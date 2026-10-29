@@ -193,37 +193,78 @@ async fn rv173_deleted_before_sparse_update_does_not_pin_cursor() {
 }
 
 #[test]
-fn rv173_l7c_custody_memory_clears_with_account_keys() {
+/// L7d (review 2279 F2): the custody memory belongs to the device. A sign-out,
+/// an R10 reset or an account switch keeps it, so a server 404 after the next
+/// sign-in still refuses instead of falling back to the legacy reader.
+#[test]
+fn rv173_l7d_custody_memory_survives_sign_out_and_account_switch() {
     let (server, _temp, bridge, root) = rv_folder_fixture(200);
-    let valid = server.state.lock().unwrap().rv_routes[&format!("/api/v1/shared-folders/{ROOT}")].clone();
-    for full_reset in [false, true] {
+    let custody = server.state.lock().unwrap().rv_routes[&format!("/api/v1/shared-folders/{ROOT}")].clone();
+    let folder_keys = |server: &ContentServer| {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|request| request.path.ends_with("/folder-keys"))
+            .count()
+    };
+    for wipe in ["sign-out", "account switch", "windows sign-out"] {
         server
             .state
             .lock()
             .unwrap()
             .rv_routes
-            .insert(format!("/api/v1/shared-folders/{ROOT}"), valid.clone());
+            .insert(format!("/api/v1/shared-folders/{ROOT}"), custody.clone());
         runtime().block_on(bridge.shared_folder_material(&root)).unwrap();
+        assert!(
+            bridge.db.has_seen_folder_custody(ROOT).unwrap(),
+            "{wipe}: the fixture starts with the custody memory"
+        );
+        // The server now denies the folder. Without the durable memory this
+        // device would read the invite's legacy unbound wrap instead.
         server
             .state
             .lock()
             .unwrap()
             .rv_routes
-            .insert(format!("/api/v1/shared-folders/{ROOT}"), (501, b"{}".to_vec()));
-        assert!(
-            runtime().block_on(bridge.shared_folder_material(&root)).is_err(),
-            "seen custody must refuse before account purge"
-        );
-        if full_reset {
-            bridge.db.clear_account_data(false).unwrap();
-        } else {
-            bridge.db.purge_all_local_state().unwrap();
+            .insert(format!("/api/v1/shared-folders/{ROOT}"), (404, b"{}".to_vec()));
+        match wipe {
+            // The macOS/Linux sign-out: purge the files and rows, then clear
+            // every account row and the owner.
+            "sign-out" => {
+                crate::purge_local_state_files_in(&bridge.db, None, &[], None).unwrap();
+                bridge.db.clear_account_data(false).unwrap();
+            }
+            // R10 reset and the account switch.
+            "account switch" => bridge.db.clear_account_data(true).unwrap(),
+            // The Windows sign-out clears the rows in one transaction.
+            _ => {
+                bridge.db.purge_all_local_state().unwrap();
+            }
         }
-        let (_, keys) = runtime().block_on(bridge.shared_folder_material(&root)).unwrap();
-        assert_eq!(
-            keys["desktop_has_custody"], false,
-            "next account inherits no custody history"
+        assert!(
+            bridge.db.has_seen_folder_custody(ROOT).unwrap(),
+            "{wipe}: the custody memory must survive"
         );
+        let before = folder_keys(&server);
+        LEGACY_CHILD_READS.with(|n| n.set(0));
+        let error = runtime()
+            .block_on(bridge.shared_folder_material(&root))
+            .err()
+            .expect("a seen-custody 404 after sign-out must refuse");
+        assert_eq!(
+            error.to_string(),
+            "This folder's keys are unavailable",
+            "{wipe}: the typed seen-custody error"
+        );
+        assert!(
+            runtime().block_on(bridge.do_hydrate(ID, None)).is_err(),
+            "{wipe}: nothing opens after the purge"
+        );
+        assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()), 0, "{wipe}: no legacy child read");
+        assert_eq!(folder_keys(&server), before, "{wipe}: no /folder-keys request");
     }
 }
 

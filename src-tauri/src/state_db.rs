@@ -2747,15 +2747,42 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute("INSERT INTO sync_state (key,value) VALUES ('owned_key_retry_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE CAST(sync_state.value AS INTEGER)<=?2", params![now.saturating_add(30).to_string(),now])? > 0)
     }
-    /// L7c: account-scoped, durable format knowledge; contains no key material.
+    /// L7d: device-wide, durable format knowledge; contains no key material.
+    /// Nothing the server says and no sign-out path removes an entry (see
+    /// `purge_all_local_state`, `clear_account_data` and `finish_windows_signout`).
     pub fn has_seen_folder_custody(&self, folder_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Self::has_seen_folder_custody_conn(&conn, folder_id)
     }
 
+    /// L7d: the set stores canonical lowercase hyphenated UUIDs only. A write
+    /// with any other form is refused, so an id shape the server reports can
+    /// never create a second entry for a folder this device has seen.
+    fn custody_seen_key(folder_id: &str) -> Result<String> {
+        match uuid::Uuid::parse_str(folder_id) {
+            Ok(canonical) if canonical.hyphenated().to_string() == folder_id => {
+                Ok(format!("shared_folder_custody_seen:{folder_id}"))
+            }
+            _ => Err(rusqlite::Error::InvalidParameterName(folder_id.to_string())),
+        }
+    }
+
+    /// The same key for a read, canonicalized: a folder id reported in another
+    /// UUID form (upper case, no hyphens, braced) maps to the entry its
+    /// canonical form stored, so a server cannot shrink the set by re-spelling
+    /// an id. An id that is not a UUID cannot be in the set (a real folder id
+    /// always is), so it reads as never seen rather than failing every read.
+    fn custody_lookup_key(folder_id: &str) -> Option<String> {
+        uuid::Uuid::parse_str(folder_id)
+            .ok()
+            .map(|canonical| format!("shared_folder_custody_seen:{}", canonical.hyphenated()))
+    }
+
     fn has_seen_folder_custody_conn(conn: &Connection, folder_id: &str) -> Result<bool> {
-        Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1",
-            [format!("shared_folder_custody_seen:{folder_id}")], |_| Ok(())).optional()?.is_some())
+        let Some(key) = Self::custody_lookup_key(folder_id) else {
+            return Ok(false);
+        };
+        Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1", [key], |_| Ok(())).optional()?.is_some())
     }
 
     /// Serialize legacy key opening with custody observation. An old inventory
@@ -2770,12 +2797,13 @@ impl StateDb {
     }
 
     pub fn remember_folder_custody_at_revision(&self, folder_id: &str, revision: u64) -> Result<()> {
+        let key = Self::custody_seen_key(folder_id)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
             return Err(rusqlite::Error::InvalidQuery);
         }
         conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
-            [format!("shared_folder_custody_seen:{folder_id}")])?;
+            [key])?;
         Ok(())
     }
 
@@ -2829,6 +2857,17 @@ impl StateDb {
             )?;
         }
         Ok(removed > 0)
+    }
+    /// A repair that got its custody key runs to completion, so the provisional
+    /// deferral it wrote must go. Unlike `revive_deferred_shared_index`, this
+    /// does not mark the index dirty: the repair itself just ran.
+    pub fn cancel_shared_index_deferral(&self, folder_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM sync_state WHERE key=?1",
+            [format!("shared_folder_index_deferred:{folder_id}")],
+        )?;
+        Ok(())
     }
     pub fn list_owned_key_records(&self)->Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
         let conn=self.0.lock().expect("state_db mutex poisoned");
@@ -6798,10 +6837,13 @@ impl StateDb {
         // three it refuses on empty), the device tables, and `sync_state` (the owner record and the sync cursors), so the
         // next sign-in on this PC finds no account data and no owner. The device tables are cleared on purpose, the same
         // as `clear_account_data` does: a sign-out starts this PC's statistics afresh for the next account.
+        //
+        // L7d: the custody memory is the one exception. It belongs to the device, so a sign-out (user-started or
+        // forced) keeps it; removing it would let a server 404 downgrade this PC to the legacy reader.
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute("DELETE FROM sync_state", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'", [])?;
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
@@ -7213,6 +7255,9 @@ impl StateDb {
     /// R10 reset, after `purge_all_local_state` has handed back the files to delete: every row of the
     /// previous account, the sync cursor and the owner record included, in one transaction.
     ///
+    /// L7d: the custody memory survives, because it belongs to the device and an account switch must not
+    /// shrink it. Only `shared_folder_custody_seen:%` is kept; every other `sync_state` row is cleared.
+    ///
     /// `owe_finder_removal` is written in the SAME transaction: a Mac whose previous account's Finder domain is
     /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
     /// `false` also clears a debt that was already recorded, because the caller only passes it once a removal
@@ -7223,7 +7268,7 @@ impl StateDb {
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute("DELETE FROM sync_state", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'", [])?;
         let mark = if owe_finder_removal {
             FINDER_REMOVAL_OWED_KEY
         } else {
@@ -7505,7 +7550,9 @@ impl StateDb {
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
         tx.execute("DELETE FROM owned_key_records", [])?;
-        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_index_deferred:%' OR key LIKE 'shared_folder_custody_seen:%' OR key='owned_key_retry_after'", [])?;
+        // L7d: the custody memory (`shared_folder_custody_seen:%`) is deliberately NOT deleted here.
+        // It is device-wide and monotonic: no sign-out, sign-in, 401 or account switch removes it.
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_index_deferred:%' OR key='owned_key_retry_after'", [])?;
 
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -14748,6 +14795,96 @@ mod tests {
         assert_eq!(deferred(&db), 1, "the deferral is durable before the purge");
         db.purge_all_local_state().unwrap();
         assert_eq!(deferred(&db), 0, "a purge forgets index work waiting for custody");
+    }
+
+    /// L7d (review 2279 F2): the custody memory is device-wide and monotonic.
+    /// Every local-state wipe keeps it; only the user removing the app's data
+    /// can drop it. The dirty marker, the deferral and the maintenance clock
+    /// are account work and still go.
+    #[test]
+    fn sf2279_custody_memory_survives_every_local_state_wipe() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let root = "10000000-0000-4000-8000-000000000041";
+        let seen = |db: &StateDb| db.has_seen_folder_custody(root).unwrap();
+        let wipe = |db: &StateDb| {
+            db.mark_shared_index_dirty(root).unwrap();
+            db.defer_shared_index_until_custody(root).unwrap();
+            db.remember_folder_custody_at_revision(root, db.account_revision())
+                .unwrap();
+            assert!(seen(db), "the fixture starts with the custody memory");
+        };
+
+        wipe(&db);
+        db.purge_all_local_state().unwrap();
+        assert!(seen(&db), "the sign-out row purge keeps the custody memory");
+        assert!(
+            db.dirty_shared_index_roots().unwrap().is_empty(),
+            "account index work still goes"
+        );
+        assert!(
+            !db.revive_deferred_shared_index(root).unwrap(),
+            "the deferral still goes"
+        );
+
+        wipe(&db);
+        db.clear_account_data(false).unwrap();
+        assert!(seen(&db), "a reset or account switch keeps the custody memory");
+        assert!(db.dirty_shared_index_roots().unwrap().is_empty());
+
+        wipe(&db);
+        db.finish_windows_signout().unwrap();
+        assert!(seen(&db), "the Windows sign-out keeps the custody memory");
+    }
+
+    /// L7d: the set stores canonical lowercase hyphenated UUIDs only. A write
+    /// with any other form is refused, so an id shape the server reports can
+    /// never create a second entry for a folder this device has seen. A read
+    /// canonicalizes, so a re-spelled id finds the entry instead of missing it.
+    #[test]
+    fn sf2279_custody_memory_refuses_a_non_canonical_id() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let revision = db.account_revision();
+        for bad in [
+            "",
+            "f-1",
+            "10000000-0000-4000-8000-00000000004A",
+            "10000000000040008000000000000042",
+            "{10000000-0000-4000-8000-000000000042}",
+        ] {
+            assert!(
+                db.remember_folder_custody_at_revision(bad, revision).is_err(),
+                "{bad:?} must be refused on write"
+            );
+        }
+        let stored: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'shared_folder_custody_seen:%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(stored, 0, "no non-canonical id was stored");
+        let canonical = "10000000-0000-4000-8000-00000000004a";
+        db.remember_folder_custody_at_revision(canonical, revision).unwrap();
+        for respelled in [
+            canonical,
+            "10000000-0000-4000-8000-00000000004A",
+            "1000000000004000800000000000004a",
+            "{10000000-0000-4000-8000-00000000004a}",
+        ] {
+            assert!(
+                db.has_seen_folder_custody(respelled).unwrap(),
+                "{respelled:?} finds the canonical entry"
+            );
+        }
+        assert!(
+            !db.has_seen_folder_custody("not-a-uuid").unwrap(),
+            "an id that is not a UUID cannot be in the set"
+        );
     }
 
     /// Added after a mutation survived (task 1834, M20): the sync cursor is account data on its own, and the
