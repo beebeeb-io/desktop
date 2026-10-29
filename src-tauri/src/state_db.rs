@@ -1590,6 +1590,32 @@ fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connection>>(
 }
 
 /// [`StateDb::delete_file`] on an open connection or transaction.
+/// Task 2267, "Keep on this PC only": the queued operations acting on the rows `ids` (their own row or the folder they
+/// act in), and the staged copies they hold (payload and resume paths), sorted, once each.
+#[cfg(any(target_os = "windows", test))]
+fn keep_ops_conn(conn: &Connection, ids: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut ops: Vec<(String, Option<String>)> = Vec::new();
+    let mut stmt = conn.prepare("SELECT op_id, payload_path FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1")?;
+    for id in ids {
+        for op in stmt.query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let op = op?;
+            if !ops.iter().any(|(op_id, _)| *op_id == op.0) {
+                ops.push(op);
+            }
+        }
+    }
+    let mut staged: Vec<String> = Vec::new();
+    for (op_id, payload) in &ops {
+        let resumed: Option<String> = conn
+            .query_row("SELECT payload_path FROM upload_resume WHERE op_id = ?1", params![op_id], |row| row.get(0))
+            .optional()?;
+        staged.extend(payload.iter().chain(resumed.iter()).filter(|path| !path.is_empty()).cloned());
+    }
+    staged.sort();
+    staged.dedup();
+    Ok((ops.into_iter().map(|(op_id, _)| op_id).collect(), staged))
+}
+
 fn delete_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
     // Task 1697: capture the parent BEFORE the delete — the change row is
     // what tells the replica's materialized filter where the item was.
@@ -6710,32 +6736,24 @@ impl StateDb {
         Ok(())
     }
 
+    /// Task 2267 (self-review of round 3, F3): the staged copies the queued operations acting on the item `ids` hold,
+    /// read before the keep forgets them, so an only copy is kept first.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn keep_staged_copies(&self, ids: &[String]) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(keep_ops_conn(&conn, ids)?.1)
+    }
+
     /// Task 2267 (fix round 2), "Keep on this PC only", after the item `ids` was moved to `kept_dir`: in ONE
     /// transaction, forget every queued operation acting on those rows (with its upload records) and the rows, remove
     /// the journal and remember `kept_dir` for "Show in Explorer". Returns the staged copies the removed operations
-    /// held, for the caller to delete.
+    /// held (as [`Self::keep_staged_copies`]).
     #[cfg(any(target_os = "windows", test))]
     pub fn finish_keep(&self, ids: &[String], kept_dir: &str) -> Result<Vec<String>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut ops: Vec<(String, Option<String>)> = Vec::new();
-        {
-            let mut stmt = tx.prepare("SELECT op_id, payload_path FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1")?;
-            for id in ids {
-                for op in stmt.query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))? {
-                    let op = op?;
-                    if !ops.iter().any(|(op_id, _)| *op_id == op.0) {
-                        ops.push(op);
-                    }
-                }
-            }
-        }
-        let mut staged: Vec<String> = Vec::new();
-        for (op_id, payload) in &ops {
-            let resumed: Option<String> = tx
-                .query_row("SELECT payload_path FROM upload_resume WHERE op_id = ?1", params![op_id], |row| row.get(0))
-                .optional()?;
-            staged.extend(payload.iter().chain(resumed.iter()).filter(|path| !path.is_empty()).cloned());
+        let (ops, staged) = keep_ops_conn(&tx, ids)?;
+        for op_id in &ops {
             tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
             tx.execute("DELETE FROM upload_finalizations WHERE op_id = ?1", params![op_id])?;
             tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
@@ -6749,8 +6767,6 @@ impl StateDb {
             params![KEPT_DIR_KEY, kept_dir],
         )?;
         tx.commit()?;
-        staged.sort();
-        staged.dedup();
         Ok(staged)
     }
 
