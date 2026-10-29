@@ -1004,6 +1004,7 @@ mod tests {
                 target_path: "Trip/landed.txt".to_string(),
                 payload_path: "staged".to_string(),
                 stamped: false,
+                review: None,
             })
             .unwrap();
         pc.db
