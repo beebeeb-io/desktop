@@ -143,11 +143,117 @@ enum Fate<'a> {
     Replay,
     /// Held, left for the person, or waiting on one of those: it stays where it is.
     Stays,
+    /// D5: in a scaffolding subtree the plan drops whole.
+    Dropped,
 }
 
-/// The plan, in a safe apply order: landed drops, parent resolves, remaps by ascending depth of the ghost's path, then
-/// holds, releases and re-arms. `payload_exists` says whether an upload's staged payload is still on disk;
-/// `disk_has_file` whether a sync-root-relative directory holds any file (D5).
+/// D5: where the backup mirror wrote when it could not read this PC's name (D9).
+const BACKUPS_UNKNOWN: &str = "Backups/unknown";
+
+/// `path` is `root` or lies under it, whole segment by segment under `≡`.
+fn at_or_under(path: &str, root: &str, case_insensitive: bool) -> bool {
+    let mut segments = path.trim_matches('/').split('/');
+    root.trim_matches('/').split('/').all(|seg| segments.next().is_some_and(|s| same_leaf(s, seg, case_insensitive)))
+}
+
+/// `dirs` in an order the caller can remove them in, one at a time: deepest first (then by path, so the order is the
+/// same whichever way they were gathered), each once.
+fn deepest_first(dirs: &mut Vec<String>) {
+    dirs.sort_by(|a, b| depth(b).cmp(&depth(a)).then_with(|| a.cmp(b)));
+    dirs.dedup();
+}
+
+/// D5: the rows and ops at or under `Backups/unknown`, read once per plan. Only made when D5 applies: this PC's backup
+/// folder has a name (D9) and it is not `unknown` under `≡`, so `Backups/unknown` is never this PC's own backup.
+struct Scaffolding<'a> {
+    /// The rows there, and every row whose parent is one of them.
+    rows: Vec<&'a Row>,
+    /// The ops that name one of those rows, as their file or their parent, or a target path there.
+    ops: Vec<&'a Op>,
+    case_insensitive: bool,
+}
+
+impl<'a> Scaffolding<'a> {
+    fn read(rows: &'a [Row], ops: &'a [Op], opts: &Options) -> Option<Self> {
+        let ci = opts.case_insensitive;
+        let device = crate::known_folder::sanitize_device_segment(opts.device_segment.as_deref()?);
+        if same_leaf(&device, leaf(BACKUPS_UNKNOWN), ci) {
+            return None;
+        }
+        let there: HashSet<&str> =
+            rows.iter().filter(|r| at_or_under(&r.path, BACKUPS_UNKNOWN, ci)).map(|r| r.file_id.as_str()).collect();
+        let names = |id: Option<&str>| id.is_some_and(|id| there.contains(id));
+        Some(Scaffolding {
+            rows: rows.iter().filter(|r| there.contains(r.file_id.as_str()) || names(r.parent_id.as_deref())).collect(),
+            ops: ops
+                .iter()
+                .filter(|op| {
+                    names(op.file_id.as_deref())
+                        || names(op.parent_id.as_deref())
+                        || op.target_path.as_deref().is_some_and(|t| at_or_under(t, BACKUPS_UNKNOWN, ci))
+                })
+                .collect(),
+            case_insensitive: ci,
+        })
+    }
+
+    fn holds(&self, path: &str) -> bool {
+        at_or_under(path, BACKUPS_UNKNOWN, self.case_insensitive)
+    }
+
+    /// The unit that drops the subtree at `root` (a ghost here with no twin), with the ids of the ghosts and the ops it
+    /// drops; `None` when the subtree is more than scaffolding. Scaffolding is ghosts only: every row at or under
+    /// `root`, and every row under one of them, is a ghost not decided earlier in this plan (so no server folder is
+    /// there, and none of them has a twin); every op on them is a ghost's `create_folder` the pass decides (none waits
+    /// for the person); and the directory holds no file on disk.
+    fn drop_at(
+        &self,
+        root: &'a Row,
+        ghost_creates: &HashMap<&str, &Op>,
+        fate: &HashMap<&str, Fate>,
+        disk_has_file: &dyn Fn(&str) -> bool,
+    ) -> Option<(Unit, Vec<&'a str>, Vec<&'a str>)> {
+        let ci = self.case_insensitive;
+        let ghosts: Vec<&'a Row> = self.rows.iter().copied().filter(|r| at_or_under(&r.path, &root.path, ci)).collect();
+        let undecided_ghost = |id: &str| ghost_creates.contains_key(id) && !fate.contains_key(id);
+        if !ghosts.iter().all(|r| undecided_ghost(r.file_id.as_str())) {
+            return None;
+        }
+        let ids: HashSet<&str> = ghosts.iter().map(|r| r.file_id.as_str()).collect();
+        let names = |id: Option<&str>| id.is_some_and(|id| ids.contains(id));
+        if self.rows.iter().any(|r| names(r.parent_id.as_deref()) && !ids.contains(r.file_id.as_str())) {
+            return None;
+        }
+        let on_them: Vec<&'a Op> = self
+            .ops
+            .iter()
+            .copied()
+            .filter(|op| {
+                names(op.file_id.as_deref())
+                    || names(op.parent_id.as_deref())
+                    || op.target_path.as_deref().is_some_and(|t| at_or_under(t, &root.path, ci))
+            })
+            .collect();
+        if on_them.iter().any(|op| op.kind != "create_folder" || !names(op.file_id.as_deref()) || !pass_decides(op)) {
+            return None;
+        }
+        if disk_has_file(&root.path) {
+            return None;
+        }
+        let mut dirs: Vec<String> = ghosts.iter().map(|r| r.path.clone()).collect();
+        deepest_first(&mut dirs);
+        let unit = Unit::DropScaffold {
+            op_ids: on_them.iter().map(|op| op.op_id.clone()).collect(),
+            file_ids: ghosts.iter().map(|r| r.file_id.clone()).collect(),
+            dirs,
+        };
+        Some((unit, ids.into_iter().collect(), on_them.iter().map(|op| op.op_id.as_str()).collect()))
+    }
+}
+
+/// The plan, in a safe apply order: landed drops, parent resolves, remaps by ascending depth of the ghost's path,
+/// scaffolding drops, then holds, releases and re-arms. `payload_exists` says whether an upload's staged payload is
+/// still on disk; `disk_has_file` whether a sync-root-relative directory holds any file (D5).
 pub fn plan(
     rows: &[Row],
     ops: &[Op],
@@ -155,9 +261,9 @@ pub fn plan(
     payload_exists: &dyn Fn(&str) -> bool,
     disk_has_file: &dyn Fn(&str) -> bool,
 ) -> (Vec<Unit>, Counts) {
-    // D5 (Task 2) reads `disk_has_file`: true when the directory at that sync-root-relative path holds a file anywhere
-    // under it, or cannot be read.
-    let _ = disk_has_file;
+    // D5 reads `disk_has_file`: true when the directory at that sync-root-relative path holds a file anywhere under it,
+    // or cannot be read.
+    let scaffolding = Scaffolding::read(rows, ops, opts);
     let mut counts = Counts::default();
     let row_of: HashMap<&str, &Row> = rows.iter().map(|r| (r.file_id.as_str(), r)).collect();
 
@@ -192,8 +298,12 @@ pub fn plan(
     let mut remaps: Vec<Unit> = Vec::new();
     let mut remap_at: HashMap<&str, usize> = HashMap::new();
     let (mut holds, mut releases, mut rearms) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut drops, mut dropped_ops): (Vec<Unit>, HashSet<&str>) = (Vec::new(), HashSet::new());
     for ghost in ghosts {
         let id = ghost.file_id.as_str();
+        if matches!(fate.get(id), Some(Fate::Dropped)) {
+            continue; // D5: dropped with the scaffolding above it
+        }
         let create = create_of[id];
         if by_path.unresolved.contains(create.op_id.as_str()) {
             // D6 held its create (and counted it): it stays, and its children wait with it.
@@ -226,6 +336,26 @@ pub fn plan(
             .get(&parent)
             .map(|rows| rows.iter().copied().filter(|t| same_leaf(leaf(&t.path), leaf(&ghost.path), opts.case_insensitive)).collect())
             .unwrap_or_default();
+        // D5: a ghost at or under `Backups/unknown` with no twin never replays. Its subtree is dropped whole when it is
+        // only scaffolding; otherwise it is held as D4 and the folders under it wait.
+        if let Some(scaffolding) = scaffolding.as_ref().filter(|s| twins.is_empty() && s.holds(&ghost.path)) {
+            if let Some((unit, ghosts, op_ids)) = scaffolding.drop_at(ghost, &create_of, &fate, disk_has_file) {
+                if let Unit::DropScaffold { dirs, .. } = &unit {
+                    counts.scaffold_dirs.extend(dirs.iter().cloned());
+                }
+                dropped_ops.extend(op_ids);
+                counts.scaffold_dropped += ghosts.len();
+                fate.extend(ghosts.into_iter().map(|g| (g, Fate::Dropped)));
+                drops.push(unit);
+            } else {
+                counts.backup_unknown_kept += 1;
+                fate.insert(id, Fate::Stays);
+                if create.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
+                    holds.push(Unit::Hold { op_id: create.op_id.clone() });
+                }
+            }
+            continue;
+        }
         let held = if ops.iter().any(|op| op.file_id.as_deref() == Some(id) && op.op_id != create.op_id) {
             Some(&mut counts.held_acts_on_ghost)
         } else if by_path.of_op(create).is_some_and(|p| Some(p) != row_parent) {
@@ -297,6 +427,7 @@ pub fn plan(
         if (op.paused_reason.is_some() && !person_paused)
             || op.parked
             || landed_ops.contains(op.op_id.as_str())
+            || dropped_ops.contains(op.op_id.as_str())
             || !op.last_error.as_deref().is_some_and(is_parent_404)
         {
             continue;
@@ -341,12 +472,14 @@ pub fn plan(
     let mut units: Vec<Unit> = landed.into_iter().map(|op_id| Unit::DropLanded { op_id: op_id.to_string() }).collect();
     units.extend(by_path.units);
     units.extend(remaps);
+    units.extend(drops);
     units.extend(by_path.holds);
     units.extend(holds);
     units.extend(twins.holds);
     units.extend(releases);
     units.extend(twins.releases);
     units.extend(rearms);
+    deepest_first(&mut counts.scaffold_dirs);
     (units, counts)
 }
 
@@ -1200,5 +1333,164 @@ mod tests {
         let (units, counts) = run(&rows, &ops);
         assert_eq!(units, vec![Unit::Release { op_id: "op-m".to_string() }]);
         assert_eq!(counts, Counts { file_twin: 1, released: 1, ..Counts::default() });
+    }
+
+    fn never(_: &str) -> bool {
+        false
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    fn drop_scaffold(op_ids: &[&str], file_ids: &[&str], dirs: &[&str]) -> Unit {
+        Unit::DropScaffold { op_ids: strings(op_ids), file_ids: strings(file_ids), dirs: strings(dirs) }
+    }
+
+    /// The 28 Oct shape (D5): the backup mirror could not read this PC's name and scaffolded `Backups/unknown` (D9)
+    /// beside this PC's own `Backups/PC-1`, three empty folders deep.
+    fn backups_unknown() -> (Vec<Row>, Vec<Op>) {
+        let rows = vec![
+            folder("b", None, "Backups", true),
+            folder("pc", Some("b"), "Backups/PC-1", true),
+            folder("u", Some("b"), "Backups/unknown", false),
+            folder("d", Some("u"), "Backups/unknown/Documents", false),
+            folder("o", Some("d"), "Backups/unknown/Documents/Old", false),
+        ];
+        let ops = vec![
+            paused(create_folder("op-u", "u", Some("b")), "auth"),
+            paused(create_folder("op-d", "d", Some("u")), "auth"),
+            gave_up(create_folder("op-o", "o", Some("d")), NOT_FOUND),
+        ];
+        (rows, ops)
+    }
+
+    /// D5: the whole subtree goes in one unit, its directories listed deepest first for the caller to remove after the
+    /// commit. The disk is asked once, about the subtree's top, which covers everything under it.
+    #[test]
+    fn empty_backups_unknown_scaffolding_is_dropped_and_its_directories_removed() {
+        let (rows, ops) = backups_unknown();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let disk_has_file = |dir: &str| {
+            asked.borrow_mut().push(dir.to_string());
+            false
+        };
+        let (units, counts) = plan(&rows, &ops, &opts(), &always, &disk_has_file);
+        let dirs = ["Backups/unknown/Documents/Old", "Backups/unknown/Documents", "Backups/unknown"];
+        assert_eq!(units, vec![drop_scaffold(&["op-u", "op-d", "op-o"], &["u", "d", "o"], &dirs)]);
+        assert_eq!(counts, Counts { scaffold_dropped: 3, scaffold_dirs: strings(&dirs), ..Counts::default() });
+        assert_eq!(asked.into_inner(), strings(&["Backups/unknown"]));
+    }
+
+    /// D5, anti-goal 3: a file on disk under it keeps the subtree, held as D4; the folders under the held one wait.
+    #[test]
+    fn backups_unknown_with_a_file_on_disk_is_kept_and_held() {
+        let (rows, ops) = backups_unknown();
+        let (units, counts) = plan(&rows, &ops, &opts(), &always, &always);
+        assert_eq!(units, vec![hold("op-u")], "nothing dropped, nothing re-armed");
+        assert_eq!(counts, Counts { backup_unknown_kept: 1, waiting_under_held: 2, ..Counts::default() });
+    }
+
+    /// D5: "only if the whole subtree is scaffolding". Anything else there keeps it, even with no file on disk: a
+    /// change queued under it, a row that is not a ghost, an op acting on one of its folders, a change moving in, or a
+    /// folder's create held for the person.
+    #[test]
+    fn backups_unknown_with_more_than_scaffolding_under_it_is_kept_and_held() {
+        let upload_under_it = |rows: &mut Vec<Row>, ops: &mut Vec<Op>| {
+            rows.push(file("f", Some("d"), "Backups/unknown/Documents/a.txt", false, 0));
+            ops.push(upload("op-f", "f", Some("d")));
+        };
+        let server_file_under_it = |rows: &mut Vec<Row>, _: &mut Vec<Op>| {
+            rows.push(file("s", Some("d"), "Backups/unknown/Documents/b.txt", true, 2));
+        };
+        let rename_of_a_folder = |_: &mut Vec<Row>, ops: &mut Vec<Op>| {
+            let rename = Op { op_id: "op-rename".to_string(), kind: "rename_file".to_string(), ..Op::default() };
+            ops.push(Op { file_id: Some("d".to_string()), ..rename });
+        };
+        let move_into_it = |rows: &mut Vec<Row>, ops: &mut Vec<Op>| {
+            rows.push(file("m", None, "Notes.txt", true, 1));
+            ops.push(Op {
+                op_id: "op-move".to_string(),
+                kind: "move_file".to_string(),
+                file_id: Some("m".to_string()),
+                target_path: Some("Backups/unknown/Documents/Notes.txt".to_string()),
+                ..Op::default()
+            });
+        };
+        let held_for_the_person = |_: &mut Vec<Row>, ops: &mut Vec<Op>| {
+            ops[1].paused_reason = Some("found_while_paused".to_string());
+        };
+        let cases: [(&str, &dyn Fn(&mut Vec<Row>, &mut Vec<Op>)); 5] = [
+            ("upload under it", &upload_under_it),
+            ("server file under it", &server_file_under_it),
+            ("rename of a folder", &rename_of_a_folder),
+            ("move into it", &move_into_it),
+            ("held for the person", &held_for_the_person),
+        ];
+        for (case, add) in cases {
+            let (mut rows, mut ops) = backups_unknown();
+            add(&mut rows, &mut ops);
+            let (units, counts) = plan(&rows, &ops, &opts(), &always, &never);
+            assert_eq!(units, vec![hold("op-u")], "{case}");
+            assert_eq!((counts.scaffold_dropped, counts.backup_unknown_kept), (0, 1), "{case}");
+        }
+    }
+
+    /// D5, D9: when this PC's own backup folder could be `Backups/unknown` (its name is `unknown`, under `≡`) or its
+    /// name cannot be read, D5 does not apply and the folders replay as before (D3). On Linux `Unknown` is another
+    /// folder than `unknown`, so there D5 still applies.
+    #[test]
+    fn backups_unknown_is_never_dropped_when_this_device_is_unknown_or_unreadable() {
+        let (rows, ops) = backups_unknown();
+        for device in [Some("unknown"), Some("UNKNOWN"), Some(" unknown."), None] {
+            let opts = Options { device_segment: device.map(str::to_string), case_insensitive: true };
+            let (units, counts) = plan(&rows, &ops, &opts, &always, &never);
+            assert_eq!(units, vec![Unit::Rearm { op_id: "op-o".to_string() }], "{device:?}");
+            assert_eq!(counts, Counts { replay: 3, rearmed: 1, ..Counts::default() }, "{device:?}");
+        }
+        let linux = Options { device_segment: Some("Unknown".to_string()), case_insensitive: false };
+        assert_eq!(plan(&rows, &ops, &linux, &always, &never).1.scaffold_dropped, 3);
+    }
+
+    /// D5 before D8: scaffolding whose create gave up on the 404 of a folder the pass folds into its twin is dropped,
+    /// never re-armed, so it can never be sent.
+    #[test]
+    fn scaffolding_that_gave_up_on_its_parents_404_is_dropped_not_rearmed() {
+        let rows = [
+            folder("bt", None, "Backups", true),
+            folder("bg", None, "Backups", false),
+            folder("u", Some("bg"), "Backups/unknown", false),
+        ];
+        let ops = [create_folder("op-bg", "bg", None), gave_up(create_folder("op-u", "u", Some("bg")), NOT_FOUND)];
+        let (units, counts) = plan(&rows, &ops, &opts(), &always, &never);
+        assert_eq!(units, vec![remap("bg", "bt", "op-bg", &[]), drop_scaffold(&["op-u"], &["u"], &["Backups/unknown"])]);
+        assert_eq!(
+            counts,
+            Counts { remapped: 1, scaffold_dropped: 1, scaffold_dirs: strings(&["Backups/unknown"]), ..Counts::default() }
+        );
+    }
+
+    /// D5 matches `Backups/unknown` by whole path segments, under `≡`: a folder that only looks like it replays.
+    #[test]
+    fn backups_unknown_is_matched_by_whole_segments() {
+        let rows = [
+            folder("b", None, "Backups", true),
+            folder("a", None, "Archive", true),
+            folder("g1", Some("b"), "Backups/unknownish", false),
+            folder("g2", Some("a"), "Archive/unknown", false),
+            folder("g3", Some("b"), "backups/UNKNOWN", false),
+        ];
+        let ops = [
+            create_folder("op-g1", "g1", Some("b")),
+            create_folder("op-g2", "g2", Some("a")),
+            create_folder("op-g3", "g3", Some("b")),
+        ];
+        let (units, counts) = plan(&rows, &ops, &opts(), &always, &never);
+        assert_eq!(units, vec![drop_scaffold(&["op-g3"], &["g3"], &["backups/UNKNOWN"])], "Windows: NTFS ignores case");
+        assert_eq!(counts.replay, 2);
+        let linux = Options { case_insensitive: false, ..opts() };
+        let (units, counts) = plan(&rows, &ops, &linux, &always, &never);
+        assert!(units.is_empty(), "{units:?}");
+        assert_eq!(counts, Counts { replay: 3, ..Counts::default() });
     }
 }
