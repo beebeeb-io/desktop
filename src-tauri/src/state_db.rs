@@ -2413,8 +2413,6 @@ pub struct ProofOp {
     pub parent_id: Option<String>,
     /// `operation_queue.kind`, as stored.
     pub kind: String,
-    /// It creates its item: a folder's create, or an upload that says it creates the file (`CREATE_OP_SQL`).
-    pub creates: bool,
 }
 
 /// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
@@ -2437,7 +2435,7 @@ const CREATE_OP_SQL: &str = "(o.kind = 'create_folder'
      OR (o.kind IN ('upload_version', 'upload_file')
          AND COALESCE(CASE WHEN json_valid(o.metadata_json) THEN json_extract(o.metadata_json, '$.operation') END = 'create_file', 0)))";
 
-/// A [`ProofOp`] from `op_id, file_id, parent_id, kind, <CREATE_OP_SQL>`.
+/// A [`ProofOp`] from `op_id, file_id, parent_id, kind`.
 #[cfg(any(target_os = "windows", test))]
 fn proof_op_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProofOp> {
     Ok(ProofOp {
@@ -2445,7 +2443,6 @@ fn proof_op_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProofOp> {
         file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
         parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
         kind: row.get(3)?,
-        creates: row.get(4)?,
     })
 }
 
@@ -6614,9 +6611,7 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT op_id, file_id, parent_id, kind, {CREATE_OP_SQL} FROM operation_queue o"
-        ))?;
+        let mut stmt = conn.prepare("SELECT op_id, file_id, parent_id, kind FROM operation_queue")?;
         let rows = stmt.query_map([], proof_op_from_row)?;
         rows.collect()
     }
@@ -6666,10 +6661,10 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT op_id, file_id, parent_id, kind, {CREATE_OP_SQL} FROM operation_queue o WHERE paused_reason = ?1
-             ORDER BY created_at ASC, rowid ASC"
-        ))?;
+        let mut stmt = conn.prepare(
+            "SELECT op_id, file_id, parent_id, kind FROM operation_queue WHERE paused_reason = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
         let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], proof_op_from_row)?;
         rows.collect()
     }
