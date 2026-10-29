@@ -66,6 +66,16 @@ pub fn retry(db: &StateDb, root: &Path) {
         match finish(db, root, &row) {
             Ok(Outcome::Done) => {}
             Ok(Outcome::Pending) => {
+                // Spec F8 ("no review"): a row in review that meets a transient error leaves review, so the next tick
+                // tries it again instead of the next start (self-review of #195).
+                if row.review.is_some() {
+                    if let Err(error) = db.clear_upload_finalization_review(&row.op_id) {
+                        tracing::warn!(
+                            reason = crate::engine_bridge::error_category(&error),
+                            "cannot clear an upload finalization review"
+                        );
+                    }
+                }
                 tracing::debug!(file_id = %row.server_file_id, "upload identity finalization pending");
             }
             // Spec R2: one warn when a row enters review (or its reason changes), never one per tick.
@@ -126,15 +136,17 @@ fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<
                 Restamped::OtherFile => Outcome::Review(ReviewReason::OtherFile),
             }),
         Step::JudgeBytes => {
-            let payload = payload_hash(Path::new(&row.payload_path))?;
             // Anti-goal 3: the agreed content counts only while no upload of the file is queued.
             let agreed = if db.sync_folder_upload_queued(&row.server_file_id)? {
                 None
             } else {
                 db.get_file_contract_state(&row.server_file_id)?.and_then(|contract| contract.local_hash)
             };
+            // The staged copy, as large as the upload, is read only once the file itself is open for its hash (0.8.19's
+            // order; self-review of #195): a file open in another program stays pending without reading it.
+            let payload = Path::new(&row.payload_path);
             placeholders::finalize_wholly_local(&on_disk, &row.local_file_id, &row.server_file_id, &mut |bytes| {
-                judge(bytes, payload.as_deref(), agreed.as_deref())
+                Ok(judge(bytes, payload_hash(payload)?.as_deref(), agreed.as_deref()))
             })
             .map(|local| match local {
                 Local::Finalized(_) => Outcome::Done,
@@ -145,13 +157,34 @@ fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<
     };
     Ok(match applied {
         Ok(outcome) => outcome,
-        Err(error) if placeholders::is_transient(&error) => Outcome::Pending,
-        Err(error) if placeholders::is_access_denied(&error) => Outcome::Review(ReviewReason::Unreadable),
-        Err(error) => {
-            tracing::debug!(file_id = %row.server_file_id, %error, "upload identity finalization platform error");
-            Outcome::Review(ReviewReason::PlatformError)
-        }
+        Err(error) => after_error(&error, &row.server_file_id),
     })
+}
+
+/// Spec F8 / F3 / F9: how an error of the platform steps ends the attempt. A file (or its folder) gone since its view
+/// was read is pending: the next tick reads the view again, and F2 ends the row (self-review of #195).
+fn after_error(error: &anyhow::Error, file_id: &str) -> Outcome {
+    use super::placeholders;
+    if placeholders::is_transient(error) || placeholders::is_gone(error) {
+        Outcome::Pending
+    } else if placeholders::is_access_denied(error) {
+        Outcome::Review(ReviewReason::Unreadable)
+    } else {
+        tracing::debug!(file_id, %error, "upload identity finalization platform error");
+        Outcome::Review(ReviewReason::PlatformError)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Staged payloads [`payload_hash`] opened on this thread (tests count them).
+    static PAYLOADS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: how many staged payloads this thread has opened to hash.
+#[cfg(test)]
+pub(crate) fn payloads_read() -> usize {
+    PAYLOADS_READ.with(std::cell::Cell::get)
 }
 
 /// The staged payload's SHA-256, or `None` when it is gone (a crash after its unlink).
@@ -162,6 +195,8 @@ fn payload_hash(path: &Path) -> anyhow::Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    #[cfg(test)]
+    PAYLOADS_READ.with(|read| read.set(read.get() + 1));
     // Stream it; never load a large upload into memory.
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
@@ -172,4 +207,23 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spec F8 (self-review of #195): a file that is gone, or whose folder is gone, since its view was read (os 2,
+    /// os 3 from the open) is pending: the next tick reads the view again and ends the row (F2). Never review.
+    #[test]
+    fn a_file_gone_since_its_view_was_read_is_pending() {
+        for code in [2, 3] {
+            let error = anyhow::Error::from(std::io::Error::from_raw_os_error(code));
+            assert_eq!(after_error(&error, "file-id"), Outcome::Pending, "os error {code}");
+        }
+        let denied = anyhow::Error::from(std::io::Error::from_raw_os_error(5));
+        assert_eq!(after_error(&denied, "file-id"), Outcome::Review(ReviewReason::Unreadable));
+        let unexpected = anyhow::Error::from(std::io::Error::from_raw_os_error(1117));
+        assert_eq!(after_error(&unexpected, "file-id"), Outcome::Review(ReviewReason::PlatformError));
+    }
 }
