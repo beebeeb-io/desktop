@@ -168,29 +168,45 @@ needed per release. The trust boundary has three parts, and each one is checked:
 - **The environment deploys only from `main` and `release/*`** (custom deployment
   branch policies; admins cannot bypass them). A run from any other branch is refused
   before the job starts, so it never gets a token Azure accepts.
-- **Only repository admins can create, push, force-push or delete a `release/*`
-  branch:** the repository ruleset "release branches (signing)". A bot, an app or a
-  collaborator without the admin role cannot make a branch that is allowed to sign.
-  The ruleset blocks every update to a `release/*` branch, a pull request merge
-  included. A change therefore reaches a release branch only through the ruleset's
-  bypass, which only an admin holds (on GitHub, a merge with `--admin`). This is a
-  constraint, not a shortcut: the bypass skips this ruleset only, so the PR's own gate
-  and review must be green before the merge. Whether a given person or agent may use
-  the bypass is decided outside this file. 0.8.19's #184 was the first merge that
-  needed it (2026-10-29). The ruleset does not constrain an admin, and that includes
-  a tool or session acting with an admin's token.
+- **Two repository rulesets protect `release/*`:**
+  - **"release branches (create/delete: admin only)":** only a repository admin can
+    create or delete a `release/*` branch. A bot, an app or a collaborator without the
+    admin role cannot make a branch that is allowed to sign.
+  - **"release branches (PR + checks)", with no bypass for anyone, admins included:**
+    - every change reaches a release branch through a pull request (merge method
+      "merge", review threads resolved);
+    - the six CI jobs every release branch runs must pass: Frontend, Rust check
+      (Windows), Rust check (macOS), Rust test (Linux), File Provider Swift (macOS), and
+      the macOS release script check;
+    - force-pushes are refused.
+  - A release-branch merge is a plain `gh pr merge --merge` once those checks are
+    green. `--admin` is neither needed nor used. A direct push, even with an admin
+    token, is refused with "Changes must be made through a pull request".
+  - This was proven on 2026-10-29 with a scratch release branch:
+    - an admin creation succeeded;
+    - a direct admin push was refused;
+    - a merge was refused while a required check was red;
+    - the same PR merged after the re-run turned green;
+    - the scratch branches were then deleted.
+  - Until 2026-10-29 a single ruleset blocked every update, and merges needed the
+    admin bypass. 0.8.19's #184 and #185 were merged that way, before the rule was
+    changed.
+  - Neither ruleset limits who holds an admin token. A tool or session acting with an
+    admin's token can still create or delete a release branch.
 
 The workflow has no reviewer gate on the environment: a release stays one dispatch.
 `signing-login-check.yml` proves the boundary without building or signing anything. It
 runs only the Azure login through the environment. From `main` it must pass. From any
 other branch it must fail with "not allowed to deploy to desktop-release". Run both
-after any change to the environment, the ruleset or the federated credential.
+after any change to the environment, the rulesets or the federated credential.
 
 History: until 0.8.18 the credential named one branch (`ref:refs/heads/main`, then one
 added per release branch, `release/0.8.13` to `release/0.8.18`). A release branch without
 its own credential failed at the Azure login with AADSTS700213 (0.8.18's first run).
-Those per-branch credentials stay until a release has signed through the environment;
-removing them is a separate, confirmed step.
+0.8.19 was the first release to sign through the environment (2026-10-29). After that,
+the seven per-branch credentials were deleted with the maintainer's confirmation, and
+only the environment credential remains. The two-way check was run again afterwards:
+from `main` it passed, and from another branch it was refused.
 
 SmartScreen honesty: signing removes the "unknown publisher" warning
 immediately, but SmartScreen *reputation* accrues with download volume and
