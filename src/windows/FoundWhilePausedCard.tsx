@@ -5,17 +5,32 @@
  * folder. The words, the result lines and when the card shows are `foundWhilePaused.ts`; nothing here decides a
  * sentence. No command takes a path: the backend knows which items and which folder.
  *
+ * Lead review round 3 of #176: the card reads what is held, by kind (`found_while_paused_review`), and both choices
+ * wait for that read; Upload sends back exactly the ids it counted (P2-2, P3-1). Nothing takes the focus on its own.
+ * A read is made when the held count needs one, at most once per summary the panel polls.
+ *
  * Mounted always by the Sync panel and draws nothing while there is nothing to show, so a keep result survives the
  * poll that no longer reports the group (it stays until dismissed or the panel unmounts).
  */
-import { useEffect, useState, type ReactNode } from 'react'
-import { commandUnavailableLabel, foundWhilePausedKeep, foundWhilePausedUpload, showKeptFolder } from '../desktopApi'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  commandUnavailableLabel,
+  foundWhilePausedKeep,
+  foundWhilePausedReview,
+  foundWhilePausedUpload,
+  showKeptFolder,
+} from '../desktopApi'
 import {
   FOUND_WHILE_PAUSED_COPY,
+  NOT_CONFIRMED_LINE,
   foundWhilePausedCardVisible,
   foundWhilePausedCount,
+  heldKindsLine,
+  keepConfirm,
+  keepLabel,
   keepResultLines,
   waitingForDecisionLine,
+  type FoundWhilePausedReview,
   type KeepResult,
 } from './foundWhilePaused'
 import type { SyncActivitySummary } from './syncActivityModel'
@@ -42,23 +57,57 @@ export function FoundWhilePausedCard({
   // (as the Updates card shows a failed downgrade). `at` puts it in the part of the card the button lives in.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [error, setError] = useState<{ text: string; at: 'decision' | 'result' } | null>(null)
+  // What is held, by kind, and the ids Upload sends back; null until read (or after a decision changed what is held).
+  const [review, setReview] = useState<FoundWhilePausedReview | null>(null)
+  // A load failure (the read), shown inline: the choices wait for that read.
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  // The summary the last read was made for: one read per poll at most, however the counts compare.
+  const readFor = useRef<SyncActivitySummary | null | undefined>(undefined)
 
   const count = foundWhilePausedCount(summary)
   const visible = foundWhilePausedCardVisible(summary, { busy: busy !== null, kept })
+  const needsReview = count > 0 && (review === null || review.op_ids.length !== count)
 
   // A card that went away (the changes were decided elsewhere) comes back at its first step, without an old error.
   useEffect(() => {
     if (visible) return
     setConfirming(false)
     setError(null)
+    setReview(null)
+    setReviewError(null)
+    readFor.current = undefined
   }, [visible])
 
+  useEffect(() => {
+    if (!needsReview || busy !== null || readFor.current === summary) return
+    readFor.current = summary
+    let live = true
+    void foundWhilePausedReview().then((result) => {
+      if (!live) return
+      if (result.ok) {
+        setReview(result.value)
+        setReviewError(null)
+      } else {
+        setReview(null)
+        setReviewError(result.unsupported ? commandUnavailableLabel('found_while_paused_review') : result.reason)
+      }
+    })
+    return () => { live = false }
+  }, [needsReview, summary, busy])
+
+  // After a decision what is held has changed: read it again.
+  const readAgain = () => {
+    setReview(null)
+    readFor.current = undefined
+  }
+
   const upload = async () => {
-    if (busy) return
+    if (busy || !review) return
     setBusy('upload')
     setError(null)
-    const result = await foundWhilePausedUpload()
-    if (!result.ok) setError({ text: result.unsupported ? commandUnavailableLabel('found_while_paused_upload') : result.reason, at: 'decision' })
+    const result = await foundWhilePausedUpload(review.op_ids)
+    if (result.ok) readAgain()
+    else setError({ text: result.unsupported ? commandUnavailableLabel('found_while_paused_upload') : result.reason, at: 'decision' })
     await refresh()
     setBusy(null)
   }
@@ -71,6 +120,7 @@ export function FoundWhilePausedCard({
     if (result.ok) setKept(result.value)
     else setError({ text: result.unsupported ? commandUnavailableLabel('found_while_paused_keep') : result.reason, at: 'decision' })
     setConfirming(false)
+    readAgain()
     await refresh()
     setBusy(null)
   }
@@ -97,11 +147,17 @@ export function FoundWhilePausedCard({
   if (!visible) return null
 
   const anyBusy = busy !== null
+  // Both choices wait for the read: Upload sends exactly what it counted, and the question names the service (if any)
+  // that syncs the kept folder.
+  const waiting = anyBusy || review === null
+  const syncedBy = review?.synced_by ?? null
   const deciding = count > 0 || busy === 'upload' || busy === 'keep'
   const lines = kept ? keepResultLines(kept) : []
+  const kinds = review ? heldKindsLine(review) : ''
+  const alertStyle = { marginTop: 10, fontSize: 11.5, color: RED, lineHeight: 1.45, fontFamily: T.fontMono, wordBreak: 'break-word' as const }
   const errorLine = (at: 'decision' | 'result') =>
     error?.at === at ? (
-      <div role="alert" style={{ marginTop: 10, fontSize: 11.5, color: RED, lineHeight: 1.45, fontFamily: T.fontMono, wordBreak: 'break-word' as const }}>
+      <div role="alert" style={alertStyle}>
         {error.text}
       </div>
     ) : null
@@ -116,11 +172,14 @@ export function FoundWhilePausedCard({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: T.ink, lineHeight: 1.4 }}>{FOUND_WHILE_PAUSED_COPY.title}</div>
             {count > 0 && (
-              <div style={{ fontSize: 12, color: T.ink3, marginTop: 4, lineHeight: 1.45 }}>{waitingForDecisionLine(count)}</div>
+              <div style={{ fontSize: 12, color: T.ink3, marginTop: 4, lineHeight: 1.45 }}>
+                <div>{kinds || waitingForDecisionLine(count)}</div>
+                <div style={{ marginTop: 2 }}>{NOT_CONFIRMED_LINE}</div>
+              </div>
             )}
             {confirming ? (
               <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 8, background: T.paper2, border: `1px solid ${T.line}` }}>
-                <div style={{ fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>{FOUND_WHILE_PAUSED_COPY.confirm}</div>
+                <div style={{ fontSize: 12, color: T.ink2, lineHeight: 1.5 }}>{keepConfirm(syncedBy)}</div>
                 <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginTop: 12 }}>
                   <CardButton primary busy={busy === 'keep'} disabled={anyBusy} onClick={keep}>{FOUND_WHILE_PAUSED_COPY.move}</CardButton>
                   <CardButton disabled={anyBusy} onClick={() => setConfirming(false)}>{FOUND_WHILE_PAUSED_COPY.cancel}</CardButton>
@@ -128,8 +187,13 @@ export function FoundWhilePausedCard({
               </div>
             ) : (
               <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginTop: 14 }}>
-                <CardButton primary busy={busy === 'upload'} disabled={anyBusy} onClick={upload}>{FOUND_WHILE_PAUSED_COPY.upload}</CardButton>
-                <CardButton disabled={anyBusy} onClick={askToKeep}>{FOUND_WHILE_PAUSED_COPY.keep}</CardButton>
+                <CardButton primary busy={busy === 'upload'} disabled={waiting} onClick={upload}>{FOUND_WHILE_PAUSED_COPY.upload}</CardButton>
+                <CardButton disabled={waiting} onClick={askToKeep}>{keepLabel(syncedBy)}</CardButton>
+              </div>
+            )}
+            {count > 0 && reviewError !== null && !confirming && (
+              <div role="alert" style={alertStyle}>
+                {reviewError}
               </div>
             )}
             {errorLine('decision')}

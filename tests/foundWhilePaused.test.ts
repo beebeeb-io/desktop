@@ -6,11 +6,17 @@ import {
   FOUND_WHILE_PAUSED,
   FOUND_WHILE_PAUSED_COPY,
   KEPT_FOLDER_NAME,
+  NOT_CONFIRMED_LINE,
   foundWhilePausedCardVisible,
   foundWhilePausedCount,
+  heldKindsLine,
+  keepConfirm,
+  keepLabel,
   keepResultLines,
   parseKeepResult,
+  parseReview,
   waitingForDecisionLine,
+  type FoundWhilePausedReview,
   type KeepResult,
 } from '../src/windows/foundWhilePaused'
 import type { HeldGroup, SyncActivitySummary } from '../src/windows/syncActivityModel'
@@ -18,7 +24,11 @@ import type { HeldGroup, SyncActivitySummary } from '../src/windows/syncActivity
 const KEPT = 'C:\\Users\\Fixture\\Beebeeb - kept on this PC\\2026-10-28'
 
 function keep(patch: Partial<KeepResult> = {}): KeepResult {
-  return { moved_files: 0, moved_items: 0, kept_path: null, not_moved: 0, stays_held: 0, ...patch }
+  return { moved_files: 0, moved_items: 0, kept_path: null, not_moved: 0, stays_held: 0, synced_by: null, ...patch }
+}
+
+function review(patch: Partial<FoundWhilePausedReview> = {}): FoundWhilePausedReview {
+  return { new_folders: 0, new_files: 0, edits: 0, deletions: 0, in_shared_folders: 0, op_ids: [], synced_by: null, ...patch }
 }
 
 function summaryWith(held: HeldGroup[]): SyncActivitySummary {
@@ -136,13 +146,14 @@ describe('the keep result, line by line', () => {
 
 describe('the keep answer’s shape', () => {
   test('the contract’s shape parses, field for field', () => {
-    const good = { moved_files: 3, moved_items: 2, kept_path: KEPT, not_moved: 1, stays_held: 0 }
+    const good = { moved_files: 3, moved_items: 2, kept_path: KEPT, not_moved: 1, stays_held: 0, synced_by: null }
     expect(parseKeepResult(good)).toEqual(good)
     expect(parseKeepResult({ ...good, kept_path: null })).toEqual({ ...good, kept_path: null })
+    expect(parseKeepResult({ ...good, synced_by: 'OneDrive' })).toEqual({ ...good, synced_by: 'OneDrive' })
   })
 
   test('anything outside it is no result, never a guess', () => {
-    const good = { moved_files: 3, moved_items: 2, kept_path: KEPT, not_moved: 1, stays_held: 0 }
+    const good = { moved_files: 3, moved_items: 2, kept_path: KEPT, not_moved: 1, stays_held: 0, synced_by: null }
     for (const bad of [
       null,
       undefined,
@@ -153,7 +164,9 @@ describe('the keep answer’s shape', () => {
       { ...good, not_moved: '1' },
       { ...good, stays_held: undefined },
       { ...good, kept_path: 7 },
-      { moved_files: 3, moved_items: 2, not_moved: 1, stays_held: 0 },
+      { ...good, synced_by: 1 },
+      { moved_files: 3, moved_items: 2, kept_path: KEPT, not_moved: 1, stays_held: 0 },
+      { moved_files: 3, moved_items: 2, not_moved: 1, stays_held: 0, synced_by: null },
     ]) {
       expect(parseKeepResult(bad)).toBeNull()
     }
@@ -195,5 +208,71 @@ describe('when the card shows', () => {
     expect(foundWhilePausedCount(undefined)).toBe(0)
     expect(foundWhilePausedCount(summaryWith([group('auth', 2_924)]))).toBe(0)
     expect(foundWhilePausedCount(summaryWith([group('auth', 2_924), group(FOUND_WHILE_PAUSED, 6)]))).toBe(6)
+  })
+})
+
+// Lead review round 3 of #176: the card shows what is held by kind (P2-2) and Upload sends back exactly the changes it
+// counted (P3-1); when OneDrive or Dropbox syncs the folder the kept folder is made in, the words never claim the
+// items stay on this PC (P3-4).
+describe('what is held, by kind', () => {
+  test('each kind with a count, in order, joined as a sentence', () => {
+    expect(heldKindsLine(review({ new_folders: 2, new_files: 5, edits: 1 }))).toBe('Waiting for your decision: 2 new folders, 5 new files and 1 edit.')
+    expect(heldKindsLine(review({ new_files: 1 }))).toBe('Waiting for your decision: 1 new file.')
+    expect(heldKindsLine(review({ new_folders: 1, deletions: 2, in_shared_folders: 1 }))).toBe(
+      'Waiting for your decision: 1 new folder, 2 deletions and 1 change in a folder shared with you.',
+    )
+    expect(heldKindsLine(review({ edits: 3, deletions: 1, in_shared_folders: 4 }))).toBe(
+      'Waiting for your decision: 3 edits, 1 deletion and 4 changes in folders shared with you.',
+    )
+    expect(heldKindsLine(review({ new_files: 1_200 }))).toBe('Waiting for your decision: 1,200 new files.')
+  })
+
+  test('nothing counted: no line', () => {
+    expect(heldKindsLine(review())).toBe('')
+  })
+
+  test('the sentence under it, exact', () => {
+    expect(NOT_CONFIRMED_LINE).toBe('Beebeeb couldn’t confirm these came from your account on this PC.')
+  })
+
+  test('the review parses field for field, and nothing outside its shape', () => {
+    const good = { new_folders: 1, new_files: 2, edits: 0, deletions: 0, in_shared_folders: 1, op_ids: ['a', 'b', 'c', 'd'], synced_by: null }
+    expect(parseReview(good)).toEqual(good)
+    expect(parseReview({ ...good, synced_by: 'Dropbox' })).toEqual({ ...good, synced_by: 'Dropbox' })
+    for (const bad of [
+      null,
+      [],
+      { ...good, op_ids: 'a' },
+      { ...good, op_ids: ['a', 2] },
+      { ...good, edits: -1 },
+      { ...good, deletions: undefined },
+      { ...good, synced_by: 3 },
+      { ...good, op_ids: ['a'] },
+    ]) {
+      expect(parseReview(bad)).toBeNull()
+    }
+  })
+})
+
+describe('a kept folder OneDrive or Dropbox syncs', () => {
+  test('the button and the question never say "on this PC" then', () => {
+    expect(keepLabel(null)).toBe(FOUND_WHILE_PAUSED_COPY.keep)
+    expect(keepLabel('OneDrive')).toBe('Keep out of Beebeeb')
+    expect(keepConfirm(null)).toBe(FOUND_WHILE_PAUSED_COPY.confirm)
+    expect(keepConfirm('OneDrive')).toBe(
+      'They’ll be moved out of your Beebeeb folder into a folder named “Beebeeb - kept on this PC” next to it. Nothing is uploaded to Beebeeb or deleted. This folder is synced by OneDrive.',
+    )
+  })
+
+  test('the result says which service syncs them, never that they stay on this PC', () => {
+    const lines = keepResultLines(keep({ moved_files: 2, moved_items: 1, kept_path: KEPT, stays_held: 1, synced_by: 'Dropbox' }))
+    expect(lines.map((line) => line.text)).toEqual([
+      `Moved 2 files to ${KEPT}. They aren’t uploaded to Beebeeb. This folder is synced by Dropbox.`,
+      '1 change can’t be kept out of Beebeeb. It isn’t uploaded and stays on hold until you choose “Upload to my Beebeeb”.',
+    ])
+    expect(keepResultLines(keep({ moved_files: 1, moved_items: 1, kept_path: KEPT, synced_by: 'OneDrive' }))[0].text).toBe(
+      `Moved 1 file to ${KEPT}. It isn’t uploaded to Beebeeb. This folder is synced by OneDrive.`,
+    )
+    expect(lines.map((line) => line.text).join(' ')).not.toContain('on this PC.')
   })
 })

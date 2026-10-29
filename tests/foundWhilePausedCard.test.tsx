@@ -32,8 +32,23 @@ function summaryHolding(count: number): SyncActivitySummary {
   }
 }
 
-/** Mount the card. `props.summary` is what the panel's last poll read; a test changes it to stand in for a refresh. */
-function open(count: number, backend: Record<string, Handler> = {}) {
+/** What `found_while_paused_review` reads for `count` held new files (lead review round 3, P2-2). */
+function reviewOf(count: number, patch: Partial<model.FoundWhilePausedReview> = {}): model.FoundWhilePausedReview {
+  const op_ids = Array.from({ length: count }, (_, i) => `op-${i + 1}`)
+  return { new_folders: 0, new_files: count, edits: 0, deletions: 0, in_shared_folders: 0, op_ids, synced_by: null, ...patch }
+}
+
+/** A `found_while_paused_keep` answer. */
+function kept(patch: Partial<model.KeepResult>): model.KeepResult {
+  return { moved_files: 0, moved_items: 0, kept_path: null, not_moved: 0, stays_held: 0, synced_by: null, ...patch }
+}
+
+/**
+ * Mount the card. `props.summary` is what the panel's last poll read; a test changes it to stand in for a refresh. The
+ * backend reads `count` held new files unless the test scripts the review itself.
+ */
+function open(count: number, scripted: Record<string, Handler> = {}) {
+  const backend: Record<string, Handler> = { found_while_paused_review: () => reviewOf(count), ...scripted }
   const refreshes: SyncActivitySummary[] = []
   const props = { summary: summaryHolding(count), refresh: async () => { refreshes.push(props.summary) } }
   const m = mount('windows/FoundWhilePausedCard.tsx', 'FoundWhilePausedCard', {
@@ -60,29 +75,69 @@ describe('when it shows', () => {
     expect(card.m.calls).toEqual([])
   })
 
-  test('found while paused: the title, the count and the two choices, and nothing sent on its own', async () => {
-    const card = open(3)
+  test('found while paused: the title, what is held by kind, the sentence and the two choices; only the read is sent', async () => {
+    const card = open(3, { found_while_paused_review: () => reviewOf(3, { new_files: 1, new_folders: 1, in_shared_folders: 1 }) })
     await card.m.flush()
     expect(card.text()).toContain(COPY.title)
-    expect(card.text()).toContain('3 changes waiting for your decision.')
+    expect(card.text()).toContain('Waiting for your decision: 1 new folder, 1 new file and 1 change in a folder shared with you.')
+    expect(card.text()).toContain(model.NOT_CONFIRMED_LINE)
     expect(card.labels()).toEqual([COPY.upload, COPY.keep])
-    expect(card.m.calls).toEqual([])
+    expect(card.buttons().every((button) => button.props.disabled === false)).toBe(true)
+    expect(card.m.calls).toEqual([{ name: 'found_while_paused_review', args: {} }])
   })
 
-  test('one change: the count line is singular', async () => {
+  test('one change: the line is singular', async () => {
     const card = open(1)
     await card.m.flush()
-    expect(card.text()).toContain('1 change waiting for your decision.')
+    expect(card.text()).toContain('Waiting for your decision: 1 new file.')
+  })
+
+  test('until the changes are read, both choices show and wait, with the count and the sentence', async () => {
+    const card = open(3, { found_while_paused_review: () => new Promise(() => undefined) })
+    await card.m.flush()
+    expect(card.text()).toContain('3 changes waiting for your decision.')
+    expect(card.text()).toContain(model.NOT_CONFIRMED_LINE)
+    expect(card.labels()).toEqual([COPY.upload, COPY.keep])
+    expect(card.buttons().every((button) => button.props.disabled === true)).toBe(true)
+  })
+
+  test('a read that fails says so, and the next refresh reads again', async () => {
+    let reads = 0
+    const card = open(2, {
+      found_while_paused_review: () => {
+        reads += 1
+        if (reads === 1) throw new Error('fixture: the changes could not be read')
+        return reviewOf(2)
+      },
+    })
+    await card.m.flush()
+    expect(textOf(card.view().find((el) => el.props.role === 'alert'))).toBe('fixture: the changes could not be read')
+    expect(card.buttons().every((button) => button.props.disabled === true)).toBe(true)
+    card.props.summary = summaryHolding(2)
+    card.m.render()
+    await card.m.flush()
+    expect(reads).toBe(2)
+    expect(card.view().some((el) => el.props.role === 'alert')).toBe(false)
+    expect(card.text()).toContain('Waiting for your decision: 2 new files.')
+    expect(card.buttons().every((button) => button.props.disabled === false)).toBe(true)
+  })
+
+  test('nothing is focused for the person: no element takes the focus on its own', async () => {
+    const card = open(3)
+    await card.m.flush()
+    expect(card.view().some((el) => el.props.autoFocus)).toBe(false)
+    await card.m.click(COPY.keep)
+    expect(card.view().some((el) => el.props.autoFocus)).toBe(false)
   })
 })
 
 describe('Upload to my Beebeeb', () => {
-  test('sends the upload command with no arguments, then reads the summary again', async () => {
+  test('sends back exactly the changes the card counted, then reads the summary again', async () => {
     const card = open(3, { found_while_paused_upload: () => ({ released: 3 }) })
     await card.m.flush()
     await card.m.click(COPY.upload)
-    expect(commandsSent(card.m)).toEqual(['found_while_paused_upload'])
-    expect(card.m.calls[0].args).toEqual({})
+    expect(commandsSent(card.m).slice(0, 2)).toEqual(['found_while_paused_review', 'found_while_paused_upload'])
+    expect(card.m.calls[1].args).toEqual({ opIds: ['op-1', 'op-2', 'op-3'] })
     expect(card.refreshes.length).toBe(1)
     card.props.summary = summaryHolding(0)
     card.m.render()
@@ -99,6 +154,9 @@ describe('Upload to my Beebeeb', () => {
     expect(card.buttons().some((button) => button.props['aria-busy'] === true)).toBe(true)
     release({ released: 3 })
     await card.m.flush()
+    // What is held is read again before the choices come back (the harness runs that effect at the next flush).
+    await card.m.flush()
+    expect(commandsSent(card.m)).toEqual(['found_while_paused_review', 'found_while_paused_upload', 'found_while_paused_review'])
     expect(card.buttons().every((button) => button.props.disabled === false)).toBe(true)
   })
 
@@ -121,23 +179,32 @@ describe('Keep on this PC only', () => {
     expect(card.text()).toContain(COPY.confirm)
     expect(card.labels()).toEqual([COPY.move, COPY.cancel])
     expect(card.view().some((el) => el.props.role === 'dialog')).toBe(false)
-    expect(card.m.calls).toEqual([])
+    expect(commandsSent(card.m)).toEqual(['found_while_paused_review'])
     await card.m.click(COPY.cancel)
     expect(card.text()).not.toContain(COPY.confirm)
     expect(card.labels()).toEqual([COPY.upload, COPY.keep])
-    expect(card.m.calls).toEqual([])
+    expect(commandsSent(card.m)).toEqual(['found_while_paused_review'])
+  })
+
+  test('a kept folder OneDrive syncs: the button and the question say so, never "on this PC"', async () => {
+    const card = open(2, { found_while_paused_review: () => reviewOf(2, { synced_by: 'OneDrive' }) })
+    await card.m.flush()
+    expect(card.labels()).toEqual([COPY.upload, 'Keep out of Beebeeb'])
+    await card.m.click('Keep out of Beebeeb')
+    expect(card.text()).toContain(model.keepConfirm('OneDrive'))
+    expect(card.text()).toContain('This folder is synced by OneDrive.')
   })
 
   test('"Move them" keeps them, shows where, offers Explorer, and stays until dismissed', async () => {
     const card = open(3, {
-      found_while_paused_keep: () => ({ moved_files: 5, moved_items: 3, kept_path: KEPT, not_moved: 0, stays_held: 0 }),
+      found_while_paused_keep: () => kept({ moved_files: 5, moved_items: 3, kept_path: KEPT, not_moved: 0, stays_held: 0 }),
       show_kept_folder: () => null,
     })
     await card.m.flush()
     await card.m.click(COPY.keep)
     await card.m.click(COPY.move)
-    expect(commandsSent(card.m)).toEqual(['found_while_paused_keep'])
-    expect(card.m.calls[0].args).toEqual({})
+    expect(commandsSent(card.m).slice(0, 2)).toEqual(['found_while_paused_review', 'found_while_paused_keep'])
+    expect(card.m.calls[1].args).toEqual({})
     expect(card.refreshes.length).toBe(1)
 
     // The poll now reads no held group: the result stays.
@@ -151,8 +218,8 @@ describe('Keep on this PC only', () => {
     expect(card.labels()).toEqual([COPY.showInExplorer, COPY.dismiss])
 
     await card.m.click(COPY.showInExplorer)
-    expect(commandsSent(card.m)).toEqual(['found_while_paused_keep', 'show_kept_folder'])
-    expect(card.m.calls[1].args).toEqual({})
+    expect(commandsSent(card.m).filter((name) => name !== 'found_while_paused_review')).toEqual(['found_while_paused_keep', 'show_kept_folder'])
+    expect(card.m.calls.find((call) => call.name === 'show_kept_folder')?.args).toEqual({})
     expect(card.text()).toContain(`Moved 5 files to ${KEPT}.`)
 
     await card.m.click(COPY.dismiss)
@@ -160,7 +227,7 @@ describe('Keep on this PC only', () => {
   })
 
   test('what could not be moved or kept is said, with no Explorer button when nothing moved, and the choice stays for what is left', async () => {
-    const card = open(4, { found_while_paused_keep: () => ({ moved_files: 0, moved_items: 0, kept_path: null, not_moved: 1, stays_held: 3 }) })
+    const card = open(4, { found_while_paused_keep: () => kept({ moved_files: 0, moved_items: 0, kept_path: null, not_moved: 1, stays_held: 3 }) })
     await card.m.flush()
     await card.m.click(COPY.keep)
     await card.m.click(COPY.move)
@@ -199,7 +266,7 @@ describe('Keep on this PC only', () => {
     card.props.summary = summaryHolding(0)
     card.m.render()
     expect(card.m.tree()).not.toBeNull()
-    release({ moved_files: 2, moved_items: 2, kept_path: KEPT, not_moved: 0, stays_held: 0 })
+    release(kept({ moved_files: 2, moved_items: 2, kept_path: KEPT, not_moved: 0, stays_held: 0 }))
     await card.m.flush()
     expect(card.text()).toContain(`Moved 2 files to ${KEPT}. They stay on this PC and aren’t uploaded.`)
   })
@@ -207,7 +274,7 @@ describe('Keep on this PC only', () => {
 
 describe('the brand', () => {
   test('one amber button per step, the primary one, and no emoji', async () => {
-    const card = open(3, { found_while_paused_keep: () => ({ moved_files: 1, moved_items: 1, kept_path: KEPT, not_moved: 0, stays_held: 0 }), show_kept_folder: () => null })
+    const card = open(3, { found_while_paused_keep: () => kept({ moved_files: 1, moved_items: 1, kept_path: KEPT, not_moved: 0, stays_held: 0 }), show_kept_folder: () => null })
     await card.m.flush()
     const amber = () => card.buttons().filter((button) => String(button.props.style.background).includes('amber')).map((button) => textOf(button.props.children).trim())
     expect(amber()).toEqual([COPY.upload])
