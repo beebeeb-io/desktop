@@ -59,12 +59,14 @@ pub(crate) async fn execute(command: Command, env: &Env<'_>) -> anyhow::Result<(
             }
             let scratch = guarded_copy(env)?;
             let listing = list_pairs(&scratch, env.root, env.observe)?;
-            let run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, retention_days: None };
+            let run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, case_only: listing.case_only, retention_days: None };
             save(env, &run)?;
             let screen = format!(
-                "Listed {} pairs; {} paths with more than two rows are counted, not listed.\n{}\nThe list is in the out dir.",
+                "Listed {} pairs; {} paths with more than two rows are counted, not listed; {} groups of paths that differ \
+                 only in case are counted, not listed (GL-0003).\n{}\nThe list is in the out dir.",
                 run.pairs.len(),
                 run.more_than_two,
+                run.case_only,
                 classes(&run.pairs)
             );
             Ok((0, screen))
@@ -277,6 +279,7 @@ pub(crate) fn list(run: &RunFile) -> String {
         run.pairs.len(),
         run.more_than_two
     );
+    let _ = writeln!(text, "Groups of paths that differ only in case (counted, not listed; GL-0003): {}.", run.case_only);
     for pair in &run.pairs {
         let _ = writeln!(text);
         let _ = writeln!(text, "pair {} · {} · action {} · {}", pair.n, kebab(&pair.class), kebab(&pair.action), pair.path);

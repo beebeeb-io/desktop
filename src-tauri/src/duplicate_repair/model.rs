@@ -199,6 +199,9 @@ pub(crate) struct RunFile {
     pub pairs: Vec<Pair>,
     /// L0: paths with more than two rows, counted, never listed.
     pub more_than_two: usize,
+    /// GL-0003: groups of paths that differ only in case, counted, never listed.
+    #[serde(default)]
+    pub case_only: usize,
     /// OP3: the server's trash retention in days, as the person read it in the admin panel (`retention <days>`).
     /// `apply-one` refuses until it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]

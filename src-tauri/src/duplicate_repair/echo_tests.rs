@@ -32,7 +32,7 @@ impl Pc {
         row(&db, B, None);
         db.set_sync_cursor(CURSOR).unwrap();
         let listing = list_pairs(&db, Path::new(ROOT), &|_: &Path| at_a()).unwrap();
-        let mut run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, retention_days: None };
+        let mut run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, case_only: listing.case_only, retention_days: None };
         run.pairs[0].applied = Some(Applied {
             outcome: Outcome::Trashed { seq: SEQ, b_trashed_at: None },
             cursor: CURSOR,

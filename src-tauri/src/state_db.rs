@@ -2627,6 +2627,21 @@ impl StateDb {
         Ok(rows.into_iter().map(|(path, count)| (path, usize::try_from(count).unwrap_or(usize::MAX))).collect())
     }
 
+    /// GL-0003: how many groups of paths are equal once case is ignored but differ as written, slashes folded as in
+    /// [`StateDb::shared_paths`]. A case-insensitive sync root shows each group as one file; the list reads paths
+    /// exactly, so these are counted, never listed. Case is folded by Unicode lowercase, which may differ from the
+    /// file system's own table for a few characters.
+    pub(crate) fn case_only_groups(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT DISTINCT replace(path, '\\', '/') FROM files")?;
+        let paths = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut spellings = std::collections::HashMap::<String, usize>::new();
+        for path in &paths {
+            *spellings.entry(path.to_lowercase()).or_default() += 1;
+        }
+        Ok(spellings.values().filter(|&&count| count > 1).count())
+    }
+
     /// The rows at `folded` (a [`StateDb::shared_paths`] path), whichever separator each was stored with.
     pub(crate) fn rows_at_folded_path(&self, folded: &str) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

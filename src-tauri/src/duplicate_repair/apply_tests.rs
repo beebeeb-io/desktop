@@ -144,7 +144,7 @@ fn trashed(b_size: i64, b_version: i64, log: Route) -> Vec<Route> {
 /// The run file after list and server read, with B's size and version as the server holds them.
 async fn listed(pc: &Pc, b_size: i64, b_version: i64) -> RunFile {
     let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
-    let mut run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, retention_days: None };
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: listing.more_than_two, case_only: listing.case_only, retention_days: None };
     let mock = RepairMockServer::start(read(b_size, b_version));
     server_read(&api(&mock), &mut run.pairs).await.unwrap();
     run
@@ -366,7 +366,7 @@ async fn t10_a_b_in_the_trash_or_gone_is_forgotten_without_a_trash() {
         let pc = Pc::new();
         let routes: Vec<Route> = std::iter::once(found(A, 10, false, 1)).chain(b_route).collect();
         let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
-        let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, retention_days: None };
+        let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
         server_read(&api(&RepairMockServer::start(routes.clone())), &mut run.pairs).await.unwrap();
         assert_eq!(run.pairs[0].class, class, "precondition");
         run.pairs[0].action = class.proposed();
@@ -554,7 +554,7 @@ async fn a_read_back_that_fails_is_unconfirmed_and_a_retry_confirms_it() {
 async fn a_class_the_server_read_does_not_give_is_refused() {
     let pc = Pc::new();
     let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
-    let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, retention_days: None };
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
     let a_gone = vec![found(A, 10, true, 1)];
     server_read(&api(&RepairMockServer::start(a_gone.clone())), &mut run.pairs).await.unwrap();
     assert_eq!(run.pairs[0].class, Class::AGone, "precondition");

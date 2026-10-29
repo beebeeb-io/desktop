@@ -36,12 +36,14 @@ pub(crate) fn observe(path: &Path) -> Observed {
 pub(crate) struct Listing {
     pub pairs: Vec<Pair>,
     pub more_than_two: usize,
+    /// GL-0003: groups of paths that differ only in case, counted, never listed.
+    pub case_only: usize,
 }
 
 /// Every path that exactly two rows share, numbered from 1 in path order, with its local class (L1-L3b, or
 /// `Unknown` until the server read). `observe` reads the platform at a path without fetching anything.
 pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> Observed) -> anyhow::Result<Listing> {
-    let mut listing = Listing { pairs: Vec::new(), more_than_two: 0 };
+    let mut listing = Listing { pairs: Vec::new(), more_than_two: 0, case_only: db.case_only_groups()? };
     for (path, rows) in db.shared_paths()? {
         if rows > 2 {
             listing.more_than_two += 1;

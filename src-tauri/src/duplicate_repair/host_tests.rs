@@ -229,6 +229,7 @@ fn t13_no_name_path_or_id_reaches_the_screen_an_error_or_a_log() {
         assert!(!logs.contains(secret), "a log line names {secret:?}:\n{logs}");
     }
     assert!(screen.contains("Listed 1 pairs"), "{screen}");
+    assert!(screen.contains("0 groups of paths that differ only in case are counted, not listed (GL-0003)"), "{screen}");
     assert!(screen.contains("pair 1: B's row forgotten on this PC, B moved to Beebeeb's trash (its trash op is 12)"), "{screen}");
     assert!(screen.contains("pair 1: the app applied the echo"), "{screen}");
     // On this PC, the list and the run file hold what the person needs: the path, both ids, B's trash time.
@@ -337,7 +338,7 @@ fn the_list_says_what_was_not_checked_and_when_b_is_purged() {
     let pc = Pc::new();
     let db = StateDb::open(&pc.db_path).unwrap();
     let listing = super::list::list_pairs(&db, &pc.root, &|_: &Path| at_a()).unwrap();
-    let mut run = RunFile { pairs: listing.pairs, more_than_two: 2, retention_days: None };
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: 2, case_only: 3, retention_days: None };
     run.pairs[0].applied = Some(Applied {
         outcome: Outcome::Trashed { seq: SEQ, b_trashed_at: Some("2026-10-29T10:00:00+00:00".into()) },
         cursor: CURSOR,
@@ -345,7 +346,13 @@ fn the_list_says_what_was_not_checked_and_when_b_is_purged() {
         at: 0,
     });
     let text = list(&run);
-    for line in [FOLDER_SHARES, DO_NOT_RESTORE, "Trash retention: not recorded yet", "(counted, not listed): 2"] {
+    for line in [
+        FOLDER_SHARES,
+        DO_NOT_RESTORE,
+        "Trash retention: not recorded yet",
+        "(counted, not listed): 2",
+        "Groups of paths that differ only in case (counted, not listed; GL-0003): 3.",
+    ] {
         assert!(text.contains(line), "{line}:\n{text}");
     }
     assert!(text.contains("purged after the retention (not recorded)"), "{text}");

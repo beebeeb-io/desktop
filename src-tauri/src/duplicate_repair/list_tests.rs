@@ -172,6 +172,33 @@ fn a_path_with_more_than_two_rows_is_only_counted_and_slashes_fold() {
     assert_eq!(listing.pairs[0].class, Class::Unknown);
 }
 
+/// GL-0003: on a case-insensitive sync root two rows whose paths differ only in case are one file, but the list reads
+/// paths exactly. Such a group is counted, never listed, so the person reviewing the list sees the gap.
+#[test]
+fn rows_whose_paths_differ_only_in_case_are_counted_not_listed() {
+    let (_dir, db) = db();
+    row(&db, "old", "Docs/Foo.txt", None);
+    row(&db, "new", "docs/foo.txt", Some("h1"));
+    let listing = listed(&db, placeholder(Some("new"), true));
+    assert_eq!(listing.case_only, 1);
+    assert!(listing.pairs.is_empty(), "{:?}", listing.pairs);
+}
+
+/// GL-0003's count folds case beyond ASCII and folds separators; an exact pair is listed and is not a case group.
+#[test]
+fn the_case_only_count_folds_unicode_and_separators_and_skips_exact_pairs() {
+    let (_dir, db) = db();
+    row(&db, "e1", "Caf\u{c9}/\u{c9}t\u{c9}.txt", None);
+    row(&db, "e2", "caf\u{e9}/\u{e9}t\u{e9}.txt", Some("h1"));
+    row(&db, "s1", "Docs\\Bar.txt", None);
+    row(&db, "s2", "docs/bar.txt", Some("h2"));
+    row(&db, "p1", "same.txt", None);
+    row(&db, "p2", "same.txt", Some("h3"));
+    let listing = listed(&db, placeholder(Some("p2"), true));
+    assert_eq!(listing.case_only, 2);
+    assert_eq!(listing.pairs.iter().map(|pair| pair.path.as_str()).collect::<Vec<_>>(), ["same.txt"]);
+}
+
 #[test]
 fn pairs_are_numbered_from_one_in_path_order() {
     let (_dir, db) = db();
