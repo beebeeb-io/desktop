@@ -496,6 +496,26 @@ pub struct HeartbeatBody {
 /// upload watcher, the heartbeat producer) is dropped with it, and this Drop
 /// impl is what actually erases the key from memory rather than leaving it
 /// to linger in a freed allocation.
+/// The server refused a custody write because the folder still has legacy key
+/// rows and the owner must upgrade it first (task 2258, decision L11). Kept as
+/// its own type so no caller can mistake it for a transport error or retry it
+/// as a legacy write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpgradeRequired;
+
+impl std::fmt::Display for UpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the owner must upgrade this folder before its keys can be shared here")
+    }
+}
+
+impl std::error::Error for UpgradeRequired {}
+
+/// Whether `error` is the typed L11 refusal (`409 upgrade_required`).
+pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UpgradeRequired>().is_some()
+}
+
 pub struct ApiClient {
     // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
     // strong count (which reaches zero before its destructor runs).
@@ -863,9 +883,24 @@ impl ApiClient {
         self.get_typed("/api/v1/shares/invites/sent").await
     }
 
-    pub async fn register_shared_folder_key(&self, id: &str, wrapped: &str, version: i32) -> anyhow::Result<serde_json::Value> {
+    /// `PUT /api/v1/shared-folders/{id}/key` — the folder's custody record.
+    ///
+    /// `format` declares the key format of the write (task 2258, L10):
+    /// `Some("l7")` for a custody folder, `None` for a no-custody (legacy)
+    /// write, where the field must be absent rather than null.
+    pub async fn register_shared_folder_key(
+        &self,
+        id: &str,
+        wrapped: &str,
+        version: i32,
+        format: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
         let url = self.url(&format!("/api/v1/shared-folders/{}/key", encode(id)));
-        let response = self.send_with_retry(|| self.client.put(&url).json(&serde_json::json!({"owner_wrapped_folder_key":wrapped,"key_version":version}))).await?;
+        let mut body = serde_json::json!({"owner_wrapped_folder_key":wrapped,"key_version":version});
+        if let Some(format) = format {
+            body["format"] = serde_json::Value::String(format.to_string());
+        }
+        let response = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
         Ok(response.json().await?)
     }
 
@@ -1337,6 +1372,15 @@ impl ApiClient {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
+        // L11: a custody write over a folder that still has legacy key rows is
+        // refused until the owner upgrades it. It is its own state — never a
+        // generic error and never a reason to retry as a legacy write.
+        if status == reqwest::StatusCode::CONFLICT
+            && serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|value| value["error"] == "upgrade_required")
+        {
+            return Err(anyhow::Error::new(UpgradeRequired));
+        }
         let snippet: String = body.chars().take(300).collect();
         anyhow::bail!("HTTP {status}: {snippet}")
     }

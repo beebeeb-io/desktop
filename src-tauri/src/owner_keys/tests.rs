@@ -328,13 +328,8 @@ fn sf2237d_l8_old_owner_wrap_is_rejected_without_fallback() {
     // Build the historical wire bytes through core, never a compatibility reader.
     let derived = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
     let old = beebeeb_core::encrypt::encrypt_chunk_raw(&derived, key.as_bytes()).unwrap();
-    let encrypted = beebeeb_core::encrypt::encrypt_name_for(
-        &key,
-        "legacy.txt",
-        None,
-        ExpectedChunkFormat::Unrecorded,
-    )
-    .unwrap();
+    let encrypted =
+        beebeeb_core::encrypt::encrypt_name_for(&key, "legacy.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
     for pending in [false, true] {
         for foreign in [false, true] {
             let record = OwnedKeyRecord {
@@ -354,33 +349,31 @@ fn sf2237d_l8_old_owner_wrap_is_rejected_without_fallback() {
 }
 
 #[test]
-fn sf2237d_l8_legacy_invite_seed_still_registers_l6_custody() {
-    use beebeeb_core::kdf::{FileKey, MasterKey};
+fn sf2265_forged_name_blob_owner_copy_is_refused() {
+    use beebeeb_core::kdf::MasterKey;
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000001";
-    let folder = FileKey::from_bytes([55; 32]);
+    // The folder's own 32-byte name JSON, sealed under the legacy folder key.
+    // A server can replay this as an "owner copy" after answering 404.
+    let name_json = br#"{"mime_type":null,"name":"Docs"}"#;
+    assert_eq!(name_json.len(), 32);
     let derived = beebeeb_core::kdf::derive_file_key(&master, root.as_bytes());
-    let seed = STANDARD
-        .encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, folder.as_bytes()).unwrap());
-    let mut custody = None;
+    let forged = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, name_json).unwrap());
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let row = forged.clone();
     let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
         let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
             (
                 200,
-                json!({"invites":[{"file_id":root,"is_folder_share":true,"encrypted_owner_folder_key":seed}]}),
+                json!({"invites":[{
+                    "id":"inv-1","file_id":root,"is_folder_share":true,"status":"approved",
+                    "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":forged
+                }]}),
             )
-        } else if req.path == format!("/api/v1/shared-folders/{root}/key") && req.method == "PUT" {
-            custody = Some(req.body["owner_wrapped_folder_key"].clone());
-            (200, json!({}))
-        } else if req.path == format!("/api/v1/shared-folders/{root}") {
-            if let Some(wrap) = &custody {
-                (
-                    200,
-                    json!({"folder_id":root,"role":"owner","key_version":1,"owner_wrapped_folder_key":wrap}),
-                )
-            } else {
-                (404, json!({}))
-            }
+        } else if req.path == "/api/v1/shares/invites/inv-1/folder-keys" {
+            (200, json!({"keys":[{"file_id":root,"encrypted_file_key":row}]}))
         } else {
             (404, json!({}))
         };
@@ -391,11 +384,283 @@ fn sf2237d_l8_legacy_invite_seed_still_registers_l6_custody() {
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
-    assert_eq!(
-        run(bridge.shared_folder_custody_key(root))
-            .unwrap()
-            .as_bytes(),
-        folder.as_bytes()
+    let error = run(bridge.shared_folder_custody_key(root))
+        .err()
+        .expect("forged copy must not open");
+    assert!(error.to_string().contains("Can't verify"), "{error}");
+    assert!(!bridge.db().has_seen_folder_custody(root).unwrap());
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|line| line == "GET /api/v1/shares/invites/inv-1/folder-keys"),
+        "proof rows were read: {seen:?}"
     );
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.contains("/key") || line.contains("/owner-key"))
+            .count(),
+        0,
+        "no key may be written or pinned: {seen:?}"
+    );
+}
+
+type OwnerCopyObservation = (Fixture, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
+
+fn owner_copy_test(root: &'static str, invites: Value, folder_keys: Value) -> OwnerCopyObservation {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let stored = Arc::new(Mutex::new(None::<String>));
+    let log = seen.clone();
+    let body_log = bodies.clone();
+    let store = stored.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (200, invites.clone())
+        } else if req.path.ends_with("/folder-keys") {
+            (200, folder_keys.clone())
+        } else if req.path == format!("/api/v1/shared-folders/{root}/key") && req.method == "PUT" {
+            *store.lock().unwrap() = req.body["owner_wrapped_folder_key"].as_str().map(str::to_string);
+            body_log.lock().unwrap().push(req.body.clone());
+            (200, json!({"created":true,"key_version":1}))
+        } else if req.path == format!("/api/v1/shared-folders/{root}") {
+            match store.lock().unwrap().clone() {
+                Some(wrap) => (
+                    200,
+                    json!({"folder_id":root,"role":"owner","key_version":1,"owner_wrapped_folder_key":wrap}),
+                ),
+                None => (404, json!({})),
+            }
+        } else {
+            (404, json!({}))
+        };
+        Some((status, serde_json::to_vec(&body).unwrap()))
+    });
+    (fixture, seen, bodies)
+}
+
+#[test]
+fn sf2265_purpose_bound_owner_copy_opens_and_registers_l7_custody() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000002";
+    let folder = FileKey::from_bytes([55; 32]);
+    let blob = beebeeb_core::kdf::wrap_invite_owner_copy(&master, root.as_bytes(), &folder).unwrap();
+    let mut copy = blob.nonce;
+    copy.extend_from_slice(&blob.ciphertext);
+    let invites = json!({"invites":[{
+        "id":"inv-2","file_id":root,"is_folder_share":true,"status":"approved",
+        "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":STANDARD.encode(&copy)
+    }]});
+    let (fixture, seen, bodies) = owner_copy_test(root, invites, json!({"keys":[]}));
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    // The fixture answers 404 for the custody GET, then accepts the write.
+    let key = run(bridge.shared_folder_custody_key(root));
+    assert!(
+        key.is_ok(),
+        "purpose-bound copy must open: {}",
+        key.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+    );
+    assert_eq!(key.unwrap().as_bytes(), folder.as_bytes());
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1, "exactly one custody write");
+    assert_eq!(bodies[0]["format"], "l7");
+    assert_eq!(bodies[0]["key_version"], 1);
     assert!(bridge.db().has_seen_folder_custody(root).unwrap());
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|line| line.ends_with("/folder-keys")),
+        "a purpose-bound copy needs no proof rows: {seen:?}"
+    );
+}
+
+#[test]
+fn sf2265_legacy_copy_with_valid_rows_opens_without_custody_write() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000003";
+    let item = "20000000-0000-4000-8000-000000000001";
+    // A real key is not valid UTF-8; core refuses a text candidate (L9 rule 1).
+    let folder = FileKey::from_bytes([0x8d; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, root.as_bytes());
+    let copy = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, folder.as_bytes()).unwrap());
+    let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
+    let invites = json!({"invites":[{
+        "id":"inv-3","file_id":root,"is_folder_share":true,"status":"approved",
+        "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":copy
+    }]});
+    let (fixture, _seen, bodies) = owner_copy_test(
+        root,
+        invites,
+        json!({"keys":[{"file_id":item,"encrypted_file_key":wrap}]}),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let key = run(bridge.shared_folder_custody_key(root));
+    assert!(
+        key.is_ok(),
+        "a proven legacy copy must open: {}",
+        key.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+    );
+    assert_eq!(key.unwrap().as_bytes(), folder.as_bytes());
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        0,
+        "a legacy key is never registered (L11)"
+    );
+    assert!(!bridge.db().has_seen_folder_custody(root).unwrap());
+}
+
+#[test]
+fn sf2265_legacy_copy_with_forged_rows_is_refused() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000004";
+    let item = "20000000-0000-4000-8000-000000000002";
+    // A real key is not valid UTF-8; core refuses a text candidate (L9 rule 1).
+    let folder = FileKey::from_bytes([0x8d; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, root.as_bytes());
+    let copy = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, folder.as_bytes()).unwrap());
+    // A row that opens under the candidate but carries the wrong child key.
+    let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, &[9u8; 32]).unwrap());
+    let invites = json!({"invites":[{
+        "id":"inv-4","file_id":root,"is_folder_share":true,"status":"approved",
+        "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":copy
+    }]});
+    let (fixture, _seen, bodies) = owner_copy_test(
+        root,
+        invites,
+        json!({"keys":[{"file_id":item,"encrypted_file_key":wrap}]}),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let error = run(bridge.shared_folder_custody_key(root))
+        .err()
+        .expect("forged rows must not prove");
+    assert!(error.to_string().contains("Can't verify"), "{error}");
+    assert_eq!(bodies.lock().unwrap().len(), 0);
+    assert!(!bridge.db().has_seen_folder_custody(root).unwrap());
+}
+
+#[test]
+fn sf2265_non_approved_invite_is_never_read() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000005";
+    let item = "20000000-0000-4000-8000-000000000003";
+    // A real key is not valid UTF-8; core refuses a text candidate (L9 rule 1).
+    let folder = FileKey::from_bytes([0x8d; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, root.as_bytes());
+    let copy = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, folder.as_bytes()).unwrap());
+    let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
+    // The pending invite is newer and would open, but only approved copies count.
+    let invites = json!({"invites":[
+        {"id":"inv-approved","file_id":root,"is_folder_share":true,"status":"approved",
+         "created_at":"2026-10-20T00:00:00Z","encrypted_owner_folder_key":copy},
+        {"id":"inv-pending","file_id":root,"is_folder_share":true,"status":"invited",
+         "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":copy}
+    ]});
+    let (fixture, seen, _bodies) = owner_copy_test(
+        root,
+        invites,
+        json!({"keys":[{"file_id":item,"encrypted_file_key":wrap}]}),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let key = run(bridge.shared_folder_custody_key(root)).unwrap();
+    assert_eq!(key.as_bytes(), folder.as_bytes());
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|line| line == "GET /api/v1/shares/invites/inv-approved/folder-keys"),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|line| line.contains("inv-pending")),
+        "a non-approved invite is never read: {seen:?}"
+    );
+}
+
+#[test]
+fn sf2258_upgrade_required_is_its_own_state_with_no_retry() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000006";
+    let folder = FileKey::from_bytes([55; 32]);
+    let blob = beebeeb_core::kdf::wrap_invite_owner_copy(&master, root.as_bytes(), &folder).unwrap();
+    let mut copy = blob.nonce;
+    copy.extend_from_slice(&blob.ciphertext);
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = seen.clone();
+    let body_log = bodies.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (
+                200,
+                json!({"invites":[{
+                    "id":"inv-6","file_id":root,"is_folder_share":true,"status":"approved",
+                    "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":STANDARD.encode(&copy)
+                }]}),
+            )
+        } else if req.path == format!("/api/v1/shared-folders/{root}/key") && req.method == "PUT" {
+            body_log.lock().unwrap().push(req.body.clone());
+            (
+                409,
+                json!({"error":"upgrade_required","message":"This folder's keys must be upgraded first; legacy key writes are refused."}),
+            )
+        } else {
+            (404, json!({}))
+        };
+        Some((status, serde_json::to_vec(&body).unwrap()))
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let error = run(bridge.shared_folder_custody_key(root))
+        .err()
+        .expect("upgrade_required must not be swallowed");
+    assert!(error.to_string().contains("must upgrade"), "{error}");
+    assert!(
+        !crate::api_client::upgrade_required(&error),
+        "the caller sees the folder state, not the raw transport error"
+    );
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["format"], "l7", "a custody-folder write declares L7");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|line| line.ends_with("/key")).count(),
+        1,
+        "the custody write is never retried: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|line| line.contains("/folder-keys")),
+        "it is never retried as a legacy read: {seen:?}"
+    );
+    assert!(!bridge.db().has_seen_folder_custody(root).unwrap());
+}
+
+#[test]
+fn sf2258_key_writes_name_their_format_only_with_custody() {
+    assert_eq!(custody_write_format(true), Some("l7"));
+    assert_eq!(custody_write_format(false), None);
 }
