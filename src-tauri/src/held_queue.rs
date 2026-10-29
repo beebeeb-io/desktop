@@ -61,7 +61,7 @@ pub enum Unit {
     Remap { ghost: String, twin: String, ghost_op: String, rearm: Vec<String>, hold: Vec<String> },
     /// D4 / D8 superseded: `needs_review`.
     Hold { op_id: String },
-    /// A `needs_review` op whose cause is gone: due again.
+    /// A `needs_review` op whose cause is gone: back to `auth`, for the key check that follows the pass (D12).
     Release { op_id: String },
     /// D8 under a ghost kept for replay.
     Rearm { op_id: String },
@@ -83,7 +83,7 @@ pub struct Counts {
     pub waiting_under_held: usize,
     /// A ghost whose create waits for the person (2267's `found_while_paused`, quota, a replaced key): left alone.
     pub left_paused: usize,
-    /// A `needs_review` ghost create whose cause is gone, due again.
+    /// A `needs_review` op whose cause is gone, released to the key check (D4, D6, D10).
     pub released: usize,
     pub held_ambiguous: usize,
     pub held_acts_on_ghost: usize,
@@ -460,8 +460,9 @@ struct FileTwins<'a> {
 
 /// D10: a new file's create meets a server-known file that no op names, with the same effective parent and leaf (`≡`):
 /// held as D4 (`needs_review`), counted `file_twin` (also while it stays held). No download, no compare, no copy (P1).
-/// A held one whose twin is gone is due again (`Release`). A create the server already holds (its row is server-known)
-/// is D8's superseded case; one D6 holds stays D6's; one held for the person (2267) is left as it is.
+/// A held one whose twin is gone is released (`Release`: back to `auth`, so the key check decides, D12). A create the
+/// server already holds (its row is server-known) is D8's superseded case; one D6 holds stays D6's; one held for the
+/// person (2267) is left as it is.
 #[allow(clippy::too_many_arguments)]
 fn file_twins<'a>(
     rows: &'a [Row],
@@ -1108,7 +1109,7 @@ mod tests {
         assert_eq!(counts, Counts { parent_resolved: 1, ..Counts::default() });
     }
 
-    /// D6 re-evaluated: a change held because no single folder matched, once one does, goes under it and is due again.
+    /// D6 re-evaluated: a change held because no single folder matched, once one does, goes under it and is released.
     #[test]
     fn a_held_change_whose_parent_is_found_later_is_released_under_it() {
         let rows =
@@ -1183,7 +1184,7 @@ mod tests {
         assert_eq!(counts, Counts { file_twin: 1, ..Counts::default() });
     }
 
-    /// D10 re-evaluated: a held new file whose twin is gone is due again; one whose twin is still there stays held.
+    /// D10 re-evaluated: a held new file whose twin is gone is released; one whose twin is still there stays held.
     #[test]
     fn a_held_file_whose_twin_is_gone_is_released() {
         let rows = [

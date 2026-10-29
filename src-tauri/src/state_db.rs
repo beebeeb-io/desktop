@@ -1078,10 +1078,12 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
             hold(op_id)?;
         }
         Unit::Release { op_id } => {
+            // Back to `auth`, never straight to due (Goal 2, I6): the key check that follows every pass (D11, D12)
+            // resumes it under this session's key or holds it as `key_replaced`, as every other `auth` change.
             conn.execute(
-                "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?2, updated_at = ?2
-                 WHERE op_id = ?1 AND paused_reason = ?3",
-                params![op_id, now, needs_review],
+                "UPDATE operation_queue SET paused_reason = ?3, next_retry_at = ?2, updated_at = ?2
+                 WHERE op_id = ?1 AND paused_reason = ?4",
+                params![op_id, now, OperationPauseReason::Auth.as_str(), needs_review],
             )?;
         }
         Unit::Rearm { op_id } => rearm_operation_conn(conn, op_id, now)?,
@@ -15243,7 +15245,7 @@ mod reconcile_tests {
     }
 
     /// D10: a new file that meets a server file of the same name is held (`needs_review`, not due); once the server
-    /// file is gone, the next pass releases it.
+    /// file is gone, the next pass releases it to the key check (`auth`), and a key that opens its name resumes it.
     #[test]
     fn reconcile_holds_a_new_file_that_meets_a_server_file_and_releases_it_once_the_twin_is_gone() {
         let pc = Pc::new();
@@ -15259,7 +15261,50 @@ mod reconcile_tests {
         pc.sql("DELETE FROM files WHERE file_id = 's'", []);
         let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         assert_eq!(counts, Counts { released: 1, ..Counts::default() });
-        assert_eq!(pc.op("op-n").4, None);
+        assert_eq!(pc.op("op-n").4.as_deref(), Some("auth"));
+        assert!(pc.due().is_empty());
+        assert_eq!(pc.db.resume_operations_paused_for_auth(NOW).unwrap(), 1);
         assert_eq!(pc.due(), vec!["op-n".to_string()]);
+    }
+
+    /// Goal 2, I6 (review finding on Task 3): the pass holds `auth` changes as `needs_review` (D4, D6, D10), out of
+    /// the key check's reach (D12 reads `auth` only). A later release must not make them due past that check: under a
+    /// replaced key they end up `key_replaced`, never sent with a name sealed under the old key.
+    #[test]
+    fn a_change_the_pass_held_is_never_released_past_the_key_check() {
+        let pc = Pc::new();
+        // D10: a new file that meets a server file of the same name.
+        pc.folder("p", None, "Docs", 3);
+        pc.file("s", Some("p"), "Docs/report.txt", 2);
+        pc.file("n", Some("p"), "Docs/report.txt", 0);
+        pc.upload("op-n", "n", Some("p"), 10);
+        pc.pause("op-n", "auth");
+        // D6: a new file queued with no parent, whose folder is not known yet.
+        pc.upload_without_a_parent();
+        pc.pause("op-f", "auth");
+        // D4: a new folder with two twins (`≡`).
+        pc.folder("t1", None, "Music", 3);
+        pc.folder("t2", None, "music", 3);
+        pc.folder("g", None, "Music", 0);
+        pc.create_folder("op-g", "g", None);
+
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { held_ambiguous: 1, parent_unresolved: 1, file_twin: 1, ..Counts::default() });
+        // The key check fails: the vault key was replaced. The held changes are not `auth`, so it does not see them.
+        pc.db.hold_operations_paused_for_auth_as_key_replaced(NOW).unwrap();
+
+        // Every cause goes away.
+        pc.sql("DELETE FROM files WHERE file_id IN ('s', 't1', 't2')", []);
+        pc.folder("a", None, "A", 3);
+        pc.folder("b", Some("a"), "A/B", 3);
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { replay: 1, released: 3, parent_resolved: 1, ..Counts::default() });
+        assert!(pc.due().is_empty(), "released into the key check, never straight to due: {:?}", pc.due());
+        // The key check after the pass fails again: all three are held as `key_replaced`.
+        assert_eq!(pc.db.hold_operations_paused_for_auth_as_key_replaced(NOW).unwrap(), 3);
+        for op_id in ["op-n", "op-f", "op-g"] {
+            assert_eq!(pc.op(op_id).4.as_deref(), Some("key_replaced"), "{op_id}");
+        }
+        assert!(pc.due().is_empty());
     }
 }
