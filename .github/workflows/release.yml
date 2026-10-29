@@ -169,10 +169,62 @@ jobs:
           mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
           cargo test --locked
 
+  verify-branch-point:
+    name: Verify release branch point
+    # Task 2281: the ruleset gates every update to an existing release/* branch, but not the
+    # branch's STARTING commit (creation is not a pull request, and required checks do not run on
+    # create), so an admin token could create release/x.y.z at an unreviewed commit and dispatch
+    # this workflow to sign it. Refuse that here, before `build` gets the `desktop-release`
+    # environment and an Azure signing token: the branch must have started at a published
+    # desktop-v* tag commit or a commit on main, and every first-parent commit since then must
+    # have arrived through a pull request merged into this same branch. A dispatch from main
+    # skips this job, because main is protected by pull requests. No `environment:` here, so the
+    # job never receives an Azure token.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      !inputs.publish_existing &&
+      startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the check walks first-parent from the dispatched head back to the
+          # branch's starting point.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release branch started from reviewed commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          MAIN_REF: origin/main
+        run: bash scripts/verify-release-branch-point.sh
+
   build:
     name: Build ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
-    needs: test
+    # `verify-branch-point` is skipped for a dispatch from main (main is protected by PRs), so
+    # this job tolerates `skipped` there; whenever the check ran, it must have passed. Signing
+    # happens in this job, so a refused branch point must stop it before it starts.
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event_name == 'workflow_dispatch' &&
+        !inputs.publish_existing &&
+        needs.test.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped')
+      }}
+    needs:
+      - test
+      - verify-branch-point
     runs-on: ${{ matrix.os }}
     # Signing trust boundary (docs/RELEASING.md, "Windows Authenticode"): Azure trusts this job's OIDC token only
     # through the GitHub environment `desktop-release` (subject repo:beebeeb-io/desktop:environment:desktop-release),

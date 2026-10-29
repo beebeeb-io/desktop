@@ -330,3 +330,47 @@ jobs:
         with:
           name: release-manifest-test
           path: ${{ runner.temp }}/release-manifest-test.log
+
+  release-branch-point:
+    # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
+    # was never reviewed (task 2281): the branch must start at a published desktop-v* tag commit
+    # or a commit on main, and every first-parent commit since then must be a pull request merged
+    # into that branch. This job tests the script offline against a real local git repository with
+    # a fake `gh`: a tag start, a main start, an unreviewed start, a direct (non-PR) commit, a PR
+    # merged into another branch, and a non-release ref. The truth line is a count
+    # ("release-branch-point: N passed, 0 failed"), asserted on the run's own log by the same
+    # count guard its self-test proves can go red.
+    name: Release branch point (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/verify-release-branch-point.sh \
+            scripts/test-release-branch-point.sh \
+            scripts/fixtures/release-branch-point-fake-gh.sh
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-branch-point.sh --self-test
+
+      - name: Branch point test (fake gh, real git)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-branch-point.sh 2>&1 | tee "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-branch-point.sh --assert-log "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Upload branch point test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-branch-point-test
+          path: ${{ runner.temp }}/release-branch-point-test.log
