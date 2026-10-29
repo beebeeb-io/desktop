@@ -125,7 +125,7 @@ Service coordinates (non-secret):
 | Resource group / account | `beebeeb-signing` / `beebeebsigning` |
 | Endpoint | `https://weu.codesigning.azure.net/` |
 | Certificate profile | `beebeeb-publictrust` (PublicTrust; 3-day certs, auto-rotating) |
-| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:ref:refs/heads/main` |
+| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:environment:desktop-release` (GitHub environment `desktop-release`, deployment branches `main` and `release/*`) |
 | Role | `Artifact Signing Certificate Profile Signer`, scoped to the account |
 
 How a release build signs (all in `release.yml`, Windows job only):
@@ -159,8 +159,30 @@ How a release build signs (all in `release.yml`, Windows job only):
    gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
    fixture. Any failure blocks the release.
 
-Dispatch `release.yml` **from `main`** — the federated credential's subject is
-`ref:refs/heads/main`, so a run from any other ref cannot authenticate.
+Dispatch `release.yml` from `main` or from a `release/*` branch. No Azure step is
+needed per release. The trust boundary has three parts, and each one is checked:
+
+- **Azure trusts one subject:** `repo:beebeeb-io/desktop:environment:desktop-release`.
+  Only a job that names the GitHub environment `desktop-release` gets that subject in
+  its OIDC token. In `release.yml` that is the `build` job.
+- **The environment deploys only from `main` and `release/*`** (custom deployment
+  branch policies; admins cannot bypass them). A run from any other branch is refused
+  before the job starts, so it never gets a token Azure accepts.
+- **Only repository admins can create, push, force-push or delete a `release/*`
+  branch:** the repository ruleset "release branches (signing)". A bot, an app or a
+  collaborator without the admin role cannot make a branch that is allowed to sign.
+
+The workflow has no reviewer gate on the environment: a release stays one dispatch.
+`signing-login-check.yml` proves the boundary without building or signing anything. It
+runs only the Azure login through the environment. From `main` it must pass. From any
+other branch it must fail with "not allowed to deploy to desktop-release". Run both
+after any change to the environment, the ruleset or the federated credential.
+
+History: until 0.8.18 the credential named one branch (`ref:refs/heads/main`, then one
+added per release branch, `release/0.8.13` to `release/0.8.18`). A release branch without
+its own credential failed at the Azure login with AADSTS700213 (0.8.18's first run).
+Those per-branch credentials stay until a release has signed through the environment;
+removing them is a separate, confirmed step.
 
 SmartScreen honesty: signing removes the "unknown publisher" warning
 immediately, but SmartScreen *reputation* accrues with download volume and
