@@ -19,7 +19,22 @@ impl EngineBridge {
         let scope = self.owner_key_scope();
         scope.check()?;
         let dirty = self.db().shared_index_dirty_revision(folder_id)?;
-        let key = self.shared_folder_custody_key(folder_id).await?;
+        let key = match self.shared_folder_custody_key(folder_id).await {
+            Ok(key) => key,
+            // Review 2276 P3-B: a legacy-proven folder has no custody and no
+            // retry can give it one before its owner upgrades (L11). Clear the
+            // marker at the revision read above so maintenance does not ask
+            // this folder for custody again every 30 seconds.
+            Err(error)
+                if error.downcast_ref::<owner_keys::SharedFolderKeyError>()
+                    == Some(&owner_keys::SharedFolderKeyError::NoCustody) =>
+            {
+                self.db()
+                    .clear_shared_index_dirty_at_revision(folder_id, dirty.as_deref())?;
+                return Ok(IndexRepairReport::default());
+            }
+            Err(error) => return Err(error),
+        };
         let mut report = IndexRepairReport::default();
         let mut queue = VecDeque::from([folder_id.to_string()]);
         let mut seen = HashSet::new();

@@ -43,6 +43,18 @@ fn missing(error: &anyhow::Error) -> bool {
     crate::engine_bridge::error_http_status(error) == Some(404) || error.to_string().starts_with("HTTP 404 ")
 }
 
+/// The server's "this invite's rows are not yours to read" answers (task 2276
+/// P3-A): 404 when the invite is gone or not ours, 400 for `not a folder share`
+/// and `invite not approved` (server `invites.rs::get_folder_keys`). Only these
+/// mean "try another approved invite" — authentication, other client errors,
+/// server errors and transport failures must reach the caller.
+fn invite_rows_gone(error: &anyhow::Error) -> bool {
+    matches!(crate::engine_bridge::error_http_status(error), Some(400 | 404))
+        || ["HTTP 400 ", "HTTP 404 "]
+            .iter()
+            .any(|prefix| error.to_string().starts_with(prefix))
+}
+
 /// These statuses describe the pre-feature custody endpoint only. Authentication,
 /// transport and other server failures must never select the legacy reader.
 pub(crate) fn custody_absent(error: &anyhow::Error) -> bool {
@@ -293,15 +305,17 @@ impl Batch {
             let Some(invite_id) = invite["id"].as_str() else {
                 continue;
             };
-            // Review P3-5: one invite's rows can be gone (for example a race
-            // made it unapproved between the two reads). Skip it and let
-            // another approved invite try to prove the folder key.
+            // Review P3-5 / 2276 P3-A: one invite's rows can be gone (a race
+            // made it unapproved between the two reads). Only the server's
+            // own "gone / not approved" answers skip it; a 401, another client
+            // error, a 5xx or a transport failure is the batch's failure.
             let rows = match self.invite_rows(scope, invite_id).await {
                 Ok(rows) => rows,
-                Err(_) => {
+                Err(error) if invite_rows_gone(&error) => {
                     scope.check()?;
                     continue;
                 }
+                Err(error) => return Err(error),
             };
             if let Some(key) = beebeeb_core::kdf::open_legacy_invite_owner_copy(
                 master,
@@ -368,6 +382,16 @@ impl Batch {
             }
             // Another client registered a newer wrap first; re-read below.
             Err(error) if error.to_string().contains("key_version_conflict") => {}
+            // Review 2276 P3-C: the server answers 404 from the custody PUT when
+            // the folder is missing, not owned by the caller, or trashed
+            // (`ensure_owned_folder`, shared_folders.rs:293-304) and when the
+            // stored row is gone or owned by someone else (:650). A snapshot can
+            // carry a live row under a trashed folder (its query has no ancestor
+            // check), so this is the same typed "no custody here" as the feature
+            // gate — never a reason to abort the whole batch.
+            Err(error) if missing(&error) => {
+                return Err(anyhow::Error::new(SharedFolderKeyError::NoCustody));
+            }
             Err(error) => return Err(error),
         }
         scope.check()?;
