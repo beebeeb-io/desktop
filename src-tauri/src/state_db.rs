@@ -2850,17 +2850,21 @@ impl StateDb {
     /// Custody became available for the root: revive the deferred repair by
     /// marking the index dirty again. Returns whether work was waiting.
     pub fn revive_deferred_shared_index(&self, folder_id: &str) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let removed = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        // Both statements in one transaction: a failure or crash between the delete and the dirty marker must not
+        // consume the deferral, or nobody would ever schedule the repair again.
+        let tx = conn.transaction()?;
+        let removed = tx.execute(
             "DELETE FROM sync_state WHERE key=?1",
             [format!("shared_folder_index_deferred:{folder_id}")],
         )?;
         if removed > 0 {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
                 [format!("shared_folder_index_dirty:{folder_id}")],
             )?;
         }
+        tx.commit()?;
         Ok(removed > 0)
     }
     /// A repair that got its custody key runs to completion, so the provisional
@@ -14810,6 +14814,63 @@ mod tests {
         assert_eq!(deferred(&db), 1, "the deferral is durable before the purge");
         db.purge_all_local_state().unwrap();
         assert_eq!(deferred(&db), 0, "a purge forgets index work waiting for custody");
+    }
+
+    /// Round 4 of 2279: reviving a deferral is one atomic step. The dirty marker is what schedules the repair, so if
+    /// it cannot be written the deferral must still be there. With two autocommit statements the delete committed on
+    /// its own and a failure or crash in between lost the repair for good.
+    #[test]
+    fn sf2279_revive_keeps_the_deferral_when_the_dirty_marker_fails() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let root = "10000000-0000-4000-8000-000000000061";
+        db.defer_shared_index_until_custody(root).unwrap();
+        // The upsert either inserts the dirty row or updates it; refuse both events so the second statement always
+        // fails, whichever way SQLite resolves the conflict.
+        for event in ["INSERT", "UPDATE"] {
+            db.0.lock()
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TRIGGER refuse_dirty_{event} BEFORE {event} ON sync_state
+                     WHEN NEW.key = 'shared_folder_index_dirty:{root}'
+                     BEGIN SELECT RAISE(ABORT, 'dirty marker refused'); END;"
+                ))
+                .unwrap();
+        }
+        let deferred = |db: &StateDb| -> i64 {
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_state WHERE key = ?1",
+                    [format!("shared_folder_index_deferred:{root}")],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let revived = db.revive_deferred_shared_index(root);
+        let err = revived.expect_err("the refused dirty marker fails the revive");
+        assert!(
+            err.to_string().contains("dirty marker refused"),
+            "the trigger, not something else, refused it: {err}"
+        );
+        assert_eq!(deferred(&db), 1, "the deferral survives so the repair is not lost");
+
+        // With the trigger gone the same call revives it exactly once.
+        for event in ["INSERT", "UPDATE"] {
+            db.0.lock()
+                .unwrap()
+                .execute_batch(&format!("DROP TRIGGER refuse_dirty_{event}"))
+                .unwrap();
+        }
+        assert!(
+            db.revive_deferred_shared_index(root).unwrap(),
+            "the retried revive finds the deferral"
+        );
+        assert_eq!(deferred(&db), 0, "the revival consumed the deferral");
+        assert!(
+            db.dirty_shared_index_roots().unwrap().contains(&root.to_string()),
+            "the revival scheduled the repair"
+        );
     }
 
     /// L7d (review 2279 F2): the custody memory is device-wide and monotonic.
