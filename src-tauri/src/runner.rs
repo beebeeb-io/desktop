@@ -240,9 +240,10 @@ fn platform_str() -> &'static str {
 /// This machine's hostname, or `"unknown"` if the OS won't tell us. Cross-
 /// platform via the `hostname` crate (already a dependency for the lock file).
 ///
-/// Only the device row's display name (`register_session`) uses it. The
-/// known-folder backup uses [`device_name`], which has no fallback, so a lossy
-/// name never starts a `Backups/unknown` folder (spec D9, tasks 1888, 2226).
+/// The device row's display name (`register_session`) uses it, and on macOS the
+/// backup source tag (spec §2: no macOS change). The Windows and Linux backup
+/// uses [`device_name`], which has no fallback, so a lossy name never starts a
+/// `Backups/unknown` folder (spec D9, tasks 1888, 2226).
 pub(crate) fn hostname_or_unknown() -> String {
     hostname::get()
         .ok()
