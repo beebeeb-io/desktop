@@ -606,8 +606,11 @@ struct FileTwins<'a> {
     held: HashSet<&'a str>,
 }
 
-/// D10: a new file's create meets a server-known file that no op names, with the same effective parent and leaf (`≡`):
-/// held as D4 (`needs_review`), counted `file_twin` (also while it stays held). No download, no compare, no copy (P1).
+/// D10' (task 2271): a new file's create meets a server-known file that no op names, with the same leaf (`≡`), in the
+/// folder the create is sent to (`sent_to`), or in its row's own folder when the row names a different one: held as D4
+/// (`needs_review`), counted `file_twin` (also while it stays held). A row that names no folder is never matched at the
+/// top level. (0.8.18 read only the row's effective parent, which is NULL for most held new files, and sent 89 of them
+/// next to a file of the same name.) No download, no compare, no copy (P1).
 /// A held one whose twin is gone is released (`Release`: back to `auth`, so the key check decides, D12). A create the
 /// server already holds (its row is server-known) is D8's superseded case; one D6 holds stays D6's; one held for the
 /// person (2267) is left as it is.
