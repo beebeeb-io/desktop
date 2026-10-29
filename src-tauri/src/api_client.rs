@@ -533,6 +533,28 @@ fn set_region_body(preferred_region: Option<&str>, region_strict: Option<bool>) 
     body
 }
 
+/// Task 2274: the duplicates repair tool's reads (spec I3), with the app's 429 backoff. Only
+/// `duplicate_repair::server::RepairApi` calls them. Only in a build with its feature.
+#[cfg(feature = "duplicate-repair")]
+impl ApiClient {
+    /// `GET /api/v1/files/{id}`.
+    pub(crate) async fn repair_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/files/{}", encode(file_id))).await
+    }
+
+    /// `GET /api/v1/shares/by-file/{id}`: the owner's links of a file. Its rows carry link material wrapped under
+    /// the owner's key; the caller counts them and drops them (spec L8 amendment).
+    pub(crate) async fn repair_links(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shares/by-file/{}", encode(file_id))).await
+    }
+
+    /// `GET /api/v1/shares/invites/sent`: every invite the owner sent. Its rows carry recipients' emails and wrapped
+    /// keys; the caller counts them and drops them (spec L8 amendment).
+    pub(crate) async fn repair_invites(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_typed("/api/v1/shares/invites/sent").await
+    }
+}
+
 impl ApiClient {
     #[cfg(any(target_os = "windows", test))]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {

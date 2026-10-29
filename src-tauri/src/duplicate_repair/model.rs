@@ -75,4 +75,38 @@ pub(crate) struct Pair {
     pub b: RowFacts,
     pub view: ViewFacts,
     pub class: Class,
+    /// Phase 1b: what the server says about A and B. `None` until read, and for a pair the local rows decided.
+    pub server: Option<ServerRead>,
+}
+
+/// Phase 1b: one file as `GET /api/v1/files/{id}` answers (spec S3, S8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ServerFacts {
+    pub trashed: bool,
+    pub parent_id: Option<String>,
+    pub size_bytes: i64,
+    pub updated_at: String,
+    /// `download_version.version_number`: the current version, 0 when the server names none.
+    pub version_number: i64,
+    /// `acted_via_share_id` is set.
+    pub via_share: bool,
+}
+
+/// A file the server read: gone (404) or found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "state")]
+pub(crate) enum ServerFile {
+    Gone,
+    Found(ServerFacts),
+}
+
+/// What phase 1b read for one pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ServerRead {
+    pub a: ServerFile,
+    /// `None` when B was not read (A gone).
+    pub b: Option<ServerFile>,
+    /// L8 amendment: B's live links and live invites, as counts. The responses themselves are never kept.
+    pub live_links: Option<usize>,
+    pub live_invites: Option<usize>,
 }

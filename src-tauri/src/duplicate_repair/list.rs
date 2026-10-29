@@ -71,7 +71,7 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
             (first, second)
         };
         let class = local_class(db, &a, &b, &observed, identity.as_deref())?;
-        listing.pairs.push(Pair { n: 0, path, a, b, view: view_facts(&observed, identity), class });
+        listing.pairs.push(Pair { n: 0, path, a, b, view: view_facts(&observed, identity), class, server: None });
     }
     listing.pairs.sort_by(|left, right| left.path.cmp(&right.path));
     for (index, pair) in listing.pairs.iter_mut().enumerate() {
