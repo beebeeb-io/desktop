@@ -87,6 +87,9 @@ mod own_data_proof;
 // Task 2267 (fix round 2): what the person decides about the changes the proof held for review.
 #[cfg(any(target_os = "windows", test))]
 mod found_while_paused;
+// Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
+// memory. Windows and Linux run it; macOS keeps its own resume.
+mod held_queue;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
