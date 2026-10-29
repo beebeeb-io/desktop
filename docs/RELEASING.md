@@ -171,6 +171,12 @@ needed per release. The trust boundary has three parts, and each one is checked:
 - **Only repository admins can create, push, force-push or delete a `release/*`
   branch:** the repository ruleset "release branches (signing)". A bot, an app or a
   collaborator without the admin role cannot make a branch that is allowed to sign.
+  The ruleset blocks every update to a `release/*` branch, a pull request merge
+  included, so each change to a release branch is merged by an admin through the
+  ruleset's bypass (`gh pr merge --admin`). The bypass is for this ruleset only: it
+  does not stand in for the PR's own gate, which must be green before the merge (first
+  needed for 0.8.19's #184, 2026-10-29). The ruleset does not constrain an admin, and
+  that includes a tool or session acting with an admin's token.
 
 The workflow has no reviewer gate on the environment: a release stays one dispatch.
 `signing-login-check.yml` proves the boundary without building or signing anything. It
