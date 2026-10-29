@@ -408,10 +408,15 @@ fn an_open_file_is_transient() {
 }
 
 fn track(db: &crate::state_db::StateDb, file_id: &str, local_hash: Option<String>) {
+    track_at(db, file_id, &format!("{file_id}.txt"), local_hash);
+}
+
+/// The server row `file_id` at `path`, with its agreed content when `local_hash` is given.
+fn track_at(db: &crate::state_db::StateDb, file_id: &str, path: &str, local_hash: Option<String>) {
     use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
     db.upsert_file(&FileEntry {
         file_id: file_id.into(),
-        path: format!("{file_id}.txt"),
+        path: path.into(),
         status: FileStatus::Local,
         size_bytes: 1,
         modified_at: 1,
@@ -496,4 +501,105 @@ fn promote_reads_a_read_only_file() {
     assert_eq!(Kept::of(&path), kept, "I1");
     settle();
     assert_eq!(fetches("t10-"), 0, "I2");
+}
+
+/// A finalization journal row for the upload `prefix` of the file at `target` (relative to the root).
+fn journal(db: &crate::state_db::StateDb, prefix: &str, target: &str, payload: &Path) {
+    db.put_upload_finalization(&crate::state_db::UploadFinalization {
+        op_id: format!("{prefix}-op"),
+        local_file_id: format!("{prefix}-local"),
+        server_file_id: format!("{prefix}-server"),
+        target_path: target.into(),
+        payload_path: payload.to_string_lossy().into_owned(),
+        stamped: false,
+        review: None,
+    })
+    .unwrap();
+}
+
+/// Spec R1, R2, I4, I5: a row held for review is left alone by every later tick (no retry, no warn per tick) and
+/// tried again once per engine start, when it goes through F0-F9 again. Its file is not changed.
+#[test]
+fn review_rows_are_retried_once_per_start() {
+    use crate::unknown_check::OnDisk;
+    let root = Root::new();
+    let db = root.db();
+    let path = root.path.join("r.txt");
+    std::fs::write(&path, b"another file's bytes").unwrap();
+    placeholders::convert_to_unsynced_placeholder(&path, "t11-other").unwrap();
+    track_at(&db, "t11-server", "r.txt", None);
+    let payload = root.temp.path().join("t11-payload");
+    std::fs::write(&payload, b"the uploaded bytes").unwrap();
+    journal(&db, "t11", "r.txt", &payload);
+
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    let rows = db.upload_finalizations().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].review.as_deref(), Some("other_file"), "held for review (F4)");
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, false, "t11-other"), "I5: not changed");
+    assert!(payload.exists(), "the staged copy is kept while the row is in review");
+
+    // Its file goes. Later ticks of the same start do not look at the row again: it is still in review.
+    std::fs::remove_file(&path).unwrap();
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    let rows = db.upload_finalizations().unwrap();
+    assert_eq!(rows.len(), 1, "a row in review is not retried every tick");
+    assert_eq!(rows[0].review.as_deref(), Some("other_file"));
+
+    // The next start tries it again: nothing is left at the target (F2), so the row ends.
+    crate::windows_cf::upload_finalization::forget_review_retry(&root.path);
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    assert!(db.upload_finalizations().unwrap().is_empty(), "the next start finishes it");
+    assert!(!payload.exists(), "and removes its staged copy");
+}
+
+/// Spec F7b with no staged copy (review focus: a crash after its unlink, or a cleanup): the bytes are the agreed
+/// content, so the row ends in sync. 0.8.19 failed on the payload's open every tick.
+#[test]
+fn a_finalization_with_its_payload_gone_still_finishes() {
+    use crate::unknown_check::OnDisk;
+    let root = Root::new();
+    let db = root.db();
+    let path = root.path.join("p.txt");
+    let bytes = b"the agreed bytes".repeat(50);
+    std::fs::write(&path, &bytes).unwrap();
+    make_read_only(&path);
+    track_at(&db, "t12-server", "p.txt", Some(sha256(&bytes)));
+    journal(&db, "t12", "p.txt", &root.temp.path().join("t12-payload-already-removed"));
+    let kept = Kept::of(&path);
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    assert!(db.upload_finalizations().unwrap().is_empty(), "the row ends");
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t12-server"));
+    assert_eq!(Kept::of(&path), kept, "I1");
+    settle();
+    assert_eq!(fetches("t12-"), 0, "I2");
+}
+
+/// Spec F8 (review focus): a file open in another program stays pending, not in review, and finishes on the next
+/// tick once it is closed.
+#[test]
+fn an_open_file_stays_pending_and_finishes_next_tick() {
+    use crate::unknown_check::{OnDisk, PlatformView};
+    let root = Root::new();
+    let db = root.db();
+    let path = root.path.join("o.txt");
+    let bytes = b"open in an editor".repeat(50);
+    std::fs::write(&path, &bytes).unwrap();
+    make_read_only(&path);
+    track_at(&db, "t13-server", "o.txt", None);
+    let payload = root.temp.path().join("t13-payload");
+    std::fs::write(&payload, &bytes).unwrap();
+    journal(&db, "t13", "o.txt", &payload);
+    let reader = std::fs::File::open(&path).unwrap();
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    let rows = db.upload_finalizations().unwrap();
+    assert_eq!(rows.len(), 1, "pending");
+    assert_eq!((rows[0].stamped, rows[0].review.as_deref()), (false, None), "not in review, not stamped");
+    assert_eq!(placeholders::platform_view(&path), PlatformView::PlainFile, "nothing changed");
+    drop(reader);
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick finishes it");
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t13-server"));
+    assert!(!payload.exists(), "its staged copy is removed");
 }
