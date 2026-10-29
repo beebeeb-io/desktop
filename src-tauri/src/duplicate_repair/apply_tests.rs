@@ -480,6 +480,7 @@ fn t14_the_tool_reaches_the_server_through_exactly_six_calls() {
         ("list.rs", include_str!("list.rs")),
         ("compare.rs", include_str!("compare.rs")),
         ("apply.rs", include_str!("apply.rs")),
+        ("echo.rs", include_str!("echo.rs")),
         ("examples/duplicate_repair.rs", include_str!("../../examples/duplicate_repair.rs")),
     ];
     for (name, source) in sources {
@@ -499,5 +500,5 @@ fn t14_the_tool_reaches_the_server_through_exactly_six_calls() {
         .filter(|name| !name.ends_with("tests.rs"))
         .collect();
     files.sort();
-    assert_eq!(files, ["apply.rs", "compare.rs", "list.rs", "mod.rs", "model.rs", "server.rs"]);
+    assert_eq!(files, ["apply.rs", "compare.rs", "echo.rs", "list.rs", "mod.rs", "model.rs", "server.rs"]);
 }
