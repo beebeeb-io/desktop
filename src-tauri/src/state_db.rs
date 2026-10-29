@@ -2803,6 +2803,33 @@ impl StateDb {
         conn.execute("DELETE FROM sync_state WHERE key=?1 AND value=?2",params![format!("shared_folder_index_dirty:{id}"),revision])?;
         Ok(())
     }
+    /// Task 2279 item 1: index work that cannot run before the root has
+    /// custody. It is kept durably instead of being cleared, but is not part of
+    /// the dirty set, so maintenance does not retry it every 30 seconds.
+    pub fn defer_shared_index_until_custody(&self, folder_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
+            [format!("shared_folder_index_deferred:{folder_id}")],
+        )?;
+        Ok(())
+    }
+    /// Custody became available for the root: revive the deferred repair by
+    /// marking the index dirty again. Returns whether work was waiting.
+    pub fn revive_deferred_shared_index(&self, folder_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let removed = conn.execute(
+            "DELETE FROM sync_state WHERE key=?1",
+            [format!("shared_folder_index_deferred:{folder_id}")],
+        )?;
+        if removed > 0 {
+            conn.execute(
+                "INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)",
+                [format!("shared_folder_index_dirty:{folder_id}")],
+            )?;
+        }
+        Ok(removed > 0)
+    }
     pub fn list_owned_key_records(&self)->Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
         let conn=self.0.lock().expect("state_db mutex poisoned");
         let mut stmt=conn.prepare("SELECT record FROM owned_key_records")?;
@@ -7478,7 +7505,7 @@ impl StateDb {
         )?;
         tx.execute("DELETE FROM id_aliases", [])?;
         tx.execute("DELETE FROM owned_key_records", [])?;
-        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_custody_seen:%' OR key='owned_key_retry_after'", [])?;
+        tx.execute("DELETE FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%' OR key LIKE 'shared_folder_index_deferred:%' OR key LIKE 'shared_folder_custody_seen:%' OR key='owned_key_retry_after'", [])?;
 
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -14699,6 +14726,28 @@ mod tests {
         db.clear_account_data(false).unwrap();
         assert!(!db.has_account_data().unwrap());
         assert_eq!(db.owner().unwrap(), None);
+    }
+
+    /// Task 2279 item 1: index work waiting for custody names a folder of one
+    /// account. A full local purge forgets it with the rest of that account's state.
+    #[test]
+    fn sf2279_purge_all_local_state_drops_deferred_index_work() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        db.defer_shared_index_until_custody("f-1").unwrap();
+        let deferred = |db: &StateDb| -> i64 {
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'shared_folder_index_deferred:%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(deferred(&db), 1, "the deferral is durable before the purge");
+        db.purge_all_local_state().unwrap();
+        assert_eq!(deferred(&db), 0, "a purge forgets index work waiting for custody");
     }
 
     /// Added after a mutation survived (task 1834, M20): the sync cursor is account data on its own, and the

@@ -271,7 +271,7 @@ fn rv173_l7c_owner_custody_is_remembered_only_after_l6_open() {
             .err()
             .unwrap()
             .to_string(),
-        "folder custody unavailable"
+        "This folder has no custody key here."
     );
     let owner_wrap = beebeeb_sync::key_resolution::wrap_folder_custody(
         &MasterKey::from_bytes([7; 32]),

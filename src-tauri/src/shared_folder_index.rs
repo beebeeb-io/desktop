@@ -21,17 +21,20 @@ impl EngineBridge {
         let dirty = self.db().shared_index_dirty_revision(folder_id)?;
         let key = match self.shared_folder_custody_key(folder_id).await {
             Ok(key) => key,
-            // Review 2276 P3-B: a legacy-proven folder has no custody and no
-            // retry can give it one before its owner upgrades (L11). Clear the
-            // marker at the revision read above so maintenance does not ask
-            // this folder for custody again every 30 seconds.
-            Err(error)
-                if error.downcast_ref::<owner_keys::SharedFolderKeyError>()
-                    == Some(&owner_keys::SharedFolderKeyError::NoCustody) =>
-            {
+            // Review 2279 items 1-2: no custody, upgrade required, "can't
+            // verify" and a seen-custody 404 cannot be repaired by retrying
+            // every 30 seconds. Keep the work in a separate durable deferral
+            // instead of clearing the only trigger (review 2276 P3-B did that
+            // only for `NoCustody`). `remember_custody` revives it when custody
+            // opens for the root.
+            Err(error) if owner_keys::shared_folder_key_unavailable(&error) => {
+                self.db().defer_shared_index_until_custody(folder_id)?;
                 self.db()
                     .clear_shared_index_dirty_at_revision(folder_id, dirty.as_deref())?;
-                return Ok(IndexRepairReport::default());
+                return Ok(IndexRepairReport {
+                    deferred: 1,
+                    ..Default::default()
+                });
             }
             Err(error) => return Err(error),
         };
