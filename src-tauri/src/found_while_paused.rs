@@ -270,17 +270,25 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// "Keep on this PC only", for every change held as `found_while_paused`. `today` names the dated folder
-/// (`YYYY-MM-DD`); `rename` moves one item and never replaces (production: [`rename_no_replace`]).
+/// "Keep on this PC only", for the changes held as `found_while_paused` that the card showed (`shown`, op ids from
+/// [`review`]; self-review of round 3, F7). `today` names the dated folder (`YYYY-MM-DD`); `rename` moves one item and
+/// never replaces (production: [`rename_no_replace`]).
 pub fn keep(
     db: &StateDb,
     sync_root: &Path,
     today: &str,
     rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    shown: &[String],
 ) -> Result<KeepResult, String> {
     recover(db, sync_root)?;
     let rows = db.own_data_proof_rows().map_err(|e| format!("read the local rows: {e}"))?;
-    let held = db.found_while_paused_ops().map_err(|e| format!("read the held changes: {e}"))?;
+    let shown: HashSet<&str> = shown.iter().map(String::as_str).collect();
+    let held: Vec<ProofOp> = db
+        .found_while_paused_ops()
+        .map_err(|e| format!("read the held changes: {e}"))?
+        .into_iter()
+        .filter(|op| shown.contains(op.op_id.as_str()))
+        .collect();
     let begun = db.files_with_upload_begun().map_err(|e| format!("read the uploads: {e}"))?;
     let plan = plan(&rows, &held, &begun);
     let mut result = KeepResult { stays_held: plan.stays_held, ..KeepResult::default() };
@@ -746,8 +754,9 @@ mod tests {
             self.db.own_data_proof_ops().unwrap().len()
         }
 
+        /// Keep what is held, all of it shown on the card.
         fn keep(&self) -> KeepResult {
-            keep(&self.db, &self.root, TODAY, &rename_no_replace).expect("keep runs")
+            keep(&self.db, &self.root, TODAY, &rename_no_replace, &self.held()).expect("keep runs")
         }
     }
 
@@ -855,7 +864,7 @@ mod tests {
             }
         };
 
-        let result = keep(&pc.db, &pc.root, TODAY, &other_volume).unwrap();
+        let result = keep(&pc.db, &pc.root, TODAY, &other_volume, &pc.held()).unwrap();
 
         assert_eq!((result.moved_items, result.moved_files, result.not_moved), (1, 1, 1), "{result:?}");
         assert_eq!(std::fs::read(pc.on_disk("Trip/note.txt")).unwrap(), b"txt", "left where it was");
@@ -880,7 +889,7 @@ mod tests {
             panic!("the process ends here");
         };
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            keep(&pc.db, &pc.root, TODAY, &crash_after_moving)
+            keep(&pc.db, &pc.root, TODAY, &crash_after_moving, &pc.held())
         }));
         assert!(crashed.is_err(), "precondition: the keep was interrupted");
         assert!(pc.db.keep_journal().unwrap().is_some(), "precondition: the journal says a move was in progress");
@@ -905,7 +914,7 @@ mod tests {
         pc.hold_all();
         let crash_before_moving = |_: &Path, _: &Path| -> std::io::Result<()> { panic!("the process ends here") };
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            keep(&pc.db, &pc.root, TODAY, &crash_before_moving)
+            keep(&pc.db, &pc.root, TODAY, &crash_before_moving, &pc.held())
         }));
         assert!(crashed.is_err() && pc.db.keep_journal().unwrap().is_some(), "precondition");
 
@@ -1115,6 +1124,21 @@ mod tests {
         assert_eq!(review.synced_by, None, "the backend says which service syncs the kept folder, not the review");
     }
 
+    /// Self-review of round 3 (F8): a change anywhere inside a folder shared with this account counts as such, however
+    /// deep: here a new file in a new folder made here inside the shared folder (the new rows are My Files rows).
+    #[test]
+    fn the_review_counts_a_change_deep_in_a_shared_folder_as_shared() {
+        let pc = Pc::new();
+        pc.row("shared-folder", "Shared", None, true, true, Namespace::SharedWithMe);
+        pc.new_folder("new-folder", "Shared/Trip", Some("shared-folder"));
+        pc.new_file("new-photo", "Shared/Trip/photo.jpg", Some("new-folder"), b"jpg");
+        pc.hold_all();
+
+        let review = review(&pc.db.found_while_paused_changes().unwrap());
+
+        assert_eq!((review.new_folders, review.new_files, review.in_shared_folders), (0, 0, 2), "{review:?}");
+    }
+
     /// Lead review round 3, P3-1: "Upload to my Beebeeb" releases the changes the card showed: never one held after
     /// the card read them, and a change released once is not counted again.
     #[test]
@@ -1154,6 +1178,23 @@ mod tests {
         assert!(!pc.staging.join("new-photo.staged").exists(), "then the staged copy goes");
         assert!(!pc.staging.join("new-note.staged").exists(), "a copy whose file moved with the item goes");
         assert!(pc.db.staged_payloads_for_signout().unwrap().is_empty(), "the journal forgets both");
+    }
+
+    /// Self-review of round 3 (F7): Keep moves only the items of the changes the card showed; a change held after the
+    /// card read them stays held, and its item stays where it is.
+    #[test]
+    fn keep_moves_only_the_items_of_the_changes_the_card_showed() {
+        let pc = Pc::new();
+        pc.new_folder("shown", "Shown", None);
+        pc.new_folder("later", "Later", None);
+        pc.hold_all();
+
+        let result = keep(&pc.db, &pc.root, TODAY, &rename_no_replace, &strings(&["op-shown"])).unwrap();
+
+        assert_eq!(result.moved_items, 1);
+        assert!(pc.kept_dir().join("Shown").exists());
+        assert!(pc.on_disk("Later").exists(), "not shown: not moved");
+        assert_eq!(pc.held(), strings(&["op-later"]));
     }
 
     /// Self-review of round 3 (F3): the only copy of a file's bytes is in the kept folder before the keep forgets the
