@@ -16,6 +16,13 @@
 //      README. At least one README key must verify.
 //   4. README.md no longer carries the false conflict claim
 //      ("the older version is renamed `file (Device, HH:MM).ext`").
+//   5. The README's public claims match the repo and the latest release (task
+//      #56 rework): every in-page link resolves to a heading, no command pins a
+//      version, Windows is not called unsigned while the release workflow gates
+//      on Authenticode, no installer type is said to have a `.sig` the latest
+//      release does not ship, macOS is not called unreleased while the latest
+//      release has a `.dmg`, and CONTRIBUTING.md does not deny the PR CI that
+//      `.github/workflows/ci.yml` runs.
 //
 // Network: needs read-only HTTPS to api.github.com + github.com. It fails
 // closed if it cannot reach them — a check that cannot prove anything is a red.
@@ -71,6 +78,26 @@ check(!runnerSweeps || /24 hours[^\n]*Keep Both/i.test(readme),
 check(!runnerSweeps || !/nothing is overwritten until you choose/i.test(readme),
   'README does not claim a conflict waits for the user indefinitely')
 
+// ── 5a. Claims checkable from the repo alone ─────────────────────────────────
+// GitHub's heading anchors: lower-case, punctuation dropped (hyphens kept), each space a hyphen.
+const slug = (heading) => heading.toLowerCase().replace(/[^\p{L}\p{M}\p{N}\p{Pc} -]/gu, '').replace(/ /g, '-')
+const anchors = new Set(headings.map(slug))
+const deadLinks = [...readme.matchAll(/\]\(#([^)]+)\)/g)].map((m) => m[1]).filter((a) => !anchors.has(a))
+check(deadLinks.length === 0, `every in-page README link resolves to a heading${deadLinks.length ? ` (dead: ${deadLinks.join(', ')})` : ''}`)
+const pinned = [...readme.matchAll(/Beebeeb[_-]\d+\.\d+\.\d+[_-][^\s`]*/g)].map((m) => m[0])
+check(pinned.length === 0, `README names installers with <version>, not a pinned version${pinned.length ? ` (found ${pinned[0]})` : ''}`)
+const releaseWorkflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
+if (/verify-authenticode\.ps1/.test(releaseWorkflow)) {
+  check(!/not (yet )?code-signed|not signed with a (Windows )?code-signing certificate|do not carry an OS-trusted code-signing certificate/i.test(readme),
+    'README does not call the Windows installers unsigned (the release workflow gates on Authenticode)')
+  check(/Authenticode-signed by \**Initlabs B\.V\./.test(readme), 'README says who signs the Windows installers (Initlabs B.V.)')
+}
+const ciPath = path.join(repoRoot, '.github', 'workflows', 'ci.yml')
+if (fs.existsSync(ciPath) && /^\s*pull_request:/m.test(fs.readFileSync(ciPath, 'utf8'))) {
+  check(!/no CI on pull requests/i.test(fs.readFileSync(contributingPath, 'utf8')),
+    'CONTRIBUTING.md does not deny the pull-request CI that ci.yml runs')
+}
+
 // ── 3. The README key verifies the latest release's real signature ───────────
 function decodeMinisignPublicKey(b64) {
   const raw = Buffer.from(b64, 'base64')
@@ -108,6 +135,24 @@ try {
   const res = await fetch(`https://api.github.com/repos/${releaseRepo}/releases/latest`, { headers })
   if (!res.ok) throw new Error(`GitHub latest-release lookup returned HTTP ${res.status}`)
   const release = await res.json()
+
+  // ── 5b. Claims checked against the latest release's assets ──────────────────
+  const names = new Set(release.assets.map((a) => a.name))
+  const installers = [...names].filter((n) => /\.(exe|msi|deb|rpm|AppImage|dmg)$/.test(n))
+  const unsigned = installers.filter((n) => !names.has(`${n}.sig`))
+  console.log(`info latest release ${release.tag_name}: ${installers.length} installers, without a .sig: ${unsigned.join(', ') || 'none'}`)
+  check(installers.length > 0, `latest release ${release.tag_name} lists installer assets`)
+  if (unsigned.length) {
+    check(!/(each|every) installer (has a matching `?\.sig|is signed with \[?minisign)/i.test(readme),
+      `README does not say every installer has a .sig (${unsigned.join(', ')} has none)`)
+  }
+  for (const ext of new Set(unsigned.map((n) => n.slice(n.lastIndexOf('.'))))) {
+    const escaped = ext.replace('.', '\\.')
+    check(new RegExp(`${escaped}\`? (has no|has none|is not)`).test(readme), `README says the ${ext} has no .sig`)
+  }
+  if (installers.some((n) => n.endsWith('.dmg'))) {
+    check(!/No macOS release is published/i.test(readme), `README does not call macOS unreleased (${release.tag_name} ships a .dmg)`)
+  }
   const sigAsset = release.assets.find((a) => a.name.endsWith('.sig'))
   if (!sigAsset) throw new Error(`latest release ${release.tag_name} has no .sig asset`)
   const sigRes = await fetch(sigAsset.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } })

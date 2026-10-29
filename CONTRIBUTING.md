@@ -67,8 +67,10 @@ actually verifies the signature of the current GitHub release (it needs network 
 3. Run the checks above and paste the counts into the pull request description.
 4. Open a pull request that says what changed and why.
 
-There is **no CI on pull requests yet**: the full test gate (`bun test` + `cargo test --locked`) runs in the
-release workflow before anything is built. That is why the counts in your pull request description matter.
+Every pull request runs **Desktop CI** (`.github/workflows/ci.yml`): the frontend suite (`bun test`, `tsc`,
+ESLint), `cargo test --locked` on Linux, Windows and macOS (plus `cargo check --all-targets` on Windows and
+macOS), and the File Provider Swift job on macOS. The release workflow runs the full test gate again before
+anything is built. Paste your own counts into the pull request description as well: they show what you ran.
 Every review conversation must be resolved before a pull request can merge, and every merge is done by a
 person.
 

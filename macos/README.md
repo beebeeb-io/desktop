@@ -72,8 +72,9 @@ See `HiSelectiveSync` in `design/hifi/hifi-desktop.jsx`.
 
 Side-by-side diff view showing both versions with change summaries.
 NEVER silently drops a version -- the user picks Keep Mine / Keep Theirs /
-Keep Both; Keep Both (also applied automatically after 24 h without a choice)
-keeps the local copy as `name (conflict - <hostname> - <YYYY-MM-DD>).ext`.
+Keep Both. A Finder save that meets a newer server version is held, not sent;
+Keep Both adds it beside the original as `name (<device name>, HH.MM).ext`
+(task 2190, `keep_both_name` in `src-tauri/src/engine_bridge.rs`).
 See `HiConflict` in `design/hifi/hifi-desktop.jsx`.
 
 ## First-run wizard

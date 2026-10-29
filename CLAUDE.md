@@ -124,18 +124,7 @@ Every request from the daemon `ApiClient` and every ad-hoc `reqwest::Client` in 
 
 ## Sync engine
 
-`src-tauri` is expected to own the background Rust sync runtime and call shared
-core/sync logic instead of duplicating protocol behavior in TypeScript.
-Conflict resolution policy: never silently drop a version. A detected conflict is flagged
-(`FileStatus::Conflict`, `modified_at` anchored to detection time), the conflict window opens and a
-notification fires; the file is left untouched until the user picks Keep Mine / Keep Theirs / Keep
-Both (`resolve_conflict`). Keep Both renames the LOCAL copy to
-`name (conflict - <hostname> - <YYYY-MM-DD>).ext` (UTC date) and hydrates the remote into the
-original path (`EngineBridge::auto_resolve_keep_both`). If the user has not chosen within 24 h,
-`runner::sweep_auto_resolutions` (called every tick after detection) applies the same Keep Both
-(`conflict::auto_resolution_deadline`). File watcher debounce: 100ms.
-The backend must create a new server version for Finder writes when the server
-versioning contract supports it.
+`src-tauri` owns the background Rust sync runtime; no protocol duplication in TypeScript. Conflicts: never silently drop a version — default `KeepBoth` (loser renamed `file (Device, HH:MM).ext`). Watcher debounce 100 ms.
 
 **Upload resume:** `POST /uploads/init` persists the session (`upload_resume` table, keyed by `op_id`, fingerprinted by staged path + size + mtime); watermark advances on every 2xx chunk PUT; retry resumes from the watermark; changed payload / gone session / given-up op abandons (create's orphaned `is_uploading` row is trashed; a replace's never). Exception for macOS Finder writes (`write_id`): after `complete` answers, the completion is recorded first and the op is never abandoned/parked — it retries only local landing (one transaction). Windows local-create completion keeps a separate `upload_finalizations` journal. Advanced settings (`desktop.toml`): `theme` light/dark/system; `local_cache_limit_bytes` per-device cap (`0` = Unlimited; evict LRU non-pinned first, never auto-evict pinned).
 
@@ -148,21 +137,7 @@ Tauri updater verifies with minisign (keypair generated 2026-05-07).
 
 ## Storage location (task 1919, by COUNTRY since task 2050)
 
-- `TAURI_SIGNING_PRIVATE_KEY` — the *contents* of `~/.tauri/beebeeb-desktop.key`,
-  set as a repository secret (not the file path)
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password if the key has one;
-  unset for the current passwordless setup
-
-To inspect the public key locally: `cat ~/.tauri/beebeeb-desktop.key.pub`.
-That was the pre-rotation key, fingerprint `545D7BA77EDEA7E1` (signed releases up to and
-including 0.8.3). Since 0.8.4 releases are signed with the rotated key `C6FADFD59D732197`, the
-key baked into `tauri.conf.json` since 0.3.0 — see `docs/RELEASING.md`.
-
-If the key is lost, no clients with already-installed builds can verify
-new updates — they'll need a manual reinstall to onboard the new pubkey.
-
 A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `docs/canon/data-residency.md` in the workspace). `europe` is the default; the rows are the API's (`GET /api/v1/me/region` `choices` = public `GET /api/v1/storage-regions`), rendered as sent — the desktop keeps NO list, city or country table; `account_set_region` sends the row's `id` verbatim with `regionStrict` stated. **No city is decoded at all** (`StorageChoice`/`RegionInfo` have no `city` field); guard `tests/noCityInCopy.test.ts` fails on a city name or a `city` read anywhere in `src/` and `src-tauri/src/`. Uploads send no region. Detail (older-server folding, "Only store in <country>", verify recipe): docs/runbook/desktop-task-history.md.
-
 
 ## Brand
 
