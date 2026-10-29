@@ -482,6 +482,41 @@ mod tests {
         }
     }
 
+    /// The real `state.db` again, with a reset that is COUNTED rather than forbidden: on macOS and Linux a reset is
+    /// allowed, so a test that expects the binding to keep the data must see the count stay 0.
+    struct CountingReset {
+        db: StateDb,
+        resets: Cell<u32>,
+    }
+
+    impl CountingReset {
+        fn open(dir: &std::path::Path) -> Self {
+            Self {
+                db: StateDb::open(dir.join("state.db")).unwrap(),
+                resets: Cell::new(0),
+            }
+        }
+    }
+
+    impl LocalData for CountingReset {
+        fn owner(&self) -> Result<Option<Identity>, String> {
+            self.db.owner().map_err(|e| e.to_string())
+        }
+        fn has_account_data(&self) -> Result<bool, String> {
+            self.db.has_account_data().map_err(|e| e.to_string())
+        }
+        fn reset(&self) -> Result<(), String> {
+            self.resets.set(self.resets.get() + 1);
+            self.db.clear_account_data(false).map_err(|e| e.to_string())
+        }
+        fn record_owner(&self, owner: &Identity) -> Result<(), String> {
+            self.db.set_owner(owner).map_err(|e| e.to_string())
+        }
+        fn adopt_once(&self, candidate: Option<&Identity>) -> Result<bool, String> {
+            self.db.adopt_owner_once(candidate).map_err(|e| e.to_string())
+        }
+    }
+
     struct Pc {
         db: Db,
         _dir: tempfile::TempDir,
@@ -1739,6 +1774,52 @@ mod tests {
         assert!(!eligible(Some(&alice_old_email), &me_by_email, true), "an owner with an id, a session without one");
         assert!(!eligible(Some(&alice), &me, true), "another user id: never");
         assert!(!eligible(None, &Identity::default(), true), "an unknown session: never");
+    }
+
+    // ---- task 2279 N1: the kept custody memory is not account data ----
+
+    /// N1 (round 3): `shared_folder_custody_seen:%` survives the Windows sign-out (F2). While it was counted as
+    /// account data, every start after a completed sign-out found "unowned local data" and was refused as another
+    /// account's — and Windows may not reset, so it never recovered (the task 2267 symptom), and the own-data proof
+    /// cannot rescue an empty database. With the row kept and not counted, the start is `Kept`.
+    #[test]
+    fn sf2279_a_kept_custody_row_does_not_refuse_the_windows_engine_start() {
+        let pc = empty_pc();
+        let root = "10000000-0000-4000-8000-000000000054";
+        pc.db
+            .0
+            .remember_folder_custody_at_revision(root, pc.db.0.account_revision())
+            .unwrap();
+        pc.db.0.finish_windows_signout().unwrap();
+        assert!(
+            pc.db.0.has_seen_folder_custody(root).unwrap(),
+            "F2: the sign-out keeps the custody row"
+        );
+        assert_eq!(
+            bind_before_engine_start(&pc.db, &session(), WINDOWS),
+            Ok(Bound::Kept),
+            "no data and no owner is nothing to reset or refuse"
+        );
+    }
+
+    /// The same on macOS and Linux, where a reset is allowed: the first engine start after a sign-out must not run the
+    /// R10 reset (which would change the sign-in kind and ask for a Finder Repair) because of a custody row it kept.
+    #[test]
+    fn sf2279_a_kept_custody_row_does_not_reset_the_first_start_after_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = CountingReset::open(dir.path());
+        let root = "10000000-0000-4000-8000-000000000055";
+        data.db
+            .remember_folder_custody_at_revision(root, data.db.account_revision())
+            .unwrap();
+        data.db.purge_all_local_state().unwrap();
+        assert!(data.db.has_seen_folder_custody(root).unwrap(), "F2: the purge keeps it");
+        assert_eq!(
+            bind_before_engine_start(&data, &session(), true),
+            Ok(Bound::Kept),
+            "nothing here belongs to an account: no reset"
+        );
+        assert_eq!(data.resets.get(), 0, "the R10 reset path did not run");
     }
 
     /// The copy a refused Windows start shows never tells a person they have another account.

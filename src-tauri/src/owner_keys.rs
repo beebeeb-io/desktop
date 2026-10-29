@@ -79,6 +79,11 @@ pub(crate) enum SharedFolderKeyError {
     /// shared-folders feature gate answered that custody is unavailable
     /// (review P2-1/P2-2). Never a reason to write a key.
     NoCustody,
+    /// This device has seen custody for the folder, and the server now answers
+    /// that it is absent (L7c, task 2279 R2). Refuses this row only: the
+    /// folder is never read as legacy and the seen-custody fact is never
+    /// forgotten.
+    CustodyGone,
 }
 
 impl std::fmt::Display for SharedFolderKeyError {
@@ -89,6 +94,7 @@ impl std::fmt::Display for SharedFolderKeyError {
                 f.write_str("The owner must upgrade this folder before its keys can be used here.")
             }
             Self::NoCustody => f.write_str("This folder has no custody key here."),
+            Self::CustodyGone => f.write_str("This folder's keys are unavailable"),
         }
     }
 }
@@ -97,7 +103,7 @@ impl std::error::Error for SharedFolderKeyError {}
 
 /// Either typed state means this row gets no key on this pass: no custody is
 /// registered, no key is minted, and no L8 envelope is pinned under it.
-fn shared_folder_key_unavailable(error: &anyhow::Error) -> bool {
+pub(crate) fn shared_folder_key_unavailable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<SharedFolderKeyError>().is_some()
 }
 
@@ -215,10 +221,16 @@ impl Batch {
                     })
             }
             Err(error) if custody_absent(&error) => {
-                anyhow::ensure!(
-                    !scope.db.has_seen_folder_custody(id)?,
-                    "This folder's keys are unavailable"
-                );
+                // Task 2279 R2 / L7c: a device that has seen custody for this
+                // folder must never downgrade it to a legacy read, whatever
+                // the server answers now. A typed refusal blocks this row and
+                // is swallowed where the other typed states are; the
+                // seen-custody fact stays.
+                if scope.db.has_seen_folder_custody(id)? {
+                    let refused = SharedFolderKeyError::CustodyGone;
+                    self.failures.insert(id.to_string(), refused);
+                    return Err(anyhow::Error::new(refused));
+                }
                 if !missing(&error) {
                     self.custody.insert(id.to_string(), None);
                     return Ok(());
@@ -763,7 +775,7 @@ impl crate::engine_bridge::EngineBridge {
             .custody
             .remove(id)
             .flatten()
-            .ok_or_else(|| anyhow::anyhow!("folder custody unavailable"))?;
+            .ok_or_else(|| anyhow::Error::new(SharedFolderKeyError::NoCustody))?;
         // Review P2-1: a legacy-proven key is readable for one batch only. It
         // is not custody, so the shared-index repair must never seal names
         // under it.
@@ -874,6 +886,11 @@ impl<'a> AccountScope<'a> {
     pub fn remember_custody(&self, folder_id: &str) -> anyhow::Result<()> {
         self.check()?;
         self.db.remember_folder_custody_at_revision(folder_id, self.revision)?;
+        // Task 2279 item 1: index work that was deferred because this root had
+        // no custody can run now. A custody GET that opens (200 with a record
+        // that opens, `remember: true`) or a purpose-bound registration both
+        // reach here, and the next maintenance pass repairs the root.
+        self.db.revive_deferred_shared_index(folder_id)?;
         Ok(())
     }
 
