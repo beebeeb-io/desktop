@@ -139,6 +139,10 @@ mod unknown_check;
 // tested everywhere; only the Windows tick calls it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod os_state_reconcile;
+// Tasks 2270 / 2280: what to do with an upload finalization journal row. Decided on every platform (tested
+// everywhere); applied on Windows only (`windows_cf::upload_finalization`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod upload_finalization_plan;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
