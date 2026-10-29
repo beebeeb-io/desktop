@@ -276,9 +276,24 @@ describe('words', () => {
     expect(heldSentence({ reason: 'locked', count: 2, ...at }, now)).toBe('2 changes are on hold while Beebeeb is locked.')
     expect(heldSentence({ reason: 'key_replaced', count: 2, ...at }, now)).toBe('2 changes are on hold: they were made with a key this account no longer uses.')
     expect(heldSentence({ reason: 'other', count: 2, ...at }, now)).toBe('2 changes from 4 Oct are on hold.')
-    for (const reason of ['quota', 'permission', 'locked', 'key_replaced', 'other']) {
+    for (const reason of ['quota', 'permission', 'locked', 'key_replaced', 'found_while_paused', 'other']) {
       expect(heldSentence({ reason, count: 2, ...at }, now)).not.toContain('update')
     }
+  })
+
+  // Task 2267: items Beebeeb could not prove were the account's own wait for the person's decision in Settings › Sync.
+  test('found while paused: its own sentence, singular and plural, with no date and no promise', () => {
+    const at = { oldest_at: 1_791_115_500, newest_at: 1_791_115_500 + 3 * 86_400 }
+    expect(heldSentence({ reason: 'found_while_paused', count: 1, ...at }, now)).toBe('1 change found while sync was paused is not uploaded yet.')
+    expect(heldSentence({ reason: 'found_while_paused', count: 3, ...at }, now)).toBe('3 changes found while sync was paused are not uploaded yet.')
+    expect(heldSentence({ reason: 'found_while_paused', count: 1_200, oldest_at: 0, newest_at: 0 }, now)).toBe('1,200 changes found while sync was paused are not uploaded yet.')
+  })
+
+  test('found while paused, alone in the queue: "Not in sync" with its sentence as the notice', () => {
+    const view = syncActivityView(signedIn, summary({ queue: { waiting: 0, gave_up: 0, held: [{ reason: 'found_while_paused', count: 3, oldest_at: 0, newest_at: 0 }] } }), { now })
+    expect(view.kind).toBe('not_in_sync')
+    expect(view.headline).toBe('3 changes found while sync was paused are not uploaded yet.')
+    expect(view.tone).toBe('attention')
   })
 
   test('held groups with no changes are left out', () => {
