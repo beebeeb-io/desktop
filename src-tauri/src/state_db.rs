@@ -1081,6 +1081,10 @@ pub(crate) fn tree_holds_a_file(dir: &Path) -> bool {
     false
 }
 
+#[cfg(test)]
+#[path = "reconcile_measure_tests.rs"]
+mod reconcile_measure_tests;
+
 /// Tasks 1888 + 2226 (spec §3): the rows and ops the reconcile pass plans over, read in one transaction. Rows in rowid
 /// order, so folders at the same depth are decided in the order they were written; ops in the queue's order.
 fn reconcile_plan_conn(
@@ -1136,6 +1140,15 @@ fn reconcile_plan_conn(
     Ok(crate::held_queue::plan(&rows, &ops, opts, &|path| Path::new(path).exists(), disk_has_file))
 }
 
+/// A remap's statements, once per remapped folder: each reads through a `parent_id` index (`idx_files_parent_id`,
+/// `idx_operation_queue_parent`), never a scan of the whole table (measured on a 43k-row copy: 5.5 s per 256 remaps
+/// without them, 0.25 s with).
+const REMAP_FILES_SQL: &str = "UPDATE files SET parent_id = ?2 WHERE parent_id = ?1";
+const REMAP_OPS_SQL: &str = "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1";
+/// I1: how many rows and ops still name the ghost.
+const GHOST_REFERENCES_SQL: &str = "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
+      + (SELECT COUNT(*) FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1)";
+
 /// Spec D8: due again now with a fresh retry budget. Never touches `created_at` or `rowid` (the queue's order), nor
 /// `paused_reason` (D8 amendment: a change held for the person stays held).
 fn rearm_operation_conn(conn: &Connection, op_id: &str, now: i64) -> Result<()> {
@@ -1162,11 +1175,8 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
             drop_orphaned_upload_resumes(conn)?;
         }
         Unit::Remap { ghost, twin, ghost_op, rearm, hold: superseded } => {
-            conn.execute("UPDATE files SET parent_id = ?2 WHERE parent_id = ?1", params![ghost, twin])?;
-            conn.execute(
-                "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
-                params![ghost, twin, now],
-            )?;
+            conn.execute(REMAP_FILES_SQL, params![ghost, twin])?;
+            conn.execute(REMAP_OPS_SQL, params![ghost, twin, now])?;
             for op_id in rearm {
                 rearm_operation_conn(conn, op_id, now)?;
             }
@@ -1176,12 +1186,7 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
             conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![ghost_op])?;
             conn.execute("DELETE FROM files WHERE file_id = ?1", params![ghost])?;
             // I1: nothing names the ghost any more, or the whole unit rolls back with its transaction.
-            let left: i64 = conn.query_row(
-                "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
-                      + (SELECT COUNT(*) FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1)",
-                params![ghost],
-                |row| row.get(0),
-            )?;
+            let left: i64 = conn.query_row(GHOST_REFERENCES_SQL, params![ghost], |row| row.get(0))?;
             if left != 0 {
                 return Err(rusqlite::Error::StatementChangedRows(left as usize));
             }
@@ -2425,13 +2430,16 @@ pub enum SnapshotVersion {
     SkippedUploading,
 }
 
+/// Tasks 1888 + 2226 (spec I4): whole units per reconcile transaction. Measured on a copy of the maintainer's queue
+/// (plan Task 1 Step 7, 29 Oct: 2,828 remaps, 60 re-arms; Windows, test build, `parent_id` indexed): the longest
+/// transaction took 300 ms at 256 units, 293 ms at 128 and 278 ms at 64. Each round re-plans the whole queue, and that
+/// fixed cost is most of a transaction, so smaller batches barely shorten the lock and multiply the re-plans
+/// (2.3 s in all at 256, 7.1 s at 64).
+pub const RECONCILE_UNITS_PER_TX: usize = 256;
+
 /// `base_pending` is 1 + the successful snapshots that did not report the file (plan Spec
 /// issue 3). The op parks when the count would pass 10 (spec §6.3.3).
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-/// Tasks 1888 + 2226 (spec I4): whole units per reconcile transaction. Provisional until the measurement on a copy of
-/// the maintainer's database (plan Task 1 Step 7).
-pub const RECONCILE_UNITS_PER_TX: usize = 256;
-
 const BASE_PENDING_PARK_AT: i64 = 11;
 
 /// One op the runner may run now. Every later write for this attempt names `claim_id`
@@ -2965,6 +2973,9 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             -- Task 2243: the tray's recent list reads the newest rows through it, not every row.
             CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
+            -- Tasks 1888 + 2226: the reconcile pass re-points a ghost folder's children by `parent_id`, once per
+            -- remapped folder (`REMAP_FILES_SQL`); without this each remap scans every row.
+            CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id);
             -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone. It starts
             -- with `paused_reason`, so it also serves every lookup the old `idx_operation_queue_paused` did, and
             -- that index is dropped: one index to keep up to date on each queue write, not two.
@@ -15514,6 +15525,24 @@ mod reconcile_tests {
     /// Every directory holds a file: the pass never drops scaffolding (D5) in these tests.
     fn holds_a_file(_: &str) -> bool {
         true
+    }
+
+    /// The query plan of `sql`, one line per step.
+    fn query_plan(db: &StateDb, sql: &str) -> String {
+        let conn = db.0.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let args = rusqlite::params_from_iter(std::iter::repeat("x").take(stmt.parameter_count()));
+        let steps = stmt.query_map(args, |row| row.get::<_, String>(3)).unwrap();
+        steps.map(Result::unwrap).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_remap_reads_the_files_table_through_an_index() {
+        let pc = Pc::new();
+        for sql in [REMAP_FILES_SQL, GHOST_REFERENCES_SQL] {
+            let plan = query_plan(&pc.db, sql);
+            assert!(!plan.contains("SCAN files"), "a remap must not scan every row:\n{plan}");
+        }
     }
 
     #[test]
