@@ -134,6 +134,7 @@ Tauri updater verifies with minisign (keypair generated 2026-05-07).
 
 - Public key: `src-tauri/tauri.conf.json` `plugins.updater.pubkey` (safe to commit). Private key: `~/.tauri/beebeeb-desktop.key` on the build machine, mode 0600, **never commit**; generated without a password — before public release regenerate with a strong password and rotate the CI secret.
 - CI secrets: `TAURI_SIGNING_PRIVATE_KEY` (key contents) + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (unset for the current passwordless setup). Inspect: `cat ~/.tauri/beebeeb-desktop.key.pub` (fingerprint `545D7BA77EDEA7E1` at generation). Lost key ⇒ already-installed clients need a manual reinstall.
+- Rotation done (task 1240; checked 2026-10-29): the baked pubkey since 0.3.0 is `C6FADFD59D732197`. 0.3.0–0.8.3 were still signed with `545D7BA77EDEA7E1` (no 0.3.0+ install could update in-app); 0.8.4+ are signed with `C6FA`. `release.yml` fails closed when a signature's key id differs from the baked one (`scripts/check-updater-signature-key.mjs`, in the build job and the manifest job). `updater_key_transition=true` only for a transition release, or to promote a tag cut before the guard after checking it by hand (`docs/RELEASING.md`).
 
 ## Storage location (task 1919, by COUNTRY since task 2050)
 
