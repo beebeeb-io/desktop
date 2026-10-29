@@ -134,7 +134,8 @@ jobs:
         if: runner.os == 'Windows' || runner.os == 'macOS'
         shell: bash
         run: |
-          py=$(command -v python3 || command -v python)
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" scripts/assert-cargo-test-counts.py --self-test
 
       - name: Cargo check
@@ -166,7 +167,8 @@ jobs:
           CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
           cat "$RUNNER_TEMP/cargo-test.log"
           echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          py=$(command -v python3 || command -v python)
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
 
       - name: Upload Rust evidence
