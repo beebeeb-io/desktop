@@ -7672,6 +7672,12 @@ const FOUND_WHILE_PAUSED_NOT_YOURS: &str =
 #[cfg(target_os = "windows")]
 const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - kept on this PC”; the rest stays where it is and isn’t uploaded.";
 
+/// Task 2267 (lead review round 3, P2-2): what the card says when it cannot read the held changes. It reads them again
+/// at the next refresh; Upload waits for that read, since it sends only what the card showed.
+#[cfg(target_os = "windows")]
+const FOUND_WHILE_PAUSED_REVIEW_FAILED: &str =
+    "Beebeeb couldn’t read these changes, so nothing was uploaded or moved. It tries again in a moment.";
+
 /// Task 2267 (fix round 2): what Upload says when the held changes could not be released: nothing changed.
 #[cfg(target_os = "windows")]
 const FOUND_WHILE_PAUSED_UPLOAD_FAILED: &str =
@@ -7772,17 +7778,47 @@ struct FoundWhilePausedReleased {
     released: usize,
 }
 
-/// Task 2267 (fix round 2), Settings › Sync, "Upload to my Beebeeb": every change held as found while sync was paused
-/// is due again, so the running engine uploads it. Only on the signed-in account's own data, and under the
-/// session-transition lock, so no sign-out or Lock runs in between.
+/// Task 2267 (lead review round 3, P2-2), Settings › Sync: the held changes by kind, the ids "Upload to my Beebeeb"
+/// sends back, and which service (if any) syncs the folder a keep moves them next to. Only on the signed-in account's
+/// own data, under the session-transition lock. Counts and ids only, never a name.
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn found_while_paused_upload(state: State<'_, AppState>) -> Result<FoundWhilePausedReleased, String> {
+async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {
+    let _transition = SESSION_TRANSITION.lock().await;
+    let identity = decision_identity(&state)?;
+    tokio::task::spawn_blocking(move || -> Result<found_while_paused::Review, String> {
+        let (db, sync_root) = own_local_data_for_decision(&identity)?;
+        let mut review = found_while_paused::review(&db.found_while_paused_changes().map_err(|error| {
+            tracing::warn!(%error, "found while paused: the held changes could not be read");
+            FOUND_WHILE_PAUSED_REVIEW_FAILED.to_string()
+        })?);
+        review.synced_by = kept_folder_synced_by(&sync_root);
+        Ok(review)
+    })
+    .await
+    .map_err(|e| format!("review task failed: {e}"))?
+}
+
+/// Task 2267 (lead review round 3, P3-4): the service that syncs the folder the kept folder is made in (next to the
+/// Beebeeb folder), if OneDrive or Dropbox does.
+#[cfg(target_os = "windows")]
+fn kept_folder_synced_by(sync_root: &Path) -> Option<String> {
+    let parent = sync_root.parent()?;
+    found_while_paused::synced_by(parent, &found_while_paused::cloud_synced_roots()).map(str::to_string)
+}
+
+/// Task 2267 (fix round 2), Settings › Sync, "Upload to my Beebeeb": the changes the card showed (`op_ids`, from
+/// [`found_while_paused_review`]; lead review round 3, P3-1) that are still held are due again, so the running engine
+/// uploads them. A change held after the card read them stays held. Only on the signed-in account's own data, and
+/// under the session-transition lock, so no sign-out or Lock runs in between.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {
     let _transition = SESSION_TRANSITION.lock().await;
     let identity = decision_identity(&state)?;
     let released = tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let (db, _) = own_local_data_for_decision(&identity)?;
-        db.release_found_while_paused(now_unix_seconds()).map_err(|error| {
+        db.release_found_while_paused(&op_ids, now_unix_seconds()).map_err(|error| {
             tracing::warn!(%error, "found while paused: the held changes could not be released");
             FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
         })
@@ -7803,11 +7839,14 @@ async fn found_while_paused_keep(state: State<'_, AppState>) -> Result<found_whi
     let identity = decision_identity(&state)?;
     let kept = tokio::task::spawn_blocking(move || -> Result<found_while_paused::KeepResult, String> {
         let (db, sync_root) = own_local_data_for_decision(&identity)?;
-        found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)
-            .map_err(|error| {
-                tracing::warn!(%error, "found while paused: the keep stopped");
-                FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
-            })
+        let mut kept =
+            found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)
+                .map_err(|error| {
+                    tracing::warn!(%error, "found while paused: the keep stopped");
+                    FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
+                })?;
+        kept.synced_by = kept_folder_synced_by(&sync_root);
+        Ok(kept)
     })
     .await
     .map_err(|e| format!("keep task failed: {e}"))??;
@@ -7843,6 +7882,12 @@ async fn show_kept_folder() -> Result<(), String> {
 
 /// Task 2267: the changes found while sync was paused exist on Windows only (the ownership proof holds them). The
 /// commands are registered everywhere, because `generate_handler!` takes no `cfg`, and say so elsewhere.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn found_while_paused_review() -> Result<(), String> {
+    Err("This works on Windows only.".into())
+}
+
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
 async fn found_while_paused_upload() -> Result<(), String> {
@@ -15054,6 +15099,7 @@ pub fn run() {
             tray_pause_sync,
             tray_resume_sync,
             sync_activity_summary,
+            found_while_paused_review,
             found_while_paused_upload,
             found_while_paused_keep,
             show_kept_folder,
@@ -26235,18 +26281,29 @@ mod account_binding_tests {
         assert!(settle.contains(&squeeze("found_while_paused::recover(&db, &paths.sync_root)")), "{settle}");
 
         let handler = body_between(&production, "tauri::generate_handler![", "])");
-        for command in ["found_while_paused_upload,", "found_while_paused_keep,", "show_kept_folder,"] {
+        for command in ["found_while_paused_review,", "found_while_paused_upload,", "found_while_paused_keep,", "show_kept_folder,"] {
             assert!(handler.contains(command), "{command} is registered");
         }
         let windows = "#[cfg(target_os = \"windows\")]\n#[tauri::command]\n";
         for (signature, steps) in [
             (
-                "async fn found_while_paused_upload(state: State<'_, AppState>) -> Result<FoundWhilePausedReleased, String> {",
+                "async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {",
                 &[
                     "let _transition = SESSION_TRANSITION.lock().await;",
                     "let identity = decision_identity(&state)?;",
                     "own_local_data_for_decision(&identity)?",
-                    "db.release_found_while_paused(now_unix_seconds())",
+                    "found_while_paused::review(&db.found_while_paused_changes()",
+                    "review.synced_by = kept_folder_synced_by(&sync_root);",
+                ][..],
+            ),
+            (
+                // Lead review round 3, P3-1: only the changes the card showed.
+                "async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {",
+                &[
+                    "let _transition = SESSION_TRANSITION.lock().await;",
+                    "let identity = decision_identity(&state)?;",
+                    "own_local_data_for_decision(&identity)?",
+                    "db.release_found_while_paused(&op_ids, now_unix_seconds())",
                 ][..],
             ),
             (
@@ -26256,6 +26313,7 @@ mod account_binding_tests {
                     "let identity = decision_identity(&state)?;",
                     "own_local_data_for_decision(&identity)?",
                     "found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)",
+                    "kept.synced_by = kept_folder_synced_by(&sync_root);",
                 ][..],
             ),
             (
@@ -26437,7 +26495,9 @@ mod account_binding_tests {
             file_id: Some("file-a".into()),
             parent_id: None,
             target_path: Some("/A.txt".into()),
-            metadata_json: None,
+            // A new file's upload says it creates the file, as the scan queues it: its row counts as made on this PC
+            // (task 2267, lead review round 2, P2-1).
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
             payload_path: Some(payload.to_str().unwrap().to_string()),
             base_version: None,
             base_object_version_id: None,

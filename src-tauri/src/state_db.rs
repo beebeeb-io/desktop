@@ -2283,6 +2283,19 @@ pub struct ProofOp {
     pub creates: bool,
 }
 
+/// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldChange {
+    pub op_id: String,
+    /// `operation_queue.kind`, as stored.
+    pub kind: String,
+    /// It creates its item (`CREATE_OP_SQL`).
+    pub creates: bool,
+    /// Its own row or its folder is in a folder shared with this account (`namespace != 'my_files'`).
+    pub shared: bool,
+}
+
 /// Task 2267 (lead review of round 2, P2-1): an op (aliased `o`) that creates its item on the server: a folder's
 /// create, or an upload whose metadata says it creates the file (`engine_bridge::is_create_file_operation`).
 #[cfg(any(target_os = "windows", test))]
@@ -6336,16 +6349,48 @@ impl StateDb {
             .optional()
     }
 
-    /// Task 2267 (fix round 2), "Upload to my Beebeeb": every change held as `found_while_paused` is due again at
-    /// `now`, keeping its attempts. Returns how many.
+    /// Task 2267 (lead review round 3, P2-2): every change held as `found_while_paused`, by kind, for the card,
+    /// oldest first.
     #[cfg(any(target_os = "windows", test))]
-    pub fn release_found_while_paused(&self, now: i64) -> Result<usize> {
+    pub fn found_while_paused_changes(&self) -> Result<Vec<HeldChange>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?1, updated_at = ?1
-             WHERE paused_reason = ?2",
-            params![now, OperationPauseReason::FoundWhilePaused.as_str()],
-        )
+        let mut stmt = conn.prepare(&format!(
+            "SELECT o.op_id, o.kind, {CREATE_OP_SQL},
+                    EXISTS (SELECT 1 FROM files f WHERE f.namespace != 'my_files' AND f.file_id IN (o.file_id, o.parent_id))
+             FROM operation_queue o WHERE o.paused_reason = ?1
+             ORDER BY o.created_at ASC, o.rowid ASC"
+        ))?;
+        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
+            Ok(HeldChange { op_id: row.get(0)?, kind: row.get(1)?, creates: row.get(2)?, shared: row.get(3)? })
+        })?;
+        rows.collect()
+    }
+
+    /// Task 2267, "Upload to my Beebeeb": the changes in `op_ids` still held as `found_while_paused` are due again at
+    /// `now`, keeping their attempts. Returns how many.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn release_found_while_paused(&self, op_ids: &[String], now: i64) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut released = 0;
+        for op_id in op_ids {
+            released += tx.execute(
+                "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?1, updated_at = ?1
+                 WHERE op_id = ?2 AND paused_reason = ?3",
+                params![now, op_id, OperationPauseReason::FoundWhilePaused.as_str()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(released)
+    }
+
+    /// Task 2267 (lead review round 3, P3-3): whether the journal names the staged copy at `path`, and the live file
+    /// it was copied from: `None` when no journal row names it, `Some(None)` when the row has no source.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn staged_payload_source(&self, path: &str) -> Result<Option<Option<String>>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT source_path FROM staged_payloads WHERE path = ?1", params![path], |row| row.get(0))
+            .optional()
     }
 
     /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has

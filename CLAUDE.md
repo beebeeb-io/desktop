@@ -349,11 +349,15 @@ whatever its pause reason, is held as `found_while_paused` (later changes to tho
 the server counts as the server folder at its path, task 1888); any other change, file content above all,
 needs one anchor tied to an own row by real parent links, never by a twin or by the folder at its path
 alone. Held changes are never sent and
-never deleted until the person decides in Settings › Sync. "Upload to my Beebeeb" releases them; "Keep on
+never deleted until the person decides in Settings › Sync. The card shows them by kind
+(`found_while_paused_review`: new folders, new files, edits, deletions, changes in folders shared with you)
+and "Upload to my Beebeeb" releases exactly the ids it showed, never a change held after that read; "Keep on
 this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
 `Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
-so a crash is settled at the next engine start) and forgets their rows. This is the only other place an
-owner is recorded; two different user ids are never questioned.
+so a crash is settled at the next engine start) and forgets their rows. It removes only the staged copies
+the journal names; one whose live file is gone is copied into the dated folder first. When OneDrive or
+Dropbox syncs the folder it is made in, the card says so (`synced_by`) instead of "on this PC". This is the
+only other place an owner is recorded; two different user ids are never questioned.
 
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 
