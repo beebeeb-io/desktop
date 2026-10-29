@@ -134,27 +134,11 @@ Tauri updater verifies with minisign (keypair generated 2026-05-07).
 
 - Public key: `src-tauri/tauri.conf.json` `plugins.updater.pubkey` (safe to commit). Private key: `~/.tauri/beebeeb-desktop.key` on the build machine, mode 0600, **never commit**; generated without a password — before public release regenerate with a strong password and rotate the CI secret.
 - CI secrets: `TAURI_SIGNING_PRIVATE_KEY` (key contents) + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (unset for the current passwordless setup). Inspect: `cat ~/.tauri/beebeeb-desktop.key.pub` (fingerprint `545D7BA77EDEA7E1` at generation). Lost key ⇒ already-installed clients need a manual reinstall.
+- Rotation done (task 1240; checked 2026-10-29): the baked pubkey since 0.3.0 is `C6FADFD59D732197`. 0.3.0–0.8.3 were still signed with `545D7BA77EDEA7E1` (no 0.3.0+ install could update in-app); 0.8.4+ are signed with `C6FA`. `release.yml` fails closed when a signature's key id differs from the baked one (`scripts/check-updater-signature-key.mjs`, in the build job and the manifest job). `updater_key_transition=true` only for a transition release, or to promote a tag cut before the guard after checking it by hand (`docs/RELEASING.md`).
 
 ## Storage location (task 1919, by COUNTRY since task 2050)
 
-- `TAURI_SIGNING_PRIVATE_KEY` — the *contents* of `~/.tauri/beebeeb-desktop.key`,
-  set as a repository secret (not the file path)
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password if the key has one;
-  unset for the current passwordless setup
-
-To inspect the public key locally: `cat ~/.tauri/beebeeb-desktop.key.pub`.
-The fingerprint at time of generation is `545D7BA77EDEA7E1`. Since 0.3.0 the baked pubkey is the
-rotated key `C6FADFD59D732197`, but CI kept signing with `545D7BA77EDEA7E1` through 0.8.3, which
-broke in-app updates for every 0.3.0+ install (see `docs/RELEASING.md` → "Current state"). The
-release workflow now fails closed when a signature's key ID differs from the baked one
-(`scripts/check-updater-signature-key.mjs`); `updater_key_transition=true` is only for a
-deliberate transition release.
-
-If the key is lost, no clients with already-installed builds can verify
-new updates — they'll need a manual reinstall to onboard the new pubkey.
-
 A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `docs/canon/data-residency.md` in the workspace). `europe` is the default; the rows are the API's (`GET /api/v1/me/region` `choices` = public `GET /api/v1/storage-regions`), rendered as sent — the desktop keeps NO list, city or country table; `account_set_region` sends the row's `id` verbatim with `regionStrict` stated. **No city is decoded at all** (`StorageChoice`/`RegionInfo` have no `city` field); guard `tests/noCityInCopy.test.ts` fails on a city name or a `city` read anywhere in `src/` and `src-tauri/src/`. Uploads send no region. Detail (older-server folding, "Only store in <country>", verify recipe): docs/runbook/desktop-task-history.md.
-
 
 ## Brand
 
