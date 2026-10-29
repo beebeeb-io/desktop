@@ -51,15 +51,7 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
             anyhow::bail!("the state DB changed while it was read; list a fresh copy");
         };
         let (first, second) = (row_facts(db, &first)?, row_facts(db, &second)?);
-        // A path the app itself would refuse is left alone; its error would name the path (A3).
-        let observed = match crate::engine_bridge::local_file_path_under_sync_root(root, &path) {
-            Ok(on_disk) => observe(&on_disk),
-            Err(_) => Observed { view: PlatformView::Unreadable, size: None, modified: None, read_only: None },
-        };
-        let identity = match &observed.view {
-            PlatformView::Placeholder { identity, .. } => identity.clone(),
-            _ => None,
-        };
+        let (observed, identity) = observe_at(root, &path, observe);
         // A is the row the file on this PC is bound to; bound to neither, the row with known content.
         let (a, b) = if identity.as_deref() == Some(second.file_id.as_str())
             || (identity.as_deref() != Some(first.file_id.as_str())
@@ -71,7 +63,17 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
             (first, second)
         };
         let class = local_class(db, &a, &b, &observed, identity.as_deref())?;
-        listing.pairs.push(Pair { n: 0, path, a, b, view: view_facts(&observed, identity), class, server: None });
+        listing.pairs.push(Pair {
+            n: 0,
+            path,
+            a,
+            b,
+            view: view_facts(&observed, identity),
+            class,
+            server: None,
+            action: class.proposed(),
+            applied: None,
+        });
     }
     listing.pairs.sort_by(|left, right| left.path.cmp(&right.path));
     for (index, pair) in listing.pairs.iter_mut().enumerate() {
@@ -80,8 +82,22 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
     Ok(listing)
 }
 
+/// What the platform shows at the stored `path` under `root`, and the file id its identity names. A path the app
+/// itself would refuse is left alone (its error would name the path, A3): unreadable.
+pub(super) fn observe_at(root: &Path, path: &str, observe: &dyn Fn(&Path) -> Observed) -> (Observed, Option<String>) {
+    let observed = match crate::engine_bridge::local_file_path_under_sync_root(root, path) {
+        Ok(on_disk) => observe(&on_disk),
+        Err(_) => Observed { view: PlatformView::Unreadable, size: None, modified: None, read_only: None },
+    };
+    let identity = match &observed.view {
+        PlatformView::Placeholder { identity, .. } => identity.clone(),
+        _ => None,
+    };
+    (observed, identity)
+}
+
 /// Spec rows L1-L3b, in order; `Unknown` when none applies (the server read decides the rest).
-fn local_class(
+pub(super) fn local_class(
     db: &StateDb,
     a: &RowFacts,
     b: &RowFacts,
@@ -108,7 +124,7 @@ fn local_class(
     Ok(Class::Unknown)
 }
 
-fn row_facts(db: &StateDb, entry: &FileEntry) -> anyhow::Result<RowFacts> {
+pub(super) fn row_facts(db: &StateDb, entry: &FileEntry) -> anyhow::Result<RowFacts> {
     let contract = db.get_file_contract_state(&entry.file_id)?;
     Ok(RowFacts {
         file_id: entry.file_id.clone(),
@@ -121,7 +137,7 @@ fn row_facts(db: &StateDb, entry: &FileEntry) -> anyhow::Result<RowFacts> {
     })
 }
 
-fn view_facts(observed: &Observed, identity: Option<String>) -> ViewFacts {
+pub(super) fn view_facts(observed: &Observed, identity: Option<String>) -> ViewFacts {
     let (kind, on_disk, in_sync) = match &observed.view {
         PlatformView::Missing => ("missing", None, None),
         PlatformView::Unreadable => ("unreadable", None, None),

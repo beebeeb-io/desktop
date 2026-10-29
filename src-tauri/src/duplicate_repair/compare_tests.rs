@@ -32,6 +32,7 @@ fn waiting(n: u32, b: &str, a_content: &[u8], size: usize) -> Pair {
     pair.a.local_hash = Some(crate::engine_bridge::sha256_hex(a_content));
     let facts = ServerFacts {
         trashed: false,
+        trashed_at: None,
         parent_id: Some("p".into()),
         size_bytes: size as i64,
         updated_at: "2026-10-29T09:00:00+00:00".into(),

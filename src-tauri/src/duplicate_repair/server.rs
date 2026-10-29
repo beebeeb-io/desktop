@@ -6,6 +6,9 @@ use super::model::{Class, Pair, ServerFacts, ServerFile, ServerRead};
 use crate::api_client::ApiClient;
 use std::collections::HashMap;
 
+/// How many pages of the op log `trash_seq` reads at most (the server's page is 1,000 ops, `sync.rs` ~245).
+const OPS_PAGES: usize = 20;
+
 /// An invite in one of these states still shares the file (the server's own set, `invites.rs` ~198).
 const LIVE_INVITE: [&str; 3] = ["invited", "claimed", "approved"];
 
@@ -16,7 +19,7 @@ pub(crate) struct RepairApi {
 
 /// A failed call: the HTTP status when the server answered, nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Failure(Option<u16>);
+pub(super) struct Failure(pub(super) Option<u16>);
 
 impl Failure {
     fn of(error: &anyhow::Error) -> Self {
@@ -48,6 +51,7 @@ impl RepairApi {
         let facts = (|| {
             Some(ServerFacts {
                 trashed: json.get("is_trashed")?.as_bool()?,
+                trashed_at: json.get("trashed_at").and_then(|at| at.as_str()).map(str::to_string),
                 parent_id: json.get("parent_id").and_then(|id| id.as_str()).map(str::to_string),
                 size_bytes: json.get("size_bytes")?.as_i64()?,
                 updated_at: json.get("updated_at")?.as_str()?.to_string(),
@@ -76,6 +80,32 @@ impl RepairApi {
         let json = self.api.repair_links(file_id).await.map_err(|error| Failure::of(&error))?;
         let rows = json.get("shares").and_then(|rows| rows.as_array()).ok_or(Failure(None))?;
         Ok(rows.iter().filter(|row| not_expired(row)).count())
+    }
+
+    /// `GET /api/v1/sync/ops?since=`, page by page from `since`: the seq of the `file_trash` op of `file_id`, `None`
+    /// when the log holds none. Only seqs and ids are read; the log is dropped.
+    pub(super) async fn trash_seq(&self, since: i64, file_id: &str) -> Result<Option<i64>, Failure> {
+        let mut since = since;
+        for _ in 0..OPS_PAGES {
+            let page = self.api.repair_ops(since).await.map_err(|error| Failure::of(&error))?;
+            if let Some(op) = page
+                .ops
+                .iter()
+                .find(|op| op.op_type == "file_trash" && op.payload["id"].as_str() == Some(file_id))
+            {
+                return Ok(Some(op.seq_id));
+            }
+            match page.ops.iter().map(|op| op.seq_id).max() {
+                Some(last) if last > since => since = last,
+                _ => return Ok(None),
+            }
+        }
+        Ok(None)
+    }
+
+    /// `DELETE /api/v1/files/{id}`: the soft trash (spec S1). The tool has no other write.
+    pub(super) async fn trash(&self, file_id: &str) -> Result<(), Failure> {
+        self.api.repair_trash(file_id).await.map_err(|error| Failure::of(&error))
     }
 
     /// `GET /api/v1/shares/invites/sent`: how many live invites name each of `file_ids`. Read once a run.

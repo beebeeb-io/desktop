@@ -533,8 +533,8 @@ fn set_region_body(preferred_region: Option<&str>, region_strict: Option<bool>) 
     body
 }
 
-/// Task 2274: the duplicates repair tool's reads (spec I3), with the app's 429 backoff. Only
-/// `duplicate_repair::server::RepairApi` calls them. Only in a build with its feature.
+/// Task 2274: the duplicates repair tool's six calls (spec I3), with the app's 429 backoff: five reads and the soft
+/// trash. Only `duplicate_repair::server::RepairApi` calls them. Only in a build with its feature.
 #[cfg(feature = "duplicate-repair")]
 impl ApiClient {
     /// `GET /api/v1/files/{id}`.
@@ -558,6 +558,18 @@ impl ApiClient {
     /// keys; the caller counts them and drops them (spec L8 amendment).
     pub(crate) async fn repair_invites(&self) -> anyhow::Result<serde_json::Value> {
         self.get_typed("/api/v1/shares/invites/sent").await
+    }
+
+    /// `GET /api/v1/sync/ops?since={n}`: the op log after `since` (ids and seqs, no content), read once after a trash.
+    pub(crate) async fn repair_ops(&self, since: i64) -> anyhow::Result<SyncOps> {
+        self.get_typed(&format!("/api/v1/sync/ops?since={since}")).await
+    }
+
+    /// `DELETE /api/v1/files/{id}`: the soft trash (the server keeps the file in the trash until its retention ends).
+    pub(crate) async fn repair_trash(&self, file_id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/files/{}", encode(file_id)));
+        self.send_with_retry(|| self.client.delete(&url)).await?;
+        Ok(())
     }
 }
 

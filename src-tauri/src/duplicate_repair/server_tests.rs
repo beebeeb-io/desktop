@@ -11,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 /// A loopback HTTP server: answers each `METHOD /path?query` it was given, 404 to anything else, and records every
-/// request line in order.
+/// request line in order. A request listed more than once gets its answers in order, the last one from then on (a
+/// file read before and after a trash).
 pub(super) struct RepairMockServer {
     pub base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
@@ -42,11 +43,14 @@ impl RepairMockServer {
                 }
                 let line = String::from_utf8_lossy(&head).lines().next().unwrap_or_default().to_string();
                 let request = line.rsplit_once(' ').map_or(line.clone(), |(request, _)| request.to_string());
-                let (status, body) = routes
-                    .iter()
-                    .find(|(route, _, _)| *route == request)
+                let mut seen = seen.lock().unwrap();
+                let asked = seen.iter().filter(|line| **line == request).count();
+                let answers: Vec<_> = routes.iter().filter(|(route, _, _)| *route == request).collect();
+                let (status, body) = answers
+                    .get(asked.min(answers.len().saturating_sub(1)))
                     .map_or((404, br#"{"error":"not found"}"#.to_vec()), |(_, status, body)| (*status, body.clone()));
-                seen.lock().unwrap().push(request);
+                seen.push(request);
+                drop(seen);
                 let head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                 let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
             }
@@ -132,6 +136,8 @@ pub(super) fn pair(n: u32, a: &str, b: &str) -> Pair {
         },
         class: Class::Unknown,
         server: None,
+        action: super::model::Action::None,
+        applied: None,
     }
 }
 

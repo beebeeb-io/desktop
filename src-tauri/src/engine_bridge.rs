@@ -29973,4 +29973,11 @@ mod tests {
             assert!(root.join("Backups").exists(), "what was not listed stays");
         }
     }
+
+    /// Task 2274: the duplicates repair tool's premises on the app's own apply paths (spec D1, D2; plan T2, T3).
+    /// Included rather than `#[path]`ed: an inline module's `#[path]` resolves under `src/engine_bridge/tests/`.
+    #[cfg(feature = "duplicate-repair")]
+    mod duplicate_repair_engine_tests {
+        include!("duplicate_repair/engine_tests.rs");
+    }
 }
