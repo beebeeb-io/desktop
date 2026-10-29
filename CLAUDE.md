@@ -345,10 +345,10 @@ place, blocks; names that prove nothing never outnumber the own ones. Proven, th
 session is recorded as the owner (`StateDb::adopt_owner_holding`) and sync starts through the same
 `spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row,
 whatever its pause reason, is held as `found_while_paused` (later changes to those items too,
-`insert_operation_conn`). A path proves only a folder create (a folder made here whose create never reached
-the server counts as the server folder at its path, task 1888); any other change, file content above all,
-needs one anchor tied to an own row by real parent links, never by a twin or by the folder at its path
-alone. Held changes are never sent and
+`insert_operation_conn`). A path proves only the create of a folder made here whose own path is an own
+server folder's (its twin, task 1888), never a new folder inside it; any other change, file content above
+all, needs one anchor tied to an own row by real parent links, never by a twin or by a folder at a path
+(also not on the walk up from a row gone from the tree). Held changes are never sent and
 never deleted until the person decides in Settings › Sync. The card shows them by kind
 (`found_while_paused_review`: new folders, new files, edits, deletions, changes in folders shared with you)
 and "Upload to my Beebeeb" releases exactly the ids it showed, never a change held after that read; "Keep on

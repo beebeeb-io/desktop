@@ -242,15 +242,17 @@ pub fn judge(master_key: &[u8; 32], rows: &[ProofRow], ops: &[ProofOp], nodes: &
             Probe::Missing => tally.missing += 1,
         }
     }
-    // Lead review of round 2, P1: a path proves a folder made here (its create sends no content, and task 1888 folds it
-    // into its server twin), never anything else. Every other change needs one anchor tied by real parent links.
+    // Lead review of round 2, P1: a path proves a folder made here whose own path is an own folder's (its twin: its
+    // create sends no content, and task 1888 folds it into that folder), never anything else (self-review of round 3,
+    // F2: not a new folder inside it). Every other change needs one anchor tied by real parent links.
     let proven: HashSet<String> = ops
         .iter()
         .filter(|op| {
-            let ties: Vec<Tie> = op.file_id.iter().chain(op.parent_id.iter()).map(|anchor| judge.anchor(anchor)).collect();
+            let own = op.file_id.as_deref().map(|anchor| judge.anchor(anchor));
+            let ties: Vec<Tie> = own.into_iter().chain(op.parent_id.as_deref().map(|anchor| judge.anchor(anchor))).collect();
             !ties.is_empty()
                 && !ties.contains(&Tie::Not)
-                && (op.kind == "create_folder" || ties.contains(&Tie::Linked))
+                && (ties.contains(&Tie::Linked) || (op.kind == "create_folder" && own == Some(Tie::Twin)))
         })
         .map(|op| op.op_id.clone())
         .collect();
@@ -263,7 +265,10 @@ pub fn judge(master_key: &[u8; 32], rows: &[ProofRow], ops: &[ProofOp], nodes: &
 enum Tie {
     /// Up real parent links to an own row (or one gone from an own folder).
     Linked,
-    /// Only through a path: a row at its own path (its twin) or the folder at its path (a row with no parent link).
+    /// The anchor is a row made here at the path of an own row of the server's (its twin), and nothing else ties it.
+    Twin,
+    /// Only through a path otherwise: a twin further up, or the folder at a path (a row with no parent link, its own or
+    /// one up the walk).
     ByPath,
     Not,
 }
@@ -284,12 +289,8 @@ impl<'a> Judge<'a> {
         Some(*self.probes.borrow_mut().entry(id).or_insert_with(|| probe(self.master_key, node)))
     }
 
-    /// The folder `row` is in: its parent link, or, for a row without one, the row at its path's folder.
-    fn parent_of(&self, row: &'a ProofRow) -> Option<&'a str> {
-        self.parent_link(row).map(|(parent, _)| parent)
-    }
-
-    /// [`Self::parent_of`], and whether it was found by the path (the row has no parent link).
+    /// The folder `row` is in: its parent link, or, for a row without one, the row at its path's folder; and whether
+    /// it was found by the path.
     fn parent_link(&self, row: &'a ProofRow) -> Option<(&'a str, bool)> {
         if let Some(parent) = row.parent_id.as_deref() {
             return Some((parent, false));
@@ -302,31 +303,41 @@ impl<'a> Judge<'a> {
     /// ancestor the tree holds is this account's own (deleted since), else `Missing`. The walk follows the local
     /// parents and ends as `Missing` at the top, at a parent with no row, or on a cycle.
     fn row(&self, row: &'a ProofRow) -> Probe {
+        self.row_tie(row).0
+    }
+
+    /// [`Self::row`], and whether the walk up to the ancestor that explains a row gone from the tree went through a
+    /// folder found at a path (a row with no parent link): such a row is tied to that folder by its path only
+    /// (self-review of round 3, F1).
+    fn row_tie(&self, row: &'a ProofRow) -> (Probe, bool) {
         if let Some(probe) = self.present(&row.file_id) {
-            return probe;
+            return (probe, false);
         }
         let mut seen: HashSet<&str> = HashSet::from([row.file_id.as_str()]);
         let mut current = row;
-        while let Some(id) = self.parent_of(current) {
+        let mut via_path = false;
+        while let Some((id, found_by_path)) = self.parent_link(current) {
             if !seen.insert(id) {
                 break;
             }
+            via_path |= found_by_path;
             if let Some(probe) = self.present(id) {
-                return if probe == Probe::Own { Probe::Gone } else { Probe::Missing };
+                return (if probe == Probe::Own { Probe::Gone } else { Probe::Missing }, via_path);
             }
             match self.local.get(id) {
                 Some(&parent) => current = parent,
                 None => break,
             }
         }
-        Probe::Missing
+        (Probe::Missing, via_path)
     }
 
     /// How a queued change's anchor (the item it acts on, or the folder it acts in) is tied to this account's proven
     /// data: the first judged row up its local parents (or at a row made here's own path, its twin) is in My Files and
     /// proven its own (or gone from its own folder). An item made on this PC at the top level, or in a folder shared
-    /// with this account, or in one whose name proves nothing, is not. The tie is `ByPath` when the walk went through
-    /// a twin or through the folder at a path (a row with no parent link).
+    /// with this account, or in one whose name proves nothing, is not. The tie is `Twin` when the anchor's own row
+    /// is a twin's, and `ByPath` when the walk went through a twin further up or through the folder at a path (a row
+    /// with no parent link), the walk up from a row gone from the tree included.
     fn anchor(&self, anchor: &'a str) -> Tie {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut id = anchor;
@@ -335,6 +346,10 @@ impl<'a> Judge<'a> {
             (false, _) => Tie::Not,
             (true, false) => Tie::Linked,
             (true, true) => Tie::ByPath,
+        };
+        let proves = |row: &'a ProofRow| {
+            let (probe, via_path) = self.row_tie(row);
+            (row.my_files && matches!(probe, Probe::Own | Probe::Gone), via_path)
         };
         loop {
             if !seen.insert(id) {
@@ -345,12 +360,17 @@ impl<'a> Judge<'a> {
                 return tied(self.present(id) == Some(Probe::Own), by_path);
             };
             if row.server_named {
-                return tied(row.my_files && matches!(self.row(row), Probe::Own | Probe::Gone), by_path);
+                let (proven, via_path) = proves(row);
+                return tied(proven, by_path || via_path);
             }
             // A folder made here whose create never reached the server shares its path with the server's folder
             // (its twin, task 1888): it is that folder.
             if let Some(&twin) = self.by_path.get(row.path.trim_matches('/')).filter(|twin| twin.server_named) {
-                return tied(twin.my_files && matches!(self.row(twin), Probe::Own | Probe::Gone), true);
+                let (proven, _) = proves(twin);
+                return match tied(proven, true) {
+                    Tie::ByPath if id == anchor => Tie::Twin,
+                    tie => tie,
+                };
             }
             match self.parent_link(row) {
                 Some((parent, found_by_path)) => {
@@ -1318,15 +1338,16 @@ mod tests {
     }
 
     /// The maintainer's PC (task 1888): 2,832 folders made here whose create never reached the server share their
-    /// path with the server's own folder (their twin), and the uploads in them name the folder made here as their
-    /// parent. A change there is tied to this account's data through the twin: it is not held. Without this rule all
-    /// 2,984 queued changes on that PC were held for review. The new file's own row is linked to the server's folder
-    /// (a real parent link), so its upload is proven by more than a path (lead review of round 2, P1: content needs
-    /// one such link; `a_path_twin_proves_a_folder_made_here_but_never_the_content_in_it`).
+    /// path with the server's own folder (their twin). A folder create there is tied to this account's data through
+    /// its own twin: it is not held. Without this rule all 2,984 queued changes on that PC were held for review. The
+    /// new file's own row here is linked to the server's folder (a real parent link), so its upload is proven by more
+    /// than a path (lead review of round 2, P1: content needs one such link). On that PC the uploads name the folder
+    /// made here instead, and wait for the click: `on_the_maintainers_pc_an_upload_into_a_folder_made_here_waits`.
     #[test]
     fn a_change_in_a_folder_made_here_whose_server_twin_is_own_is_not_held() {
         let pc = pc_with(&IDS);
         add_row_at(&pc, "twin", "Backups", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "twin-sub", "Backups/PC", Some("twin"), Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
         add_row_at(&pc, "ghost", "Backups", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
         add_row_at(&pc, "ghost-sub", "Backups/PC", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::Folder);
         add_row_at(&pc, "new-file", "Backups/a.txt", Some("twin"), Shape::Local, Namespace::MyFiles, ItemKind::File);
@@ -1336,14 +1357,36 @@ mod tests {
         adopt_unbound(&pc.db, None).unwrap();
         let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
         tree.push(mine("twin"));
+        tree.push(mine("twin-sub"));
 
         let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
 
         assert!(
-            matches!(outcome, Outcome::Adopted(t) if t.own == 4 && t.proven_changes == 4 && t.held_for_review == 0),
+            matches!(outcome, Outcome::Adopted(t) if t.own == 5 && t.proven_changes == 4 && t.held_for_review == 0),
             "{outcome:?}"
         );
         assert!(held_for_review(&pc).is_empty());
+    }
+
+    /// The maintainer's PC as it is (measured read-only: 145 of its 2,984 queued changes): an upload whose row names
+    /// a folder made here as its parent is tied to the account by that folder's twin, a path only. It is new content,
+    /// so it waits for the person's click (lead review of round 2, P1), while the folder's own create is proven.
+    #[test]
+    fn on_the_maintainers_pc_an_upload_into_a_folder_made_here_waits() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "twin", "Backups", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost", "Backups", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "new-file", "Backups/a.txt", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&create("op-ghost", "ghost", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-new-file", "new-file", Some("ghost"), false)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("twin"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 2 && t.held_for_review == 1), "{outcome:?}");
+        assert_eq!(held_for_review(&pc), vec!["op-new-file".to_string()]);
     }
 
     /// Lead review of round 2, P1: account A's rows made on this PC sit at the paths of account B's own rows (a
@@ -1384,6 +1427,52 @@ mod tests {
             vec!["op-a-loose".to_string(), "op-a-notes".to_string(), "op-a-report".to_string()],
             "no content is sent on a path's word"
         );
+    }
+
+    /// Self-review of round 3 (F1): a server row gone from this account's tree, with no parent link, is explained by
+    /// the own folder at its path, so it is tied to that folder by a path only. New content for it is held. The same
+    /// row with a real parent link to that folder is gone from it, tied by the link, and its edit uploads.
+    #[test]
+    fn content_for_a_gone_row_explained_only_by_the_folder_at_its_path_is_held() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "own-folder", "Projects", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "gone", "Projects/old.txt", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::File);
+        add_row_at(&pc, "gone-linked", "Projects/linked.txt", Some("own-folder"), Shape::Snapshot, Namespace::MyFiles, ItemKind::File);
+        pc.db.0.enqueue_operation(&edit("op-gone", "gone")).unwrap();
+        pc.db.0.enqueue_operation(&edit("op-gone-linked", "gone-linked")).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("own-folder"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.gone == 2 && t.held_for_review == 1), "{outcome:?}");
+        assert_eq!(held_for_review(&pc), vec!["op-gone".to_string()]);
+    }
+
+    /// Self-review of round 3 (F2): a path proves a folder create only for the folder at that path, its own twin. A
+    /// new folder inside a folder made here has no twin: its create would give the account a folder name it never
+    /// had, on a path's word, so it is held. The folders made here that do have an own twin are proven.
+    #[test]
+    fn a_new_folder_inside_a_folder_made_here_is_held_when_it_has_no_twin_of_its_own() {
+        let pc = pc_with(&IDS);
+        add_row_at(&pc, "twin", "Backups", None, Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "twin-sub", "Backups/PC", Some("twin"), Shape::Snapshot, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost", "Backups", None, Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost-sub", "Backups/PC", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        add_row_at(&pc, "ghost-new", "Backups/New", Some("ghost"), Shape::Local, Namespace::MyFiles, ItemKind::Folder);
+        pc.db.0.enqueue_operation(&create("op-ghost", "ghost", None, true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-ghost-sub", "ghost-sub", Some("ghost"), true)).unwrap();
+        pc.db.0.enqueue_operation(&create("op-ghost-new", "ghost-new", Some("ghost"), true)).unwrap();
+        adopt_unbound(&pc.db, None).unwrap();
+        let mut tree: Vec<_> = IDS.iter().map(|id| mine(id)).collect();
+        tree.push(mine("twin"));
+        tree.push(mine("twin-sub"));
+
+        let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
+
+        assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 3 && t.held_for_review == 1), "{outcome:?}");
+        assert_eq!(held_for_review(&pc), vec!["op-ghost-new".to_string()]);
     }
 
     /// Lead review of round 2, P2-1: a row counts as made on this PC only when a queued create names it. Every other
