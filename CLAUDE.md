@@ -354,7 +354,7 @@ never deleted until the person decides in Settings › Sync. The card shows them
 (a change anywhere inside a shared folder counts there), and both choices act on exactly the ids it showed,
 never a change held after that read: "Upload to my Beebeeb" releases them; "Keep on this PC only"
 (`found_while_paused.rs`) MOVES the items made on this PC they act on out of the sync root into
-`Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
+`Beebeeb - not uploaded\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
 so a crash is settled at the next engine start) and forgets their rows. It removes only the staged copies
 the journal names; one whose live file is gone is copied into the dated folder first, before the rows are
 forgotten (a restart after that copy does not make it twice). When OneDrive or

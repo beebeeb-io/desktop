@@ -5,7 +5,7 @@
 //! - The card first reads them by kind ([`review`]); "Upload to my Beebeeb" releases exactly the changes it showed
 //!   (`StateDb::release_found_while_paused`), never one held after that read (lead review round 3, P2-2 and P3-1).
 //! - "Keep on this PC only" (the lead's ruling (a)) moves each item made on this PC that a held change acts on out of
-//!   the Beebeeb folder, into `Beebeeb - kept on this PC\YYYY-MM-DD\` next to it, and forgets its rows and queued
+//!   the Beebeeb folder, into `Beebeeb - not uploaded\YYYY-MM-DD\` next to it, and forgets its rows and queued
 //!   changes:
 //!   1. On the same volume only, by rename only: an item on another volume, or one whose rename fails, stays where it
 //!      is, still held, and the person is told. Never copy-then-delete.
@@ -28,8 +28,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// The folder next to the Beebeeb folder that kept items move into (plain hyphen, lead ruling (a) 1).
-pub const KEPT_FOLDER_NAME: &str = "Beebeeb - kept on this PC";
+/// The folder next to the Beebeeb folder that kept items move into (plain hyphen, lead ruling (a) 1). Its name, by the
+/// lead's ruling on self-review F9 (2026-10-29), is true whether or not OneDrive or Dropbox syncs the folder it is made in.
+pub const KEPT_FOLDER_NAME: &str = "Beebeeb - not uploaded";
 
 /// What "Keep on this PC only" did, for Settings › Sync (`src/windows/foundWhilePaused.ts`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -631,8 +632,10 @@ mod tests {
             Self { db, root, staging, temp }
         }
 
+        /// Lead ruling on self-review F9 (2026-10-29): the kept folder is "Beebeeb - not uploaded", true whether or not
+        /// OneDrive or Dropbox syncs the folder it is made in. Spelled out here so the name is tested, not assumed.
         fn kept_dir(&self) -> PathBuf {
-            self.temp.path().join(KEPT_FOLDER_NAME).join(TODAY)
+            self.temp.path().join("Beebeeb - not uploaded").join(TODAY)
         }
 
         /// A row: `server` says the server named it (a version), `None` parent at the top level.
@@ -1063,7 +1066,7 @@ mod tests {
         let pc = Pc::new();
         pc.new_file("new-top", "todo.txt", None, b"todo");
         assert_eq!(pc.keep(), KeepResult::default());
-        assert!(!pc.temp.path().join(KEPT_FOLDER_NAME).exists());
+        assert!(!pc.temp.path().join("Beebeeb - not uploaded").exists());
         assert!(pc.on_disk("todo.txt").is_file());
     }
 
