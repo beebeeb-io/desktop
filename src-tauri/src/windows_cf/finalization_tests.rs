@@ -197,7 +197,7 @@ fn cloud_only(path: &Path, bytes: &[u8], identity: &str) {
     assert_eq!(placeholders::platform_view(path), placeholder(crate::unknown_check::OnDisk::Nothing, true, identity));
 }
 
-fn never_judged(_: &str) -> Judged {
+fn never_judged(_: &str) -> anyhow::Result<Judged> {
     panic!("the bytes of this file must not be read")
 }
 
@@ -215,7 +215,7 @@ fn regression_2270_a_read_only_plain_file_finalizes_in_sync_with_its_attributes_
     let mut judged_hash = None;
     let local = placeholders::finalize_wholly_local(&path, "t01-local", "t01-server", &mut |hash| {
         judged_hash = Some(hash.to_string());
-        judge(hash, Some(&sha256(&bytes)), None)
+        Ok(judge(hash, Some(&sha256(&bytes)), None))
     })
     .unwrap();
     assert_eq!(local, Local::Finalized(Judged::MarkInSync));
@@ -240,7 +240,7 @@ fn a_read_only_unsynced_placeholder_finalizes_under_the_server_identity() {
     make_read_only(&path);
     let kept = Kept::of(&path);
     let local =
-        placeholders::finalize_wholly_local(&path, "t02-local", "t02-server", &mut |hash| judge(hash, Some(&sha256(&bytes)), None))
+        placeholders::finalize_wholly_local(&path, "t02-local", "t02-server", &mut |hash| Ok(judge(hash, Some(&sha256(&bytes)), None)))
             .unwrap();
     assert_eq!(local, Local::Finalized(Judged::MarkInSync));
     assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t02-server"));
@@ -283,7 +283,7 @@ fn a_later_edit_that_landed_finalizes_in_sync() {
     let kept = Kept::of(&path);
     let (payload, agreed) = (sha256(b"the uploaded original"), sha256(b"the edit that landed"));
     let local =
-        placeholders::finalize_wholly_local(&path, "t04-local", "t04-server", &mut |hash| judge(hash, Some(&payload), Some(&agreed)))
+        placeholders::finalize_wholly_local(&path, "t04-local", "t04-server", &mut |hash| Ok(judge(hash, Some(&payload), Some(&agreed))))
             .unwrap();
     assert_eq!(local, Local::Finalized(Judged::MarkInSync));
     assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t04-server"));
@@ -308,7 +308,7 @@ fn bytes_that_are_neither_get_the_identity_only() {
         make_read_only(&path);
         let kept = Kept::of(&path);
         let local = placeholders::finalize_wholly_local(&path, "t05-local", "t05-server", &mut |hash| {
-            judge(hash, Some(&sha256(b"the uploaded original")), None)
+            Ok(judge(hash, Some(&sha256(b"the uploaded original")), None))
         })
         .unwrap();
         assert_eq!(local, Local::Finalized(Judged::IdentityOnly), "{name}");
@@ -400,7 +400,7 @@ fn an_open_file_is_transient() {
     assert_eq!(placeholders::platform_view(&path), crate::unknown_check::PlatformView::PlainFile, "nothing changed");
     drop(reader);
     let local =
-        placeholders::finalize_wholly_local(&path, "t08-local", "t08-server", &mut |hash| judge(hash, Some(&sha256(&bytes)), None))
+        placeholders::finalize_wholly_local(&path, "t08-local", "t08-server", &mut |hash| Ok(judge(hash, Some(&sha256(&bytes)), None)))
             .unwrap();
     assert_eq!(local, Local::Finalized(Judged::MarkInSync));
     assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t08-server"));
@@ -602,4 +602,86 @@ fn an_open_file_stays_pending_and_finishes_next_tick() {
     assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick finishes it");
     assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t13-server"));
     assert!(!payload.exists(), "its staged copy is removed");
+}
+
+/// Spec F7c, I3 (self-review of #195): a placeholder of this upload that is already marked in sync, whose bytes are
+/// neither the payload nor the agreed content, gets the server identity and is left NOT in sync. Keeping the old mark
+/// would claim the server holds bytes it may not have, and "Free up space" could then drop them.
+#[test]
+fn an_in_sync_placeholder_whose_bytes_are_neither_is_left_not_in_sync() {
+    use crate::unknown_check::OnDisk;
+    let root = Root::new();
+    let path = root.path.join("s.txt");
+    std::fs::write(&path, b"bytes the server may not have").unwrap();
+    placeholders::convert_to_in_sync_placeholder(&path, "t15-local").unwrap();
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t15-local"));
+    make_read_only(&path);
+    let kept = Kept::of(&path);
+    let local = placeholders::finalize_wholly_local(&path, "t15-local", "t15-server", &mut |hash| {
+        Ok(judge(hash, Some(&sha256(b"the uploaded original")), None))
+    })
+    .unwrap();
+    assert_eq!(local, Local::Finalized(Judged::IdentityOnly));
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, false, "t15-server"), "F7c: not in sync");
+    assert_eq!(Kept::of(&path), kept, "I1");
+    settle();
+    assert_eq!(fetches("t15-"), 0, "I2");
+}
+
+/// Spec F8 for a row in review (self-review of #195): when the start's retry of a row in review ends pending (its file
+/// is open in another program), the row leaves review ("no review"), so a later tick of the same start finishes it
+/// once the file is closed, and the tray stops counting it.
+#[test]
+fn a_review_row_that_comes_back_pending_leaves_review_and_finishes_next_tick() {
+    use crate::unknown_check::OnDisk;
+    let root = Root::new();
+    let db = root.db();
+    let path = root.path.join("rp.txt");
+    let bytes = b"held, then open in an editor".repeat(50);
+    std::fs::write(&path, &bytes).unwrap();
+    make_read_only(&path);
+    track_at(&db, "t14-server", "rp.txt", None);
+    let payload = root.temp.path().join("t14-payload");
+    std::fs::write(&payload, &bytes).unwrap();
+    journal(&db, "t14", "rp.txt", &payload);
+    db.mark_upload_finalization_review("t14-op", "platform_error", 1).unwrap();
+    let reader = std::fs::File::open(&path).unwrap();
+    // The first retry of this start: the row in review goes through F0-F9 again and meets the open file (F8).
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    let rows = db.upload_finalizations().unwrap();
+    assert_eq!(rows.len(), 1, "pending");
+    assert_eq!((rows[0].stamped, rows[0].review.as_deref()), (false, None), "pending is not review (F8)");
+    drop(reader);
+    // A later tick of the same start.
+    crate::windows_cf::upload_finalization::retry(&db, &root.path);
+    assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick finishes it");
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "t14-server"));
+    assert!(!payload.exists(), "its staged copy is removed");
+}
+
+/// Self-review of #195 (0.8.19 read the staged copy only after the file opened): a row whose file is open in another
+/// program stays pending without reading its staged copy, which is as large as the upload. The copy is read once,
+/// when the file itself is open for its hash.
+#[test]
+fn a_pending_row_does_not_read_its_staged_copy() {
+    use crate::windows_cf::upload_finalization::{payloads_read, retry};
+    let root = Root::new();
+    let db = root.db();
+    let path = root.path.join("big.txt");
+    let bytes = b"a large upload".repeat(1000);
+    std::fs::write(&path, &bytes).unwrap();
+    track_at(&db, "t16-server", "big.txt", None);
+    let payload = root.temp.path().join("t16-payload");
+    std::fs::write(&payload, &bytes).unwrap();
+    journal(&db, "t16", "big.txt", &payload);
+    let reader = std::fs::File::open(&path).unwrap();
+    let before = payloads_read();
+    retry(&db, &root.path);
+    retry(&db, &root.path);
+    assert_eq!(db.upload_finalizations().unwrap().len(), 1, "pending");
+    assert_eq!(payloads_read() - before, 0, "the staged copy is not read while the file is open elsewhere");
+    drop(reader);
+    retry(&db, &root.path);
+    assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick finishes it");
+    assert_eq!(payloads_read() - before, 1, "read once, with the file open for its hash");
 }

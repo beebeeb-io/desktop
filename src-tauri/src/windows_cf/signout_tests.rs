@@ -414,8 +414,9 @@ fn round6_verified_upload_finalization_updates_identity() {
 }
 
 /// Tasks 2270 / 2280 (spec X1, I5; review focus): a row held for review no longer blocks sign-out (the person cannot
-/// act on it), and sign-out forgets it. A row still pending (its file is open in another program) still blocks it,
-/// with today's message, until it finishes.
+/// act on it), and sign-out forgets it once it goes ahead. A row still pending (its file is open in another program)
+/// still blocks it, with today's message, until it finishes; a sign-out it refuses keeps the row in review too
+/// (self-review of #195: it was forgotten before the refusal, so the tray lost it and no start retried it).
 #[test]
 fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     let registered = RegisteredRoot::new();
@@ -434,8 +435,12 @@ fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     let reader = std::fs::File::open(&path).unwrap();
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(error.to_string().contains("still needs its local identity repaired"), "{error:?}");
-    let ops: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| row.op_id).collect();
-    assert_eq!(ops, vec!["pending-op".to_string()], "the review row is forgotten, the pending one kept");
+    let rows: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| (row.op_id, row.review)).collect();
+    assert_eq!(
+        rows,
+        vec![("review-op".to_string(), Some("moved".to_string())), ("pending-op".to_string(), None)],
+        "a refused sign-out keeps both rows as they were"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), b"uploaded bytes");
     drop(reader);
     purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap();

@@ -6250,11 +6250,15 @@ impl StateDb {
         )?;
         Ok(())
     }
-    /// Task 2270 (spec X1): sign-out forgets the rows held for review (their staged copies are unlinked with every
-    /// other staged payload); a pending row is kept, and still blocks the sign-out.
+    /// Task 2270 (spec F8, self-review of #195): a row in review that meets a transient error leaves review, so the
+    /// next tick tries it again and the tray stops counting it.
     #[cfg(any(target_os = "windows", test))]
-    pub fn forget_reviewed_upload_finalizations(&self) -> Result<usize> {
-        Ok(self.0.lock().unwrap().execute("DELETE FROM upload_finalizations WHERE review IS NOT NULL", [])?)
+    pub fn clear_upload_finalization_review(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE upload_finalizations SET review=NULL, review_at=NULL WHERE op_id=?1",
+            params![op_id],
+        )?;
+        Ok(())
     }
     #[cfg(any(target_os = "windows", test))]
     pub fn forget_upload_finalization(&self, op_id: &str) -> Result<()> {
@@ -6368,8 +6372,11 @@ impl StateDb {
         if pending != 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        // Task 2270 (spec X1): a finalization held for review does not refuse sign-out; it goes with the account data
+        // below, in this transaction. A pending one still refuses it.
         let remaining: i64 = tx.query_row(
-            "SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)",
+            "SELECT (SELECT COUNT(*) FROM staged_payloads)
+                  + (SELECT COUNT(*) FROM upload_finalizations WHERE review IS NULL)",
             [],
             |r| r.get(0),
         )?;
@@ -9125,19 +9132,27 @@ mod tests {
         assert_eq!((review("a"), review("b"), review("c")), (Some("other_file".into()), Some("moved".into()), None));
     }
 
-    /// Task 2270 (spec X1): sign-out forgets the rows held for review, and only them.
+    /// Task 2270 (spec X1, I5; self-review of #195): a row held for review does not stop sign-out from finishing, and
+    /// goes with the account data in the same transaction. A pending row still refuses it, and a refused sign-out
+    /// keeps the row in review as well.
     #[test]
-    fn reviewed_finalizations_are_forgotten_and_pending_ones_kept() {
+    fn finishing_sign_out_forgets_review_rows_and_a_pending_row_refuses_it() {
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
-        db.put_upload_finalization(&finalization("held")).unwrap();
-        db.put_upload_finalization(&finalization("pending")).unwrap();
+        for op in ["held", "pending"] {
+            db.put_upload_finalization(&finalization(op)).unwrap();
+            // The purge unlinks every staged payload before it finishes.
+            db.forget_staged_payload(&format!("proof-{op}")).unwrap();
+        }
         db.mark_upload_finalization_review("held", "partly_on_disk", 7).unwrap();
 
-        assert_eq!(db.forget_reviewed_upload_finalizations().unwrap(), 1);
-
+        assert!(db.finish_windows_signout().is_err(), "a pending row refuses it");
         let ops: Vec<String> = db.upload_finalizations().unwrap().into_iter().map(|r| r.op_id).collect();
-        assert_eq!(ops, ["pending"]);
+        assert_eq!(ops, ["held", "pending"], "a refused sign-out keeps both");
+
+        db.mark_upload_finalization_review("pending", "moved", 8).unwrap();
+        db.finish_windows_signout().expect("rows in review do not refuse it");
+        assert!(db.upload_finalizations().unwrap().is_empty(), "and go with the account data");
     }
 
     /// Task 2270 (spec M1): a 0.8.19 database (no review columns) gains them on open, and its rows read as not held.

@@ -321,8 +321,11 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 /// Existing placeholders require CfUpdatePlaceholder: conversion is a no-op
 /// for a placeholder and cannot replace its pre-upload temporary identity.
 ///
-/// Tasks 2270 / 2280: through [`open_exclusive_without_write_data`], so a read-only file converts too. Open it only
-/// on a file wholly on disk: on a cloud-only placeholder that open fetches it.
+/// Tasks 2270 / 2280: tests only now. An upload's finalization goes through [`finalize_wholly_local`] (F7) or
+/// [`restamp_cloud_only`] (F5), which judge the bytes before the in-sync mark; this marks without judging, as test
+/// setup. Through [`open_exclusive_without_write_data`], so a read-only file converts too. Open it only on a file
+/// wholly on disk: on a cloud-only placeholder that open fetches it.
+#[cfg(test)]
 pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> anyhow::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -395,13 +398,14 @@ fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Res
 }
 
 /// Give the file behind `handle` the identity `file_id`: `CfUpdatePlaceholder` on a placeholder,
-/// `CfConvertToPlaceholder` on a plain file. In sync only when `in_sync`; otherwise the state is left as it is (an
-/// unsynced placeholder stays unsynced, a converted plain file is not in sync).
+/// `CfConvertToPlaceholder` on a plain file. In sync only when `in_sync`; otherwise NOT in sync: a placeholder's
+/// in-sync mark is cleared (spec F7c, I3; self-review of #195: one marked earlier would otherwise keep claiming the
+/// server holds bytes it may not), and a converted plain file is not marked.
 fn stamp_identity(handle: windows::Win32::Foundation::HANDLE, placeholder: bool, file_id: &str, in_sync: bool) -> anyhow::Result<()> {
     // SAFETY: `handle` is open for the call; `file_id` outlives it.
     unsafe {
         if placeholder {
-            let flags = if in_sync { CF_UPDATE_FLAG_MARK_IN_SYNC } else { CF_UPDATE_FLAG_NONE };
+            let flags = if in_sync { CF_UPDATE_FLAG_MARK_IN_SYNC } else { CF_UPDATE_FLAG_CLEAR_IN_SYNC };
             CfUpdatePlaceholder(handle, None, Some(file_id.as_ptr().cast()), file_id.len() as u32, None, flags, None, None)?;
         } else {
             let flags = if in_sync { CF_CONVERT_FLAG_MARK_IN_SYNC } else { CF_CONVERT_FLAG_NONE };
@@ -469,7 +473,7 @@ pub fn finalize_wholly_local(
     path: &std::path::Path,
     local_id: &str,
     server_id: &str,
-    judge: &mut dyn FnMut(&str) -> crate::upload_finalization_plan::Judged,
+    judge: &mut dyn FnMut(&str) -> anyhow::Result<crate::upload_finalization_plan::Judged>,
 ) -> anyhow::Result<Local> {
     use crate::upload_finalization_plan::Judged;
     use std::os::windows::io::AsRawHandle;
@@ -492,7 +496,7 @@ pub fn finalize_wholly_local(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
-    let judged = judge(&format!("{:x}", hasher.finalize()));
+    let judged = judge(&format!("{:x}", hasher.finalize()))?;
     stamp_identity(handle, existing.is_some(), server_id, judged == Judged::MarkInSync)?;
     Ok(Local::Finalized(judged))
 }
@@ -503,6 +507,12 @@ pub fn is_transient(error: &anyhow::Error) -> bool {
     use windows::Win32::Foundation::{ERROR_CLOUD_FILE_IN_USE, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
     let codes = [ERROR_SHARING_VIOLATION.0, ERROR_LOCK_VIOLATION.0, ERROR_CLOUD_FILE_IN_USE.0];
     win32_code(error).is_some_and(|code| codes.contains(&code))
+}
+
+/// Spec F8: the file, or its folder, is gone (os 2, os 3), since the caller's view of it was read.
+pub fn is_gone(error: &anyhow::Error) -> bool {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    win32_code(error).is_some_and(|code| code == ERROR_FILE_NOT_FOUND.0 || code == ERROR_PATH_NOT_FOUND.0)
 }
 
 /// Spec F3: access denied (a file this account may not open as these handles do).
@@ -534,9 +544,10 @@ fn win32_code(error: &anyhow::Error) -> Option<u32> {
 /// it in-sync now would be a lie (and could let "Free up space" dehydrate bytes
 /// that were never uploaded). We pass `CF_CONVERT_FLAG_NONE`: the file becomes a
 /// placeholder that keeps its bytes on disk and is understood to be locally
-/// ahead of the cloud. Once the real `file_id` lands,
-/// [`super::super::engine_bridge::EngineBridge::defer_local_upload_finalization`]
-/// → [`convert_to_in_sync_placeholder`] re-stamps it in-sync with the server id.
+/// ahead of the cloud. Once the real `file_id` lands, the upload finalization
+/// journal (`upload_finalization::retry` → [`finalize_wholly_local`], tasks 2270 /
+/// 2280) re-stamps it with the server id, in sync when its bytes are the
+/// uploaded or the agreed content.
 ///
 /// We use a throwaway identity here (the local op uuid would do, but we have no
 /// server id yet) — pass `local_id`, which `finalize` overwrites with the real
