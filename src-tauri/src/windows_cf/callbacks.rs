@@ -1210,3 +1210,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "finalization_tests.rs"]
+mod finalization_tests;

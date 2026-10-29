@@ -47,6 +47,8 @@ function installBackend(reads: boolean[]) {
   const handlers: Record<string, (args: any) => unknown> = {
     popover_snapshot: () => snapshot(reads[Math.min(read++, reads.length - 1)]),
     pending_setup: () => new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+    // 1747 Part 2: this Mac's key is in the Keychain; the route is its own file's subject (`macAppVaultRoute.test.tsx`).
+    vault_unlock_route: () => 'keychain',
     set_pending_setup: () => null,
     account_subscription: () => ({ plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: null, quota_bytes: 1, used_bytes: 0 }),
     consume_main_navigation: () => null,

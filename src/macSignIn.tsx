@@ -625,7 +625,7 @@ export function PasswordPanel({
  * On a Mac the step is the sign-out ask in the switch's words, from the snapshot the sign-in carried: “Sign out and
  * switch” keeps the waiting saves with that snapshot's `askId`; a refusal (`unsent_changes:`) counts again and
  * re-renders the ask, with no toast; a count that cannot be read (E3) is a line in the step, never a toast. A code
- * prefix is never shown. With no snapshot (the browser path without its event, or Linux) the step is spec A's.
+ * prefix is never shown. With no snapshot (Linux) the step is spec A's.
  *
  * Drawn in the hi-fi (section 2, “Account switch”): the confirm is the red button, and focus is on Cancel when the step
  * opens, so a stray Enter cancels and can never confirm.

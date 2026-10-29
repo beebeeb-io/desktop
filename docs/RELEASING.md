@@ -38,8 +38,20 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+<!-- Pick the line that matches the channel you pass to the workflow. The release body is
+     written once and reused unchanged on every later promotion, so it must stay true on
+     the first channel. -->
+<!-- stable: --> Existing desktop installs receive this release through the in-app updater automatically.
+<!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
+
+For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
 ```
+
+The release workflow enforces the channel rule: when `channel` is `alpha` or `beta`, notes that
+promise automatic delivery to existing installs fail validation
+(`node scripts/release-channel-checks.mjs notes <version> <channel>`, tested in
+`tests/releaseChannelChecks.test.ts`). desktop-v0.8.3, a security fix, shipped with the
+unconditional stable wording while it was only ever published to `alpha.json`.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
@@ -378,6 +390,8 @@ update or downgrade is actually installed from that channel.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
 9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
+10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
+11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
 
 ## Style Notes
 

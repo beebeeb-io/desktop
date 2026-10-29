@@ -139,6 +139,10 @@ mod unknown_check;
 // tested everywhere; only the Windows tick calls it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod os_state_reconcile;
+// Tasks 2270 / 2280: what to do with an upload finalization journal row. Decided on every platform (tested
+// everywhere); applied on Windows only (`windows_cf::upload_finalization`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod upload_finalization_plan;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
@@ -1643,6 +1647,15 @@ impl LoginOutcome {
     fn needs_2fa() -> Self {
         Self {
             requires_2fa: true,
+            ..Self::signed_in()
+        }
+    }
+
+    /// A browser sign-in that installed its session: the handoff carried the vault key, so the vault is unlocked (spec C
+    /// C-S1). The password paths cannot say that: they sign in without a key and the recovery phrase follows.
+    fn browser_signed_in() -> Self {
+        Self {
+            vault_unlocked: true,
             ..Self::signed_in()
         }
     }
@@ -3756,13 +3769,14 @@ async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>
     Err("This works on a Mac only.".into())
 }
 
-/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
-/// `settle_sign_in`, is not built on Windows.
+/// W11: on macOS the switch step renders a snapshot, owned by the window the step runs in: the Beebeeb window (`main`),
+/// which the app destroys on a close, so a close drops it (task 1747 Part 1, review P3-5 on #143; it was owned by the label
+/// `onboarding`, a window a Mac no longer builds). Its one caller, `settle_sign_in`, is not built on Windows.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
     #[cfg(target_os = "macos")]
     {
-        let snapshot = count_ask("onboarding")?;
+        let snapshot = count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?;
         // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
         tracing::info!(
             files = snapshot.counts.files,
@@ -6134,8 +6148,63 @@ fn local_data_owner(sources: &LocalSources) -> Result<Option<account_binding::Id
 /// unlocks and never reads the key (the real Keychain answers from the item's attributes). Fails closed.
 #[cfg(not(target_os = "windows"))]
 fn keychain_vault_key_present(account_id: &str) -> bool {
-    keychain::holds_vault_key(&platform_keychain_store_for(account_id))
-        || keychain::holds_vault_key(&keychain::legacy_platform_keychain_store())
+    vault_key_in_either_layout(
+        &platform_keychain_store_for(account_id),
+        &keychain::legacy_platform_keychain_store(),
+    )
+}
+
+/// The question over any two stores (the id-keyed layout, then the legacy one), so a test can hold a fake in each. A store that
+/// cannot answer counts as holding a key (`keychain::holds_vault_key`'s fail-closed rule): never a reason to say "no key".
+#[cfg(not(target_os = "windows"))]
+fn vault_key_in_either_layout<A: keychain::AuthSecretStore, B: keychain::AuthSecretStore>(
+    id_keyed: &A,
+    legacy: &B,
+) -> bool {
+    keychain::holds_vault_key(id_keyed) || keychain::holds_vault_key(legacy)
+}
+
+/// Where "unlock" goes on this Mac (task 1747 Part 2): `Keychain` when the vault key is in the Keychain, `RecoveryPhrase` when
+/// neither layout holds one (a session without keys: the first password sign-in that was never finished with the phrase). The
+/// window shows Set up this Mac for the second and Home's locked card for the first (plan D4). Serialized snake_case, which is
+/// what `vaultUnlockRoute` in `src/desktopApi.ts` parses (pinned equal in `tests/vaultUnlockRoute.test.ts`).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VaultUnlockRoute {
+    Keychain,
+    RecoveryPhrase,
+}
+
+/// `key_present` is [`keychain_vault_key_present`]'s answer, which fails closed: a Keychain that cannot be read routes to the
+/// Keychain unlock, so the existing unlock error reaches the person, rather than to a path that would overwrite a key.
+#[cfg(target_os = "macos")]
+fn unlock_route(key_present: bool) -> VaultUnlockRoute {
+    if key_present {
+        VaultUnlockRoute::Keychain
+    } else {
+        VaultUnlockRoute::RecoveryPhrase
+    }
+}
+
+/// The route for one account slot. It reaches the Keychain only through [`keychain_vault_key_present`], which reads the item's
+/// attributes and never the key.
+#[cfg(target_os = "macos")]
+fn vault_unlock_route_for(account_id: &str) -> VaultUnlockRoute {
+    unlock_route(keychain_vault_key_present(account_id))
+}
+
+/// The Beebeeb window asks this once, when it opens signed in and locked, and again at the click on “Unlock vault” (and
+/// Settings › Account's Unlock). An answer about the ACTIVE account, so the window keeps its revision guard on it, and it is
+/// not part of `sync_status`, which is polled every second. The Keychain is asked off the async workers; a worker that failed
+/// to answer is the Keychain unlock, the fail-closed side.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn vault_unlock_route(state: State<'_, AppState>) -> Result<VaultUnlockRoute, String> {
+    let account_id = state.active_account()?.id.as_str().to_string();
+    Ok(tokio::task::spawn_blocking(move || vault_unlock_route_for(&account_id))
+        .await
+        .unwrap_or(VaultUnlockRoute::Keychain))
 }
 
 /// Does the Keychain still hold a session token for this account slot (id-keyed or legacy)? A read error counts as
@@ -15751,6 +15820,8 @@ pub fn run() {
             consume_main_navigation,
             set_pending_setup,
             pending_setup,
+            #[cfg(target_os = "macos")]
+            vault_unlock_route,
             main_window_state,
             check_for_updates_now,
             consume_menu_update_check,
@@ -39413,8 +39484,11 @@ mod sign_out_keep_tests {
                 "absent while the count worked"
             );
             assert!(
-                state.sign_out.snapshots.drop_owned_by("onboarding"),
-                "owned by the window the switch step runs in"
+                state
+                    .sign_out
+                    .snapshots
+                    .drop_owned_by(surfaces::policy::main_window_label(surfaces::policy::Platform::current())),
+                "owned by the window the switch step runs in (the Beebeeb window on a Mac, not the retired onboarding window)"
             );
             let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
             assert_eq!(
@@ -39496,8 +39570,9 @@ mod sign_out_keep_tests {
 
     /// U19, from the count to the window (W11): the switch settles with the snapshot it counted (a Mac) or none
     /// (elsewhere); both password sign-ins hand the settlement's snapshot and E3 on to `LoginOutcome`; and the browser
-    /// sign-in puts each in its `account_mismatch` event only when it is there. The sign-ins need a server, so their
-    /// text is read.
+    /// sign-in hands them on in the same call (spec C C-S1, task 1747 Part 1): it returns the `LoginOutcome` the password
+    /// paths return, where it used to put each in an `account_mismatch` event and fail with a raw code. The sign-ins need
+    /// a server, so their text is read.
     #[test]
     fn the_switch_count_reaches_the_sign_in_window() {
         let counts = sign_out::snapshot::AskCounts {
@@ -39541,19 +39616,62 @@ mod sign_out_keep_tests {
                 "{login} hands both on"
             );
         }
-        let browser = squeeze(&include_str!("browser_login.rs").replace("\r\n", "\n"));
-        for step in [
-            "let mut payload = serde_json::json!({ \"pending_changes\": pending_changes });",
-            "if let Some(unsent) = unsent {
-                payload[\"unsent\"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
-            }",
-            "if let Some(unsent_error) = unsent_error {
-                payload[\"unsent_error\"] = serde_json::Value::String(unsent_error);
-            }",
-            "emit(app, \"account_mismatch\", payload);",
-        ] {
-            assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
-        }
+        // The browser handoff holds the same hand-off as the two password sign-ins, in the same call, through its returned
+        // outcome, and no raw `account_mismatch` event or error string is left in it (C-S1).
+        let browser_source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        // The handoff's own code, not its tests (which hold the words of what must not be there).
+        let browser = squeeze(&browser_source[..browser_source.find("#[cfg(test)]").expect("the tests module")]);
+        assert!(
+            browser.contains(&squeeze(
+                "return Ok(crate::LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));"
+            )),
+            "the browser handoff hands both on"
+        );
+        assert!(
+            !browser.contains(concat!("\"account", "_mismatch\"")),
+            "no raw code is left in the handoff, as an event or as an error"
+        );
+    }
+
+    /// Task 1747 Part 1 (review P3-5 on #143): the switch snapshot is owned by the window the switch step runs in. On a Mac
+    /// that is `main`, which the app destroys on a close, so a close of `main` drops it, and another window's close leaves
+    /// it. It used to be owned by the label `onboarding`, a window a Mac no longer builds, so nothing dropped it.
+    #[tokio::test]
+    async fn the_switch_snapshot_is_dropped_by_the_window_it_runs_in_and_by_no_other() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            let owner = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+            #[cfg(target_os = "macos")]
+            assert_eq!(owner, "main", "the sign-in window of a Mac is the Beebeeb window");
+            if switch_snapshot(&state).unwrap().is_some() {
+                for other in ["settings", "onboarding", "popover", "conflict-7f3a"] {
+                    assert!(
+                        !flow_window_closed(&state.sign_out, other).snapshot_dropped,
+                        "{other}: another window's close leaves the switch snapshot"
+                    );
+                }
+                assert!(state.sign_out.snapshots.newest_ask_id().is_some());
+                assert!(
+                    flow_window_closed(&state.sign_out, owner).snapshot_dropped,
+                    "the window the step runs in drops it"
+                );
+                assert_eq!(state.sign_out.snapshots.newest_ask_id(), None);
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn the_switch_snapshot_is_counted_for_the_window_label_not_a_literal() {
+        let production = super::finder_setup_command_tests::production_source();
+        let snapshot = super::finder_setup_command_tests::body_between(&production, "fn switch_snapshot(", "\n}\n");
+        assert!(
+            snapshot.contains("count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?"),
+            "{snapshot}"
+        );
+        assert!(!snapshot.contains("\"onboarding\""), "no window label as a literal:\n{snapshot}");
     }
 
     // ---- the fix round after the /code-review of the Mac sign-in PR (task 1683 slice 2) ----
@@ -39690,6 +39808,139 @@ mod sign_out_keep_tests {
         // The startup restore's own test of the same failure is untouched: it reads the Keychain's words.
         let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
         assert!(!restore.contains("unlock_failure"), "{restore}");
+    }
+
+    // ---- task 1747 Part 2: the Keychain-presence signal (`vault_unlock_route`) ----
+
+    /// A store that answers ONE question, “is a vault key stored?”, and panics on anything that reads or writes a secret: a
+    /// route that read the key (or anything else) would fail the test that uses it.
+    struct HoldsAKey(fn() -> keychain::AuthResult<bool>);
+
+    impl keychain::AuthSecretStore for HoldsAKey {
+        fn save_session_token(&self, _: &SessionToken) -> keychain::AuthResult<()> {
+            unreachable!("the route writes nothing")
+        }
+        fn load_session_token(&self) -> keychain::AuthResult<Option<SessionToken>> {
+            unreachable!("the route reads no token")
+        }
+        fn delete_session_token(&self) -> keychain::AuthResult<()> {
+            unreachable!("the route deletes nothing")
+        }
+        fn save_wrapped_master_key(&self, _: SecretBytes) -> keychain::AuthResult<()> {
+            unreachable!("the route writes nothing")
+        }
+        fn load_wrapped_master_key(&self) -> keychain::AuthResult<Option<SecretBytes>> {
+            unreachable!("the route never reads the key")
+        }
+        fn delete_wrapped_master_key(&self) -> keychain::AuthResult<()> {
+            unreachable!("the route deletes nothing")
+        }
+        fn holds_wrapped_master_key(&self) -> keychain::AuthResult<bool> {
+            (self.0)()
+        }
+    }
+
+    const ABSENT: HoldsAKey = HoldsAKey(|| Ok(false));
+    const PRESENT: HoldsAKey = HoldsAKey(|| Ok(true));
+    const NOT_FOUND: HoldsAKey = HoldsAKey(|| Err(keychain::AuthStoreError::NotFound));
+    const UNREADABLE: HoldsAKey = HoldsAKey(|| Err(keychain::AuthStoreError::Backend("the Keychain is locked".into())));
+
+    fn route_over(id_keyed: &HoldsAKey, legacy: &HoldsAKey) -> VaultUnlockRoute {
+        unlock_route(vault_key_in_either_layout(id_keyed, legacy))
+    }
+
+    /// Item 1, through the real account-slot function and the in-memory Keychain a test build resolves.
+    #[test]
+    fn the_route_is_keychain_when_the_key_is_there() {
+        use keychain::AuthSecretStore as _;
+        let id = "route-the-key-is-there";
+        AuthVault::new(platform_keychain_store_for(id))
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
+            .unwrap();
+        assert_eq!(vault_unlock_route_for(id), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&PRESENT, &ABSENT), VaultUnlockRoute::Keychain);
+        platform_keychain_store_for(id).delete_wrapped_master_key().unwrap();
+    }
+
+    /// Item 2: a session and no key (the interrupted first run) is the recovery phrase. `NotFound` and a store that cannot hold
+    /// secrets say the same as an empty one.
+    #[test]
+    fn the_route_is_recovery_phrase_when_neither_layout_holds_a_key() {
+        use keychain::AuthSecretStore as _;
+        let id = "route-no-key-anywhere";
+        platform_keychain_store_for(id)
+            .save_session_token(&SessionToken::new("tok-no-key".to_string()).unwrap())
+            .unwrap();
+        assert_eq!(vault_unlock_route_for(id), VaultUnlockRoute::RecoveryPhrase, "a token is not a key");
+        assert_eq!(route_over(&ABSENT, &ABSENT), VaultUnlockRoute::RecoveryPhrase);
+        assert_eq!(route_over(&NOT_FOUND, &NOT_FOUND), VaultUnlockRoute::RecoveryPhrase);
+        platform_keychain_store_for(id).delete_session_token().unwrap();
+    }
+
+    /// Item 3: a key that only the legacy flat layout holds is a key (the unlock reads it as a fallback).
+    #[test]
+    fn the_route_reads_the_legacy_layout_too() {
+        assert_eq!(route_over(&ABSENT, &PRESENT), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&PRESENT, &PRESENT), VaultUnlockRoute::Keychain);
+    }
+
+    /// Item 4, pinned so nobody “fixes” it: a Keychain that cannot be read routes to the Keychain unlock, whose own error then
+    /// reaches the person. Set up this Mac would end by writing a key over one that may well be there.
+    #[test]
+    fn an_unreadable_keychain_routes_to_the_keychain_unlock() {
+        assert_eq!(route_over(&UNREADABLE, &ABSENT), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&ABSENT, &UNREADABLE), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&UNREADABLE, &UNREADABLE), VaultUnlockRoute::Keychain);
+    }
+
+    /// What the window parses: snake_case strings, and no other fields.
+    #[test]
+    fn the_route_is_a_snake_case_string_on_the_wire() {
+        assert_eq!(serde_json::to_value(VaultUnlockRoute::Keychain).unwrap(), serde_json::json!("keychain"));
+        assert_eq!(
+            serde_json::to_value(VaultUnlockRoute::RecoveryPhrase).unwrap(),
+            serde_json::json!("recovery_phrase")
+        );
+    }
+
+    /// Item 5: the command reaches the Keychain only through `keychain_vault_key_present`, which asks both layouts and never
+    /// unlocks (`the_vault_key_probe_asks_both_layouts_and_never_unlocks` holds that helper); a worker that failed to answer is
+    /// the Keychain unlock; and the command is registered on a Mac only.
+    #[test]
+    fn the_route_never_reads_the_key() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |signature: &str| super::finder_setup_command_tests::body_between(&production, signature, "\n}\n").to_string();
+        let route_for = body("fn vault_unlock_route_for(");
+        assert!(route_for.contains("unlock_route(keychain_vault_key_present(account_id))"), "{route_for}");
+        let command = body("async fn vault_unlock_route(");
+        assert!(command.contains("vault_unlock_route_for(&account_id)"), "{command}");
+        assert!(command.contains(".unwrap_or(VaultUnlockRoute::Keychain)"), "fails closed:\n{command}");
+        for (name, text) in [("the command", &command), ("the account function", &route_for), ("the decision", &body("fn unlock_route("))] {
+            for forbidden in ["load_", "AuthVault", "unlock_vault", "master_key", "unlock(", "session", "token", ".ok()", "unwrap_or(false)"] {
+                assert!(!text.contains(forbidden), "{name} must not touch {forbidden}:\n{text}");
+            }
+        }
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        let at = handler.find("vault_unlock_route,").expect("registered");
+        assert!(
+            handler[..at].trim_end().ends_with("#[cfg(target_os = \"macos\")]"),
+            "registered on a Mac only"
+        );
+    }
+
+    /// Item 6 (plan D5): the route is its own command; the 1 Hz `sync_status` poll never reaches the Keychain for it.
+    #[test]
+    fn sync_status_does_not_read_the_keychain() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "async fn sync_status(", "\n}\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        for forbidden in ["keychain", "vault_unlock_route", "unlock_route", "holds_vault_key", "vault_key_in_either_layout"] {
+            assert!(!body.contains(forbidden), "sync_status must not reach {forbidden}");
+        }
     }
 
     /// Review P3-1: `open_reauth_window` on a Mac asks the window for “Sign in again”, whatever the session says; the

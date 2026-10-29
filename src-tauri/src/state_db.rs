@@ -113,6 +113,9 @@ pub struct UploadFinalization {
     pub target_path: String,
     pub payload_path: String,
     pub stamped: bool,
+    /// Task 2270 (spec R2): the reason label this row is held for review (`row_gone`, `moved`, `unreadable`,
+    /// `other_file`, `partly_on_disk`, `platform_error`), or `None` while it is pending. Never a path or a name.
+    pub review: Option<String>,
 }
 
 /// High-level sync status for a single file. Maps 1:1 to the icon
@@ -3255,6 +3258,9 @@ impl StateDb {
         ensure_column(conn, "upload_resume", "completed_version", "INTEGER")?;
         ensure_column(conn, "upload_resume", "completed_object_version_id", "TEXT")?;
         ensure_column(conn, "upload_resume", "completed_mime_type", "TEXT")?;
+        // Task 2270 (spec M1): a finalization that cannot complete for a lasting reason is held for review.
+        ensure_column(conn, "upload_finalizations", "review", "TEXT")?;
+        ensure_column(conn, "upload_finalizations", "review_at", "INTEGER")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_operation_queue_write_id ON operation_queue(write_id);
@@ -6700,7 +6706,7 @@ impl StateDb {
     pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped FROM upload_finalizations",
+            "SELECT op_id,local_file_id,server_file_id,target_path,payload_path,stamped,review FROM upload_finalizations",
         )?;
         stmt.query_map([], |r| {
             Ok(UploadFinalization {
@@ -6710,6 +6716,7 @@ impl StateDb {
                 target_path: r.get(3)?,
                 payload_path: r.get(4)?,
                 stamped: r.get(5)?,
+                review: r.get(6)?,
             })
         })?
         .collect()
@@ -6718,6 +6725,26 @@ impl StateDb {
     pub fn mark_upload_finalization_stamped(&self, op_id: &str) -> Result<()> {
         self.0.lock().unwrap().execute(
             "UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",
+            params![op_id],
+        )?;
+        Ok(())
+    }
+    /// Task 2270 (spec R2): hold the row for review with a reason label, at `at` (Unix seconds). It is not retried
+    /// on every tick after this; the tray counts it as `not_marked_synced`.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn mark_upload_finalization_review(&self, op_id: &str, reason: &str, at: i64) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE upload_finalizations SET review=?2, review_at=?3 WHERE op_id=?1",
+            params![op_id, reason, at],
+        )?;
+        Ok(())
+    }
+    /// Task 2270 (spec F8, self-review of #195): a row in review that meets a transient error leaves review, so the
+    /// next tick tries it again and the tray stops counting it.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn clear_upload_finalization_review(&self, op_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE upload_finalizations SET review=NULL, review_at=NULL WHERE op_id=?1",
             params![op_id],
         )?;
         Ok(())
@@ -6834,8 +6861,11 @@ impl StateDb {
         if pending != 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        // Task 2270 (spec X1): a finalization held for review does not refuse sign-out; it goes with the account data
+        // below, in this transaction. A pending one still refuses it.
         let remaining: i64 = tx.query_row(
-            "SELECT (SELECT COUNT(*) FROM staged_payloads) + (SELECT COUNT(*) FROM upload_finalizations)",
+            "SELECT (SELECT COUNT(*) FROM staged_payloads)
+                  + (SELECT COUNT(*) FROM upload_finalizations WHERE review IS NULL)",
             [],
             |r| r.get(0),
         )?;
@@ -7877,6 +7907,17 @@ impl StateDb {
             }
             waiting - count
         };
+        // Task 2270 (spec U1): uploads this PC could not mark as synced for a lasting reason, dated by when each was
+        // held. Not a pause reason, and not an operation: the upload itself landed.
+        let (count, oldest_at, newest_at) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(MIN(review_at), 0), COALESCE(MAX(review_at), 0)
+             FROM upload_finalizations WHERE review IS NOT NULL",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )?;
+        if count > 0 {
+            add("not_marked_synced".to_string(), count, oldest_at, newest_at);
+        }
         Ok(QueueHold {
             waiting,
             gave_up,
@@ -9769,6 +9810,7 @@ mod tests {
             target_path: "file".into(),
             payload_path: "proof".into(),
             stamped: false,
+            review: None,
         };
         db.put_upload_finalization(&row).unwrap();
         assert_eq!(db.upload_finalizations().unwrap(), vec![row.clone()]);
@@ -9790,6 +9832,93 @@ mod tests {
         db.forget_upload_finalization("op").unwrap();
         db.finish_windows_signout().unwrap();
         assert_eq!(db.upload_finalizations().unwrap().len(), 0);
+    }
+
+    fn finalization(op: &str) -> UploadFinalization {
+        UploadFinalization {
+            op_id: op.into(),
+            local_file_id: format!("local-{op}"),
+            server_file_id: format!("server-{op}"),
+            target_path: format!("dir/{op}.txt"),
+            payload_path: format!("proof-{op}"),
+            stamped: false,
+            review: None,
+        }
+    }
+
+    /// Task 2270 (spec U1): a finalization held for review is one group of the tray's summary, dated by when it was
+    /// held; a pending one is not counted, and the queue's own counts are untouched.
+    #[test]
+    fn queue_hold_summary_counts_review_rows_as_not_marked_synced() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for op in ["a", "b", "c"] {
+            db.put_upload_finalization(&finalization(op)).unwrap();
+        }
+        db.mark_upload_finalization_review("a", "other_file", 100).unwrap();
+        db.mark_upload_finalization_review("b", "moved", 200).unwrap();
+
+        let summary = db.queue_hold_summary().unwrap();
+
+        assert_eq!((summary.waiting, summary.gave_up), (0, 0));
+        assert_eq!(
+            summary.held,
+            vec![HeldGroup { reason: "not_marked_synced".into(), count: 2, oldest_at: 100, newest_at: 200 }]
+        );
+        let rows = db.upload_finalizations().unwrap();
+        let review = |op: &str| rows.iter().find(|r| r.op_id == op).unwrap().review.clone();
+        assert_eq!((review("a"), review("b"), review("c")), (Some("other_file".into()), Some("moved".into()), None));
+    }
+
+    /// Task 2270 (spec X1, I5; self-review of #195): a row held for review does not stop sign-out from finishing, and
+    /// goes with the account data in the same transaction. A pending row still refuses it, and a refused sign-out
+    /// keeps the row in review as well.
+    #[test]
+    fn finishing_sign_out_forgets_review_rows_and_a_pending_row_refuses_it() {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for op in ["held", "pending"] {
+            db.put_upload_finalization(&finalization(op)).unwrap();
+            // The purge unlinks every staged payload before it finishes.
+            db.forget_staged_payload(&format!("proof-{op}")).unwrap();
+        }
+        db.mark_upload_finalization_review("held", "partly_on_disk", 7).unwrap();
+
+        assert!(db.finish_windows_signout().is_err(), "a pending row refuses it");
+        let ops: Vec<String> = db.upload_finalizations().unwrap().into_iter().map(|r| r.op_id).collect();
+        assert_eq!(ops, ["held", "pending"], "a refused sign-out keeps both");
+
+        db.mark_upload_finalization_review("pending", "moved", 8).unwrap();
+        db.finish_windows_signout().expect("rows in review do not refuse it");
+        assert!(db.upload_finalizations().unwrap().is_empty(), "and go with the account data");
+    }
+
+    /// Task 2270 (spec M1): a 0.8.19 database (no review columns) gains them on open, and its rows read as not held.
+    #[test]
+    fn a_state_db_without_the_review_columns_gains_them() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE upload_finalizations (
+                    op_id TEXT PRIMARY KEY,
+                    local_file_id TEXT NOT NULL,
+                    server_file_id TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    payload_path TEXT NOT NULL,
+                    stamped INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO upload_finalizations VALUES ('old', 'l', 's', 't', 'p', 0);",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        let rows = db.upload_finalizations().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].review, None);
+        db.mark_upload_finalization_review("old", "unreadable", 5).unwrap();
+        assert_eq!(db.upload_finalizations().unwrap()[0].review.as_deref(), Some("unreadable"));
     }
 
     // 2026-10-07 (task 1834, R10): renamed from `round5_legacy_resume_inventory_survives_operation_purge`
@@ -12580,6 +12709,7 @@ mod tests {
             target_path: "a.txt".into(),
             payload_path: "/staged/finalizing".into(),
             stamped: false,
+            review: None,
         })
         .unwrap();
 
@@ -13229,6 +13359,7 @@ mod tests {
             target_path: "a.txt".into(),
             payload_path: "/staged/create".into(),
             stamped: false,
+            review: None,
         };
         let input = LandingInput {
             op_id: "create",
@@ -13313,6 +13444,7 @@ mod tests {
             target_path: "p.txt".into(),
             payload_path: "/staged/create".into(),
             stamped: false,
+            review: None,
         };
         let input = LandingInput {
             op_id: "create",

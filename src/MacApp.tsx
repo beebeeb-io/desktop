@@ -32,8 +32,10 @@ import {
   commandUnavailableLabel,
   openUrl,
   popoverSnapshot,
+  vaultUnlockRoute,
   type CommandResult,
   type Subscription,
+  type VaultUnlockRoute,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
@@ -143,6 +145,21 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
     const unlock = async () => {
       mark('unlock', 'running')
       setNoKey(false)
+      // Task 1747 Part 2: the Keychain is asked at the click, not trusted from when the window opened. A Mac with no key anywhere
+      // goes to Set up this Mac (the Keychain unlock would have nothing to read); a key that appeared since is honoured too.
+      const routed = await vaultUnlockRoute()
+      if (routed.ok && routed.value === 'recovery_phrase') {
+        mark('unlock', null)
+        moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
+        return
+      }
+      // A build without the command cannot tell; any other failure is the unlock failing, in its own words and surface.
+      if (!routed.ok && !routed.unsupported) {
+        mark('unlock', null)
+        showToast({ variant: 'error', title: 'Couldn’t unlock the vault', message: routed.reason })
+        onRefresh()
+        return
+      }
       const result = await command<void>('unlock_vault')
       if (!result.ok) {
         if (!result.unsupported && isNoVaultKey(result.reason)) setNoKey(true)
@@ -354,7 +371,10 @@ export default function MacApp() {
   // Home's locked card is not drawn for a moment and then replaced.
   const [setupAsk, setSetupAsk] = useState<'idle' | 'asking' | 'done'>('idle')
   const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
-  const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
+  // Task 1747 Part 2 (plan D4): the Keychain's route, asked with the same one question and for the same window: one that OPENS
+  // signed in and locked. `windowScreen` settles while it is out and, with no key anywhere, shows Set up this Mac by state.
+  const [route, setRoute] = useState<VaultUnlockRoute>('keychain')
+  const screen = account === null ? 'home' : windowScreen(account, flowNow, askingForSetup ? 'unknown' : route)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
   // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
   // Not under a sheet: nothing navigates under one (§8.2), and the Repair sheet lives in Sync. The move comes when it closes.
@@ -451,13 +471,21 @@ export default function MacApp() {
   useEffect(() => {
     if (!askingForSetup || setupAsk !== 'idle') return
     setSetupAsk('asking')
-    void command<unknown>('pending_setup').then((result) => {
-      const resumed = result.ok ? flowForPendingSetup(result.value) : null
+    // Both questions at once: a step Rust remembers wins (it says why the phrase is asked), and the route covers the app having
+    // been quit, which forgets that step. A route that cannot be read is the Keychain unlock, never a window stuck settling.
+    void Promise.all([command<unknown>('pending_setup'), vaultUnlockRoute()]).then(([pending, routed]) => {
+      const resumed = pending.ok ? flowForPendingSetup(pending.value) : null
       // A step set while Rust was answering is the person's: never replaced by a resumed one.
       if (resumed !== null && getSignInFlow().step === null) setSignInFlow(resumed)
+      setRoute(routed.ok ? routed.value : 'keychain')
       setSetupAsk('done')
     })
   }, [askingForSetup, setupAsk])
+  // The route is the Mac as it was when the window opened. Once the keys have arrived (the phrase restored them, or the
+  // sign-in brought them: Finder is next) it is spent, so a later Lock shows Home's locked card, not Set up this Mac again.
+  useEffect(() => {
+    if (unlocked || signInFlow.step === 'finder') setRoute('keychain')
+  }, [unlocked, signInFlow.step])
 
   // The one check above, kept: the store follows what the first render already showed.
   useEffect(() => {
@@ -734,7 +762,12 @@ export default function MacApp() {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
         {view.section === 'general' ? <GeneralTab settings={settings} signedIn={signedIn} /> : null}
-        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
+        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} onSetUpThisMac={() => {
+          // Review P2: the card is drawn in `main`, so the click also leaves Settings — otherwise the Account tab stays up and
+          // the recovery-phrase form the person just asked for never appears.
+          go({ to: 'home' })
+          moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
+        }} /> : null}
         {view.section === 'sync' ? <SyncTab settings={settings} /> : null}
         {view.section === 'security' ? <SecurityTab unlocked={unlocked} /> : null}
         {view.section === 'about' ? <AboutTab settings={settings} signedIn={signedIn} /> : null}
