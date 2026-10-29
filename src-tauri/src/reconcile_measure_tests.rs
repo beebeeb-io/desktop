@@ -49,6 +49,22 @@ fn reconcile_on_a_copy() {
                 .unwrap();
         }
         let dry = db.reconcile_dry_run(&opts, &keep).unwrap();
+        // Task 2271: with `BB_RECONCILE_HELD_OUT`, the ids of the ops the plan holds, one per line, go to that local
+        // file for a script to compare by count. They are never printed.
+        if let Ok(out) = std::env::var("BB_RECONCILE_HELD_OUT") {
+            let conn = db.0.lock().unwrap();
+            let (units, _) = reconcile_plan_conn(&conn, &opts, &keep).unwrap();
+            let held: Vec<&str> = units
+                .iter()
+                .flat_map(|unit| match unit {
+                    crate::held_queue::Unit::Hold { op_id } => vec![op_id.as_str()],
+                    crate::held_queue::Unit::Remap { hold, .. } => hold.iter().map(String::as_str).collect(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            std::fs::write(&out, held.join("\n")).expect("write the held ids");
+            println!("held_written={}", held.len());
+        }
         let mut last = Instant::now();
         let mut batch_ms = Vec::new();
         let started = Instant::now();
