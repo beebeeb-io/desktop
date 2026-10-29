@@ -2,27 +2,39 @@
  * The browser sign-in's state machine, shared by the Windows first-run window and the Beebeeb window on a Mac (task
  * 1683 slice 2; spec C `…-first-run-sign-in.md` §7.1 and C-S1, task 1734).
  *
- * It was inline in `WindowsFirstRun.tsx`. These tests hold what that code did (the order of subscribe and invoke, the
- * phases, the single `done`, the visible error) and what spec C asks of it for a Mac: a different account is the same
- * `SignInSettled` the password path yields, and the raw code `account_mismatch` never reaches a screen.
- *
- * The delicate part is the order of the two signals a different account sends: the `browser-login` event
- * `account_mismatch` (1887’s snapshot rides in it, pinned in `lib.rs` by `the_switch_count_reaches_the_sign_in_window`)
- * and the command’s `Err("account_mismatch")`. Either can arrive first.
+ * Task 1747 Part 1 (C-S1, the Rust half): `start_browser_login` returns the password path's `LoginOutcome`, and this
+ * controller settles from that answer through `settledFrom`, the strict parser the password path uses, so both paths reach
+ * the account switch step through one parser. The `browser-login` events are progress only. Nothing here keeps a timer or
+ * a raw code: a different account is an outcome, never an error string, and the event-or-`Err` race of slice 2 is gone.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { BrowserSignIn, browserSignInDeps, IDLE_BROWSER_SIGN_IN, MISMATCH_GRACE_MS, type BrowserSignInState } from '../src/browserSignIn'
+import { BrowserSignIn, browserSignInDeps, IDLE_BROWSER_SIGN_IN, type BrowserSignInState } from '../src/browserSignIn'
 import { SIGN_IN_OUTCOME_UNREADABLE } from '../src/accountSwitchCopy'
-import type { SignInSettled } from '../src/onboardingSignIn'
+import { settledFrom, type SignInSettled } from '../src/onboardingSignIn'
 import { commandUnavailableLabel, type CommandResult } from '../src/desktopApi'
+import { rustStr } from './fixtures/rustConstants'
 
 const ASK = { askId: 'a1', files: 2, copiedFiles: 2, others: 1, missingFiles: 0, earlierFolders: ['/Users/sam/Changes not sent'] }
 
-function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = () => ({ ok: true, value: undefined })) {
+/** What Rust's `LoginOutcome` serialises to; the controller reads it with `settledFrom`, as the password path does. */
+const outcome = (over: Record<string, unknown> = {}) => ({
+  requires_2fa: false,
+  reauthenticated: false,
+  vault_unlocked: true,
+  key_replaced: false,
+  account_mismatch: null,
+  ...over,
+})
+const FRESH = outcome()
+const SAME_ACCOUNT = outcome({ reauthenticated: true })
+const MISMATCH = outcome({ vault_unlocked: false, account_mismatch: { pending_changes: 3, unsent: ASK } })
+type Answer = CommandResult<unknown>
+const ok = (value: unknown = FRESH): Answer => ({ ok: true, value })
+
+function rig(start: () => Promise<Answer> | Answer = () => ok()) {
   const log: string[] = []
   const handlers = new Map<string, (event: { payload: any }) => void>()
-  const timers: Array<{ fn: () => void; ms: number; live: boolean }> = []
   const states: BrowserSignInState[] = []
   const settled: SignInSettled[] = []
   let unlistened = 0
@@ -41,8 +53,6 @@ function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = (
         attempts.push(attempt)
         return start()
       },
-      setTimer: (fn, ms) => { timers.push({ fn, ms, live: true }); return timers.length - 1 },
-      clearTimer: (handle) => { timers[handle as number].live = false },
     },
     (state) => states.push(state),
     (result) => settled.push(result),
@@ -51,8 +61,7 @@ function rig(start: () => Promise<CommandResult<void>> | CommandResult<void> = (
   // test says otherwise.
   const emit = (payload: Record<string, unknown>, attempt: string | null = `attempt-${attemptCount}`) =>
     handlers.get('browser-login')!({ payload: attempt === null ? payload : { attempt, ...payload } })
-  const fireTimers = () => timers.filter((t) => t.live).forEach((t) => { t.live = false; t.fn() })
-  return { sign, log, emit, states, settled, timers, fireTimers, attempts, unlistened: () => unlistened }
+  return { sign, log, emit, states, settled, attempts, unlistened: () => unlistened }
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -122,14 +131,14 @@ describe('attempts (P3-2)', () => {
     const r = rig(() => new Promise(() => {}))
     void r.sign.start()
     await tick()
-    r.emit({ phase: 'done', email: 'a@example.eu' })
-    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+    r.emit({ phase: 'error', message: 'The browser took too long.' })
+    expect(r.sign.state).toEqual({ phase: 'error', userCode: null, verificationUri: null, error: 'The browser took too long.' })
   })
 
   test('a late answer of attempt 1’s command does not settle or fail attempt 2', async () => {
-    let answerFirst: (result: CommandResult<void>) => void = () => undefined
+    let answerFirst: (result: Answer) => void = () => undefined
     let calls = 0
-    const r = rig(() => (++calls === 1 ? new Promise<CommandResult<void>>((resolve) => { answerFirst = resolve }) : new Promise(() => {})))
+    const r = rig(() => (++calls === 1 ? new Promise<Answer>((resolve) => { answerFirst = resolve }) : new Promise(() => {})))
     void r.sign.start()
     await tick()
     r.emit({ phase: 'error', message: 'It did not work' }) // attempt 1 fails; the person tries again
@@ -199,43 +208,51 @@ describe('progress', () => {
   })
 })
 
-describe('done: exactly once, whichever signal comes first', () => {
-  test('the done event settles a fresh sign-in whose keys are here (C-S1: never the recovery phrase)', async () => {
-    const r = rig()
-    await r.sign.start()
-    r.emit({ phase: 'done', email: 'sam@example.eu' })
-    await tick()
-    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
-  })
-
-  test('the command’s Ok settles too, when the event was missed', async () => {
-    const r = rig()
+describe('the command’s answer is the outcome, settled once (C-S1)', () => {
+  test('a fresh browser sign-in delivered the keys: fresh, vault unlocked, never the recovery phrase', async () => {
+    const r = rig(() => ok(FRESH))
     await r.sign.start()
     expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
   })
 
-  test('the event first and the Ok after: once', async () => {
-    let finish: (value: CommandResult<void>) => void = () => {}
+  test('the same account signing in again is a re-sign-in with its key here, not a fresh sign-in', async () => {
+    const r = rig(() => ok(SAME_ACCOUNT))
+    await r.sign.start()
+    expect(r.settled).toEqual([{ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }])
+  })
+
+  // Task 1747 Part 1: the `done` event used to settle a fresh sign-in; it is progress now, because an outcome that is a
+  // re-sign-in would have been settled as fresh by it, and the outcome that follows ignored.
+  test('the done event settles nothing: only the answer does', async () => {
+    let finish: (value: Answer) => void = () => {}
     const r = rig(() => new Promise((resolve) => { finish = resolve }))
     const started = r.sign.start()
     await tick()
-    r.emit({ phase: 'done' })
-    finish({ ok: true, value: undefined })
+    r.emit({ phase: 'done', email: 'sam@example.eu' })
+    await tick()
+    expect(r.settled).toEqual([])
+    finish(ok(SAME_ACCOUNT))
     await started
-    expect(r.settled).toHaveLength(1)
+    expect(r.settled).toEqual([{ kind: 'reauthenticated', vaultUnlocked: true, keyReplaced: false }])
   })
 
-  test('the Ok first and a late event after: once', async () => {
+  test('a late event after the answer settles nothing more: once', async () => {
     const r = rig()
     await r.sign.start()
     r.emit({ phase: 'done' })
+    r.emit({ phase: 'error', message: 'late' })
     expect(r.settled).toHaveLength(1)
+    expect(r.sign.state.error).toBeNull()
   })
 
   test('it stops listening when it settles', async () => {
     const r = rig()
     await r.sign.start()
     expect(r.unlistened()).toBe(1)
+  })
+
+  test('no timer: the controller has none to schedule (the grace of slice 2 is gone)', () => {
+    expect(Object.keys(browserSignInDeps()).sort()).toEqual(['listen', 'newAttemptId', 'start'])
   })
 })
 
@@ -254,7 +271,7 @@ describe('errors are visible and recoverable (the handoff must never leave a spi
   })
 
   test('the first error ends the attempt: the Err that follows the event does not replace its message, and nothing settles', async () => {
-    let fail: (value: CommandResult<void>) => void = () => {}
+    let fail: (value: Answer) => void = () => {}
     const r = rig(() => new Promise((resolve) => { fail = resolve }))
     const started = r.sign.start()
     await tick()
@@ -291,90 +308,67 @@ describe('errors are visible and recoverable (the handoff must never leave a spi
   })
 })
 
-describe('C-S1: a different account is the password path’s outcome, and the raw code never reaches a screen', () => {
-  const mismatch = { phase: 'account_mismatch', pending_changes: 3, unsent: ASK }
-
-  test('the event settles the switch step with the count, the snapshot and no E3', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
-    await tick()
-    r.emit(mismatch)
+describe('C-S1: a different account is the password path’s outcome, and no raw code reaches a screen', () => {
+  test('the switch step gets the count, the snapshot and no E3', async () => {
+    const r = rig(() => ok(MISMATCH))
+    await r.sign.start()
     expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 3, unsent: ASK, unsentError: null }])
   })
 
+  test('both paths reach the switch step through one parser: the same JSON settles the same', async () => {
+    for (const json of [
+      MISMATCH,
+      outcome({ account_mismatch: { pending_changes: 0, unsent_error: 'unsent_count_failed: no' } }),
+      outcome({ account_mismatch: { pending_changes: 2, unsent: { askId: 'a', files: -1 } } }),
+      outcome({ account_mismatch: { pending_changes: 1 } }),
+    ]) {
+      const r = rig(() => ok(json))
+      await r.sign.start()
+      expect(r.settled).toEqual([settledFrom(json as never)])
+    }
+  })
+
   test('a count that could not be read arrives as the coded E3 and is carried as such', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
-    await tick()
-    r.emit({ phase: 'account_mismatch', pending_changes: 0, unsent_error: 'unsent_count_failed: no' })
+    const r = rig(() => ok(outcome({ account_mismatch: { pending_changes: 0, unsent_error: 'unsent_count_failed: no' } })))
+    await r.sign.start()
     expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 0, unsent: null, unsentError: 'unsent_count_failed: no' }])
   })
 
-  test('a snapshot that is not whole is none, never a guess (the same strictness as the password path)', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
-    await tick()
-    r.emit({ phase: 'account_mismatch', pending_changes: 2, unsent: { askId: 'a', files: -1 } })
+  test('a snapshot that is not whole is none, never a guess', async () => {
+    const r = rig(() => ok(outcome({ account_mismatch: { pending_changes: 2, unsent: { askId: 'a', files: -1 } } })))
+    await r.sign.start()
     expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 2, unsent: null, unsentError: null }])
   })
 
   test('a count that is not a whole number is not a switch with an invented count: it is an error, nothing settled', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
-    await tick()
-    r.emit({ phase: 'account_mismatch', pending_changes: 'many' })
+    const r = rig(() => ok(outcome({ account_mismatch: { pending_changes: 'many' } })))
+    await r.sign.start()
     expect(r.settled).toEqual([])
     expect(r.sign.state.phase).toBe('error')
     expect(r.sign.state.error).toBe(SIGN_IN_OUTCOME_UNREADABLE)
   })
 
-  test('the error event and the Err that follow carry the raw code: neither is shown, neither settles twice', async () => {
-    let fail: (value: CommandResult<void>) => void = () => {}
-    const r = rig(() => new Promise((resolve) => { fail = resolve }))
-    const started = r.sign.start()
-    await tick()
-    r.emit(mismatch)
-    r.emit({ phase: 'error', message: 'account_mismatch' })
-    fail({ ok: false, reason: 'account_mismatch', unsupported: false })
-    await started
-    expect(r.settled).toHaveLength(1)
-    expect(JSON.stringify(r.states)).not.toContain('account_mismatch')
-    expect(r.sign.state.error).toBeNull()
-  })
-
-  test('the Err first, the event after (the two travel separately): the event’s snapshot is still used', async () => {
-    let fail: (value: CommandResult<void>) => void = () => {}
-    const r = rig(() => new Promise((resolve) => { fail = resolve }))
-    const started = r.sign.start()
-    await tick()
-    fail({ ok: false, reason: 'account_mismatch', unsupported: false })
-    await started
-    expect(r.settled).toEqual([])
-    expect(r.timers.some((t) => t.live && t.ms === MISMATCH_GRACE_MS)).toBe(true)
-    // The `error` event that carries the raw code can arrive while the controller waits for the count: never shown.
-    r.emit({ phase: 'error', message: 'account_mismatch' })
-    expect(r.sign.state.error).toBeNull()
-    expect(r.sign.state.phase).toBe('connecting')
-    r.emit(mismatch)
-    expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 3, unsent: ASK, unsentError: null }])
-    r.fireTimers()
-    expect(r.settled).toHaveLength(1)
-  })
-
-  test('the Err and no event at all: after the grace the switch step opens WITHOUT a snapshot, and Rust’s gate asks again before anything is signed out', async () => {
-    const r = rig(() => ({ ok: false, reason: 'account_mismatch', unsupported: false }))
+  test('no raw code is ever on a screen: the switch outcome shows no error, and no state mentions the code', async () => {
+    const r = rig(() => ok(MISMATCH))
     await r.sign.start()
-    expect(r.settled).toEqual([])
-    r.fireTimers()
-    expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 0, unsent: null, unsentError: null }])
+    expect(JSON.stringify(r.states)).not.toContain(['account', 'mismatch'].join('_'))
     expect(r.sign.state.error).toBeNull()
   })
 
-  test('only the exact code is a mismatch: a reason that merely contains it is an ordinary error', async () => {
-    const r = rig(() => ({ ok: false, reason: 'not an account_mismatch, something else', unsupported: false }))
+  test('an account that could not be confirmed is the retryable sentence, as an error', async () => {
+    const sentence = rustStr('lib.rs', 'SIGN_IN_ACCOUNT_UNKNOWN')
+    const r = rig(() => ({ ok: false, reason: sentence, unsupported: false }))
     await r.sign.start()
-    expect(r.sign.state.phase).toBe('error')
+    expect(r.sign.state).toEqual({ phase: 'error', userCode: null, verificationUri: null, error: sentence })
     expect(r.settled).toEqual([])
+  })
+
+  test('a result that is not the contract is unreadable, never a sign-in', async () => {
+    for (const bad of [null, undefined, 'ok', [], {}, outcome({ account_mismatch: undefined }), outcome({ vault_unlocked: 'yes' }), outcome({ requires_2fa: true })]) {
+      const r = rig(() => ({ ok: true, value: bad }))
+      await r.sign.start()
+      expect({ bad, settled: r.settled, error: r.sign.state.error }).toEqual({ bad, settled: [], error: SIGN_IN_OUTCOME_UNREADABLE })
+    }
   })
 })
 
@@ -384,34 +378,27 @@ describe('C-S1: a different account is the password path’s outcome, and the ra
 // browser path, the main one, would often skip it. So a screen that goes away DETACHES: it stops being told, and the
 // attempt carries on to its end (a controller of a gone screen stays listening only until then).
 describe('a screen that goes away mid-handoff (a remount, or the person moved on)', () => {
-  test('the done event still settles, once, and the listener is released then', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
-    await tick()
-    r.sign.detach()
-    expect(r.unlistened()).toBe(0)
-    r.emit({ phase: 'done', email: 'sam@example.eu' })
-    expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
-    expect(r.unlistened()).toBe(1)
-  })
-
-  test('the command’s Ok settles it too, when the event was missed', async () => {
-    let finish: (value: CommandResult<void>) => void = () => {}
+  test('the answer still settles, once, and the listener is released then', async () => {
+    let finish: (value: Answer) => void = () => {}
     const r = rig(() => new Promise((resolve) => { finish = resolve }))
     const started = r.sign.start()
     await tick()
     r.sign.detach()
-    finish({ ok: true, value: undefined })
+    expect(r.unlistened()).toBe(0)
+    finish(ok(FRESH))
     await started
     expect(r.settled).toEqual([{ kind: 'fresh', vaultUnlocked: true }])
+    expect(r.unlistened()).toBe(1)
   })
 
   test('a different account still reaches the switch step', async () => {
-    const r = rig(() => new Promise(() => {}))
-    void r.sign.start()
+    let finish: (value: Answer) => void = () => {}
+    const r = rig(() => new Promise((resolve) => { finish = resolve }))
+    const started = r.sign.start()
     await tick()
     r.sign.detach()
-    r.emit({ phase: 'account_mismatch', pending_changes: 3, unsent: ASK })
+    finish(ok(MISMATCH))
+    await started
     expect(r.settled).toEqual([{ kind: 'account_mismatch', pendingChanges: 3, unsent: ASK, unsentError: null }])
   })
 
@@ -464,14 +451,6 @@ describe('leaving the screen', () => {
     r.sign.dispose()
     await started
     expect(r.unlistened()).toBe(1)
-    expect(r.settled).toEqual([])
-  })
-
-  test('dispose cancels a waiting mismatch timer', async () => {
-    const r = rig(() => ({ ok: false, reason: 'account_mismatch', unsupported: false }))
-    await r.sign.start()
-    r.sign.dispose()
-    r.fireTimers()
     expect(r.settled).toEqual([])
   })
 })

@@ -262,6 +262,12 @@ fn signin_log(line: &str) {
 ///                               not be fetched: the session is installed, but no engine starts until it is)
 ///   - `error` { message }     — any failure (also returned as `Err`)
 ///
+/// The events are progress. The handoff's outcome is the command's return value (spec C C-S1, task 1747 Part 1): the
+/// same `LoginOutcome` the password sign-ins return. A fresh sign-in delivered the keys (`vault_unlocked: true`), the
+/// same account signing in again is a re-sign-in, and a different account is the switch outcome (the new session is
+/// revoked and nothing changed here), with the count and the ask snapshot the switch step shows. No raw code is sent to
+/// the window for a different account: it is an outcome, not an error.
+///
 /// The whole handoff is bounded by the server's 300s code expiry; on timeout we
 /// emit `error` and return `Err` so the UI can offer "try again".
 ///
@@ -272,7 +278,7 @@ pub async fn start_browser_login(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     attempt_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<crate::LoginOutcome, String> {
     ATTEMPT
         .scope(self::attempt_id(attempt_id), async {
             bc!("[bb-signin] start_browser_login: command entry");
@@ -289,7 +295,7 @@ pub async fn start_browser_login(
             #[cfg(not(target_os = "windows"))]
             let result = work.await;
             match result {
-                Ok(()) => Ok(()),
+                Ok(outcome) => Ok(outcome),
                 Err(e) => {
                     tracing::error!(error = %e, "browser-login: sign-in failed");
                     signin_log(&format!("error {e}"));
@@ -305,7 +311,7 @@ async fn run_handoff(
     app: &tauri::AppHandle,
     state: &State<'_, AppState>,
     #[cfg(target_os = "windows")] attempt: &crate::auth_attempts::Attempt,
-) -> Result<(), String> {
+) -> Result<crate::LoginOutcome, String> {
     // This sign-in is one session transition: its generation is captured before it looks at anything on this
     // computer, so a Lock, a Sign-out or another sign-in that completes while the browser is open is never followed by
     // its writes (they are refused, and nothing of it is stored).
@@ -474,6 +480,8 @@ async fn run_handoff(
     // account behind the new session is the server's own record of it. A record that could not be fetched cannot be
     // compared, so on a Mac that holds an account the sign-in is refused and nothing changes. Compiled out on
     // Windows, which refuses a sign-in while a session exists.
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
+    let mut reauthenticated = false;
     #[cfg(not(target_os = "windows"))]
     {
         let client = reqwest::Client::builder()
@@ -523,7 +531,7 @@ async fn run_handoff(
                         .as_ref()
                         .map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
                 );
-                return Ok(());
+                return Ok(browser_installed_outcome(true));
             }
             Some(crate::SignInSettlement::AccountMismatch {
                 pending_changes,
@@ -531,15 +539,7 @@ async fn run_handoff(
                 unsent_error,
             }) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
-                let mut payload = serde_json::json!({ "pending_changes": pending_changes });
-                if let Some(unsent) = unsent {
-                    payload["unsent"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
-                }
-                if let Some(unsent_error) = unsent_error {
-                    payload["unsent_error"] = serde_json::Value::String(unsent_error);
-                }
-                emit(app, "account_mismatch", payload);
-                return Err("account_mismatch".to_string());
+                return Ok(crate::LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
             }
             Some(crate::SignInSettlement::Unconfirmed) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
@@ -549,13 +549,10 @@ async fn run_handoff(
             // accepted the kept one, or it differs from the handed-over one): `apply_session` below installs the
             // handoff's key, which is this same account's current key, and purges nothing; or an unidentified sign-in
             // on a Mac that holds nothing of an account.
-            Some(
-                crate::SignInSettlement::Reauthenticated {
-                    vault_unlocked: false, ..
-                }
-                | crate::SignInSettlement::Fresh,
-            )
-            | None => {}
+            Some(crate::SignInSettlement::Reauthenticated {
+                vault_unlocked: false, ..
+            }) => reauthenticated = true,
+            Some(crate::SignInSettlement::Fresh) | None => {}
         }
     }
     crate::apply_session(
@@ -577,7 +574,19 @@ async fn run_handoff(
         "done",
         email.map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
     );
-    Ok(())
+    Ok(browser_installed_outcome(reauthenticated))
+}
+
+/// What a browser sign-in that installed its session answers (spec C C-S1): the handoff delivered the keys, so the vault is
+/// unlocked and the window goes on to Finder, never to the recovery phrase; the same account signing in again is the
+/// re-sign-in of the password path. The kept key is replaced by the handed-over one without a word (there is no recovery
+/// step to explain), so `key_replaced` is false, and a handoff has no second factor.
+fn browser_installed_outcome(reauthenticated: bool) -> crate::LoginOutcome {
+    if reauthenticated {
+        crate::LoginOutcome::reauthenticated(true, false)
+    } else {
+        crate::LoginOutcome::browser_signed_in()
+    }
 }
 
 /// ECDH(P-256) → HKDF-SHA256(info="beebeeb-cli-auth-v1") → AES-256-GCM decrypt.
@@ -668,6 +677,90 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    /// Task 1747 Part 1 (spec C C-S1): a fresh browser sign-in delivered the keys, so its outcome says so and it never lands
+    /// on the recovery phrase; the same account signing in again is the password path's re-sign-in, with the key here. Both
+    /// are the five-field JSON the window parses with `settledFrom`, with no recovery step to explain.
+    #[test]
+    fn a_browser_sign_in_reports_the_vault_unlocked() {
+        for (reauthenticated, expected) in [
+            (
+                false,
+                r#"{"requires_2fa":false,"reauthenticated":false,"vault_unlocked":true,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+            (
+                true,
+                r#"{"requires_2fa":false,"reauthenticated":true,"vault_unlocked":true,"key_replaced":false,"account_mismatch":null}"#,
+            ),
+        ] {
+            let json = serde_json::to_string(&browser_installed_outcome(reauthenticated)).unwrap();
+            assert_eq!(json, expected, "reauthenticated = {reauthenticated}");
+        }
+    }
+
+    #[test]
+    fn the_browser_handoff_returns_a_login_outcome() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
+        let command = &production[production.find("pub async fn start_browser_login(").expect("the command")..];
+        assert!(command.contains(") -> Result<crate::LoginOutcome, String> {"), "the command answers with the outcome");
+        let handoff = &production[production.find("async fn run_handoff(").expect("the handoff")..];
+        let signature = &handoff[..handoff.find("{\n").unwrap()];
+        assert!(signature.contains("-> Result<crate::LoginOutcome, String>"), "{signature}");
+    }
+
+    /// The answer's `reauthenticated` follows the settlement on both ways out of the handoff: the same account whose key is
+    /// here returns at once as a re-sign-in, and the one whose key is not falls through to the install and is still a
+    /// re-sign-in when it answers (the handed-over key is installed, the account is the same one).
+    #[test]
+    fn the_same_account_is_a_re_sign_in_on_both_ways_out_of_the_handoff() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
+        let handoff = &production[production.find("async fn run_handoff(").expect("the handoff")..];
+        assert!(handoff.contains("return Ok(browser_installed_outcome(true));"), "the key is here: a re-sign-in at once");
+        assert!(
+            handoff.contains("vault_unlocked: false, ..\n            }) => reauthenticated = true,"),
+            "no usable key: the same account all the same"
+        );
+        assert!(handoff.contains("Ok(browser_installed_outcome(reauthenticated))"), "and the install answers with it");
+    }
+
+    /// C-S1: no raw code reaches a screen. The handoff's events are progress only, and a different account is no event and no
+    /// error string at all. (The literal is built, so this file does not contain it.)
+    #[test]
+    fn no_raw_account_mismatch_code_leaves_the_browser_handoff() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
+        assert!(!production.contains(concat!("\"account", "_mismatch\"")), "no raw code in the handoff");
+        let mut phases = std::collections::BTreeSet::new();
+        for call in production.split("emit(").skip(1) {
+            // `emit(&app, "error", …)`, `emit(app, "waiting", …)`, or `emit(\n    app,\n    "done", …)`.
+            let args = &call[..call.find(");").unwrap_or(call.len())];
+            let quoted: Vec<&str> = args.split('"').skip(1).step_by(2).collect();
+            if let Some(phase) = quoted.first() {
+                phases.insert(phase.to_string());
+            }
+        }
+        let allowed: std::collections::BTreeSet<String> =
+            ["authorized", "connecting", "done", "error", "waiting"].map(String::from).into();
+        assert!(!phases.is_empty(), "the scan found the emits");
+        assert!(phases.is_subset(&allowed), "the handoff's events are progress only: {phases:?}");
+    }
+
+    /// An account that could not be confirmed is the retryable sentence, as an error: a different account is not the only
+    /// thing that revokes the new session, and the window must say so, not switch.
+    #[test]
+    fn an_unconfirmed_browser_sign_in_stays_a_retryable_error() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
+        let arm = &production[production.find("Some(crate::SignInSettlement::Unconfirmed) => {").expect("the arm")..];
+        let arm = &arm[..arm.find("\n            }\n").unwrap()];
+        assert!(arm.contains("revoke_desktop_session("), "{arm}");
+        assert!(arm.contains("return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());"), "{arm}");
+        // The command's error arm still tells the window (the `error` event) before it returns the same `Err`.
+        let command = &production[production.find("pub async fn start_browser_login(").unwrap()..];
+        assert!(command.contains("emit(&app, \"error\", serde_json::json!({ \"message\": e }));"), "{command}");
+    }
 
     /// Review P3-2: every event of an attempt carries the attempt id the window gave it, and a window that sent none (or
     /// one that is not an id) gets events with none, which the window ignores as nobody's.

@@ -645,3 +645,17 @@ window whose first read is locked); and a sign-out that fails after the removal 
 sentence anyway, and only holds it (lead ruling: a held sentence is shown above the card whether or not a remount comes, so a
 toast would say it twice; the toast is the fallback for a sentence that cannot be held).
 
+### 1747 Part 1: C-S1, the Rust half (2026-10-25)
+
+`start_browser_login` returns the password path's `LoginOutcome` (plan `docs/plans/2026-10-25-1747-account-view.md`, Part 1). The
+arms of the handoff stay in `run_handoff` (decision D6), so four source pins that read `browser_login.rs` stay unedited; only a
+different account's arm changes, from "emit an `account_mismatch` event and fail with that string" to
+`return Ok(LoginOutcome::account_mismatch(..))`, the call `desktop_login` makes, and the one pin that held the event,
+`the_switch_count_reaches_the_sign_in_window`, now holds the browser handoff to the same hand-off as the password paths. A fresh
+sign-in answers `vault_unlocked: true` (`LoginOutcome::browser_signed_in`), the same account `reauthenticated(true, false)`. The
+controller (`browserSignIn.ts`) settles from that answer with `settledFrom`; `done` is progress, and the event-or-`Err` race, its
+grace timer and the raw-code swallowing of slice 2 are gone. The switch snapshot is owned by the window the step runs in
+(`main_window_label`), not the retired `onboarding` label (review P3-5 on #143): the plan guessed that two flow-window pins would
+need re-pointing, but only `the_switch_carries_a_snapshot_on_macos_only` held the label, the other pair use `onboarding` as an
+arbitrary "another window".
+
