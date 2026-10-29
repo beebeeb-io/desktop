@@ -289,6 +289,18 @@ describe('words', () => {
     expect(heldSentence({ reason: 'found_while_paused', count: 1_200, oldest_at: 0, newest_at: 0 }, now)).toBe('1,200 changes found while sync was paused are not uploaded yet.')
   })
 
+  // Tasks 2270 / 2280 (spec U2): uploads this PC could not mark as synced after the upload. What happened, and the one
+  // thing the person can do; no date and no promise.
+  test('heldSentence: not_marked_synced, one and many', () => {
+    const at = { oldest_at: 1_791_115_500, newest_at: 1_791_115_500 + 3 * 86_400 }
+    expect(heldSentence({ reason: 'not_marked_synced', count: 1, ...at }, now)).toBe(
+      "1 file was uploaded, but this PC couldn't mark it as synced. Contact support@beebeeb.io and we'll sort it out with you.",
+    )
+    expect(heldSentence({ reason: 'not_marked_synced', count: 1_200, oldest_at: 0, newest_at: 0 }, now)).toBe(
+      "1,200 files were uploaded, but this PC couldn't mark them as synced. Contact support@beebeeb.io and we'll sort it out with you.",
+    )
+  })
+
   test('found while paused, alone in the queue: "Not in sync" with its sentence as the notice', () => {
     const view = syncActivityView(signedIn, summary({ queue: { waiting: 0, gave_up: 0, held: [{ reason: 'found_while_paused', count: 3, oldest_at: 0, newest_at: 0 }] } }), { now })
     expect(view.kind).toBe('not_in_sync')
