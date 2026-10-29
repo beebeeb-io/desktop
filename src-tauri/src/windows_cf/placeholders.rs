@@ -320,8 +320,16 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 ///
 /// Existing placeholders require CfUpdatePlaceholder: conversion is a no-op
 /// for a placeholder and cannot replace its pre-upload temporary identity.
+///
+/// Tasks 2270 / 2280: through [`open_exclusive_without_write_data`], so a read-only file converts too. Open it only
+/// on a file wholly on disk: on a cloud-only placeholder that open fetches it.
 pub fn convert_to_in_sync_placeholder(path: &std::path::Path, file_id: &str) -> anyhow::Result<()> {
-    complete_upload_placeholder(path, file_id, None)
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    let file = open_exclusive_without_write_data(path)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let existing = read_identity(handle)?;
+    stamp_identity(handle, existing.is_some(), file_id, true)
 }
 
 /// The uploader additionally proves ownership and that the resident bytes still
@@ -370,6 +378,193 @@ pub fn complete_upload_placeholder(
         }
     }
     Ok(())
+}
+
+/// Tasks 2270 / 2280 (spec §3): the handle finalization, the stamp pass and the promote pass open a user's file
+/// with. It has no write-data access, so a read-only file opens: `FILE_ATTRIBUTE_READONLY` refuses only opens that
+/// write data, append or delete (0.8.19 opened these files for writing and failed on every tick with access
+/// denied: probe A2, task 2270). It carries `WRITE_DAC` because `CfConvertToPlaceholder`, `CfUpdatePlaceholder`
+/// and `CfSetInSyncState` require write-data or `WRITE_DAC` access (precedent:
+/// `mark_not_in_sync_without_data_access`); nothing sets a security descriptor through it (lead note, 2026-10-29:
+/// the finalization tests assert the DACL is unchanged). Exclusive (share 0): while it is open no other handle can
+/// be opened, so no write lands between a hash and a stamp.
+///
+/// It has read-data access: open it ONLY on a plain file or a placeholder wholly on disk. On a cloud-only
+/// placeholder the open alone asks the provider for the file (probe K0: one fetch for an open with no read).
+pub fn open_exclusive_without_write_data(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, SYNCHRONIZE, WRITE_DAC,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0 | SYNCHRONIZE.0)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+}
+
+/// Tasks 2270 / 2280 (spec §3): [`open_exclusive_without_write_data`] without read-data access either, for a
+/// cloud-only placeholder: its open fetches nothing (probe K0), and `CfUpdatePlaceholder` accepts it (probe K1).
+fn open_exclusive_without_data(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, SYNCHRONIZE, WRITE_DAC};
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0 | SYNCHRONIZE.0)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+}
+
+/// The placeholder identity read through `handle`: `None` for a file that is not a placeholder.
+fn read_identity(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<Vec<u8>>> {
+    Ok(read_standard_info(handle)?.map(|(identity, _)| identity))
+}
+
+/// The identity and the on-disk byte count (on disk + modified) read through `handle`, or `None` for a file that is
+/// not a placeholder.
+fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
+    use windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE;
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `handle` is open for the call (the caller's `File` outlives it); the buffer is 8-byte aligned and its
+    // length is passed, so the call writes only inside it.
+    let read = unsafe {
+        CfGetPlaceholderInfo(handle, CF_PLACEHOLDER_INFO_STANDARD, buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None)
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start, and its identity (at
+    // most 4 KiB, inside the buffer) right after it.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+    Ok(Some((identity.to_vec(), info.OnDiskDataSize.saturating_add(info.ModifiedDataSize))))
+}
+
+/// Give the file behind `handle` the identity `file_id`: `CfUpdatePlaceholder` on a placeholder,
+/// `CfConvertToPlaceholder` on a plain file. In sync only when `in_sync`; otherwise the state is left as it is (an
+/// unsynced placeholder stays unsynced, a converted plain file is not in sync).
+fn stamp_identity(handle: windows::Win32::Foundation::HANDLE, placeholder: bool, file_id: &str, in_sync: bool) -> anyhow::Result<()> {
+    // SAFETY: `handle` is open for the call; `file_id` outlives it.
+    unsafe {
+        if placeholder {
+            let flags = if in_sync { CF_UPDATE_FLAG_MARK_IN_SYNC } else { CF_UPDATE_FLAG_NONE };
+            CfUpdatePlaceholder(handle, None, Some(file_id.as_ptr().cast()), file_id.len() as u32, None, flags, None, None)?;
+        } else {
+            let flags = if in_sync { CF_CONVERT_FLAG_MARK_IN_SYNC } else { CF_CONVERT_FLAG_NONE };
+            CfConvertToPlaceholder(handle, Some(file_id.as_ptr().cast()), file_id.len() as u32, flags, None, None)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a placeholder identity names this upload: its throwaway local id, its server id, or nothing.
+fn names_this_upload(identity: &[u8], local_id: &str, server_id: &str) -> bool {
+    identity.is_empty() || identity == local_id.as_bytes() || identity == server_id.as_bytes()
+}
+
+/// Spec F5's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restamped {
+    /// The server identity, marked in sync.
+    Done,
+    /// Bytes arrived since the view was read: the next tick judges it as a file on disk.
+    NoLongerCloudOnly,
+    /// Its identity names another file (read again through the handle).
+    OtherFile,
+}
+
+/// Tasks 2270 / 2280, spec F5: give a cloud-only placeholder of this upload the server identity, marked in sync,
+/// through [`open_exclusive_without_data`]: nothing is read, nothing is fetched (probe K1), and its attributes and
+/// times are kept. The placeholder's state is read again through that handle, so bytes that arrived since the
+/// caller's view are never marked.
+pub fn restamp_cloud_only(path: &std::path::Path, local_id: &str, server_id: &str) -> anyhow::Result<Restamped> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    let file = open_exclusive_without_data(path)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let Some((identity, on_disk)) = read_standard_info(handle)? else {
+        return Ok(Restamped::NoLongerCloudOnly);
+    };
+    if !names_this_upload(&identity, local_id, server_id) {
+        return Ok(Restamped::OtherFile);
+    }
+    if on_disk != 0 {
+        return Ok(Restamped::NoLongerCloudOnly);
+    }
+    stamp_identity(handle, true, server_id, true)?;
+    Ok(Restamped::Done)
+}
+
+/// Spec F7's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Local {
+    /// The server identity, in sync or not as judged.
+    Finalized(crate::upload_finalization_plan::Judged),
+    /// Not every byte is on disk: nothing was read (spec F6).
+    NotWhollyLocal,
+    /// A placeholder whose identity names another file: nothing was changed (spec F4).
+    OtherFile,
+}
+
+/// Tasks 2270 / 2280, spec F7: a plain file, or a placeholder of this upload wholly on disk. Under ONE
+/// [`open_exclusive_without_write_data`] handle: the bytes are checked to be wholly on disk again, the identity is
+/// checked again, the bytes are hashed and `judge`d, and the server identity is stamped, in sync or not
+/// (`CfConvertToPlaceholder` on a plain file, `CfUpdatePlaceholder` on a placeholder). The file's attributes, times
+/// and security descriptor are not changed.
+pub fn finalize_wholly_local(
+    path: &std::path::Path,
+    local_id: &str,
+    server_id: &str,
+    judge: &mut dyn FnMut(&str) -> crate::upload_finalization_plan::Judged,
+) -> anyhow::Result<Local> {
+    use crate::upload_finalization_plan::Judged;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    // Before the data open, from the attributes alone: that open fetches a file that is not wholly on disk.
+    if !fully_on_disk(path) {
+        return Ok(Local::NotWhollyLocal);
+    }
+    let mut file = open_exclusive_without_write_data(path)?;
+    // Review F9 of 1640: read through the handle too, so it describes the file the hash then reads.
+    if !handle_fully_on_disk(&file) {
+        return Ok(Local::NotWhollyLocal);
+    }
+    let handle = HANDLE(file.as_raw_handle());
+    let existing = read_identity(handle)?;
+    if existing.as_deref().is_some_and(|identity| !names_this_upload(identity, local_id, server_id)) {
+        return Ok(Local::OtherFile);
+    }
+    // Stream the bytes; never load a large upload into memory.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let judged = judge(&format!("{:x}", hasher.finalize()));
+    stamp_identity(handle, existing.is_some(), server_id, judged == Judged::MarkInSync)?;
+    Ok(Local::Finalized(judged))
+}
+
+/// Spec F8: an error that passes by itself (the file is open elsewhere, locked, or busy with a Cloud Files
+/// operation): the row stays pending and the next tick tries again.
+pub fn is_transient(error: &anyhow::Error) -> bool {
+    use windows::Win32::Foundation::{ERROR_CLOUD_FILE_IN_USE, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+    let codes = [ERROR_SHARING_VIOLATION.0, ERROR_LOCK_VIOLATION.0, ERROR_CLOUD_FILE_IN_USE.0];
+    win32_code(error).is_some_and(|code| codes.contains(&code))
+}
+
+/// Spec F3: access denied (a file this account may not open as these handles do).
+pub fn is_access_denied(error: &anyhow::Error) -> bool {
+    win32_code(error) == Some(windows::Win32::Foundation::ERROR_ACCESS_DENIED.0)
+}
+
+/// The Win32 error code behind `error`, from an `io::Error` or a Win32-facility `HRESULT`.
+fn win32_code(error: &anyhow::Error) -> Option<u32> {
+    if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        return io.raw_os_error().map(|code| code as u32);
+    }
+    let code = error.downcast_ref::<windows::core::Error>()?.code().0 as u32;
+    (code & 0xFFFF_0000 == 0x8007_0000).then_some(code & 0xFFFF)
 }
 
 /// Convert a brand-new plain local file at `path` into a Cloud Files
@@ -908,9 +1103,8 @@ pub fn placeholder_local_entry_trusting(path: &std::path::Path, trust_in_sync: b
 /// file is open elsewhere: the next pass tries again).
 pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
     use crate::engine_bridge::LocalEntry;
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
     // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
     // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
@@ -918,14 +1112,9 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     if !fully_on_disk(path) {
         return Ok(false);
     }
-    // share_mode(0): while this handle is open no other handle can be opened to write.
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-    else {
+    // Task 2270 (spec S2): without write-data access, so a read-only file is promoted too. Exclusive: while this
+    // handle is open no other handle can be opened to write.
+    let Ok(mut file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
     };
     // Review F9: read through the handle too, so it describes the file the hash then reads.
@@ -962,13 +1151,12 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
 
 /// Task 1640 (review P2-4): mark the placeholder at `path` in sync when its bytes are the agreed
 /// content, holding ONE exclusive handle across the hash and the mark (as
-/// [`complete_upload_placeholder`] does), so no write can land between them. `Ok(false)`: not
+/// [`finalize_wholly_local`] does), so no write can land between them. `Ok(false)`: not
 /// marked (already in sync, not wholly on disk, an upload queued, no agreed content, other bytes,
-/// or the file is open elsewhere: the next pass tries again).
+/// an identity other than `file_id`, or the file is open elsewhere: the next pass tries again).
 pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
         return Ok(false);
     }
@@ -978,18 +1166,18 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     let Some(agreed) = db.get_file_contract_state(file_id)?.and_then(|contract| contract.local_hash) else {
         return Ok(false);
     };
-    // share_mode(0): while this handle is open no other handle can be opened to write.
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
-    else {
+    // Task 2270 (spec S1): without write-data access, so a read-only file is marked too. Exclusive: while this
+    // handle is open no other handle can be opened to write.
+    let Ok(mut file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
     };
     // Review F9: re-read through the handle: reading a file not wholly on disk would fetch the rest.
     if !handle_fully_on_disk(&file) {
+        return Ok(false);
+    }
+    // Spec S1: only a placeholder that carries this file's server id is marked; one naming another file, or no
+    // file, never is.
+    if read_identity(HANDLE(file.as_raw_handle()))?.as_deref() != Some(file_id.as_bytes()) {
         return Ok(false);
     }
     use sha2::{Digest, Sha256};
