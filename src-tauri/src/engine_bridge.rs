@@ -7763,7 +7763,7 @@ fn metadata_name_from_plaintext(plaintext: &str) -> String {
         .unwrap_or_else(|| plaintext.to_string())
 }
 
-fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
+pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
     if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted)
         && let Ok(plaintext) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob)
     {

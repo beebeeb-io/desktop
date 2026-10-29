@@ -1294,13 +1294,20 @@ fn finder_accepts_closed_conn(conn: &Connection) -> Result<bool> {
 
 /// [`StateDb::enqueue_operation`]'s insert on an open connection or transaction: a new op, or an op with the same id
 /// replaced.
+/// Queue `op`, or replace the op with its id. Task 2267 (self-review F3): an op acting on an item whose changes are held
+/// for the person's decision (`found_while_paused`: the item itself, or the folder it is in) is held with them, and a
+/// held op queued again stays held, so nothing of that item is sent before the person decides.
 fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()> {
     conn.execute(
         "INSERT INTO operation_queue (
                 op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
                 base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
                 last_error, last_error_class, paused_reason, backup_source_key, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14, ?15, ?16)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL,
+                CASE WHEN EXISTS (SELECT 1 FROM operation_queue held
+                                  WHERE held.paused_reason = ?17 AND held.file_id IN (?3, ?4))
+                     THEN ?17 END,
+                ?14, ?15, ?16)
              ON CONFLICT(op_id) DO UPDATE SET
                 kind = excluded.kind,
                 file_id = excluded.file_id,
@@ -1315,7 +1322,7 @@ fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()>
                 next_retry_at = excluded.next_retry_at,
                 last_error = excluded.last_error,
                 last_error_class = excluded.last_error_class,
-                paused_reason = excluded.paused_reason,
+                paused_reason = CASE WHEN operation_queue.paused_reason = ?17 THEN ?17 ELSE excluded.paused_reason END,
                 backup_source_key = excluded.backup_source_key,
                 updated_at = excluded.updated_at",
         params![
@@ -1334,7 +1341,8 @@ fn insert_operation_conn(conn: &Connection, op: &PendingOperation) -> Result<()>
             op.last_error,
             op.backup_source_key,
             op.created_at,
-            op.updated_at
+            op.updated_at,
+            OperationPauseReason::FoundWhilePaused.as_str()
         ],
     )?;
     Ok(())
@@ -1465,6 +1473,32 @@ fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connection>>(
 }
 
 /// [`StateDb::delete_file`] on an open connection or transaction.
+/// Task 2267, "Keep on this PC only": the queued operations acting on the rows `ids` (their own row or the folder they
+/// act in), and the staged copies they hold (payload and resume paths), sorted, once each.
+#[cfg(any(target_os = "windows", test))]
+fn keep_ops_conn(conn: &Connection, ids: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut ops: Vec<(String, Option<String>)> = Vec::new();
+    let mut stmt = conn.prepare("SELECT op_id, payload_path FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1")?;
+    for id in ids {
+        for op in stmt.query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let op = op?;
+            if !ops.iter().any(|(op_id, _)| *op_id == op.0) {
+                ops.push(op);
+            }
+        }
+    }
+    let mut staged: Vec<String> = Vec::new();
+    for (op_id, payload) in &ops {
+        let resumed: Option<String> = conn
+            .query_row("SELECT payload_path FROM upload_resume WHERE op_id = ?1", params![op_id], |row| row.get(0))
+            .optional()?;
+        staged.extend(payload.iter().chain(resumed.iter()).filter(|path| !path.is_empty()).cloned());
+    }
+    staged.sort();
+    staged.dedup();
+    Ok((ops.into_iter().map(|(op_id, _)| op_id).collect(), staged))
+}
+
 fn delete_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
     // Task 1697: capture the parent BEFORE the delete — the change row is
     // what tells the replica's materialized filter where the item was.
@@ -2180,6 +2214,10 @@ pub enum OperationPauseReason {
     /// arm does not count as building it, so other platforms would report it never constructed.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     KeyReplaced,
+    /// Task 2267 (fix round 2): a change the ownership proof could not tie to this account's own data (a new item at
+    /// the top level, or in a folder that is not proven its own, such as a shared one), found when Beebeeb adopted the
+    /// data on this PC. It is never sent on its own: the person uploads it or keeps it on this PC only.
+    FoundWhilePaused,
 }
 
 impl OperationPauseReason {
@@ -2190,6 +2228,7 @@ impl OperationPauseReason {
             OperationPauseReason::Permission => "permission",
             OperationPauseReason::Locked => "locked",
             OperationPauseReason::KeyReplaced => "key_replaced",
+            OperationPauseReason::FoundWhilePaused => "found_while_paused",
         }
     }
 }
@@ -2233,6 +2272,70 @@ pub struct HeldGroup {
     /// Unix seconds the oldest and newest of them were queued (0 = not recorded).
     pub oldest_at: i64,
     pub newest_at: i64,
+}
+
+/// Task 2267 (fix round 2): the `sync_state` keys of "Keep on this PC only" (`found_while_paused.rs`).
+#[cfg(any(target_os = "windows", test))]
+const KEEP_JOURNAL_KEY: &str = "found_while_paused.keep_journal";
+#[cfg(any(target_os = "windows", test))]
+const KEPT_DIR_KEY: &str = "found_while_paused.kept_dir";
+
+/// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofRow {
+    pub file_id: String,
+    pub parent_id: Option<String>,
+    /// Its path under the sync root ('/'-separated). 128 of the 2,979 nested rows made on the maintainer's PC have no
+    /// parent link, so a walk up falls back to the row at the path's folder.
+    pub path: String,
+    /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
+    pub my_files: bool,
+    /// Judged against the server's tree: not made on this PC. A row made here has `current_version` and
+    /// `remote_updated_at` both at 0 and a queued create names it (lead review of round 2, P2-1).
+    pub server_named: bool,
+}
+
+/// Task 2267 (fix round 2): one queued operation, by what it acts on.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofOp {
+    pub op_id: String,
+    pub file_id: Option<String>,
+    pub parent_id: Option<String>,
+    /// `operation_queue.kind`, as stored.
+    pub kind: String,
+}
+
+/// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldChange {
+    pub op_id: String,
+    /// `operation_queue.kind`, as stored.
+    pub kind: String,
+    /// It creates its item (`CREATE_OP_SQL`).
+    pub creates: bool,
+    /// Its own row or its folder is in a folder shared with this account (`namespace != 'my_files'`).
+    pub shared: bool,
+}
+
+/// Task 2267 (lead review of round 2, P2-1): an op (aliased `o`) that creates its item on the server: a folder's
+/// create, or an upload whose metadata says it creates the file (`engine_bridge::is_create_file_operation`).
+#[cfg(any(target_os = "windows", test))]
+const CREATE_OP_SQL: &str = "(o.kind = 'create_folder'
+     OR (o.kind IN ('upload_version', 'upload_file')
+         AND COALESCE(CASE WHEN json_valid(o.metadata_json) THEN json_extract(o.metadata_json, '$.operation') END = 'create_file', 0)))";
+
+/// A [`ProofOp`] from `op_id, file_id, parent_id, kind`.
+#[cfg(any(target_os = "windows", test))]
+fn proof_op_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProofOp> {
+    Ok(ProofOp {
+        op_id: row.get(0)?,
+        file_id: row.get::<_, Option<String>>(1)?.filter(|id| !id.is_empty()),
+        parent_id: row.get::<_, Option<String>>(2)?.filter(|id| !id.is_empty()),
+        kind: row.get(3)?,
+    })
 }
 
 /// One `files` row as the Selective sync tree reads it (0.8.15). A row the server never confirmed (a folder this PC
@@ -6083,6 +6186,248 @@ impl StateDb {
     pub fn has_account_data(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(account_rows(&conn)? > 0)
+    }
+
+    /// Task 2267 (fix round 2): every `files` row as the ownership proof judges it, read once. A row this PC made and
+    /// never uploaded has `current_version` and `remote_updated_at` both at 0 AND a queued create names it (lead review
+    /// of round 2, P2-1: absence of a server version alone is not evidence). Every other row is judged: a snapshot row
+    /// carries the server's version, a delta or a landing stamps the time (`remote_updated_at` alone is not enough: the
+    /// My Files ingest leaves it 0 for every snapshot row, the server sends `updated_at` as RFC 3339 text).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn own_data_proof_rows(&self) -> Result<Vec<ProofRow>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT file_id, parent_id, namespace = 'my_files',
+                    NOT (current_version = 0 AND remote_updated_at = 0
+                         AND EXISTS (SELECT 1 FROM operation_queue o WHERE o.file_id = files.file_id AND {CREATE_OP_SQL})),
+                    path
+             FROM files"
+        ))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProofRow {
+                file_id: row.get(0)?,
+                parent_id: row.get::<_, Option<String>>(1)?.filter(|parent| !parent.is_empty()),
+                my_files: row.get(2)?,
+                server_named: row.get(3)?,
+                path: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2): every queued operation by what it acts on: its own row and its parent.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT op_id, file_id, parent_id, kind FROM operation_queue")?;
+        let rows = stmt.query_map([], proof_op_from_row)?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2): record `owner`, and hold for the person's review every queued operation the proof did
+    /// not prove (`found_while_paused`), in ONE transaction. Only if the recorded owner is still `expected` and account
+    /// data is still here, so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
+    /// sign-out emptied meanwhile. An operation queued after the proof read the queue is not in `proven`, so it is held
+    /// too, and so is an unproven one paused for any reason (it would lose that pause when queued again). Returns how
+    /// many were held, or `None` when nothing was recorded.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn adopt_owner_holding(
+        &self,
+        expected: Option<&crate::account_binding::Identity>,
+        owner: &crate::account_binding::Identity,
+        proven: &std::collections::HashSet<String>,
+        now: i64,
+    ) -> Result<Option<usize>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if read_owner(&tx)?.as_ref() != expected || account_rows(&tx)? == 0 {
+            return Ok(None);
+        }
+        write_owner(&tx, owner)?;
+        // Lead review of round 2, P3-2: whatever the pause (quota, permission, a locked file …): queued again, an op
+        // loses its pause, and an unproven one would then be sent unjudged.
+        let candidates: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason != ?1",
+            )?;
+            let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<String>>>()?
+        };
+        let mut held = 0;
+        for op_id in candidates.iter().filter(|op_id| !proven.contains(*op_id)) {
+            held += tx.execute(
+                "UPDATE operation_queue SET paused_reason = ?2, updated_at = ?3 WHERE op_id = ?1",
+                params![op_id, OperationPauseReason::FoundWhilePaused.as_str(), now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(held))
+    }
+
+    /// Task 2267 (fix round 2): the queued operations held for the person's review (`found_while_paused`), by what
+    /// they act on, oldest first.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT op_id, file_id, parent_id, kind FROM operation_queue WHERE paused_reason = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], proof_op_from_row)?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2), "Keep on this PC only": the rows whose upload has begun, so the server may already
+    /// hold part of them: a queued upload with a resumable session, or an upload that landed and awaits its
+    /// finalization (its operation is gone then; the finalization names the row).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn files_with_upload_begun(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT o.file_id FROM upload_resume r JOIN operation_queue o ON o.op_id = r.op_id WHERE o.file_id IS NOT NULL
+             UNION SELECT local_file_id FROM upload_finalizations",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Task 2267 (fix round 2), "Keep on this PC only": the one move in progress (`found_while_paused::Journal`, as
+    /// JSON), written before the move and removed in the transaction that finishes it, so a crash in between is
+    /// finished or undone at the next start.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn keep_journal(&self) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY], |row| row.get(0))
+            .optional()
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn set_keep_journal(&self, journal: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEEP_JOURNAL_KEY, journal],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn clear_keep_journal(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY])?;
+        Ok(())
+    }
+
+    /// Task 2267 (self-review of round 3, F3): the staged copies the queued operations acting on the item `ids` hold,
+    /// read before the keep forgets them, so an only copy is kept first.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn keep_staged_copies(&self, ids: &[String]) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(keep_ops_conn(&conn, ids)?.1)
+    }
+
+    /// Task 2267 (fix round 2), "Keep on this PC only", after the item `ids` was moved to `kept_dir`: in ONE
+    /// transaction, forget every queued operation acting on those rows (with its upload records) and the rows, remove
+    /// the journal and remember `kept_dir` for "Show in Explorer". Returns the staged copies the removed operations
+    /// held (as [`Self::keep_staged_copies`]).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn finish_keep(&self, ids: &[String], kept_dir: &str) -> Result<Vec<String>> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (ops, staged) = keep_ops_conn(&tx, ids)?;
+        for op_id in &ops {
+            tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;
+            tx.execute("DELETE FROM upload_finalizations WHERE op_id = ?1", params![op_id])?;
+            tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+        }
+        for id in ids {
+            delete_file_conn(&tx, id)?;
+        }
+        tx.execute("DELETE FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY])?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEPT_DIR_KEY, kept_dir],
+        )?;
+        tx.commit()?;
+        Ok(staged)
+    }
+
+    /// Task 2267 (fix round 2): the folder the last "Keep on this PC only" moved items into.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn last_kept_dir(&self) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", params![KEPT_DIR_KEY], |row| row.get(0))
+            .optional()
+    }
+
+    /// Task 2267 (lead review round 3, P2-2): every change held as `found_while_paused`, by kind, for the card,
+    /// oldest first. A change is in a shared folder when its row, or any folder up the parent links from its row or
+    /// from the folder it acts in, is not a My Files row (self-review of round 3, F8: not only the direct parent).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn found_while_paused_changes(&self) -> Result<Vec<HeldChange>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut rows: std::collections::HashMap<String, (Option<String>, bool)> = std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT file_id, NULLIF(parent_id, ''), namespace != 'my_files' FROM files")?;
+            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?))))? {
+                let (id, row) = row?;
+                rows.insert(id, row);
+            }
+        }
+        let shared = |anchor: Option<String>| {
+            let mut seen = std::collections::HashSet::new();
+            let mut id = anchor;
+            while let Some(current) = id.filter(|current| seen.insert(current.clone())) {
+                match rows.get(&current) {
+                    Some((_, true)) => return true,
+                    Some((parent, false)) => id = parent.clone(),
+                    None => return false,
+                }
+            }
+            false
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT o.op_id, o.kind, {CREATE_OP_SQL}, NULLIF(o.file_id, ''), NULLIF(o.parent_id, '')
+             FROM operation_queue o WHERE o.paused_reason = ?1
+             ORDER BY o.created_at ASC, o.rowid ASC"
+        ))?;
+        let changes = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
+            let (file_id, parent_id): (Option<String>, Option<String>) = (row.get(3)?, row.get(4)?);
+            Ok(HeldChange {
+                op_id: row.get(0)?,
+                kind: row.get(1)?,
+                creates: row.get(2)?,
+                shared: shared(file_id) || shared(parent_id),
+            })
+        })?;
+        changes.collect()
+    }
+
+    /// Task 2267, "Upload to my Beebeeb": the changes in `op_ids` still held as `found_while_paused` are due again at
+    /// `now`, keeping their attempts. Returns how many.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn release_found_while_paused(&self, op_ids: &[String], now: i64) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut released = 0;
+        for op_id in op_ids {
+            released += tx.execute(
+                "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?1, updated_at = ?1
+                 WHERE op_id = ?2 AND paused_reason = ?3",
+                params![now, op_id, OperationPauseReason::FoundWhilePaused.as_str()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(released)
+    }
+
+    /// Task 2267 (lead review round 3, P3-3): whether the journal names the staged copy at `path`, and the live file
+    /// it was copied from: `None` when no journal row names it, `Some(None)` when the row has no source.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn staged_payload_source(&self, path: &str) -> Result<Option<Option<String>>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row("SELECT source_path FROM staged_payloads WHERE path = ?1", params![path], |row| row.get(0))
+            .optional()
     }
 
     /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has

@@ -334,6 +334,33 @@ starts (Windows refuses instead); an owner that cannot be compared stops the sta
 sign-out purge stops. Keep every engine start behind `spawn_bound_engine`:
 `every_engine_start_is_bound_first` counts them.
 
+On Windows a refusal over data with no owner, or an owner recorded by an email only, asks the server in
+the background (`own_data_proof.rs`, task 2267). It lists this account's whole tree once (the snapshot and
+the trash) and judges EVERY My Files row the server named, no sample: a row in the tree is its own when its
+name decrypts under this session's key; a row not in the tree is gone only when its nearest ancestor in
+the tree is its own. A row counts as made on this PC (not judged) only when its version columns are both 0
+AND a queued create names it. A name that does not open under this key (unless the node says a file
+request or a collaborator sealed it; a node that says nothing is no evidence), or a row this account cannot
+place, blocks; names that prove nothing never outnumber the own ones. Proven, the
+session is recorded as the owner (`StateDb::adopt_owner_holding`) and sync starts through the same
+`spawn_bound_engine`. In the same transaction every queued change the proof cannot tie to an own row,
+whatever its pause reason, is held as `found_while_paused` (later changes to those items too,
+`insert_operation_conn`). A path proves only the create of a folder made here whose own path is an own
+server folder's (its twin, task 1888), never a new folder inside it; any other change, file content above
+all, needs one anchor tied to an own row by real parent links, never by a twin or by a folder at a path
+(also not on the walk up from a row gone from the tree). Held changes are never sent and
+never deleted until the person decides in Settings › Sync. The card shows them by kind
+(`found_while_paused_review`: new folders, new files, edits, deletions, changes in folders shared with you)
+(a change anywhere inside a shared folder counts there), and both choices act on exactly the ids it showed,
+never a change held after that read: "Upload to my Beebeeb" releases them; "Keep on this PC only"
+(`found_while_paused.rs`) MOVES the items made on this PC they act on out of the sync root into
+`Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
+so a crash is settled at the next engine start) and forgets their rows. It removes only the staged copies
+the journal names; one whose live file is gone is copied into the dated folder first, before the rows are
+forgotten (a restart after that copy does not make it twice). When OneDrive or
+Dropbox syncs the folder it is made in, the card says so (`synced_by`) instead of "on this PC". This is the
+only other place an owner is recorded; two different user ids are never questioned.
+
 ## Browser sign-in (`src-tauri/src/browser_login.rs`, task 1734)
 
 The first-run "Sign in with browser" handoff opens `<APP_URL>/cli-auth` and shows the device code in the app. The link carries NO code: the person TYPES the code on the page and confirms with their password, so a link someone else sends them has nothing to approve (security review 2026-10-04, finding 9). The WS init frame (`init_frame`) adds `client: "desktop"`, the release version, `os` and the hostname for the page to show as "reported by the device"; the screen copy lives in `src/browserLoginCopy.ts` (tested by `tests/browserLoginCopy.test.ts`). The decrypt path is unchanged.
