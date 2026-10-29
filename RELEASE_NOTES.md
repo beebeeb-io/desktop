@@ -50,10 +50,10 @@ This release fixes a problem 0.8.18 introduced and one it exposed.
   - `cargo test --locked`: the library reported `test result: ok. 2175 passed; 0 failed; 10 ignored`, and three integration suites ran 31, 8 and 3 tests, all with 0 failed. 2,217 tests ran in total.
 - Continuous integration on the change: 6 of 6 checks passed. They cover the Linux tests, the Windows tests, the macOS tests (new in this release), the macOS File Provider build, the frontend tests and the macOS release script check.
 - Real data: the dry run above, on a read-only copy of the maintainer's database.
+- The maintainer waived the macOS sign-out device checks that 0.8.12 shipped without for this release on 2026-10-29: "Waive for 0.8.19". The blocker stays listed on main for later releases.
 - Not verified:
   - the 0.8.19 build itself on real hardware: it was not run on a device before release, and it runs on the maintainer's Windows 11 PC after install;
-  - Linux on real hardware (the Linux test suite above ran; there was no device run);
-  - the macOS sign-out device checks that 0.8.12 shipped without.
+  - Linux on real hardware (the Linux test suite above ran; there was no device run).
 
 ### Install / Update
 
