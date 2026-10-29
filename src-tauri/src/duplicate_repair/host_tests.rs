@@ -142,6 +142,13 @@ fn server() -> RepairMockServer {
     ])
 }
 
+const PROBE: &str = "t13 probe event";
+
+/// One TRACE event from one callsite, as any code the tool runs could log.
+fn probe() {
+    tracing::trace!("{PROBE}");
+}
+
 /// A writer the test's tracing subscriber appends to.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -165,13 +172,22 @@ fn t13_no_name_path_or_id_reaches_the_screen_an_error_or_a_log() {
     let mock = server();
     let logs = Captured::default();
     let writer = logs.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .finish();
+    let capture = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+    // tracing caches each callsite's interest for every thread. While one dispatcher is registered, a callsite first
+    // hit on another thread (a test running alongside, with no subscriber there) is cached as never, and this test's
+    // capture would miss its events: so a second dispatcher stays registered for the whole test, and the probe, first
+    // hit on a thread without a subscriber, must still reach the capture.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    std::thread::spawn(probe).join().unwrap();
     let mut seen: Vec<String> = Vec::new();
-    tracing::subscriber::with_default(subscriber, || {
+    tracing::dispatcher::with_default(&capture, || {
+        probe();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             for command in [
@@ -202,6 +218,7 @@ fn t13_no_name_path_or_id_reaches_the_screen_an_error_or_a_log() {
         });
     });
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains(PROBE), "the capture saw the probe's TRACE event:\n{logs}");
     let screen = seen.join("\n");
     let secrets = [A, B, PARENT, FOLDER, NAME, ROOT_NAME, TOKEN, &pc.root.display().to_string()];
     for secret in secrets {
