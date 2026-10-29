@@ -184,6 +184,12 @@ pub struct AccountRuntime {
     /// The ask the last resume served. A Mac's engine start serves it under the engine slot, before the engine exists;
     /// off macOS the engine serves it after its reconcile pass and the key check (spec D11, D12).
     pub(crate) auth_resume_done: Arc<AtomicU64>,
+    /// Review P2 (task 1888): how many releases ("Upload to my Beebeeb" on a held change, Windows) asked for a reconcile
+    /// pass. Not a sign-in, so it resumes nothing. Off macOS the engine's queue sends nothing while it is ahead of
+    /// `reconcile_pass_served` ([`crate::runner::ResumeTicket`]).
+    pub(crate) reconcile_pass_wanted: Arc<AtomicU64>,
+    /// The release ask the last committed pass served.
+    pub(crate) reconcile_pass_served: Arc<AtomicU64>,
 }
 
 impl AccountRuntime {
@@ -211,6 +217,8 @@ impl AccountRuntime {
             engine_refusal: Mutex::new(None),
             auth_resume_asked: Arc::new(AtomicU64::new(0)),
             auth_resume_done: Arc::new(AtomicU64::new(0)),
+            reconcile_pass_wanted: Arc::new(AtomicU64::new(0)),
+            reconcile_pass_served: Arc::new(AtomicU64::new(0)),
         }
     }
 
