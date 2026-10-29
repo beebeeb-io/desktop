@@ -868,8 +868,10 @@ jobs:
 
       # Same guard as the build job, on what installs will actually fetch. This
       # also covers publish_existing=true promotions, which never run the build.
-      # Tags cut before this guard existed lack the script and cannot be promoted
-      # without a transition flag; that is deliberate (all of them are 545D-signed).
+      # Tags cut before this guard existed lack the script and are refused without
+      # the transition flag. 0.8.4-0.8.20 are signed with the baked key, 0.8.3 and
+      # older are not: promote such a tag only after checking its .sig files by hand
+      # (docs/RELEASING.md, "Promoting a tag cut before the guard").
       - name: Check manifest signatures match the baked updater key
         env:
           KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
@@ -880,7 +882,7 @@ jobs:
               echo "::warning::desktop-v${{ inputs.version }} predates the updater key guard; publishing under updater_key_transition=true without a key check."
               exit 0
             fi
-            echo "::error::desktop-v${{ inputs.version }} predates the updater key guard, so its signatures cannot be checked. Cut a new release, or rerun with updater_key_transition=true only for a deliberate transition release (docs/RELEASING.md)."
+            echo "::error::desktop-v${{ inputs.version }} predates the updater key guard, so its signatures cannot be checked. Cut a new release, or check its .sig files by hand and rerun with updater_key_transition=true (docs/RELEASING.md, Promoting a tag cut before the guard)."
             exit 1
           fi
           node desktop-src/scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG \

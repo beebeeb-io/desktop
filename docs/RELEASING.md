@@ -73,23 +73,23 @@ fingerprint `545D7BA77EDEA7E1`. The replacement private key and passphrase must 
 Guus out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
 or chat. The CI secret change is deliberately not part of this commit.
 
-### Current state (2026-09-25): release N shipped, N+1 never cut
+### State of the task-1240 rotation (checked 2026-10-29): done
 
-The transition release N was **0.3.0** (commit `1fe52ac`/`fc7395d`, 2026-07-25): it was the first
-release to bake `C6FADFD59D732197`. N+1 was never cut, so CI kept signing **every** release from
-0.3.0 through 0.8.3 with the old key `545D7BA77EDEA7E1`. Consequences, verified against the
-published artifacts and manifests:
+- **Release N was 0.3.0** (commit `1fe52ac`/`fc7395d`, 2026-07-25), the first to bake
+  `C6FADFD59D732197`. N+1 was not cut then, so CI kept signing every release from 0.3.0 through
+  **0.8.3** with the old key `545D7BA77EDEA7E1` (0.8.3: 5 of 5 `.sig` files on `545D`). In that
+  time no 0.3.0+ install could apply an update in-app.
+- **Release N+1 was 0.8.4** (#62, 2026-09-25), the first signed with `C6FADFD59D732197`. Every
+  release since is signed with it: 0.8.4 through 0.8.20, 17 releases, every updater `.sig` on the
+  release (5 or 6 each) passes `node scripts/check-updater-signature-key.mjs --sig <files>`. The
+  `latest`, `beta` and `alpha` manifests (all 0.8.20) pass `--manifest`, 5 of 5 each.
+- **Who can update in-app:** every install on 0.3.0 or later. An install older than 0.3.0 trusts
+  only `545D7BA77EDEA7E1`, rejects every release since 0.8.4, and needs one manual reinstall from
+  the GitHub release or beebeeb.io/download.
+- **The published verification key** is the new one: the site's `src/lib/downloads.ts` names
+  `C6FADFD59D732197` (N+1 checklist step 6).
 
-- Every install on 0.3.0-0.8.x trusts only `C6FADFD59D732197` and rejects every published
-  update. `node scripts/check-updater-signature-key.mjs --manifest https://releases.beebeeb.io/desktop/latest.json`
-  reports 4 of 4 signatures on `545D7BA77EDEA7E1` (same for `beta.json` and `alpha.json`).
-- 0.8.3 (the sync-daemon IPC privilege-escalation fix) therefore cannot reach any 0.3.0+ install
-  in-app, whatever channel it is promoted to.
-- Only pre-0.3.0 installs (which trust `545D7BA77EDEA7E1`) can still apply a 545D-signed update.
-
-The way out is to cut N+1 now (checklist below). After it, 0.3.0+ installs update normally;
-pre-0.3.0 installs will reject N+1 and need one manual reinstall. The N+1 release notes and the
-README must say that in plain words.
+The two checklists below stay for the next rotation.
 
 ### Signature-key guard
 
@@ -99,12 +99,27 @@ workflow runs it twice and fails closed on any mismatch:
 
 - in the build job, on every staged `release-assets/*.sig` (before anything is published), and
 - in `publish-manifest`, on the generated channel manifest (this also covers
-  `publish_existing=true` promotions). Tags that predate the guard cannot be promoted without the
-  transition flag.
+  `publish_existing=true` promotions). That step runs the checker from the release tag, so a tag
+  cut before the guard was merged (0.8.20 and every older tag) has no checker, and the step
+  refuses it.
 
-A transition release N is the only legitimate mismatch. For that release alone, trigger the
-workflow with `updater_key_transition=true`; the guard then reports the mismatch as a warning.
-Never set it for any other release.
+**Promoting a tag cut before the guard** (for example 0.8.20 to another channel) needs
+`updater_key_transition=true`, and then the manifest step only warns: nothing in the workflow
+checks the key. So check it by hand first, with the checker from `main`, and promote only on OK:
+
+```sh
+gh release download desktop-v<version> -R beebeeb-io/desktop --pattern '*.sig' --dir /tmp/sigs-<version>
+node scripts/check-updater-signature-key.mjs --sig /tmp/sigs-<version>/*.sig
+```
+
+After the promotion, run `--manifest https://releases.beebeeb.io/desktop/<channel>.json` on the
+channel it went to. Tags from 0.8.4 on are signed with the baked key; 0.8.3 and older are not, and
+must never be promoted.
+
+A transition release N is the only legitimate mismatch. For that release, trigger the workflow
+with `updater_key_transition=true`; the guard then reports the mismatch as a warning. The only
+other use is promoting a tag cut before the guard, checked by hand as above. Never set it for
+anything else.
 
 Mechanical checklist for release N:
 
