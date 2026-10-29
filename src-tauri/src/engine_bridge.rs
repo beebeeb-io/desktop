@@ -31862,6 +31862,7 @@ mod tests {
             root: PathBuf,
             bridge: EngineBridge,
             /// The ticket the bridge's queue reads, as the runner shares it.
+            #[cfg_attr(target_os = "macos", allow(dead_code))]
             resume: ResumeTicket,
         }
 
@@ -31877,6 +31878,7 @@ mod tests {
             }
 
             /// A due change that needs no network (`PinTree`): it shows whether the queue sends.
+            #[cfg(not(target_os = "macos"))]
             fn due_pin(&self, op_id: &str) {
                 self.sql(&format!(
                     "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts, next_retry_at,
@@ -32014,6 +32016,9 @@ mod tests {
         /// a committed pass has served that ask, the queue sends nothing (at a tick or a send-phase wake: both go
         /// through `process_due_operations`). The pass then sees the released create and folds the ghost into its twin,
         /// so it is never sent; and a release resumes no `auth` op, because it is not a sign-in.
+        /// Not on macOS: the queue's pass-owed gate is off there (engine_bridge.rs `process_due_operations`), and macOS
+        /// has no "Upload to my Beebeeb" release.
+        #[cfg(not(target_os = "macos"))]
         #[tokio::test]
         async fn a_released_change_is_not_sent_before_a_pass_has_seen_it() {
             let pc = Pc::new();
