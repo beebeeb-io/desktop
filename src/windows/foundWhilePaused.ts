@@ -11,6 +11,10 @@
  *
  * Copy rules (as `syncActivityModel.ts`): counts only, never a file name; the one path shown is the folder the backend
  * reports it moved them to, which the person needs to find them.
+ *
+ * Lead review round 3 of #176: the card first reads what is held, by kind (`found_while_paused_review`), and Upload
+ * sends back exactly the changes it counted (P2-2, P3-1). When OneDrive or Dropbox syncs the folder the kept folder is
+ * made in (`synced_by`), no sentence says the items stay on this PC (P3-4).
  */
 import { plural, type SyncActivitySummary } from './syncActivityModel'
 
@@ -31,6 +35,28 @@ export const FOUND_WHILE_PAUSED_COPY = {
   dismiss: 'Dismiss',
 } as const
 
+/** Under what is held, always: why it waits (lead review round 3, P2-2). */
+export const NOT_CONFIRMED_LINE = 'Beebeeb couldn’t confirm these came from your account on this PC.'
+
+/** The keep button when OneDrive or Dropbox syncs the folder the kept folder is made in. */
+const KEEP_OUT_OF_BEEBEEB = 'Keep out of Beebeeb'
+
+/** `found_while_paused_review`, field for field. */
+export interface FoundWhilePausedReview {
+  new_folders: number
+  new_files: number
+  /** Changes to items that exist: new content, a rename, a move. */
+  edits: number
+  /** Items the change moves to the trash. */
+  deletions: number
+  /** Any change to an item in a folder shared with this account (counted here only). */
+  in_shared_folders: number
+  /** The changes counted above, which "Upload to my Beebeeb" sends back: exactly these. */
+  op_ids: string[]
+  /** "OneDrive" or "Dropbox" when it syncs the folder the kept folder is made in. */
+  synced_by: string | null
+}
+
 /** `found_while_paused_keep`, field for field. */
 export interface KeepResult {
   /** Files moved, counted inside folders too. */
@@ -43,17 +69,71 @@ export interface KeepResult {
   not_moved: number
   /** Held changes no move can keep off Beebeeb (the item is already there, or its upload had begun): they stay held. */
   stays_held: number
+  /** As `FoundWhilePausedReview.synced_by`. */
+  synced_by: string | null
 }
 
 const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0
+
+const isNameOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string'
 
 /** Narrow a `found_while_paused_keep` answer. Null when it is not the contract's shape: the card then shows an error. */
 export function parseKeepResult(raw: unknown): KeepResult | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
   const r = raw as Record<string, unknown>
   if (!isCount(r.moved_files) || !isCount(r.moved_items) || !isCount(r.not_moved) || !isCount(r.stays_held)) return null
-  if (!(r.kept_path === null || typeof r.kept_path === 'string')) return null
-  return { moved_files: r.moved_files, moved_items: r.moved_items, kept_path: r.kept_path, not_moved: r.not_moved, stays_held: r.stays_held }
+  if (!isNameOrNull(r.kept_path) || !isNameOrNull(r.synced_by)) return null
+  return {
+    moved_files: r.moved_files,
+    moved_items: r.moved_items,
+    kept_path: r.kept_path,
+    not_moved: r.not_moved,
+    stays_held: r.stays_held,
+    synced_by: r.synced_by,
+  }
+}
+
+/**
+ * Narrow a `found_while_paused_review` answer. Null when it is not the contract's shape, or when the ids are not
+ * exactly the changes counted: Upload must never send what the card did not show.
+ */
+export function parseReview(raw: unknown): FoundWhilePausedReview | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  const counts = [r.new_folders, r.new_files, r.edits, r.deletions, r.in_shared_folders]
+  if (!counts.every(isCount) || !isNameOrNull(r.synced_by)) return null
+  if (!Array.isArray(r.op_ids) || !r.op_ids.every((id) => typeof id === 'string')) return null
+  const [new_folders, new_files, edits, deletions, in_shared_folders] = counts as number[]
+  if (new_folders + new_files + edits + deletions + in_shared_folders !== r.op_ids.length) return null
+  return { new_folders, new_files, edits, deletions, in_shared_folders, op_ids: [...(r.op_ids as string[])], synced_by: r.synced_by }
+}
+
+/** What is held, by kind, as one sentence ("Waiting for your decision: 2 new folders and 1 edit."); '' for nothing. */
+export function heldKindsLine(review: FoundWhilePausedReview): string {
+  const parts = [
+    review.new_folders > 0 ? plural(review.new_folders, 'new folder', 'new folders') : null,
+    review.new_files > 0 ? plural(review.new_files, 'new file', 'new files') : null,
+    review.edits > 0 ? plural(review.edits, 'edit', 'edits') : null,
+    review.deletions > 0 ? plural(review.deletions, 'deletion', 'deletions') : null,
+    review.in_shared_folders > 0
+      ? plural(review.in_shared_folders, 'change in a folder shared with you', 'changes in folders shared with you')
+      : null,
+  ].filter((part): part is string => part !== null)
+  if (parts.length === 0) return ''
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+  return `Waiting for your decision: ${list}.`
+}
+
+/** The keep button: "on this PC only" only while no service syncs the kept folder. */
+export function keepLabel(syncedBy: string | null): string {
+  return syncedBy === null ? FOUND_WHILE_PAUSED_COPY.keep : KEEP_OUT_OF_BEEBEEB
+}
+
+/** The question before a keep. */
+export function keepConfirm(syncedBy: string | null): string {
+  return syncedBy === null
+    ? FOUND_WHILE_PAUSED_COPY.confirm
+    : `They’ll be moved out of your Beebeeb folder into a folder named “${KEPT_FOLDER_NAME}” next to it. Nothing is uploaded to Beebeeb or deleted. This folder is synced by ${syncedBy}.`
 }
 
 /** The changes held as found while sync was paused, from the last summary read (0 when it was not read). */
@@ -88,7 +168,10 @@ export function keepResultLines(result: KeepResult): KeepResultLine[] {
       : { n: result.moved_items, what: plural(result.moved_items, 'item', 'items') }
     const before = `Moved ${counted.what} to `
     const path = result.kept_path ?? KEPT_FOLDER_NAME
-    const after = counted.n === 1 ? '. It stays on this PC and isn’t uploaded.' : '. They stay on this PC and aren’t uploaded.'
+    const one = counted.n === 1
+    const after = result.synced_by === null
+      ? (one ? '. It stays on this PC and isn’t uploaded.' : '. They stay on this PC and aren’t uploaded.')
+      : `${one ? '. It isn’t uploaded to Beebeeb.' : '. They aren’t uploaded to Beebeeb.'} This folder is synced by ${result.synced_by}.`
     lines.push({ key: 'moved', text: `${before}${path}${after}`, path: { before, path, after } })
   }
   if (result.not_moved > 0) {
@@ -102,11 +185,12 @@ export function keepResultLines(result: KeepResult): KeepResultLine[] {
   }
   if (result.stays_held > 0) {
     const n = result.stays_held
+    const kept = result.synced_by === null ? 'kept on this PC only' : 'kept out of Beebeeb'
     lines.push({
       key: 'stays_held',
       text: n === 1
-        ? `1 change can’t be kept on this PC only. It isn’t uploaded and stays on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`
-        : `${plural(n, 'change', 'changes')} can’t be kept on this PC only. They aren’t uploaded and stay on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`,
+        ? `1 change can’t be ${kept}. It isn’t uploaded and stays on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`
+        : `${plural(n, 'change', 'changes')} can’t be ${kept}. They aren’t uploaded and stay on hold until you choose “${FOUND_WHILE_PAUSED_COPY.upload}”.`,
     })
   }
   return lines

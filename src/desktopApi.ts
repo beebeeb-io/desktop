@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
 import { parseSyncActivitySummary, type SyncActivitySummary } from './windows/syncActivityModel'
-import { parseKeepResult, type KeepResult } from './windows/foundWhilePaused'
+import { parseKeepResult, parseReview, type FoundWhilePausedReview, type KeepResult } from './windows/foundWhilePaused'
 import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
@@ -529,9 +529,20 @@ export interface FoundWhilePausedUploadResult {
   released: number
 }
 
-/** "Upload to my Beebeeb": release every `found_while_paused` operation so it uploads. */
-export function foundWhilePausedUpload(): Promise<CommandResult<FoundWhilePausedUploadResult>> {
-  return command<FoundWhilePausedUploadResult>('found_while_paused_upload')
+/**
+ * What is held, by kind, with the ids "Upload to my Beebeeb" sends back (lead review round 3, P2-2). An answer outside
+ * the contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedReview(): Promise<CommandResult<FoundWhilePausedReview>> {
+  const result = await command<unknown>('found_while_paused_review')
+  if (!result.ok) return result
+  const review = parseReview(result.value)
+  return review ? { ok: true, value: review } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** "Upload to my Beebeeb": release the `found_while_paused` operations the card showed (`opIds`), so they upload. */
+export function foundWhilePausedUpload(opIds: string[]): Promise<CommandResult<FoundWhilePausedUploadResult>> {
+  return command<FoundWhilePausedUploadResult>('found_while_paused_upload', { opIds })
 }
 
 /**
