@@ -240,10 +240,9 @@ fn platform_str() -> &'static str {
 /// This machine's hostname, or `"unknown"` if the OS won't tell us. Cross-
 /// platform via the `hostname` crate (already a dependency for the lock file).
 ///
-/// `pub(crate)` so the known-folder backup mirror can derive its
-/// `Backup/<device>/<folder>` destination from the SAME value this device
-/// registers with the server (`register_session`), keeping the backup path and
-/// the device row in lockstep.
+/// Only the device row's display name (`register_session`) uses it. The
+/// known-folder backup uses [`device_name`], which has no fallback, so a lossy
+/// name never starts a `Backups/unknown` folder (spec D9, tasks 1888, 2226).
 pub(crate) fn hostname_or_unknown() -> String {
     hostname::get()
         .ok()

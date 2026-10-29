@@ -160,13 +160,18 @@ pub fn backup_source_key_for_rel_path(rel_path: &str, expected_device: &str) -> 
 }
 
 /// Convenience wrapper over [`backup_source_key_for_rel_path`] that resolves
-/// `expected_device` from this machine's hostname (the SAME value the mirror
-/// writes under `Backups/<device>/…`), sanitized to a single segment. Use this at
-/// op-enqueue and purge-decision sites; the explicit-device form stays pure for
-/// unit tests.
+/// `expected_device` from this machine's name, `runner::device_name()` (the SAME
+/// value the mirror writes under `Backups/<device>/…`), sanitized to a single
+/// segment. Use this at op-enqueue and purge-decision sites; the explicit-device
+/// form stays pure for unit tests.
 pub fn backup_source_key_for_this_device(rel_path: &str) -> Option<String> {
-    let device = sanitize_device_segment(&crate::runner::hostname_or_unknown());
-    backup_source_key_for_rel_path(rel_path, &device)
+    backup_source_key_for_device(rel_path, crate::runner::device_name().as_deref())
+}
+
+/// Spec D9 (tasks 1888, 2226): `None` when this PC's name cannot be read. The mirror makes no backup folder then, so
+/// no path is one, `Backups/unknown` included.
+fn backup_source_key_for_device(rel_path: &str, device: Option<&str>) -> Option<String> {
+    backup_source_key_for_rel_path(rel_path, &sanitize_device_segment(device?))
 }
 
 // ── Pure diff classifier (cross-platform, unit-tested everywhere) ────────────
@@ -227,7 +232,7 @@ pub fn needs_copy(decision: CopyDecision) -> bool {
 /// Sanitize a raw device name into a single safe path segment for the backup
 /// destination `<sync_root>\Backups\<device>\<DisplayName>`.
 ///
-/// The device name comes from `runner::hostname_or_unknown()` — normally a tame
+/// The device name comes from `runner::device_name()` — normally a tame
 /// hostname, but we never trust it to be path-safe. We collapse it to a single
 /// segment that cannot escape its parent or split into nested folders:
 ///
@@ -267,8 +272,8 @@ pub fn sanitize_device_segment(raw: &str) -> String {
 ///
 /// Factored cross-platform (pure `Path` joins) so the path layout — and the
 /// device-name sanitization feeding it — is unit-testable without Windows. The
-/// Windows mirror loop calls this with `runner::hostname_or_unknown()` as
-/// `device_name`; the same value this device registers with the server.
+/// Windows mirror loop calls this with `runner::device_name()` as `device_name`
+/// (and makes nothing when there is none, spec D9).
 pub fn backup_dest_root(sync_root: &Path, device_name: &str, display_name: &str) -> std::path::PathBuf {
     sync_root
         .join("Backups")
@@ -393,10 +398,11 @@ mod windows_impl {
     /// source → `<sync_root>\Backups\<device>\<DisplayName>`. Best-effort +
     /// idempotent — a per-file error logs (count only) and the pass continues.
     ///
-    /// `<device>` is `runner::hostname_or_unknown()` (the SAME value this device
-    /// registers with the server) sanitized to one safe path segment, so a
-    /// multi-device account keeps each machine's backup in its own subtree under
-    /// `Backups/`.
+    /// `<device>` is `runner::device_name()` (this machine's hostname, the same
+    /// value this device registers with the server) sanitized to one safe path
+    /// segment, so a multi-device account keeps each machine's backup in its own
+    /// subtree under `Backups/`. When the name cannot be read the pass makes
+    /// nothing (spec D9): see `mirror_enabled_known_folders_with`.
     ///
     /// Safety invariants enforced here:
     /// - We only ever WRITE under `<sync_root>\Backups\<device>\<DisplayName>`
@@ -409,13 +415,23 @@ mod windows_impl {
     ///   source that somehow resolves under `<sync_root>\Backups\...` — it is
     ///   under the sync root, so the same guard refuses it.
     pub fn mirror_enabled_known_folders(sync_root: &Path, enabled_keys: &[String]) {
+        // Resolve the device name ONCE per pass: this machine's hostname, sanitized
+        // inside `backup_dest_root` to a single safe path segment.
+        mirror_enabled_known_folders_with(sync_root, enabled_keys, crate::runner::device_name());
+    }
+
+    /// [`mirror_enabled_known_folders`] with the device name given. Spec D9 (tasks
+    /// 1888, 2226): `None` (the hostname cannot be read) skips the pass and creates
+    /// nothing, so a lossy name never starts a second `Backups/<device>` folder such
+    /// as `Backups/unknown`.
+    pub(super) fn mirror_enabled_known_folders_with(sync_root: &Path, enabled_keys: &[String], device: Option<String>) {
         if enabled_keys.is_empty() {
             return;
         }
-        // Resolve the device name ONCE per pass: the SAME hostname this device
-        // registers with the server, sanitized inside `backup_dest_root` to a
-        // single safe path segment.
-        let device_name = crate::runner::hostname_or_unknown();
+        let Some(device_name) = device else {
+            tracing::debug!("known-folder backup: this device's name cannot be read; skipping pass");
+            return;
+        };
         let mut total = MirrorStats::default();
         // Per-pass copy budget shared across ALL enabled folders: once this many
         // files have been copied this pass we stop, and the next pass resumes the
@@ -706,6 +722,28 @@ mod tests {
             backup_source_key_for_rel_path("Backups/Legion/Documents/notes.txt", "Legion").as_deref(),
             Some("documents")
         );
+    }
+
+    /// Spec D9 (tasks 1888, 2226): with no readable name this PC has no backup folder, so no path is tagged as one,
+    /// `Backups/unknown` included.
+    #[test]
+    fn an_unreadable_hostname_tags_no_backup_path() {
+        assert_eq!(backup_source_key_for_device("Backups/unknown/Documents/a.txt", None), None);
+        assert_eq!(backup_source_key_for_device("Backups/PC-1/Documents/a.txt", None), None);
+        assert_eq!(
+            backup_source_key_for_device("Backups/PC-1/Documents/a.txt", Some("PC-1")).as_deref(),
+            Some("documents")
+        );
+    }
+
+    /// Spec D9: when this PC's name cannot be read, the mirror makes nothing under the sync root, so a lossy name
+    /// never starts a `Backups/unknown` folder. Windows only: the mirror resolves the real known folders.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_unreadable_hostname_scaffolds_no_backup_folder() {
+        let sync_root = tempfile::tempdir().unwrap();
+        super::windows_impl::mirror_enabled_known_folders_with(sync_root.path(), &["documents".to_string()], None);
+        assert_eq!(std::fs::read_dir(sync_root.path()).unwrap().count(), 0, "nothing under the sync root");
     }
 
     #[test]

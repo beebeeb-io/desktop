@@ -1215,12 +1215,29 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
                 conn.execute("UPDATE files SET parent_id = ?2 WHERE file_id = ?1", params![file_id, parent])?;
             }
         }
-        Unit::DropScaffold { .. } => {
-            // Task 2 (D5) applies this; the planner does not make it before then.
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
-                Some("reconcile: unit not applied yet".into()),
-            ));
+        Unit::DropScaffold { op_ids, file_ids, .. } => {
+            // D5: the scaffolding's creates and rows go; its directories are the caller's, after the commit.
+            for op_id in op_ids {
+                conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+            }
+            for file_id in file_ids {
+                conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+            }
+            drop_orphaned_upload_resumes(conn)?;
+            // I1: nothing names a dropped row any more, or the whole unit rolls back with its transaction. One scan for
+            // the whole subtree (`parent_id` has no index).
+            let ids = serde_json::to_string(file_ids).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let left: i64 = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM files
+                         WHERE file_id IN (SELECT value FROM json_each(?1)) OR parent_id IN (SELECT value FROM json_each(?1)))
+                      + (SELECT COUNT(*) FROM operation_queue
+                         WHERE file_id IN (SELECT value FROM json_each(?1)) OR parent_id IN (SELECT value FROM json_each(?1)))",
+                params![ids],
+                |row| row.get(0),
+            )?;
+            if left != 0 {
+                return Err(rusqlite::Error::StatementChangedRows(left as usize));
+            }
         }
     }
     Ok(())
@@ -16037,5 +16054,44 @@ mod reconcile_tests {
             assert_eq!(pc.op(op_id).4.as_deref(), Some("key_replaced"), "{op_id}");
         }
         assert!(pc.due().is_empty());
+    }
+
+    /// D5: empty `Backups/unknown` scaffolding, under a `Backups` the pass folds into its twin, goes in the pass. No op
+    /// and no row is left under it, nothing names a dropped row (I1), and the pass returns its directories deepest first
+    /// for the caller to remove after the commit; the pass itself removes none. A second pass changes nothing (I3).
+    #[test]
+    fn the_pass_drops_empty_backups_unknown_scaffolding_and_returns_its_directories() {
+        let pc = Pc::new();
+        let sync_root = tempdir().unwrap();
+        pc.folder("bt", None, "Backups", 3);
+        pc.folder("bg", None, "Backups", 0);
+        pc.folder("u", Some("bg"), "Backups/unknown", 0);
+        pc.folder("d", Some("u"), "Backups/unknown/Documents", 0);
+        pc.folder("o", Some("d"), "Backups/unknown/Documents/Old", 0);
+        for (op_id, id, parent) in [("op-bg", "bg", None), ("op-u", "u", Some("bg")), ("op-d", "d", Some("u")), ("op-o", "o", Some("d"))] {
+            pc.create_folder(op_id, id, parent);
+        }
+        std::fs::create_dir_all(sync_root.path().join("Backups/unknown/Documents/Old")).unwrap();
+        let on_disk = |dir: &str| tree_holds_a_file(&sync_root.path().join(dir));
+        let dry = pc.db.reconcile_dry_run(&opts(), &on_disk).unwrap();
+
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &on_disk);
+        assert!(counts.is_ok(), "{counts:?}");
+        let dirs = ["Backups/unknown/Documents/Old", "Backups/unknown/Documents", "Backups/unknown"];
+        let expected = Counts {
+            remapped: 1,
+            scaffold_dropped: 3,
+            scaffold_dirs: dirs.iter().map(|dir| dir.to_string()).collect(),
+            ..Counts::default()
+        };
+        assert_eq!(counts.unwrap(), expected);
+        assert_eq!(dry, expected, "the dry run shows what the run does");
+        assert_eq!(pc.count("SELECT COUNT(*) FROM files WHERE path LIKE 'Backups/unknown%'", []), 0);
+        assert_eq!(pc.count("SELECT COUNT(*) FROM operation_queue", []), 0);
+        for id in ["bg", "u", "d", "o"] {
+            assert_eq!(pc.references(id), 0, "{id}");
+        }
+        assert!(sync_root.path().join("Backups/unknown/Documents/Old").is_dir(), "the pass removes no directory");
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW + 60, &on_disk).unwrap(), Counts::default());
     }
 }
