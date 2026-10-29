@@ -131,9 +131,11 @@ jobs:
           workspaces: src-tauri
 
       - name: Test count guard self-test
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         shell: bash
-        run: python scripts/assert-cargo-test-counts.py --self-test
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/assert-cargo-test-counts.py --self-test
 
       - name: Cargo check
         working-directory: src-tauri
@@ -145,22 +147,27 @@ jobs:
           echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
           exit "$check_exit"
 
-      - name: Run Windows Rust tests
-        if: runner.os == 'Windows'
+      # Task 2272 / 2271: macOS runs the tests too, not only `cargo check`. The 0.8.18 release found a macOS-only test
+      # failure on the maintainer's Mac that this job would have caught.
+      - name: Run Rust tests
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         working-directory: src-tauri
         shell: bash
         env:
-          # Windows config/cache use Known Folders in the disposable runner's
-          # profile; keep temporary test files in their own directory.
+          # Config/cache live in the disposable runner's profile (Windows Known Folders, macOS
+          # ~/Library); keep temporary test files in their own directory. TEMP/TMP are Windows',
+          # TMPDIR is macOS'.
           TEMP: ${{ runner.temp }}/beebeeb-tmp
           TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
         run: |
           mkdir -p "$TEMP"
           cargo_exit=0
           CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
           cat "$RUNNER_TEMP/cargo-test.log"
           echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+          py=$(command -v python3 || command -v python)
+          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
 
       - name: Upload Rust evidence
         if: always()
