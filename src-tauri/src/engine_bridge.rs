@@ -6717,7 +6717,7 @@ fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) ->
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-fn decrypt_downloaded_chunk(
+pub(crate) fn decrypt_downloaded_chunk(
     file_key: &beebeeb_core::kdf::FileKey,
     chunk_bytes: &[u8],
 ) -> Result<Vec<u8>, beebeeb_core::CoreError> {

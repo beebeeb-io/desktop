@@ -16,7 +16,7 @@ pub(crate) struct RepairApi {
 
 /// A failed call: the HTTP status when the server answered, nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Failure(Option<u16>);
+pub(super) struct Failure(Option<u16>);
 
 impl Failure {
     fn of(error: &anyhow::Error) -> Self {
@@ -25,7 +25,7 @@ impl Failure {
         Self(text.strip_prefix("HTTP ").and_then(|rest| rest.get(..3)).and_then(|code| code.parse().ok()))
     }
 
-    fn at(self, pair: u32) -> anyhow::Error {
+    pub(super) fn at(self, pair: u32) -> anyhow::Error {
         match self.0 {
             Some(status) => anyhow::anyhow!("pair {pair}: the server answered HTTP {status}; nothing was changed"),
             None => anyhow::anyhow!("pair {pair}: no usable answer from the server; nothing was changed"),
@@ -39,7 +39,7 @@ impl RepairApi {
     }
 
     /// `GET /api/v1/files/{id}`: `Gone` on a 404.
-    async fn file(&self, file_id: &str) -> Result<ServerFile, Failure> {
+    pub(super) async fn file(&self, file_id: &str) -> Result<ServerFile, Failure> {
         let json = match self.api.repair_file(file_id).await {
             Ok(json) => json,
             Err(error) if Failure::of(&error) == Failure(Some(404)) => return Ok(ServerFile::Gone),
@@ -53,9 +53,22 @@ impl RepairApi {
                 updated_at: json.get("updated_at")?.as_str()?.to_string(),
                 version_number: json.pointer("/download_version/version_number").and_then(|n| n.as_i64()).unwrap_or(0),
                 via_share: json.get("acted_via_share_id").is_some_and(|id| !id.is_null()),
+                chunk_count: json.get("chunk_count")?.as_i64()?,
             })
         })();
         facts.map(ServerFile::Found).ok_or(Failure(None))
+    }
+
+    /// `GET /api/v1/files/{id}/chunks/{index}`: one encrypted chunk of the current version.
+    pub(super) async fn chunk(&self, file_id: &str, index: u32) -> Result<Vec<u8>, Failure> {
+        self.api.repair_chunk(file_id, index).await.map_err(|error| Failure::of(&error))
+    }
+
+    /// The key of a file this account owns, derived from the session's master key (no call). Only owned files
+    /// reach the compare: a shared B is your call (L8).
+    pub(super) fn file_key(&self, file_id: &str) -> beebeeb_core::kdf::FileKey {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
+        beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes())
     }
 
     /// `GET /api/v1/shares/by-file/{id}`: how many of the owner's links of the file have not expired.

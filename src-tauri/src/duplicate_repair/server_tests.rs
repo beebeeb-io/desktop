@@ -20,7 +20,7 @@ pub(super) struct RepairMockServer {
 }
 
 impl RepairMockServer {
-    pub fn start(routes: Vec<(String, u16, String)>) -> Self {
+    pub fn start(routes: Vec<(String, u16, Vec<u8>)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -45,13 +45,10 @@ impl RepairMockServer {
                 let (status, body) = routes
                     .iter()
                     .find(|(route, _, _)| *route == request)
-                    .map_or((404, r#"{"error":"not found"}"#.to_string()), |(_, status, body)| (*status, body.clone()));
+                    .map_or((404, br#"{"error":"not found"}"#.to_vec()), |(_, status, body)| (*status, body.clone()));
                 seen.lock().unwrap().push(request);
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
+                let head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
             }
         });
         Self { base_url, requests, shutdown, handle: Some(handle) }
@@ -71,11 +68,11 @@ impl Drop for RepairMockServer {
     }
 }
 
-fn get(path: &str, status: u16, body: String) -> (String, u16, String) {
-    (format!("GET {path}"), status, body)
+pub(super) fn get(path: &str, status: u16, body: String) -> (String, u16, Vec<u8>) {
+    (format!("GET {path}"), status, body.into_bytes())
 }
 
-fn file(parent: &str, size: i64, trashed: bool, version: i64) -> String {
+pub(super) fn file(parent: &str, size: i64, trashed: bool, version: i64) -> String {
     serde_json::json!({
         "id": "ignored",
         "parent_id": parent,
@@ -83,18 +80,19 @@ fn file(parent: &str, size: i64, trashed: bool, version: i64) -> String {
         "is_trashed": trashed,
         "trashed_at": if trashed { serde_json::json!("2026-10-29T10:00:00+00:00") } else { serde_json::Value::Null },
         "updated_at": "2026-10-29T09:00:00+00:00",
+        "chunk_count": 1,
         "download_version": { "version_number": version },
         "acted_via_share_id": null,
     })
     .to_string()
 }
 
-fn links(expires: &[Option<&str>]) -> String {
+pub(super) fn links(expires: &[Option<&str>]) -> String {
     let shares: Vec<_> = expires.iter().map(|at| serde_json::json!({ "id": "s", "expires_at": at })).collect();
     serde_json::json!({ "shares": shares, "count": shares.len() }).to_string()
 }
 
-fn invites(of: &[(&str, &str, Option<&str>)]) -> String {
+pub(super) fn invites(of: &[(&str, &str, Option<&str>)]) -> String {
     let rows: Vec<_> = of
         .iter()
         .map(|(file_id, status, expires)| {
@@ -105,7 +103,7 @@ fn invites(of: &[(&str, &str, Option<&str>)]) -> String {
     serde_json::json!({ "invites": rows }).to_string()
 }
 
-fn row(id: &str) -> RowFacts {
+pub(super) fn row(id: &str) -> RowFacts {
     RowFacts {
         file_id: id.into(),
         status: "local".into(),
@@ -117,7 +115,7 @@ fn row(id: &str) -> RowFacts {
     }
 }
 
-fn pair(n: u32, a: &str, b: &str) -> Pair {
+pub(super) fn pair(n: u32, a: &str, b: &str) -> Pair {
     Pair {
         n,
         path: format!("p{n}.txt"),

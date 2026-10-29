@@ -90,6 +90,8 @@ pub(crate) struct ServerFacts {
     pub version_number: i64,
     /// `acted_via_share_id` is set.
     pub via_share: bool,
+    /// `chunk_count`: how many chunks the compare downloads.
+    pub chunk_count: i64,
 }
 
 /// A file the server read: gone (404) or found.

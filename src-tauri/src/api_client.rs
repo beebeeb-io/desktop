@@ -542,6 +542,12 @@ impl ApiClient {
         self.get_typed(&format!("/api/v1/files/{}", encode(file_id))).await
     }
 
+    /// `GET /api/v1/files/{id}/chunks/{index}`: one encrypted chunk, with the same status errors as the reads above.
+    pub(crate) async fn repair_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
+        let url = self.chunk_url(file_id, chunk_idx);
+        Ok(self.send_with_retry(|| self.client.get(&url)).await?.bytes().await?.to_vec())
+    }
+
     /// `GET /api/v1/shares/by-file/{id}`: the owner's links of a file. Its rows carry link material wrapped under
     /// the owner's key; the caller counts them and drops them (spec L8 amendment).
     pub(crate) async fn repair_links(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
