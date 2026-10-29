@@ -327,9 +327,13 @@ pub fn plan(
             _ => row_parent,
         };
         if parent.is_none() && ghost.path.trim_matches('/').contains('/') {
-            // A nested folder the scan wrote without a parent: D6 finds its parent by path first, never the top level.
+            // A nested folder whose row names no parent that D6 could not settle by path: never matched at the top
+            // level, and held (D4) so the key check never resumes its create to the vault root or next to a twin.
             counts.parent_unresolved += 1;
             fate.insert(id, Fate::Stays);
+            if create.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
+                holds.push(Unit::Hold { op_id: create.op_id.clone() });
+            }
             continue;
         }
         let twins: Vec<&Row> = server_folders
@@ -1063,7 +1067,8 @@ mod tests {
 
     #[test]
     fn a_nested_ghost_without_a_parent_id_is_never_matched_at_the_top_level() {
-        // D6 (task 3) finds its parent by path first; until then it stays as it is.
+        // D6 has no path to go by (its create names no parent and no target path): it is held for review, never matched
+        // at the top level and never resumed into a create at the vault root.
         let rows = [
             folder("a", None, "A", true),
             folder("t", Some("a"), "A/Photos", true),
@@ -1072,8 +1077,29 @@ mod tests {
         ];
         let ops = [create_folder("op-g", "g", None)];
         let (units, counts) = run(&rows, &ops);
-        assert!(units.is_empty(), "{units:?}");
+        assert_eq!(units, vec![Unit::Hold { op_id: "op-g".to_string() }]);
         assert_eq!(counts, Counts { parent_unresolved: 1, ..Counts::default() });
+    }
+
+    /// D4, cross-lane review P2-1: the row names no parent while its create names `a`. Left as it is, the create is
+    /// resumed and sent under `a`, next to `t`: a duplicate folder. It is held, and the folder under it waits with it.
+    #[test]
+    fn a_nested_ghost_whose_row_names_no_parent_is_held_and_its_subtree_waits() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("t", Some("a"), "A/Photos", true),
+            folder("g", None, "A/Photos", false),
+            folder("g2", Some("g"), "A/Photos/2024", false),
+        ];
+        let ops = [create_folder("op-g", "g", Some("a")), create_folder("op-g2", "g2", Some("g"))];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![Unit::Hold { op_id: "op-g".to_string() }]);
+        assert_eq!(counts, Counts { parent_unresolved: 1, waiting_under_held: 1, ..Counts::default() });
+
+        // Already held: a second pass adds nothing.
+        let ops = [paused(create_folder("op-g", "g", Some("a")), NEEDS_REVIEW), create_folder("op-g2", "g2", Some("g"))];
+        let (units, _) = run(&rows, &ops);
+        assert!(units.is_empty(), "{units:?}");
     }
 
     #[test]
