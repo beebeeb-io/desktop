@@ -14,6 +14,8 @@ import {
   type SyncStatus,
   type VersionConflictEntry,
 } from '../desktopApi'
+import { reviewCounts } from '../reviewCounts'
+import { reviewKindLabel } from '../reviewKindLabel'
 import { useToast } from '../windows/ui'
 
 function formatTimestamp(value: string | number | null | undefined): string {
@@ -26,27 +28,6 @@ function formatTimestamp(value: string | number | null | undefined): string {
     return Number.isNaN(parsed) ? value : new Date(parsed).toLocaleString()
   }
   return 'Time unknown'
-}
-
-function kindLabel(kind: VersionConflictEntry['kind']): string {
-  switch (kind) {
-    case 'quota_failure':
-      return 'Quota'
-    case 'permission_failure':
-      return 'Permission'
-    case 'stale_base':
-      return 'Stale base'
-    case 'failed_upload':
-      return 'Upload'
-    case 'metadata':
-      return 'Metadata'
-    case 'delete':
-      return 'Delete'
-    case 'restore':
-      return 'Restore'
-    default:
-      return 'Conflict'
-  }
 }
 
 export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: number }) {
@@ -62,6 +43,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   const [notice, setNotice] = useState<string | null>(null)
   const [versionNotice, setVersionNotice] = useState<string | null>(null)
   const [restoring, setRestoring] = useState<string | null>(null)
+  // Task 1640: a dismissed entry reloads the feed.
+  const [reloads, setReloads] = useState(0)
 
   const selectedEntry = selected ?? entries[0] ?? null
 
@@ -91,13 +74,15 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     return () => {
       cancelled = true
     }
-  }, [refreshSignal])
+  }, [refreshSignal, reloads])
 
   useEffect(() => {
     let cancelled = false
     const loadVersions = async () => {
-      if (!selectedEntry) {
+      // Task 1640: a kept copy's file was deleted elsewhere; it has no versions to show here.
+      if (!selectedEntry || selectedEntry.kind === 'kept_copy') {
         setVersions([])
+        setVersionNotice(null)
         return
       }
       setVersionNotice(null)
@@ -122,6 +107,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       fileId: entry.file_id,
       fileName: entry.file_name,
       isText: false,
+      // Task 2190: a parked conflict is decided by its queued write.
+      opId: entry.kind === 'stale_base' ? (entry.op_id ?? null) : null,
     })
     if (!result.ok) {
       showToast({
@@ -133,18 +120,23 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
   }
 
   const signInAgain = async () => {
-    // Task 1546 Codex round 2, finding 2: must clear the expired session
-    // BEFORE opening onboarding, or onboarding fast-forwards an "unlocked,
-    // configured" user straight past the sign-in form — `forceReauth` does
-    // both steps in the right order.
+    // `forceReauth` decides the flow per platform. macOS (R8, spec 2026-10-06)
+    // opens sign-in in place and clears nothing. Windows and Linux clear the
+    // expired session BEFORE opening onboarding (task 1546 Codex round 2,
+    // finding 2), or onboarding fast-forwards an "unlocked, configured" user
+    // straight past the sign-in form.
     const result = await forceReauth()
     if (!result.ok) {
       showToast({
         variant: 'error',
         title: 'Couldn’t open sign-in',
-        message: result.unsupported ? commandUnavailableLabel('open_onboarding_window') : result.reason,
+        // forceReauth names the command a build is missing itself (M7): it knows which step failed.
+        message: result.reason,
       })
+      return
     }
+    // FB-24: the expired session was cleared, but a step could not be confirmed: said neutrally.
+    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence })
   }
 
   const restoreVersion = async (version: FileVersionEntry) => {
@@ -157,7 +149,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     if (result.ok) {
       showToast({
         title: 'Restore queued',
-        message: `${selectedEntry.file_name} version ${version.version_number ?? version.id} will be restored by the sync engine.`,
+        message: `${selectedEntry.file_name} goes back to version ${version.version_number ?? version.id} on the next sync.`,
         variant: 'success',
       })
       return
@@ -170,24 +162,32 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
     })
   }
 
-  const metrics = useMemo(() => {
-    const failed = entries.filter((entry) => entry.kind !== 'conflict').length
-    const stale = entries.filter((entry) => entry.kind === 'stale_base').length
-    return { failed, stale }
-  }, [entries])
+  const dismissEntry = async (entry: VersionConflictEntry) => {
+    const result = await command<void>('dismiss_review_entry', { entryId: entry.id })
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t dismiss',
+        message: result.unsupported ? commandUnavailableLabel('dismiss_review_entry') : result.reason,
+      })
+      return
+    }
+    setReloads((value) => value + 1)
+  }
+
+  const metrics = useMemo(() => reviewCounts(entries), [entries])
+  // Task 1640: a kept copy is informational; only entries that need a decision turn the dot red.
+  const needsAttention = conflicts > 0 || entries.some((entry) => entry.kind !== 'kept_copy')
 
   return (
     <section className="page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Versions & conflicts</h1>
-          <p className="page-copy">
-            Desktop writes create server-side versions. Stale-base edits, upload failures, quota
-            errors, and restore actions stay visible here until the daemon can finish them.
-          </p>
+          <p className="page-copy">Files that need a decision from you, and changes Beebeeb couldn’t send yet.</p>
         </div>
         <span className="status-pill">
-          <span className={`dot ${conflicts > 0 || entries.length > 0 ? 'error' : 'ok'}`} />
+          <span className={`dot ${needsAttention ? 'error' : 'ok'}`} />
           {refreshing ? 'Refreshing' : `${entries.length} review item${entries.length === 1 ? '' : 's'}`}
         </span>
       </div>
@@ -198,26 +198,24 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
         <div className="metric">
           <div className="metric-label">Active conflicts</div>
           <div className="metric-value">{conflicts}</div>
-          <div className="metric-detail">Rows marked conflict by the daemon</div>
+          <div className="metric-detail">Files changed in two places</div>
         </div>
         <div className="metric">
           <div className="metric-label">Upload reviews</div>
-          <div className="metric-value">{metrics.failed}</div>
-          <div className="metric-detail">Failed or queued Finder writes</div>
+          <div className="metric-value">{metrics.notSent}</div>
+          <div className="metric-detail">Changes Beebeeb couldn’t send yet</div>
         </div>
         <div className="metric">
-          <div className="metric-label">Stale-base edits</div>
-          <div className="metric-value">{metrics.stale}</div>
-          <div className="metric-detail">Local bytes preserved for review</div>
+          <div className="metric-label">Changed elsewhere</div>
+          <div className="metric-value">{metrics.changedElsewhere}</div>
+          <div className="metric-detail">Your changes, kept safe for you to review</div>
         </div>
       </div>
 
       {loading ? (
         <div className="empty-state">Loading version center...</div>
       ) : entries.length === 0 ? (
-        <div className="empty-state">
-          No conflicts, failed writes, or restore reviews are recorded in the local state DB.
-        </div>
+        <div className="empty-state">Nothing needs your attention.</div>
       ) : (
         <div className="grid two">
           <div className="panel">
@@ -231,7 +229,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   <span>
                     <span className="row-title">{entry.file_name}</span>
                     <span className="row-detail">
-                      {kindLabel(entry.kind)} · {entry.status} · {formatTimestamp(entry.updated_at)}
+                      {reviewKindLabel(entry.kind)} · {entry.status} · {formatTimestamp(entry.updated_at)}
                     </span>
                     <span className="row-detail">{entry.detail}</span>
                   </span>
@@ -242,6 +240,13 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   if (reviewAction.kind === 'open_conflict') {
                     return (
                       <button className="button" onClick={() => void openConflict(entry)}>
+                        {reviewAction.label}
+                      </button>
+                    )
+                  }
+                  if (reviewAction.kind === 'dismiss') {
+                    return (
+                      <button className="button" onClick={() => void dismissEntry(entry)}>
                         {reviewAction.label}
                       </button>
                     )
@@ -275,9 +280,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                 </div>
                 {versionNotice && <div className="notice" style={{ margin: '0 0 12px' }}>{versionNotice}</div>}
                 {versions.length === 0 ? (
-                  <div className="empty-state">
-                    Version history is unavailable for this file until the server list-versions route responds.
-                  </div>
+                  <div className="empty-state">Couldn’t load this file’s versions. Try again.</div>
                 ) : (
                   versions.map((version) => {
                     const versionId = restoreVersionId(version)

@@ -50,9 +50,13 @@
 
 pub mod callbacks;
 pub mod placeholders;
+#[cfg(test)]
+mod reconcile_tests;
+pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
 
+use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -84,15 +88,18 @@ pub const PROVIDER_ID: &str = "Beebeeb";
 /// installs registered at 1.0.0 must re-register to apply the new modifier.
 pub const PROVIDER_VERSION: &str = "1.1.0";
 
-/// Live handle to the engine bridge, set once at runner startup and
-/// read by the Cloud Files fetch callback. We can't capture the
-/// bridge into the `extern "system"` function pointer Windows expects,
-/// so a OnceLock is the simplest hop.
-///
-/// Set from `runner::run` immediately after building the bridge,
-/// before placeholders are created (so a callback never fires before
-/// the bridge exists).
-static BRIDGE: OnceLock<Arc<EngineBridge>> = OnceLock::new();
+// Each connection carries a monotonically increasing context ID. Old OS
+// callbacks cannot borrow credentials from a later account, even if Windows
+// reuses a connection key.
+static BRIDGE: std::sync::LazyLock<crate::callback_gate::CallbackGate<EngineBridge>> =
+    std::sync::LazyLock::new(crate::callback_gate::CallbackGate::new);
+struct Connection {
+    key: CF_CONNECTION_KEY,
+    generation: u64,
+    root: std::path::PathBuf,
+}
+static CONNECTION: std::sync::Mutex<Option<Connection>> = std::sync::Mutex::new(None);
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Live handle to the tokio runtime that owns the daemon.
 ///
@@ -117,14 +124,14 @@ static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 /// `populate_placeholders` mints. Stashed here from [`connect_root`] (which
 /// already owns the path); set-once for the process lifetime (a re-login reuses
 /// the same root).
-static SYNC_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+static SYNC_ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 
 /// Internal accessor for the callback module: the connected sync-root path, or
 /// `None` if [`connect_root`] hasn't run yet. Used to reconstruct an on-disk
 /// placeholder path from a state-DB relative path when the callback's
 /// `NormalizedPath` is unavailable.
 pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
-    SYNC_ROOT.get().cloned()
+    SYNC_ROOT.read().ok().and_then(|root| root.clone())
 }
 
 /// Stable provider GUID for the Beebeeb sync root.
@@ -141,13 +148,6 @@ pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
 /// form above.
 pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
 
-/// Set once the first time we successfully `CfConnectSyncRoot`. Used to
-/// make callback registration idempotent across engine respawns (re-login,
-/// sync-root change) — Windows rejects a second connect on a root that's
-/// already connected by this process, so we connect exactly once per
-/// process lifetime.
-static CONNECTED: OnceLock<()> = OnceLock::new();
-
 /// Sender into the upload driver's debounce loop (`crate::watcher`). The
 /// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
 /// live channel through this slot. Overwritten by [`set_notify_sender`] from
@@ -162,9 +162,6 @@ static CONNECTED: OnceLock<()> = OnceLock::new();
 /// the first logout→login. So we store the sender in a `RwLock<Option<…>>` and
 /// OVERWRITE it on every (re)spawn, always pointing at the live debounce loop.
 ///
-/// (This differs from the `BRIDGE`/`RUNTIME` `OnceLock`s, which are genuinely
-/// set-once: a respawn reuses the same runtime + rebuilds the bridge value, and
-/// neither has a receiver end that gets torn down. A channel does.)
 static NOTIFY_TX: RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>>> =
     RwLock::new(None);
 
@@ -188,19 +185,159 @@ pub(crate) fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate
     NOTIFY_TX.read().ok().and_then(|slot| slot.clone())
 }
 
-/// Stash the engine bridge so [`callbacks::fetch_data_callback`] can
-/// reach it when Windows demands hydration. Idempotent — once set the
-/// pointer doesn't change for the lifetime of the process; on
-/// re-login the runner respawns inside the same process and reuses the
-/// existing OnceLock value (the master key + token are session-scoped
-/// and live inside the bridge's `ApiClient`, not here).
+/// Publish only while the runner is live, serialized with connection teardown.
 pub fn set_bridge(bridge: Arc<EngineBridge>) {
-    let _ = BRIDGE.set(bridge);
+    let connection = CONNECTION.lock().unwrap();
+    if bridge.is_stopping() || ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    if let Some(connection) = connection.as_ref() {
+        if let Err(error) = BRIDGE.install(connection.generation, bridge) {
+            tracing::error!(%error, "callback reactivation refused");
+        }
+    }
 }
 
-/// Internal accessor for the callback module.
-pub(crate) fn bridge() -> Option<Arc<EngineBridge>> {
-    BRIDGE.get().cloned()
+pub(crate) fn bridge() -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(None)?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+pub(crate) fn callback_bridge(
+    context: *mut std::ffi::c_void,
+) -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(Some(context as usize as u64))?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+/// Cancellation is polled independently of the HTTP request: dropping its
+/// future releases the download/key owner even when the server never replies.
+pub(crate) async fn cancelled(lease: &crate::callback_gate::CallbackLease<EngineBridge>) {
+    while !lease.is_revoked() && !lease.is_stopping() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Stop admission, cancel downloads, drain transfers and release credentials.
+/// Preserve a failed disconnect's key so a retry cannot register over it.
+static REVOCATION_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn ensure_reactivation_allowed() -> std::result::Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst)
+        || REVOCATION_PENDING.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(
+            "Vault lock did not finish. Retry locking; if it persists, restart Beebeeb before unlocking.".into(),
+        );
+    }
+    Ok(())
+}
+
+pub async fn revoke_callbacks() -> anyhow::Result<()> {
+    REVOCATION_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Close admission synchronously, even if CONNECTION is held by a stalled
+    // native call. Keep that revoked slot until its actual leases have drained.
+    let revoked = BRIDGE.revoke();
+    let worker = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if let Some(revoked) = revoked {
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
+        }
+        let mut connection = CONNECTION.lock().unwrap();
+        // A stopping runner may have published after the first revoke.
+        if let Some(revoked) = BRIDGE.revoke() {
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
+        }
+        *NOTIFY_TX.write().unwrap() = None;
+        if let Some(current) = connection.as_ref() {
+            unsafe { CfDisconnectSyncRoot(current.key) }?;
+        }
+        *connection = None;
+        *SYNC_ROOT.write().unwrap() = None;
+        Ok(())
+    });
+    // CfDisconnect/CfExecute cannot be force-aborted safely. They remain on
+    // isolated native/blocking workers. A deadline is a FAILED lock, and the
+    // process stays fenced if such a worker cannot confirm completion.
+    match tokio::time::timeout(std::time::Duration::from_secs(4), worker).await {
+        Ok(result) => {
+            result??;
+            REVOCATION_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!("Cloud Files callbacks revoked and drained");
+            Ok(())
+        }
+        Err(_) => {
+            refuse_unconfirmed_stop();
+            anyhow::bail!(
+                "Vault lock failed: a Windows Cloud Files operation is not responding. The vault is not locked. Restart Beebeeb before unlocking."
+            )
+        }
+    }
+}
+
+static STOP_UNCONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn refuse_unconfirmed_stop() {
+    STOP_UNCONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+static CREDENTIAL_OWNERS: std::sync::Mutex<Vec<std::sync::Weak<()>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn track_credentials(api: &Arc<crate::api_client::ApiClient>) {
+    CREDENTIAL_OWNERS.lock().unwrap().push(api.credential_lifetime());
+}
+
+/// Includes watcher scans/heartbeat workers that may be outside the runner's
+/// task. An unconfirmed owner is retained as a weak reference for the next retry.
+pub async fn wait_for_credential_release() -> std::result::Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(
+            "Sync shutdown could not be confirmed. Restart Beebeeb before locking or switching accounts.".into(),
+        );
+    }
+    for _ in 0..1000 {
+        {
+            let mut owners = CREDENTIAL_OWNERS.lock().unwrap();
+            owners.retain(|owner| owner.strong_count() != 0);
+            if owners.is_empty() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("Sync workers are still stopping. Retry locking/signing out before switching accounts.".into())
+}
+
+pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    if let Err(error) = unsafe { CfUnregisterSyncRoot(PCWSTR(wide.as_ptr())) } {
+        use windows::Win32::Foundation::{ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_NOT_A_CLOUD_FILE};
+        if error.code() != HRESULT::from_win32(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            && error.code() != HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0)
+        {
+            return Err(error.into());
+        }
+    }
+    // Prove the Cloud Files registration itself is gone, independently of the
+    // Explorer/WinRT registration and its per-user registry metadata.
+    let mut buffer = vec![0u64; 1024];
+    let result = unsafe { CfGetSyncRootInfoByPath(PCWSTR(wide.as_ptr()), CF_SYNC_ROOT_INFO_BASIC,
+        buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
+    match result {
+        Err(error) if error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
+        Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
+    }
 }
 
 /// Internal accessor for the daemon's tokio runtime handle, used by the
@@ -610,9 +747,8 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
 ///
 /// Called on sign-out / reset so a logout does not leave a dead "Beebeeb"
 /// nav-pane entry, Status column, or overlays pointing at a folder the user is
-/// no longer signed into. Best-effort: a failure (including "not registered")
-/// is returned for the caller to log-and-continue and must never break the
-/// sign-out flow.
+/// no longer signed into. Sign-out propagates failures and verifies absence;
+/// an already-absent registration is an idempotent success.
 ///
 /// The Id is reconstructed from the sync-root path via the same stable
 /// [`shell_sync_root_id`] scheme used to register, so the caller only needs the
@@ -639,13 +775,47 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
     // Inverse of `register_thumbnail_provider_for_sync_root`.
     thumbnail_provider::unregister_thumbnail_provider(&id);
 
-    StorageProviderSyncRootManager::Unregister(&id_h)
-        .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
-    tracing::info!(
-        sync_root = %sync_root.display(),
-        shell_id = %id,
-        "Explorer shell sync root unregistered"
-    );
+    let roots = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    let mut registered = false;
+    for index in 0..roots.Size()? {
+        if roots.GetAt(index)?.Id()? == id_h {
+            registered = true;
+            break;
+        }
+    }
+    if registered {
+        StorageProviderSyncRootManager::Unregister(&id_h)
+            .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
+    }
+    let remaining = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    for index in 0..remaining.Size()? {
+        anyhow::ensure!(
+            remaining.GetAt(index)?.Id()? != id_h,
+            "Explorer registration remains after unregister; sign-out did not finish"
+        );
+    }
+    // WinRT removes the live registration but can leave our per-user handler
+    // key behind. Delete only this root's stable ID, then prove absence.
+    remove_owned_shell_key(&id)?;
+    tracing::info!(sync_root = %sync_root.display(), shell_id = %id, "Explorer shell sync root unregistered");
+    Ok(())
+}
+
+fn remove_owned_shell_key(id: &str) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"));
+    unsafe {
+        let result = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
+        anyhow::ensure!(result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND,
+            "Could not remove owned Explorer registry key: {result:?}");
+        let mut handle = HKEY::default();
+        let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
+        if remaining == ERROR_SUCCESS { let _ = RegCloseKey(handle); }
+        anyhow::ensure!(remaining == ERROR_FILE_NOT_FOUND || remaining == ERROR_PATH_NOT_FOUND,
+            "Could not verify owned Explorer registry key removal: {remaining:?}");
+    }
     Ok(())
 }
 
@@ -690,6 +860,9 @@ static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
 /// the flyout, and hydration are unaffected.
 pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
     if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
+        if let Err(error) = thumbnail_provider::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
         return;
     }
     let shell_id = shell_sync_root_id(sync_root);
@@ -789,6 +962,9 @@ pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
 /// Status column, the nav-pane entry and hydration are unaffected.
 pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
     if STATUS_UI_THREAD.get().is_some() {
+        if let Err(error) = status_ui::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
         return;
     }
     let shell_id = shell_sync_root_id(sync_root);
@@ -862,7 +1038,7 @@ pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
 /// delivery. [LEAD native build: confirm the three NOTIFY callbacks actually
 /// fire on a real CfConnectSyncRoot'd root — the bindings + table shape are
 /// verified against windows-0.58, but only a native run proves delivery.]
-fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyhow::Result<CF_CONNECTION_KEY> {
     let path_wide: Vec<u16> = sync_root_path
         .to_string_lossy()
         .encode_utf16()
@@ -901,57 +1077,34 @@ fn connect_callbacks(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
 
     // SAFETY: `path_wide` and `table` are kept alive on this stack frame for
     // the duration of the call. The callback function pointers have static
-    // lifetime. We ignore the returned connection key: hydration only needs
-    // the connection key passed back inside `CF_CALLBACK_INFO`, and we keep
-    // the root connected for the whole process lifetime.
+    // lifetime. Retain the key for authoritative teardown.
     unsafe {
         CfConnectSyncRoot(
             PCWSTR(path_wide.as_ptr()),
             table.as_ptr(),
-            None,
+            Some(generation as usize as *const std::ffi::c_void),
             CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO,
         )
-        .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))
     }
-    Ok(())
 }
 
-/// **Phase 1 of activation — run EARLY in `runner::run`, BEFORE the engine
-/// writes anything into the sync root** (the `.beebeeb-sync.lock` file and the
-/// `.beebeeb/state.db` database both live inside the root).
-///
-/// This is the fix for the bootstrap-ordering deadlock: `CfRegisterSyncRoot`
-/// alone puts the folder under Cloud Files control but leaves it
-/// *disconnected*, and a registered-but-disconnected root rejects **all**
-/// writes with `0x801F0005 ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING`. If the
-/// engine tries to acquire the lock or open the state DB before the provider
-/// connects, those writes fail and `run()` bails out — so the connect step
-/// below never runs and the root is permanently non-functional. By connecting
-/// here, before the first write, the root is live and writable when the lock
-/// and DB are created.
-///
-/// Steps (no DB / bridge required — connecting only needs the registered root):
-///
-/// 1. Stash the current tokio runtime handle so the Cloud Files fetch callback
-///    (which fires on an OS filter-driver thread with no runtime attached) can
-///    `block_on` the async hydration. `run` calls this on a tokio worker, so
-///    `Handle::current()` is valid here. Idempotent.
-/// 2. Register the sync root with Windows ([`register_sync_root`]).
-///    Re-registering the same path is a no-op at the OS layer (and
-///    `install_windows_shell_integration` already registered it during
-///    onboarding — this makes the engine path self-contained for re-logins).
-/// 3. Connect the in-process fetch callback table via `CfConnectSyncRoot`,
-///    exactly once per process (guarded by the `CONNECTED` OnceLock — Windows
-///    rejects a second connect on an already-connected root).
-///
-/// The fetch callback reaches the bridge through the `BRIDGE` OnceLock, which
-/// is set later in [`seed_placeholders`]. That ordering is safe: no
-/// placeholders exist yet (they are minted in `seed_placeholders`), so Windows
-/// has nothing to fetch and the callback cannot fire before the bridge is set.
-///
-/// All failures are logged rather than propagated: a Cloud Files hiccup must
-/// not take down the sync loop, which still works headlessly.
+/// Connect once per runner generation. Existing placeholders may call us before
+/// the bridge is installed; those requests fail promptly until activation.
 pub fn connect_root(sync_root: &std::path::Path) {
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    let mut connection = CONNECTION.lock().unwrap();
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    if let Some(current) = connection.as_ref() {
+        if current.root != sync_root {
+            tracing::error!("old Cloud Files root still connected");
+        }
+        return;
+    }
     // Stash the current tokio runtime handle so the Cloud Files fetch
     // callback (which fires on an OS filter-driver thread with no runtime
     // attached) can `block_on` the async hydration. This runs on a tokio
@@ -961,7 +1114,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // Stash the sync-root path so the fetch callback can reconstruct an on-disk
     // placeholder path from a state-DB relative path when `CF_CALLBACK_INFO`'s
     // `NormalizedPath` is unavailable (task 0783 resolve-or-error fallback).
-    let _ = SYNC_ROOT.set(sync_root.to_path_buf());
+    *SYNC_ROOT.write().unwrap() = Some(sync_root.to_path_buf());
 
     if let Err(e) = register_sync_root(sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
@@ -997,20 +1150,17 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // Idempotent across re-logins; failures are logged inside the thread.
     register_thumbnail_provider_for_sync_root(sync_root);
 
-    // Connect the in-process fetch callback exactly once per process. Without
-    // this, Windows shows placeholders but never asks us to hydrate them — and,
-    // critically, the root stays DISCONNECTED and rejects the engine's lock +
-    // state.db writes with ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING.
-    if CONNECTED.get().is_none() {
-        match connect_callbacks(sync_root) {
-            Ok(()) => {
-                let _ = CONNECTED.set(());
-                tracing::info!("Cloud Files callbacks connected");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled");
-            }
+    let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match connect_callbacks(sync_root, generation) {
+        Ok(key) => {
+            *connection = Some(Connection {
+                key,
+                generation,
+                root: sync_root.to_path_buf(),
+            });
+            tracing::info!(generation, "Cloud Files callbacks connected");
         }
+        Err(e) => tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled"),
     }
 }
 
@@ -1033,12 +1183,9 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
 
-    let created = populate_placeholders(&bridge, sync_root);
-    tracing::info!(
-        placeholders = created,
-        sync_root = %sync_root.display(),
-        "Cloud Files placeholders seeded"
-    );
+    let created = populate_placeholders(bridge.db(), sync_root).created;
+    // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
+    tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
 
 /// Re-run placeholder population from the current DB so cloud-only rows
@@ -1055,8 +1202,8 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
 /// currently in `CloudOnly` status and skips any with an empty `path` (so a
 /// row whose name hasn't decrypted yet is simply retried next tick once the
 /// path is populated). `create_placeholder` maps the steady-state
-/// `ERROR_ALREADY_EXISTS` to `Ok`, so re-creating an existing placeholder is a
-/// no-op rather than an error — calling this every tick is safe.
+/// `ERROR_ALREADY_EXISTS` to `Ok(false)`, so re-creating an existing placeholder
+/// is a no-op rather than an error — calling this every tick is safe.
 ///
 /// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
 /// the runner only calls this on ticks that run after the bridge is built, so
@@ -1066,19 +1213,21 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
         return;
     };
-    let ensured = populate_placeholders(&bridge, sync_root);
-    if ensured > 0 {
-        // `ensured` counts every cloud-only row whose placeholder is now present,
-        // INCLUDING ones that already existed (re-creating an existing placeholder
-        // maps ERROR_ALREADY_EXISTS → Ok). So this is "placeholders present after
-        // refresh", not "newly added rows" — keep the wording neutral so a
-        // steady-state tick doesn't read as if new files appeared every time.
-        tracing::debug!(
-            placeholders = ensured,
-            sync_root = %sync_root.display(),
-            "Cloud Files placeholders refreshed"
-        );
-    }
+    // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
+    // Counts and milliseconds only, never a path.
+    let s = populate_placeholders(bridge.db(), sync_root);
+    tracing::debug!(
+        rows = s.rows,
+        skipped = s.skipped,
+        ensure_dir_errors = s.ensure_dir_errors,
+        create_calls = s.create_calls,
+        created = s.created,
+        already_existed = s.already_existed,
+        create_errors = s.create_errors,
+        db_ms = s.db_ms,
+        elapsed_ms = s.elapsed_ms,
+        "placeholder refresh"
+    );
 }
 
 /// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
@@ -1104,78 +1253,72 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 /// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
 /// are never overridden — `decode_os_state` returns `None` for them.
 ///
+/// ## Task 2240 slice 2: one listing per folder, and confirm before write
+///
+/// Each file row's attribute word comes from one listing of its parent folder, not one
+/// `GetFileAttributesW` per file (1.45–1.95 s of kernel time per tick on 37k files). A row whose
+/// listing word asks for a change is read again directly, and only that direct word decides what is
+/// written, so a listing that shows a change late (a handle still open) delays a detection but never
+/// writes a wrong pin or status. The decision lives in [`crate::os_state_reconcile`].
+///
 /// ## Zero-knowledge
 ///
-/// Never logs a path or filename — only the aggregate update count.
+/// Never logs a path or filename — only counts and milliseconds.
 #[cfg(target_os = "windows")]
 pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
-    use crate::state_db::{decode_os_state, FileStatus, PinState};
-
     let Some(bridge) = bridge() else {
         tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
         return;
     };
+    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
+}
+
+/// Where the next tick's sentinel window starts (spec D4). Only the sync tick touches it.
+#[cfg(target_os = "windows")]
+static RECONCILE_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`reconcile_placeholder_state`] against `db` instead of the bridge's, so the native tests run it on
+/// a scratch root. Writes the deltas, logs one counts line, and returns what it decided.
+#[cfg(target_os = "windows")]
+pub(crate) fn reconcile_placeholder_state_with(
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    cursor: &std::sync::atomic::AtomicUsize,
+) -> crate::os_state_reconcile::ReconcilePlan {
+    use std::sync::atomic::Ordering;
+    let started = std::time::Instant::now();
 
     // `file_overview_rows` pairs each row with its EFFECTIVE-pinned flag, computed
     // with the same predicate the in-app "Files" tab uses — exactly the current
     // pin truth we must diff the OS-reported pin against.
-    let rows = match bridge.db().file_overview_rows() {
+    let rows = match db.file_overview_rows() {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "reconcile_placeholder_state: could not list files");
-            return;
+            return crate::os_state_reconcile::ReconcilePlan {
+                deltas: Vec::new(),
+                counts: Default::default(),
+                next_cursor: cursor.load(Ordering::Relaxed),
+            };
         }
     };
+    let db_ms = started.elapsed().as_millis() as u64;
 
-    let mut deltas: Vec<(String, Option<FileStatus>, Option<PinState>)> = Vec::new();
-    for (entry, pinned) in rows {
-        // Directory placeholders carry their own pin/hydration semantics handled
-        // by the engine's recursive pin path; reconcile only leaf files, the same
-        // surface `populate_placeholders` mints file placeholders for.
-        if entry.is_dir() {
-            continue;
-        }
-
-        // Map the server-relative '/'-joined key to the on-disk placeholder path
-        // the SAME way `populate_placeholders` does.
-        let rel = entry.path.trim_matches('/');
-        if rel.is_empty() {
-            continue;
-        }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-        let Some(attrs) = placeholders::read_os_placeholder_state(&local_path) else {
-            // Placeholder gone / unreadable this tick — skip; a later tick retries.
-            continue;
-        };
-
-        let (desired_status, desired_pin) = decode_os_state(attrs, entry.status.clone());
-
-        // Status delta: only when decode produced a candidate that differs.
-        let status_delta = match desired_status {
-            Some(s) if s != entry.status => Some(s),
-            _ => None,
-        };
-
-        // Pin delta: decode reports the EXPLICIT per-file pin the OS carries
-        // (Pinned/Unpinned) or None. Compare its boolean meaning to the row's
-        // current effective-pinned flag so we don't churn on equivalent states.
-        let pin_delta = match desired_pin {
-            Some(PinState::Pinned) if !pinned => Some(PinState::Pinned),
-            Some(PinState::Unpinned) if pinned => Some(PinState::Unpinned),
-            _ => None,
-        };
-
-        if status_delta.is_some() || pin_delta.is_some() {
-            deltas.push((entry.file_id, status_delta, pin_delta));
-        }
-    }
+    // Relative '/'-joined keys map onto the sync root the SAME way `populate_placeholders` does.
+    let native = |rel: &str| sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let plan = crate::os_state_reconcile::plan_reconcile(
+        rows,
+        cursor.load(Ordering::Relaxed),
+        |parent| placeholders::list_dir_attributes(&native(parent)),
+        |rel| placeholders::read_os_placeholder_state(&native(rel)),
+    );
+    cursor.store(plan.next_cursor, Ordering::Relaxed);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    match bridge.db().reconcile_os_state(&deltas, now) {
+    match db.reconcile_os_state(&plan.deltas, now) {
         Ok(updated) => {
             if updated > 0 {
                 // Zero-knowledge: count only, never a path.
@@ -1186,6 +1329,35 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
             tracing::warn!(error = %e, "reconcile_os_state failed");
         }
     }
+
+    // Spec D5: one counts line per tick; a warn when the listing was seen lagging.
+    let c = plan.counts;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    macro_rules! reconcile_line {
+        ($level:ident) => {
+            tracing::$level!(
+                rows = c.rows,
+                dirs_listed = c.dirs_listed,
+                listing_hits = c.listing_hits,
+                fallbacks = c.fallbacks,
+                list_errors = c.list_errors,
+                candidates = c.candidates,
+                confirmed = c.confirmed,
+                stale_candidates = c.stale_candidates,
+                sentinel_checked = c.sentinel_checked,
+                sentinel_mismatches = c.sentinel_mismatches,
+                db_ms,
+                elapsed_ms,
+                "reconcile"
+            )
+        };
+    }
+    if c.sentinel_mismatches > 0 || c.stale_candidates > 0 {
+        reconcile_line!(warn);
+    } else {
+        reconcile_line!(debug);
+    }
+    plan
 }
 
 /// Maximum number of `CfSetInSyncState` calls issued in a single
@@ -1197,34 +1369,139 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
 /// in-sync placeholder is a Windows no-op).
 const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
 
-/// Stamp every DB-`Local` file whose on-disk Cloud Files placeholder is NOT
-/// yet marked in-sync, so Explorer shows the green ✓ overlay for those files.
+#[cfg(target_os = "windows")]
+/// Task 2191 (D2, D9): at engine start, every file of unknown content (synced before task 1640)
+/// whose placeholder holds bytes and reads in sync is marked NOT in sync, so neither this app,
+/// Explorer nor Storage Sense frees it. No network. Counts only.
+///
+/// Desktop 0.8.15: this pass runs beside the engine (`runner::spawn_startup_guard`), as pass
+/// `generation` of [`crate::unknown_check::STARTUP_GUARD`]: it reports its progress there (and in
+/// an info line every [`crate::unknown_check::GUARD_PROGRESS_EVERY`] rows), stops between rows
+/// when the engine stops, and only a pass that walked every row lets freeing work run.
+pub fn guard_unknown_placeholders(sync_root: &std::path::Path, generation: u64) {
+    use crate::unknown_check::{GuardControl, STARTUP_GUARD, guard_progress_due};
+    let Some(bridge) = bridge() else {
+        STARTUP_GUARD.abandon(generation);
+        tracing::warn!("guard: the engine stopped before the start-up pass began");
+        return;
+    };
+    let rows = match bridge.db().list_guarded() {
+        Ok(rows) => rows,
+        Err(e) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: could not list the files of unknown content; freeing stays held");
+            return;
+        }
+    };
+    let total = rows.len();
+    STARTUP_GUARD.set_total(generation, total as u64);
+    tracing::info!(guarded = total, "guard: start-up pass began");
+    let started = std::time::Instant::now();
+    // A lock or a sign-out waits at most 3 s for this lease (`revoke_callbacks`): stop between rows.
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
+    let mut progress = |done: usize| {
+        STARTUP_GUARD.advance(generation, done as u64);
+        if guard_progress_due(done, total) {
+            tracing::info!(done, total, elapsed_secs = started.elapsed().as_secs(), "guard: progress");
+        }
+    };
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    let mut control = GuardControl { stop: &stop, progress: &mut progress };
+    match crate::unknown_check::guard_rows(bridge.db(), sync_root, &rows, &placeholders::platform_view, &mut mark, &mut control) {
+        Ok(summary) if !summary.stopped => {
+            STARTUP_GUARD.finish(generation);
+            tracing::info!(
+                guarded = total,
+                marked = summary.marked,
+                emptied = summary.emptied,
+                mark_failed = summary.mark_failed,
+                elapsed_secs = started.elapsed().as_secs(),
+                "guard: files of unknown content kept from being freed"
+            );
+        }
+        Ok(summary) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::info!(walked = summary.walked, guarded = total, "guard: the start-up pass stopped with the engine");
+        }
+        Err(e) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: the start-up pass stopped; freeing stays held");
+        }
+    }
+}
+
+/// Task 2191 (D2, D12): every tick, the marks still to be made (a failed one, a row that joined
+/// the guarded set, a placeholder left at another path). No network. Counts only. Desktop
+/// 0.8.15: skipped while the start-up pass walks the rows (it covers them; two walkers would
+/// open every placeholder twice), and stopped between rows when the engine stops.
+pub fn retry_pending_marks(sync_root: &std::path::Path) {
+    if crate::unknown_check::STARTUP_GUARD.is_running() {
+        return;
+    }
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    match crate::unknown_check::retry_marks(bridge.db(), sync_root, &placeholders::platform_view, &mut mark, &stop) {
+        Ok(0) => {}
+        Ok(marked) => tracing::info!(marked, "guard: pending marks made"),
+        Err(e) => tracing::warn!(error = %e, "guard: the retry stopped"),
+    }
+}
+
+/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
+/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
+pub fn retry_kept_originals(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry_trusting);
+}
+
+/// Task 1640 (review P2-5): a file's size and modification time.
+#[cfg(target_os = "windows")]
+fn file_fingerprint(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Task 1640 (review P2-5): the files the stamp pass found or marked in sync, by their
+/// fingerprint then: unchanged since, they are not opened again.
+#[cfg(target_os = "windows")]
+fn in_sync_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>> {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// Mark in sync, in Explorer's terms, the `Local` files whose bytes are the content this device
+/// agreed with the server on, so Explorer shows the synced overlay.
 ///
 /// ## Why this is needed
 ///
-/// `CfSetInSyncState(IN_SYNC)` currently fires only from `fetch_data_callback`
-/// when a single FETCH_DATA request covers the WHOLE file
-/// (`required_offset == 0 && required_length >= file_size`). Under
-/// `CF_HYDRATION_POLICY_PARTIAL` that condition rarely holds — Windows often
-/// issues partial-range requests — so files that ARE fully local (status=Local
-/// in the DB) may never receive the ✓ overlay. Additionally, the upload path
-/// (`upload_version` / modify) transitions the DB row to `Local` but does not
-/// call `CfSetInSyncState`, so freshly-uploaded files also miss the overlay.
+/// `CfSetInSyncState(IN_SYNC)` fires from `fetch_data_callback` only when one FETCH_DATA request
+/// covers the WHOLE file, which under `CF_HYDRATION_POLICY_PARTIAL` rarely holds, and a landing
+/// marks only a create. So a file can be fully local and agreed yet out of sync.
 ///
-/// This pass drives the built-in CF overlay from DB truth: if a row is `Local`
-/// the file IS fully synced, so we stamp it in-sync regardless of how it got
-/// there. `CfSetInSyncState` on an already-in-sync placeholder is a documented
-/// Windows no-op, making the pass idempotent and safe to run every tick.
+/// ## Task 1640: only agreed bytes
 ///
-/// ## Zero-knowledge
-///
-/// Never logs a path or filename — only aggregate counts. Paths may appear at
-/// `debug` level (matching the `mark_in_sync` sibling in `callbacks.rs`).
+/// Before task 1640 this pass marked EVERY `Local` row in sync on every tick, unsent edits
+/// included, which let "Free up space" discard them. Now a file is marked only when
+/// [`placeholders::stamp_if_agreed`] finds its bytes equal to the agreed content, under one
+/// exclusive handle across the hash and the mark. An edit (the platform cleared its in-sync
+/// state), a queued upload, or a file with no agreed content recorded stays out of sync.
 ///
 /// ## Bounded
 ///
-/// At most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files are stamped per call. Any
-/// remaining Local files are stamped on subsequent ticks.
+/// Candidates come from `list_stamp_candidates` (agreed content recorded, no upload queued),
+/// filtered before the cap. A file found in sync whose size and modification time have not
+/// changed is skipped without opening it; at most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files that need
+/// work are handled per pass.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only aggregate counts.
 #[cfg(target_os = "windows")]
 pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     // All CF symbols (CfOpenFileWithOplock, CfSetInSyncState, CfCloseHandle,
@@ -1239,81 +1516,88 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
         return;
     };
 
-    let entries = match bridge.db().list_by_status(crate::state_db::FileStatus::Local) {
-        Ok(entries) => entries,
+    // Task 1640 (review P2-5): only rows that may be marked (agreed content recorded, no upload
+    // queued) are candidates, filtered before the cap; the cap bounds the work per pass.
+    let candidates = match bridge.db().list_stamp_candidates() {
+        Ok(candidates) => candidates,
         Err(e) => {
-            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list Local files");
+            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list candidates");
             return;
         }
     };
 
     let mut stamped: usize = 0;
     let mut errors: usize = 0;
+    let mut checked: usize = 0;
 
-    for entry in entries.iter().take(MAX_IN_SYNC_STAMPS_PER_PASS) {
-        // Directory placeholders are managed separately (pin/hydration semantics
-        // for folders differ); stamp only leaf files, consistent with how
-        // `populate_placeholders` mints file placeholders.
-        if entry.is_dir() {
-            continue;
+    for (file_id, path) in &candidates {
+        if checked >= MAX_IN_SYNC_STAMPS_PER_PASS {
+            break;
         }
-
         // Map the server-relative '/'-joined path onto the on-disk placeholder
         // path — the same safe-join that `populate_placeholders` and
         // `reconcile_placeholder_state` use.
-        let rel = entry.path.trim_matches('/');
+        let rel = path.trim_matches('/');
         if rel.is_empty() {
             continue;
         }
         let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-
         // Skip placeholders that don't exist on disk yet. They will be
         // minted by `refresh_placeholders` (which runs before this pass) and
         // will be stamped on the next tick once they appear.
-        if !local_path.exists() {
+        let Some(fingerprint) = file_fingerprint(&local_path) else {
+            continue;
+        };
+        // A file found in sync whose size and modification time have not changed since is
+        // skipped without opening it: only files that need work count toward the cap.
+        if in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).get(file_id) == Some(&fingerprint) {
             continue;
         }
-
-        // Build the NUL-terminated UTF-16 path string that `CfOpenFileWithOplock`
-        // expects — identical to `db_placeholder_path` in callbacks.rs.
-        let path_wide: Vec<u16> = local_path
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0u16))
-            .collect();
-
-        // Mirror the `mark_in_sync` pattern from callbacks.rs exactly:
-        //   CfOpenFileWithOplock → CfSetInSyncState(IN_SYNC) → CfCloseHandle.
-        // Handle is ALWAYS closed before the next iteration — via the Ok and
-        // Err branches — so there is no handle leak on error.
-        //
-        // SAFETY: `path_wide` is a NUL-terminated wide string kept alive for
-        // the duration of the unsafe block. The CF handle returned by
-        // CfOpenFileWithOplock is closed by CfCloseHandle before return.
-        // CfSetInSyncState on an already-in-sync placeholder is a no-op.
-        let handle = match unsafe {
-            CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE)
-        } {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::debug!(error = %e, "stamp_local_files_in_sync: CfOpenFileWithOplock failed");
-                errors += 1;
+        if placeholders::placeholder_in_sync(&local_path) == Some(true) {
+            // Task 1640 (review N1): a file range fetches brought in, now whole and in sync, gets
+            // its candidate as the agreed content. Until then it is not "seen": a fetch that
+            // completes it may leave its size and time as they were.
+            let has_baseline = bridge
+                .db()
+                .get_file_contract_state(file_id)
+                .ok()
+                .flatten()
+                .is_some_and(|contract| contract.local_hash.is_some());
+            if has_baseline {
+                in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
                 continue;
             }
-        };
-
-        if let Err(e) = unsafe {
-            CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)
-        } {
-            tracing::debug!(error = %e, "stamp_local_files_in_sync: CfSetInSyncState failed");
-            errors += 1;
-        } else {
-            stamped += 1;
+            checked += 1;
+            match placeholders::promote_fetched_content(bridge.db(), file_id, &local_path) {
+                Ok(true) => {
+                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "stamp_local_files_in_sync: promotion failed");
+                    errors += 1;
+                }
+            }
+            continue;
         }
-
-        // Close the handle on ALL paths (including the CfSetInSyncState error
-        // branch above — the handle is still open and must be released).
-        unsafe { CfCloseHandle(handle) };
+        checked += 1;
+        // Task 1640: only agreed content is marked in sync, under one exclusive handle (P2-4).
+        // An edit the person made (the platform cleared its in-sync state), or a file whose
+        // upload is queued, stays out of sync, so neither this engine nor Explorer's "Free up
+        // space" can discard its bytes. Before, every `Local` row was stamped on every tick.
+        match placeholders::stamp_if_agreed(bridge.db(), file_id, &local_path) {
+            Ok(true) => {
+                stamped += 1;
+                if let Some(after) = file_fingerprint(&local_path) {
+                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), after);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "stamp_local_files_in_sync: stamp failed");
+                errors += 1;
+            }
+        }
     }
 
     if stamped > 0 || errors > 0 {
@@ -1322,23 +1606,42 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     }
 }
 
+/// What one [`populate_placeholders`] pass did (task 2240 slice 2, spec D6: measured, not changed). Counts and
+/// milliseconds only, never a path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PopulateStats {
+    pub rows: usize,
+    pub skipped: usize,
+    pub ensure_dir_errors: usize,
+    pub create_calls: usize,
+    pub created: usize,
+    pub already_existed: usize,
+    pub create_errors: usize,
+    pub db_ms: u64,
+    pub elapsed_ms: u64,
+}
+
 /// Walk the engine bridge's DB file list and drop a cloud-only placeholder
-/// into Explorer for every file currently marked `CloudOnly`. Returns the
-/// number of placeholders successfully created (already-existing ones are
-/// counted as created since the end state is identical).
+/// into Explorer for every file currently marked `CloudOnly`. Returns what it
+/// did; `created` is the number of placeholders created now (task 1640: an
+/// already-existing one is no error, but is not counted as created).
 ///
 /// The placeholder is created under `sync_root joined with the file's
 /// parent directory` — we mint the parent path from the stored relative
 /// path and ensure it exists first, so nested cloud files land in the right
 /// Explorer subfolder.
-fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> usize {
-    let mut entries = match bridge.db().list_by_status(crate::state_db::FileStatus::CloudOnly) {
+fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::Path) -> PopulateStats {
+    let started = std::time::Instant::now();
+    let mut stats = PopulateStats::default();
+    let mut entries = match db.list_by_status(crate::state_db::FileStatus::CloudOnly) {
         Ok(entries) => entries,
         Err(e) => {
             tracing::warn!(error = %e, "could not list cloud-only files for placeholder seeding");
-            return 0;
+            return stats;
         }
     };
+    stats.db_ms = started.elapsed().as_millis() as u64;
+    stats.rows = entries.len();
 
     // PARENTS-BEFORE-CHILDREN. A nested file's placeholder must land INSIDE its
     // parent directory's placeholder, and a directory placeholder must exist
@@ -1356,13 +1659,13 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
     // directory placeholder was wanted. Depth-ordering avoids that race.
     entries.sort_by_key(|e| e.path.trim_matches('/').split('/').count());
 
-    let mut created = 0usize;
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
         // leading slash. Map onto the local sync root with native
         // separators.
         let rel = entry.path.trim_matches('/');
         if rel.is_empty() {
+            stats.skipped += 1;
             continue;
         }
         let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -1372,6 +1675,7 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
                 // Zero-knowledge: log the file_id only, never the decrypted
                 // plaintext path/name.
                 tracing::warn!(file_id = %entry.file_id, "skipping placeholder for path with no file name");
+                stats.skipped += 1;
                 continue;
             }
         };
@@ -1386,9 +1690,11 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             // relative path, so it can carry plaintext folder names — log the
             // file_id only, not the path.
             tracing::warn!(error = %e, file_id = %entry.file_id, "could not create placeholder parent dir");
+            stats.ensure_dir_errors += 1;
             continue;
         }
 
+        stats.create_calls += 1;
         match placeholders::create_placeholder(
             &parent_dir,
             &entry.file_id,
@@ -1397,8 +1703,20 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             entry.modified_at,
             entry.is_dir(),
         ) {
-            Ok(()) => created += 1,
+            Ok(true) => {
+                stats.created += 1;
+                // Task 1640 (review F1): created where nothing was, so no fetched bytes are on
+                // disk: a first fetch starts the file's candidate. Only a row never fetched into
+                // is marked (a fetch on the new placeholder records first), so none is forgotten.
+                if !entry.is_dir() {
+                    if let Err(e) = db.mark_no_fetched_content(&entry.file_id) {
+                        tracing::debug!(error = %e, file_id = %entry.file_id, "could not mark the new placeholder empty");
+                    }
+                }
+            }
+            Ok(false) => stats.already_existed += 1,
             Err(e) => {
+                stats.create_errors += 1;
                 // Zero-knowledge: log the file_id only — never the decrypted
                 // plaintext filename.
                 tracing::warn!(
@@ -1409,5 +1727,8 @@ fn populate_placeholders(bridge: &EngineBridge, sync_root: &std::path::Path) -> 
             }
         }
     }
-    created
+    stats.elapsed_ms = started.elapsed().as_millis() as u64;
+    stats
 }
+
+pub(crate) mod upload_finalization;

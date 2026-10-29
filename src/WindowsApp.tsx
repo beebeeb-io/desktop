@@ -6,24 +6,18 @@
  * the onboarding "Open control center" button both route here, and it's the
  * window shown automatically on launch once the PC is configured.
  *
- * This is the SHELL: a left sidebar (brand mark + nav groups + a live storage
- * widget) and a content area with a state-based router. It hosts the data-backed views that
- * later packages will fill — TODAY most views are honest placeholders / skeleton
- * slots. What IS finished here: the window, nav + active states, routing,
- * responsive content area, the auth gate, loading/skeleton scaffolding, and the
- * live storage widget (wired to account_usage with a desktop_storage_summary
- * fallback).
- *
- * Data wrappers for the 15 account/billing/devices/activity IPCs live in
- * desktopApi.ts (accountProfile, accountUsage, …). The placeholder views below
- * call almost none of them yet — that's the next packages' job. Each slot is
- * marked with a `DATA SLOT:` note naming the wrapper(s) it should consume.
+ * Correction (2026-09-29, task 1611): the earlier header described these
+ * views as placeholders. All eleven validated nav IDs now have concrete
+ * views. See docs/CAPABILITIES.md for per-action backend reachability and
+ * native verification gaps; source wiring is not a native pass.
  *
  * Design tokens + idioms are shared through `src/windows/ui.tsx`. Brand: amber
  * for encryption state + the active nav icon accent only; Inter for humans,
- * JetBrains Mono for ids/sizes; name the city only ("Falkenstein"), never the
+ * JetBrains Mono for ids/sizes; use the effective continent in product copy, never the
  * storage provider; honest voice; no emojis.
  */
+
+import { useRegionLabel } from './windows/useRegion'
 
 import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -45,6 +39,7 @@ import {
   setKnownFolderBackup,
   type KnownFolderStatus,
   type BillingUsage,
+  type DesktopConfig,
   type StorageSummary,
   type SyncStatus,
   type AccountProfile,
@@ -55,6 +50,7 @@ import {
   type StatusBucket,
   type RecentFile,
 } from './desktopApi'
+import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
 import UpdateBanner from './UpdateBanner'
 import AuthExpiredBanner from './AuthExpiredBanner'
 import DesktopQuickSearch, { DesktopQuickSearchTrigger } from './DesktopQuickSearch'
@@ -69,8 +65,11 @@ import DevicesView from './windows/views/DevicesView'
 import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
-import { useRegionLabel } from './windows/useRegion'
 import { usePlatformName, thisDeviceNoun } from './platform'
+import { finderOpenFailedToast } from './finderSetup'
+import { useSyncActivitySummary } from './windows/syncActivityUi'
+import { pollWhileVisible } from './windows/visiblePoll'
+import { homeSyncMetrics } from './windows/homeSyncMetrics'
 
 // ── Nav structure ───────────────────────────────────────────────────────────
 
@@ -203,12 +202,13 @@ function PlaceholderBody({ note, dataSlot, rows = 3 }: { note: string; dataSlot:
 // ── Signed-out gate ─────────────────────────────────────────────────────────
 
 function SignedOutGate({ onOpenSignIn }: { onOpenSignIn: () => void }) {
+  const regionLabel = useRegionLabel()
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, padding: '28px 36px', gap: 10 }}>
       <NavIcon name="lock" size={26} color={T.ink3} />
       <div style={{ fontSize: 16, fontWeight: 600, color: T.ink, marginTop: 6 }}>Sign in to Beebeeb</div>
       <div style={{ fontSize: 12, color: T.ink3, textAlign: 'center' as const, lineHeight: 1.6, maxWidth: 320 }}>
-        Your files are encrypted on this PC before they leave for Falkenstein. Sign in to see your vault, devices, and account.
+        Your files are encrypted on this PC before they leave. {regionLabel}. Sign in to see your vault, devices, and account.
       </div>
       <div style={{ marginTop: 8 }}>
         <PrimaryBtn onClick={onOpenSignIn}>Sign in</PrimaryBtn>
@@ -268,19 +268,24 @@ function homeHumanizeType(type: string): string {
 // account body shows a calm signed-out prompt.
 function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage: BillingUsage | null; storage: StorageSummary | null }) {
   const platform = usePlatformName()
-  const stateLabel =
-    status == null ? '…'
-    : !status.logged_in ? 'Signed out'
-    : status.engine === 'running' ? (status.syncing > 0 ? 'Syncing' : 'Up to date')
-    : 'Paused'
+  // What sync is doing (0.8.15): the model Settings › Sync and the tray render, so Home never says "Up to date" over
+  // held changes. Before this the strip read `status` alone and showed "Up to date · Syncing 0" next to 2,967 unsent
+  // changes. The saved pause setting is the model's fallback only while the summary cannot be read (as in Settings).
+  const { summary } = useSyncActivitySummary()
+  const [pausedFallback, setPausedFallback] = useState<boolean | undefined>(undefined)
+  useEffect(() => {
+    let cancelled = false
+    void command<DesktopConfig | null>('desktop_config').then((result) => {
+      if (!cancelled && result.ok && result.value != null) setPausedFallback(result.value.pause_sync)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   const usedBytes = usage?.used_bytes ?? storage?.used_bytes ?? null
   const quotaBytes = usage?.quota_bytes ?? storage?.quota_bytes ?? null
 
   const metrics: Array<{ k: string; v: string }> = [
-    { k: 'State', v: stateLabel },
-    { k: 'Syncing', v: status ? String(status.syncing) : '…' },
-    { k: 'Conflicts', v: status ? String(status.conflicts) : '…' },
+    ...homeSyncMetrics(status, summary, { device: thisDeviceNoun(platform), pausedFallback }),
     { k: 'In vault', v: usedBytes != null ? formatBytes(usedBytes) : '…' },
   ]
 
@@ -509,6 +514,14 @@ function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage
             <div style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink }}>{v}</div>
           </div>
         ))}
+        {/* Must-render row 10 (lead ruling FT-row10): why sync did not start, when the engine start
+            was refused (on Windows: another account's local files on this PC). Rust's sentence,
+            verbatim, and no action. */}
+        {status?.engine_refusal && (
+          <div role="status" data-engine-refusal={status.engine_refusal.code} style={{ gridColumn: '1 / -1', fontSize: 12.5, lineHeight: 1.5, color: T.ink }}>
+            {status.engine_refusal.sentence}
+          </div>
+        )}
       </div>
 
       {/* Storage line (live when available) */}
@@ -623,29 +636,39 @@ function StatusPill({ status }: { status: string }) {
 
 // ── Sub-card: Open-in-Explorer (kept from the previous FilesView) ─────────────
 
-function SyncFolderCard() {
-  const [root, setRoot] = useState<string | null>(null)
+function SyncFolderCard({ status: polledStatus }: { status: SyncStatus | null }) {
+  const [status, setStatus] = useState(polledStatus)
+  useEffect(() => setStatus(polledStatus), [polledStatus])
+  const root = status?.sync_root ?? null
+  const isMacos = usePlatformName() === 'macos'
   const [opening, setOpening] = useState(false)
   const { showToast } = useToast()
 
-  useEffect(() => {
-    let cancelled = false
-    command<string | null>('default_sync_root').then((r) => {
-      if (!cancelled && r.ok) setRoot(r.value)
-    })
-    return () => { cancelled = true }
-  }, [])
-
   const openInExplorer = async () => {
     setOpening(true)
-    const r = await command<void>('open_finder_location', { path: root })
+    // The last poll may predate a root change or removal.
+    const current = isMacos ? null : await loadSyncStatus()
+    if (!isMacos) {
+      setStatus(current)
+      if (!current?.sync_root) {
+        setOpening(false)
+        return
+      }
+    }
+    const r = await command<void>('open_finder_location', isMacos ? undefined : { path: current!.sync_root })
     setOpening(false)
     if (!r.ok) {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open folder',
-        message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
-      })
+      // A Mac's error is a redacted bridge code, never shown: the toast is the one sentence
+      // (task 17b). Windows/Linux keep the error text, which names a folder.
+      showToast(
+        isMacos
+          ? finderOpenFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open folder',
+              message: r.unsupported ? commandUnavailableLabel('open_finder_location') : r.reason,
+            },
+      )
     }
   }
 
@@ -657,12 +680,12 @@ function SyncFolderCard() {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 2 }}>Beebeeb sync folder</div>
-          <div style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
-            {root ?? 'Not configured on this PC yet'}
+          <div title={root ?? undefined} style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+            {status == null ? 'Sync folder unavailable' : isMacos ? 'Beebeeb in Finder' : root ?? 'Not configured on this PC yet'}
           </div>
         </div>
-        <PrimaryBtn onClick={() => void openInExplorer()} disabled={opening || root == null}>
-          <NavIcon name="external" size={13} color={T.paper} /> {opening ? 'Opening…' : 'Open in Explorer'}
+        <PrimaryBtn onClick={() => void openInExplorer()} disabled={opening || status == null || (!isMacos && root == null)}>
+          <NavIcon name="external" size={13} color={T.paper} /> {opening ? 'Opening…' : isMacos ? 'Open in Finder' : 'Open in Explorer'}
         </PrimaryBtn>
       </div>
     </Card>
@@ -908,7 +931,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
   if (err.unsupported) {
     return (
       <>
-        <SyncFolderCard />
         <Card style={{ padding: 22 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -927,7 +949,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
   }
   return (
     <>
-      <SyncFolderCard />
       <Card style={{ padding: 22 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ width: 36, height: 36, borderRadius: 9, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -951,7 +972,6 @@ function FilesErrorState({ err, onRetry }: { err: { reason: string; unsupported:
 function FilesEmptyState() {
   return (
     <>
-      <SyncFolderCard />
       <Card style={{ padding: 0 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px 36px', gap: 10 }}>
           <NavIcon name="cloud" size={26} color={T.ink4} />
@@ -1175,7 +1195,7 @@ function ManageBackupCard() {
         </div>
       ) : (
         <div>
-          {folders.map((f, i) => {
+          {folders.filter((f) => f.source_path != null).map((f, i) => {
             const isPending = pending.has(f.key)
             const status = backupStatus(f, isPending)
             const statusColor =
@@ -1235,7 +1255,7 @@ function ManageBackupCard() {
 
 // ── Root: FilesView ───────────────────────────────────────────────────────────
 
-function FilesView() {
+function FilesView({ status }: { status: SyncStatus | null }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<{ reason: string; unsupported: boolean } | null>(null)
   const [overview, setOverview] = useState<FileOverview | null>(null)
@@ -1271,13 +1291,14 @@ function FilesView() {
         subtitle="What’s synced to this PC — local vs online-only, anything pinned or in conflict, and your most recent changes. Explorer stays your file surface; this is the device view."
       />
 
+      <SyncFolderCard status={status} />
+
       {loading ? (
         <FilesLoadingState />
       ) : err ? (
         <FilesErrorState err={err} onRetry={retry} />
       ) : isEmpty ? (
         <>
-          <SyncFolderCard />
           {/* Manage backup is useful even before any files exist — it's how the
               user opts their Windows folders INTO the vault in the first place. */}
           <ManageBackupCard />
@@ -1285,7 +1306,6 @@ function FilesView() {
         </>
       ) : overview ? (
         <>
-          <SyncFolderCard />
           <ManageBackupCard />
           <FilesMetricStrip overview={overview} />
           <ByStatusBar overview={overview} />
@@ -1629,6 +1649,8 @@ function StorageWidget({ usage, storage, onUpgrade }: { usage: BillingUsage | nu
 // ── Root component ──────────────────────────────────────────────────────────
 
 export default function WindowsApp() {
+  const regionLabel = useRegionLabel()
+  const caps = useCapabilities()
   const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
@@ -1686,16 +1708,16 @@ export default function WindowsApp() {
     return () => window.removeEventListener(KF_ONBOARDING_REOPEN_EVENT, onReopen)
   }, [])
 
-  // Poll sync status (drives the auth gate + Home metrics).
+  // Poll sync status (drives the auth gate + Home metrics), while the window is on screen (task 2243: closing the
+  // window hides it, and each read opens the state DB).
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 5000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    const stop = pollWhileVisible(refresh, 5000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   const loggedIn = status?.logged_in ?? false
@@ -1767,10 +1789,11 @@ export default function WindowsApp() {
 
   const filteredSections = NAV_SECTIONS.map((section) => ({
     ...section,
-    items: section.items.filter((item) => loggedIn || ALWAYS_ACCESSIBLE.has(item.id)),
+    items: section.items.filter((item) => supportsRoute(caps, item.id) && (loggedIn || ALWAYS_ACCESSIBLE.has(item.id))),
   })).filter((section) => section.items.length > 0)
 
   const renderContent = () => {
+    if (!supportsRoute(caps, activeNav)) return <CapabilityAlternative />
     if (!loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) {
       return <SignedOutGate onOpenSignIn={openSignIn} />
     }
@@ -1778,7 +1801,7 @@ export default function WindowsApp() {
       case 'home':
         return loggedIn ? <HomeView status={status} usage={usage} storage={storage} /> : <SignedOutGate onOpenSignIn={openSignIn} />
       case 'files':
-        return <FilesView />
+        return <FilesView status={status} />
       case 'trash':
         return <TrashView />
       case 'settings':
@@ -1898,7 +1921,7 @@ export default function WindowsApp() {
             <div style={{ marginTop: 'auto', padding: '14px 12px 10px', borderTop: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 6 }}>
               <NavIcon name="shield" size={11} color={T.amberDeep} />
               <span style={{ fontSize: 10.5, fontFamily: T.fontMono, color: T.ink3, textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>
-                Falkenstein
+                {regionLabel}
               </span>
             </div>
           )}

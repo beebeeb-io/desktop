@@ -1,0 +1,71 @@
+name: Sign macOS updater artifact
+
+# macOS releases are built + Developer ID signed + notarized LOCALLY on a Mac holding the
+# keychain identity (see task 1608, docs/RELEASING.md) — CI never builds macOS because that
+# would need the Developer ID private key exported from the keychain as a .p12 CI secret,
+# which is deliberately never done. But the Tauri UPDATER package (`Beebeeb.app.tar.gz`) still
+# needs a minisign signature from TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# — the same secrets CI already uses to sign every Windows/Linux updater package — and that key
+# was rotated on 2026-09-25 (desktop PR #62) to a value that exists ONLY as this repository's CI
+# secret, not on any local machine. Rather than exporting/duplicating that secret anywhere, this
+# workflow performs the ONE step that genuinely needs it: sign an already-built, already-notarized
+# macOS updater artifact that a human has uploaded to an existing GitHub release, uploading the
+# resulting .sig back as a release asset. It builds nothing and touches no Developer ID material.
+#
+# Usage: after uploading <tag>'s Beebeeb.app.tar.gz to the release by hand, run this via
+# `gh workflow run sign-macos-updater-artifact.yml -f release_tag=desktop-vX.Y.Z`, then re-run
+# release.yml with publish_existing=true to pick up the resulting darwin-aarch64 manifest entry.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub release tag (e.g. desktop-v0.8.5) whose Beebeeb.app.tar.gz needs a minisign .sig
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    name: Sign Beebeeb.app.tar.gz
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download updater artifact from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'Beebeeb.app.tar.gz' \
+            --dir dl \
+            --clobber
+          test -f dl/Beebeeb.app.tar.gz
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Sign with the updater private key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          bunx --bun @tauri-apps/cli@2.11.4 signer sign \
+            -k "$TAURI_SIGNING_PRIVATE_KEY" \
+            -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
+            dl/Beebeeb.app.tar.gz
+          test -f dl/Beebeeb.app.tar.gz.sig
+
+      - name: Upload signature to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ inputs.release_tag }}" \
+            dl/Beebeeb.app.tar.gz.sig \
+            --repo "${{ github.repository }}" \
+            --clobber

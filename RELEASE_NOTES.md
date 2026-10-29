@@ -1,39 +1,103 @@
-# Beebeeb Desktop 0.8.4 — the auto-updater is fixed for every 0.3.0+ install
+# Beebeeb Desktop 0.8.12 — Finder saves on macOS
 
-Every desktop install running 0.3.0 or later has been unable to verify or apply any update since 0.3.0 shipped on July 25 — including 0.8.3's sync-daemon security fix. The cause: 0.3.0 baked a new updater verification key (fingerprint `C6FADFD59D732197`) into the app, but the CI pipeline that signs releases kept using the old key (`545D7BA77EDEA7E1`) for every release through 0.8.3, so no signature has matched since. The updater fails closed on a bad signature, so nothing was ever installed unverified — it just never found anything it could install either. CI's signing secret was switched to the matching key on September 25, and 0.8.4 is the first release actually signed with it. Everything below has been sitting unreachable behind that mismatch for two months; this update delivers all of it at once.
+0.8.12 lets you create and save files in Finder on macOS, and adds a sign-out
+flow for saves that are still waiting to upload. Read the Verification section
+before you rely on that sign-out flow: of the twelve planned device checks for
+it, one was run before this release.
 
 ### What's New
 
-- macOS onboarding now handles two-factor authentication during sign-in instead of silently getting stuck after the password step (task 1521).
-- macOS dark mode fixed across onboarding (wordmark, Finder-location card, primary buttons), the conflict-resolution window (previously unthemed), Notifications and Bandwidth pages, plus a new `--amber-ink` token for text on solid amber (task 1523).
-- macOS tray rebuilt: one status item instead of a possible duplicate, a template icon, and a redesigned flyout anchored under the icon (tasks 1384, 1173).
-- Every desktop→server API request, including the CLI-auth WebSocket upgrade, now identifies itself (`X-Beebeeb-Client: desktop`, `X-Beebeeb-Client-Version`) so the server can record which client wrote a given file version (task 1436).
-- Ad-hoc error alerts across Account, Notifications, Pinning and the sync-folder picker now go through the same Toast component, enforced going forward by a new lint rule that catches ad-hoc error surfaces before they ship (tasks 1318, 1319, 1323, 1325, 1328, 1329, 1330).
-- CI now builds and tests every pull request and main push on Linux, Windows and macOS, not a partial matrix.
-- macOS Account page now has a Plan & subscription panel (plan name, trial/status, quota bar, renewal date, Upgrade/Manage-plan button), and quota-blocked rows in Versions & Conflicts get an Upgrade button — previously the macOS app had no in-app path to upgrade at all (task 1546).
-- Conflict resolution now shows the actual diverging content — a real line diff for text files, real sizes for binary files — instead of hardcoded placeholder text; Keep Mine / Keep Theirs is no longer chosen blind (task 1546).
-- An expired or invalid session (401) on an upload now surfaces as a "Sign in again" action in Versions & Conflicts instead of a generic upload-failed message (task 1546).
-- macOS onboarding footer now names the city ("Falkenstein") instead of the generic "EU servers", matching the rest of the app (task 1546).
-- The compact app shell's sidebar subtitle is now platform-aware, fixing the shipped Linux build showing "macOS Drive" (task 1546).
+- **[macOS] Create and save files in Finder.** Finder writes enter a durable
+  staging queue and the desktop engine sends them to the server (PR #118).
+- **[macOS] Signing out with changes still waiting.**
+  - **Sending first.** A sign-out first tries to send waiting changes for up to
+    60 seconds, with a visible count and a "Stop waiting" button.
+  - **When it asks.** If everything is sent, it signs out without asking. If
+    changes are still waiting, it asks first.
+  - **What is kept.** On "Sign out", it copies each waiting **file save** to a
+    dated "Changes not sent" folder on this Mac, then clears the local account
+    state. Settings → Sync can show that folder or dismiss the notice.
+  - **What is dropped.** Other waiting changes (renames, moves, deletions, new
+    folders, restores) are not copied. Signing out drops them, and those items
+    stay as they are on the server. A save whose staged copy is missing cannot
+    be kept either. The question before signing out says both.
+  - **Testing.** Automated tests cover the flow. On a device, only the case
+    where everything was sent was checked (PR #130).
+- **[macOS] Finder setup.** The app adds its Finder location itself after launch
+  and sign-in, and offers a retry when that fails. The manual "Install in Finder"
+  button is gone on macOS. If a session expires and you sign in again to the same
+  account, its waiting changes and Finder location are kept. Signing in to a
+  different account goes through the account-switch step (PR #117).
+- **Storage location by country.** Settings shows the countries the server
+  returns, with their availability. Germany is the only live location today, and
+  other countries are listed as coming soon. Europe remains the default. "Only
+  store in" asks the server to keep new uploads in one country (PRs #128 and
+  #129). If the server refuses an upload under that setting, the app shows its
+  standard upload error, not a specific message.
 
 ### Bug Fixes / Hardening
 
-- **[P0] Sign-out (and account switch) now purges the local operation queue, decrypted file cache, and — on macOS — the File Provider domain.** Previously a still-queued upload from the just-signed-out account could execute after a different account signed in on the same machine, uploading the previous account's plaintext content into the new account's storage with no ownership check; and decrypted cache files left behind by the previous account were orphaned permanently on disk with no code path that could ever find or delete them (task 1538).
-- **Updater signing key now matches what every 0.3.0+ install trusts.** See the intro above — this is the fix this release exists for. Installs on 0.3.0 or later will verify and apply this update automatically; installs still older than 0.3.0 trust only the old key and cannot verify a release signed with the new one, and need a manual reinstall (see Install/Update below).
-- **Recovery-phrase unlock now verifies the phrase against the account before persisting the derived key.** Previously `desktop_unlock_with_recovery_phrase` accepted any checksum-valid 12-word phrase — a wrong phrase, or a typo that still happens to pass BIP39's checksum (roughly 1 in 16), keyed the sync engine with the wrong master key, silently making every file uploaded from that machine undecryptable everywhere else. The derived key's recovery check is now verified against the server before anything is persisted or the engine starts; a mismatch is refused with a clear error and nothing is written. 4 new tests, confirmed failing against the old behavior before the fix landed.
-- **Sync no longer drops a remote edit that lands in the same tick as a rename.** A version upload that renames and edits a file in one server-side operation stamped both resulting rows with the same wall-clock second; the edit was being skipped as "already applied" because the rename had already advanced the row's timestamp past it, leaving the file permanently on the old version on that device. Both operations are now always applied, not gated on a timestamp comparison, since each is a real change delivered once.
-- **macOS "Install Finder location" no longer times out.** The sync daemon's local IPC socket was being placed inside the sandboxed `$HOME` (`~/Library/Containers/io.beebeeb.app/...`), which both exceeded the 104-byte Unix socket path limit and was unreachable by the File Provider extension anyway. The socket now lives in the shared App Group container, and the real (non-sandboxed) home directory is resolved via `getpwuid_r` instead of the sandbox-rewritten `$HOME` wherever it's still needed.
-- **macOS IPC socket now checks the calling process's identity**, closing the last item from the sandbox-hardening work: connections are verified same-user via `getpeereid()` before any request is accepted, matching the check Linux already had.
-- **Removed the unused `set_session` IPC command** — one less way to write session state from the frontend, now that the only real caller (web's old Tauri handoff) is gone. The Windows browser-login path still uses `apply_session`.
+- **Concurrent Settings changes preserve each other.** Configuration updates now
+  serialize the read, change and write, and Settings sends only the fields that
+  changed. An older Settings snapshot can no longer overwrite a newer tray pause
+  or another preference update (PR #124; automated coverage in
+  `config_write_pin_tests` and `settingsWriteOnlyChangedFields.test.tsx`).
+- **[macOS] Open in Finder reports the actual result.** The app opens the
+  security-scoped File Provider URL through the native bridge. It reports when
+  opening fails, instead of treating a successfully spawned process as success
+  (PR #122).
+- **[macOS] Quick search shows only what Finder has.** Files shared with you are
+  not in the Finder location, so a Mac's quick search no longer lists them
+  (PR #122).
+- **[macOS] Finder removal requests preservation of unsynced files.** Removal uses
+  macOS's preserve-dirty-data mode, and shows a kept folder when that folder has
+  contents or cannot be inspected. Saves that macOS already handed to the app but
+  that are still queued are covered by the sign-out flow above (PRs #119 and #130).
 
 ### Verification
 
-- Frontend: `bunx tsc --noEmit` exit 0; `bun test` — 53 passed, 0 failed (11 files).
-- Rust: `cargo check --locked` (src-tauri, private `CARGO_TARGET_DIR`) — exit 0, 20 pre-existing dead-code warnings, no errors. This is a compile check, not the full test gate — the release workflow's own `cargo test --locked` job is the test gate for this release and has not run yet as of this writing.
-- Release-notes guard: this file names `0.8.4` verbatim (checked by inspection against `.github/workflows/release.yml`'s exact-version regex).
-- Not verified here: a real-device install/update test of an app actually crossing the key boundary (0.8.3 → 0.8.4) on Windows, Linux or macOS. This PR does not trigger the release workflow or any build; that verification happens once 0.8.4 is actually cut and an existing install is pointed at it.
-- Not resolved here, flagged for whoever cuts this release: `docs/RELEASING.md`'s own N+1 checklist calls for confirming adoption of the transition release before starting N+1, and open PR #54 on this repo documents that the public update feed is static (no version-aware serving), so an install that hasn't yet crossed the key boundary and checks for an update after 0.8.4 publishes will see the new-key manifest and reject it rather than falling back. Neither has been independently re-confirmed in this session.
+- **Product code:** desktop `680ea7ca` (PR #130 merged). The release commit adds
+  only release documentation on top of it.
+- **Frontend:** `bun test` 1163 pass / 0 fail across 69 files (in CI on
+  `680ea7ca`, and again on a Mac on 2026-10-24).
+- **Rust**, `cargo test --locked` on `680ea7ca`:
+  - **Linux (CI):** library `test result: ok. 1587 passed; 0 failed; 6 ignored`.
+    Keychain 31 passed, Windows session wiring 8 passed, Windows sign-out
+    cleanup 3 passed.
+  - **Windows (CI):** library `test result: ok. 1388 passed; 0 failed; 5 ignored`.
+    The same three integration suites: 31, 8 and 3 passed.
+  - **macOS (Apple Silicon, 2026-10-24):** library
+    `test result: ok. 1904 passed; 0 failed; 8 ignored`. The same three suites:
+    31, 8 and 3 passed.
+- **Other CI on `680ea7ca`:** the File Provider Swift build and the macOS
+  release-script test passed
+  ([run 39310409598](https://github.com/beebeeb-io/desktop/actions/runs/39310409598)).
+- **Device check of the sign-out flow** (macOS, signed debug build, local test
+  server). One of the twelve planned cases was run: signing out with the server
+  reachable while one Finder save was waiting.
+  - The app counted 1 waiting file and sent it in about 1 second.
+  - It then signed out without asking and without copying anything aside.
+  - After signing back in, the file's SHA-256 matched the original.
+- **Device cases not run before this release** (eleven, tracked for a later
+  release):
+  - server unreachable
+  - Cancel
+  - the menu shortcut
+  - a failed copy
+  - several saves of one file
+  - the 60-second limit
+  - account switch
+  - two kept folders
+  - closing Settings while sending
+  - closing Settings while asking
+  - held changes
+- **Not verified before publication:** installing 0.8.12 fresh, and updating to it
+  from 0.8.11, on physical hardware.
 
 ### Install / Update
 
-Existing desktop installs on version 0.3.0 or later receive this release through the in-app updater automatically. Installs older than 0.3.0 (which trust only the pre-rotation key) cannot verify this release and need a manual reinstall — download the latest installer from the release assets below. For a fresh Windows install, download the NSIS `setup.exe`.
+Existing desktop installs receive this release through the in-app updater. On a
+Mac, that starts once the signed and notarized Mac build has been added to this
+release, which happens after the Windows and Linux builds. For a fresh Windows
+install, download the NSIS `setup.exe`; the MSI is also available. For a fresh
+Mac install, download the `.dmg` (Apple Silicon, macOS 14 or later).

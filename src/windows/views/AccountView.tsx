@@ -4,7 +4,7 @@
  * Replaces the scaffolded `account` placeholder in WindowsApp.tsx. Two cards:
  *   1. Profile  — email + verified/unverified state, member-since, role, and a
  *                 calm warning row when the account is frozen / pending deletion.
- *   2. Plan     — plan + billing cycle + status, region (city only, e.g. Falkenstein),
+ *   2. Plan     — plan + billing cycle + status, region (continent-aware product copy),
  *                 quota usage, renewal date, and seats when a multi-seat plan.
  * plus an honest footer: password & billing are managed on the web, opened via
  * the real `openUrl` IPC — no faked in-app mutation surfaces.
@@ -16,6 +16,8 @@
  * percentages) render in JetBrains Mono; human copy in Inter.
  */
 
+import { useRegionLabel } from '../useRegion'
+
 import { useEffect, useState } from 'react'
 import {
   accountProfile,
@@ -23,13 +25,15 @@ import {
   clearSession,
   formatBytes,
   openUrl,
-  regionCityFromCode,
+  signOutUnknownFiles,
   type AccountProfile,
   type Subscription,
+  type UnknownFilesAtSignOut,
 } from '../../desktopApi'
-import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { UnknownFilesSignOutDialog } from '../UnknownFilesSignOutDialog'
+import { ACCOUNT_SETTINGS_URL } from '../../settingsConstants'
+import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
-const ACCOUNT_URL = 'https://app.beebeeb.io/settings/account'
 const BILLING_URL = 'https://app.beebeeb.io/billing'
 const DANGER = 'oklch(0.5 0.18 25)'
 
@@ -251,6 +255,7 @@ function QuotaBar({ used, quota }: { used: number; quota: number }) {
 }
 
 function PlanCard({ sub }: { sub: Subscription }) {
+  const regionLabel = useRegionLabel()
   const renewsRel = relativeFuture(sub.current_period_end)
   const renewsAbs = sub.current_period_end ? shortDate(sub.current_period_end) : null
   const hasSeats = sub.seats > 1
@@ -275,7 +280,7 @@ function PlanCard({ sub }: { sub: Subscription }) {
 
       <Row label="Region">
         <NavIcon name="shield" size={12} color={T.ink3} />
-        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>{regionCityFromCode(sub.region)}</span>
+        <span style={{ fontFamily: T.fontMono, fontSize: 11.5, color: T.ink2, letterSpacing: '0.02em' }}>{regionLabel}</span>
       </Row>
 
       <Row label="Renews" mono last={!hasSeats}>
@@ -304,18 +309,35 @@ function PlanCard({ sub }: { sub: Subscription }) {
 type DisconnectPhase = 'idle' | 'confirming' | 'busy' | 'error'
 
 function DisconnectSection() {
+  const { showToast } = useToast()
   const [phase, setPhase] = useState<DisconnectPhase>('idle')
   const [errorMsg, setErrorMsg] = useState<string>('')
+  // Task 2191: files from before the last update that hold bytes; the person chooses.
+  const [unknownAsk, setUnknownAsk] = useState<UnknownFilesAtSignOut | null>(null)
 
-  const handleConfirm = async () => {
+  const handleConfirm = async (unknownFiles?: 'keep' | 'delete', keptFolder?: string) => {
+    setUnknownAsk(null)
+    // Task 2191 (Decision (lead, 2026-10-26)): files from before the last update are never
+    // copied or deleted silently. If any hold bytes on this PC, ask first.
+    if (!unknownFiles) {
+      const unknown = await signOutUnknownFiles()
+      if (unknown.ok && unknown.value.count > 0 && unknown.value.folder) {
+        setUnknownAsk(unknown.value)
+        return
+      }
+    }
     setPhase('busy')
-    const result = await clearSession()
+    const result = await clearSession(unknownFiles ? { unknownFiles, ...(keptFolder ? { keptFolder } : {}) } : {})
     if (!result.ok) {
       setErrorMsg(result.reason)
       setPhase('error')
+      return
     }
     // On success: the root sync_status poll will detect logged_in: false and
-    // unmount this whole view — no explicit navigation needed here.
+    // unmount this whole view — no explicit navigation needed here. A step the
+    // sign-out could not confirm (FB-24) is said neutrally, in a note that
+    // outlives this view and stays until dismissed.
+    if (result.value.warning) showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
   }
 
   const reset = () => {
@@ -330,6 +352,14 @@ function DisconnectSection() {
       background: T.paper,
       overflow: 'hidden',
     }}>
+      {unknownAsk?.folder ? (
+        <UnknownFilesSignOutDialog
+          count={unknownAsk.count}
+          folder={unknownAsk.folder}
+          onCancel={() => setUnknownAsk(null)}
+          onChoose={(choice) => void handleConfirm(choice, unknownAsk.folder ?? undefined)}
+        />
+      ) : null}
       {/* Header row */}
       <div style={{
         display: 'flex',
@@ -490,7 +520,7 @@ function Footer() {
         </div>
       </div>
       <button
-        onClick={() => void openUrl(ACCOUNT_URL)}
+        onClick={() => void openUrl(ACCOUNT_SETTINGS_URL)}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -580,7 +610,15 @@ export default function AccountView() {
   } else if (state.phase === 'unsupported') {
     body = <UnsupportedState />
   } else if (state.phase === 'error') {
-    body = <ErrorState reason={state.reason} onRetry={load} />
+    // Sign-out must stay reachable even when the profile API 401s: the old
+    // error branch rendered only ErrorState, so DisconnectSection — the only
+    // in-app sign-out control — vanished exactly when the session was dead.
+    body = (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <ErrorState reason={state.reason} onRetry={load} />
+        <DisconnectSection />
+      </div>
+    )
   } else {
     body = (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

@@ -63,8 +63,7 @@ use windows::Win32::Graphics::Gdi::{
     HDC,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_LOCAL_SERVER, CoRegisterClassObject, CoRevokeClassObject, IClassFactory,
-    IClassFactory_Impl, REGCLS_MULTIPLEUSE,
+    CLSCTX_LOCAL_SERVER, CoRegisterClassObject, IClassFactory, IClassFactory_Impl, REGCLS_MULTIPLEUSE,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -106,7 +105,7 @@ pub const THUMBNAIL_PROVIDER_CLSID: GUID =
 // `unsafe`; contention is nil (one shell thread drives one instance).
 #[implement(IThumbnailProvider, IInitializeWithItem)]
 struct ThumbnailProvider {
-    file_id: Mutex<Option<String>>,
+    file_id: Mutex<Option<(u64, String)>>,
 }
 
 impl ThumbnailProvider {
@@ -179,10 +178,12 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
         }
 
         // The file_id was resolved in Initialize. Absent → fail to the type icon.
-        let file_id = match self.this.file_id.lock().ok().and_then(|g| g.clone()) {
+        let (generation, file_id) = match self.this.file_id.lock().ok().and_then(|g| g.clone()) {
             Some(id) => id,
             None => return Err(E_FAIL.into()),
         };
+        let lease = super::callback_bridge(generation as usize as *mut std::ffi::c_void)
+            .ok_or_else(|| windows::core::Error::from(E_FAIL))?;
         tracing::debug!(file_id = %file_id, cx, "GetThumbnail invoked");
 
         // Pick the variant by the requested size: small thumbs for small tiles,
@@ -198,7 +199,7 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 
         // Fetch + decrypt the thumbnail entirely in memory, on the daemon's tokio
         // runtime, under a tight timeout so Explorer never blocks on the network.
-        let decoded = match fetch_thumbnail_blocking(&file_id, variant) {
+        let decoded = match fetch_thumbnail_blocking(&lease, &file_id, variant) {
             Some(bytes) => bytes,
             None => return Err(E_FAIL.into()),
         };
@@ -226,7 +227,10 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 /// or `None` if the path is not under the live sync root / has no state-DB row /
 /// the bridge isn't up. This is the path→file_id map AND the sync-root scoping
 /// guard in one.
-fn resolve_file_id_for_path(path: &str) -> Option<String> {
+fn resolve_file_id_for_path(path: &str) -> Option<(u64, String)> {
+    // Hold admission before reading the root; revoke cannot swap either while
+    // this path is mapped, so an old path cannot resolve against a new account.
+    let bridge = super::bridge()?;
     let sync_root = super::sync_root()?;
     let p = std::path::Path::new(path);
 
@@ -242,28 +246,31 @@ fn resolve_file_id_for_path(path: &str) -> Option<String> {
         return None;
     }
 
-    let bridge = super::bridge()?;
     let entry = bridge.db().get_file_by_path(&rel_str).ok().flatten()?;
-    Some(entry.file_id)
+    Some((bridge.generation_id(), entry.file_id))
 }
 
 /// Run `EngineBridge::fetch_thumbnail_to_memory` on the daemon's tokio runtime
 /// under [`THUMBNAIL_FETCH_TIMEOUT`], returning the decrypted (still-encoded)
 /// image bytes or `None` on any failure/timeout. The returned buffer is
 /// [`Zeroizing`], so the plaintext image bytes are wiped on drop.
-fn fetch_thumbnail_blocking(file_id: &str, variant: &str) -> Option<Zeroizing<Vec<u8>>> {
-    let bridge = super::bridge()?;
+fn fetch_thumbnail_blocking(
+    bridge: &crate::callback_gate::CallbackLease<crate::engine_bridge::EngineBridge>,
+    file_id: &str,
+    variant: &str,
+) -> Option<Zeroizing<Vec<u8>>> {
     let handle = super::runtime()?;
     let file_id = file_id.to_string();
     let variant = variant.to_string();
 
     handle.block_on(async move {
-        match tokio::time::timeout(
+        tokio::select! {
+        biased;
+        _ = super::cancelled(bridge) => None,
+        result = tokio::time::timeout(
             THUMBNAIL_FETCH_TIMEOUT,
             bridge.fetch_thumbnail_to_memory(&file_id, &variant),
-        )
-        .await
-        {
+        ) => match result {
             Ok(Ok(bytes)) => Some(bytes),
             Ok(Err(e)) => {
                 // Error message carries no plaintext (status strings only).
@@ -274,6 +281,7 @@ fn fetch_thumbnail_blocking(file_id: &str, variant: &str) -> Option<Zeroizing<Ve
                 tracing::debug!(file_id = %file_id, variant = %variant, "thumbnail fetch timed out; type icon will show");
                 None
             }
+        }
         }
     })
 }
@@ -406,7 +414,7 @@ impl IClassFactory_Impl for ThumbnailClassFactory_Impl {
 }
 
 /// COM registration cookie from `CoRegisterClassObject`, kept so
-/// [`unregister_thumbnail_provider`] can `CoRevokeClassObject` it. Set once per
+/// the original STA apartment owns it until process exit. Set once per
 /// process.
 static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 
@@ -432,6 +440,11 @@ static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 /// `CoRegisterClassObject` requires the calling thread to have initialized COM
 /// (the caller — [`super::register_thumbnail_provider_for_sync_root`] — handles
 /// that on its dedicated STA thread).
+pub fn rebind(shell_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(CLASS_OBJECT_COOKIE.get().is_some(), "COM factory is not ready");
+    register_thumbnail_provider(shell_id)
+}
+
 pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
     // 1. Register the class object so this exe is the CLSID's local server.
     if CLASS_OBJECT_COOKIE.get().is_none() {
@@ -500,16 +513,13 @@ pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
 }
 
 /// Remove the thumbnail-provider registration (inverse of
-/// [`register_thumbnail_provider`]). Revokes the COM class object, removes the
+/// [`register_thumbnail_provider`]). Keeps the credential-free COM factory and removes the
 /// `ThumbnailProvider` binding under the sync-root key, and deletes the CLSID
 /// subtree. Best-effort: each step is independent and a failure is logged.
 pub fn unregister_thumbnail_provider(shell_id: &str) {
-    if let Some(&cookie) = CLASS_OBJECT_COOKIE.get() {
-        // SAFETY: `cookie` is the value our own CoRegisterClassObject returned.
-        if let Err(e) = unsafe { CoRevokeClassObject(cookie) } {
-            tracing::warn!(error = %e, "CoRevokeClassObject(thumbnail provider) failed");
-        }
-    }
+    // The credential-free class factory stays registered on its original STA.
+    // Callback leases deny all account access while locked/signed out. Re-login
+    // restores the registry binding without reusing a revoked COM cookie.
 
     // Remove the ThumbnailProvider binding under the sync-root key (leave the rest
     // of the key, which `unregister_shell_sync_root` owns).

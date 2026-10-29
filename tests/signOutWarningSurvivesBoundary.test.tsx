@@ -1,0 +1,583 @@
+/**
+ * FB-24 row 12 on a Mac, in React itself: a sign-out that happened but could not confirm that Beebeeb was
+ * removed from Finder must still say so after `AccountSessionBoundary` remounts the window.
+ *
+ * A sign-out always moves the session revision (`set_auth_present(false)` and `set_auth_email(None)` in Rust),
+ * the boundary's one-second status poll observes it, and the boundary remounts everything under it. A sentence
+ * held in component state was gone within that second, and the remount also put each window back on its
+ * first tab or page.
+ *
+ * These tests mount each window exactly as `main.tsx` does (StrictMode, AccountSessionBoundary, ToastProvider,
+ * CapabilityProvider, then the window) with the real `react-dom` on a minimal DOM. They sign out through the
+ * real buttons, let the boundary's own poll observe the new revision, check that the window really was
+ * remounted (the nodes it showed before are detached), and only then read the screen.
+ *
+ * What this does NOT prove: layout, or anything on a Mac. The device rung is "Settings › Account sign-out with
+ * an unconfirmed Finder removal: the sentence stays".
+ *
+ * Task 1683 slice 1 (two-surface spec §8.1): the Settings window is now the Settings pane of the one Beebeeb window
+ * (`MacApp`, `?window=main&platform=macos`). The pins moved with it: the sentence still survives the remount, and the
+ * remounted window, now signed out, shows it above the sign-in card ("the window then shows sign-in (the note is held
+ * … and shown above the sign-in card)") where the Settings window showed it on its Account tab. After the next
+ * sign-in the window opens where it normally does, on Home.
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import type { ReactElement } from 'react'
+import { accountSessionRevision, clearSignOutWarning, heldSignOutWarning } from '../src/accountSession'
+import { allElements, click, installMiniDom, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
+import { rustStr } from './fixtures/rustConstants'
+
+const SIGN_OUT_WARNING = { code: 'finder_removal_unconfirmed', sentence: rustStr('lib.rs', 'FINDER_SIGN_OUT_UNCONFIRMED_WARNING') }
+const capabilities = JSON.parse(readFileSync(new URL('./fixtures/desktop-capabilities.json', import.meta.url), 'utf8')).macos
+
+let dom: MiniDomInstall
+let React: typeof import('react')
+let client: typeof import('react-dom/client')
+let roots: Array<{ unmount: () => void }> = []
+
+beforeAll(async () => {
+  dom = installMiniDom('')
+  // react-dom decides at load time whether it runs with a DOM, so it is loaded after the DOM is installed.
+  React = await import('react')
+  client = await import('react-dom/client')
+})
+afterEach(async () => {
+  // A test that ran its sign-out outside React.act hands React back to act() for the unmount.
+  ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
+  for (const root of roots) await React.act(async () => root.unmount())
+  roots = []
+  delete dom.window.__TAURI_INTERNALS__
+  // A sign-out's sentence lives in a module store (it outlives the session boundary): one test's is not the next one's.
+  clearSignOutWarning()
+})
+afterAll(() => dom.restore())
+
+/** What Rust holds for this WebView: whether an account is signed in, and the session revision. */
+interface Native {
+  loggedIn: boolean
+  revision: number
+  calls: string[]
+}
+
+/** What `sync_status` answers for an account that is (or is not) signed in at `revision`. */
+const statusAnswer = (loggedIn: boolean, revision: number) => ({
+  logged_in: loggedIn,
+  session_revision: revision,
+  vault_unlocked: loggedIn,
+  engine: loggedIn ? 'running' : 'stopped',
+  sync_root: null,
+  syncing: 0,
+  cloud_only: 0,
+  conflicts: 0,
+  auth_expired: false,
+  engine_refusal: null,
+})
+
+/** The commands both windows send, answered from `native`; anything else is an IPC error, as an unknown command is. */
+function installBackend(native: Native, extra: Record<string, (args: any) => unknown> = {}) {
+  let callbackId = 0
+  const snapshot = () => ({
+    phase: 'synced',
+    generated_at: 1000,
+    account: { email: native.loggedIn ? 'sam@example.eu' : null, logged_in: native.loggedIn, vault_unlocked: native.loggedIn, auth_expired: false },
+    paused: false,
+    engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: 990 },
+    reason: null,
+    finder: { setup: 'ready', reason: null, reason_line: null },
+    storage: native.loggedIn ? { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false } : null,
+    storage_full: false,
+    pending_changes: 0,
+    conflicts: { count: 0, files: [] },
+    activity: [],
+  })
+  const handlers: Record<string, (args: any) => unknown> = {
+    sync_status: () => statusAnswer(native.loggedIn, native.revision),
+    desktop_capabilities: () => capabilities,
+    'plugin:event|listen': () => callbackId,
+    'plugin:event|unlisten': () => null,
+    get_desktop_config: () => ({ upload_kbps_limit: 0, download_kbps_limit: 0, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'dark', local_cache_limit_bytes: 0 }),
+    consume_menu_update_check: () => false,
+    // The Beebeeb window (task 1683 slice 1): its request channel, what it tells Rust for the menu, and Home's reads.
+    consume_main_navigation: () => null,
+    main_window_state: () => null,
+    finder_setup_state: () => ({ setup: 'ready', reason: null, launch_location: 'applications', attempt: 1, max_attempts: 1, last_failure: null }),
+    kept_unsynced_folder: () => null,
+    kept_unsent_folder: () => null,
+    popover_snapshot: snapshot,
+    account_subscription: () => ({ plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-10-14T12:00:00Z', quota_bytes: 1, used_bytes: 0 }),
+    account_email: () => (native.loggedIn ? 'sam@example.eu' : null),
+    autostart_enabled: () => false,
+    desktop_platform: () => 'macos',
+    app_version: () => '0.1.0',
+    // A sign-out that happened but could not confirm the Finder removal. Like `clear_session_impl`, it moves the
+    // revision twice as its last steps (auth flag, then the email) and answers Ok with the warning.
+    clear_session: () => {
+      native.loggedIn = false
+      native.revision += 2
+      return { warning: SIGN_OUT_WARNING }
+    },
+    // Settings' sign-out flow (spec 2026-10-10 §5.1) on a Mac: it consumes a pending flow request when it mounts (none
+    // here), counts before it signs out (nothing waits, so it signs out at once), and acknowledges a result it showed.
+    consume_sign_out_flow_request: () => false,
+    sign_out_count: () => ({ askId: 'a0', files: 0, copiedFiles: 0, others: 0, missingFiles: 0, earlierFolders: [], canSend: false, notSending: null }),
+    sign_out_result_ack: () => null,
+    ...extra,
+  }
+  dom.window.__TAURI_INTERNALS__ = {
+    transformCallback: () => ++callbackId,
+    unregisterCallback() {},
+    invoke: async (name: string, args: unknown) => {
+      native.calls.push(name)
+      const handler = handlers[name]
+      if (!handler) throw new Error(`unknown command ${name}`)
+      return handler(args)
+    },
+  }
+  dom.window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
+  return handlers
+}
+
+/** Mount `window` under the same providers, in the same order, as main.tsx. */
+async function mountWindow(search: string, window: ReactElement) {
+  const { default: AccountSessionBoundary } = await import('../src/AccountSessionBoundary')
+  const { ToastProvider } = await import('../src/windows/ui')
+  const { CapabilityProvider } = await import('../src/capabilities')
+  // Each window opens as in a fresh WebView: no sentence held from an earlier test.
+  expect(heldSignOutWarning()).toBeNull()
+  dom.window.location.search = search
+  const container = dom.document.createElement('div')
+  dom.document.body.appendChild(container)
+  const root = client.createRoot(container as never)
+  roots.push(root)
+  await React.act(async () => {
+    root.render(
+      <React.StrictMode>
+        <AccountSessionBoundary><ToastProvider><CapabilityProvider>{window}</CapabilityProvider></ToastProvider></AccountSessionBoundary>
+      </React.StrictMode>,
+    )
+  })
+  return container
+}
+
+/** Let React and the backend run (real timers: the boundary's poll is a real one-second timeout). */
+async function waitFor(what: string, done: () => boolean, ms = 3000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
+    if (done()) return
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+  }
+}
+
+const elements = (container: MiniElement) => allElements(container)
+const byText = (container: MiniElement, tag: string, text: string) => {
+  const hits = elements(container).filter((el) => el.tagName === tag.toUpperCase() && el.textContent.trim() === text)
+  if (hits.length !== 1) throw new Error(`expected one <${tag}> "${text}", found ${hits.length}`)
+  return hits[0]
+}
+const statusLines = (container: MiniElement) =>
+  elements(container).filter((el) => el.getAttribute('role') === 'status').map((el) => el.textContent.trim())
+const press = (container: MiniElement, tag: string, text: string) => React.act(async () => { click(container, byText(container, tag, text)) })
+
+/** The window really was remounted: the node it showed before the sign-out is no longer in it. */
+async function waitForRemount(container: MiniElement, before: MiniElement, native: Native) {
+  const { accountSessionRevision } = await import('../src/accountSession')
+  await waitFor('the boundary to observe the sign-out and remount the window', () => accountSessionRevision() === native.revision && !container.contains(before))
+}
+
+/** Whatever the remounted window shows, it has resolved its capabilities and finished loading. */
+async function waitForSettled(container: MiniElement, shown: (container: MiniElement) => boolean) {
+  await waitFor('the remounted window to settle', () =>
+    shown(container) && !container.textContent.includes('Checking device support…') && !container.textContent.includes('Loading…'))
+}
+
+/** Each test waits for at least one real status poll (one second); bun's default five seconds is too tight. */
+const SLOW = 15_000
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+/** The Beebeeb window is drawn and has read the account: its sidebar, or its signed-out card. */
+const hasTabs = (container: MiniElement) =>
+  elements(container).some((el) => el.tagName === 'NAV' || isSignInCard(el))
+/** Task 1683 slice 2: the signed-out card is the sign-in screen's (`mw-scard`, the hi-fi's `.scard`); it was slice 1's `mw-signin`. */
+const isSignInCard = (el: MiniElement) => String(el.className).split(/\s+/).includes('mw-scard')
+/** Signed out: the centred card, no sidebar (§7.4). */
+const showsSignIn = (container: MiniElement) =>
+  elements(container).some(isSignInCard) && !elements(container).some((el) => el.tagName === 'NAV')
+const pane = (container: MiniElement) => elements(container).find((el) => el.className === 'ms-pane mw-pane')!
+const pressLabel = (container: MiniElement, label: string) =>
+  React.act(async () => {
+    const hits = elements(container).filter((el) => el.tagName === 'BUTTON' && el.getAttribute('aria-label') === label)
+    if (hits.length !== 1) throw new Error(`expected one button labelled "${label}", found ${hits.length}`)
+    click(container, hits[0])
+  })
+const hasPage = (container: MiniElement) => elements(container).some((el) => el.tagName === 'SECTION' && el.className === 'page')
+/** What the sidebar marks as the current section. */
+const selectedTabs = (container: MiniElement) =>
+  elements(container).filter((el) => el.tagName === 'BUTTON' && el.getAttribute('aria-current') === 'page').map((el) => el.getAttribute('aria-label') ?? el.textContent.trim())
+const ACCOUNT_ROW = 'Account, sam@example.eu, Basic plan'
+/** Home, then the gear (Settings › General), then the account row (Settings › Account), as a person gets there. */
+async function openAccountByTheGear(container: MiniElement) {
+  await waitFor('the window', () => hasTabs(container) && container.textContent.includes('Basic plan'))
+  await pressLabel(container, 'Settings')
+  await waitFor('Settings', () => selectedTabs(container).includes('General'))
+  await pressLabel(container, ACCOUNT_ROW)
+  await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+}
+const headings = (container: MiniElement) => elements(container).filter((el) => el.tagName === 'H1').map((el) => el.textContent.trim())
+
+/**
+ * The engine slot as `clear_session_impl` holds it on a Mac: from the engine stop until just before it moves the
+ * revision. `sync_status` reads `logged_in`, then waits for that slot, then reads the revision, so a status read
+ * sent while the slot is held is held back and answers "signed in" at the NEW revision.
+ *
+ * This `clear_session` holds the slot until a status read has been held back behind it (the boundary polls every
+ * second), moves the revision twice, releases the slot and answers Ok with the warning. `order` is which of the
+ * two answers this WebView sees first:
+ * - `poll-first`: the held-back read's (the boundary observes it and remounts), then, one macrotask later, the sign-out's;
+ * - `answer-first`: the sign-out's, then the held-back read's.
+ * `probe` records how many reads were held back, and the revision this WebView had observed when the sign-out answered.
+ */
+function heldBehindSignOut(native: Native, order: 'poll-first' | 'answer-first') {
+  const heldBack: Array<() => void> = []
+  let slotTaken = false
+  const probe = { heldBack: 0, revisionAtAnswer: null as number | null }
+  const handlers = {
+    sync_status: async () => {
+      const loggedIn = native.loggedIn
+      if (slotTaken) await new Promise<void>((resolve) => heldBack.push(resolve))
+      return statusAnswer(loggedIn, native.revision)
+    },
+    clear_session: async () => {
+      slotTaken = true
+      const deadline = Date.now() + 4000
+      while (heldBack.length === 0 && Date.now() < deadline) await sleep(10)
+      probe.heldBack = heldBack.length
+      native.loggedIn = false
+      native.revision += 2
+      slotTaken = false
+      const release = heldBack.splice(0)
+      if (order === 'poll-first') {
+        for (const resolve of release) resolve()
+        await sleep(1)
+      } else {
+        setTimeout(() => { for (const resolve of release) resolve() }, 0)
+      }
+      probe.revisionAtAnswer = accountSessionRevision()
+      return { warning: SIGN_OUT_WARNING }
+    },
+  }
+  return { handlers, probe }
+}
+
+/** Wait with real timers and no act() scope. */
+async function plainWait(what: string, done: () => boolean, ms = 6000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    await sleep(20)
+    if (done()) return
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+  }
+}
+
+/**
+ * Confirm the sign-out with `confirm` outside React.act, as a WebView runs it: every answer commits when it
+ * arrives, so the order of the answers is the order the window sees. Then wait until the sign-out has answered,
+ * the boundary has observed its revision and remounted the window (`before` is detached), and the window has
+ * settled. A sentence held after that still gets a moment to reach the screen, so a missing one is an assertion
+ * failure, not a timeout.
+ */
+async function signOutOutsideAct(
+  container: MiniElement,
+  confirm: MiniElement,
+  before: MiniElement,
+  native: Native,
+  probe: { revisionAtAnswer: number | null },
+  shown: (container: MiniElement) => boolean,
+) {
+  ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = false
+  click(container, confirm)
+  await plainWait('the sign-out, the remount and the settled window', () =>
+    probe.revisionAtAnswer !== null &&
+    accountSessionRevision() === native.revision &&
+    !container.contains(before) &&
+    shown(container) &&
+    !container.textContent.includes('Checking device support…') &&
+    !container.textContent.includes('Loading…'))
+  await sleep(300)
+}
+
+describe('a sign-out with an unconfirmed Finder removal, through AccountSessionBoundary', () => {
+  test('main.tsx mounts both windows under the boundary in the order these tests use', () => {
+    const main = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
+    expect(main).toContain('<AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>')
+    expect(main).toContain("which === 'main' && platform === 'macos'")
+    expect(main).toMatch(/<StrictMode>\s*\{which === 'onboarding'/)
+  })
+
+  // This test and the next cover one order: the sign-out answers before a status read carries its revision. The other order is tested outside React.act below.
+  test('Settings › Account: the sentence is still on screen after the boundary remounts the window', async () => {
+    const native: Native = { loggedIn: true, revision: 10, calls: [] }
+    installBackend(native)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+
+    // Only the boundary replaces this node; the sign-out itself re-renders it in place.
+    const shownBefore = pane(container)
+    await press(container, 'button', 'Sign out…')
+    await press(container, 'button', 'Sign out')
+    await waitFor('the sign-out', () => native.calls.includes('clear_session') && container.textContent.includes('You’re signed out'))
+    // Through the window's sign-out flow (spec 2026-10-10 §5.1): one count, then the sign-out.
+    expect(native.calls.filter((name) => name === 'sign_out_count')).toHaveLength(1)
+    expect(native.calls.indexOf('sign_out_count')).toBeLessThan(native.calls.indexOf('clear_session'))
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+
+    await waitForRemount(container, shownBefore, native)
+    await waitForSettled(container, showsSignIn)
+
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    // §8.1: signed out, the window shows the sign-in card with the sentence above it.
+    const text = container.textContent
+    expect(text.indexOf(SIGN_OUT_WARNING.sentence)).toBeLessThan(text.indexOf('Sign in to Beebeeb'))
+    // Said neutrally: no alert, no "Couldn’t …".
+    expect(elements(container).filter((el) => el.getAttribute('role') === 'alert')).toEqual([])
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+
+  test('the compact window’s Account page: the sentence is still on screen after the boundary remounts the window', async () => {
+    const native: Native = { loggedIn: true, revision: 20, calls: [] }
+    installBackend(native)
+    const { default: App } = await import('../src/App')
+    const container = await mountWindow('?platform=macos', <App />)
+    await waitFor('the window', () => container.textContent.includes('Account & security'))
+    await React.act(async () => {
+      click(container, elements(container).find((el) => el.tagName === 'BUTTON' && el.textContent.includes('Account & security'))!)
+    })
+    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+    await press(container, 'button', 'Sign out')
+    await waitFor('the sign-out', () => native.calls.includes('clear_session') && statusLines(container).includes(SIGN_OUT_WARNING.sentence))
+
+    await waitForRemount(container, shownBefore, native)
+    await waitForSettled(container, (c) => elements(c).some((el) => el.tagName === 'SECTION' && el.className === 'page'))
+
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    expect(byText(container, 'h1', 'Account & security')).toBeDefined()
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+
+  test('the next sign-in clears the sentence (and the window opens where it normally does)', async () => {
+    const native: Native = { loggedIn: true, revision: 30, calls: [] }
+    installBackend(native)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+    const signedOut = pane(container)
+    await press(container, 'button', 'Sign out…')
+    await press(container, 'button', 'Sign out')
+    await waitFor('the sign-out', () => native.calls.includes('clear_session'))
+    await waitForRemount(container, signedOut, native)
+    await waitFor('the remounted window', () => statusLines(container).includes(SIGN_OUT_WARNING.sentence))
+
+    // A sign-in in another window: Rust moves the revision again and the account is signed in.
+    const beforeSignIn = elements(container).find(isSignInCard)!
+    native.loggedIn = true
+    native.revision += 2
+    await waitForRemount(container, beforeSignIn, native)
+    await waitFor('the window after the sign-in', () => elements(container).some((el) => el.tagName === 'NAV'))
+
+    expect(container.textContent).not.toContain(SIGN_OUT_WARNING.sentence)
+    // The remounted window opens where it normally does: Home.
+    expect(selectedTabs(container)).toEqual(['Home'])
+  }, SLOW)
+})
+
+describe('a status read held back behind the sign-out and answered before it (outside React.act)', () => {
+  test('Settings › Account: the sign-out still stands, its sentence is held and on screen, and nothing says "Account changed"', async () => {
+    const native: Native = { loggedIn: true, revision: 40, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    installBackend(native, slot.handlers)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container))
+    await openAccountByTheGear(container)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+    const shownBefore = pane(container)
+    await press(container, 'button', 'Sign out…')
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, showsSignIn)
+
+    // The order really was poll-first: a status read was held back, and its revision was observed before the sign-out answered.
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+
+  test('the compact window’s Account page: the sign-out still stands, its sentence is held and on screen, and nothing says "Account changed"', async () => {
+    const native: Native = { loggedIn: true, revision: 50, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    installBackend(native, slot.handlers)
+    const { default: App } = await import('../src/App')
+    // Opened on the Account page by its URL, for the same reason.
+    const container = await mountWindow('?platform=macos&nav=account', <App />)
+    await waitFor('the account', () => accountSessionRevision() === native.revision && container.textContent.includes('sam@example.eu'))
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    expect(byText(container, 'h1', 'Account & security')).toBeDefined()
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }, SLOW)
+})
+
+/**
+ * Whenever a sign-out's sentence becomes held, the window shows the surface that says it: the Settings window its
+ * Account tab, the compact window its Account page. Both windows start here on their default surface (General,
+ * Status), so after the remount only following the held sentence can bring them back to Account.
+ */
+describe('the window follows the held sentence, in either order of the two answers (outside React.act)', () => {
+  /** The first `popover_snapshot` sent after the sign-out (Settings reading the account after its action) waits for `release`. */
+  function gateTheReadAfterSignOut(native: Native, handlers: Record<string, (args: any) => unknown>) {
+    const answer = handlers.popover_snapshot
+    const gate = { waiting: false, used: false, release: () => {} }
+    handlers.popover_snapshot = async (args: unknown) => {
+      if (native.calls.includes('clear_session') && !gate.used) {
+        gate.used = true
+        gate.waiting = true
+        await new Promise<void>((resolve) => { gate.release = resolve })
+        gate.waiting = false
+      }
+      return answer(args)
+    }
+    return gate
+  }
+
+  /** Settings › General, then Settings › Account with the sign-out confirm open. */
+  async function openSettingsOnGeneral(native: Native, extra: Record<string, (args: any) => unknown> = {}) {
+    const handlers = installBackend(native, extra)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasTabs(container) && container.textContent.includes('Basic plan'))
+    await pressLabel(container, 'Settings')
+    await waitFor('Settings', () => selectedTabs(container).includes('General'))
+    expect(selectedTabs(container)).toEqual(['General'])
+    await pressLabel(container, ACCOUNT_ROW)
+    await waitFor('the account', () => container.textContent.includes('Vault is unlocked'))
+    await press(container, 'button', 'Sign out…')
+    return { container, handlers }
+  }
+
+  /** The compact window on its Status page, then on Account. */
+  async function openCompactOnStatus(native: Native, extra: Record<string, (args: any) => unknown>) {
+    installBackend(native, extra)
+    const { default: App } = await import('../src/App')
+    const container = await mountWindow('?platform=macos', <App />)
+    await waitFor('the window', () => accountSessionRevision() === native.revision && hasPage(container))
+    expect(headings(container)).not.toContain('Account & security')
+    await React.act(async () => {
+      click(container, elements(container).find((el) => el.tagName === 'BUTTON' && el.textContent.includes('Account & security'))!)
+    })
+    await waitFor('the account', () => container.textContent.includes('sam@example.eu'))
+    return container
+  }
+
+  const nothingSaysItFailed = (container: MiniElement) => {
+    expect(container.textContent).not.toContain('Account changed')
+    expect(container.textContent).not.toContain('Couldn’t sign out')
+  }
+
+  test('Settings: the sentence is held as soon as the sign-out answers, before the tab reads the account again', async () => {
+    const native: Native = { loggedIn: true, revision: 60, calls: [] }
+    const { container, handlers } = await openSettingsOnGeneral(native)
+    const gate = gateTheReadAfterSignOut(native, handlers)
+    await press(container, 'button', 'Sign out')
+    await waitFor('the read of the account after the sign-out', () => gate.waiting)
+    expect(heldSignOutWarning()).toBe(SIGN_OUT_WARNING.sentence)
+    await React.act(async () => { gate.release() })
+  }, SLOW)
+
+  test('Settings, the status read first: the window ends on the sign-in card with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 70, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    const { container } = await openSettingsOnGeneral(native, slot.handlers)
+    const shownBefore = pane(container)
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, showsSignIn)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(showsSignIn(container)).toBe(true)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('Settings, the sign-out’s answer first and its read of the account answered after the remount: the window ends on the sign-in card with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 80, calls: [] }
+    const slot = heldBehindSignOut(native, 'answer-first')
+    const { container, handlers } = await openSettingsOnGeneral(native, slot.handlers)
+    const gate = gateTheReadAfterSignOut(native, handlers)
+    const shownBefore = pane(container)
+
+    ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = false
+    click(container, byText(container, 'button', 'Sign out'))
+    await plainWait('the remounted window, while the read of the account after the sign-out is unanswered', () =>
+      gate.waiting &&
+      slot.probe.revisionAtAnswer !== null &&
+      accountSessionRevision() === native.revision &&
+      !container.contains(shownBefore) &&
+      hasTabs(container) &&
+      !container.textContent.includes('Checking device support…'))
+    gate.release()
+    await plainWait('the settled window', () => !gate.waiting && !container.textContent.includes('Loading…'))
+    await sleep(300)
+
+    // The order really was answer-first: the sign-out answered before this window observed its revision.
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision - 2)
+    expect(showsSignIn(container)).toBe(true)
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('the compact window, the status read first: it ends on the Account page with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 90, calls: [] }
+    const slot = heldBehindSignOut(native, 'poll-first')
+    const container = await openCompactOnStatus(native, slot.handlers)
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision)
+    expect(headings(container)).toContain('Account & security')
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+
+  test('the compact window, the sign-out’s answer first: it ends on the Account page with the sentence on screen', async () => {
+    const native: Native = { loggedIn: true, revision: 100, calls: [] }
+    const slot = heldBehindSignOut(native, 'answer-first')
+    const container = await openCompactOnStatus(native, slot.handlers)
+    const shownBefore = elements(container).find((el) => el.tagName === 'SECTION' && el.className === 'page')!
+
+    await signOutOutsideAct(container, byText(container, 'button', 'Sign out'), shownBefore, native, slot.probe, hasPage)
+
+    expect(slot.probe.heldBack).toBeGreaterThan(0)
+    expect(slot.probe.revisionAtAnswer).toBe(native.revision - 2)
+    expect(headings(container)).toContain('Account & security')
+    expect(statusLines(container)).toContain(SIGN_OUT_WARNING.sentence)
+    nothingSaysItFailed(container)
+  }, SLOW)
+})

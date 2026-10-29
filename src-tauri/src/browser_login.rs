@@ -7,14 +7,17 @@
 //!
 //! Flow (see `cli_auth.rs` for the server side):
 //!   1. Desktop opens a WebSocket to `wss://api.beebeeb.io/api/v1/auth/cli` and
-//!      sends an ephemeral P-256 ECDH public key: `{"ecdh_public_key_b64": "..."}`.
+//!      sends an ephemeral P-256 ECDH public key plus what it can say about
+//!      itself (`init_frame`): `{"ecdh_public_key_b64": "...", "client": "desktop", ...}`.
 //!   2. Server replies `{"user_code","verification_uri","expires_in"}` (300s).
-//!   3. We open the system browser at `verification_uri` and emit a
-//!      `browser-login` event so the UI can show the code + "we opened your
-//!      browser" state.
-//!   4. The (already-signed-in) browser fetches our pubkey, ECDH-encrypts
-//!      `{session_token, master_key_b64, email}`, and POSTs it to the server,
-//!      which pushes the encrypted blob back over our WS.
+//!   3. We open the system browser at `verification_uri` (which carries NO
+//!      code, task 1734) and emit a `browser-login` event so the UI can show
+//!      the code + "we opened your browser" state. The person TYPES that code
+//!      on the page; a link someone else sends them has nothing to approve.
+//!   4. The (already-signed-in) browser looks the code up, shows who is
+//!      asking, re-proves the user's password, then ECDH-encrypts
+//!      `{session_token, master_key_b64, email}` to our pubkey and POSTs it to
+//!      the server, which pushes the encrypted blob back over our WS.
 //!   5. We derive the shared secret, run HKDF-SHA256 with info
 //!      `"beebeeb-cli-auth-v1"`, AES-256-GCM-decrypt, and hand the credentials
 //!      to `crate::apply_session` (persist to the platform credential store +
@@ -88,13 +91,35 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// server yet fails fast with an actionable error instead of an infinite spinner.
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Emit a structured progress event to all windows. Non-fatal on failure.
-fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
+tokio::task_local! {
+    /// The attempt the running handoff belongs to (review P3-2 on the Mac sign-in PR): the id the window gave
+    /// `start_browser_login`, echoed in every event of that attempt. A task-local so `emit`'s callers are unchanged: it is
+    /// set once around the whole command and read where an event is built.
+    static ATTEMPT: Option<String>;
+}
+
+/// The attempt id the window sent, if it is one that is safe to echo: 1 to 64 ASCII letters, digits, `-` or `_`. Anything
+/// else is treated as no id at all (the events then carry none, and the window ignores them as nobody's).
+fn attempt_id(raw: Option<String>) -> Option<String> {
+    raw.filter(|id| (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+}
+
+/// One `browser-login` event's body: the payload, its `phase`, and the attempt it belongs to when there is one.
+fn event_body(payload: serde_json::Value, phase: &str, attempt: Option<&str>) -> serde_json::Value {
     let mut body = payload;
     if let Some(obj) = body.as_object_mut() {
         obj.insert("phase".to_string(), serde_json::Value::String(phase.to_string()));
+        if let Some(attempt) = attempt {
+            obj.insert("attempt".to_string(), serde_json::Value::String(attempt.to_string()));
+        }
     }
-    let _ = app.emit(EVENT, body);
+    body
+}
+
+/// Emit a structured progress event to all windows. Non-fatal on failure.
+fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
+    let attempt = ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten();
+    let _ = app.emit(EVENT, event_body(payload, phase, attempt.as_deref()));
 }
 
 /// Build the `wss://…/api/v1/auth/cli` URL from the engine's API base.
@@ -102,6 +127,37 @@ fn ws_url() -> String {
     let base = runner::api_base_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     format!("{ws}/api/v1/auth/cli")
+}
+
+/// This machine's name, if it has one.
+fn device_hostname() -> Option<String> {
+    hostname::get().ok().and_then(|h| h.into_string().ok())
+}
+
+/// The version this build reports: `BEEBEEB_RELEASE_VERSION` (set by
+/// release.yml) falling back to the Cargo version for local builds — the same
+/// string `api_client`'s `X-Beebeeb-Client-Version` header carries.
+const CLIENT_VERSION: &str = match option_env!("BEEBEEB_RELEASE_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// The first WebSocket frame: our public key (so the browser can do its half of
+/// the ECDH) plus what this app can honestly say about itself, which the
+/// approval page shows the person labelled "reported by the device" — a fake
+/// client can say anything, so the page treats it as a hint, never as proof.
+/// The server ignores anything it does not recognise.
+fn init_frame(pub_key_b64: &str, hostname: Option<String>) -> serde_json::Value {
+    let mut frame = serde_json::json!({
+        "ecdh_public_key_b64": pub_key_b64,
+        "client": "desktop",
+        "client_version": CLIENT_VERSION,
+        "os": std::env::consts::OS,
+    });
+    if let Some(name) = hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+        frame["device_name"] = serde_json::Value::String(name);
+    }
+    frame
 }
 
 /// Build the WebSocket upgrade request for `ws_url()`, carrying the same
@@ -202,26 +258,58 @@ fn signin_log(line: &str) {
 ///   - `waiting` { user_code, verification_uri, expires_in } — browser opened,
 ///     awaiting confirmation; the UI shows the code so the user can verify it
 ///   - `authorized`            — encrypted payload received, decrypting
-///   - `done` { email }        — session persisted + engine started
+///   - `done` { email }        — session persisted + engine started (no `email` when the account record could
+///                               not be fetched: the session is installed, but no engine starts until it is)
 ///   - `error` { message }     — any failure (also returned as `Err`)
 ///
 /// The whole handoff is bounded by the server's 300s code expiry; on timeout we
 /// emit `error` and return `Err` so the UI can offer "try again".
+///
+/// `attempt_id` is the window's id for this attempt (review P3-2): every event of it carries it back, so a window that
+/// tries again while an earlier handoff is still running (and later times out) is not failed by the earlier one's events.
 #[tauri::command]
-pub async fn start_browser_login(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    bc!("[bb-signin] start_browser_login: command entry");
-    match run_handoff(&app, &state).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            tracing::error!(error = %e, "browser-login: sign-in failed");
-            signin_log(&format!("error {e}"));
-            emit(&app, "error", serde_json::json!({ "message": e }));
-            Err(e)
-        }
-    }
+pub async fn start_browser_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    attempt_id: Option<String>,
+) -> Result<(), String> {
+    ATTEMPT
+        .scope(self::attempt_id(attempt_id), async {
+            bc!("[bb-signin] start_browser_login: command entry");
+            #[cfg(target_os = "windows")]
+            let attempt = crate::AUTH_ATTEMPTS.begin()?;
+            let work = run_handoff(
+                &app,
+                &state,
+                #[cfg(target_os = "windows")]
+                &attempt,
+            );
+            #[cfg(target_os = "windows")]
+            let result = attempt.run(work).await;
+            #[cfg(not(target_os = "windows"))]
+            let result = work.await;
+            match result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    tracing::error!(error = %e, "browser-login: sign-in failed");
+                    signin_log(&format!("error {e}"));
+                    emit(&app, "error", serde_json::json!({ "message": e }));
+                    Err(e)
+                }
+            }
+        })
+        .await
 }
 
-async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Result<(), String> {
+async fn run_handoff(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    #[cfg(target_os = "windows")] attempt: &crate::auth_attempts::Attempt,
+) -> Result<(), String> {
+    // This sign-in is one session transition: its generation is captured before it looks at anything on this
+    // computer, so a Lock, a Sign-out or another sign-in that completes while the browser is open is never followed by
+    // its writes (they are refused, and nothing of it is stored).
+    let mut turn = state.active_account()?.session_generation();
     // 1. Ephemeral P-256 key pair (uncompressed SEC1 point, base64).
     let secret = EphemeralSecret::random(&mut OsRng);
     let public_key = secret.public_key();
@@ -262,11 +350,9 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
                 "browser-login: connect timed out"
             );
             signin_log(&format!("connect-timeout {url} after {}s", CONNECT_TIMEOUT.as_secs()));
-            return Err(
-                "Could not reach Beebeeb to start sign-in (connection timed out). \
+            return Err("Could not reach Beebeeb to start sign-in (connection timed out). \
                  Check your internet connection and try again."
-                    .to_string(),
-            );
+                .to_string());
         }
     };
     bc!("[bb-signin] run_handoff: connected");
@@ -276,14 +362,12 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
     //    the server's device-code reply. Both are bounded by DEVICE_CODE_TIMEOUT:
     //    a connected-but-silent server (cold/stalled first handoff) must not hang
     //    the UI on "Connecting" forever — fail fast with an actionable error.
-    let init = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
+    let init = init_frame(&pub_key_b64, device_hostname());
     let handoff = async {
-        ws.send(Message::Text(init.to_string()))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "browser-login: failed to send public key");
-                format!("Sign-in handshake failed: {e}")
-            })?;
+        ws.send(Message::Text(init.to_string())).await.map_err(|e| {
+            tracing::error!(error = %e, "browser-login: failed to send public key");
+            format!("Sign-in handshake failed: {e}")
+        })?;
         bc!("[bb-signin] run_handoff: sent public key");
         tracing::info!("browser-login: sent public key");
         recv_text(&mut ws).await
@@ -297,18 +381,19 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
                 "browser-login: device-code handoff timed out"
             );
             signin_log(&format!("device-code-timeout after {}s", DEVICE_CODE_TIMEOUT.as_secs()));
-            return Err(
-                "Beebeeb did not respond while starting sign-in (timed out). \
+            return Err("Beebeeb did not respond while starting sign-in (timed out). \
                  Please check your connection and try again."
-                    .to_string(),
-            );
+                .to_string());
         }
     };
     let resp: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Invalid server response: {e}"))?;
     if let Some(err) = resp["error"].as_str() {
         return Err(format!("Sign-in error: {err}"));
     }
-    let user_code = resp["user_code"].as_str().ok_or("Server omitted the device code")?.to_string();
+    let user_code = resp["user_code"]
+        .as_str()
+        .ok_or("Server omitted the device code")?
+        .to_string();
     let verification_uri = resp["verification_uri"]
         .as_str()
         .ok_or("Server omitted the verification URL")?
@@ -361,34 +446,137 @@ async fn run_handoff(app: &tauri::AppHandle, state: &State<'_, AppState>) -> Res
         .as_str()
         .ok_or("Missing browser public key in payload")?;
 
-    let plaintext = decrypt_payload(&secret, browser_pub_b64, nonce_b64, payload_b64)?;
-
-    // 8. Parse credentials and install the session via the shared path.
-    let creds: serde_json::Value =
-        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
-    let session_token = creds["session_token"]
-        .as_str()
-        .ok_or("Credentials missing session_token")?
-        .to_string();
-    let master_key_b64 = creds["master_key_b64"]
-        .as_str()
-        .ok_or("Credentials missing master_key_b64")?;
-    let email = creds["email"].as_str().map(|s| s.to_string());
-
-    let master_key_vec = B64
-        .decode(master_key_b64.trim())
-        .map_err(|e| format!("Invalid master key encoding: {e}"))?;
-    if master_key_vec.len() != 32 {
-        return Err(format!("master key must be 32 bytes, got {}", master_key_vec.len()));
+    let plaintext = zeroize::Zeroizing::new(decrypt_payload(&secret, browser_pub_b64, nonce_b64, payload_b64)?);
+    #[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+    struct Credentials {
+        session_token: String,
+        master_key_b64: String,
     }
-    let mut master_key = [0u8; 32];
+    // The email the browser also sends is not read: it is the web client's text, not an identity (see below).
+    let creds: Credentials =
+        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
+    let master_key_vec = zeroize::Zeroizing::new(
+        B64.decode(creds.master_key_b64.trim())
+            .map_err(|e| format!("Invalid master key encoding: {e}"))?,
+    );
+    if master_key_vec.len() != 32 {
+        return Err("master key must be 32 bytes".into());
+    }
+    let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(&master_key_vec);
-
-    crate::apply_session(app.clone(), state, session_token, master_key, email.clone()).await?;
+    // The account's own record names it the way the server spells it (and gives its user id), which is what the
+    // session is known by. Fetched here, outside `apply_session`'s Windows transition lock, like the password
+    // login's profile fetch. If the fetch fails the session has NO identity: nothing the browser handed over stands
+    // in for it, so no engine starts (and no local data is bound, adopted or reset) until a fetch names it.
+    let profile = crate::fetch_canonical_profile(&creds.session_token).await;
+    let email = crate::session_email(profile.as_ref());
+    // R8 (spec 2026-10-06): the same account signs in again in place; another account is an account switch. The
+    // account behind the new session is the server's own record of it. A record that could not be fetched cannot be
+    // compared, so on a Mac that holds an account the sign-in is refused and nothing changes. Compiled out on
+    // Windows, which refuses a sign-in while a session exists.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .default_headers(provenance_headers())
+            .build()
+            .map_err(|e| format!("reqwest build: {e}"))?;
+        let base_url = runner::api_base_url();
+        let settlement = match profile.as_ref() {
+            Some(profile) => {
+                // The handed-over key goes to the check too: when the key this Mac kept differs from it, the kept
+                // key is not used and `apply_session` below installs the handed-over one (spec §5.6).
+                match crate::settle_sign_in(
+                    app.clone(),
+                    state,
+                    &creds.session_token,
+                    profile,
+                    Some(&*master_key),
+                    &mut turn,
+                )
+                .await
+                {
+                    Ok(settlement) => Some(settlement),
+                    Err(failure) => {
+                        // Failed before its token reached the Keychain: nothing of the new session is stored.
+                        if !failure.token_stored {
+                            let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                        }
+                        return Err(failure.message);
+                    }
+                }
+            }
+            None if crate::sign_in_leaves_account_traces(state) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+            }
+            None => None,
+        };
+        match settlement {
+            Some(crate::SignInSettlement::Reauthenticated {
+                vault_unlocked: true, ..
+            }) => {
+                emit(
+                    app,
+                    "done",
+                    email
+                        .as_ref()
+                        .map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
+                );
+                return Ok(());
+            }
+            Some(crate::SignInSettlement::AccountMismatch {
+                pending_changes,
+                unsent,
+                unsent_error,
+            }) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                let mut payload = serde_json::json!({ "pending_changes": pending_changes });
+                if let Some(unsent) = unsent {
+                    payload["unsent"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
+                }
+                if let Some(unsent_error) = unsent_error {
+                    payload["unsent_error"] = serde_json::Value::String(unsent_error);
+                }
+                emit(app, "account_mismatch", payload);
+                return Err("account_mismatch".to_string());
+            }
+            Some(crate::SignInSettlement::Unconfirmed) => {
+                let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
+                return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+            }
+            // A first sign-in; or the same account with no usable key on this Mac (none was kept, the server no longer
+            // accepted the kept one, or it differs from the handed-over one): `apply_session` below installs the
+            // handoff's key, which is this same account's current key, and purges nothing; or an unidentified sign-in
+            // on a Mac that holds nothing of an account.
+            Some(
+                crate::SignInSettlement::Reauthenticated {
+                    vault_unlocked: false, ..
+                }
+                | crate::SignInSettlement::Fresh,
+            )
+            | None => {}
+        }
+    }
+    crate::apply_session(
+        app.clone(),
+        state,
+        creds.session_token.clone(),
+        &master_key,
+        profile,
+        &mut turn,
+        #[cfg(target_os = "windows")]
+        attempt,
+    )
+    .await?;
 
     tracing::info!("browser-login: done, session installed");
     signin_log("done session-installed");
-    emit(app, "done", serde_json::json!({ "email": email }));
+    emit(
+        app,
+        "done",
+        email.map_or_else(|| serde_json::json!({}), |email| serde_json::json!({ "email": email })),
+    );
     Ok(())
 }
 
@@ -415,15 +603,19 @@ fn decrypt_payload(
     let shared_secret = secret.diffie_hellman(&browser_pub_key);
     let shared_bytes = shared_secret.raw_secret_bytes();
 
-    let nonce_bytes = B64.decode(nonce_b64).map_err(|e| format!("Invalid nonce encoding: {e}"))?;
-    let ciphertext = B64.decode(payload_b64).map_err(|e| format!("Invalid payload encoding: {e}"))?;
+    let nonce_bytes = B64
+        .decode(nonce_b64)
+        .map_err(|e| format!("Invalid nonce encoding: {e}"))?;
+    let ciphertext = B64
+        .decode(payload_b64)
+        .map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
     let hk = Hkdf::<Sha256>::new(None, shared_bytes);
-    let mut hkdf_key = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut hkdf_key)
+    let mut hkdf_key = zeroize::Zeroizing::new([0u8; 32]);
+    hk.expand(HKDF_INFO, &mut *hkdf_key)
         .expect("HKDF expand failed — 32-byte output length is always valid");
 
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&hkdf_key));
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&*hkdf_key));
     cipher
         .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
         .or_else(|_| {
@@ -477,6 +669,50 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    /// Review P3-2: every event of an attempt carries the attempt id the window gave it, and a window that sent none (or
+    /// one that is not an id) gets events with none, which the window ignores as nobody's.
+    #[test]
+    fn an_event_carries_the_attempt_it_belongs_to() {
+        let body = event_body(serde_json::json!({ "user_code": "KQ7M-4TXP" }), "waiting", Some("lq3x-1"));
+        assert_eq!(body, serde_json::json!({ "user_code": "KQ7M-4TXP", "phase": "waiting", "attempt": "lq3x-1" }));
+        let none = event_body(serde_json::json!({}), "connecting", None);
+        assert_eq!(none, serde_json::json!({ "phase": "connecting" }));
+    }
+
+    #[test]
+    fn only_a_plain_id_is_echoed() {
+        assert_eq!(attempt_id(Some("lq3x-1_A".to_string())), Some("lq3x-1_A".to_string()));
+        assert_eq!(attempt_id(Some("a".repeat(64))), Some("a".repeat(64)));
+        for refused in [Some(String::new()), Some("a".repeat(65)), Some("a b".to_string()), Some("a\nb".to_string()), Some("é".to_string()), None] {
+            assert_eq!(attempt_id(refused.clone()), None, "{refused:?}");
+        }
+    }
+
+    /// `emit` reads the attempt from the task-local that `start_browser_login` sets around the whole command, so no event
+    /// builder has to be handed it; outside the command (a test, any other caller) there is none.
+    #[tokio::test]
+    async fn the_attempt_is_visible_to_emit_inside_the_command_and_nowhere_else() {
+        assert_eq!(ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten(), None);
+        let inside = ATTEMPT
+            .scope(Some("lq3x-2".to_string()), async { ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten() })
+            .await;
+        assert_eq!(inside.as_deref(), Some("lq3x-2"));
+    }
+
+    #[test]
+    fn the_command_scopes_the_attempt_around_its_whole_body_and_emit_reads_it() {
+        let source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        let command = &source[source.find("pub async fn start_browser_login(").expect("the command")..];
+        let command = &command[..command.find("\n}\n").expect("its end")];
+        assert!(command.contains("attempt_id: Option<String>"), "the window names the attempt:\n{command}");
+        assert!(command.contains("ATTEMPT\n        .scope(self::attempt_id(attempt_id), async {"), "{command}");
+        // The error event of a failed handoff is inside the scope too, so a timed-out attempt's `error` carries its id.
+        assert!(command.find("ATTEMPT").unwrap() < command.find("emit(&app, \"error\"").unwrap());
+        let emit = &source[source.find("fn emit(app: &tauri::AppHandle").expect("emit")..];
+        let emit = &emit[..emit.find("\n}\n").unwrap()];
+        assert!(emit.contains("ATTEMPT.try_with(") && emit.contains("event_body("), "{emit}");
+    }
+
     /// Task 1436 (Codex review on PR #39): `build_ws_request` — the function
     /// `run_handoff` actually calls to build the `/api/v1/auth/cli` WebSocket
     /// upgrade request — must carry the same writer-provenance headers every
@@ -502,6 +738,31 @@ mod tests {
             Some(expected_version),
             "X-Beebeeb-Client-Version missing or stale on the /api/v1/auth/cli WS upgrade request"
         );
+    }
+
+    // Task 1734: what the desktop app tells the server about itself when it
+    // asks to be signed in. The approval page shows it to the person labelled
+    // "reported by the device" - it is a hint, never proof - and the server
+    // ignores anything it does not recognise.
+    #[test]
+    fn init_frame_carries_the_key_and_what_this_device_can_say_about_itself() {
+        let frame = init_frame("cHVia2V5", Some("Guus-PC".to_string()));
+        assert_eq!(frame["ecdh_public_key_b64"], "cHVia2V5");
+        assert_eq!(frame["client"], "desktop");
+        assert_eq!(
+            frame["client_version"],
+            option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(frame["device_name"], "Guus-PC");
+        assert_eq!(frame["os"], std::env::consts::OS);
+    }
+
+    #[test]
+    fn init_frame_omits_a_device_name_when_the_machine_has_none() {
+        let frame = init_frame("cHVia2V5", None);
+        assert!(frame.get("device_name").is_none(), "{frame}");
+        let blank = init_frame("cHVia2V5", Some("  \t ".to_string()));
+        assert!(blank.get("device_name").is_none(), "{blank}");
     }
 
     type WsItem = Result<Message, tokio_tungstenite::tungstenite::Error>;
@@ -564,7 +825,9 @@ mod tests {
             frames: vec![
                 Message::Ping(vec![].into()),
                 Message::Pong(vec![].into()),
-                Message::Text(r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into()),
+                Message::Text(
+                    r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into(),
+                ),
             ],
         };
         let bound = Duration::from_secs(15); // mirrors DEVICE_CODE_TIMEOUT — real-time wait, but this branch resolves immediately

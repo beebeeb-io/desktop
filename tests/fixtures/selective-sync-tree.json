@@ -1,0 +1,204 @@
+{
+  "after": [
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 1,
+          "id": "srv-other",
+          "is_folder": true,
+          "name": "other",
+          "on_disk_bytes": 0,
+          "size_bytes": 512000000
+        }
+      ],
+      "excluded": false,
+      "file_count": 1,
+      "id": "srv-archive",
+      "is_folder": true,
+      "name": "Archive",
+      "on_disk_bytes": 0,
+      "size_bytes": 512000000
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 1,
+          "id": "srv-taxes",
+          "is_folder": true,
+          "name": "Taxes",
+          "on_disk_bytes": 0,
+          "size_bytes": 860000
+        }
+      ],
+      "excluded": false,
+      "file_count": 2,
+      "id": "srv-documents",
+      "is_folder": true,
+      "name": "Documents",
+      "on_disk_bytes": 2400000,
+      "size_bytes": 3260000
+    },
+    {
+      "children": [],
+      "excluded": false,
+      "file_count": 1,
+      "id": "srv-music",
+      "is_folder": true,
+      "name": "Music",
+      "on_disk_bytes": 0,
+      "size_bytes": 9800000
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 2,
+          "id": "srv-2026",
+          "is_folder": true,
+          "name": "2026",
+          "on_disk_bytes": 3700000,
+          "size_bytes": 7800000
+        }
+      ],
+      "excluded": false,
+      "file_count": 2,
+      "id": "srv-photos",
+      "is_folder": true,
+      "name": "Photos",
+      "on_disk_bytes": 3700000,
+      "size_bytes": 7800000
+    }
+  ],
+  "before": [
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 0,
+          "id": "ghost-other",
+          "is_folder": true,
+          "name": "other",
+          "on_disk_bytes": 0,
+          "size_bytes": 0
+        }
+      ],
+      "excluded": false,
+      "file_count": 0,
+      "id": "ghost-archive",
+      "is_folder": true,
+      "name": "Archive",
+      "on_disk_bytes": 0,
+      "size_bytes": 0
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 1,
+          "id": "srv-other",
+          "is_folder": true,
+          "name": "other",
+          "on_disk_bytes": 0,
+          "size_bytes": 512000000
+        }
+      ],
+      "excluded": false,
+      "file_count": 1,
+      "id": "srv-archive",
+      "is_folder": true,
+      "name": "Archive",
+      "on_disk_bytes": 0,
+      "size_bytes": 512000000
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 0,
+          "id": "ghost-taxes",
+          "is_folder": true,
+          "name": "Taxes",
+          "on_disk_bytes": 0,
+          "size_bytes": 0
+        }
+      ],
+      "excluded": false,
+      "file_count": 0,
+      "id": "ghost-documents",
+      "is_folder": true,
+      "name": "Documents",
+      "on_disk_bytes": 0,
+      "size_bytes": 0
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 1,
+          "id": "srv-taxes",
+          "is_folder": true,
+          "name": "Taxes",
+          "on_disk_bytes": 0,
+          "size_bytes": 860000
+        }
+      ],
+      "excluded": false,
+      "file_count": 2,
+      "id": "srv-documents",
+      "is_folder": true,
+      "name": "Documents",
+      "on_disk_bytes": 2400000,
+      "size_bytes": 3260000
+    },
+    {
+      "children": [],
+      "excluded": false,
+      "file_count": 1,
+      "id": "srv-music",
+      "is_folder": true,
+      "name": "Music",
+      "on_disk_bytes": 0,
+      "size_bytes": 9800000
+    },
+    {
+      "children": [],
+      "excluded": false,
+      "file_count": 0,
+      "id": "ghost-photos",
+      "is_folder": true,
+      "name": "Photos",
+      "on_disk_bytes": 0,
+      "size_bytes": 0
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "excluded": false,
+          "file_count": 2,
+          "id": "srv-2026",
+          "is_folder": true,
+          "name": "2026",
+          "on_disk_bytes": 3700000,
+          "size_bytes": 7800000
+        }
+      ],
+      "excluded": false,
+      "file_count": 2,
+      "id": "srv-photos",
+      "is_folder": true,
+      "name": "Photos",
+      "on_disk_bytes": 3700000,
+      "size_bytes": 7800000
+    }
+  ]
+}

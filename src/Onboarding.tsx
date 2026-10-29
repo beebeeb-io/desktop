@@ -1,20 +1,32 @@
+import { useRegionLabel } from './windows/useRegion'
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import {
+  clearSession,
   command,
   commandUnavailableLabel,
+  lastSignedInEmail,
   loadSyncStatus,
   type CommandResult,
-  type DesktopPlatform,
   type FinderInstallState,
   type SyncStatus,
   type VaultItem,
 } from './desktopApi'
-import { submitPassword, submitTotpCode } from './onboardingSignIn'
+import { A0S_TITLE, A1S_LINE, askLines, stripCode, type AskCounts, type SignOutCount } from './signOutCopy'
+import { submitPassword, submitTotpCode, type SignInSettled } from './onboardingSignIn'
+import { ACCOUNT_SWITCH_CANCEL, ACCOUNT_SWITCH_CONFIRM, ACCOUNT_SWITCH_FAILED, ACCOUNT_SWITCH_TITLE, KEY_REPLACED_RECOVERY_COPY, accountSwitchBody } from './accountSwitchCopy'
+import { classifyFinderInstallResult } from './finderInstallCard'
 import { Wordmark } from './Logo'
 import { useToast } from './windows/ui'
 
-type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready'
+/**
+ * The first-run window of Linux (`?window=onboarding`). A Mac signs in in the Beebeeb window (`MacApp.tsx`, `macSignIn.tsx`;
+ * task 1683 slice 2, spec C §11) and never builds this window, so the macOS Finder step, its routing by the
+ * Finder reconciler, its platform fallback and its rail wording are gone from here. The five-row rail, the offline-folder
+ * step and the ready step stay for Linux (spec C §7.8). Windows has its own wizard (`WindowsFirstRun.tsx`).
+ */
+type Step = 'signin' | 'unlock' | 'finder' | 'pinning' | 'ready' | 'switch'
 const RECOVERY_WORD_COUNT = 12
 
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
@@ -25,36 +37,110 @@ const STEPS: Array<{ id: Step; title: string; detail: string }> = [
   { id: 'ready', title: 'Review status', detail: 'Open the control center.' },
 ]
 
-export default function Onboarding() {
+export default function Onboarding({ mode = 'setup' }: { mode?: 'setup' | 'reauth' }) {
+  return <OnboardingErrorBoundary><OnboardingView mode={mode} /></OnboardingErrorBoundary>
+}
+
+function OnboardingView({ mode }: { mode: 'setup' | 'reauth' }) {
   const [step, setStep] = useState<Step>('signin')
+  // How many unsent changes the switch warning names; set when a sign-in turns out to be another account.
+  const [pendingSwitch, setPendingSwitch] = useState(0)
+  // Spec 2026-10-10 W11: on macOS the switch step is the sign-out ask, from the snapshot the sign-in carries (or E3).
+  const [switchUnsent, setSwitchUnsent] = useState<AskCounts | null>(null)
+  const [switchUnsentError, setSwitchUnsentError] = useState<string | null>(null)
+  // FT-I4: the address typed in the sign-in that turned out to be another account. After "Sign out
+  // and switch" the next sign-in form opens with it, so the person who confirmed account B never sees
+  // A's address (the prefill), and B's password is not tried against A's email.
+  const [switchEmail, setSwitchEmail] = useState<string | undefined>(undefined)
+  const [signInEmail, setSignInEmail] = useState<string | undefined>(undefined)
+  // FB-I1: the same account signed in again, but its kept vault key was no longer the account's and
+  // was removed. The recovery step says why it is asking.
+  const [keyReplaced, setKeyReplaced] = useState(false)
+  const regionLabel = useRegionLabel(step)
 
   useEffect(() => {
     let cancelled = false
 
-    Promise.all([
-      loadSyncStatus(),
-      command<DesktopPlatform>('desktop_platform'),
-      command<FinderInstallState>('finder_location_state'),
-    ]).then(([status, platform, finder]) => {
-      if (cancelled || !status?.logged_in) return
+    void loadSyncStatus().then((status) => {
+      if (cancelled) return
+      // R8: "Sign in again" opens this window in reauth mode. It starts at sign-in whatever
+      // sync_status says; nothing was cleared, so the status still reads signed in and unlocked.
+      if (mode === 'reauth') return
+      if (!status?.logged_in) return
 
       if (!status.vault_unlocked) {
         setStep('unlock')
         return
       }
-
-      const isMacos = platform.ok && platform.value === 'macos'
-      if ((isMacos && (!finder.ok || !finder.value.installed)) || (!isMacos && !status.sync_root)) {
-        setStep('finder')
-        return
-      }
-      setStep('ready')
+      setStep(status.sync_root ? 'ready' : 'finder')
     })
 
     return () => {
       cancelled = true
     }
+  }, [mode])
+
+  // The window outlives a sign-out: closing it only hides it, and every "Sign in" (Status, the Finder row, the menu)
+  // shows and focuses this same WebView again (`open_onboarding_window`), so the flow would come back on the step it
+  // was left on, past a sign-in form a signed-out person could no longer reach. When the window is shown or focused
+  // again, a flow on a step that needs a session reads the session, and if it has ended, starts over at sign-in.
+  // What a sign-out keeps for the next sign-in still applies: the form is prefilled with the last signed-in address,
+  // and an account switch's typed address (FT-I4) is untouched, because the switch already sits on the sign-in step.
+  const stepRef = useRef(step)
+  useEffect(() => {
+    stepRef.current = step
+  }, [step])
+  useEffect(() => {
+    let cancelled = false
+    const needsSession = (at: Step) => at === 'unlock' || at === 'finder' || at === 'pinning' || at === 'ready'
+    const recheck = async () => {
+      if (!needsSession(stepRef.current)) return
+      const status = await loadSyncStatus()
+      // Only an explicit "signed out" starts over; a status that cannot be read is no evidence of a sign-out.
+      if (cancelled || status?.logged_in !== false || !needsSession(stepRef.current)) return
+      // An address carried by an earlier switch is not this sign-in's; the form's own prefill fills it instead. The
+      // rest of the flow's state (the switch's count and address, the replaced-key note) is set by the sign-in itself.
+      setSignInEmail(undefined)
+      setStep('signin')
+    }
+    const onShown = () => void recheck()
+    window.addEventListener('visibilitychange', onShown)
+    window.addEventListener('focus', onShown)
+    return () => {
+      cancelled = true
+      window.removeEventListener('visibilitychange', onShown)
+      window.removeEventListener('focus', onShown)
+    }
   }, [])
+
+  // The window closes itself through the `onboarding-close` capability (core:window:allow-close,
+  // this window only). The close is awaited, and a refusal falls back to the DOM close, as the
+  // ReadyStep does, so a rejection is never silently dropped.
+  const closeWindow = async () => {
+    try {
+      await getCurrentWindow().close()
+    } catch {
+      window.close()
+    }
+  }
+
+  const afterSignIn = (settled: SignInSettled, email?: string) => {
+    if (settled.kind === 'account_mismatch') {
+      setPendingSwitch(settled.pendingChanges)
+      setSwitchUnsent(settled.unsent)
+      setSwitchUnsentError(settled.unsentError)
+      setSwitchEmail(email)
+      setStep('switch')
+      return
+    }
+    if (settled.kind === 'reauthenticated' && settled.vaultUnlocked) {
+      // The same account, its keys here: sync resumes; nothing else to set up.
+      void closeWindow()
+      return
+    }
+    setKeyReplaced(settled.kind === 'reauthenticated' && settled.keyReplaced)
+    setStep('unlock')
+  }
 
   return (
     <div className="onboarding-shell">
@@ -66,7 +152,8 @@ export default function Onboarding() {
           </div>
           <div className="steps">
             {STEPS.map((item, index) => (
-              <div key={item.id} className={`step-row ${step === item.id ? 'active' : ''}`}>
+              // M8: the switch warning is part of signing in, so Sign in stays the active row there.
+              <div key={item.id} className={`step-row ${step === item.id || (step === 'switch' && item.id === 'signin') ? 'active' : ''}`}>
                 <div className="step-number">{index + 1}</div>
                 <div>
                   <div className="row-title">{item.title}</div>
@@ -77,13 +164,25 @@ export default function Onboarding() {
           </div>
         </div>
         <div className="sidebar-footer">
-          End-to-end encrypted | Falkenstein | Zero-knowledge
+          {regionLabel} | Zero-knowledge
         </div>
       </aside>
 
       <main className="onboarding-main">
-        {step === 'signin' && <SignInStep onDone={() => setStep('unlock')} />}
-        {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} />}
+        {step === 'signin' && <SignInStep onDone={afterSignIn} initialEmail={signInEmail} />}
+        {step === 'switch' && (
+          <AccountSwitchStep
+            pendingChanges={pendingSwitch}
+            unsent={switchUnsent}
+            unsentError={switchUnsentError}
+            onSwitched={() => {
+              setSignInEmail(switchEmail)
+              setStep('signin')
+            }}
+            onCancel={() => (mode === 'reauth' ? void closeWindow() : setStep('signin'))}
+          />
+        )}
+        {step === 'unlock' && <UnlockStep onDone={() => setStep('finder')} keyReplaced={keyReplaced} />}
         {step === 'finder' && <FinderInstallStep onDone={() => setStep('pinning')} />}
         {step === 'pinning' && <PinningStep onDone={() => setStep('ready')} />}
         {step === 'ready' && <ReadyStep />}
@@ -165,14 +264,33 @@ function Field({
  * issued at 2FA setup — the server's `/auth/2fa/verify` accepts either in the
  * same field (`verify_totp_or_backup`).
  */
-function SignInStep({ onDone }: { onDone: () => void }) {
+function SignInStep({ onDone, initialEmail }: { onDone: (settled: SignInSettled, email: string) => void; initialEmail?: string }) {
   type Mode = 'password' | 'totp' | 'backup'
   const [mode, setMode] = useState<Mode>('password')
 
-  const [email, setEmail] = useState('')
+  // `initialEmail` (after an account switch, FT-I4) is the field's first value, so it beats the
+  // prefill below, which only ever fills an empty field.
+  const [email, setEmail] = useState(initialEmail ?? '')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
+
+  // Prefill the email from the last signed-in account on this install, so a
+  // sign-out / startup-401 auto sign-out lands on a password form that
+  // already knows the address (backend keeps it in desktop.toml — the
+  // keychain account-email credential is erased by sign-out). Prefill only:
+  // never overwrites what the user is typing, and stays silent on
+  // unavailability (fresh install / hand-edited config).
+  useEffect(() => {
+    let cancelled = false
+    void lastSignedInEmail().then((result) => {
+      if (cancelled || !result.ok || !result.value) return
+      setEmail((current) => (current ? current : result.value as string))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const [totpCode, setTotpCode] = useState('')
   const [backupCode, setBackupCode] = useState('')
@@ -201,7 +319,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       startTotpStep('totp')
       return
     }
-    onDone()
+    onDone(result.settled, email)
   }
 
   const submitTotpForm = async (event: FormEvent) => {
@@ -221,7 +339,7 @@ function SignInStep({ onDone }: { onDone: () => void }) {
       requestAnimationFrame(() => totpInputRef.current?.focus())
       return
     }
-    onDone()
+    onDone(result.settled, email)
   }
 
   if (mode === 'totp' || mode === 'backup') {
@@ -315,7 +433,108 @@ function SignInStep({ onDone }: { onDone: () => void }) {
   )
 }
 
-function UnlockStep({ onDone }: { onDone: () => void }) {
+/**
+ * R8: another account is signing in on this Mac. Nothing has changed yet. "Sign out and switch"
+ * is the full sign-out (Finder entry removed, queue and cache purged), then a fresh sign-in.
+ * The sign-out also forgets the previous account's address (`forgetEmail`, FB-I2; spec §5.6: "The
+ * switch leaves no vault key and no account email behind"). An `Err` means the sign-out did not
+ * happen (including `SIGN_OUT_EMAIL_NOT_FORGOTTEN`): its sentence is shown verbatim as a toast and
+ * the step stays; it never continues to sign-in on an `Err`. Any `Ok` continues, and an `Ok` with a
+ * warning (FB-24) shows the warning's sentence as a neutral note.
+ *
+ * On macOS (spec 2026-10-10 W11, §5.3 row 1) the step is the sign-out ask in the switch's words, from the snapshot the
+ * sign-in carried: "Sign out and switch" keeps the waiting saves with that snapshot's `askId`; a refusal
+ * (`unsent_changes:`) counts again and re-renders the ask, with no toast; a count that cannot be read (E3) is a line in
+ * the step, never a toast. A toast or a warning Rust holds pending is acknowledged once shown (F12). A code prefix is
+ * never shown. With no snapshot (Linux) the step is spec A's, with its pending-change count.
+ *
+ * Drawn in design/hifi/macos-settings-dialogs.html §4 (onboarding-window variant): no close, the
+ * confirm is the filled destructive button, and focus is on Cancel when the step opens, so a stray
+ * Enter cancels and can never confirm.
+ */
+function AccountSwitchStep({
+  pendingChanges,
+  unsent,
+  unsentError,
+  onSwitched,
+  onCancel,
+}: {
+  pendingChanges: number
+  unsent: AskCounts | null
+  unsentError: string | null
+  onSwitched: () => void
+  onCancel: () => void
+}) {
+  const { showToast } = useToast()
+  const [busy, setBusy] = useState(false)
+  const [ask, setAsk] = useState<AskCounts | null>(unsent)
+  // Spec 2026-10-10 §5.3 row 1: E3, a line in this step, while the count could not be read. Deliberately inline, never
+  // a toast (the design's "count failed" Card, §4): it persists because "Sign out and switch" cannot keep anything
+  // until a count succeeds, and it is replaced by the ask when a fresh count does.
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
+  const [countError, setCountError] = useState<string | null>(unsentError)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    cancelRef.current?.focus()
+  }, [])
+  const waiting = ask !== null && (ask.files > 0 || ask.others > 0)
+  const switchAccount = async () => {
+    setBusy(true)
+    const result = await clearSession({ forgetEmail: true, keepUnsent: ask ? { askId: ask.askId } : undefined })
+    setBusy(false)
+    if (!result.ok) {
+      // W11: a refusal re-renders the ask from a fresh count, with no toast.
+      if (result.reason.startsWith('unsent_changes: ')) {
+        const fresh = await command<SignOutCount>('sign_out_count')
+        if (fresh.ok) {
+          setAsk(fresh.value)
+          setCountError(null)
+          return
+        }
+        setCountError(fresh.reason) // E3 again: the line, never a toast
+        return
+      }
+      // The gate's own read failed: E3 as the line; Rust holds it pending, so it is acknowledged once shown (F12).
+      if (result.reason.startsWith('unsent_count_failed: ')) {
+        setCountError(result.reason)
+        void command<void>('sign_out_result_ack')
+        return
+      }
+      showToast({ variant: 'error', title: ACCOUNT_SWITCH_FAILED, message: result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason) })
+      void command<void>('sign_out_result_ack')
+      return
+    }
+    // FB-24: the sign-out happened. A step it could not confirm is said neutrally (never under
+    // "Couldn’t sign out"), and the note stays until dismissed: this step unmounts as sign-in opens.
+    if (result.value.warning) {
+      showToast({ variant: 'info', message: result.value.warning.sentence, durationMs: null })
+      void command<void>('sign_out_result_ack')
+    }
+    onSwitched()
+  }
+  const lines = waiting && ask ? askLines(ask, null, true) : null
+  // With no count (E3), the step says only what is known: the switch signs the other account out.
+  const copyLine = waiting || countError !== null ? A1S_LINE : accountSwitchBody(ask ? 0 : pendingChanges)
+  return (
+    <Card title={waiting ? A0S_TITLE : ACCOUNT_SWITCH_TITLE} copy={copyLine}>
+      {countError !== null && !waiting ? <p className="page-copy" role="alert">{stripCode(countError)}</p> : null}
+      {lines ? lines.paragraphs.slice(0, lines.foldersAfter).map((line) => <p key={line} className="page-copy">{line}</p>) : null}
+      {lines?.foldersLine ? <p className="page-copy">{lines.foldersLine}</p> : null}
+      {lines ? lines.folders.map((folder) => <p key={folder} className="page-copy" style={{ fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>{folder}</p>) : null}
+      {lines ? lines.paragraphs.slice(lines.foldersAfter).map((line) => <p key={line} className="page-copy">{line}</p>) : null}
+      <div className="button-row" style={{ marginTop: 16 }}>
+        <button ref={cancelRef} className="button" onClick={onCancel} disabled={busy}>
+          {ACCOUNT_SWITCH_CANCEL}
+        </button>
+        <button className="button danger filled" onClick={() => void switchAccount()} disabled={busy}>
+          {ACCOUNT_SWITCH_CONFIRM}
+        </button>
+      </div>
+    </Card>
+  )
+}
+
+function UnlockStep({ onDone, keyReplaced = false }: { onDone: () => void; keyReplaced?: boolean }) {
   const [recoveryWords, setRecoveryWords] = useState<string[]>(() =>
     Array.from({ length: RECOVERY_WORD_COUNT }, () => ''),
   )
@@ -340,6 +559,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   const applyWords = (startIndex: number, rawWords: string[]) => {
     const cleanWords = rawWords.map((word) => word.trim()).filter(Boolean)
     if (cleanWords.length === 0) return
+    // Match the “paste all 12 words into any box” promise.
+    if (cleanWords.length === RECOVERY_WORD_COUNT) startIndex = 0
 
     setResult(null)
     setRecoveryWords((current) => {
@@ -371,14 +592,18 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
       return
     }
     if (event.key === 'Backspace' && !recoveryWords[index] && index > 0) {
-      wordRefs.current[index - 1]?.focus()
+      // Cancel deletion before focus moves: WebView2 applies it to the new input.
+      event.preventDefault()
+      const previous = wordRefs.current[index - 1]
+      previous?.focus()
+      previous?.setSelectionRange(previous.value.length, previous.value.length)
     }
   }
 
   return (
     <Card
       title="Set up this Mac"
-      copy="This Mac does not have your encryption keys yet. Restore them to continue."
+      copy={keyReplaced ? KEY_REPLACED_RECOVERY_COPY : 'This Mac does not have your encryption keys yet. Restore them to continue.'}
     >
       {result && !result.ok && (
         <div className="notice">
@@ -435,9 +660,13 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   )
 }
 
+/**
+ * Windows/Linux only since spec 2026-10-06; Linux alone mounts this window since task 1683 slice 2. The macOS-only
+ * branches (the turned-off card, its poll, the System Settings link, the macOS copy) are gone; on these platforms
+ * they never rendered. The macOS counterpart is `FinderScreen` in `macSignIn.tsx`.
+ */
 function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [syncRoot, setSyncRoot] = useState<string | null>(null)
-  const [platform, setPlatform] = useState<DesktopPlatform>('unknown')
   const [finderPath, setFinderPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   // KEPT INLINE BY DESIGN — task 1255, lead ruling 2026-08-31 ("option (a)").
@@ -458,9 +687,6 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
-    command<DesktopPlatform>('desktop_platform').then((result) => {
-      if (result.ok) setPlatform(result.value)
-    })
     command<string>('default_sync_root').then((result) => {
       if (result.ok) setSyncRoot(result.value)
     })
@@ -484,17 +710,16 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
   const install = useCallback(async () => {
     setBusy(true)
     setMessage(null)
-    const result = await command<FinderInstallState>('install_finder_location', {
-      path: platform === 'macos' ? null : syncRoot,
-    })
+    const result = await command<FinderInstallState>('install_finder_location', { path: syncRoot })
     setBusy(false)
-    if (result.ok) {
-      setFinderPath(result.value.path ?? null)
+    const outcome = classifyFinderInstallResult(result)
+    if (outcome.kind === 'installed') {
+      setFinderPath(outcome.path)
       onDone()
       return
     }
-    setMessage(result.unsupported ? commandUnavailableLabel('install_finder_location') : result.reason)
-  }, [onDone, platform, syncRoot])
+    setMessage(!result.ok && result.unsupported ? commandUnavailableLabel('install_finder_location') : outcome.message)
+  }, [onDone, syncRoot])
 
   const continueWithoutInstall = useCallback(async () => {
     setBusy(true)
@@ -508,37 +733,29 @@ function FinderInstallStep({ onDone }: { onDone: () => void }) {
     setMessage(result.unsupported ? commandUnavailableLabel('continue_without_finder_location') : result.reason)
   }, [onDone, syncRoot])
 
-  const isMacos = platform === 'macos'
-
   return (
     <Card
       title="Install the Finder location"
-      copy={
-        isMacos
-          ? 'Beebeeb appears as a system-managed Finder location. Offline folders are controlled separately.'
-          : 'Beebeeb should appear as a file-manager location. This is separate from choosing optional offline folders.'
-      }
+      copy="Beebeeb should appear as a file-manager location. This is separate from choosing optional offline folders."
     >
       {message && <div className="notice">{message}</div>}
       <div className="panel" style={{ marginTop: 16, background: 'var(--paper-2)' }}>
-        <div className="section-label">{isMacos ? 'Finder location' : 'Folder path'}</div>
+        <div className="section-label">Folder path</div>
         <div className="mono" style={{ marginTop: 8, fontSize: 13 }}>
-          {finderPath ?? (isMacos ? 'Beebeeb in Finder' : syncRoot ?? '~/Beebeeb')}
+          {finderPath ?? syncRoot ?? '~/Beebeeb'}
         </div>
       </div>
       <div className="button-row" style={{ marginTop: 16 }}>
-        {!isMacos && (
-          <button className="button" onClick={chooseFolder} disabled={busy}>
-            Choose location
-          </button>
-        )}
+        <button className="button" onClick={chooseFolder} disabled={busy}>
+          Choose location
+        </button>
         <button className="button amber" onClick={install} disabled={busy}>
           {busy ? 'Installing…' : 'Install Finder location'}
         </button>
         {/* This escape hatch EXISTS ONLY while `message` is set — it is the gate described
             on the `message` state above. Removing the inline error removes this button.
             Read that comment before refactoring either one. */}
-        {message && !isMacos && (
+        {message && (
           <button className="button" onClick={continueWithoutInstall} disabled={busy}>
             Continue without install
           </button>

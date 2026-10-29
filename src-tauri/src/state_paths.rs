@@ -49,10 +49,43 @@ pub(crate) fn init_from_app(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn beebeeb_state_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Ok(dir) = STATE_DIR_OVERRIDE.try_with(PathBuf::clone) {
+        return Ok(dir);
+    }
     BEEBEEB_STATE_DIR
         .get()
         .cloned()
         .ok_or_else(|| "Beebeeb state dir has not been initialized".to_string())
+}
+
+// Tests only: the state dir for one future (`STATE_DIR_OVERRIDE.scope(dir, future)`), instead of the process-wide
+// scratch dir that every sign-out test shares (`init_for_test`). For a test that queues rows: since task 1887 a
+// sign-out on a Mac reads the queue before it changes anything, so a row left in the shared dir would refuse another
+// test's sign-out. Code that runs on another task or thread inside the scope uses the shared dir, as before.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static STATE_DIR_OVERRIDE: PathBuf;
+}
+
+/// Test-only: resolve the process-wide state dir to a throwaway directory, the way `init_from_app`
+/// does at real startup.
+///
+/// `clear_session_impl` runs the local-state purge on BOTH sign-out paths, already-signed-out included
+/// (it is a cross-account safety invariant), and it resolves the state dir through the global above. A
+/// unit test that drives `clear_session_impl` without an `AppHandle` therefore got `Err("Beebeeb state
+/// dir has not been initialized")` (CI run 37322574694, 782 passed / 1 failed, on Windows). Until R10
+/// (task 1834) macOS and Linux only logged that and went on, so this was Windows-only; now a sign-out
+/// whose purge cannot run stops there too (`SIGN_OUT_PURGE_FAILED`), so every platform's sign-out tests
+/// need it. The directory is a `tempfile` one, never a real app-local path. `set` is first-writer-wins,
+/// so whichever test gets here first fixes the directory; the returned path is whatever the global
+/// really holds. Tests of the account binding never use it: they pass their own state dir.
+#[cfg(test)]
+pub(crate) fn init_for_test() -> PathBuf {
+    static SCRATCH: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let scratch = SCRATCH.get_or_init(|| tempfile::tempdir().expect("create scratch state dir"));
+    let _ = BEEBEEB_STATE_DIR.set(scratch.path().to_path_buf());
+    BEEBEEB_STATE_DIR.get().cloned().expect("state dir set just above")
 }
 
 pub(crate) fn beebeeb_state_dir_from_app_local_data(app_local_data_dir: &Path) -> PathBuf {

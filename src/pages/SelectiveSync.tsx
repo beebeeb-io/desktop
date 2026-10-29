@@ -70,8 +70,7 @@ export default function SelectiveSync() {
         <div>
           <h1 className="page-title">Selective sync</h1>
           <p className="page-copy">
-            The drive is online-only by default. Pin a folder to recursively keep it hydrated on
-            this Mac; unpinning returns it to remote-first behavior after pending uploads settle.
+            Folders you choose stay on this Mac. Everything else downloads when you open it.
           </p>
         </div>
         <span className="status-pill">
@@ -86,15 +85,15 @@ export default function SelectiveSync() {
         <div className="grid three">
           <div>
             <div className="metric-label">Default</div>
-            <div className="metric-detail">No folders pinned</div>
+            <div className="metric-detail">No folders kept on this computer</div>
           </div>
           <div>
             <div className="metric-label">Scope</div>
-            <div className="metric-detail">Recursive folder toggles</div>
+            <div className="metric-detail">A folder and everything inside it</div>
           </div>
           <div>
-            <div className="metric-label">Persisted by</div>
-            <div className="metric-detail">Local daemon state</div>
+            <div className="metric-label">Saved</div>
+            <div className="metric-detail">On this computer</div>
           </div>
         </div>
       </div>
@@ -102,10 +101,7 @@ export default function SelectiveSync() {
       {loading ? (
         <div className="empty-state">Loading remote tree…</div>
       ) : folderItems.length === 0 ? (
-        <div className="empty-state">
-          No remote tree is available. The UI is ready for `list_remote_tree` and
-          `set_recursive_pin`, but this build has no folder data to pin yet.
-        </div>
+        <div className="empty-state">{notice ? 'Couldn’t load your folders.' : 'No folders yet.'}</div>
       ) : (
         <div className="tree">
           {folderItems.map((item) => (

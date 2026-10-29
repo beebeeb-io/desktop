@@ -1,18 +1,29 @@
-import { useEffect, useState } from 'react'
+import { useRegionLabel } from '../windows/useRegion'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useToast } from '../windows/ui'
 import {
   accountSubscription,
   BILLING_URL,
+  clearSession,
   command,
   commandUnavailableLabel,
   formatBytes,
   loadSyncStatus,
+  lockVault,
   openUrl,
-  regionCityFromCode,
   type Subscription,
   type SyncStatus,
 } from '../desktopApi'
+import {
+  SUPPORT_BUNDLE_DETAIL,
+  SUPPORT_BUNDLE_SAVED_TITLE,
+  SUPPORT_BUNDLE_TITLE,
+  supportBundleSavedMessage,
+  type ProblemReportResult,
+} from '../diagnosticsCopy'
+import { clearSignOutWarning, heldSignOutWarning, holdSignOutWarning, subscribeSignOutWarning } from '../accountSession'
 import { planRenewalCopy, planStatusTone, quotaPercent, titleCasePlan } from '../planPresentation'
+import { stripCode } from '../signOutCopy'
 
 const WEB_APP_URL = 'https://app.beebeeb.io'
 
@@ -27,12 +38,19 @@ type PlanState =
   | { phase: 'loaded'; sub: Subscription }
 
 export default function Account() {
+  const regionLabel = useRegionLabel()
   const { showToast } = useToast()
   const [email, setEmail] = useState<string | null>(null)
   const [status, setStatus] = useState<SyncStatus | null>(null)
   const [autostart, setAutostart] = useState<boolean | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanState>({ phase: 'loading' })
+  // FB-24: a Lock or a sign-out that happened but could not confirm one step. Rust's sentence, as a
+  // neutral line (never under "Couldn’t …"), until the next Lock or sign-out. A sign-out's sentence is
+  // held outside the session boundary, because the sign-out remounts this page (accountSession.ts); the
+  // next Lock, Unlock or sign-out clears it.
+  const [actionNote, setActionNote] = useState<string | null>(null)
+  const signOutNote = useSyncExternalStore(subscribeSignOutWarning, heldSignOutWarning, heldSignOutWarning)
 
   // Poll sync_status so the component reflects auto-unlock state that
   // occurs on startup — the vault may unlock a few seconds after mount.
@@ -101,14 +119,28 @@ export default function Account() {
     return true
   }
 
+  // An Err means it did not happen (one error toast); an Ok may carry a warning (FB-24), shown as the
+  // neutral line. The status is read again after ANY result (M4).
   const lock = async () => {
-    if (await runAction('lock_vault')) {
-      const next = await loadSyncStatus()
-      setStatus(next)
+    setBusy('lock_vault')
+    setActionNote(null)
+    clearSignOutWarning()
+    const result = await lockVault()
+    setBusy(null)
+    if (!result.ok) {
+      showToast({
+        variant: 'error',
+        title: 'That didn’t work',
+        message: result.unsupported ? commandUnavailableLabel('lock_vault') : result.reason,
+      })
+    } else {
+      setActionNote(result.value.warning?.sentence ?? null)
     }
+    setStatus(await loadSyncStatus())
   }
 
   const unlock = async () => {
+    clearSignOutWarning()
     if (await runAction('unlock_vault')) {
       const next = await loadSyncStatus()
       setStatus(next)
@@ -117,16 +149,29 @@ export default function Account() {
 
   const signOut = async () => {
     setBusy('clear_session')
-    const result = await command<void>('clear_session')
+    setActionNote(null)
+    clearSignOutWarning()
+    const result = await clearSession()
     setBusy(null)
     if (!result.ok) {
+      // Spec 2026-10-10 §4 row 2: a waiting change opens the flow in Settings › Account, never a toast here.
+      if (result.reason.startsWith('unsent_changes: ')) {
+        await command<void>('request_sign_out_flow')
+        setStatus(await loadSyncStatus())
+        return
+      }
       showToast({
         variant: 'error',
         title: 'Couldn’t sign out',
-        message: result.unsupported ? commandUnavailableLabel('clear_session') : result.reason,
+        message: result.unsupported ? commandUnavailableLabel('clear_session') : stripCode(result.reason),
       })
+      // F12: a result Rust holds pending is acknowledged once it was shown.
+      void command<void>('sign_out_result_ack')
+      setStatus(await loadSyncStatus())
       return
     }
+    holdSignOutWarning(result.value.warning?.sentence ?? null)
+    if (result.value.warning) void command<void>('sign_out_result_ack')
     setEmail(null)
     setStatus({ logged_in: false, engine: 'stopped', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0 })
   }
@@ -143,34 +188,49 @@ export default function Account() {
     })
   }
 
+  // `report_problem` writes the bundle and reveals it; `export_diagnostics`
+  // only returns the JSON to the webview, so calling it here saved nothing.
   const diagnostics = async () => {
-    if (await runAction('export_diagnostics')) {
+    setBusy('report_problem')
+    const result = await command<ProblemReportResult>('report_problem')
+    setBusy(null)
+    if (!result.ok) {
       showToast({
-        variant: 'success',
-        title: 'Diagnostics export started',
-        message: 'The bundle is being written to your sync folder.',
+        variant: 'error',
+        title: 'Couldn’t save the support bundle',
+        message: result.unsupported ? commandUnavailableLabel('report_problem') : result.reason,
       })
+      return
     }
+    // The bundle is on disk either way; a failed email draft is a warning, not a failed save.
+    showToast({
+      variant: result.value.email_opened ? 'success' : 'warning',
+      title: SUPPORT_BUNDLE_SAVED_TITLE,
+      message: supportBundleSavedMessage(result.value.path, result.value.email_opened),
+    })
   }
 
   const loggedIn = status?.logged_in ?? false
   const unlocked = loggedIn && (status?.vault_unlocked ?? status?.engine === 'running')
+  const note = actionNote ?? signOutNote
 
   return (
     <section className="page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Account & security</h1>
-          <p className="page-copy">
-            Session token, unlock state, diagnostics, sign-out, and launch behavior. Locking clears
-            file-content access while leaving the Finder location visible.
-          </p>
         </div>
         <span className="status-pill">
           <span className={`dot ${unlocked ? 'ok' : loggedIn ? 'warn' : ''}`} />
           {unlocked ? 'Unlocked' : loggedIn ? 'Locked or paused' : 'Signed out'}
         </span>
       </div>
+
+      {note && (
+        <div className="notice" role="status" style={{ marginBottom: 14 }}>
+          {note}
+        </div>
+      )}
 
 
       <div className="grid two">
@@ -185,21 +245,15 @@ export default function Account() {
               Open web app
             </button>
           </div>
-          <div className="row">
-            <div>
-              <div className="row-title">Session token</div>
-              <div className="row-detail">{loggedIn ? 'Stored by native session layer' : 'Missing'}</div>
-            </div>
-          </div>
         </div>
 
         <div className="panel">
           <h2 className="section-title">Vault lock</h2>
           <div className="row">
             <div>
-              <div className="row-title">Master key lifetime</div>
+              <div className="row-title">{unlocked ? 'Vault is unlocked' : 'Vault is locked'}</div>
               <div className="row-detail">
-                {unlocked ? 'Unwrapped in memory' : 'Unavailable to file operations'}
+                {unlocked ? 'Locking stops sync until you enter your password again.' : 'Sync is paused until you unlock it.'}
               </div>
             </div>
           </div>
@@ -221,7 +275,7 @@ export default function Account() {
         ) : plan.phase === 'loading' ? (
           <div className="empty-state">Loading plan…</div>
         ) : plan.phase === 'unsupported' ? (
-          <div className="notice">Plan details aren’t available in this build.</div>
+          <div className="notice">Plan details aren’t available right now.</div>
         ) : plan.phase === 'error' ? (
           <div className="notice">{plan.reason}</div>
         ) : (
@@ -237,7 +291,7 @@ export default function Account() {
                     <span className={`dot ${planStatusTone(plan.sub.status) === 'green' ? 'ok' : ''}`} />
                     {titleCasePlan(plan.sub.status)}
                   </span>
-                  {regionCityFromCode(plan.sub.region)}
+                  {regionLabel}
                 </div>
               </div>
               <button className="button amber" onClick={() => void openUrl(BILLING_URL)}>
@@ -278,10 +332,10 @@ export default function Account() {
           <h2 className="section-title">Diagnostics</h2>
           <div className="row">
             <div>
-              <div className="row-title">Support bundle</div>
-              <div className="row-detail">Export logs and daemon state without secrets or plaintext names.</div>
+              <div className="row-title">{SUPPORT_BUNDLE_TITLE}</div>
+              <div className="row-detail">{SUPPORT_BUNDLE_DETAIL}</div>
             </div>
-            <button className="button" disabled={busy === 'export_diagnostics'} onClick={() => void diagnostics()}>
+            <button className="button" disabled={busy === 'report_problem'} onClick={() => void diagnostics()}>
               Export
             </button>
           </div>
@@ -304,10 +358,6 @@ export default function Account() {
 
         <div className="panel">
           <h2 className="section-title">Sign out</h2>
-          <p className="page-copy" style={{ margin: '0 0 14px' }}>
-            Signing out stops sync and removes the session. Future native wiring should also clear
-            cached plaintext and wrapped-key material.
-          </p>
           <button
             className="button danger"
             disabled={!loggedIn || busy === 'clear_session'}
