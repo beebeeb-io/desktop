@@ -19,8 +19,32 @@ impl EngineBridge {
         let scope = self.owner_key_scope();
         scope.check()?;
         let dirty = self.db().shared_index_dirty_revision(folder_id)?;
+        // L7d F1: a folder this device has seen with custody is never deferred.
+        // Waiting cannot help (the server says its keys are gone) and a
+        // deferral would hide the work from maintenance forever, so its dirty
+        // marker stays and the next 30 s pass asks again, as on main before
+        // this PR.
+        //
+        // L7d F3: the deferral for a never-seen root is written BEFORE the
+        // custody lookup. `remember_custody` deletes the deferral and
+        // re-dirties the root; a deferral written after that revive would
+        // strand the work. The re-check below covers a custody write that
+        // races this write.
+        if !self.db().has_seen_folder_custody(folder_id)? {
+            self.db().defer_shared_index_until_custody(folder_id)?;
+            if self.db().has_seen_folder_custody(folder_id)? {
+                self.db().revive_deferred_shared_index(folder_id)?;
+                return Ok(IndexRepairReport::default());
+            }
+        }
         let key = match self.shared_folder_custody_key(folder_id).await {
-            Ok(key) => key,
+            Ok(key) => {
+                // The provisional deferral must not outlive a repair that got
+                // its key. `revive_deferred_shared_index` already removed it if
+                // custody opened during the lookup, so this is a no-op then.
+                self.db().cancel_shared_index_deferral(folder_id)?;
+                key
+            }
             // Review 2279 items 1-2: no custody, upgrade required, "can't
             // verify" and a seen-custody 404 cannot be repaired by retrying
             // every 30 seconds. Keep the work in a separate durable deferral
@@ -28,7 +52,14 @@ impl EngineBridge {
             // only for `NoCustody`). `remember_custody` revives it when custody
             // opens for the root.
             Err(error) if owner_keys::shared_folder_key_unavailable(&error) => {
-                self.db().defer_shared_index_until_custody(folder_id)?;
+                // Seen custody, before this pass or by a custody GET that
+                // opened while it ran: keep the dirty marker and ask again on
+                // the next pass. The concurrent `remember_custody` already
+                // deleted the deferral and re-dirtied the root.
+                if self.db().has_seen_folder_custody(folder_id)? {
+                    self.db().cancel_shared_index_deferral(folder_id)?;
+                    return Ok(IndexRepairReport::default());
+                }
                 self.db()
                     .clear_shared_index_dirty_at_revision(folder_id, dirty.as_deref())?;
                 return Ok(IndexRepairReport {
