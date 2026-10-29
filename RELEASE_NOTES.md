@@ -38,7 +38,7 @@ This release fixes the problem 0.8.18 and 0.8.19 listed as a known limitation.
     - Each one that marks a file checks that the file's read-only setting, its date and its permissions are unchanged, and that nothing was downloaded.
     - Each was seen to fail first: on the 0.8.19 code, or with the fix deliberately broken. For example, with the check that the file is wholly on the PC removed, opening a file that was only partly there downloaded the rest, and the test caught it.
 - **[Developer] The state database is created under one write lock** (task 2278). Two parts of the app opening a new database at the same moment could make one of them fail. This made a required macOS check fail at random.
-- **[Developer] A release can only be built from a branch that starts at a published release, on a reviewed commit** (task 2281). The release workflow checks this before it builds anything. The tag of the release it starts at must also point at the merge commit of a reviewed pull request: a published release on any other tagged commit no longer counts.
+- **[Developer] A release branch must start at a reviewed commit** (task 2281). Before it builds anything, the release workflow checks a release branch. Every change on the branch must have come through a pull request into that branch. The branch must start either at a commit on `main` or at the commit of a published release. That release's tag must point at the merge commit of a pull request into `main` or a release branch; a published release on any other tagged commit no longer counts. A release built from `main` itself skips this check, because changes reach `main` only through pull requests.
 
 ### Verification
 
