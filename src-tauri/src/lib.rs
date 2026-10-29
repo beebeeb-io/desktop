@@ -7845,7 +7845,7 @@ const FOUND_WHILE_PAUSED_NOT_YOURS: &str =
 /// Task 2267 (fix round 2): what Keep says when it stopped part way (the database could not be written). Every item it
 /// moved is forgotten in its own transaction, or settled at the next start (`settle_an_interrupted_keep`).
 #[cfg(target_os = "windows")]
-const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - kept on this PC”; the rest stays where it is and isn’t uploaded.";
+const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - not uploaded”; the rest stays where it is and isn’t uploaded.";
 
 /// Task 2267 (lead review round 3, P2-2): what the card says when it cannot read the held changes. It reads them again
 /// at the next refresh; Upload waits for that read, since it sends only what the card showed.
@@ -7904,7 +7904,7 @@ fn own_local_data_for_decision(identity: &account_binding::Identity) -> Result<(
 }
 
 /// Task 2267 (fix round 2): the folder "Show in Explorer" opens: the dated folder the last keep recorded, only when it
-/// is a `YYYY-MM-DD` folder directly inside `Beebeeb - kept on this PC` next to the Beebeeb folder, and is there.
+/// is a `YYYY-MM-DD` folder directly inside `Beebeeb - not uploaded` next to the Beebeeb folder, and is there.
 #[cfg(any(target_os = "windows", test))]
 fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<Option<String>>) -> Result<PathBuf, String> {
     let folder = PathBuf::from(
@@ -27850,13 +27850,22 @@ mod account_binding_tests {
         assert_eq!(decision_identity(&AuthorizeFixture::without_session().state).map(|_| ()), refused, "no session");
     }
 
+    /// Task 2267, lead ruling on self-review F9 (2026-10-29): Keep's stop message names the kept folder as it is made.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn keep_stopped_names_the_kept_folder_as_it_is_made() {
+        assert!(FOUND_WHILE_PAUSED_KEEP_STOPPED.contains("“Beebeeb - not uploaded”"), "{FOUND_WHILE_PAUSED_KEEP_STOPPED}");
+        let named = format!("“{}”", crate::found_while_paused::KEPT_FOLDER_NAME);
+        assert!(FOUND_WHILE_PAUSED_KEEP_STOPPED.contains(&named), "{FOUND_WHILE_PAUSED_KEEP_STOPPED}");
+    }
+
     /// Task 2267 (fix round 2): "Show in Explorer" opens only the dated folder the last keep recorded, inside
-    /// `Beebeeb - kept on this PC` next to the Beebeeb folder, and only while it is there.
+    /// `Beebeeb - not uploaded` next to the Beebeeb folder, and only while it is there.
     #[test]
     fn show_in_explorer_opens_only_a_dated_folder_in_the_kept_folder_next_to_the_beebeeb_folder() {
         let top = tempfile::tempdir().unwrap();
         let root = top.path().join("Beebeeb");
-        let kept = top.path().join(crate::found_while_paused::KEPT_FOLDER_NAME);
+        let kept = top.path().join("Beebeeb - not uploaded");
         let dated = kept.join("2026-10-28");
         for dir in [&root, &dated, &kept.join("notes"), &top.path().join("elsewhere").join("2026-10-28")] {
             std::fs::create_dir_all(dir).unwrap();
@@ -27940,7 +27949,7 @@ mod account_binding_tests {
             );
             let kept = top
                 .path()
-                .join(crate::found_while_paused::KEPT_FOLDER_NAME)
+                .join("Beebeeb - not uploaded")
                 .join("2026-10-28")
                 .join("A.txt");
             assert_eq!(std::fs::read(kept).unwrap(), b"local bytes", "nothing lost");
