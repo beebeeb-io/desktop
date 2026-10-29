@@ -41,8 +41,9 @@
 //! 2. **Periodic enumeration scan** ([`scan_loop`]) — the actual CREATE trigger.
 //!    Every [`SCAN_INTERVAL`] it recursively walks the sync root (reading the
 //!    disk directly always works — it does not depend on any filter callback),
-//!    runs the SAME [`EngineBridge::classify_local_path`] on every regular file,
-//!    and for each survivor (a genuinely-new plain file) converts it to an
+//!    runs the SAME [`EngineBridge::classify_local_path`] on every regular file
+//!    not found settled with the same listing and row before ([`ScanMemo`]; all of
+//!    them every [`FULL_RECHECK_INTERVAL`]), and for each survivor (a genuinely-new plain file) converts it to an
 //!    unsynced placeholder and queues the encrypted upload — the exact pipeline
 //!    the (non-firing) NOTIFY create callback would have used.
 //!
@@ -50,7 +51,7 @@
 //! and the convert→queue sequence live in one place. The transfer loop then
 //! encrypts + uploads; on success a new local file becomes an in-sync
 //! placeholder (see
-//! [`crate::engine_bridge::EngineBridge::finalize_local_upload_placeholder`]).
+//! [`crate::engine_bridge::EngineBridge::defer_local_upload_finalization`]).
 //!
 //! ## Lifecycle
 //!
@@ -121,8 +122,7 @@ use tokio::sync::mpsc;
 // [`suppress_engine_delete`], and the debounce loop consults [`take_engine_delete_suppressed`]
 // on every `Delete` event — a hit means "engine-originated, do not propagate".
 //
-// Mirrors the existing `in_flight` CREATE-suppression set (scan_loop) and the
-// `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
+// Mirrors the `windows_cf::NOTIFY_TX` static: an `extern "system"` callback / a deep engine
 // call site can't thread a handle, so a process-global is the simplest hop. The
 // set is small (only paths mid-delete) and self-draining (entries are consumed on
 // the matching Delete event, or swept by [`prune_stale_engine_suppressions`]).
@@ -153,6 +153,12 @@ fn take_engine_delete_suppressed(path: &Path) -> bool {
     }
 }
 
+/// Task 1640 (review-151d P3-1): the engine's own remove registered for `path` did not happen (it
+/// failed): drop its registration, so a later delete by the person is honoured.
+pub fn cancel_engine_delete_suppression(path: &Path) {
+    let _ = take_engine_delete_suppressed(path);
+}
+
 /// Drop suppression entries older than this. A registered engine delete whose
 /// NOTIFY never arrives (revert/remove failed, or the OS coalesced the event)
 /// must not linger and swallow a genuine LATER user delete of the same path.
@@ -168,7 +174,7 @@ fn prune_stale_engine_suppressions() {
     }
 }
 
-use crate::engine_bridge::{EngineBridge, FinderWriteOutcome};
+use crate::engine_bridge::{EngineBridge, FinderWriteOutcome, LocalPathVerdict};
 
 /// Debounce window: coalesce a burst of writes to the same path (an editor
 /// saving in several `write` syscalls, a copy streaming in) into a single
@@ -216,6 +222,64 @@ const MAX_SCAN_DEPTH: usize = 64;
 /// scaffolding is NOT counted against this cap: folders are cheap metadata ops
 /// and must keep pace with their files so parents always exist first.
 const MAX_NEW_UPLOADS_PER_SCAN: usize = 256;
+
+/// Task 2229: how long the scan trusts a settled verdict before it classifies every file again.
+/// The listing misses bytes rewritten with the old size and modification time on Windows, and a
+/// file still open for writing; this bounds both. The full pass compares the bytes by a fingerprint
+/// a restored time cannot fool ([`crate::engine_bridge::ContentFingerprint`], task 2232).
+const FULL_RECHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Task 2229: a file as the directory listing shows it. On Windows the listing carries all of it
+/// (`DirEntry::metadata` opens no handle), where a stat opens one: ~40 µs each on a Cloud Files
+/// sync root. A file still open for writing may list its old size and time until it is closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DiskStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(target_os = "windows")]
+    attributes: u32,
+    #[cfg(unix)]
+    inode_and_change: (u64, i64, i64),
+}
+
+impl DiskStamp {
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(target_os = "windows")]
+            attributes: std::os::windows::fs::MetadataExt::file_attributes(meta),
+            #[cfg(unix)]
+            inode_and_change: {
+                use std::os::unix::fs::MetadataExt;
+                (meta.ino(), meta.ctime(), meta.ctime_nsec())
+            },
+        }
+    }
+}
+
+/// Task 2229: the files a pass found settled or held ([`ScanDispatch::Settled`]), with the disk stamp
+/// and the row stamp seen before classifying them. A later pass skips a file whose two stamps
+/// are both unchanged. The scan used to classify every file on every pass (about five handle
+/// opens each), which kept a core busy on a 37k-file sync root. Cleared every
+/// [`FULL_RECHECK_INTERVAL`].
+#[derive(Default)]
+pub(crate) struct ScanMemo {
+    settled: HashMap<PathBuf, (DiskStamp, u64)>,
+    since: Option<Instant>,
+    /// Files classified by the last pass.
+    pub(crate) classified: usize,
+    /// Files the last pass skipped as settled and unchanged.
+    pub(crate) skipped: usize,
+}
+
+#[cfg(test)]
+impl ScanMemo {
+    /// As if the last full pass ran `by` earlier.
+    pub(crate) fn age_by(&mut self, by: Duration) {
+        self.since = self.since.and_then(|since| since.checked_sub(by));
+    }
+}
 
 /// An event delivered by a Windows Cloud Files NOTIFY callback. Push-only from
 /// the callback side ([`crate::windows_cf::callbacks`]); consumed by
@@ -360,7 +424,13 @@ async fn debounce_loop(
                     .collect();
                 for path in ready {
                     pending.remove(&path);
-                    handle_settled_path(&bridge, &sync_root, &path).await;
+                    // Task 1640 (review P2-5): classifying a tracked file reads and hashes it.
+                    let (settle_bridge, settle_root) = (bridge.clone(), sync_root.clone());
+                    if let Err(e) =
+                        tokio::task::spawn_blocking(move || handle_settled_path(&settle_bridge, &settle_root, &path)).await
+                    {
+                        tracing::warn!(error = %e, "upload driver: settling a closed file panicked; continuing");
+                    }
                 }
             }
         }
@@ -369,36 +439,36 @@ async fn debounce_loop(
 
 /// The CREATE trigger. Every [`SCAN_INTERVAL`] (debounced by awaiting each walk
 /// before scheduling the next), recursively walk `sync_root`, run the shared
-/// [`EngineBridge::classify_local_path`] on every regular file, and upload the
+/// [`EngineBridge::classify_local_path`] on every regular file not found settled
+/// with the same listing and row before ([`ScanMemo`]), and upload the
 /// survivors (genuinely-new plain files). This is what catches a file a foreign
 /// process drops into the sync root — the case the CF NOTIFY callbacks miss
 /// entirely (see module docs).
 ///
 /// Why a scan and not just the callbacks: reading the disk always works; it does
 /// not depend on any filter callback firing. The cost is a recursive `read_dir`
-/// of a small vault every 8s, which is negligible — and the heavy lifting (the
-/// walk + classify + the synchronous `queue_finder_create`, which touches the
+/// every 8s plus one indexed row read per file: a file found settled is skipped
+/// while its listing and its row are unchanged ([`ScanMemo`], task 2229 — classifying
+/// all 37k files of one sync root on every pass kept a core busy). The heavy lifting
+/// (the walk + classify + the synchronous `queue_finder_create`, which touches the
 /// SQLite DB and stages bytes) runs inside [`tokio::task::spawn_blocking`] so it
 /// never stalls the async runtime.
 ///
-/// Dedupe: `classify_local_path`'s filter-3 already rejects any path with a DB
-/// row, and `queue_finder_create` writes that row synchronously before
-/// returning — so a file queued by scan N is rejected by scan N+1. The
-/// `in_flight` set is a belt-and-braces second guard covering the in-process
-/// window between dispatch and the row being observable, and it stops repeated
-/// `convert_to_unsynced_placeholder` calls on a path already handed off. A path
-/// that disappears from disk is pruned from the set so a later same-named file
-/// can still be picked up.
+/// Dedupe: `queue_finder_create` writes the file's `Uploading` row
+/// synchronously before it returns, so a file queued by scan N is a tracked
+/// file for scan N+1: `classify_local_path` takes it to `classify_tracked_edit`,
+/// which queues nothing while its upload is queued and, once it landed, only a
+/// change of its bytes (task 1640). Task 1640 (follow-up): there used to be an
+/// `in_flight` set of the paths a scan had queued, skipped until they left the
+/// disk. Since the row is written before the queue call returns, it guarded no
+/// window, but it kept a just-uploaded file from ever being classified again, so
+/// an atomic save of it (no change notification) waited for a restart. Removed.
 async fn scan_loop(
     bridge: Arc<EngineBridge>,
     sync_root: PathBuf,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    // Paths this engine lifetime has already dispatched for upload. Lives across
-    // ticks so a file mid-upload isn't re-dispatched in the window before its
-    // `Uploading` DB row is observable to filter-3.
-    let mut in_flight: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
+    let mut memo = ScanMemo::default();
     loop {
         // Wait one interval OR a shutdown signal. We sleep FIRST so the very
         // first scan happens one interval after startup — by then the initial
@@ -413,43 +483,52 @@ async fn scan_loop(
             _ = tokio::time::sleep(SCAN_INTERVAL) => {}
         }
 
-        // Run the blocking walk + classify + queue off the async runtime. We
-        // move the in-flight set in and get it back so it persists across ticks
-        // without a lock. `bridge`/`sync_root` are cheap to clone (Arc + PathBuf).
+        // Run the blocking walk + classify + queue off the async runtime.
+        // `bridge`/`sync_root` are cheap to clone (Arc + PathBuf).
         let bridge_for_scan = bridge.clone();
         let root_for_scan = sync_root.clone();
-        let taken = std::mem::take(&mut in_flight);
+        let mut memo_for_scan = std::mem::take(&mut memo);
         match tokio::task::spawn_blocking(move || {
-            let mut set = taken;
-            run_one_scan(&bridge_for_scan, &root_for_scan, &mut set);
-            set
+            run_one_scan_with(&bridge_for_scan, &root_for_scan, &mut memo_for_scan);
+            memo_for_scan
         })
         .await
         {
-            Ok(set) => in_flight = set,
-            Err(e) => {
-                // The blocking task panicked — log and continue with an empty
-                // set (filter-3 + filter-2 still prevent double uploads; the set
-                // is only an optimisation). Never let one bad scan kill the loop.
-                tracing::warn!(error = %e, "enumeration scan task panicked; continuing");
-                in_flight = std::collections::HashSet::new();
-            }
+            Ok(kept) => memo = kept,
+            // The blocking task panicked — log and continue. Never let one bad
+            // scan kill the loop. The memo is lost: the next pass classifies every file.
+            Err(e) => tracing::warn!(error = %e, "enumeration scan task panicked; continuing"),
         }
     }
 }
 
-/// One pass of the enumeration scan: walk the tree under `sync_root`, dispatch
-/// every genuinely-new file for upload, and keep `in_flight` in sync with disk
-/// reality (add dispatched paths, prune vanished ones). Synchronous — called
-/// inside [`tokio::task::spawn_blocking`] from [`scan_loop`].
-fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &mut std::collections::HashSet<PathBuf>) {
-    let mut seen_on_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+/// One pass of the enumeration scan: walk the tree under `sync_root` and
+/// dispatch every genuinely-new file for upload, and every change of a tracked
+/// one (task 1640). Synchronous — called inside [`tokio::task::spawn_blocking`]
+/// from [`scan_loop`].
+pub(crate) fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path) {
+    run_one_scan_with(bridge, sync_root, &mut ScanMemo::default());
+}
+
+/// [`run_one_scan`] remembering, in `memo`, the files earlier passes found settled (task 2229).
+pub(crate) fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, memo: &mut ScanMemo) {
+    // Task 2240: the pass looks up every row by path. With SQLite's default page cache those lookups re-read the
+    // state DB from disk on every pass; sized to the DB, the second pass reads nothing.
+    if let Err(e) = bridge.db().fit_page_cache() {
+        tracing::debug!(error = %e, "enumeration scan: could not size the page cache; scanning with the current one");
+    }
+    let now = Instant::now();
+    if memo
+        .since
+        .is_none_or(|since| now.duration_since(since) >= FULL_RECHECK_INTERVAL)
+    {
+        memo.settled.clear();
+        memo.since = Some(now);
+    }
+    memo.classified = 0;
+    memo.skipped = 0;
     let mut dispatched = 0usize;
-    tracing::debug!(
-        sync_root = %sync_root.display(),
-        in_flight = in_flight.len(),
-        "enumeration scan: starting pass"
-    );
+    tracing::debug!(sync_root = %sync_root.display(), "enumeration scan: starting pass");
 
     // Live known-folder-backup gate (task 0811 review fix for the disable race).
     // The mirror copies files onto disk, but it can be racing a DISABLE: a file
@@ -503,24 +582,11 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
             }
             bridge.ensure_local_folder(sync_root, dir_path);
         },
-        &mut |file_path| {
+        &mut |file_path, meta| {
             tracing::debug!(
                 path = %file_path.display(),
                 "enumeration scan: found file"
             );
-            seen_on_disk.insert(file_path.to_path_buf());
-
-            // Already dispatched this lifetime and not yet reflected as a DB row?
-            // Skip the redundant classify/convert. classify_local_path would also
-            // reject it once the row lands, but this avoids the work + repeated
-            // CfConvertToPlaceholder churn in the meantime.
-            if in_flight.contains(file_path) {
-                tracing::debug!(
-                    path = %file_path.display(),
-                    "enumeration scan: skipped in-flight file"
-                );
-                return;
-            }
 
             // Disable-race gate (task 0811 review fix): a file the mirror copied
             // while its folder was enabled is still on disk after a disable+purge.
@@ -535,11 +601,24 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 return;
             }
 
+            // Task 2229: a file found settled whose listing and row are both unchanged needs
+            // nothing, and skipping it opens no handle. The row stamp is read before
+            // classifying, so a write to the row during the pass makes the next pass ask again.
+            let disk = DiskStamp::of(meta);
+            let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
+                .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
+            if let (Some(row), Some(&(seen_disk, seen_row))) = (row, memo.settled.get(file_path))
+                && seen_disk == disk
+                && seen_row == row
+            {
+                memo.skipped += 1;
+                return;
+            }
+
             // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
             // a huge folder ramps up gradually instead of flooding the queue. Keep
-            // walking (so `seen_on_disk` stays complete for the prune below and
-            // parent folders keep getting scaffolded) but stop dispatching files —
-            // the next pass picks up the remainder.
+            // walking (so parent folders keep getting scaffolded) but stop
+            // dispatching files — the next pass picks up the remainder.
             if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
                 tracing::debug!(
                     path = %file_path.display(),
@@ -549,28 +628,48 @@ fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path, in_flight: &
                 return;
             }
 
-            if dispatch_local_create(bridge, sync_root, file_path, "scan") {
-                in_flight.insert(file_path.to_path_buf());
-                dispatched += 1;
-            } else {
-                tracing::debug!(
-                    path = %file_path.display(),
-                    "enumeration scan: file was not queued"
-                );
+            // A file queued here is a tracked file from now on (its row is written before
+            // the queue call returns): a later pass queues nothing while its upload is
+            // queued, and sends a later change of it (task 1640).
+            memo.classified += 1;
+            match (dispatch_local_create_verdict(bridge, sync_root, file_path, "scan"), row) {
+                (ScanDispatch::Settled, Some(row)) => {
+                    memo.settled.insert(file_path.to_path_buf(), (disk, row));
+                }
+                (verdict, _) => {
+                    memo.settled.remove(file_path);
+                    if verdict == ScanDispatch::Queued {
+                        dispatched += 1;
+                    } else {
+                        tracing::debug!(
+                            path = %file_path.display(),
+                            "enumeration scan: file was not queued"
+                        );
+                    }
+                }
             }
         },
     );
 
-    // Prune in-flight entries whose files are gone (deleted, renamed, or the
-    // upload finished and the placeholder no longer matches a plain file we'd
-    // re-dispatch). We only retain entries we actually saw this walk; anything
-    // else is no longer a path we need to suppress. This keeps the set bounded
-    // and lets a NEW file at a previously-used path be picked up later.
-    in_flight.retain(|p| seen_on_disk.contains(p));
-
     if dispatched > 0 {
         tracing::debug!(dispatched, "enumeration scan queued new local files");
     }
+    // Task 2244: one line for the edits this pass held, never one per file; each is listed for review.
+    // Counted by reason: an edit with no known base needs a look; a file synced before 1640 does not.
+    let (content_unknown, base_unknown) = bridge.take_newly_held();
+    if content_unknown + base_unknown > 0 {
+        tracing::warn!(
+            held = content_unknown + base_unknown,
+            content_unknown,
+            base_unknown,
+            "sync folder: changes to synced files are kept on this PC, not sent; each is listed for review"
+        );
+    }
+    tracing::debug!(
+        classified = memo.classified,
+        skipped = memo.skipped,
+        "enumeration scan: pass done"
+    );
 }
 
 /// Depth-first recursive walk of `dir`, invoking `on_file` for every regular
@@ -588,7 +687,7 @@ fn walk_dir(
     dir: &std::path::Path,
     depth: usize,
     on_dir: &mut dyn FnMut(&std::path::Path),
-    on_file: &mut dyn FnMut(&std::path::Path),
+    on_file: &mut dyn FnMut(&std::path::Path, &std::fs::Metadata),
 ) {
     if depth > MAX_SCAN_DEPTH {
         tracing::warn!(depth, "enumeration scan hit max depth; not descending further");
@@ -641,10 +740,12 @@ fn walk_dir(
             continue;
         }
 
-        // Use symlink_metadata so a symlink is classified as a symlink (we skip
-        // it) rather than followed — no symlink-cycle risk, and we never upload
-        // through a link to outside the vault.
-        let meta = match std::fs::symlink_metadata(&path) {
+        // The listing's own metadata, which never follows a link, so a symlink is
+        // classified as a symlink (we skip it) rather than followed — no
+        // symlink-cycle risk, and we never upload through a link to outside the
+        // vault. Task 2229: on Windows it opens no handle, where a stat opened one
+        // per entry on every pass.
+        let meta = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!(
@@ -669,7 +770,7 @@ fn walk_dir(
             on_dir(&path);
             walk_dir(sync_root, &path, depth + 1, on_dir, on_file);
         } else if ft.is_file() {
-            on_file(&path);
+            on_file(&path, &meta);
         } else {
             tracing::debug!(
                 path = %path.display(),
@@ -685,8 +786,34 @@ fn walk_dir(
 /// file, enqueue its encrypted upload. Thin wrapper over [`dispatch_local_create`]
 /// — the CF NOTIFY close-completion path and the enumeration scan share the same
 /// convert→queue sequence.
-async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    crate::windows_cf::upload_finalization::retry(bridge.db(), sync_root);
     let _ = dispatch_local_create(bridge, sync_root, path, "notify");
+}
+
+/// [`dispatch_local_create_verdict`]: `true` iff an upload was queued.
+pub(crate) fn dispatch_local_create(
+    bridge: &EngineBridge,
+    sync_root: &std::path::Path,
+    path: &std::path::Path,
+    source: &'static str,
+) -> bool {
+    matches!(
+        dispatch_local_create_verdict(bridge, sync_root, path, source),
+        ScanDispatch::Queued
+    )
+}
+
+/// Task 2229: what [`dispatch_local_create_verdict`] did with a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanDispatch {
+    /// An upload was queued.
+    Queued,
+    /// A tracked file that needs nothing while its row and its bytes stay as they are.
+    Settled,
+    /// Nothing queued; ask again next pass.
+    NotQueued,
 }
 
 /// Classify `path` and, if it survives the feedback filters (a genuinely-new
@@ -699,23 +826,41 @@ async fn handle_settled_path(bridge: &EngineBridge, sync_root: &std::path::Path,
 /// [`EngineBridge::classify_local_path`] — this function only does the
 /// placeholder convert + the queue, never re-implements a filter.
 ///
-/// Returns `true` iff an upload was actually queued (a survivor). The scan loop
-/// uses that to record the path in its in-flight set so it is not re-dispatched
-/// before the `Uploading` DB row makes filter-3 reject it. `source` is a static
+/// Returns [`ScanDispatch::Queued`] iff an upload was actually queued (a survivor), and
+/// [`ScanDispatch::Settled`] for a tracked file that needs nothing while its row and its bytes
+/// stay as they are (task 2229: the scan skips it until either changes). `source` is a static
 /// tag (`"notify"` / `"scan"`) used only for log attribution.
-fn dispatch_local_create(
+pub(crate) fn dispatch_local_create_verdict(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     path: &std::path::Path,
     source: &'static str,
-) -> bool {
-    let Some(target) = bridge.classify_local_path(sync_root, path) else {
-        return false;
+) -> ScanDispatch {
+    let target = match bridge.classify_local_path_verdict(sync_root, path) {
+        LocalPathVerdict::Write(target) => target,
+        LocalPathVerdict::Settled => return ScanDispatch::Settled,
+        LocalPathVerdict::Skip => return ScanDispatch::NotQueued,
     };
 
     // Capture size for the log before `target` is moved into the queue call.
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let nested = target.parent_id.is_some();
+    // Task 1640: a target with a file id is an edit of a synced file (`classify_tracked_edit`):
+    // a content modify of that file, sent with its base. Only a new file is created (and, on
+    // Windows, converted to an unsynced placeholder below).
+    if target.file_id.is_some() {
+        return match bridge.queue_finder_modify(target) {
+            Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+                tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued an edit of a synced file for encrypted upload");
+                ScanDispatch::Queued
+            }
+            Ok(FinderWriteOutcome::Ignored { .. }) => ScanDispatch::NotQueued,
+            Err(e) => {
+                tracing::warn!(error = %e, source, "upload driver: failed to queue an edit of a synced file");
+                ScanDispatch::NotQueued
+            }
+        };
+    }
 
     // `queue_finder_create` stages a copy of the bytes, derives the per-file key
     // inside the transfer loop via beebeeb-core, and encrypts on upload — we
@@ -723,16 +868,17 @@ fn dispatch_local_create(
     // `Uploading` DB row synchronously before returning, so the very next
     // `classify_local_path` (filter 3) rejects this path → no double upload.
     match bridge.queue_finder_create(target) {
-        Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
+        Ok(FinderWriteOutcome::Queued { op_id, file_id: local_id, .. }) => {
             // Windows: queue/stage FIRST, then hand the local file to Cloud Files
             // as an UNSYNCED placeholder. If staging ever fails, the file stays a
             // plain local file and a later scan can retry. Converting before the
             // row exists can poison that retry path: the next scan sees a
             // placeholder with no DB row and `classify_local_path` correctly
             // rejects it as engine-owned.
+            #[cfg(not(target_os = "windows"))]
+            let _ = &local_id;
             #[cfg(target_os = "windows")]
-            {
-                let local_id = uuid::Uuid::new_v4().to_string();
+            if let Some(local_id) = local_id {
                 if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
                     tracing::warn!(
                         error = %e,
@@ -744,12 +890,12 @@ fn dispatch_local_create(
             }
             // Zero-knowledge: log the op id, never the decrypted filename.
             tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued new local file for encrypted upload");
-            true
+            ScanDispatch::Queued
         }
-        Ok(FinderWriteOutcome::Ignored { .. }) => false, // temp/ignored name — fine
+        Ok(FinderWriteOutcome::Ignored { .. }) => ScanDispatch::NotQueued, // temp/ignored name — fine
         Err(e) => {
             tracing::warn!(error = %e, source, "upload driver: failed to queue local file upload");
-            false
+            ScanDispatch::NotQueued
         }
     }
 }
@@ -758,7 +904,7 @@ fn dispatch_local_create(
 /// existing trash op so the server deletes it too. If there is no DB row, the
 /// delete was of an untracked local file (or an engine-internal file) — nothing
 /// to propagate.
-async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     // Engine-internal deletes (state.db churn, lock file) must never propagate.
     if crate::engine_bridge::path_is_engine_internal(sync_root, path) {
         return;
@@ -766,6 +912,30 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // Task 2204 S0.4: a safe save renamed the original away, put the new bytes at its name and
+    // now deletes the renamed file. While that rename is unsent, it folds back: the row returns
+    // to the vacated path and the new bytes there are an edit of the original. A file that was
+    // only renamed then deleted (nothing at the vacated path), or a vacated path another tracked
+    // file holds (a manual swap), is a delete as before.
+    if let Ok(Some(entry)) = bridge.db().get_file_by_path(&rel)
+        && let Ok(Some(vacated)) = bridge.db().pending_local_rename_vacated(&entry.file_id)
+        && let Ok(vacated_on_disk) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &vacated)
+        && vacated_on_disk.is_file()
+        // Review-155 P1-B: only onto a row that can take the new bytes as an edit (a synced file
+        // with a known base); a file synced before task 1640 (unknown content) or not on this PC
+        // keeps the delete, and its new bytes upload as a new file once the rename is sent.
+        && entry.status == crate::state_db::FileStatus::Local
+        && matches!(
+            crate::engine_bridge::sync_folder_content(bridge.db(), &entry.file_id, &vacated_on_disk, None),
+            Ok(crate::engine_bridge::SyncFolderContent::Agreed
+                | crate::engine_bridge::SyncFolderContent::Changed { base: Some(_) })
+        )
+        && bridge.db().fold_local_rename(&entry.file_id, &vacated).unwrap_or(false)
+    {
+        tracing::info!("upload driver: a safe save kept the file (rename folded back)");
+        handle_settled_path(bridge, sync_root, &vacated_on_disk);
+        return;
+    }
     match bridge.db().get_file_by_path(&rel) {
         Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
@@ -795,10 +965,11 @@ async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path:
 
 /// A local rename/move fired. Resolve the SOURCE path to a known server file and
 /// enqueue a metadata update describing its new name + new parent. The
-/// `queue_finder_modify` metadata path already maps a present `parent_id`
-/// (changed parent) → MoveFile and a name-only change → RenameFile, so we hand
-/// it the new filename + the resolved new parent and let it pick.
-async fn handle_rename(
+/// `queue_finder_modify` metadata path reads a parent that differs from the row's
+/// (the root included) as a move → MoveFile, and the row's own parent as a rename
+/// → RenameFile (spec 2026-10-09 §7.2), so we hand it the new filename and the new
+/// parent, and pass the row's own parent when the new one cannot be resolved.
+pub(crate) async fn handle_rename(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     source: &std::path::Path,
@@ -821,7 +992,7 @@ async fn handle_rename(
         // file to a new name — classify the TARGET as a possible new upload
         // instead (it will no-op if it is engine-owned / already tracked).
         Ok(None) => {
-            handle_settled_path(bridge, sync_root, target).await;
+            handle_settled_path(bridge, sync_root, target);
             return;
         }
         Err(e) => {
@@ -839,18 +1010,35 @@ async fn handle_rename(
 
     // Resolve the NEW parent folder id from the target's parent directory. The
     // classifier's parent resolver is reused so move-into-subfolder gets the
-    // right server parent; `None` means moved to (or kept at) the root. We pass
-    // it through verbatim — `queue_finder_modify` treats `Some(parent)` as a
-    // move and `None` as a rename-in-place.
-    let new_parent_id = bridge.resolve_parent_id_for(sync_root, target);
+    // right server parent. Spec §7.2 (final review): "the root" and "not found"
+    // are different answers. The new parent is the root (`None`) only when the
+    // target's directory IS the sync root. A lookup that misses (no folder row yet,
+    // a path left stale by a folder rename, a database error) keeps the row's own
+    // parent, so the op is a rename and sends no parent; read as the root, the
+    // miss would move the file to the top level on every device.
+    let resolved_parent = if target.parent() == Some(sync_root) {
+        Some(None)
+    } else {
+        bridge.resolve_parent_id_for(sync_root, target).map(Some)
+    };
+    let new_parent_id = resolved_parent.clone().unwrap_or_else(|| existing.parent_id.clone());
+    // Task 2204 S0.1: a FILE whose new parent resolved, renamed onto a path no other row holds,
+    // has its row moved in the transaction that queues the op, so a new file at the old name is
+    // a new file. A folder (its descendants would move too), a replace, and an unresolved
+    // parent keep the old behaviour: the row is re-keyed by the pull after the op lands.
+    let rekey_to = crate::engine_bridge::relative_db_path(sync_root, target).filter(|target_rel| {
+        !existing.is_dir()
+            && resolved_parent.is_some()
+            && matches!(bridge.db().get_file_by_path(target_rel), Ok(None))
+    });
 
     let modify = crate::engine_bridge::FinderWriteTarget {
         file_id: Some(existing.file_id.clone()),
         parent_id: new_parent_id,
         filename: new_name,
         // A metadata-only move/rename: the server path is derived from
-        // parent_id + name, and the local row's path is re-keyed by the next
-        // sync_tick. No new-file path key to carry here.
+        // parent_id + name. The row is re-keyed by `queue_local_rename` (task 2204 S0.1), else
+        // by the pull after the op lands. No new-file path key to carry here.
         rel_path: None,
         kind: crate::engine_bridge::FinderWriteItemKind::File,
         // No new bytes — this is a metadata-only move/rename.
@@ -859,7 +1047,11 @@ async fn handle_rename(
         base_version_identifier: None,
     };
 
-    match bridge.queue_finder_modify(modify) {
+    let queued = match rekey_to.as_deref() {
+        Some(target_rel) => bridge.queue_local_rename(modify, target_rel),
+        None => bridge.queue_finder_modify(modify),
+    };
+    match queued {
         Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
             tracing::info!(op_id = %op_id, "upload driver: queued server rename/move for locally-renamed file");
         }
@@ -878,6 +1070,23 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::sync::Arc;
+
+    /// Task 2240 (T7, D1): every scan pass sizes the engine connection's page cache before it walks the tree, so the
+    /// row lookups of the pass hit memory instead of the file. A failure to size it is logged, and the pass goes on with
+    /// the cache it has.
+    #[test]
+    fn task_2240_every_scan_pass_fits_the_page_cache_first() {
+        use crate::finder_setup_command_tests::body_between;
+        use crate::source_pin::squeeze;
+        let source = include_str!("watcher.rs").replace("\r\n", "\n");
+        let body = squeeze(body_between(&source, "pub(crate) fn run_one_scan_with(", "\n}\n"));
+        let fit = body
+            .find("ifletErr(e)=bridge.db().fit_page_cache(){")
+            .expect("the pass fits the page cache");
+        let memo = body.find("memo.settled.clear()").expect("the memo reset");
+        let walk = body.find("walk_dir(").expect("the walk");
+        assert!(fit < memo && fit < walk, "the fit comes first:\n{body}");
+    }
 
     #[test]
     fn engine_delete_suppression_is_consumed_once() {
@@ -933,7 +1142,7 @@ mod tests {
     /// naturally regardless of platform separator.
     fn walked_rel(root: &std::path::Path) -> HashSet<String> {
         let mut found: HashSet<String> = HashSet::new();
-        walk_dir(root, root, 0, &mut |_dir| {}, &mut |p| {
+        walk_dir(root, root, 0, &mut |_dir| {}, &mut |p, _meta| {
             let rel = p.strip_prefix(root).unwrap();
             let joined = rel
                 .components()
@@ -1028,8 +1237,7 @@ mod tests {
         let file = sync_root.join("direct-write.txt");
         fs::write(&file, b"direct explorer payload").unwrap();
 
-        let mut in_flight = HashSet::new();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
 
         assert_uploading_row(&db, "direct-write.txt", 23);
     }
@@ -1047,15 +1255,14 @@ mod tests {
         let final_file = sync_root.join("renamed-write.txt");
         fs::write(&temp_file, b"atomic rename explorer payload").unwrap();
 
-        let mut in_flight = HashSet::new();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
         assert!(
             db.get_file_by_path("renamed-write.txt.tmp").unwrap().is_none(),
             "temporary Explorer copy name must not be queued"
         );
 
         fs::rename(&temp_file, &final_file).unwrap();
-        run_one_scan(&bridge, &sync_root, &mut in_flight);
+        run_one_scan(&bridge, &sync_root);
 
         assert_uploading_row(&db, "renamed-write.txt", 30);
     }
@@ -1081,4 +1288,71 @@ mod tests {
             "must not descend through a symlink, got: {found:?}"
         );
     }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn round6_real_watcher_uses_queued_file_identity() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::CloudFilters::*};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let path = root.join("local.txt");
+        fs::write(&path, b"watcher upload bytes").unwrap();
+        assert!(dispatch_local_create(&bridge, &root, &path, "scan"));
+        let ops = db.list_due_operations(i64::MAX).unwrap();
+        assert_eq!(ops.len(), 1);
+        let expected = ops[0].file_id.as_ref().unwrap();
+        assert_eq!(&db.get_file_by_path("local.txt").unwrap().unwrap().file_id, expected);
+        let file = fs::File::open(&path).unwrap();
+        let mut buffer = vec![0u64; 1024];
+        unsafe { CfGetPlaceholderInfo(HANDLE(file.as_raw_handle()), CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(), (buffer.len()*8) as u32, None).unwrap(); }
+        let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+        let actual = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) }.to_vec();
+        drop(file);
+        crate::windows_cf::unregister_sync_root(&root).unwrap();
+        for op in ops.iter() { if let Some(payload) = &op.payload_path { fs::remove_file(payload).unwrap(); } }
+        assert_eq!(String::from_utf8(actual).unwrap(), *expected, "watcher identity must belong to its queued DB row");
+    }
+
+    /// Tasks 1888 + 2226 (spec §4 "Windows Cloud Files identity", plan Task 1 Step 6b): a folder made on this PC gets a
+    /// row and a create, but no Cloud Files identity on disk. So when the reconcile pass re-points its row to the
+    /// server twin and deletes the ghost's id, nothing on disk still names that id.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_folder_made_on_this_pc_gets_no_cloud_files_identity() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::CloudFilters::*};
+        // FILE_FLAG_BACKUP_SEMANTICS: needed to open a directory.
+        const OPEN_A_DIRECTORY: u32 = 0x0200_0000;
+        const ERROR_NOT_A_CLOUD_FILE: u32 = 0x8007_0178;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        crate::windows_cf::register_sync_root(&root).unwrap();
+        let (_db, bridge) = test_bridge(&temp.path().join("state.db"));
+        let dir = root.join("new");
+        fs::create_dir(&dir).unwrap();
+        let id = bridge.ensure_local_folder(&root, &dir);
+        let handle = fs::OpenOptions::new().read(true).custom_flags(OPEN_A_DIRECTORY).open(&dir).unwrap();
+        let mut buffer = vec![0u64; 1024];
+        let info = unsafe {
+            CfGetPlaceholderInfo(
+                HANDLE(handle.as_raw_handle()),
+                CF_PLACEHOLDER_INFO_STANDARD,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 8) as u32,
+                None,
+            )
+        };
+        drop(handle);
+        crate::windows_cf::unregister_sync_root(&root).unwrap();
+        assert!(id.is_some(), "the folder gets a row and a create");
+        let error = info.expect_err("a folder made on this PC is no Cloud Files placeholder");
+        assert_eq!(error.code().0 as u32, ERROR_NOT_A_CLOUD_FILE, "{error}");
+    }
+
 }

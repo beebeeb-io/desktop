@@ -22,6 +22,9 @@
  *   NEW (WS1): set_sync_mode (arg: mode: 'everything' | 'smart' | 'custom' | 'online_only')
  */
 
+import { useRegionLabel } from './windows/useRegion'
+
+import { useCapabilities } from './capabilities'
 import {
   useCallback,
   useEffect,
@@ -31,7 +34,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { listen } from '@tauri-apps/api/event'
+import OnboardingErrorBoundary from './OnboardingErrorBoundary'
 import {
   command,
   commandUnavailableLabel,
@@ -44,18 +47,13 @@ import {
   type VaultItem,
 } from './desktopApi'
 import { useToast } from './windows/ui'
-
-// Progress event emitted by the Rust `start_browser_login` handoff.
-// `phase` keys the UI state machine; the other fields are populated on
-// `waiting` (the device code) and `done` (the signed-in email).
-type BrowserLoginEvent = {
-  phase: 'connecting' | 'waiting' | 'authorized' | 'done' | 'error'
-  user_code?: string
-  verification_uri?: string
-  expires_in?: number
-  email?: string
-  message?: string
-}
+import {
+  BROWSER_DID_NOT_OPEN_HINT,
+  BROWSER_SIGN_IN_INTRO,
+  browserWaitingInstruction,
+} from './browserLoginCopy'
+import { useBrowserSignIn } from './browserSignIn'
+import { pollWhileVisible } from './windows/visiblePoll'
 
 // Windows shell integration uses the same shape as the macOS FinderInstallState
 type ShellIntegrationState = FinderInstallState
@@ -66,7 +64,7 @@ const RECOVERY_WORD_COUNT = 12
 const STEPS: Array<{ id: Step; title: string; detail: string }> = [
   { id: 'signin', title: 'Sign in', detail: 'Authenticate your Beebeeb account.' },
   { id: 'unlock', title: 'Unlock vault', detail: 'Restore encryption keys on this PC.' },
-  { id: 'sync-mode', title: 'Sync mode', detail: 'Pick what lives on this PC.' },
+  { id: 'sync-mode', title: 'Files on demand', detail: 'Download files when you open them.' },
   { id: 'explorer', title: 'Explorer integration', detail: 'Add Beebeeb to File Explorer.' },
   { id: 'ready', title: 'Ready', detail: 'Open the control center.' },
 ]
@@ -173,6 +171,7 @@ function Notice({ children, kind = 'warn' }: { children: React.ReactNode; kind?:
 // ── Left rail ─────────────────────────────────────────────────────────────
 
 function LeftRail({ currentStep }: { currentStep: Step }) {
+  const regionLabel = useRegionLabel(currentStep)
   const currentIdx = STEPS.findIndex((s) => s.id === currentStep)
   return (
     <div style={{
@@ -277,7 +276,7 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
           letterSpacing: '0.04em',
           textTransform: 'uppercase' as const,
         }}>
-          Falkenstein · E2E encrypted
+          {regionLabel} · Zero-knowledge
         </div>
       </div>
     </div>
@@ -300,11 +299,19 @@ function LeftRail({ currentStep }: { currentStep: Step }) {
  */
 function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => void }) {
   // ── Browser-flow state ──────────────────────────────────────────────────
-  type BrowserPhase = 'idle' | 'connecting' | 'waiting' | 'authorized' | 'error'
-  const [browserPhase, setBrowserPhase] = useState<BrowserPhase>('idle')
-  const [userCode, setUserCode] = useState<string | null>(null)
-  const [verificationUri, setVerificationUri] = useState<string | null>(null)
-  const browserDoneRef = useRef(false)
+  // The handoff's state machine is shared with the Mac's Beebeeb window (`browserSignIn.ts`, task 1683 slice 2): it
+  // subscribes to the progress events before it invokes `start_browser_login`, shows every phase, and settles exactly
+  // once. The hook hands over the keys with a `fresh` outcome; a different account is a Mac outcome (Rust compiles it
+  // out on Windows, which refuses a second session), so only `fresh` advances the wizard here.
+  const { state: browser, start: startBrowserLogin } = useBrowserSignIn({
+    onSettled: (settled) => {
+      if (settled.kind === 'fresh') onDone({ vaultUnlocked: settled.vaultUnlocked })
+    },
+  })
+  const browserPhase = browser.phase
+  const userCode = browser.userCode
+  const verificationUri = browser.verificationUri
+  const browserError = browser.error
 
   const browserBusy =
     browserPhase === 'connecting' ||
@@ -327,77 +334,6 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
   const [totpBusy, setTotpBusy] = useState(false)
   const [totpError, setTotpError] = useState<string | null>(null)
   const totpInputRef = useRef<HTMLInputElement | null>(null)
-
-  // Shared error for browser flow
-  const [browserError, setBrowserError] = useState<string | null>(null)
-
-  // ── Browser-flow handler ────────────────────────────────────────────────
-  const startBrowserLogin = useCallback(async () => {
-    setBrowserError(null)
-    setUserCode(null)
-    setVerificationUri(null)
-    setBrowserPhase('connecting')
-    browserDoneRef.current = false
-
-    // Subscribe to handoff progress before invoking so we never miss an event.
-    const unlisten = await listen<BrowserLoginEvent>('browser-login', (event) => {
-      const p = event.payload
-      switch (p.phase) {
-        case 'connecting':
-          setBrowserPhase('connecting')
-          break
-        case 'waiting':
-          setBrowserPhase('waiting')
-          if (p.user_code) setUserCode(p.user_code)
-          if (p.verification_uri) setVerificationUri(p.verification_uri)
-          break
-        case 'authorized':
-          setBrowserPhase('authorized')
-          break
-        case 'done':
-          // Advance exactly once — guard with browserDoneRef so a late command
-          // resolve can't double-fire onDone if the event arrived first.
-          if (!browserDoneRef.current) {
-            browserDoneRef.current = true
-            onDone({ vaultUnlocked: true })
-          }
-          break
-        case 'error':
-          setBrowserPhase('error')
-          setBrowserError(p.message ?? 'Sign-in failed. Please try again.')
-          break
-      }
-    })
-
-    const result = await command<void>('start_browser_login')
-    unlisten()
-
-    // If the 'done' event already fired (and advanced the wizard) before or
-    // during the await, browserDoneRef is true — nothing left to do here.
-    if (browserDoneRef.current) return
-
-    if (result.ok) {
-      // Command resolved OK but the 'done' event was either missed (arrived
-      // after unlisten) or not yet emitted. Advance now — this is the same
-      // success path: handoff persisted the session AND the master key, so the
-      // vault is already unlocked — no recovery phrase needed on this path.
-      browserDoneRef.current = true
-      onDone({ vaultUnlocked: true })
-      return
-    }
-
-    // Any non-success outcome MUST leave the busy/"Connecting" state and show a
-    // visible, actionable error. The Rust handoff now bounds the WebSocket
-    // connect with a 15s timeout, so this branch is always reached on a failure
-    // (previously a stalled TLS handshake never returned and the UI hung on
-    // "Connecting" forever with no error). We always fall back to phase 'error'
-    // here — never leave the user staring at a spinner.
-    const message = result.unsupported
-      ? commandUnavailableLabel('start_browser_login')
-      : result.reason
-    setBrowserPhase('error')
-    setBrowserError(message)
-  }, [onDone])
 
   // ── Email + password submit ─────────────────────────────────────────────
   const submitPassword = useCallback(
@@ -644,9 +580,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
         Sign in to Beebeeb
       </h1>
       <p style={{ margin: '0 0 22px', fontSize: 12, color: T.ink3, lineHeight: 1.6 }}>
-        Sign in through your browser. Beebeeb opens a Beebeeb tab, you confirm
-        the code below, and your access &amp; refresh credentials are handed back
-        encrypted — end-to-end, never touching this app in the clear.
+        {BROWSER_SIGN_IN_INTRO}
       </p>
       {browserError && <Notice kind="error">{browserError}</Notice>}
 
@@ -662,9 +596,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
             {browserPhase === 'authorized' ? 'Authorized — finishing…' : 'We opened your browser'}
           </div>
           <p style={{ margin: '0 0 12px', fontSize: 12, color: T.ink2, lineHeight: 1.6 }}>
-            {browserPhase === 'authorized'
-              ? 'Decrypting your credentials and starting sync…'
-              : 'Confirm the sign-in in the browser tab we just opened. Check that the code there matches:'}
+            {browserWaitingInstruction(browserPhase)}
           </p>
           {userCode && (
             <div style={{
@@ -682,7 +614,7 @@ function SignInStep({ onDone }: { onDone: (info: { vaultUnlocked: boolean }) => 
             <p style={{ margin: 0, fontSize: 11, color: T.ink3, lineHeight: 1.5, wordBreak: 'break-all' as const }}>
               Browser didn&apos;t open? Visit{' '}
               <span style={{ fontFamily: T.fontMono, color: T.amberDeep }}>{verificationUri}</span>
-              {' '}in any signed-in browser.
+              {' '}{BROWSER_DID_NOT_OPEN_HINT}
             </p>
           )}
         </div>
@@ -720,6 +652,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   const applyWords = (start: number, raw: string[]) => {
     const clean = raw.map((w) => w.trim()).filter(Boolean)
     if (!clean.length) return
+    // A complete phrase belongs to the whole grid, regardless of the paste target.
+    if (clean.length === RECOVERY_WORD_COUNT) start = 0
     setError(null)
     setWords((prev) => {
       const next = [...prev]
@@ -796,13 +730,21 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
                   outline: 'none',
                 }}
                 onChange={(e) => {
-                  if (/\s/.test(e.currentTarget.value)) { applyWords(idx, e.currentTarget.value.split(/\s+/)); return }
+                  // React clears currentTarget after dispatch; the updater may run later.
+                  const value = e.currentTarget.value
+                  if (/\s/.test(value)) { applyWords(idx, value.split(/\s+/)); return }
                   setError(null)
-                  setWords((prev) => prev.map((w, i) => i === idx ? e.currentTarget.value : w))
+                  setWords((prev) => prev.map((w, i) => i === idx ? value : w))
                 }}
                 onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
                   if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); refs.current[Math.min(idx + 1, RECOVERY_WORD_COUNT - 1)]?.focus(); return }
-                  if (e.key === 'Backspace' && !word && idx > 0) refs.current[idx - 1]?.focus()
+                  if (e.key === 'Backspace' && !word && idx > 0) {
+                    // Cancel deletion before focus moves: WebView2 applies it to the new input.
+                    e.preventDefault()
+                    const previous = refs.current[idx - 1]
+                    previous?.focus()
+                    previous?.setSelectionRange(previous.value.length, previous.value.length)
+                  }
                 }}
                 onPaste={(e) => { e.preventDefault(); applyWords(idx, e.clipboardData.getData('text').split(/\s+/)) }}
               />
@@ -828,7 +770,8 @@ function UnlockStep({ onDone }: { onDone: () => void }) {
   )
 }
 
-function SyncModeStep({ onDone }: { onDone: () => void }) {
+export function SyncModeStep({ onDone }: { onDone: () => void }) {
+  const caps = useCapabilities()
   const [selected, setSelected] = useState<SyncMode>('smart')
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
@@ -843,6 +786,15 @@ function SyncModeStep({ onDone }: { onDone: () => void }) {
     }
     showToast({ variant: 'error', title: 'Couldn’t set sync mode', message: result.reason })
   }
+
+  if (!caps?.sync_mode_selection) return (
+    <div>
+      <h1>Files download when you open them</h1>
+      <p>Your files appear in File Explorer. Open a file to download its contents.
+        Use Selective sync in Beebeeb to make folders online-only.</p>
+      <Btn variant="primary" onClick={onDone}>Continue →</Btn>
+    </div>
+  )
 
   return (
     <div>
@@ -1004,9 +956,9 @@ function ReadyStep() {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
     }
-    void refresh()
-    const id = window.setInterval(refresh, 2000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    // Task 2243: the wizard window stays loaded, hidden, after sign-in; it reads only while it is on screen.
+    const stop = pollWhileVisible(refresh, 2000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   const finish = async () => {
@@ -1056,6 +1008,10 @@ function ReadyStep() {
 // ── Root component ─────────────────────────────────────────────────────────
 
 export default function WindowsFirstRun() {
+  return <OnboardingErrorBoundary><WindowsFirstRunView /></OnboardingErrorBoundary>
+}
+
+function WindowsFirstRunView() {
   const [step, setStep] = useState<Step>('signin')
   const [loggedIn, setLoggedIn] = useState<boolean>(true)
 
@@ -1072,9 +1028,9 @@ export default function WindowsFirstRun() {
       if (cancelled || !status) return
       setLoggedIn(status.logged_in)
     }
-    void checkSession()
-    const id = window.setInterval(checkSession, 3000)
-    return () => { cancelled = true; window.clearInterval(id) }
+    // Task 2243: only while the window is on screen; showing it again reads at once.
+    const stop = pollWhileVisible(checkSession, 3000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   // The only stale-view scenario is a lingering "All set." screen after a

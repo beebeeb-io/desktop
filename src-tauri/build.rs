@@ -48,5 +48,6 @@ fn build_macos_file_provider_bridge(target: &str) {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=beebeeb_file_provider_bridge");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=FileProvider");
 }

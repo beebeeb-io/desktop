@@ -20,16 +20,16 @@
 //! state that stays on `AppState` is process-global (`auth_present`) or
 //! login-in-flight with no account yet (`pending_2fa`).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::AppState;
 use crate::Session;
 use crate::account_dto::AccountProfile;
 use crate::config::DesktopConfig;
-use crate::runner::EngineRunner;
+use crate::runner::{AuthHealth, EngineRunner};
 
 /// Stable identity for one account in the runtime registry.
 ///
@@ -98,6 +98,37 @@ impl AccountConfig {
     }
 }
 
+/// A point in an account's sequence of session transitions: every sign-in, re-sign-in, unlock, lock and sign-out, the
+/// startup restore and its discard of a token the server rejected, and the naming of a session the server identified.
+/// Work that belongs to the session of the moment captures it first ([`AccountRuntime::session_generation`]) and,
+/// before it acts on its result, asks whether that session is still the one it started with
+/// ([`AccountRuntime::session_unchanged_since`]). A result whose session changed is dropped.
+///
+/// The session writers in `lib.rs` (the Keychain and the session in memory) go further: a write is allowed only under
+/// the session-write lock and only while the generation its transition captured is still current, and it moves the
+/// generation on, so an older transition that is still in flight can never write after it (and none at all after a
+/// Lock or a Sign-out has returned).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionGeneration(u64);
+
+/// What moved an account's [`SessionGeneration`] last, so a transition that is refused can say why in words that fit
+/// (Task 12 fix round 1, item 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTransition {
+    /// A session was written: a sign-in, an unlock, the restore, the naming of a session.
+    Write = 0,
+    Lock = 1,
+    SignOut = 2,
+}
+
+/// One flight of the request that asks the server who an unidentified session is (Task 12 fix round 1, item 4): at most
+/// one at a time per account, and app activation asks at most once a minute.
+#[derive(Debug, Default)]
+pub(crate) struct IdentifyFlight {
+    pub(crate) in_flight: bool,
+    pub(crate) last_started: Option<std::time::Instant>,
+}
+
 /// The live, per-account state moved off `AppState`.
 ///
 /// Holds exactly the state that becomes 1-per-account in Phase 2:
@@ -110,6 +141,15 @@ impl AccountConfig {
 ///     last-seen status string + the runtime pause flag.
 ///   - `cached_profile` — the `/auth/me` payload cached at login.
 ///   - `auth_email` — the signed-in address mirrored for the Account page.
+///   - `auth_health` — the consecutive-401 streak fed by the engine's
+///     heartbeat + sync-tick API calls, read by `sync_status` as
+///     `auth_expired` (task 1546 finding 5).
+///   - `engine_stop_unconfirmed` — set when a sign-out could not CONFIRM
+///     the engine task terminated (Bug A2): the consumed handle leaves an
+///     empty `engine` slot, so without this flag a sign-out RETRY would
+///     sail past the stop gate (slot looks idle) into the cross-account
+///     purge while the old engine may still be running. In-memory only —
+///     a process restart is the documented remedy (and re-resets it).
 ///
 /// Accessed via `Arc<AccountRuntime>` from `AppState::active_account()`; callers
 /// lock the inner mutexes. The `Arc` shares the runtime; it never duplicates the
@@ -122,6 +162,34 @@ pub struct AccountRuntime {
     pub sync_paused: Arc<AtomicBool>,
     pub cached_profile: Mutex<Option<AccountProfile>>,
     pub auth_email: Mutex<Option<String>>,
+    pub auth_health: Arc<AuthHealth>,
+    pub engine_stop_unconfirmed: AtomicBool,
+    /// See [`SessionGeneration`]. Moved on only by `lib.rs`, under the session-write lock.
+    session_generation: AtomicU64,
+    /// What moved it last (a [`SessionTransition`] as a `u8`).
+    last_transition: AtomicU8,
+    /// The identify request's single flight and its debounce (see [`IdentifyFlight`]).
+    pub(crate) identify_flight: Mutex<IdentifyFlight>,
+    /// The naming could not write the session's email to the Keychain; the next naming trigger writes it again
+    /// (Task 12 fix round 2, item 3).
+    pub(crate) keychain_email_pending: AtomicBool,
+    /// The last binding refusal of an engine start for the current session (Task 12 fix round 2, ruling P), shown as
+    /// `sync_status.engine_refusal`. A start that runs clears it, and so does every session transition.
+    pub(crate) engine_refusal: Mutex<Option<crate::account_binding::Refusal>>,
+    /// Lead ruling F9 (spec 2026-10-06 R8): how many sign-ins have asked for the operations paused for `auth` to be due
+    /// again. A sign-in that puts a session in memory moves it on in its write turn, after the session is there, and so
+    /// does the startup check that confirmed the stored token (F9 review I-2). Spec D11 (task 1888): on every OS.
+    /// Shared with the engine ([`crate::runner::ResumeTicket`]).
+    pub(crate) auth_resume_asked: Arc<AtomicU64>,
+    /// The ask the last resume served. A Mac's engine start serves it under the engine slot, before the engine exists;
+    /// off macOS the engine serves it after its reconcile pass and the key check (spec D11, D12).
+    pub(crate) auth_resume_done: Arc<AtomicU64>,
+    /// Review P2 (task 1888): how many releases ("Upload to my Beebeeb" on a held change, Windows) asked for a reconcile
+    /// pass. Not a sign-in, so it resumes nothing. Off macOS the engine's queue sends nothing while it is ahead of
+    /// `reconcile_pass_served` ([`crate::runner::ResumeTicket`]).
+    pub(crate) reconcile_pass_wanted: Arc<AtomicU64>,
+    /// The release ask the last committed pass served.
+    pub(crate) reconcile_pass_served: Arc<AtomicU64>,
 }
 
 impl AccountRuntime {
@@ -140,6 +208,61 @@ impl AccountRuntime {
             sync_paused: Arc::new(AtomicBool::new(false)),
             cached_profile: Mutex::new(None),
             auth_email: Mutex::new(None),
+            auth_health: Arc::new(AuthHealth::new()),
+            engine_stop_unconfirmed: AtomicBool::new(false),
+            session_generation: AtomicU64::new(0),
+            last_transition: AtomicU8::new(0),
+            identify_flight: Mutex::new(IdentifyFlight::default()),
+            keychain_email_pending: AtomicBool::new(false),
+            engine_refusal: Mutex::new(None),
+            auth_resume_asked: Arc::new(AtomicU64::new(0)),
+            auth_resume_done: Arc::new(AtomicU64::new(0)),
+            reconcile_pass_wanted: Arc::new(AtomicU64::new(0)),
+            reconcile_pass_served: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The account's current [`SessionGeneration`]. Capture it before starting work for the current session.
+    pub fn session_generation(&self) -> SessionGeneration {
+        SessionGeneration(self.session_generation.load(Ordering::SeqCst))
+    }
+
+    /// Whether no session transition has happened since `generation` was captured: the session is still the one the
+    /// work started with, and its result may be used.
+    pub fn session_unchanged_since(&self, generation: SessionGeneration) -> bool {
+        self.session_generation() == generation
+    }
+
+    /// Move the generation on: a session transition (`by`) happened. The long name is the contract: call it only while
+    /// holding `lib.rs`'s session-write lock, so a check and the write that follows it can never be split by another
+    /// transition.
+    pub(crate) fn advance_session_generation_holding_session_write_lock(
+        &self,
+        by: SessionTransition,
+    ) -> SessionGeneration {
+        self.last_transition.store(by as u8, Ordering::SeqCst);
+        let moved = SessionGeneration(self.session_generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1));
+        // An engine-start refusal belongs to the session it was found for: any transition ends it (ruling P). Cleared
+        // after the move, so a start that records one checks the generation under this same mutex and never records
+        // over a transition.
+        *self
+            .engine_refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        // Fix round 3, M5: a Keychain email write still owed belongs to the session a Lock or a Sign-out ends. A Write
+        // keeps it: the naming that marks a failed write moves the generation with a Write right after.
+        if matches!(by, SessionTransition::Lock | SessionTransition::SignOut) {
+            self.keychain_email_pending.store(false, Ordering::SeqCst);
+        }
+        moved
+    }
+
+    /// What moved the generation last.
+    pub(crate) fn last_session_transition(&self) -> SessionTransition {
+        match self.last_transition.load(Ordering::SeqCst) {
+            1 => SessionTransition::Lock,
+            2 => SessionTransition::SignOut,
+            _ => SessionTransition::Write,
         }
     }
 }
@@ -232,9 +355,7 @@ mod tests {
     fn active_account_after_synthesis_is_default_shape() {
         let state = AppState::default();
         synthesize_single_account(&state, fixed_id());
-        let acct = state
-            .active_account()
-            .expect("active account resolves after synthesis");
+        let acct = state.active_account().expect("active account resolves after synthesis");
         assert_eq!(
             *acct.engine_state.lock().unwrap(),
             "stopped",
@@ -245,10 +366,39 @@ mod tests {
             "fresh runtime must have no session"
         );
         assert!(
-            !acct
-                .sync_paused
-                .load(std::sync::atomic::Ordering::Relaxed),
+            !acct.sync_paused.load(std::sync::atomic::Ordering::Relaxed),
             "fresh runtime must not be paused"
+        );
+    }
+
+    /// The session generation (Task 12, lead ruling 11): work captures it, and asks before it uses its result whether a
+    /// session transition happened since. Every transition moves it on, never back, and each account has its own.
+    #[test]
+    fn the_session_generation_tells_whether_the_session_changed_since_it_was_captured() {
+        let acct = AccountRuntime::new(fixed_id());
+        let other = AccountRuntime::new(AccountId("acct-other".into()));
+        let others = other.session_generation();
+        let captured = acct.session_generation();
+        assert!(acct.session_unchanged_since(captured), "nothing happened yet");
+        let after = acct.advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+        assert!(
+            !acct.session_unchanged_since(captured),
+            "a transition happened since it was captured"
+        );
+        assert!(
+            acct.session_unchanged_since(after),
+            "the generation the transition moved to is current"
+        );
+        assert_eq!(acct.session_generation(), after);
+        assert_ne!(
+            acct.advance_session_generation_holding_session_write_lock(SessionTransition::Write),
+            after,
+            "it never comes back to an earlier value"
+        );
+        assert!(!acct.session_unchanged_since(after));
+        assert!(
+            other.session_unchanged_since(others),
+            "another account's work is not touched by these transitions"
         );
     }
 

@@ -3,29 +3,8 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum BeebeebItemKind: String, Codable {
-    case namespace
     case folder
     case file
-}
-
-enum BeebeebNamespace: String, CaseIterable {
-    case myFiles = "my_files"
-    case sharedWithMe = "shared_with_me"
-    case offline
-    case conflicts
-
-    var identifier: NSFileProviderItemIdentifier {
-        NSFileProviderItemIdentifier("namespace:\(rawValue)")
-    }
-
-    var displayName: String {
-        switch self {
-        case .myFiles: return "My files"
-        case .sharedWithMe: return "Shared with me"
-        case .offline: return "Offline"
-        case .conflicts: return "Conflicts"
-        }
-    }
 }
 
 struct BeebeebProviderItem: Codable {
@@ -38,20 +17,144 @@ struct BeebeebProviderItem: Codable {
     let status: String
     let capabilities: Int
     let versionIdentifier: String?
+    // Task 1697: optional metadata from the daemon (absent = not reported;
+    // `decodeItem` defaults everything so an older daemon stays compatible).
+    let createdAt: Date?
+    let modifiedAt: Date?
+    /// Real child count for folders; `nil` for files.
+    let childItemCount: Int64?
+    /// contentVersion: changes only when the content identity changes.
+    let contentVersion: String?
+    /// metadataVersion: changes on rename/move/status — no re-download.
+    let metadataVersion: String?
+    /// Task 1698: the item's effective pin state (the daemon resolves
+    /// pin_state + inherited_pin_state). Drives `contentPolicy`:
+    /// `.downloadEagerlyAndKeepDownloaded` on pinned items (a pinned folder's
+    /// children inherit it), the root's `.downloadLazily` governs everything
+    /// else. The cross-device pin BACKEND is task 1683 — today the pin set is
+    /// this device's own (`files.pin_state`), so the mapping is real but its
+    /// inputs are local-only (task 1698 deviation 1).
+    let pinned: Bool
 
     static let read = 1 << 0
     static let write = 1 << 1
     static let rename = 1 << 2
     static let delete = 1 << 3
+    /// .allowsAddingSubItems — task 1694. Bit 4, identical numbering to the
+    /// Rust payload builder's CAP_ADD_SUBITEMS (src-tauri/src/ipc_socket.rs);
+    /// the payload crosses the XPC bridge as this plain Int.
+    static let addSubItems = 1 << 4
+    /// .allowsReparenting — task 1697. Bit 5, same numbering as Rust's
+    /// CAP_REPARENT. Without it Finder blocks dragging an item OUT (a move).
+    static let reparent = 1 << 5
+    /// .allowsTrashing — task 1697. Bit 6, same numbering as Rust's CAP_TRASH.
+    /// Trash SEMANTICS (trashContainer handling) landed in task 1698 (ruling:
+    /// full trash sync — see FileProviderExtension's modifyRoute/deleteItem).
+    static let trash = 1 << 6
 
-    static func namespace(_ namespace: BeebeebNamespace) -> BeebeebProviderItem {
+    // Task 1699: NSFileProviderItemDecorating identifiers. Each MUST be
+    // declared in BeebeebFileProvider/Info.plist under
+    // NSExtension.NSFileProviderDecorations (with its badge UTI declared in
+    // UTImportedTypeDeclarations), or macOS drops the decoration silently.
+    static let decorationError = "io.beebeeb.app.decoration.error"
+    static let decorationConflict = "io.beebeeb.app.decoration.conflict"
+    static let decorationTrashing = "io.beebeeb.app.decoration.trashing"
+    static let decorationUploading = "io.beebeeb.app.decoration.uploading"
+    static let decorationDownloading = "io.beebeeb.app.decoration.downloading"
+
+    /// The sync-state badge for a daemon `status` string — at most ONE
+    /// identifier per item: macOS renders only the FIRST decoration in the
+    /// Badge category, so a list would falsely promise more than Finder can
+    /// show. Priority if statuses ever compose:
+    /// error > conflict > trashing > uploading > downloading. Plain states
+    /// (local, cloud_only) and unknown statuses carry no badge.
+    static func decorationIdentifier(forStatus status: String) -> String? {
+        switch status {
+        case "error":
+            return decorationError
+        case "conflict":
+            return decorationConflict
+        case "trashing":
+            return decorationTrashing
+        case "uploading":
+            return decorationUploading
+        case "downloading":
+            return decorationDownloading
+        default:
+            return nil
+        }
+    }
+
+    /// The memberwise constructor with defaults for the 1697 fields, so
+    /// existing call sites (and tests) stay unchanged.
+    init(
+        identifier: String,
+        parentIdentifier: String,
+        filename: String,
+        kind: BeebeebItemKind,
+        sizeBytes: Int64,
+        contentType: String?,
+        status: String,
+        capabilities: Int,
+        versionIdentifier: String?,
+        createdAt: Date? = nil,
+        modifiedAt: Date? = nil,
+        childItemCount: Int64? = nil,
+        contentVersion: String? = nil,
+        metadataVersion: String? = nil,
+        pinned: Bool = false
+    ) {
+        self.identifier = identifier
+        self.parentIdentifier = parentIdentifier
+        self.filename = filename
+        self.kind = kind
+        self.sizeBytes = sizeBytes
+        self.contentType = contentType
+        self.status = status
+        self.capabilities = capabilities
+        self.versionIdentifier = versionIdentifier
+        self.createdAt = createdAt
+        self.modifiedAt = modifiedAt
+        self.childItemCount = childItemCount
+        self.contentVersion = contentVersion
+        self.metadataVersion = metadataVersion
+        self.pinned = pinned
+    }
+
+    /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
+    /// container — "Beebeeb", the user's own files, matching the Windows
+    /// app. The old synthetic namespace roots (`My files`, `Shared with me`,
+    /// `Offline`, `Conflicts`) are gone; shared files live in the webapp.
+    /// Root keeps READ | ADD_SUBITEMS (1694 semantics: drops into the root
+    /// must keep working).
+    static func root() -> BeebeebProviderItem {
         BeebeebProviderItem(
-            identifier: namespace.identifier.rawValue,
+            identifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
             parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
-            filename: namespace.displayName,
-            kind: .namespace,
+            filename: "Beebeeb",
+            kind: .folder,
             sizeBytes: 0,
-            contentType: UTType.folder.identifier,
+            contentType: nil,
+            status: "local",
+            capabilities: read | addSubItems,
+            versionIdentifier: nil
+        )
+    }
+
+    /// Task 1698 (trash ruling): the SYSTEM trash container. Apple's
+    /// `supportsSyncingTrash` (default YES) makes macOS surface it as the
+    /// Trash; its contents come from the daemon's trash-container
+    /// enumeration (Trashing rows). The container itself is a system
+    /// container — answered locally, always materialized, never
+    /// created/renamed/deleted by us, so READ only.
+    static func trashContainer() -> BeebeebProviderItem {
+        BeebeebProviderItem(
+            identifier: NSFileProviderItemIdentifier.trashContainer.rawValue,
+            parentIdentifier: NSFileProviderItemIdentifier.trashContainer.rawValue,
+            filename: "Trash",
+            kind: .folder,
+            sizeBytes: 0,
+            contentType: nil,
             status: "local",
             capabilities: read,
             versionIdentifier: nil
@@ -80,7 +183,7 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
     }
 
     var contentType: UTType {
-        if model.kind == .namespace || model.kind == .folder {
+        if model.kind == .folder {
             return .folder
         }
         if let raw = model.contentType, let type = UTType(raw) {
@@ -93,14 +196,33 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         model.kind == .file ? NSNumber(value: model.sizeBytes) : nil
     }
 
+    /// Task 1697: the real child count from the daemon (informational;
+    /// Finder renders it in list views). The daemon sends it only for
+    /// folders; a file's count stays nil.
     var childItemCount: NSNumber? {
-        model.kind == .file ? nil : NSNumber(value: 0)
+        model.kind == .file ? nil : model.childItemCount.flatMap { NSNumber(value: $0) }
     }
 
+    var creationDate: Date? {
+        model.createdAt ?? model.modifiedAt
+    }
+
+    var contentModificationDate: Date? {
+        model.modifiedAt
+    }
+
+    /// Task 1697: the version SPLIT. `contentVersion` must change ONLY when
+    /// the content identity changes — a change forces a re-download and
+    /// invalidates the thumbnail cache. `metadataVersion` covers
+    /// mtime/size/parent/name so a rename no longer fakes a content change.
+    /// The contentVersion also doubles as the write-key base version (the
+    /// Rust write path parses its numeric prefix — see `parse_base_version_
+    /// number` in engine_bridge.rs), so it stays `versionIdentifier`'s
+    /// format and never becomes a bare hash.
     var itemVersion: NSFileProviderItemVersion {
-        let version = model.versionIdentifier ?? "\(model.status):\(model.sizeBytes)"
-        let data = Data(version.utf8)
-        return NSFileProviderItemVersion(contentVersion: data, metadataVersion: data)
+        let content = model.contentVersion ?? model.versionIdentifier ?? "\(model.status):\(model.sizeBytes)"
+        let metadata = model.metadataVersion ?? "\(model.status):\(model.sizeBytes)"
+        return NSFileProviderItemVersion(contentVersion: Data(content.utf8), metadataVersion: Data(metadata.utf8))
     }
 
     var isUploaded: Bool {
@@ -120,6 +242,22 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         isDownloaded
     }
 
+    /// Task 1698 (contentPolicy, macOS 13+; our minimum is 14.0). The system
+    /// evicts only items reported `isUploaded` with no local edits, so a
+    /// materialized+uploaded item the user PINNED must say "keep me":
+    /// `.downloadEagerlyAndKeepDownloaded`. The root (always here, never a
+    /// system-managed item) reports `.downloadLazily` — dataless until opened
+    /// is the single-root default. Everything else inherits.
+    var contentPolicy: NSFileProviderContentPolicy {
+        if model.identifier == NSFileProviderItemIdentifier.rootContainer.rawValue {
+            return .downloadLazily
+        }
+        if model.pinned {
+            return .downloadEagerlyAndKeepDownloaded
+        }
+        return .inherited
+    }
+
     var capabilities: NSFileProviderItemCapabilities {
         var result: NSFileProviderItemCapabilities = []
         if model.capabilities & BeebeebProviderItem.read != 0 {
@@ -134,6 +272,36 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
         if model.capabilities & BeebeebProviderItem.delete != 0 {
             result.insert(.allowsDeleting)
         }
+        if model.capabilities & BeebeebProviderItem.addSubItems != 0 {
+            // Task 1694: without this Finder refuses every drop INTO the item
+            // (blocked icon) — it is the only flag that governs adding
+            // sub-items.
+            result.insert(.allowsAddingSubItems)
+        }
+        if model.capabilities & BeebeebProviderItem.reparent != 0 {
+            // Task 1697: without this Finder blocks dragging an item OUT of
+            // its parent (a move). Same bridge numbering as Rust CAP_REPARENT.
+            result.insert(.allowsReparenting)
+        }
+        if model.capabilities & BeebeebProviderItem.trash != 0 {
+            // Task 1697: without this Finder blocks drag-to-Trash. Trash
+            // SEMANTICS (trashContainer handling) are task 1698's decision.
+            result.insert(.allowsTrashing)
+        }
         return result
+    }
+}
+
+// Task 1699: sync-state badges. The system consults `decorations` when it
+// paints the item's icon; identifiers must exist in Info.plist's
+// NSFileProviderDecorations with a UTImportedTypeDeclarations badge UTI
+// whose icon ships in the bundle (BeebeebFileProvider/Resources/*.png,
+// copied by scripts/build-fileprovider-extension.sh).
+extension FileProviderItem: NSFileProviderItemDecorating {
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        guard let identifier = BeebeebProviderItem.decorationIdentifier(forStatus: model.status) else {
+            return nil
+        }
+        return [NSFileProviderItemDecorationIdentifier(identifier)]
     }
 }

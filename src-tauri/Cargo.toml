@@ -136,19 +136,22 @@ rand = "0.8"
 # Sync engine + crypto from the core repo, pinned to a git REV for
 # reproducible builds (task 0815). A relative `path` dep resolved wrong from a
 # /tmp worktree and silently linked a stale local checkout; the rev pin gives a
-# deterministic core (45a612c = task 0806's `decrypt_names` + the 4-arg
-# `client_login_finish`). The core sub-crates reference each other by
+# deterministic core (c08defc7 = L8 purpose-bound owner-file envelopes and
+# explicit-key writers, including the L6/L7 bound envelopes). The
+# core sub-crates reference each other by
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "45a612c" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Private staging directory for atomic owner-only IPC socket publication.
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # 0.16 is the minimum version patched for RUSTSEC-2021-0154 (fuser passed a
@@ -296,8 +299,31 @@ windows = { version = "0.58", features = [
 # `windows` crate's interfaces expect (type-identity errors).
 windows-core = "0.58"
 
+# 0.8.15: turn off WebView2's browser shortcuts (Ctrl+P / Ctrl+Shift+P print, F5 / Ctrl+R reload, Ctrl+F find, ...) in
+# every app window. Tauri 2.11 does not expose wry's `with_browser_accelerator_keys`, so `lib.rs`
+# (`webview2_browser_keys`) reaches the WebView2 controller through `Webview::with_webview` and sets them off itself.
+# Both crates are the versions wry 0.55 already links (Cargo.lock lists them before this line was added); no new crate
+# is downloaded. `windows-core` 0.61 is renamed because 0.58 above stays the `windows` crate's: it supplies the
+# `Interface::cast` the WebView2 0.61 interfaces need.
+webview2-com = "0.38"
+windows-core-webview2 = { package = "windows-core", version = "0.61" }
+
 [dev-dependencies]
 tempfile = "3"
+# Same 3.x Tauri itself merges platform configs with (already in Cargo.lock);
+# used only by the merged-config tests in src/surfaces/config_tests.rs.
+json-patch = { version = "3", default-features = false }
+# Task 1887: the send phase's wake test runs on tokio's paused clock (`#[tokio::test(start_paused = true)]`), so a
+# loaded machine cannot flake it. A feature only: `test-util` turns on tokio's own `rt`, `sync` and `time`, which
+# `[dependencies]` already has, so no crate is added and Cargo.lock is unchanged.
+tokio = { version = "1", features = ["test-util"] }
+
+# Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
+# real status listener and the real status pulse against a mock runtime. A feature only (no new
+# crate; Cargo.lock is unchanged). Not on Windows: slice 1's lib test binary died at load there
+# (0xc0000139) the moment a test touched the webview runtime, and Linux runs these tests.
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "test"] }
 
 [features]
 default = ["custom-protocol"]

@@ -21,7 +21,7 @@
  *
  * Brand: amber is reserved for encryption state + primary/destructive-confirm
  * actions; Inter for human text, JetBrains Mono for ids/codes/timestamps;
- * name the city only ("Falkenstein"), never the storage provider; no emojis.
+ * keep product copy residency-neutral, never name the storage provider; no emojis.
  */
 
 import { useEffect, useState } from 'react'
@@ -35,6 +35,7 @@ import {
   type SecurityFactor,
   type AccountSession,
 } from '../../desktopApi'
+import { SECURITY_SETTINGS_URL } from '../../settingsConstants'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
 
 // ── Local palette extensions (warning/danger reuse WindowsApp's error tone) ──
@@ -43,7 +44,6 @@ const WARN = 'oklch(0.5 0.18 25)'
 const WARN_BG = 'oklch(0.97 0.02 25)'
 const WARN_LINE = 'oklch(0.85 0.08 25)'
 
-const MANAGE_2FA_URL = 'https://app.beebeeb.io/settings/security'
 
 // ── Factor humanization ──────────────────────────────────────────────────────
 // Map the server's snake_case factor keys to a human label + the action implied
@@ -212,7 +212,7 @@ function ErrorBody({ unsupported, reason, onRetry }: { unsupported: boolean; rea
           Security details aren't wired into this desktop build yet. You can manage sessions and two-factor on beebeeb.io.
         </div>
         <div style={{ marginTop: 4 }}>
-          <PrimaryBtn onClick={() => void openUrl(MANAGE_2FA_URL)}>
+          <PrimaryBtn onClick={() => void openUrl(SECURITY_SETTINGS_URL)}>
             <NavIcon name="external" size={12} color={T.paper} /> Open on beebeeb.io
           </PrimaryBtn>
         </div>
@@ -396,7 +396,7 @@ function TwoFactorRow({ enabled }: { enabled: boolean | null }) {
           </div>
         </div>
         <button
-          onClick={() => void openUrl(MANAGE_2FA_URL)}
+          onClick={() => void openUrl(SECURITY_SETTINGS_URL)}
           style={{
             display: 'inline-flex',
             alignItems: 'center',

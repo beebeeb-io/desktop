@@ -1,26 +1,26 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useRegionLabel } from '../useRegion'
+import { useCapabilities, supportsRoute, CapabilityAlternative, canInstallUpdate } from '../../capabilities'
+import { CapabilityNotice } from '../../CapabilityNotice'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
-  accountRegion,
   accountNotificationPreferences,
   accountUpdateNotificationPreferences,
   appActivitySnapshot,
-  checkForDesktopUpdatesNow,
   command,
   commandUnavailableLabel,
   formatBytes,
   installDesktopChannelDowngrade,
   openUrl,
-  setAccountRegion,
   type AppActivitySnapshot,
   type DesktopConfig,
   type DesktopTheme,
   type FinderInstallState,
   type NotificationPreferenceValues,
-  type RegionInfo,
   type StorageSummary,
   type SyncStatus,
   DEFAULT_CONFIG,
 } from '../../desktopApi'
+import { RELEASE_CHANNELS } from '../../settingsConstants'
 import {
   ALWAYS_ACCESSIBLE_SETTINGS,
   availableSettingsSections,
@@ -33,8 +33,6 @@ import { usePlatform, usePlatformName, thisDeviceNoun, type PlatformName } from 
 import {
   buildDowngradeConfirmationViewModel,
   buildUpdateCheckViewModel,
-  stateFromManualUpdateResult,
-  type ManualUpdateCheckState,
 } from '../updateCheckViewModel'
 import {
   ACCOUNT_NOTIFICATION_PREF_META,
@@ -43,7 +41,6 @@ import {
   type DesktopNotificationPrefKey,
 } from '../notificationPreferenceMeta'
 import { T, Card, Chip, Modal, NavIcon, PageHeader, PrimaryBtn, Skeleton, useToast } from '../ui'
-import { useRegionCity } from '../useRegion'
 import {
   CACHE_LIMIT_OPTIONS,
   buildCacheLimitView,
@@ -51,11 +48,19 @@ import {
   normalizeThemePreference,
 } from '../advancedSettingsModel'
 import {
-  DATA_RESIDENCY_FALLBACK_REGIONS,
   buildDataResidencyViewState,
-  commitPreferredRegionSelection,
+  residencySummary,
+  savedRegionMessage,
 } from '../dataResidencySettingsModel'
+import { useDataResidency } from '../useDataResidency'
+import { useFinderSetup } from '../../finderSetup'
+import { FINDER_SETUP_TITLE, finderActionButtonLabel, finderStatusPill } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
+import { syncActivityView, type SyncActivityView } from '../syncActivityModel'
+import { SyncActivityIcon, SyncCheckProgress, SyncPauseButton, useSyncActivitySummary, useSyncPauseToggle } from '../syncActivityUi'
+import { FoundWhilePausedCard } from '../FoundWhilePausedCard'
+import { desktopUpdateCheck } from '../manualUpdateCheck'
+import { pollWhileVisible } from '../visiblePoll'
 
 type ShellIntegrationState = FinderInstallState
 
@@ -74,8 +79,8 @@ interface SyncRow {
 
 const SYNC_ROWS: SyncRow[] = [
   {
-    label: 'Keep files encrypted end-to-end',
-    hint: 'This cannot be disabled. Every byte on disk is ciphertext.',
+    label: 'End-to-end encryption',
+    hint: 'Files are encrypted before upload. This cannot be disabled.',
     locked: true,
   },
   {
@@ -105,12 +110,6 @@ const SYNC_ROWS: SyncRow[] = [
 ]
 
 type ReleaseChannelValue = NonNullable<DesktopConfig['release_channel']>
-
-const RELEASE_CHANNELS: Array<{ value: ReleaseChannelValue; label: string; hint: string }> = [
-  { value: 'stable', label: 'Stable', hint: 'Regular releases after validation.' },
-  { value: 'beta', label: 'Beta', hint: 'Earlier builds for release testing.' },
-  { value: 'alpha', label: 'Alpha', hint: 'Earliest builds for rapid feedback.' },
-]
 
 const RED = 'var(--red)'
 const ACTIVITY_POLL_INTERVAL_MS = 1_500
@@ -260,22 +259,26 @@ function SyncPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const windows = caps?.host_os === 'windows'
+  const rows = SYNC_ROWS.filter((row) => !windows || (
+    (row.label !== 'Sync on metered connections' || caps.metered_sync_control) &&
+    (row.label !== 'Show sync overlays in File Explorer' || caps.sync_overlay_control) &&
+    (row.label !== 'Files on Demand (online-only by default)' || caps.hydrate_all_control)
+  ))
   const [freeUpBusy, setFreeUpBusy] = useState(false)
   // Not an error surface: freeUpNote reports the RESULT of 'Free up space' on both success and
   // failure, in ink3, not as an error. It happens to carry result.reason on the failure branch.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [freeUpNote, setFreeUpNote] = useState<string | null>(null)
-  const [lastSyncLabel, setLastSyncLabel] = useState('...')
-
-  useEffect(() => {
-    if (status?.syncing === 0 && status.engine === 'running') {
-      setLastSyncLabel('Just now')
-    } else if (status?.engine === 'running') {
-      setLastSyncLabel('Syncing...')
-    } else {
-      setLastSyncLabel('-')
-    }
-  }, [status?.syncing, status?.engine])
+  const { showToast } = useToast()
+  const platform = usePlatformName()
+  // What sync is doing (0.8.15): the live pause flag, the queue in counts and the startup check, next to `status`.
+  // Before this the card read only `status`, so 2,924 changes on hold looked like "Up to date".
+  const { summary, refresh } = useSyncActivitySummary()
+  const view = syncActivityView(status, summary, { device: thisDeviceNoun(platform), pausedFallback: config.pause_sync })
+  const pause = useSyncPauseToggle(view, refresh, (failure) => showToast({ variant: 'error', ...failure }))
+  const lastSyncLabel = lastCheckLabel(summary?.last_tick_ok_at ?? null, summary === undefined)
 
   const freeUp = async () => {
     setFreeUpBusy(true)
@@ -300,18 +303,15 @@ function SyncPanel({
       <PageHeader
         title="Sync"
         subtitle="Manage what syncs with this PC and how. Files are encrypted on this device before upload."
-        aside={
-          <Chip tone={status?.engine === 'running' && status.syncing === 0 ? 'green' : 'amber'}>
-            {status?.engine === 'running' && status.syncing === 0 ? 'All devices up to date' : 'Syncing'}
-          </Chip>
-        }
+        aside={<Chip tone={view.tone === 'good' ? 'green' : 'neutral'}>{view.label}</Chip>}
       />
 
-      <Card style={{ padding: 20, background: `linear-gradient(135deg, ${T.amberBg}, ${T.paper2})`, borderColor: T.amberDeep, marginBottom: 22 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 20 }}>
+      <Card style={{ padding: 0, marginBottom: 22, overflow: 'hidden' }}>
+        <SyncStateHeader view={view} busy={pause.busy} onToggle={() => void pause.toggle()} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 20, padding: '14px 20px 16px', borderTop: `1px solid ${T.line}`, background: T.paper2 }}>
           {[
-            { k: 'State', v: status?.engine === 'running' ? (status.syncing > 0 ? 'Syncing' : 'Up to date') : 'Paused' },
-            { k: 'On this PC', v: onPc },
+            { k: 'State', v: view.label },
+            { k: `On ${thisDeviceNoun(platform)}`, v: onPc },
             { k: 'In vault', v: synced7d },
             { k: 'Last sync', v: lastSyncLabel },
           ].map(({ k, v }) => (
@@ -325,13 +325,16 @@ function SyncPanel({
         </div>
       </Card>
 
+      {/* Task 2267: changes found while sync was paused wait here for the person's decision (draws nothing otherwise). */}
+      <FoundWhilePausedCard summary={summary} refresh={refresh} />
+
       <Card style={{ padding: 0, overflow: 'hidden' }}>
-        {SYNC_ROWS.map((row, i) => {
-          const isLast = i === SYNC_ROWS.length - 1
+        {rows.map((row, i) => {
+          const isLast = i === rows.length - 1
           let control: ReactNode = null
 
           if (row.locked) {
-            control = <Toggle on={true} onChange={() => undefined} label={row.label} />
+            control = <Chip>Always on</Chip>
           } else if (row.label === 'Sync on metered connections') {
             control = <Toggle on={metered} onChange={(v) => onConfigChange({ metered: v })} label={row.label} />
           } else if (row.label === 'Files on Demand (online-only by default)') {
@@ -357,7 +360,7 @@ function SyncPanel({
                   {row.label}
                   {row.locked && <Chip>Locked by design</Chip>}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.ink3, marginTop: 3, lineHeight: 1.4 }}>{row.hint}</div>
+                <div style={{ fontSize: 11.5, color: T.ink3, marginTop: 3, lineHeight: 1.4 }}>{windows && row.locked ? 'Files are encrypted before upload. Downloaded files can be opened on this PC.' : row.hint}</div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>{control}</div>
             </div>
@@ -365,6 +368,8 @@ function SyncPanel({
         })}
       </Card>
 
+      {windows && <CapabilityNotice style={{ marginTop: 24 }}>Files download when opened. Use Selective sync to make folders online-only.
+        Automatic metered-network control and overlay preferences are not available yet.</CapabilityNotice>}
       <Card style={{ marginTop: 24, padding: 18, display: 'flex', alignItems: 'center', gap: 14, background: T.paper2 }}>
         <div style={{ width: 32, height: 32, borderRadius: 8, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <NavIcon name="cloud" size={14} color={T.amberDeep} />
@@ -381,6 +386,42 @@ function SyncPanel({
         </PrimaryBtn>
       </Card>
     </SettingsSectionShell>
+  )
+}
+
+/**
+ * "Last sync" from the engine's last check that reached the server since the app started. Never a guess: no check yet
+ * is "Not yet", and an unread summary is "…".
+ */
+function lastCheckLabel(at: number | null, reading: boolean, now: number = Date.now()): string {
+  if (reading) return '…'
+  if (at == null || at <= 0) return 'Not yet'
+  const sec = Math.max(0, Math.round(now / 1000 - at))
+  if (sec < 45) return 'Just now'
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min} min ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr} hr ago`
+  const day = Math.round(hr / 24)
+  return `${day} day${day === 1 ? '' : 's'} ago`
+}
+
+/** The live state, in words, with Pause / Resume beside it (0.8.15; before it the only way to pause was the menu). */
+function SyncStateHeader({ view, busy, onToggle }: { view: SyncActivityView; busy: boolean; onToggle: () => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '18px 20px' }}>
+      <div style={{ paddingTop: 1 }}>
+        <SyncActivityIcon view={view} size={20} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }} aria-live="polite">
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, lineHeight: 1.35 }}>{view.headline}</div>
+        {view.details.map((line) => (
+          <div key={line} style={{ fontSize: 12, color: T.ink2, marginTop: 4, lineHeight: 1.45 }}>{line}</div>
+        ))}
+        {view.progress && <SyncCheckProgress check={view.progress} />}
+      </div>
+      <SyncPauseButton view={view} busy={busy} onToggle={onToggle} />
+    </div>
   )
 }
 
@@ -466,7 +507,7 @@ function NotificationPreferencesPanel() {
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="cog" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Notification preferences</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Account notifications</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Choose which account events notify you.</div>
         </div>
       </div>
@@ -534,7 +575,7 @@ function DesktopNotificationPreferencesPanel({
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="external" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Desktop alerts</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>On this device</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Native notifications fired by this device.</div>
         </div>
       </div>
@@ -583,12 +624,12 @@ function RegionSelectionCard({
   onSelect,
 }: {
   item: ReturnType<typeof buildDataResidencyViewState>['items'][number]
-  onSelect: (continent: string) => void
+  onSelect: (id: string) => void
 }) {
   return (
     <button
       type="button"
-      onClick={() => onSelect(item.continent)}
+      onClick={() => onSelect(item.id)}
       disabled={item.disabled}
       aria-pressed={item.selected}
       style={{
@@ -631,10 +672,13 @@ function RegionSelectionCard({
             {item.displayName}
           </span>
           {item.isDefault && <Chip>Default</Chip>}
+          {item.comingSoon && <Chip>Coming soon</Chip>}
         </span>
-        <span style={{ display: 'block', fontFamily: T.fontMono, fontSize: 11.5, color: T.ink3, lineHeight: 1.45 }}>
-          {item.locationLabel}
-        </span>
+        {item.detail && (
+          <span style={{ display: 'block', fontFamily: T.fontMono, fontSize: 11.5, color: T.ink3, lineHeight: 1.45 }}>
+            {item.detail}
+          </span>
+        )}
       </span>
 
       {item.selected && <NavIcon name="check" size={14} color={T.amberDeep} />}
@@ -644,84 +688,79 @@ function RegionSelectionCard({
 
 function DataResidencyPanel() {
   const { showToast } = useToast()
-  const [regions, setRegions] = useState<RegionInfo[]>(DATA_RESIDENCY_FALLBACK_REGIONS)
-  const [preferredRegion, setPreferredRegion] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const { loading, loadError, view, retry, select, setStrict } = useDataResidency()
 
-  const load = () => {
-    let cancelled = false
-    setLoading(true)
-    setLoadError(null)
-    void (async () => {
-      const result = await accountRegion()
-      if (cancelled) return
-      if (result.ok) {
-        setRegions(result.value.regions.length ? result.value.regions : DATA_RESIDENCY_FALLBACK_REGIONS)
-        setPreferredRegion(result.value.preferred_region ?? null)
-      } else {
-        setRegions(DATA_RESIDENCY_FALLBACK_REGIONS)
-        setPreferredRegion(null)
-        setLoadError(result.unsupported ? commandUnavailableLabel('account_region') : result.reason)
-      }
-      setLoading(false)
-    })()
-    return () => { cancelled = true }
-  }
-
-  useEffect(() => load(), [])
-
-  const view = buildDataResidencyViewState({
-    preferredRegion,
-    regions,
-    saving,
-  })
-
-  const handleSelect = async (continent: string) => {
-    if (view.onlyOneRegion || saving) return
-
-    setSaving(true)
-    const result = await commitPreferredRegionSelection({
-      continent,
-      preferredRegion,
-      saving,
-      setPreferredRegion,
-      savePreferredRegion: async next => {
-        const response = await setAccountRegion(next)
-        if (!response.ok) {
-          throw new Error(response.unsupported ? commandUnavailableLabel('account_set_region') : response.reason)
-        }
-        return response.value
-      },
-    })
-    setSaving(false)
-
-    if (result.status === 'saved') {
+  const handleStrict = async (next: boolean) => {
+    const pinned = view.pinned
+    const result = await setStrict(next)
+    if (result.status === 'saved' && pinned) {
       showToast({
         variant: 'success',
-        title: 'Region updated',
-        message: 'New uploads will use your preferred region.',
+        title: result.strict ? `Only storing in ${pinned.displayName}` : 'Other EU countries allowed',
+        message: result.strict
+          ? `If ${pinned.displayName} can’t take a new file, the upload stops.`
+          : `If ${pinned.displayName} can’t take a new file, it goes to another EU country.`,
       })
       return
     }
-
     if (result.status === 'error') {
       showToast({
         variant: 'error',
-        title: 'Failed to save region',
+        title: 'Failed to save storage location',
         message: result.message || 'Please try again.',
       })
     }
   }
 
-  const currentCity = regions.find(region => region.continent === view.effectiveRegion)?.city ?? regions[0]?.city ?? 'Falkenstein'
+  const handleSelect = async (id: string) => {
+    const result = await select(id)
+    if (result?.status === 'saved') {
+      showToast({
+        variant: 'success',
+        title: 'Storage location updated',
+        message: savedRegionMessage(view.items, result.preferredRegion),
+      })
+      return
+    }
+
+    if (result?.status === 'error') {
+      showToast({
+        variant: 'error',
+        title: 'Failed to save storage location',
+        message: result.message || 'Please try again.',
+      })
+    }
+  }
+
+  return <DataResidencyContent loading={loading} loadError={loadError} view={view} onRetry={retry} onSelect={handleSelect} onStrictChange={handleStrict} />
+}
+
+export function DataResidencyContent({ loading, loadError, view, onRetry, onSelect, onStrictChange }: {
+  loading: boolean
+  loadError: string | null
+  view: ReturnType<typeof buildDataResidencyViewState>
+  onRetry: () => void
+  onSelect: (id: string) => void
+  /** "Only store in <country>": offered only while a country is selected. */
+  onStrictChange: (next: boolean) => void
+}) {
+  const summary = residencySummary(view)
+  // A stored country that left the list is not a load failure: the rows are fine, none is selected.
+  const error = loadError ?? (!summary && !view.preferenceUnavailable
+    ? 'Your storage region could not be determined. Please try again.'
+    : null)
+  const subtitle = loading
+    ? 'Loading data residency…'
+    : error ? undefined
+    : view.preferenceUnavailable
+      ? 'Your chosen location isn’t available right now. New files go wherever Beebeeb places them by default.'
+      : summary ?? undefined
 
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Data residency"
-        subtitle="Choose where new uploads are stored. Existing files stay where they are."
+        title="Storage location"
+        subtitle={subtitle}
       />
 
       {loading ? (
@@ -731,19 +770,19 @@ function DataResidencyPanel() {
         </Card>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {loadError && (
+          {error && (
             <Card style={{ padding: 14, background: T.paper2, borderColor: 'oklch(0.88 0.05 25)' }}>
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                 <NavIcon name="external" size={14} color={RED} />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not refresh region list</div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Could not load data residency</div>
                   <div style={{ fontSize: 11.5, lineHeight: 1.5, color: T.ink3, marginTop: 3, wordBreak: 'break-word' as const }}>
-                    {loadError}
+                    {error}
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={load}
+                  onClick={onRetry}
                   style={{
                     border: `1px solid ${T.line2}`,
                     borderRadius: 6,
@@ -761,31 +800,42 @@ function DataResidencyPanel() {
             </Card>
           )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {!error && <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {view.items.map(item => (
               <RegionSelectionCard
-                key={item.continent}
+                key={item.id}
                 item={item}
-                onSelect={(continent) => void handleSelect(continent)}
+                onSelect={(id) => onSelect(id)}
               />
             ))}
-          </div>
+          </div>}
 
-          {view.onlyOneRegion && (
-            <div style={{ fontSize: 11.5, color: T.ink4, lineHeight: 1.55 }}>
-              More regions are coming soon. Your files are stored in {currentCity}.
-            </div>
+          {!error && view.pinned && (
+            <Card style={{ padding: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 650, color: T.ink2 }}>{view.pinned.strictLabel}</div>
+                  <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55, marginTop: 3 }}>{view.pinned.strictHint}</div>
+                </div>
+                <Toggle
+                  on={view.strict}
+                  busy={view.saving}
+                  onChange={onStrictChange}
+                  label={view.pinned.strictLabel}
+                />
+              </div>
+            </Card>
           )}
 
-          <Card style={{ padding: 14, background: T.paper2 }}>
+          {!error && !view.onlyOneRegion && <Card style={{ padding: 14, background: T.paper2 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
               <NavIcon name="shield" size={14} color={T.amberDeep} />
               <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.55 }}>
                 <strong style={{ color: T.ink2 }}>Existing files stay where they are.</strong>{' '}
-                Only new uploads use your preferred region.
+                Only new uploads use the location you choose.
               </div>
             </div>
-          </Card>
+          </Card>}
         </div>
       )}
     </SettingsSectionShell>
@@ -842,21 +892,20 @@ function LaunchPanel() {
 }
 
 /**
- * The Rust command pair backing this panel, per platform. macOS registers the
- * sync root as a File Provider domain (`finder_*`); Windows registers it as a
- * Cloud Files sync root (`windows_*`). Both return `FinderInstallState`
- * (aliased here as `ShellIntegrationState`), so the panel's result mapping is
- * shared — only the command names differ. Linux has no backing command yet:
- * `null` tells the panel to say so honestly instead of invoking a
- * platform-specific command that can only ever error.
+ * The Rust command pair backing the Explorer panel, per platform. Windows registers the sync root
+ * as a Cloud Files sync root (`windows_*`) and returns `FinderInstallState` (aliased here as
+ * `ShellIntegrationState`). macOS never reaches this panel (`ShellOrFinderPanel` sends it to
+ * `MacFinderIntegrationPanel`, which reads the reconciler). Linux has no backing command yet:
+ * `null` tells the panel to say so honestly instead of invoking a platform-specific command that
+ * can only ever error.
  */
 function shellIntegrationCommandsFor(platform: PlatformName): { state: string; install: string } | null {
-  if (platform === 'macos') return { state: 'finder_location_state', install: 'install_finder_location' }
   if (platform === 'windows') return { state: 'windows_shell_integration_state', install: 'install_windows_shell_integration' }
   return null
 }
 
-function ExplorerIntegrationPanel() {
+function ExplorerIntegrationPanel({ status }: { status: SyncStatus | null }) {
+  const regionLabel = useRegionLabel()
   // Gate everything below on `resolved`: `platform` starts `null` and only
   // becomes a real value once `desktop_platform` answers. Deriving `commands`
   // from `resolved ? platform : null` means `commands` itself is the single
@@ -875,13 +924,12 @@ function ExplorerIntegrationPanel() {
   const fileSurfaceName =
     platform === 'macos' ? 'Finder' : platform === 'linux' ? 'your file manager' : platform === 'windows' ? 'File Explorer' : 'your files'
   const commands = useMemo(() => (platform ? shellIntegrationCommandsFor(platform) : null), [platform])
-  const actionVerb = platform === 'macos' ? 'Install' : 'Enable'
-  const actionVerbBusy = platform === 'macos' ? 'Installing...' : 'Enabling...'
+  const actionVerb = 'Enable'
+  const actionVerbBusy = 'Enabling...'
   const [state, setState] = useState<ShellIntegrationState | null>(null)
   const [checking, setChecking] = useState(false)
   const [busy, setBusy] = useState(false)
   const { showToast } = useToast()
-  const regionCity = useRegionCity()
 
   const refresh = async () => {
     if (!commands) return
@@ -918,13 +966,13 @@ function ExplorerIntegrationPanel() {
     return () => { cancelled = true }
   }, [showToast, midSentenceLabel, commands])
 
+  // Windows/Linux: a failed enable is a toast and nothing is painted from the saved
+  // `finder_install_last_error` (the Windows first-run flow saves one that Settings has never shown).
+  // macOS has no install action at all since spec 2026-10-06: it renders MacFinderIntegrationPanel.
   const enable = async () => {
     if (!commands) return
     setBusy(true)
-    // macOS ignores `path` and always installs at the default sync root
-    // (src-tauri/src/lib.rs `install_finder_location`), same as Onboarding.tsx.
-    const args = platform === 'macos' ? { path: null } : undefined
-    const r = await command<ShellIntegrationState>(commands.install, args)
+    const r = await command<ShellIntegrationState>(commands.install)
     setBusy(false)
     if (r.ok) {
       setState(r.value)
@@ -947,24 +995,25 @@ function ExplorerIntegrationPanel() {
       : checking
         ? 'Checking...'
         : active
-          ? platform === 'macos'
-            ? `Finder location installed on ${deviceNoun}.`
-            : `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
-          : platform === 'macos'
-            ? `Finder location not installed on ${deviceNoun}.`
-            : `Not set up yet on ${deviceNoun}.`
+          ? `Active. Beebeeb is registered as a sync folder on ${deviceNoun}.`
+          : `Not set up yet on ${deviceNoun}.`
 
   return (
     <SettingsSectionShell>
       <PageHeader
         title={label}
-        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave for ${regionCity}.`}
+        subtitle={`Beebeeb appears in ${fileSurfaceName} as a sync folder. Files are encrypted on ${deviceNoun} before they leave. ${regionLabel}.`}
       />
 
       <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{fileSurfaceName} location</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{statusText}</div>
+          {platform === 'windows' && (
+            <div title={status?.sync_root ?? undefined} style={{ fontSize: 11.5, fontFamily: T.fontMono, color: T.ink3, marginTop: 3, overflowWrap: 'anywhere' }}>
+              {status == null ? 'Sync folder unavailable' : status.sync_root ?? 'Not configured on this PC yet'}
+            </div>
+          )}
         </div>
         {commands && !checking && !active && (
           <PrimaryBtn onClick={() => void enable()} disabled={busy}>{busy ? actionVerbBusy : actionVerb}</PrimaryBtn>
@@ -975,21 +1024,95 @@ function ExplorerIntegrationPanel() {
   )
 }
 
-function UpdatesPanel({
+/** Dispatches the main window's integration panel: macOS reads the reconciler (spec 2026-10-06). */
+function ShellOrFinderPanel({ status }: { status: SyncStatus | null }) {
+  const { name, resolved } = usePlatform()
+  return resolved && name === 'macos' ? <MacFinderIntegrationPanel /> : <ExplorerIntegrationPanel status={status} />
+}
+
+/**
+ * macOS: the reconciler's state, read-only. The load, the `finder-setup-changed` subscription and
+ * the failed-action toast come from the one shared hook (lead ruling 7b). No install action exists
+ * here (R5): Beebeeb adds itself to Finder, and this panel says where that stands. A failed SETUP
+ * gates Finder, so it is the one inline notice below the card (never also a toast); a failed
+ * ACTION gates nothing, so the hook raises it as a toast.
+ */
+function MacFinderIntegrationPanel() {
+  const regionLabel = useRegionLabel()
+  const finder = useFinderSetup()
+  const presentation = finder.presentation
+  const alert = presentation.kind === 'notice' && presentation.tone === 'alert'
+  // A notice's card line is the notice's own pill label (keyed on the presentation, FT-I2); every
+  // other state says its line. A loaded Missing says its one resting sentence (FA-I2), and before the
+  // first answer the line is empty: no ad-hoc "Checking" string (M6).
+  const detail = presentation.kind === 'notice' ? (finderStatusPill(finder.load)?.label ?? '') : presentation.line
+  return (
+    <SettingsSectionShell>
+      <PageHeader title="Finder integration" subtitle={`Beebeeb appears in Finder as a sync folder. Files are encrypted on this Mac before they leave. ${regionLabel}.`} />
+      <Card style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 16px', background: T.paper2 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>{FINDER_SETUP_TITLE}</div>
+          <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>{detail}</div>
+        </div>
+        {presentation.kind === 'ready' && <Chip tone="green">Active</Chip>}
+        {/* The state could not be read: this reads it again (`retry`). It is not the reconciler's
+            `try_again`, which only exists inside a failure notice. */}
+        {presentation.kind === 'unavailable' && <PrimaryBtn onClick={() => void finder.retry()}>{presentation.actionLabel}</PrimaryBtn>}
+      </Card>
+      {presentation.kind === 'notice' && (
+        <div
+          role={alert ? 'alert' : 'status'}
+          data-error-surface={alert ? 'finder-setup' : undefined}
+          style={{
+            marginTop: 10,
+            padding: '10px 12px',
+            background: alert ? 'var(--err-bg)' : T.paper2,
+            border: alert ? '1px solid var(--err-line)' : `1px solid ${T.line2}`,
+            borderRadius: 8,
+            color: T.ink,
+            fontSize: 12,
+            lineHeight: 1.5,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+          }}
+        >
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{presentation.sentence}</span>
+          {/* No action for an unconfirmed engine stop: only a relaunch helps (row 9). */}
+          {presentation.action && (
+            <PrimaryBtn onClick={() => void finder.run(presentation.action!)}>
+              {finderActionButtonLabel(presentation.action, presentation.actionLabel, finder.copied)}
+            </PrimaryBtn>
+          )}
+        </div>
+      )}
+      {/* Row 15: what a failed Try again said (Rust's fixed sentence, with its remedy), neutrally. */}
+      {finder.actionNote && (
+        <div role="status" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5, color: T.ink2 }}>
+          {finder.actionNote}
+        </div>
+      )}
+    </SettingsSectionShell>
+  )
+}
+
+export function UpdatesPanel({
   config,
   onConfigChange,
 }: {
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const installSupported = canInstallUpdate(caps)
   const platform = usePlatformName()
   const [version, setVersion] = useState<string | null>(null)
-  const [updateCheckState, setUpdateCheckState] = useState<ManualUpdateCheckState>({ kind: 'idle' })
+  const updateCheckState = useSyncExternalStore(desktopUpdateCheck.subscribe, desktopUpdateCheck.getSnapshot, desktopUpdateCheck.getSnapshot)
   const [downgradeInstallState, setDowngradeInstallState] = useState<'idle' | 'installing' | 'error'>('idle')
   const [downgradeInstallError, setDowngradeInstallError] = useState<string | null>(null)
   const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
-  const updateCheckRequestRef = useRef(0)
   const downgradeConfirmButtonRef = useRef<HTMLButtonElement | null>(null)
   const releaseChannel = config.release_channel ?? 'stable'
   const updateCheckView = buildUpdateCheckViewModel(updateCheckState, version, releaseChannel)
@@ -1011,8 +1134,7 @@ function UpdatesPanel({
 
   const handleReleaseChannelChange = (channel: ReleaseChannelValue) => {
     if (channel === releaseChannel) return
-    updateCheckRequestRef.current += 1
-    setUpdateCheckState({ kind: 'idle' })
+    desktopUpdateCheck.reset()
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
     setDowngradeConfirmOpen(false)
@@ -1020,36 +1142,22 @@ function UpdatesPanel({
     onConfigChange({ release_channel: channel })
   }
 
-  const handleCheckForUpdates = async () => {
-    const requestId = updateCheckRequestRef.current + 1
-    updateCheckRequestRef.current = requestId
-    setUpdateCheckState({ kind: 'checking' })
+  useEffect(() => {
+    if (updateCheckState.kind !== 'checking') return
     setDowngradeInstallState('idle')
     setDowngradeInstallError(null)
     setDowngradeConfirmOpen(false)
     setReleaseNotesOpen(false)
-
-    const result = await checkForDesktopUpdatesNow()
-    if (updateCheckRequestRef.current !== requestId) return
-
-    if (result.ok) {
-      setUpdateCheckState(stateFromManualUpdateResult(result.value))
-    } else {
-      setUpdateCheckState({
-        kind: 'error',
-        reason: result.unsupported ? commandUnavailableLabel('check_for_updates_now') : result.reason,
-      })
-    }
-  }
+  }, [updateCheckState])
 
   const openDowngradeConfirmation = () => {
-    if (updateCheckState.kind !== 'downgrade_available') return
+    if (!installSupported || updateCheckState.kind !== 'downgrade_available') return
     setReleaseNotesOpen(false)
     setDowngradeConfirmOpen(true)
   }
 
   const handleConfirmDowngrade = async () => {
-    if (updateCheckState.kind !== 'downgrade_available') return
+    if (!installSupported || updateCheckState.kind !== 'downgrade_available') return
     setDowngradeConfirmOpen(false)
 
     setDowngradeInstallState('installing')
@@ -1082,7 +1190,7 @@ function UpdatesPanel({
         <Chip tone={updateCheckView.tone}>{updateCheckView.chip}</Chip>
         <button
           type="button"
-          onClick={() => void handleCheckForUpdates()}
+          onClick={() => void desktopUpdateCheck.check()}
           disabled={updateCheckBusy || downgradeInstallBusy}
           aria-busy={updateCheckBusy}
           style={{
@@ -1107,7 +1215,7 @@ function UpdatesPanel({
           }}
         >
           <NavIcon name="download" size={12} color={T.ink} />
-          {updateCheckBusy ? 'Checking...' : 'Check for updates'}
+          {updateCheckBusy ? 'Checking...' : updateCheckError ? 'Try again' : 'Check for updates'}
         </button>
         {updateCheckState.kind === 'downgrade_available' && (
           <div style={{ gridColumn: '2 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, minWidth: 0 }}>
@@ -1178,7 +1286,7 @@ function UpdatesPanel({
                 <NavIcon name="external" size={11} color={T.ink3} />
                 View on GitHub
               </button>
-              <button
+              {installSupported && <button
                 type="button"
                 onClick={openDowngradeConfirmation}
                 disabled={downgradeInstallBusy || updateCheckBusy}
@@ -1204,13 +1312,15 @@ function UpdatesPanel({
               >
                 <NavIcon name="download" size={11} color={T.ink} />
                 {downgradeInstallBusy ? 'Downgrading...' : `Downgrade to ${updateCheckState.version}`}
-              </button>
+              </button>}
             </div>
           </div>
         )}
       </Card>
 
-      {downgradeConfirmationView && (
+      {!installSupported && <p>In-app installation is unavailable for this package. {caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update.'} <button type="button" onClick={() => void openUrl('https://beebeeb.io/download')}>Downloads</button></p>}
+
+      {installSupported && downgradeConfirmationView && (
         <Modal
           open={downgradeConfirmOpen}
           onClose={() => setDowngradeConfirmOpen(false)}
@@ -1462,11 +1572,11 @@ function AppActivityPanel() {
       }
     }
 
-    void load()
-    const id = window.setInterval(() => { void load() }, ACTIVITY_POLL_INTERVAL_MS)
+    // Task 2243: each read opens the state DB; only while the window is on screen.
+    const stop = pollWhileVisible(load, ACTIVITY_POLL_INTERVAL_MS)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [reloadKey])
 
@@ -1551,7 +1661,7 @@ function AppActivityPanel() {
   )
 }
 
-function AdvancedPanel({
+export function AdvancedPanel({
   storage,
   config,
   onConfigChange,
@@ -1560,6 +1670,8 @@ function AdvancedPanel({
   config: DesktopConfig
   onConfigChange: (patch: Partial<DesktopConfig>) => void
 }) {
+  const caps = useCapabilities()
+  const cacheControl = caps?.host_os !== 'windows' || caps.cache_limit_control
   const platform = usePlatformName()
   const themeOptions = THEME_OPTIONS.map((option) =>
     option.value === 'system' ? { ...option, hint: systemThemeHint(platform) } : option,
@@ -1587,8 +1699,8 @@ function AdvancedPanel({
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Advanced"
-        subtitle="Device-level behavior for this desktop app."
+        title="Appearance & storage"
+        subtitle="Theme and downloaded files on this device."
       />
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
@@ -1596,7 +1708,7 @@ function AdvancedPanel({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Theme</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-              Choose the appearance for this app window.
+              {themeOptions.find((option) => option.value === themePreference)?.hint}
             </div>
           </div>
           <div
@@ -1643,31 +1755,9 @@ function AdvancedPanel({
             })}
           </div>
         </div>
-        {themeOptions.map((option, index) => {
-          const selected = option.value === themePreference
-          return (
-            <div
-              key={option.value}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 12,
-                padding: '11px 18px',
-                alignItems: 'center',
-                borderBottom: index === themeOptions.length - 1 ? 'none' : `1px solid ${T.line}`,
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink }}>{option.label}</div>
-                <div style={{ fontSize: 11, color: T.ink3, marginTop: 2, lineHeight: 1.45 }}>{option.hint}</div>
-              </div>
-              {selected && <Chip tone="green">Selected</Chip>}
-            </div>
-          )
-        })}
       </Card>
 
-      <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+      {cacheControl ? <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, padding: '15px 18px', alignItems: 'center', borderBottom: `1px solid ${T.line}` }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Local cache limit</div>
@@ -1754,7 +1844,7 @@ function AdvancedPanel({
             {cacheView.warning}
           </div>
         )}
-      </Card>
+      </Card> : <CapabilityNotice>Automatic disk cache limits are not available on Windows yet. Use Free up space in Sync settings to reclaim downloaded files.</CapabilityNotice>}
 
       <AppActivityPanel />
     </SettingsSectionShell>
@@ -1773,8 +1863,9 @@ function SettingsNav({
   // `null` while the real host platform hasn't resolved yet — passed through
   // as-is so `availableSettingsSections` renders the neutral "Shell
   // integration" label instead of a guessed one that then flips (PR #34 review).
+  const caps = useCapabilities()
   const { name: platform, resolved } = usePlatform()
-  const sections = availableSettingsSections(loggedIn, resolved ? platform : null)
+  const sections = availableSettingsSections(loggedIn, resolved ? platform : null).map((section) => ({ ...section, items: section.items.filter((item) => supportsRoute(caps, item.id)) })).filter((section) => section.items.length > 0)
 
   return (
     <div style={{ background: T.paper2, borderRight: `1px solid ${T.line}`, padding: '16px 10px', overflow: 'auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -1826,6 +1917,7 @@ function SettingsNav({
 }
 
 export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps) {
+  const caps = useCapabilities()
   const { name: platform, resolved: platformResolved } = usePlatform()
   const loggedIn = status?.logged_in ?? false
   const [activeNav, setActiveNav] = useState<SettingsNavId>(() => defaultSettingsPage(loggedIn))
@@ -1866,7 +1958,9 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
     const next: DesktopConfig = { ...configRef.current, ...patch }
     configRef.current = next
     setConfig(next)
-    const result = await command<void>('set_desktop_config', { config: next })
+    // Only the fields this change touched are written (task 1889, fix round 1 M5): the object this window read on
+    // open is never sent back, so a pause made from the tray meanwhile is not undone.
+    const result = await command<void>('set_desktop_config', { config: patch })
     if (!result.ok) {
       // Transient ACTION failure (a settings control the user just changed) -> Toast.
       // This used to be a `notice` string prop-drilled into four panels, which rendered
@@ -1876,6 +1970,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
   }
 
   const renderPanel = () => {
+    if (!supportsRoute(caps, activeNav)) return <CapabilityAlternative />
     if (!loggedIn && !ALWAYS_ACCESSIBLE_SETTINGS.has(activeNav)) {
       return <SignedOutSettingsGate onOpenSignIn={onOpenSignIn} />
     }
@@ -1902,7 +1997,7 @@ export default function SettingsView({ status, onOpenSignIn }: SettingsViewProps
       case 'launch':
         return <LaunchPanel />
       case 'explorer-integration':
-        return <ExplorerIntegrationPanel />
+        return <ShellOrFinderPanel status={status} />
       case 'updates':
         return <UpdatesPanel config={config} onConfigChange={(patch) => void handleConfigChange(patch)} />
       case 'advanced':

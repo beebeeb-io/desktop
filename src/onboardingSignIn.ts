@@ -20,8 +20,15 @@
  * (accepts either a 6-digit TOTP code or an 8-digit backup code — the server's
  * `/auth/2fa/verify` tries TOTP first, then backup codes, see
  * `beebeeb-api/src/routes/totp.rs::verify_totp_or_backup`).
+ *
+ * R8 (spec 2026-10-06): both steps also report what the sign-in BECAME (`settled`): a fresh
+ * sign-in, the account already on this Mac signing in again in place, or another account
+ * (`account_mismatch`, nothing changed here). The caller routes on it. A result that cannot be
+ * classified is an error, never "the same account": see `settledFrom`.
  */
-import { desktopLogin, desktopLogin2fa, commandUnavailableLabel } from './desktopApi'
+import { SIGN_IN_OUTCOME_UNREADABLE } from './accountSwitchCopy'
+import { desktopLogin, desktopLogin2fa, commandUnavailableLabel, type DesktopLoginResult } from './desktopApi'
+import type { AskCounts } from './signOutCopy'
 
 export interface SignInApi {
   desktopLogin: typeof desktopLogin
@@ -30,11 +37,88 @@ export interface SignInApi {
 
 export const defaultSignInApi: SignInApi = { desktopLogin, desktopLogin2fa }
 
+/** What a completed sign-in became (R8). */
+export type SignInSettled =
+  /**
+   * A sign-in with no account on this Mac before. `vaultUnlocked` (spec C C-S1): the keys arrived with it, so no
+   * recovery phrase is asked. Rust's password path always says `false`; the browser path's keys are always here.
+   */
+  | { kind: 'fresh'; vaultUnlocked: boolean }
+  /**
+   * The account on this Mac signed in again in place. `keyReplaced` (FB-I1): the kept vault key was no
+   * longer the account's, so it was removed and the recovery phrase follows; that step says why.
+   */
+  | { kind: 'reauthenticated'; vaultUnlocked: boolean; keyReplaced: boolean }
+  /**
+   * Another account. On macOS `unsent` is the switch's ask snapshot (spec 2026-10-10 W11), and `unsentError` the coded
+   * E3 when its count failed (§5.3 row 1); Linux sends neither, so both are null there.
+   */
+  | { kind: 'account_mismatch'; pendingChanges: number; unsent: AskCounts | null; unsentError: string | null }
+
+/** `settledFrom`'s answer: a `SignInSettled`, or `unreadable` for a shape it cannot classify. */
+export type SignInOutcome = SignInSettled | { kind: 'unreadable' }
+
 export type PasswordStepResult =
-  | { ok: true; requiresTotp: boolean }
+  | { ok: true; requiresTotp: boolean; settled: SignInSettled }
   | { ok: false; message: string }
 
-export type TotpStepResult = { ok: true } | { ok: false; message: string }
+export type TotpStepResult = { ok: true; settled: SignInSettled } | { ok: false; message: string }
+
+/** The switch's snapshot (spec 2026-10-10 W11), or null when absent or not whole (Linux sends none). */
+export function unsentFrom(raw: unknown): AskCounts | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const u = raw as Record<string, unknown>
+  const whole = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
+  if (typeof u.askId !== 'string' || ![u.files, u.copiedFiles, u.others, u.missingFiles].every(whole)) return null
+  if (!Array.isArray(u.earlierFolders) || !u.earlierFolders.every((p) => typeof p === 'string')) return null
+  return { askId: u.askId, files: u.files as number, copiedFiles: u.copiedFiles as number, others: u.others as number, missingFiles: u.missingFiles as number, earlierFolders: u.earlierFolders as string[] }
+}
+
+/**
+ * Classify what `desktop_login` / `desktop_login_2fa` returned (R8). Strict by design: this is the
+ * line between "your own account signed in again" and everything else, so a value that does not
+ * match the contract is `unreadable` (the caller shows an error), never the same account and never
+ * an account switch with an invented pending-change count.
+ *
+ *  - Every field Rust's `LoginOutcome` always sends is required (M9): `requires_2fa`,
+ *    `reauthenticated`, `vault_unlocked` and `key_replaced` as booleans, `account_mismatch` present
+ *    (null or an object). A missing one, or no result at all, is a contract break: `unreadable`, never
+ *    a plain sign-in (the bundle ships with that Rust, so it cannot skew against an older build).
+ *  - `account_mismatch` wins, and needs a whole, non-negative `pending_changes`. Claiming to be
+ *    the same account at the same time is a contradiction.
+ *  - `reauthenticated: true` keeps the account; the keys are claimed to be here only when
+ *    `vault_unlocked` says `true`.
+ *  - `key_replaced` (FB-I1) is required and boolean. It is true only for a same-account re-sign-in
+ *    whose kept key was removed, so with `vault_unlocked: true`, an account switch, or a plain
+ *    sign-in it is a contradiction.
+ */
+export function settledFrom(value: DesktopLoginResult | null | undefined): SignInOutcome {
+  const unreadable: SignInOutcome = { kind: 'unreadable' }
+  const raw: unknown = value
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return unreadable
+  const { requires_2fa, reauthenticated, vault_unlocked, account_mismatch, key_replaced } = raw as Record<string, unknown>
+  if ([requires_2fa, reauthenticated, vault_unlocked, key_replaced].some((field) => typeof field !== 'boolean')) return unreadable
+  if (!('account_mismatch' in raw) || account_mismatch === undefined) return unreadable
+  if (account_mismatch !== null) {
+    if (reauthenticated === true || key_replaced) return unreadable
+    const pending = typeof account_mismatch === 'object' ? (account_mismatch as Record<string, unknown>).pending_changes : undefined
+    if (typeof pending !== 'number' || !Number.isSafeInteger(pending) || pending < 0) return unreadable
+    const raw = account_mismatch as Record<string, unknown>
+    return {
+      kind: 'account_mismatch',
+      pendingChanges: pending,
+      unsent: unsentFrom(raw.unsent),
+      // The coded E3 when the switch's count failed; the step shows it as a line.
+      unsentError: typeof raw.unsent_error === 'string' ? raw.unsent_error : null,
+    }
+  }
+  if (reauthenticated === true) {
+    if (key_replaced && vault_unlocked === true) return unreadable
+    return { kind: 'reauthenticated', vaultUnlocked: vault_unlocked === true, keyReplaced: key_replaced === true }
+  }
+  if (key_replaced) return unreadable
+  return { kind: 'fresh', vaultUnlocked: vault_unlocked === true }
+}
 
 /**
  * Submit email + password. Returns `requiresTotp: true` when the server's
@@ -55,7 +139,13 @@ export async function submitPassword(
       message: result.unsupported ? commandUnavailableLabel('desktop_login') : result.reason,
     }
   }
-  return { ok: true, requiresTotp: result.value.requires_2fa }
+  // `requires_2fa` must be an actual boolean: a missing one used to read as "no second factor
+  // needed" (task 1521's bug class), and an unreadable result is never a completed sign-in.
+  const settled = settledFrom(result.value)
+  if (typeof result.value?.requires_2fa !== 'boolean' || settled.kind === 'unreadable') {
+    return { ok: false, message: SIGN_IN_OUTCOME_UNREADABLE }
+  }
+  return { ok: true, requiresTotp: result.value.requires_2fa, settled }
 }
 
 /**
@@ -77,5 +167,7 @@ export async function submitTotpCode(
       message: result.unsupported ? commandUnavailableLabel('desktop_login_2fa') : result.reason,
     }
   }
-  return { ok: true }
+  const settled = settledFrom(result.value)
+  if (settled.kind === 'unreadable') return { ok: false, message: SIGN_IN_OUTCOME_UNREADABLE }
+  return { ok: true, settled }
 }

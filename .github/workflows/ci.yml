@@ -1,0 +1,380 @@
+name: Desktop CI
+
+# Every PR and every push to main is built and tested on all three desktop
+# targets. Before this workflow the only CI was release.yml (workflow_dispatch),
+# so the Windows/Linux `#[cfg(...)]` code paths (windows_cf, linux_fuse, the
+# Windows Credential Manager store) were first compiled at release time.
+#
+# Job names are stable on purpose: branch protection requires them by name.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend (bun test + tsc + eslint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: bun test
+
+      - name: Typecheck
+        run: bunx tsc --noEmit -p .
+
+      - name: Lint
+        run: bun run lint
+
+  rust-linux:
+    name: Rust test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            libfuse-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test count guard self-test
+        run: python scripts/assert-cargo-test-counts.py --self-test
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        env:
+          # Keep the app's config/lock files out of the runner's real home.
+          XDG_CONFIG_HOME: ${{ runner.temp }}/beebeeb-xdg-config
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/cargo-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+      - name: Upload Rust test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-test-linux
+          path: |
+            ${{ runner.temp }}/cargo-test.log
+            ${{ runner.temp }}/cargo-test.exit
+
+  rust-check:
+    name: Rust check (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test count guard self-test
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" scripts/assert-cargo-test-counts.py --self-test
+
+      - name: Cargo check
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          check_exit=0
+          CARGO_TERM_COLOR=never cargo check --locked --all-targets > "$RUNNER_TEMP/cargo-check.log" 2>&1 || check_exit=$?
+          cat "$RUNNER_TEMP/cargo-check.log"
+          echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
+          exit "$check_exit"
+
+      # Task 2272 / 2271: macOS runs the tests too, not only `cargo check`. The 0.8.18 release found a macOS-only test
+      # failure on the maintainer's Mac that this job would have caught.
+      - name: Run Rust tests
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        working-directory: src-tauri
+        shell: bash
+        env:
+          # Config/cache live in the disposable runner's profile (Windows Known Folders, macOS
+          # ~/Library); keep temporary test files in their own directory. TEMP/TMP are Windows',
+          # TMPDIR is macOS'.
+          TEMP: ${{ runner.temp }}/beebeeb-tmp
+          TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TEMP"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/cargo-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+      - name: Upload Rust evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/cargo-check.log
+            ${{ runner.temp }}/cargo-check.exit
+            ${{ runner.temp }}/cargo-test.log
+            ${{ runner.temp }}/cargo-test.exit
+
+  fileprovider-swift:
+    # Task 1670 issue 3: until this job existed, NO CI step compiled the File
+    # Provider extension's Swift (rust-check only runs `cargo check`; the
+    # extension was first built at release time, on a developer's Mac). It now
+    # compiles on every PR, unsigned and without secrets, and runs the pure
+    # Foundation framing tests with a COUNTED truth line.
+    name: File Provider Swift (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Swift toolchain
+        run: |
+          xcrun swiftc --version
+          xcodebuild -version
+
+      - name: Framing test count guard self-test
+        run: bash scripts/test-ipc-framing.sh --self-test
+
+      # XPCBridge.swift is not compiled into the swiftc test harness, so the
+      # Swift tests cannot see a call site reverted to the default 30 s IPC
+      # timeout. This source-level check does (and its self-test proves it can
+      # go red).
+      - name: IPC timeout call-site guard self-test
+        run: python3 scripts/check-ipc-timeouts.py --self-test
+
+      - name: IPC timeout call-site guard
+        run: python3 scripts/check-ipc-timeouts.py
+
+      - name: IPC framing tests (swiftc, pure Foundation)
+        env:
+          IPC_FRAMING_TEST_OUT: ${{ runner.temp }}/ipc-framing-tests
+        run: bash scripts/test-ipc-framing.sh
+
+      # `!cancelled()` so a red test step still lets the compile step report
+      # its own verdict (they are independent failures).
+      - name: Compile the File Provider extension (unsigned, ad-hoc codesign)
+        if: ${{ !cancelled() }}
+        env:
+          # No signing identity, no provisioning profile, no secrets: the
+          # script falls back to an ad-hoc signature.
+          APPLE_SIGNING_IDENTITY: ""
+        run: |
+          set -o pipefail
+          bash scripts/build-fileprovider-extension.sh \
+            --out "$RUNNER_TEMP/fileprovider/BeebeebFileProvider.appex" \
+            --helper-out "$RUNNER_TEMP/fileprovider/BeebeebFileProviderCtl" 2>&1 | tee "$RUNNER_TEMP/fileprovider-build.log"
+
+      - name: Upload File Provider Swift evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fileprovider-swift
+          path: |
+            ${{ runner.temp }}/ipc-framing-tests/run.log
+            ${{ runner.temp }}/ipc-framing-tests/run.exit
+            ${{ runner.temp }}/fileprovider-build.log
+
+  release-script:
+    # scripts/release-macos-local.sh is the ONE command Guus runs on a Mac to turn the
+    # CI-created desktop-v<VERSION> release into a macOS release (notarize, staple,
+    # rebuild the dmg from the stapled app, upload, sign, backfill the manifest). It
+    # cannot run here, but its ORDER and its fail-closed gates can: the test puts shims
+    # for xcrun/codesign/spctl/hdiutil/ditto/plutil/gh/bunx on PATH and runs the real
+    # script against a throwaway repo. The truth line is a count
+    # ("release-macos-local: N passed, 0 failed"), guarded by a self-test that goes red.
+    name: macOS release script (shim test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/release-macos-local.sh \
+            scripts/test-release-macos-local.sh \
+            scripts/fixtures/release-macos-shim.sh \
+            scripts/macos-release-preflight.sh
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-macos-local.sh --self-test
+
+      - name: Release script test (shims, real script)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-macos-local.sh 2>&1 | tee "$RUNNER_TEMP/release-script-test.log"
+
+      - name: Upload release script test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-script-test
+          path: ${{ runner.temp }}/release-script-test.log
+
+  release-manifest:
+    # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
+    # manifests every installed app updates from. The test runs that step's own run: block
+    # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
+    # a half-present macOS release, a missing or empty signature, or a download that keeps
+    # failing writes no manifest. The truth line is a count
+    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
+    # same count guard its self-test proves can go red. A red run prints each failing
+    # scenario's step output and call log.
+    name: Release channel manifest (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/test-release-channel-manifest.sh \
+            scripts/fixtures/release-manifest-fake-gh.sh
+          bash scripts/test-release-channel-manifest.sh --print-step > "$RUNNER_TEMP/manifest-step.sh"
+          test -s "$RUNNER_TEMP/manifest-step.sh"
+          shellcheck -s bash -S warning "$RUNNER_TEMP/manifest-step.sh"
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-channel-manifest.sh --self-test
+
+      - name: Manifest step test (fake gh, real step)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
+
+      - name: Upload manifest step test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest-test
+          path: ${{ runner.temp }}/release-manifest-test.log
+
+  release-branch-point:
+    # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
+    # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
+    # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
+    # branch, and every first-parent commit since then must be a pull request merged
+    # into that branch. This job tests the script offline against a real local git repository with
+    # a fake `gh`: a tag on a PR merge into a release branch, a tag on a PR merge into main, a
+    # main start, an unreviewed start, a direct (non-PR) commit, a tag on a direct commit, a PR
+    # merged into another branch, a tag on a PR merge into a feature branch, a non-release ref, a
+    # tag with no release, a draft release, a failing release lookup and a failing pulls lookup.
+    # The truth line is a count
+    # ("release-branch-point: N passed, 0 failed"), asserted on the run's own log by the same
+    # count guard its self-test proves can go red.
+    name: Release branch point (fake gh test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck (warnings and above)
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x \
+            scripts/verify-release-branch-point.sh \
+            scripts/test-release-branch-point.sh \
+            scripts/fixtures/release-branch-point-fake-gh.sh
+
+      - name: Count guard self-test
+        run: bash scripts/test-release-branch-point.sh --self-test
+
+      - name: Branch point test (fake gh, real git)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-branch-point.sh 2>&1 | tee "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Count guard on the run's own log
+        run: bash scripts/test-release-branch-point.sh --assert-log "$RUNNER_TEMP/release-branch-point-test.log"
+
+      - name: Upload branch point test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-branch-point-test
+          path: ${{ runner.temp }}/release-branch-point-test.log
