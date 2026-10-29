@@ -98,6 +98,9 @@ pub struct Counts {
     pub parent_resolved: usize,
     pub parent_unresolved: usize,
     pub scaffold_dropped: usize,
+    /// D5: the sync-root-relative directories of the dropped scaffolding, for the caller to remove bottom-up with
+    /// `std::fs::remove_dir` after the commit. Paths: never logged.
+    pub scaffold_dirs: Vec<String>,
     pub backup_unknown_kept: usize,
     pub file_twin: usize,
 }
@@ -143,8 +146,18 @@ enum Fate<'a> {
 }
 
 /// The plan, in a safe apply order: landed drops, parent resolves, remaps by ascending depth of the ghost's path, then
-/// holds, releases and re-arms. `payload_exists` says whether an upload's staged payload is still on disk.
-pub fn plan(rows: &[Row], ops: &[Op], opts: &Options, payload_exists: &dyn Fn(&str) -> bool) -> (Vec<Unit>, Counts) {
+/// holds, releases and re-arms. `payload_exists` says whether an upload's staged payload is still on disk;
+/// `disk_has_file` whether a sync-root-relative directory holds any file (D5).
+pub fn plan(
+    rows: &[Row],
+    ops: &[Op],
+    opts: &Options,
+    payload_exists: &dyn Fn(&str) -> bool,
+    disk_has_file: &dyn Fn(&str) -> bool,
+) -> (Vec<Unit>, Counts) {
+    // D5 (Task 2) reads `disk_has_file`: true when the directory at that sync-root-relative path holds a file anywhere
+    // under it, or cannot be read.
+    let _ = disk_has_file;
     let mut counts = Counts::default();
     let row_of: HashMap<&str, &Row> = rows.iter().map(|r| (r.file_id.as_str(), r)).collect();
 
@@ -376,7 +389,7 @@ mod tests {
     }
 
     fn run(rows: &[Row], ops: &[Op]) -> (Vec<Unit>, Counts) {
-        plan(rows, ops, &opts(), &always)
+        plan(rows, ops, &opts(), &always, &always)
     }
 
     fn remap(ghost: &str, twin: &str, ghost_op: &str, rearm: &[&str]) -> Unit {
@@ -622,7 +635,7 @@ mod tests {
             file("f1", Some("g"), "Photos/1.jpg", false, 0),
         ];
         let ops = [create_folder("op-g", "g", None), gave_up(upload("op-404", "f1", Some("g")), NOT_FOUND)];
-        let (units, counts) = plan(&rows, &ops, &opts(), &|_| false);
+        let (units, counts) = plan(&rows, &ops, &opts(), &|_| false, &always);
         assert_eq!(units, vec![remap("g", "t", "op-g", &[])]);
         assert_eq!(counts, Counts { remapped: 1, rearm_no_payload: 1, ..Counts::default() });
     }
