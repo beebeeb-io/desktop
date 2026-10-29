@@ -9297,20 +9297,18 @@ pub async fn sync_tick_outcome(
         }
     };
 
-    // Detect a cursor that is somehow AHEAD of the server's op log (e.g. a server
-    // history reset / op-log truncation): the server clamps `since` to whatever
-    // we sent and returns only `seq_id > since`, so a stale/over-large cursor
-    // yields an empty op list forever and we'd never reconcile. We can't
-    // distinguish "nothing changed" from "cursor too old" from the ops response
-    // alone, so we re-anchor against the snapshot's authoritative `seq_id`: only
-    // when the ops list is empty do we cheaply confirm the cursor still tracks
-    // the server (a single extra call ONLY on the empty-delta path is acceptable;
-    // any non-empty delta means the cursor is valid and we skip the check).
+    // New servers carry the authoritative per-user head in the delta response.
+    // Idle ticks need no full tree fetch. Keep the snapshot probe only for a
+    // reset (cursor ahead) or an old server that does not advertise its head.
     if ops.ops.is_empty() {
-        // No new ops. Verify the cursor hasn't drifted past the server head; if
-        // it has (server reset its op log), re-bootstrap. The snapshot call here
-        // is the single concession — it runs only when there is genuinely
-        // nothing to apply, so steady state stays at ~1 request/tick.
+        if ops.head_seq.is_some_and(|head| head >= cursor) {
+            // The delta came back (empty, at the head): this tick reached the server.
+            return Ok(SyncTickOutcome {
+                conflicts,
+                applied_item_ids: dedupe(applied_item_ids),
+                reached_server: true,
+            });
+        }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
         // predates this snapshot fetch, so it can't be later than any row a
         // concurrent completion stamps during the fetch.
@@ -15684,6 +15682,74 @@ mod tests {
             self.handle.join().unwrap();
             Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
         }
+    }
+
+    #[tokio::test]
+    async fn test_1909_idle_head_avoids_snapshot() {
+        for head in [0, 8, 12] {
+            let dir = tempfile::tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done = stop.clone();
+            let handle = thread::spawn(move || {
+                let mut paths = Vec::new();
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            // Darwin may inherit the listener's nonblocking flag.
+                            stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                                .unwrap();
+                            let req = read_http_request(&mut stream);
+                            let body = if req.path.contains("/sync/ops") {
+                                serde_json::json!({"since": head, "head_seq": head, "ops": []})
+                            } else {
+                                serde_json::json!({"seq_id": head, "nodes": []})
+                            };
+                            paths.push(req.path);
+                            stream.write_all(http_json("200 OK", body).as_bytes()).unwrap();
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(std::time::Duration::from_millis(2))
+                        }
+                        Err(e) => panic!("accept: {e}"),
+                    }
+                }
+                paths
+            });
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), url, [3u8; 32]);
+            bridge.db().set_sync_cursor(head).unwrap();
+            for _ in 0..3 {
+                sync_tick(&bridge, dir.path()).await.unwrap();
+            }
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let paths = handle.join().unwrap();
+            assert_eq!(paths.len(), 3, "idle ticks must use only ops, even with cursor zero");
+            assert!(paths.iter().all(|p| p.contains("/sync/ops?since=")));
+            assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(head));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_1909_cursor_ahead_of_head_recovers_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = SyncMockServer::start(vec![
+            (
+                "200 OK".into(),
+                serde_json::json!({"since": 50, "head_seq": 3, "ops": []}),
+            ),
+            ("200 OK".into(), serde_json::json!({"seq_id": 3, "nodes": []})),
+        ]);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [3u8; 32]);
+        bridge.db().set_sync_cursor(50).unwrap();
+        sync_tick(&bridge, dir.path()).await.unwrap();
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].path, "/api/v1/sync/snapshot");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(3));
     }
 
     fn enc_name(master_key: &[u8; 32], file_id: &str, name: &str) -> String {
