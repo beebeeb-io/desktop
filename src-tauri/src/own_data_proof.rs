@@ -112,17 +112,9 @@ pub fn eligible(owner: Option<&Identity>, session: &Identity, has_local_data: bo
     }
 }
 
-/// Whether `sealed` (a `name_encrypted` envelope) is this account's name for `file_id`. Core's file metadata reader
-/// (`decrypt_file_metadata`) opens it under the file key derived from `master_key` and `file_id`, in every format the
-/// engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI); the name subkey
-/// (`beebeeb/name/v1`, task 1908) and the legacy raw file key; both envelopes. It refuses a plaintext name, which proves
-/// nothing. The key is derived from this id, so a name sealed for another file, or under another account's key, never
-/// opens. Task 1888's key check reads names the same way.
-pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
-    let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
-    beebeeb_core::encrypt::decrypt_file_metadata(&master, file_id, sealed)
-        .is_ok_and(|metadata| !metadata.name.trim().is_empty())
-}
+/// Whether a sealed name opens under this session's master key, by its own file id. It lives in the engine bridge since
+/// task 1888, whose key check (spec D12) reads names the same way on Windows and Linux, where this module is not built.
+pub use crate::engine_bridge::name_opens;
 
 /// Judge one node of this account's tree against this session's master key.
 pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {
