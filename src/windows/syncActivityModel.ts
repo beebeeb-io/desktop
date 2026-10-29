@@ -6,17 +6,21 @@
  * read any of that. This model reads `sync_activity_summary` (`src-tauri/src/sync_activity.rs`) next to `sync_status`,
  * and never says "up to date" or "syncing" while the queue says otherwise.
  *
- * Copy rules: counts and dates only, never a file name; honest, never reassuring. The changes paused for `auth` stay
- * paused in 0.8.15 by the Mac lead's ruling (nothing here offers to resume them); a later update repairs them.
+ * Copy rules: counts and dates only, never a file name; honest, never reassuring. The changes paused for `auth` stayed
+ * paused in 0.8.15 by the Mac lead's ruling. Since 0.8.18 the engine resumes them after a sign-in, behind the reconcile
+ * pass and the key check (spec 1888/2226 D11, D12); nothing here offers to resume them.
  */
 import type { SyncStatus } from '../desktopApi'
 
 export interface HeldGroup {
   /**
-   * `auth`, `quota`, `permission`, `locked`, `key_replaced`, `found_while_paused`, or `other`. `found_while_paused`
-   * (task 2267, Windows): local items Beebeeb could not prove were this account's own when it adopted the PC's data
-   * (new top-level items made while sync was refused, or changes inside shared-with-me folders). They wait for the
-   * person's decision in Settings › Sync (`foundWhilePaused.ts`): upload them, or keep them on this PC only.
+   * `auth`, `quota`, `permission`, `locked`, `key_replaced`, `found_while_paused`, `needs_review`,
+   * `waiting_for_folder`, or `other`. `found_while_paused` (task 2267, Windows): local items Beebeeb could not prove
+   * were this account's own when it adopted the PC's data (new top-level items made while sync was refused, or changes
+   * inside shared-with-me folders). They wait for the person's decision in Settings › Sync (`foundWhilePaused.ts`):
+   * upload them, or keep them on this PC only. `needs_review` (spec 1888/2226 D4, D10): changes the reconcile pass
+   * holds because an item with the same name is already in Beebeeb. `waiting_for_folder` (D7) is not a pause reason
+   * but a group the hold summary computes: changes whose folder's create is paused or given up.
    */
   reason: string
   count: number
@@ -164,7 +168,10 @@ function datePhrase(group: HeldGroup, now: Date): string {
 }
 
 /**
- * One sentence per pause reason. Only `auth` promises a repair: the Mac lead's ruling for 0.8.15. `found_while_paused`
+ * One sentence per held group (spec 1888/2226 D13). None promises an update. `auth` says what brings the changes back:
+ * since 0.8.18 the engine resumes them after a sign-in (D11); in 0.8.15 the sentence promised "an update". The date is
+ * the day the oldest of them was queued. `needs_review` (D4, D10) says what happened and what the person can do.
+ * `waiting_for_folder` (D7) counts changes whose folder's create is held, so they wait with it. `found_while_paused`
  * promises nothing either: those changes wait for the person's decision (task 2267).
  */
 export function heldSentence(group: HeldGroup, now: Date = new Date()): string {
@@ -173,7 +180,15 @@ export function heldSentence(group: HeldGroup, now: Date = new Date()): string {
   const are = n === 1 ? 'is' : 'are'
   switch (group.reason) {
     case 'auth':
-      return `${changes}${datePhrase(group, now)} ${are} on hold. An update will repair ${n === 1 ? 'it' : 'them'}.`
+      return `${changes}${datePhrase(group, now)} ${are} on hold until you sign in again.`
+    case 'needs_review':
+      return (
+        `${changes} ${are} on hold: an item with the same name is already in Beebeeb. ` +
+        `${n === 1 ? "It wasn't" : "They weren't"} sent, and nothing was overwritten or deleted. ` +
+        "Contact support@beebeeb.io and we'll sort it out with you."
+      )
+    case 'waiting_for_folder':
+      return `${changes} ${are} waiting for ${n === 1 ? 'its' : 'their'} folder to reach Beebeeb.`
     case 'quota':
       return `${changes} ${are} on hold because your storage is full.`
     case 'permission':

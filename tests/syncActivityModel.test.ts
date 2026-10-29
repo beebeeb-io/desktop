@@ -39,7 +39,7 @@ function guusOnHold(patch: Partial<SyncActivitySummary> = {}): SyncActivitySumma
   return { ...parsed, engine_state: 'idle', startup_check: null, ...patch }
 }
 
-const HELD_LINE = '2,924 changes from 4 Oct are on hold. An update will repair them.'
+const HELD_LINE = '2,924 changes from 4 Oct are on hold until you sign in again.'
 const GAVE_UP_LINE = '43 changes stopped after repeated errors and are not retried.'
 
 describe('the summary contract', () => {
@@ -111,7 +111,7 @@ describe('Guus’s on-hold state', () => {
     }
   })
 
-  test('nothing offers to resume or retry the held changes (Mac lead ruling: they stay paused until an update)', () => {
+  test('nothing offers to resume or retry the held changes (the engine resumes them after a sign-in, spec 1888 D11)', () => {
     for (const s of [guusOnHold(), guusOnHold({ paused: true }), guusOnHold({ engine_state: 'running', startup_check: { done: 1, total: 2 } })]) {
       const words = [syncActivityView(signedIn, s, { now }).headline, ...syncActivityView(signedIn, s, { now }).details].join(' ')
       expect(words).not.toMatch(/\bresume them\b|\bunpause\b|\btry again\b|\bretry now\b/i)
@@ -258,25 +258,25 @@ describe('precedence', () => {
 
 describe('words', () => {
   test('singular and plural', () => {
-    expect(heldSentence({ reason: 'auth', count: 1, oldest_at: 1_791_115_500, newest_at: 1_791_115_500 }, now)).toBe('1 change from 4 Oct is on hold. An update will repair it.')
+    expect(heldSentence({ reason: 'auth', count: 1, oldest_at: 1_791_115_500, newest_at: 1_791_115_500 }, now)).toBe('1 change from 4 Oct is on hold until you sign in again.')
     expect(gaveUpSentence(1)).toBe('1 change stopped after repeated errors and is not retried.')
     expect(gaveUpSentence(1_200)).toBe('1,200 changes stopped after repeated errors and are not retried.')
   })
 
   test('dates: one day is "from", a span is "since", another year carries the year, none is left out', () => {
-    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: 1_791_115_500, newest_at: 1_791_115_500 + 3 * 86_400 }, now)).toBe('2 changes since 4 Oct are on hold. An update will repair them.')
+    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: 1_791_115_500, newest_at: 1_791_115_500 + 3 * 86_400 }, now)).toBe('2 changes since 4 Oct are on hold until you sign in again.')
     expect(shortDate(1_791_115_500 - 365 * 86_400, now)).toBe('4 Oct 2025')
-    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: 0, newest_at: 0 }, now)).toBe('2 changes are on hold. An update will repair them.')
+    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: 0, newest_at: 0 }, now)).toBe('2 changes are on hold until you sign in again.')
   })
 
-  test('every pause reason has its own sentence, and only auth promises a repair', () => {
+  test('every pause reason has its own sentence, and none promises an update', () => {
     const at = { oldest_at: 1_791_115_500, newest_at: 1_791_115_500 }
     expect(heldSentence({ reason: 'quota', count: 3, ...at }, now)).toBe('3 changes are on hold because your storage is full.')
     expect(heldSentence({ reason: 'permission', count: 1, ...at }, now)).toBe('1 change is on hold because you don’t have permission to make it.')
     expect(heldSentence({ reason: 'locked', count: 2, ...at }, now)).toBe('2 changes are on hold while Beebeeb is locked.')
     expect(heldSentence({ reason: 'key_replaced', count: 2, ...at }, now)).toBe('2 changes are on hold: they were made with a key this account no longer uses.')
     expect(heldSentence({ reason: 'other', count: 2, ...at }, now)).toBe('2 changes from 4 Oct are on hold.')
-    for (const reason of ['quota', 'permission', 'locked', 'key_replaced', 'found_while_paused', 'other']) {
+    for (const reason of ['auth', 'needs_review', 'waiting_for_folder', 'quota', 'permission', 'locked', 'key_replaced', 'found_while_paused', 'other']) {
       expect(heldSentence({ reason, count: 2, ...at }, now)).not.toContain('update')
     }
   })
@@ -299,5 +299,39 @@ describe('words', () => {
   test('held groups with no changes are left out', () => {
     const view = syncActivityView(signedIn, summary({ queue: { waiting: 0, gave_up: 0, held: [{ reason: 'quota', count: 0, oldest_at: 0, newest_at: 0 }] } }), { now })
     expect(view.kind).toBe('up_to_date')
+  })
+})
+
+// Spec 1888/2226 D13: what is held, and why, in the words the person reads. The date is the day the oldest held change
+// was queued (`oldest_at`), never hard-coded; 0 (not recorded) drops the date.
+describe('held sentences for auth, needs_review, waiting_for_folder', () => {
+  const OCT4 = 1_791_115_500
+  const OCT27 = OCT4 + 23 * 86_400
+  const oct28 = new Date('2026-10-28T12:00:00+01:00')
+
+  test('auth: the oldest change’s day, until a sign-in', () => {
+    expect(heldSentence({ reason: 'auth', count: 2924, oldest_at: OCT4, newest_at: OCT4 }, now)).toBe('2,924 changes from 4 Oct are on hold until you sign in again.')
+  })
+
+  test('auth: the date comes from oldest_at, never a fixed day', () => {
+    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: OCT27, newest_at: OCT27 }, oct28)).toBe('2 changes from 27 Oct are on hold until you sign in again.')
+  })
+
+  test('auth: no recorded date, no date phrase', () => {
+    expect(heldSentence({ reason: 'auth', count: 2, oldest_at: 0, newest_at: 0 }, now)).toBe('2 changes are on hold until you sign in again.')
+  })
+
+  test('needs_review: what happened and what the person can do, singular and plural, with no date', () => {
+    expect(heldSentence({ reason: 'needs_review', count: 3, oldest_at: OCT4, newest_at: OCT27 }, oct28)).toBe(
+      "3 changes are on hold: an item with the same name is already in Beebeeb. They weren't sent, and nothing was overwritten or deleted. Contact support@beebeeb.io and we'll sort it out with you.",
+    )
+    expect(heldSentence({ reason: 'needs_review', count: 1, oldest_at: 0, newest_at: 0 }, now)).toBe(
+      "1 change is on hold: an item with the same name is already in Beebeeb. It wasn't sent, and nothing was overwritten or deleted. Contact support@beebeeb.io and we'll sort it out with you.",
+    )
+  })
+
+  test('waiting_for_folder: singular and plural, with no date', () => {
+    expect(heldSentence({ reason: 'waiting_for_folder', count: 1, oldest_at: OCT4, newest_at: OCT4 }, now)).toBe('1 change is waiting for its folder to reach Beebeeb.')
+    expect(heldSentence({ reason: 'waiting_for_folder', count: 1_200, oldest_at: 0, newest_at: 0 }, now)).toBe('1,200 changes are waiting for their folder to reach Beebeeb.')
   })
 })
