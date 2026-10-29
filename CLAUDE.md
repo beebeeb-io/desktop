@@ -64,7 +64,7 @@ bun run tauri:build    # produces .dmg / .msi / .deb / .AppImage
 
 To develop against the real web client: run `repos/web` on :5173 — the Tauri window loads it automatically (`devUrl`). For production bundles the web client is built and copied to `../dist/` (or `tauri.conf.json` repointed at `../web/dist/`). `cargo check` from `src-tauri/` validates the Rust side without the frontend.
 
-Desktop CI (`.github/workflows/ci.yml`): `cargo check --locked --all-targets` + `cargo test --locked` (Windows/macOS all-target check, Linux tests). `python scripts/assert-cargo-test-counts.py --self-test` proves the count guard rejects empty runs; each library/integration binary must execute tests (only the `src/main.rs` harness and doctests may be empty). CI uploads logs as `rust-Windows`/`rust-macOS`/`rust-test-linux`. A Windows cross-check on Linux is not a native test pass.
+Desktop CI (`.github/workflows/ci.yml`): `cargo check --locked --all-targets` + `cargo test --locked` (Windows and macOS: the all-target check, then `cargo test --locked` checked by the count guard (macOS since 0.8.19); Linux: the tests). `scripts/assert-cargo-test-counts.py --self-test` (`python` on Windows, `python3` on macOS) proves the count guard rejects empty runs; each library/integration binary must execute tests (only the `src/main.rs` harness and doctests may be empty). CI uploads logs as `rust-Windows`/`rust-macOS`/`rust-test-linux`. A Windows cross-check on Linux is not a native test pass.
 
 Test fixtures: `docs/NATIVE_PARITY_FIXTURES.md` (task 1612) — test-only `native_parity_tests::corpus` and `native_parity_tests::http_` filters exercise socket-free fixtures and loopback bridge requests; neither proves CFAPI/FUSE/File Provider execution; do not log fixture credentials.
 
