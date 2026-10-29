@@ -2,7 +2,7 @@
 //! The future is created without polling it; admission precedes every credential
 //! read. Cancellation drops the entire future (including its client) before the
 //! lease is released. Compiled in tests on every host.
-use crate::callback_gate::CallbackGate;
+use crate::callback_gate::{CallbackGate, CallbackLease};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -68,10 +68,32 @@ impl SessionCommands {
         self.pending.store(false, Ordering::SeqCst);
     }
     pub async fn run<T>(&self, work: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
-        let lease = self
-            .gate
+        let lease = self.lease()?;
+        Self::within(lease, work).await
+    }
+    /// Work that outlives the command that started it (a task of its own) is bound to the session here, when it is
+    /// created: the lease is taken before the work is first polled, so a lock cancels it and waits for it to drop.
+    /// Refused once the session is closed; the work then drops without ever being polled (#139 review P1).
+    /// The future owns its lease and borrows nothing of `self` (`use<T, W>`), so it can run as a task of its own.
+    pub fn bind<T, W>(
+        &self,
+        work: W,
+    ) -> Result<impl std::future::Future<Output = Result<T, String>> + use<T, W>, String>
+    where
+        W: std::future::Future<Output = Result<T, String>>,
+    {
+        let lease = self.lease()?;
+        Ok(Self::within(lease, work))
+    }
+    fn lease(&self) -> Result<CallbackLease<()>, String> {
+        self.gate
             .acquire(None)
-            .ok_or_else(|| "vault is locked or stopping".to_string())?;
+            .ok_or_else(|| "vault is locked or stopping".to_string())
+    }
+    async fn within<T>(
+        lease: CallbackLease<()>,
+        work: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
         let result = {
             tokio::pin!(work);
             tokio::select! {
@@ -135,6 +157,65 @@ mod tests {
                 .is_err()
         );
         assert_eq!(reads.load(Ordering::SeqCst), 0, "locked command copied credentials");
+    }
+    /// #139 review P1: work that outlives the command that started it (the popover's storage fetch runs as a task of
+    /// its own) is bound to the session when it is created. A lock cancels it and drops what it holds before the drain
+    /// reports success; bound after the lock, it never runs and drops at once.
+    #[tokio::test]
+    async fn a_bound_fetch_that_outlives_its_command_is_cancelled_and_drained_with_the_session() {
+        let commands = Arc::new(SessionCommands::new());
+        commands.open().unwrap();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (reply, reply_rx) = tokio::sync::oneshot::channel::<()>();
+        let credentials = Arc::new(42);
+        let weak = Arc::downgrade(&credentials);
+        let bound = commands
+            .bind(async move {
+                let _credentials = credentials;
+                started.send(()).unwrap();
+                let _ = reply_rx.await;
+                Ok("usage")
+            })
+            .unwrap();
+        // The command that created it has returned; the fetch runs on as its own task.
+        let detached = tokio::spawn(bound);
+        started_rx.await.unwrap();
+        let revoked = commands.close();
+        let drained = {
+            let commands = commands.clone();
+            tokio::task::spawn_blocking(move || commands.drain(revoked, Duration::from_secs(1)))
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), detached)
+                .await
+                .expect("the detached fetch was not cancelled")
+                .unwrap()
+                .is_err(),
+            "the detached fetch answered after the lock"
+        );
+        drained
+            .await
+            .unwrap()
+            .expect("the drain waited for nothing, or for ever");
+        assert!(weak.upgrade().is_none(), "the token outlived the lock");
+        assert!(reply.send(()).is_err(), "the HTTP future was not dropped");
+
+        // Bound once the session is closed: refused, never polled, and what it holds drops at once.
+        let polled = Arc::new(AtomicBool::new(false));
+        let late = Arc::new(7);
+        let late_weak = Arc::downgrade(&late);
+        let flag = polled.clone();
+        assert!(
+            commands
+                .bind(async move {
+                    let _late = late;
+                    flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!polled.load(Ordering::SeqCst));
+        assert!(late_weak.upgrade().is_none(), "a refused fetch kept its token");
     }
     #[tokio::test]
     async fn queued_engine_start_revalidates_generation_after_lock_and_relogin() {

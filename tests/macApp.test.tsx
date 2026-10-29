@@ -339,9 +339,8 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   test('a session that ends under an open sheet leaves the section alone until the sheet is closed, then falls back to General', async () => {
     let current: unknown = snapshot()
     let modals = 0
-    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals } })
-    const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    // The window reads again a few ms after each read here (task 2179's reader, not an interval).
+    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals, SNAPSHOT_REFRESH_MS: 5 } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, 'Sync')
@@ -350,8 +349,11 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     m.render()
     await settle(m)
     current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
-    ticks.forEach((tickFn) => tickFn())
+    const reads = m.calls.filter((c) => c.name === 'popover_snapshot').length
+    for (let i = 0; i < 50 && m.calls.filter((c) => c.name === 'popover_snapshot').length === reads; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').length, 'a read after the session ended').toBeGreaterThan(reads)
     await settle(m)
+    expect(buttonsIn(navOf(m)[0]).map(label), 'the read that says signed out landed').toEqual(['Back to Sign in', 'General', 'About'])
     expect(shown(m), 'a sheet is open: the section stays').toEqual(['sync'])
     modals = 0
     m.render()

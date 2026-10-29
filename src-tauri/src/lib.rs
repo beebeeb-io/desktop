@@ -172,6 +172,26 @@ macro_rules! session_command {
     }};
 }
 
+/// Work a command starts as a task of its own, which may outlive the command (the popover's storage fetch), is bound to
+/// the session when it is created: on Windows a lock cancels it and waits for what it holds to drop, and once the
+/// session is closed it never starts (#139 review P1; tests/windows_session_wiring.rs guards the callers).
+fn session_bound<T>(
+    work: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+{
+    #[cfg(target_os = "windows")]
+    {
+        let bound = SESSION_COMMANDS.bind(work);
+        async move { bound?.await }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        work
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn close_session_commands() -> Result<(), String> {
     let revoked = SESSION_COMMANDS.close();
@@ -10197,7 +10217,7 @@ async fn popover_snapshot(
                         &state.popover_storage,
                         now,
                         VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
-                        || async move { fetch_storage_usage(&runner::api_base_url(), &token).await },
+                        || session_bound(async move { fetch_storage_usage(&runner::api_base_url(), &token).await }),
                     )
                     .await
                 }
@@ -21111,7 +21131,10 @@ mod popover_wiring_tests {
         // that was put in memory while the sign-out ran; and a re-sign-in whose kept key the server no longer accepts
         // bumps when it ended a session in memory (spec §5.6).
         assert_eq!(source.matches("bump_vault_epoch();\n").count(), 6);
-        assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                        || async move { fetch_storage_usage"));
+        // The fetch is bound to the session (#139 review P1; tests/windows_session_wiring.rs pins the binding).
+        assert!(source.contains(
+            "VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                        || session_bound(async move { fetch_storage_usage"
+        ));
         // Spec 2026-10-06: the snapshot reads the reconciler's view and never probes the OS.
         let snapshot = {
             let at = source.find("async fn popover_snapshot(").unwrap();
@@ -22260,7 +22283,7 @@ mod signout_teardown_tests {
         assert_eq!(seeded.map(|s| s.used_bytes), Some(84));
         assert!(!state.popover_storage.lock().unwrap().is_empty());
         set_auth_present(&state, false);
-        let result = clear_session_impl(&state, false, None).await;
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
         assert!(result.is_ok(), "{result:?}");
         assert!(state.popover_storage.lock().unwrap().is_empty(), "{:?}", state.popover_storage.lock().unwrap());
     }
