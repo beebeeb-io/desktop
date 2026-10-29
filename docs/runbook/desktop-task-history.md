@@ -645,3 +645,30 @@ window whose first read is locked); and a sign-out that fails after the removal 
 sentence anyway, and only holds it (lead ruling: a held sentence is shown above the card whether or not a remount comes, so a
 toast would say it twice; the toast is the fallback for a sentence that cannot be held).
 
+### 1747 Part 1: C-S1, the Rust half (2026-10-25)
+
+`start_browser_login` returns the password path's `LoginOutcome` (plan `docs/plans/2026-10-25-1747-account-view.md`, Part 1). The
+arms of the handoff stay in `run_handoff` (decision D6), so four source pins that read `browser_login.rs` stay unedited; only a
+different account's arm changes, from "emit an `account_mismatch` event and fail with that string" to
+`return Ok(LoginOutcome::account_mismatch(..))`, the call `desktop_login` makes, and the one pin that held the event,
+`the_switch_count_reaches_the_sign_in_window`, now holds the browser handoff to the same hand-off as the password paths. A fresh
+sign-in answers `vault_unlocked: true` (`LoginOutcome::browser_signed_in`), the same account `reauthenticated(true, false)`. The
+controller (`browserSignIn.ts`) settles from that answer with `settledFrom`; `done` is progress, and the event-or-`Err` race, its
+grace timer and the raw-code swallowing of slice 2 are gone. The switch snapshot is owned by the window the step runs in
+(`main_window_label`), not the retired `onboarding` label (review P3-5 on #143): the plan guessed that two flow-window pins would
+need re-pointing, but only `the_switch_carries_a_snapshot_on_macos_only` held the label, the other pair use `onboarding` as an
+arbitrary "another window".
+
+### 1747 Part 2: the Keychain-presence signal and the interrupted first run (2026-10-25)
+
+`vault_unlock_route` (macOS) answers `keychain` or `recovery_phrase` from `keychain_vault_key_present`, the helper that serves the
+sign-in traces: the item's attributes in the id-keyed and the legacy layout, never the key, and a Keychain that cannot be read counts
+as holding one (so the route is `keychain` and the existing unlock error reaches the person, rather than a path that would
+overwrite a key). It is its own command, not a field of `sync_status` (D5), and keeps the revision guard. The Beebeeb window asks
+it with `pending_setup` when it opens signed in and locked, and `windowScreen` takes the answer as a third argument: `settling`
+while it is out, Set up this Mac by state when there is no key (D4: the interrupted first run, a password sign-in on a Mac with
+no key whose window was closed or whose app was quit before the phrase, used to land on a Home whose "Unlock vault" has nothing
+to read; Rust's pending step does not survive a quit, the Keychain does). Home's "Unlock vault" and Settings › Account's "Unlock"
+(plan O4: an inference from D4, not a ruling; the PR asks the lead to confirm it) ask again at the click. The route is spent
+once the keys arrive (`unlocked`, or the Finder step, which Finder-ready leaves for Home before the next snapshot read), so a
+later Lock shows Home's locked card; a window that opens unlocked and is then locked asks nothing (the P3-3 rule).

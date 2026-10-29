@@ -74,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -82,35 +82,12 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          notes_path="RELEASE_NOTES.md"
-
-          if [[ ! -f "$notes_path" ]]; then
-            echo "::error file=$notes_path::Missing RELEASE_NOTES.md for Beebeeb Desktop $RELEASE_VERSION. Author the release notes at the repo root, commit them, then rerun this workflow. See docs/RELEASING.md."
-            exit 1
-          fi
-
-          python3 <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-
-          version = os.environ["RELEASE_VERSION"]
-          notes_path = pathlib.Path("RELEASE_NOTES.md")
-          notes = notes_path.read_text(encoding="utf-8")
-          exact_version = re.compile(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z-]|\.[0-9A-Za-z])")
-
-          if not exact_version.search(notes):
-              print(
-                  f"::error file=RELEASE_NOTES.md::RELEASE_NOTES.md must mention the exact release version {version}. "
-                  "Update the title/body for this release and commit it before rerunning the workflow. See docs/RELEASING.md.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          PY
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        # Fails closed if RELEASE_NOTES.md is missing, does not name the exact version,
+        # or promises automatic delivery to existing installs while the release is
+        # published to alpha/beta only (desktop-v0.8.3 did exactly that and sat in
+        # alpha for 57 days). Covered by tests/releaseChannelChecks.test.ts.
+        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md
 
       - name: Refuse while RELEASE_BLOCKERS.md lists an item
         shell: bash
@@ -140,7 +117,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Install Linux dependencies
         run: |
@@ -198,7 +175,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           # Full history: the check walks first-parent from the dispatched head back to the
           # branch's starting point.
@@ -279,7 +256,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -392,7 +369,7 @@ jobs:
         run: bash scripts/macos-release-preflight.sh
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -527,7 +504,7 @@ jobs:
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-macos
           path: release-assets/*
@@ -535,7 +512,7 @@ jobs:
 
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-windows
           path: release-assets/*
@@ -543,7 +520,7 @@ jobs:
 
       - name: Upload Linux artifacts
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-linux
           path: release-assets/*
@@ -569,23 +546,28 @@ jobs:
 
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
       - name: Create release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: desktop-v${{ inputs.version }}
           name: Beebeeb Desktop ${{ inputs.version }}
           target_commitish: ${{ github.sha }}
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
+          # GitHub "Latest" is what beebeeb.io/download hands to fresh installs, so it must
+          # track the stable updater manifest (desktop/latest.json). An alpha/beta release is
+          # never marked Latest here; publish-manifest marks it Latest when it is promoted to
+          # stable. (desktop-v0.8.3 was marked Latest while stable still served 0.8.2.)
+          make_latest: ${{ inputs.channel == 'stable' && 'true' || 'false' }}
           fail_on_unmatched_files: false
           # Single catch-all instead of a per-extension allowlist — the upload steps above now
           # glob whole bundle directories, so every real bundle type flows through automatically
@@ -625,11 +607,12 @@ jobs:
     # bounds the job as a whole, so a stalled connection fails it instead of hanging for hours.
     timeout-minutes: 15
     permissions:
-      contents: read
+      # write: only to mark the GitHub release "Latest" on a stable publish (final step).
+      contents: write
 
     steps:
       - name: Checkout releases repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: beebeeb-io/releases
           ref: main
@@ -908,3 +891,16 @@ jobs:
         env:
           RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
           TAG: desktop-v${{ inputs.version }}
+
+      - name: Mark stable release as GitHub Latest
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Keep GitHub's Latest (served by beebeeb.io/download) equal to the stable
+          # updater manifest. `node scripts/release-channel-checks.mjs delivery` checks
+          # the two live values after the releases site has redeployed.
+          gh release edit "$TAG" --repo "$REPO" --latest

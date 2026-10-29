@@ -152,9 +152,14 @@ function installBackend({ caps, fx }) {
           if (f.browser !== 'done') return new Promise(() => {})
           await new Promise((resolve) => setTimeout(resolve, 300))
           window.__emit('browser-login', { attempt: a?.attemptId, phase: 'authorized' })
+          // C-S1 (task 1747 Part 1): the handoff's answer is the password path's LoginOutcome. Another account is an
+          // outcome, not an event and not an error: nothing was installed, and the switch step shows the count.
+          if (f.browserOutcome === 'mismatch') {
+            return { requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: { pending_changes: 3, unsent: { askId: 'a1', files: 2, copiedFiles: 2, others: 1, missingFiles: 0, earlierFolders: [] } } }
+          }
           signedIn(f, true)
           window.__emit('browser-login', { attempt: a?.attemptId, phase: 'done', email: 'sam@example.eu' })
-          return null
+          return { requires_2fa: false, reauthenticated: false, vault_unlocked: true, key_replaced: false, account_mismatch: null }
         }
         case 'desktop_capabilities': return caps
         case 'desktop_platform': return 'macos'
@@ -196,6 +201,9 @@ function installBackend({ caps, fx }) {
         }
         case 'unlock_vault': { if (f.unlock === 'nokey') throw 'This Mac does not have your encryption keys yet. Restore them to continue.'; return null }
         case 'pending_setup': return f.pending ?? null
+        // 1747 Part 2: the Keychain route. `route` is one answer; `routes` is a list read in order (the last one repeats), for a key that
+        // vanishes between the window opening and the click.
+        case 'vault_unlock_route': return f.routes ? (f.routes.length > 1 ? f.routes.shift() : f.routes[0]) : (f.route ?? 'keychain')
         case 'set_pending_setup': return null
         case 'sign_out_result_ack': return null
         case 'consume_menu_update_check': return false
@@ -303,10 +311,19 @@ const SCENARIOS = [
   // P2-3 b: the Keychain holds a token and no key. The unlock says the approved sentence, and offers the phrase.
   { name: 'locked-without-key', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), unlock: 'nokey' }, act: async (p) => { await p.getByRole('button', { name: 'Unlock vault' }).click(); await p.getByRole('button', { name: 'Use your recovery phrase' }).waitFor() }, has: ['Your vault is locked', 'This Mac does not have your encryption keys yet. Restore them to continue.', 'Use your recovery phrase'], hasNot: ['secret not found', 'Sign in before unlocking'] },
   { name: 'locked-without-key-phrase', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), unlock: 'nokey' }, act: async (p) => { await p.getByRole('button', { name: 'Unlock vault' }).click(); await p.getByRole('button', { name: 'Use your recovery phrase' }).click(); await p.getByText('Set up this Mac').waitFor() }, has: ['Set up this Mac', 'Recovery phrase', 'Unlock vault'], noSidebar: true, card: 440, title: 'Set up this Mac' },
+  // 1747 Part 2 (plan D4, item 14): the interrupted first run. A session in the Keychain, no key anywhere, nothing pending in Rust (the app was
+  // quit): the window opens on Set up this Mac by state, with no click. With the key in the Keychain it is Home's locked card.
+  { name: 'locked-no-key-opens-set-up', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), route: 'recovery_phrase' }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.', 'Recovery phrase'], hasNot: ['Your vault is locked', 'Vault locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
+  { name: 'locked-with-key-opens-home', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), route: 'keychain' }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Set up this Mac', 'Recovery phrase'] },
+  // The click asks again: the key vanished after the window opened, so “Unlock vault” goes to Set up this Mac and never to a Keychain error.
+  { name: 'locked-key-vanished-before-the-click', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), routes: ['keychain', 'recovery_phrase'], unlock: 'nokey' }, act: async (p) => { await p.getByRole('button', { name: 'Unlock vault' }).click(); await p.getByText('Set up this Mac').waitFor() }, has: ['Set up this Mac', 'Recovery phrase'], hasNot: ['Your vault is locked', 'secret not found'], noSidebar: true, card: 440, title: 'Set up this Mac' },
   // P2-3 a: a window reopened (⌘W destroyed the earlier one) while a password sign-in was waiting for the recovery phrase.
   { name: 'reopened-pending-setup', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), pending: { key_replaced: false } }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.'], hasNot: ['Your vault is locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
   // P3-1: `open_reauth_window` asks for Sign in again whatever the session says.
   { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.', 'Signed in before as sam@example.eu', 'Back to Home'], hasNot: ['Sync is paused'], noSidebar: true, card: 380, title: 'Sign in again' },
+  // C-S1 (task 1747 Part 1): a different account through the browser reaches the switch step through the handoff's returned
+  // outcome, with its count; no raw code is on the page.
+  { name: 'browser-account-switch', fx: { snapshot: snapshot({ phase: 'session_ended', account: { auth_expired: true } }), browser: 'done', browserOutcome: 'mismatch' }, act: async (p) => { await p.getByRole('button', { name: 'Sign in with browser' }).click(); await p.getByText('Switch accounts with changes not sent?').waitFor() }, has: ['Switch accounts with changes not sent?', 'Cancel', 'Sign out and switch'], hasNot: ['account_mismatch', 'Sign-in failed'], noSidebar: true, card: 460, focus: 'Cancel' },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
 ]
