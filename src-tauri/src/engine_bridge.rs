@@ -2421,6 +2421,7 @@ impl EngineBridge {
             target_path: target_path.to_string(),
             payload_path: payload_path.to_string_lossy().into_owned(),
             stamped: false,
+            review: None,
         }))
     }
 
