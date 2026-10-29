@@ -3686,10 +3686,12 @@ impl EngineBridge {
         }
         match self.row_judging_bytes_at(&rel, path) {
             Ok(RowAtPath::One(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
-            Ok(RowAtPath::Ambiguous) => {
+            Ok(RowAtPath::Ambiguous { file_ids, rows }) => {
+                // Lead ruling P2 (2271 contract §7): file ids and the row count, never the path.
                 tracing::warn!(
-                    rel_path = %rel,
-                    "sync folder: several synced files share this path and its bytes are none of them; kept on this PC, not sent"
+                    ?file_ids,
+                    rows,
+                    "sync folder: several synced files share one path and its bytes are none of them; kept on this PC, not sent"
                 );
                 return LocalPathVerdict::Settled;
             }
@@ -3828,7 +3830,10 @@ impl EngineBridge {
                 }
                 match matching[..] {
                     [at] => at,
-                    _ => return Ok(RowAtPath::Ambiguous),
+                    _ => {
+                        let file_ids = recorded.iter().map(|(at, _)| rows[*at].file_id.clone()).collect();
+                        return Ok(RowAtPath::Ambiguous { file_ids, rows: rows.len() });
+                    }
                 }
             }
         };
@@ -6573,8 +6578,9 @@ fn place_holds_bytes(path: &Path) -> bool {
 enum RowAtPath {
     None,
     One(FileEntry),
-    /// Several rows record content this PC agreed on, and the bytes are none of them.
-    Ambiguous,
+    /// Several rows record content this PC agreed on, and the bytes are none of them (or more than one): the ids of
+    /// those rows, and how many rows share the path.
+    Ambiguous { file_ids: Vec<String>, rows: usize },
 }
 
 pub(crate) fn sync_folder_content(
@@ -28365,8 +28371,17 @@ mod tests {
         assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "the bytes are b's");
         assert_eq!(queued(), 0);
         std::fs::write(&local, b"edited, agrees with neither").unwrap();
-        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "no row is guessed");
+        let mut dispatched = true;
+        let logs = capture_logs_async(async {
+            dispatched = crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan");
+        })
+        .await;
+        assert!(!dispatched, "no row is guessed");
         assert_eq!(queued(), 0, "nothing sent: no edit of a guessed row, no new file");
+        // Lead ruling P2 (contract §7): file ids and the row count, never the path (log lines can leave the PC in the
+        // support bundle).
+        assert!(logs.contains(a) && logs.contains(b) && logs.contains("rows=2"), "{logs}");
+        assert!(!logs.contains("notes.txt"), "no path in the log: {logs}");
         drop(server.finish());
     }
 
