@@ -434,6 +434,31 @@ const DUE_ORDER_SQL: &str = "ORDER BY rowid ASC";
 #[cfg(not(target_os = "macos"))]
 const DUE_ORDER_SQL: &str = "ORDER BY created_at ASC, rowid ASC";
 
+/// Parent first (spec D7, I5; task 2226): an op whose parent folder still has a `create_folder` op of its own is not
+/// due, whatever state that create is in, and its claim claims nothing, so it spends no attempt on the parent's 404.
+/// It becomes due once that create landed (its op is gone). Appended to a `WHERE` on `operation_queue` without an alias;
+/// the lookup goes through `idx_operation_queue_file_id`. Empty on macOS: its File Provider path does not change.
+#[cfg(target_os = "macos")]
+const DUE_PARENT_GATE_SQL: &str = "";
+#[cfg(not(target_os = "macos"))]
+const DUE_PARENT_GATE_SQL: &str = "AND NOT EXISTS (SELECT 1 FROM operation_queue p
+                     WHERE p.kind = 'create_folder' AND p.file_id = operation_queue.parent_id)";
+
+/// D7: the folders whose create cannot land until the person or a pass acts: paused or out of attempts, and every folder
+/// made inside one of them, at any depth. A change in one waits for its folder (`waiting_for_folder`) and is no
+/// transfer work. For `WITH RECURSIVE`; reads `idx_operation_queue_create_folder` alone.
+#[cfg(not(target_os = "macos"))]
+const HELD_FOLDER_CTE: &str = "held_folder(file_id) AS (
+         SELECT file_id FROM operation_queue
+         WHERE kind = 'create_folder' AND file_id IS NOT NULL
+           AND (paused_reason IS NOT NULL OR attempts >= max_attempts)
+         UNION
+         SELECT inner_create.file_id FROM held_folder
+         JOIN operation_queue inner_create
+           ON inner_create.kind = 'create_folder' AND inner_create.parent_id = held_folder.file_id
+         WHERE inner_create.file_id IS NOT NULL
+     )";
+
 /// Task 2204: a Windows rename (`metadata.local_rename`) not sent yet: unclaimed, and neither
 /// parked nor paused.
 const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move_file')
@@ -2454,11 +2479,13 @@ pub struct QueueDiagnostics {
 /// or an error text.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct QueueHold {
-    /// Not paused and not given up: due now, backing off, or being sent.
+    /// Not paused and not given up: due now, backing off, or being sent. On Windows and Linux, not one that waits for a
+    /// held folder either (spec D7: those are `held`'s `waiting_for_folder`).
     pub waiting: i64,
     /// Not paused, but out of attempts: nothing retries them.
     pub gave_up: i64,
-    /// Paused, one group per reason (`PAUSE_REASON_LABELS`, anything else as `other`), ordered by reason.
+    /// Paused, one group per reason (`PAUSE_REASON_LABELS`, anything else as `other`), ordered by reason. On Windows
+    /// and Linux it also holds the computed `waiting_for_folder` group (spec D7).
     pub held: Vec<HeldGroup>,
 }
 
@@ -2864,6 +2891,17 @@ impl StateDb {
                 created_at INTEGER NOT NULL
             );
             ",
+        )?;
+        // Tasks 1888, 2226 (spec D7): `queue_hold_summary`'s `waiting_for_folder` group reads these two alone, so the
+        // tray's poll stays inside task 2243's budget. The first holds only the folder creates; the second finds the
+        // changes in a folder. Indexes only, no table or column change. macOS has no parent-first gate.
+        #[cfg(not(target_os = "macos"))]
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_operation_queue_create_folder
+                 ON operation_queue(parent_id, file_id, paused_reason, attempts, max_attempts)
+                 WHERE kind = 'create_folder';
+             CREATE INDEX IF NOT EXISTS idx_operation_queue_parent
+                 ON operation_queue(parent_id, paused_reason, attempts, max_attempts, created_at);",
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
         ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
@@ -3879,12 +3917,25 @@ impl StateDb {
     /// retry time is still ahead of it is waiting out a backoff and does not count.
     pub fn transfer_backlog(&self, now: i64) -> Result<TransferBacklog> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        // D7: an upload waiting for a held folder is not sent until the hold ends, so it is not transfer work; counted,
+        // it would keep the engine "syncing" for as long as the hold lasts. One waiting for a folder still on its way
+        // is (`DUE_PARENT_GATE_SQL` holds it for that folder's landing only).
+        #[cfg(target_os = "macos")]
+        let not_held = "";
+        #[cfg(not(target_os = "macos"))]
+        let not_held = format!(
+            "AND (q.parent_id IS NULL
+                  OR q.parent_id NOT IN (WITH RECURSIVE {HELD_FOLDER_CTE} SELECT file_id FROM held_folder))"
+        );
         let (upload_files, upload_bytes): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(MAX(COALESCE(f.size_bytes, 0), 0)), 0)
-             FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
-             WHERE q.kind IN ('upload_file', 'upload_version')
-               AND q.next_retry_at <= ?1
-               AND q.paused_reason IS NULL AND q.attempts < q.max_attempts",
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(MAX(COALESCE(f.size_bytes, 0), 0)), 0)
+                 FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
+                 WHERE q.kind IN ('upload_file', 'upload_version')
+                   AND q.next_retry_at <= ?1
+                   AND q.paused_reason IS NULL AND q.attempts < q.max_attempts
+                   {not_held}"
+            ),
             params![now],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -6015,6 +6066,7 @@ impl StateDb {
                     last_error, backup_source_key, created_at, updated_at
              FROM operation_queue
              WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL
+             {DUE_PARENT_GATE_SQL}
              {DUE_ORDER_SQL}"
         ))?;
         let rows = stmt.query_map(params![now], |row| {
@@ -7143,7 +7195,10 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let queued = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0))?;
         let due = conn.query_row(
-            "SELECT COUNT(*) FROM operation_queue WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL",
+            &format!(
+                "SELECT COUNT(*) FROM operation_queue
+                 WHERE next_retry_at <= ?1 AND attempts < max_attempts AND paused_reason IS NULL {DUE_PARENT_GATE_SQL}"
+            ),
             params![now],
             |row| row.get(0),
         )?;
@@ -7217,9 +7272,7 @@ impl StateDb {
             ))
         })?;
         let mut held: BTreeMap<String, HeldGroup> = BTreeMap::new();
-        for group in groups {
-            let (reason, count, oldest_at, newest_at) = group?;
-            let reason = allowed_label(&reason, PAUSE_REASON_LABELS);
+        let mut add = |reason: String, count: i64, oldest_at: i64, newest_at: i64| {
             let entry = held.entry(reason.clone()).or_insert(HeldGroup {
                 reason,
                 count: 0,
@@ -7229,7 +7282,32 @@ impl StateDb {
             entry.count += count;
             entry.oldest_at = entry.oldest_at.min(oldest_at);
             entry.newest_at = entry.newest_at.max(newest_at);
+        };
+        for group in groups {
+            let (reason, count, oldest_at, newest_at) = group?;
+            add(allowed_label(&reason, PAUSE_REASON_LABELS), count, oldest_at, newest_at);
         }
+        // D7: a change that waits for its folder's create (`DUE_PARENT_GATE_SQL`) while that create is paused or out of
+        // attempts is counted as `waiting_for_folder`, not as waiting: nothing sends it until the hold ends. The same
+        // goes for a change in a folder made inside such a folder, at any depth. Read from the two D7 indexes alone;
+        // CROSS JOIN keeps the held folders as the outer loop, so no change outside them is read.
+        #[cfg(not(target_os = "macos"))]
+        let waiting = {
+            let (count, oldest_at, newest_at) = conn.query_row(
+                &format!(
+                    "WITH RECURSIVE {HELD_FOLDER_CTE}
+                     SELECT COUNT(*), COALESCE(MIN(op.created_at), 0), COALESCE(MAX(op.created_at), 0)
+                     FROM held_folder CROSS JOIN operation_queue op ON op.parent_id = held_folder.file_id
+                     WHERE op.paused_reason IS NULL AND op.attempts < op.max_attempts"
+                ),
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            )?;
+            if count > 0 {
+                add("waiting_for_folder".to_string(), count, oldest_at, newest_at);
+            }
+            waiting - count
+        };
         Ok(QueueHold {
             waiting,
             gave_up,
@@ -7318,12 +7396,14 @@ impl StateDb {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Gone, or no longer due: a pass lists its ops once, and a landing earlier in the same
         // pass can park a later op of the file (a successor it could not re-key, §8.6 rule 3).
-        // Nothing retries a parked op.
+        // Nothing retries a parked op. An op whose parent folder's create has not landed is not
+        // due either (D7): no claim, and its attempts and retry time stay as they are.
         let Some(op) = tx
             .query_row(
                 &format!(
                     "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue
-                     WHERE op_id = ?1 AND attempts < max_attempts AND paused_reason IS NULL"
+                     WHERE op_id = ?1 AND attempts < max_attempts AND paused_reason IS NULL
+                     {DUE_PARENT_GATE_SQL}"
                 ),
                 params![op_id],
                 pending_operation_from_row,
@@ -15362,5 +15442,175 @@ mod reconcile_tests {
         }
         assert!(sync_root.path().join("Backups/unknown/Documents/Old").is_dir(), "the pass removes no directory");
         assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW + 60, &on_disk).unwrap(), Counts::default());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn unpause(pc: &Pc, op_id: &str) {
+        pc.sql("UPDATE operation_queue SET paused_reason = NULL WHERE op_id = ?1", params![op_id]);
+    }
+
+    /// A folder made here, not on the server yet, whose create is due, and a new file in it whose upload is due too.
+    #[cfg(not(target_os = "macos"))]
+    fn new_folder_with_a_new_file(pc: &Pc) {
+        pc.folder("new", None, "New", 0);
+        pc.create_folder("op-new", "new", None);
+        unpause(pc, "op-new");
+        pc.file("f", Some("new"), "New/f.txt", 0);
+        pc.upload("op-f", "f", Some("new"), 20);
+    }
+
+    /// D7, I5 (2226's verification line: "not retried"): a change under a folder whose create has not landed is not
+    /// due, its claim claims nothing, and it keeps its attempts and its retry time.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_upload_under_a_folder_not_yet_on_the_server_is_not_due_and_keeps_its_attempts() {
+        let pc = Pc::new();
+        new_folder_with_a_new_file(&pc);
+        assert_eq!(pc.due(), vec!["op-new".to_string()], "only the folder's create is due");
+        assert!(matches!(pc.db.claim_operation("op-f", NOW).unwrap(), ClaimOutcome::Gone), "the change is not claimed");
+        assert_eq!(pc.op("op-f"), (Some("new".to_string()), 0, 0, None, None), "attempts and retry time untouched");
+        assert_eq!(pc.count("SELECT COUNT(*) FROM operation_queue WHERE op_id = 'op-f' AND claim_id IS NULL", []), 1);
+    }
+
+    /// D7: once the folder's create lands (its op is gone), the change under it is due and is claimed.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn it_becomes_due_once_its_folder_lands() {
+        let pc = Pc::new();
+        new_folder_with_a_new_file(&pc);
+        assert!(!pc.due().contains(&"op-f".to_string()), "not due while its folder's create is queued");
+        let ClaimOutcome::Claimed(folder) = pc.db.claim_operation("op-new", NOW).unwrap() else {
+            panic!("the folder's create is claimed")
+        };
+        assert!(pc.db.finish_claimed("op-new", &folder.claim_id, None).unwrap());
+        assert_eq!(pc.due(), vec!["op-f".to_string()]);
+        assert!(matches!(pc.db.claim_operation("op-f", NOW).unwrap(), ClaimOutcome::Claimed(_)));
+    }
+
+    /// D7, D13: a change under a folder whose create is held (paused, or out of attempts) is counted as waiting for its
+    /// folder, not as waiting; under a folder whose create can still run it is waiting.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_hold_summary_counts_children_of_a_held_folder_as_waiting_for_their_folder() {
+        let pc = Pc::new();
+        new_folder_with_a_new_file(&pc);
+        let for_folder = HeldGroup { reason: "waiting_for_folder".to_string(), count: 1, oldest_at: 20, newest_at: 20 };
+
+        pc.pause("op-new", "auth");
+        let hold = pc.db.queue_hold_summary().unwrap();
+        assert_eq!((hold.waiting, hold.gave_up), (0, 0));
+        assert_eq!(
+            hold.held,
+            vec![HeldGroup { reason: "auth".to_string(), count: 1, oldest_at: 1, newest_at: 1 }, for_folder.clone()]
+        );
+
+        unpause(&pc, "op-new");
+        pc.gave_up("op-new", SERVER_ERROR);
+        let hold = pc.db.queue_hold_summary().unwrap();
+        assert_eq!((hold.waiting, hold.gave_up), (0, 1));
+        assert_eq!(hold.held, vec![for_folder]);
+
+        pc.sql("UPDATE operation_queue SET attempts = 0 WHERE op_id = 'op-new'", []);
+        let hold = pc.db.queue_hold_summary().unwrap();
+        assert_eq!((hold.waiting, hold.gave_up), (2, 0), "the folder's create can run: both are waiting");
+        assert!(hold.held.is_empty(), "no group: {:?}", hold.held);
+    }
+
+    /// D7 below one level: a folder made here inside a held folder waits for it, and so does a change inside that
+    /// folder. Counted as waiting, it would show the queue busy for as long as the hold lasts.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_change_in_a_folder_inside_a_held_folder_also_waits_for_its_folder() {
+        let pc = Pc::new();
+        pc.folder("new", None, "New", 0);
+        pc.create_folder("op-new", "new", None);
+        pc.folder("sub", Some("new"), "New/Sub", 0);
+        pc.create_folder("op-sub", "sub", Some("new"));
+        unpause(&pc, "op-sub");
+        pc.file("f", Some("sub"), "New/Sub/f.txt", 0);
+        pc.upload("op-f", "f", Some("sub"), 20);
+        assert!(pc.due().is_empty(), "nothing runs before its folder");
+        let hold = pc.db.queue_hold_summary().unwrap();
+        assert_eq!((hold.waiting, hold.gave_up), (0, 0));
+        assert_eq!(
+            hold.held,
+            vec![
+                HeldGroup { reason: "auth".to_string(), count: 1, oldest_at: 1, newest_at: 1 },
+                HeldGroup { reason: "waiting_for_folder".to_string(), count: 2, oldest_at: 1, newest_at: 20 },
+            ]
+        );
+    }
+
+    /// Task 2243's budget holds with the D7 group in it: 300 held folders and 2,700 changes waiting in them are
+    /// counted from the indexes, without reading the changes themselves (about 250 pages here).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_waiting_for_folder_group_reads_indexes_not_the_changes() {
+        let pc = Pc::new();
+        {
+            let mut conn = pc.db.0.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            let id = |n: i64| format!("0a000000-0000-4000-8000-{n:012}");
+            for folder in 0..300_i64 {
+                tx.execute(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, target_path, paused_reason, created_at)
+                     VALUES (?1, 'create_folder', ?2, ?3, 'auth', 1)",
+                    params![id(folder), id(folder), format!("Projects/Folder {folder:05}")],
+                )
+                .unwrap();
+                for n in 0..9_i64 {
+                    let op = 1_000 + folder * 9 + n;
+                    tx.execute(
+                        "INSERT INTO operation_queue (op_id, kind, file_id, parent_id, target_path, metadata_json, created_at)
+                         VALUES (?1, 'upload_version', ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            id(op),
+                            id(op),
+                            id(folder),
+                            format!("Projects/Folder {folder:05}/draft-{n}.txt"),
+                            format!("{{\"operation\":\"create_file\",\"name_ct\":\"{}\"}}", "x".repeat(120)),
+                            10 + op,
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let db = StateDb::open(pc.dir.path().join("state.db")).unwrap();
+        let hold = db.queue_hold_summary().unwrap();
+        let reads = db.page_reads();
+        assert_eq!(hold.waiting, 0);
+        assert_eq!(
+            hold.held,
+            vec![
+                HeldGroup { reason: "auth".to_string(), count: 300, oldest_at: 1, newest_at: 1 },
+                HeldGroup { reason: "waiting_for_folder".to_string(), count: 2_700, oldest_at: 1_010, newest_at: 3_709 },
+            ]
+        );
+        assert!(reads <= 80, "the hold summary (the open and its reads) read {reads} pages from disk");
+    }
+
+    /// D7 and the tray's activity: a change waiting for a held folder is not transfer work, or the engine would show
+    /// "syncing" for as long as the hold lasts. Under a folder whose create can still run it is.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_change_waiting_for_a_held_folder_is_not_transfer_work() {
+        let pc = Pc::new();
+        new_folder_with_a_new_file(&pc);
+        pc.pause("op-new", "auth");
+        assert_eq!(pc.db.transfer_backlog(NOW).unwrap().upload_files, 0);
+        unpause(&pc, "op-new");
+        assert_eq!(pc.db.transfer_backlog(NOW).unwrap().upload_files, 1, "it is sent once its folder lands");
+    }
+
+    /// D7: the diagnostics' `due` is what the queue would send now, gate included.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_diagnostics_due_count_is_what_the_queue_would_send() {
+        let pc = Pc::new();
+        new_folder_with_a_new_file(&pc);
+        assert_eq!(pc.due().len(), 1);
+        assert_eq!(pc.db.queue_diagnostics(NOW).unwrap().due, 1);
     }
 }
