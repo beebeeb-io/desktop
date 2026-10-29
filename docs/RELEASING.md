@@ -160,7 +160,7 @@ How a release build signs (all in `release.yml`, Windows job only):
    fixture. Any failure blocks the release.
 
 Dispatch `release.yml` from `main` or from a `release/*` branch. No Azure step is
-needed per release. The trust boundary has three parts, and each one is checked:
+needed per release. The trust boundary has four parts, and each one is checked:
 
 - **Azure trusts one subject:** `repo:beebeeb-io/desktop:environment:desktop-release`.
   Only a job that names the GitHub environment `desktop-release` gets that subject in
@@ -197,12 +197,27 @@ needed per release. The trust boundary has three parts, and each one is checked:
     - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
       unreviewed commit gets a branch that `release.yml` can sign.
     - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
-    - The rule: cut a release branch only from a published `desktop-v*` tag or a commit
-      on `main`, and keep the cut commit in the release record.
-    - A check inside `release.yml` that refuses any other branch point is a follow-up
-      (workspace task 2281).
+    - The rule: cut a release branch only from a `desktop-v*` tag with a published GitHub
+      release, or a commit on `main`, and keep the cut commit in the release record.
+    - The tag itself is not protected, so a published GitHub release is what is trusted,
+      not the tag. A tag ruleset is proposed separately (the maintainer decides).
+    - `release.yml` enforces that rule (task 2281, next bullet): it refuses any other
+      branch point before signing.
   - Neither ruleset limits who holds an admin token. A tool or session acting with an
     admin's token can still create, delete or recreate a release branch.
+- **`release.yml` refuses an unreviewed branch point:** `verify-branch-point` runs before
+  `build`, so before any job holds the `desktop-release` environment or an Azure token. For a
+  dispatch from a `release/*` branch it walks the branch's first-parent history from the
+  dispatched commit back to its starting point (the first commit that is not a merge of a pull
+  request into that branch). Every commit on that walk must be a merge of a PR that was merged
+  into this same branch, and the starting point must be the commit of a `desktop-v*` tag with a
+  published GitHub release (`draft == false`) or a commit on `main`; otherwise the run stops
+  before signing and names the offending commit. A
+  dispatch from `main` skips the job, because `main` is protected by pull requests. The ruleset
+  above cannot gate branch creation, which is why this check exists (task 2281). Branches created
+  before that ruleset hold direct commits of their own (for example `release/0.8.19`), so a fresh
+  dispatch from them is refused; promoting an existing release with `publish_existing=true` does
+  not run the check.
 
 The workflow has no reviewer gate on the environment: a release stays one dispatch.
 `signing-login-check.yml` proves the boundary without building or signing anything. It
