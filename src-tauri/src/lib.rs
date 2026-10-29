@@ -7489,6 +7489,8 @@ fn spawn_bound_engine(
             runner::ResumeTicket {
                 asked: acct.auth_resume_asked.clone(),
                 done: acct.auth_resume_done.clone(),
+                pass_wanted: acct.reconcile_pass_wanted.clone(),
+                pass_served: acct.reconcile_pass_served.clone(),
             },
         )
     });
@@ -7822,31 +7824,30 @@ fn kept_folder_synced_by(sync_root: &Path) -> Option<String> {
 async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {
     let _transition = SESSION_TRANSITION.lock().await;
     let identity = decision_identity(&state)?;
+    // Task 1888 (Task 1's ruling on 2267's held changes; review P2): a released change may be a ghost folder's create
+    // the reconcile pass left to the person; sent before a pass sees it, it would make a folder the server already has
+    // a second time. So the release asks for a pass, before it commits and again after: the engine's queue sends
+    // nothing while an ask is unserved, and its next successful tick runs the pass (no resume: a release is not a
+    // sign-in). Without the account there is no ask, so nothing is released.
+    let pass_wanted = state
+        .active_account()
+        .map_err(|_| FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string())?
+        .reconcile_pass_wanted
+        .clone();
     let released = tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let (db, _) = own_local_data_for_decision(&identity)?;
-        db.release_found_while_paused(&op_ids, now_unix_seconds()).map_err(|error| {
+        pass_wanted.fetch_add(1, Ordering::SeqCst);
+        let released = db.release_found_while_paused(&op_ids, now_unix_seconds()).map_err(|error| {
             tracing::warn!(%error, "found while paused: the held changes could not be released");
             FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
-        })
+        })?;
+        pass_wanted.fetch_add(1, Ordering::SeqCst);
+        Ok(released)
     })
     .await
     .map_err(|e| format!("upload task failed: {e}"))??;
-    ask_for_a_pass_after_a_release(&state, released);
     tracing::info!(released, "found while paused: released to upload");
     Ok(FoundWhilePausedReleased { released })
-}
-
-/// Task 1888 (Task 1's ruling on 2267's held changes): a released change may be a ghost folder's create the reconcile
-/// pass left to the person; sent before a pass sees it, it would make a folder the server already has a second time.
-/// So a release asks for a pass: the engine's next successful tick runs it, with the key check and the resume behind
-/// it (spec D11), before its queue step.
-#[cfg(target_os = "windows")]
-fn ask_for_a_pass_after_a_release(state: &AppState, released: usize) {
-    if released > 0
-        && let Ok(acct) = state.active_account()
-    {
-        acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 /// Task 2267 (fix round 2), Settings › Sync, "Keep on this PC only" (lead ruling (a)): every item made on this PC that
@@ -30020,7 +30021,8 @@ mod reauth_tests {
         let spawn = squeeze(&code_of(&production, "fn spawn_bound_engine("));
         assert!(
             spawn.contains(&squeeze(
-                "runner::ResumeTicket { asked: acct.auth_resume_asked.clone(), done: acct.auth_resume_done.clone(), }"
+                "runner::ResumeTicket { asked: acct.auth_resume_asked.clone(), done: acct.auth_resume_done.clone(),
+                 pass_wanted: acct.reconcile_pass_wanted.clone(), pass_served: acct.reconcile_pass_served.clone(), }"
             )),
             "{spawn}"
         );
@@ -30039,12 +30041,15 @@ mod reauth_tests {
         let pass = tick
             .find(&squeeze(
                 "#[cfg(not(target_os = \"macos\"))]
-                 if let Err(error) = bridge.reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run).await {",
+                 if tick.reached_server
+                     && let Err(error) = bridge.reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run).await {",
             ))
-            .unwrap_or_else(|| panic!("the pass, off macOS, in the arm:\n{tick}"));
+            .unwrap_or_else(|| panic!("the pass, off macOS, in the arm, only when the pull came back:\n{tick}"));
         assert!(tick.find("auth_health.note_result(None);").unwrap() < pass, "after the pull succeeded");
         assert!(pass < tick.find("queue_step(").unwrap(), "before the tick's queue step:\n{tick}");
         assert_eq!(squeeze(runner).matches("reconcile_then_resume(").count(), 1, "one call");
+        // Review P2: the engine's queue reads the same ticket, so it sends nothing while a release waits for a pass.
+        assert!(squeeze(runner).contains(&squeeze(".with_resume(resume.clone())")), "the bridge shares the ticket");
         assert!(
             squeeze(runner).contains(&squeeze(
                 "#[cfg(not(target_os = \"macos\"))]
@@ -30064,24 +30069,24 @@ mod reauth_tests {
         assert!(waits < phase.find("queue_step(").unwrap(), "{phase}");
     }
 
-    /// Task 1 ruling (1888 ledger, on 2267's held changes): "Upload to my Beebeeb" makes a held ghost folder's create
-    /// due again, so it asks for a pass after the release: the engine's next successful tick reconciles before it
-    /// sends.
+    /// Task 1 ruling (1888 ledger, on 2267's held changes; review P2): "Upload to my Beebeeb" makes a held ghost folder's
+    /// create due again, so it asks for a pass before the release commits and again after it, on the pass counter (the
+    /// engine's queue waits for that pass; a release resumes no `auth` op).
     #[test]
     fn a_released_held_change_asks_for_a_pass() {
         use crate::source_pin::squeeze;
         let production = production_source();
         let upload = squeeze(&code_of(&production, "async fn found_while_paused_upload("));
+        let ask = squeeze("pass_wanted.fetch_add(1, Ordering::SeqCst);");
         let released = upload.find("db.release_found_while_paused(").expect("the release");
-        let asked = upload
-            .find(&squeeze("ask_for_a_pass_after_a_release(&state, released);"))
-            .unwrap_or_else(|| panic!("asks for a pass:\n{upload}"));
-        assert!(released < asked, "after the release:\n{upload}");
-        let ask = squeeze(&code_of(&production, "fn ask_for_a_pass_after_a_release("));
+        let before = upload.find(&ask).unwrap_or_else(|| panic!("asks for a pass:\n{upload}"));
+        let after = upload.rfind(&ask).unwrap();
+        assert!(before < released && released < after, "before the release commits, and again after it:\n{upload}");
         assert!(
-            ask.contains(&squeeze("if released > 0")) && ask.contains(&squeeze("acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);")),
-            "{ask}"
+            upload.contains(&squeeze("let pass_wanted = state.active_account()")) && upload.contains(&squeeze(".reconcile_pass_wanted.clone();")),
+            "the pass counter, not the sign-in counter:\n{upload}"
         );
+        assert!(!upload.contains("auth_resume_asked"), "a release resumes no auth op:\n{upload}");
     }
 
     /// Spec §5.6: a re-sign-in whose kept key the server no longer accepts removes only that key. It never purges,

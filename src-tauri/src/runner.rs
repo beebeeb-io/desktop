@@ -724,6 +724,11 @@ async fn next_wake(
 pub struct ResumeTicket {
     pub asked: Arc<AtomicU64>,
     pub done: Arc<AtomicU64>,
+    /// Review P2 (task 1888): the releases that asked for a pass ("Upload to my Beebeeb" on a held change, Windows).
+    /// Separate from `asked`, so a release never resumes the operations paused for `auth`.
+    pub pass_wanted: Arc<AtomicU64>,
+    /// The release ask the last committed pass served: a pass serves what it read before it planned.
+    pub pass_served: Arc<AtomicU64>,
 }
 
 /// Owned handle to a running engine task. Drop it (or call
@@ -1091,9 +1096,6 @@ async fn run(
         send_phase,
         resume,
     } = controls;
-    // A Mac serves the resume requests in the engine start, before the engine exists (spec D11).
-    #[cfg(target_os = "macos")]
-    let _ = &resume;
 
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
     // no Unix-socket daemon endpoint (see that block's own doc comment), so
@@ -1262,8 +1264,13 @@ async fn run(
         .try_state::<crate::popover_data::PopoverRuntime>()
         .map(|runtime| runtime.transfers.clone())
         .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    let bridge =
-        Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
+    // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
+    // waits for a pass.
+    let bridge = Arc::new(
+        EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping)
+            .with_transfers(transfers.clone())
+            .with_resume(resume.clone()),
+    );
     // What each request saw of the link (offline vs server did not answer).
     let link = api.link();
     send_phase.attach(link.clone());
@@ -1601,11 +1608,14 @@ async fn run(
                         // Spec D11, D12, I6 (task 1888): the reconcile pass, then the key check and the resume of what
                         // a refused session paused, before this tick's queue step sends anything. A pass that fails
                         // resumes nothing and is tried again next tick; the queue step still runs (the parent-first
-                        // gate keeps a ghost's children waiting), as before this pass existed.
+                        // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
+                        // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
+                        // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
                         #[cfg(not(target_os = "macos"))]
-                        if let Err(error) = bridge
-                            .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)
-                            .await
+                        if tick.reached_server
+                            && let Err(error) = bridge
+                                .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)
+                                .await
                         {
                             tracing::warn!(
                                 %error,

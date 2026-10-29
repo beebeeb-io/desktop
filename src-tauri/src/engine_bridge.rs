@@ -235,6 +235,10 @@ pub struct EngineBridge {
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     failed_snapshots: std::sync::atomic::AtomicU32,
+    /// Spec D11 (task 1888, review P2): the account's resume and pass requests, shared with the runner. A one-shot
+    /// bridge keeps a private one nobody moves. Off macOS, [`Self::process_due_operations`] sends nothing while a
+    /// release waits for a pass ([`Self::a_pass_is_owed`]).
+    resume: crate::runner::ResumeTicket,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }
@@ -1013,6 +1017,7 @@ impl EngineBridge {
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
+            resume: crate::runner::ResumeTicket::default(),
             #[cfg(test)]
             seams: Seams::default(),
         }
@@ -1062,6 +1067,21 @@ impl EngineBridge {
     pub fn with_transfers(mut self, board: Arc<crate::transfer_progress::TransferBoard>) -> Self {
         self.transfers = board;
         self
+    }
+
+    /// Share the account's resume and pass requests (spec D11; review P2). [`crate::runner::run`] passes the same
+    /// ticket it serves in [`Self::reconcile_then_resume`].
+    pub fn with_resume(mut self, resume: crate::runner::ResumeTicket) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Review P2 (task 1888): a release asked for a pass that no committed pass has served yet. A released change may
+    /// be a ghost folder's create the pass has not seen; sent now, it would make a folder the server already has a
+    /// second time (anti-goal 1). The next successful tick runs the pass.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn a_pass_is_owed(&self) -> bool {
+        self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
     }
 
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
@@ -1117,6 +1137,9 @@ impl EngineBridge {
     ///   as `key_replaced`;
     /// - the resume (or that hold), then `done = asked`.
     ///
+    /// A release that asked for a pass (`pass_wanted > pass_served`; review P2) gets the pass alone: no key check, no
+    /// resume. Any committed pass serves the release ask it read before it planned.
+    ///
     /// `*reconciled` turns true only when all of it committed, so a step that fails is tried again at the next tick,
     /// and nothing is resumed before a pass of this run (I6). Local only, counts only in the log (I7).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -1127,8 +1150,11 @@ impl EngineBridge {
         reconciled: &mut bool,
     ) -> anyhow::Result<()> {
         let asked = resume.asked.load(Ordering::SeqCst);
+        // Review P2: a release's ask, read before the pass plans, so the pass that serves it has seen the release.
+        let wanted = resume.pass_wanted.load(Ordering::SeqCst);
         let first_pass = !*reconciled;
-        if !first_pass && asked <= resume.done.load(Ordering::SeqCst) {
+        let resume_owed = first_pass || asked > resume.done.load(Ordering::SeqCst);
+        if !resume_owed && wanted <= resume.pass_served.load(Ordering::SeqCst) {
             return Ok(());
         }
         let opts = crate::held_queue::Options {
@@ -1157,12 +1183,18 @@ impl EngineBridge {
             file_twin = counts.file_twin,
             "reconcile pass committed"
         );
-        let (resumed, held_key_replaced) = if self.auth_ops_open_under_this_key()? {
+        // A pass that only a release asked for resumes nothing: a release is not a sign-in (spec D11).
+        let (resumed, held_key_replaced) = if !resume_owed {
+            (0, 0)
+        } else if self.auth_ops_open_under_this_key()? {
             (self.db.resume_operations_paused_for_auth(now)?, 0)
         } else {
             (0, self.db.hold_operations_paused_for_auth_as_key_replaced(now)?)
         };
-        resume.done.fetch_max(asked, Ordering::SeqCst);
+        if resume_owed {
+            resume.done.fetch_max(asked, Ordering::SeqCst);
+        }
+        resume.pass_served.fetch_max(wanted, Ordering::SeqCst);
         *reconciled = true;
         tracing::info!(
             resumed,
@@ -1240,6 +1272,12 @@ impl EngineBridge {
             // sign-out needs this loop to actually stop promptly on its own,
             // not "eventually, once the batch happens to finish".
             if self.is_stopping() {
+                break;
+            }
+            // Review P2 (task 1888): a release that asked for a pass after this list was read stops the queue here, so
+            // a released ghost create is never sent before a pass has seen it; the next successful tick runs the pass.
+            #[cfg(not(target_os = "macos"))]
+            if self.a_pass_is_owed() {
                 break;
             }
             // The list is read once per pass, and an upload that lands moves
@@ -8321,6 +8359,12 @@ pub struct ConflictDetected {
 pub struct SyncTickOutcome {
     pub conflicts: Vec<ConflictDetected>,
     pub applied_item_ids: Vec<String>,
+    /// Spec D11 (task 1888, review P1): the pull came back from the server: a snapshot, or the `/sync/ops` delta. A
+    /// tick whose `GET /sync/ops` failed (offline, a 5xx, a 401) still returns `Ok`, so `Ok` alone proves neither that
+    /// the server accepts this session's token nor that the rows the reconcile pass plans against are current; the
+    /// pass and the resume wait for a tick where this is true.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub reached_server: bool,
 }
 
 /// Re-snapshots that must fail in a row before a failed one no longer ends the tick (spec §6.3.2).
@@ -8447,6 +8491,7 @@ pub async fn sync_tick_outcome(
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: true,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -8464,6 +8509,7 @@ pub async fn sync_tick_outcome(
                     return Ok(SyncTickOutcome {
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
+                        reached_server: true,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e)?,
@@ -8480,9 +8526,11 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
+            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1).
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
+                reached_server: false,
             });
         }
     };
@@ -8523,6 +8571,7 @@ pub async fn sync_tick_outcome(
         return Ok(SyncTickOutcome {
             conflicts,
             applied_item_ids: dedupe(applied_item_ids),
+            reached_server: true,
         });
     }
 
@@ -8544,6 +8593,7 @@ pub async fn sync_tick_outcome(
     Ok(SyncTickOutcome {
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
+        reached_server: true,
     })
 }
 
@@ -15219,6 +15269,59 @@ mod tests {
             Some(8),
             "cursor preserved across 429"
         );
+    }
+
+    /// Spec D11 (task 1888, review P1): a tick reaches the server only when its pull came back. A `/sync/ops` that
+    /// fails is swallowed (the tick is still `Ok`), so the outcome says so, and the reconcile pass and the resume wait.
+    #[tokio::test]
+    async fn a_tick_reaches_the_server_only_when_its_pull_came_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = [3u8; 32];
+        let only = "eeee0000-0000-4000-8000-000000000001";
+        let db_path = dir.path().join("state.db");
+
+        // Cursor unset: the snapshot bootstrap came back.
+        let boot = serde_json::json!({ "seq_id": 4, "nodes": [ snap_node(&mk, only, "only.txt", None, false, 10) ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), boot)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "a snapshot bootstrap reached the server");
+
+        // Cursor set, the session refused: `/sync/ops` answers 401 and the tick is still Ok.
+        let refused = serde_json::json!({ "error": "unauthorized" });
+        let server = SyncMockServer::start(vec![("401 Unauthorized".into(), refused)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        assert_eq!(server.finish().len(), 1);
+        assert!(!tick.reached_server, "a refused pull did not reach the server");
+
+        // A server error: the same.
+        let failed = serde_json::json!({ "error": "unavailable" });
+        let server = SyncMockServer::start(vec![("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        assert!(!sync_tick_outcome(&bridge, dir.path()).await.unwrap().reached_server, "a 5xx pull");
+        server.finish();
+        let failed = serde_json::json!({ "error": "unavailable" });
+
+        // An empty delta came back (its freshness probe failing does not change that).
+        let empty = serde_json::json!({ "since": 4, "ops": [] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), empty), ("503 Service Unavailable".into(), failed)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back, empty");
+
+        // A delta with ops came back.
+        let ops = serde_json::json!({ "since": 4, "ops": [ {
+            "seq_id": 5, "op_type": "file_trash", "file_id": only, "payload": { "id": only }, "created_at": 20,
+        } ] });
+        let server = SyncMockServer::start(vec![("200 OK".into(), ops)]);
+        let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), mk);
+        let tick = sync_tick_outcome(&bridge, dir.path()).await.unwrap();
+        server.finish();
+        assert!(tick.reached_server, "the delta came back");
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(5), "and was applied");
     }
 
     #[tokio::test]
@@ -29339,6 +29442,8 @@ mod tests {
             dir: tempfile::TempDir,
             root: PathBuf,
             bridge: EngineBridge,
+            /// The ticket the bridge's queue reads, as the runner shares it.
+            resume: ResumeTicket,
         }
 
         impl Pc {
@@ -29346,8 +29451,20 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let root = dir.path().join("Beebeeb");
                 std::fs::create_dir_all(&root).unwrap();
-                let bridge = test_bridge_with_api(&dir.path().join("state.db"), "https://api.example".into(), KEY);
-                Self { dir, root, bridge }
+                let resume = ResumeTicket::default();
+                let bridge = test_bridge_with_api(&dir.path().join("state.db"), "https://api.example".into(), KEY)
+                    .with_resume(resume.clone());
+                Self { dir, root, bridge, resume }
+            }
+
+            /// A due change that needs no network (`PinTree`): it shows whether the queue sends.
+            fn due_pin(&self, op_id: &str) {
+                self.sql(&format!(
+                    "INSERT INTO operation_queue (op_id, kind, file_id, metadata_json, attempts, max_attempts, next_retry_at,
+                                                  created_at, updated_at)
+                     VALUES ('{op_id}', 'pin_tree', 'pin-{op_id}', '{{\"operation\":\"pin_tree\",\"pinned\":true}}', 0, 5, 0,
+                             100, 100)"
+                ));
             }
 
             fn sql(&self, sql: &str) {
@@ -29472,6 +29589,36 @@ mod tests {
             pc.tick(&resume, &mut reconciled).await;
             assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a second call with no new ask resumes nothing");
             assert_eq!(resume.done.load(SeqCst), 1);
+        }
+
+        /// Review P2 (task 1888): "Upload to my Beebeeb" releases a held ghost folder's create and asks for a pass. Until
+        /// a committed pass has served that ask, the queue sends nothing (at a tick or a send-phase wake: both go
+        /// through `process_due_operations`). The pass then sees the released create and folds the ghost into its twin,
+        /// so it is never sent; and a release resumes no `auth` op, because it is not a sign-in.
+        #[tokio::test]
+        async fn a_released_change_is_not_sent_before_a_pass_has_seen_it() {
+            let pc = Pc::new();
+            pc.ghost_with_twin();
+            pc.pause("op-g", "found_while_paused");
+            pc.due_pin("op-pin");
+            // This run's first pass already ran; then the person pressed Upload on the held create.
+            let mut reconciled = true;
+            pc.resume.pass_wanted.fetch_add(1, SeqCst);
+            assert_eq!(pc.bridge.db().release_found_while_paused(&["op-g".to_string()], 200).unwrap(), 1);
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert!(outcome.completed_op_ids.is_empty(), "nothing is sent while a release waits for a pass");
+            assert!(pc.has_op("op-pin") && pc.has_op("op-g"));
+
+            pc.tick(&pc.resume, &mut reconciled).await;
+            assert!(!pc.has_op("op-g") && !pc.has_row("g"), "the pass saw the released create: the ghost was remapped");
+            assert_eq!(pc.op_parent("op-f").as_deref(), Some("t"));
+            assert_eq!(pc.paused("op-f").as_deref(), Some("auth"), "a release resumes no auth op");
+            assert_eq!(pc.resume.pass_served.load(SeqCst), 1, "the release ask is served");
+            assert_eq!(pc.resume.done.load(SeqCst), 0, "and no sign-in ask was");
+
+            let outcome = pc.bridge.process_due_operations(&pc.root, 200).await.unwrap();
+            assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()], "after the pass the queue sends again");
         }
 
         /// I6: a pass that fails resumes nothing, serves no ask and records no pass for the run, so the next tick tries
