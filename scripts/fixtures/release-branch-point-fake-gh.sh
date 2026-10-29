@@ -2,7 +2,9 @@
 # Fake `gh` for scripts/test-release-branch-point.sh. Installed on PATH as `gh`.
 #
 #   gh api repos/<repo>/commits/<sha>/pulls
-#                                   -> $BB_FAKE_GH_DIR/pulls/<sha>.json (or `[]` when absent)
+#                                   -> $BB_FAKE_GH_DIR/pulls/<sha>.json (or `[]` when absent), or
+#                                      a 500-style failure (exit 1) when
+#                                      $BB_FAKE_GH_DIR/pull-errors/<sha> exists
 #   gh api repos/<repo>/git/matching-refs/tags/desktop-v
 #                                   -> $BB_FAKE_GH_DIR/tags.json
 #   gh api repos/<repo>/git/tags/<sha>
@@ -57,6 +59,10 @@ case "$endpoint" in
   repos/*/commits/*/pulls)
     sha="${endpoint%/pulls}"
     sha="${sha##*/}"
+    if [[ -f "$BB_FAKE_GH_DIR/pull-errors/$sha" ]]; then
+      echo "fake gh: HTTP 500 for the pulls of $sha" >&2
+      exit 1
+    fi
     if [[ -f "$BB_FAKE_GH_DIR/pulls/$sha.json" ]]; then
       cat "$BB_FAKE_GH_DIR/pulls/$sha.json"
     else

@@ -287,12 +287,15 @@ jobs:
 
   release-branch-point:
     # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
-    # was never reviewed (task 2281): the branch must start at a published desktop-v* tag commit
-    # or a commit on main, and every first-parent commit since then must be a pull request merged
+    # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
+    # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
+    # branch, and every first-parent commit since then must be a pull request merged
     # into that branch. This job tests the script offline against a real local git repository with
-    # a fake `gh`: a tag with a published release, a main start, an unreviewed start, a direct
-    # (non-PR) commit, a PR merged into another branch, a non-release ref, a tag with no release,
-    # a draft release, and a failing release lookup. The truth line is a count
+    # a fake `gh`: a tag on a PR merge into a release branch, a tag on a PR merge into main, a
+    # main start, an unreviewed start, a direct (non-PR) commit, a tag on a direct commit, a PR
+    # merged into another branch, a tag on a PR merge into a feature branch, a non-release ref, a
+    # tag with no release, a draft release, a failing release lookup and a failing pulls lookup.
+    # The truth line is a count
     # ("release-branch-point: N passed, 0 failed"), asserted on the run's own log by the same
     # count guard its self-test proves can go red.
     name: Release branch point (fake gh test)
