@@ -41,6 +41,7 @@ afterEach(() => {
 
 const showSignOutOutcome = loadComponent('MacSettings.tsx', 'showSignOutOutcome', { stripCode: signOutCopy.stripCode, holdSignOutWarning: accountSession.holdSignOutWarning })
 const locationSearch = loadComponent('MacApp.tsx', 'locationSearch', {})
+const snapshotReadFailure = loadComponent('MacApp.tsx', 'snapshotReadFailure', {})
 const focusById = (id: string) => { focused.push(id) }
 let focused: string[] = []
 const accountLine = loadComponent('MacApp.tsx', 'accountLine', { planShortLine: model.planShortLine })
@@ -69,6 +70,9 @@ const snapshot = (over: { account?: Record<string, unknown>; [k: string]: unknow
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
   storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
   ...over,
+  // Rust's sync part of the state (task 2179): the phase outside a Finder phase, and never a Finder phase itself, unless a
+  // test says otherwise (#139 review P3-13).
+  sync_phase: (over.sync_phase as string | undefined) ?? (String(over.phase ?? 'synced').startsWith('finder_') ? 'synced' : (over.phase as string | undefined) ?? 'synced'),
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
 const subscription = { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-11-14T00:00:00Z', quota_bytes: 1, used_bytes: 0 }
@@ -129,6 +133,8 @@ function openWindow(opts: WindowOpts = {}) {
       locationSearch: () => opts.search ?? '',
       focusById, accountLine,
       SNAPSHOT_REFRESH_MS: 5000,
+      SNAPSHOT_WATCHDOG_MS: 15_000,
+      snapshotReadFailure,
       ...opts.bindings,
     },
   })
@@ -164,6 +170,54 @@ const click = async (m: Mounted, text: string) => { await byLabel(m, text).props
 const title = (m: Mounted) => textOf(find(m, (el) => el.props.id === 'mw-title')[0]?.props.children).trim()
 const current = (m: Mounted) => find(m, (el) => el.props['aria-current'] === 'page').map(label)
 const menuStates = (m: Mounted) => m.calls.filter((c) => c.name === 'main_window_state').map((c) => c.args)
+
+describe('the window reads the state again after each outcome: the three refresh wirings (task 2179 item 8)', () => {
+  const reads = (m: Mounted) => m.calls.filter((c) => c.name === 'popover_snapshot').length
+  const propsOf = (m: Mounted, tab: string) => find(m, (el) => el.props['data-tab'] === tab)[0]?.props['data-props']
+
+  test('Home\'s onRefresh is the reader\'s refresh: a read at once, resolved when the result is applied', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    const before = reads(m)
+    expect(before).toBe(1)
+    const onRefresh = propsOf(m, 'home').onRefresh
+    await onRefresh()
+    expect(reads(m)).toBe(before + 1)
+  })
+
+  test('a sign-out flow\'s outcome reads the state at once (the flowOutcomes effect)', async () => {
+    const { m, request } = openWindow({ backend: { sign_out_count: () => { throw new Error('count failed') } } })
+    await settle(m)
+    await request({ to: 'settings', section: 'account' })
+    const before = reads(m)
+    await propsOf(m, 'account').flow.request() // the count fails: a "failed" outcome, reported
+    m.render()
+    await settle(m)
+    expect(m.toasts.length).toBeGreaterThan(0) // the outcome was shown
+    expect(reads(m)).toBe(before + 1)
+  })
+
+  test('"Try again" on a failed first read reads at once; clicks while it runs join it (item 7)', async () => {
+    let answer: () => unknown = () => { throw new Error('API unreachable') }
+    let release: () => void = () => {}
+    const { m } = openWindow({ snap: () => answer() })
+    await settle(m)
+    expect(textOf(expand(m.tree()))).toContain('Couldn’t load your account')
+    const before = reads(m)
+    answer = () => new Promise((resolve) => { release = () => resolve(snapshot()) })
+    const button = byLabel(m, 'Try again')
+    button.props.onClick()
+    button.props.onClick()
+    button.props.onClick()
+    await settle(m)
+    expect(reads(m)).toBe(before + 1)
+    release()
+    await settle(m)
+    m.render()
+    await settle(m)
+    expect(textOf(expand(m.tree()))).not.toContain('Couldn’t load your account')
+  })
+})
 
 describe('the window, signed in: Home and the sidebar (§7.6)', () => {
   test('Home in the sidebar, selected; the footer has the account and the gear; the toolbar names the section and is the drag region', async () => {
@@ -262,17 +316,17 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   for (const section of ['Security', 'Sync']) {
   test(`${section} is never shown without a session: when the account signs out under it, the window falls back to General (§7.8, review P2-6)`, async () => {
     let current: unknown = snapshot()
-    const { m } = openWindow({ snap: () => current })
-    const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    // The reader reads again SNAPSHOT_REFRESH_MS after its last read finished (task 2179 item 6); 5 ms here.
+    const { m } = openWindow({ snap: () => current, bindings: { SNAPSHOT_REFRESH_MS: 5 } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, section)
     expect(shown(m)).toEqual([section.toLowerCase()])
     // The session ends while the pane is open: the next read says signed out.
     current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
-    expect(ticks.length).toBeGreaterThan(0)
-    ticks.forEach((tickFn) => tickFn())
+    const reads = m.calls.filter((c) => c.name === 'popover_snapshot').length
+    for (let i = 0; i < 50 && m.calls.filter((c) => c.name === 'popover_snapshot').length === reads; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').length).toBeGreaterThan(reads)
     await settle(m)
     expect(shown(m)).toEqual(['general'])
     expect(title(m)).toBe('General')
@@ -285,9 +339,8 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   test('a session that ends under an open sheet leaves the section alone until the sheet is closed, then falls back to General', async () => {
     let current: unknown = snapshot()
     let modals = 0
-    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals } })
-    const ticks: Array<() => void> = []
-    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    // The window reads again a few ms after each read here (task 2179's reader, not an interval).
+    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals, SNAPSHOT_REFRESH_MS: 5 } })
     await settle(m)
     await click(m, 'Settings')
     await click(m, 'Sync')
@@ -296,8 +349,11 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
     m.render()
     await settle(m)
     current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
-    ticks.forEach((tickFn) => tickFn())
+    const reads = m.calls.filter((c) => c.name === 'popover_snapshot').length
+    for (let i = 0; i < 50 && m.calls.filter((c) => c.name === 'popover_snapshot').length === reads; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').length, 'a read after the session ended').toBeGreaterThan(reads)
     await settle(m)
+    expect(buttonsIn(navOf(m)[0]).map(label), 'the read that says signed out landed').toEqual(['Back to Sign in', 'General', 'About'])
     expect(shown(m), 'a sheet is open: the section stays').toEqual(['sync'])
     modals = 0
     m.render()
@@ -898,8 +954,10 @@ const useFinderSetupModule = () => ({
   },
 })
 
-function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}) {
+function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, onRefresh?: () => Promise<boolean>) {
   let refreshed = 0
+  // The props object itself, so a test can hand HomePane its next snapshot (what the window does on every applied read).
+  const props = { snapshot: snap, onRefresh: () => { refreshed += 1; return onRefresh ? onRefresh() : Promise.resolve(true) } }
   const m = mount('MacApp.tsx', 'HomePane', {
     expand: true,
     backend: {
@@ -909,7 +967,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       kept_unsent_folder: () => null,
       ...backend,
     } as any,
-    props: { snapshot: snap, onRefresh: () => { refreshed += 1 } },
+    props,
     hookModules: [useFinderSetupModule(), useKeptFoldersModule()],
     bindings: {
       ...desktopApi,
@@ -928,7 +986,7 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
     },
   })
   mounted.push(m)
-  return { m, refreshed: () => refreshed }
+  return { m, refreshed: () => refreshed, props }
 }
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const settleHome = async (m: Mounted) => { await m.flush(); await tick(); await m.flush(); await m.flush() }
@@ -1073,6 +1131,72 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     await settleHome(m)
     expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t unlock the vault'])
     expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
+  })
+
+  test('Unlock vault and Resume sync stay busy until the refreshed state shows, so a second click sends nothing (task 2179 item 2)', async () => {
+    const cases = [
+      { snap: snapshot({ phase: 'locked', account: { vault_unlocked: false } }), label: 'Unlock vault', busyLabel: 'Unlocking…', command: 'unlock_vault' },
+      { snap: snapshot({ phase: 'paused', pending_changes: 1 }), label: 'Resume sync', busyLabel: 'Resume sync', command: 'tray_resume_sync' },
+    ]
+    for (const c of cases) {
+      let applied: () => void = () => {}
+      const { m, refreshed } = openHome(c.snap, { vault_unlock_route: () => 'keychain', [c.command]: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
+      await settleHome(m)
+      const clicked = homeButton(m, c.label).props.onClick()
+      await settleHome(m)
+      m.render()
+      await settleHome(m)
+      // The command answered and the refresh is under way, its snapshot not applied yet: still busy.
+      expect(m.calls.filter((call) => call.name === c.command)).toHaveLength(1)
+      expect(refreshed()).toBe(1)
+      expect({ command: c.command, disabled: homeButton(m, c.busyLabel).props.disabled }).toEqual({ command: c.command, disabled: true })
+      applied()
+      await clicked
+      m.render()
+      await settleHome(m)
+      expect({ command: c.command, disabled: homeButton(m, c.label).props.disabled }).toEqual({ command: c.command, disabled: false })
+    }
+  })
+
+  test('a refresh that was not applied (failed, timed out, superseded) keeps the button busy until the next snapshot shows (#139 review P2-2)', async () => {
+    const cases = [
+      { snap: () => snapshot({ phase: 'locked', account: { vault_unlocked: false } }), label: 'Unlock vault', busyLabel: 'Unlocking…', command: 'unlock_vault' },
+      { snap: () => snapshot({ phase: 'paused', pending_changes: 1 }), label: 'Resume sync', busyLabel: 'Resume sync', command: 'tray_resume_sync' },
+    ]
+    for (const c of cases) {
+      const { m, props } = openHome(c.snap(), { vault_unlock_route: () => 'keychain', [c.command]: () => null }, () => Promise.resolve(false))
+      await settleHome(m)
+      await homeButton(m, c.label).props.onClick()
+      m.render()
+      await settleHome(m)
+      // The read after the action did not land: the card on screen is the one from before it, so no second click.
+      expect({ command: c.command, disabled: homeButton(m, c.busyLabel).props.disabled }).toEqual({ command: c.command, disabled: true })
+      expect(m.calls.filter((call) => call.name === c.command)).toHaveLength(1)
+      // The next snapshot the window applies is from after the action (only the current epoch's reads apply).
+      props.snapshot = c.snap()
+      m.render()
+      await settleHome(m)
+      expect({ command: c.command, disabled: homeButton(m, c.label).props.disabled }).toEqual({ command: c.command, disabled: false })
+    }
+  })
+
+  test('each button has its own busy state: Open in Finder finishing does not re-enable a Resume sync still under way (#139 review P3-5)', async () => {
+    let applied: () => void = () => {}
+    const { m } = openHome(snapshot({ phase: 'paused', pending_changes: 1 }), { tray_resume_sync: () => null, open_finder_location: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
+    await settleHome(m)
+    const resuming = homeButton(m, 'Resume sync').props.onClick()
+    await settleHome(m)
+    m.render()
+    expect(homeButton(m, 'Resume sync').props.disabled).toBe(true)
+    await homeButton(m, 'Open in Finder').props.onClick()
+    m.render()
+    await settleHome(m)
+    expect({ resume: homeButton(m, 'Resume sync').props.disabled, open: homeButton(m, 'Open in Finder').props.disabled }).toEqual({ resume: true, open: false })
+    applied()
+    await resuming
+    m.render()
+    await settleHome(m)
+    expect(homeButton(m, 'Resume sync').props.disabled).toBe(false)
   })
 
   // Task 1747 Part 2 (items 11 and 12): "Unlock vault" asks the Keychain's route AT THE CLICK. A key that appeared or vanished since

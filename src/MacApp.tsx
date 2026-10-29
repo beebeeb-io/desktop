@@ -87,8 +87,16 @@ import { setMainWindowTitle } from './windowTitle'
 import { openModalCount, subscribeOpenModals, useToast } from './windows/ui'
 import { connectNativeUpdateMenu, desktopUpdateCheck } from './windows/manualUpdateCheck'
 
-/** How often the window reads the account and sync state again while it is open. */
+/** How long after a read finishes the window reads the account and sync state again while it is open. */
 const SNAPSHOT_REFRESH_MS = 5000
+/** A snapshot read still unanswered after this long is given up (task 2179): it fails, and the next one starts. */
+const SNAPSHOT_WATCHDOG_MS = 15_000
+
+/** What the reader applies for a read that threw, rejected or never answered. */
+function snapshotReadFailure(cause: 'threw' | 'rejected' | 'timed out', error?: unknown): CommandResult<PopoverSnapshot> {
+  const reason = cause === 'timed out' ? 'Beebeeb didn’t answer in time.' : error instanceof Error ? error.message : String(error ?? cause)
+  return { ok: false, reason, unsupported: false }
+}
 
 function locationSearch(): string {
   try {
@@ -106,36 +114,53 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
 
 // ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
 
-function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => void }) {
+type BusyKey = 'open' | 'resume' | 'unlock'
+/** `running`: the command is under way. `waiting`: it answered, but the window has not yet shown a snapshot read after
+ * it (its own refresh failed, timed out or was superseded), so the card on screen may still be the one from before. */
+type BusyState = 'running' | 'waiting'
+
+function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<boolean> }) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
-  const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
+  // One busy state per button (#139 review P3-5): Open in Finder finishing never re-enables a Resume still under way.
+  const [busy, setBusy] = useState<Partial<Record<BusyKey, BusyState>>>({})
+  const mark = (key: BusyKey, state: BusyState | null) =>
+    setBusy((current) => {
+      const next = { ...current }
+      if (state) next[key] = state
+      else delete next[key]
+      return next
+    })
   // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
   // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
   const [noKey, setNoKey] = useState(false)
+  // Every snapshot the window applies after an action is from after it (only the current epoch's reads apply), so it
+  // ends the wait of a button whose own refresh did not land (#139 review P2-2).
+  useEffect(() => {
+    setBusy((current) => (Object.values(current).includes('waiting') ? Object.fromEntries(Object.entries(current).filter(([, state]) => state !== 'waiting')) : current))
+  }, [snapshot])
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
-      setBusy('unlock')
+      mark('unlock', 'running')
       setNoKey(false)
       // Task 1747 Part 2: the Keychain is asked at the click, not trusted from when the window opened. A Mac with no key anywhere
       // goes to Set up this Mac (the Keychain unlock would have nothing to read); a key that appeared since is honoured too.
       const routed = await vaultUnlockRoute()
       if (routed.ok && routed.value === 'recovery_phrase') {
-        setBusy(null)
+        mark('unlock', null)
         moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
         return
       }
       // A build without the command cannot tell; any other failure is the unlock failing, in its own words and surface.
       if (!routed.ok && !routed.unsupported) {
-        setBusy(null)
+        mark('unlock', null)
         showToast({ variant: 'error', title: 'Couldn’t unlock the vault', message: routed.reason })
         onRefresh()
         return
       }
       const result = await command<void>('unlock_vault')
-      setBusy(null)
       if (!result.ok) {
         if (!result.unsupported && isNoVaultKey(result.reason)) setNoKey(true)
         else {
@@ -146,7 +171,10 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           })
         }
       }
-      onRefresh()
+      // Busy until the window shows what the unlock did (task 2179; #139 review P2-2): a stale locked card never offers
+      // the button again, also when the refresh after it did not land.
+      const shown = await onRefresh()
+      mark('unlock', shown ? null : 'waiting')
     }
     return (
       <div className="mw-content">
@@ -158,8 +186,8 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
             <div className="mw-row-title">Your vault is locked</div>
             <div className="mw-row-hint">Sync is paused until you unlock it. Files already downloaded to this Mac stay where they are.</div>
           </div>
-          <Btn primary disabled={busy === 'unlock'} onClick={() => void unlock()}>
-            {busy === 'unlock' ? 'Unlocking…' : 'Unlock vault'}
+          <Btn primary disabled={busy.unlock !== undefined} onClick={() => void unlock()}>
+            {busy.unlock !== undefined ? 'Unlocking…' : 'Unlock vault'}
           </Btn>
         </div>
         {noKey ? (
@@ -180,16 +208,15 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const attention = kept.kept !== null || kept.keptUnsent !== null
 
   const openInFinder = async () => {
-    setBusy('open')
+    mark('open', 'running')
     const result = await command<void>('open_finder_location', { path: null })
-    setBusy(null)
+    mark('open', null)
     if (!result.ok) showToast(finderOpenFailedToast())
   }
 
   const resume = async () => {
-    setBusy('resume')
+    mark('resume', 'running')
     const result = await command<void>('tray_resume_sync')
-    setBusy(null)
     if (!result.ok) {
       showToast({
         variant: 'error',
@@ -197,13 +224,15 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
         message: result.unsupported ? commandUnavailableLabel('tray_resume_sync') : result.reason,
       })
     }
-    onRefresh()
+    // Busy until the window shows what the resume did (task 2179; #139 review P2-2).
+    const shown = await onRefresh()
+    mark('resume', shown ? null : 'waiting')
   }
 
   let statusAction = null
   if (status.action === 'resume') {
     statusAction = (
-      <Btn primary disabled={busy === 'resume'} onClick={() => void resume()}>
+      <Btn primary disabled={busy.resume !== undefined} onClick={() => void resume()}>
         Resume sync
       </Btn>
     )
@@ -214,7 +243,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   let finderControl = null
   if (row.kind === 'added') {
     finderControl = (
-      <Btn primary disabled={busy === 'open'} onClick={() => void openInFinder()}>
+      <Btn primary disabled={busy.open !== undefined} onClick={() => void openInFinder()}>
         Open in Finder
       </Btn>
     )
@@ -390,9 +419,9 @@ export default function MacApp() {
     setFocusId(focusAfterNav(previous, next, nav))
   }
 
-  // The account and sync state: on open, every few seconds, and after each sign-out outcome. The reader keeps one read
-  // in flight and never throws one away because the timer fired (a read can take 8 s, the tick is 5 s); an outcome's
-  // read wins over the reads started before it (follow-up to PR #134, auto-review thread 1).
+  // The account and sync state: on open, a few seconds after each read, and after each outcome. The reader keeps one
+  // read in flight and never throws one away because the timer fired; an outcome's read wins over the reads started
+  // before it (follow-up to PR #134, auto-review thread 1; task 2179).
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverSnapshot>> | null>(null)
   // Set when a finished sign-in asks for a fresh read; the first read that lands after that ends the settling.
   const awaitingSettle = useRef(false)
@@ -411,20 +440,16 @@ export default function MacApp() {
           setSnapshotFailed(true)
         }
       },
+      { failure: snapshotReadFailure, watchdogMs: SNAPSHOT_WATCHDOG_MS },
     )
   }
   const reader = readerRef.current
   useEffect(() => {
-    reader.resume()
-    reader.tick()
-    const id = window.setInterval(() => reader.tick(), SNAPSHOT_REFRESH_MS)
-    return () => {
-      window.clearInterval(id)
-      reader.stop()
-    }
+    reader.start(SNAPSHOT_REFRESH_MS)
+    return () => reader.stop()
   }, [reader])
   useEffect(() => {
-    if (flowOutcomes > 0) reader.refresh()
+    if (flowOutcomes > 0) void reader.refresh()
   }, [reader, flowOutcomes])
 
   // A sign-in that finished (the same account signed in again in place) must not draw the old "Sign in again" card
@@ -586,7 +611,7 @@ export default function MacApp() {
               kind="alert"
               surface="main-load"
               title={LOAD_FAILED_TITLE}
-              actions={<Btn onClick={() => reader.refresh()}>Try again</Btn>}
+              actions={<Btn onClick={() => void reader.retry()}>Try again</Btn>}
             />
           ) : (
             <div className="ms-loading" role="status">Loading…</div>

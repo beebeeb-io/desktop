@@ -231,6 +231,7 @@ const finder = {
 const config = { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'dark', local_cache_limit_bytes: 123 }
 const snapshot = (over: { account?: object; storage?: object | null; phase?: string } = {}) => ({
   phase: over.phase ?? 'synced',
+  sync_phase: over.phase ?? 'synced',
   generated_at: 1000,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...over.account },
   paused: false,

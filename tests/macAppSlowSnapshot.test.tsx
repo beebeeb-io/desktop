@@ -1,8 +1,9 @@
 /**
- * Follow-up to PR #134, auto-review thread 1: the Beebeeb window reads the account and sync state every 5 s, and
- * `popover_snapshot` can take up to 8 s (it awaits the storage fetch, popover_data.rs, which has an 8 s timeout and
- * fills no cache when it fails). A tick must never cancel the read in flight: while the API answers slower than the
- * tick, every result used to be thrown away and the window stayed on "Loading…".
+ * Follow-up to PR #134, auto-review thread 1: the Beebeeb window reads the account and sync state every 5 s, and a read
+ * can be slower than that. Before task 2179, `popover_snapshot` awaited the storage fetch (8 s timeout, no cache of a
+ * failure); since then it waits for it 1 s at most, but a read can still be slow. A tick must never cancel the read in
+ * flight: while the API answered slower than the tick, every result used to be thrown away and the window stayed on
+ * "Loading…".
  *
  * Mounted with the real `react-dom` on the minimal DOM (React's own effect cleanup is what cancelled the read; the
  * component harness does not run cleanups on a dependency change) and on bun's fake clock, so 20 s pass in an instant.
@@ -28,7 +29,7 @@ afterEach(() => {
 afterAll(() => dom.restore())
 
 const snapshot = {
-  phase: 'synced', generated_at: 1000, paused: false,
+  phase: 'synced', sync_phase: 'synced', generated_at: 1000, paused: false,
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false },
   engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: null },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
@@ -96,27 +97,33 @@ describe('a snapshot read slower than the 5 s tick', () => {
     jest.useFakeTimers()
     installBackend(1000)
     const { container, unmount } = await mountMacApp()
-    await pass(2000)
-    expect(container.textContent).toContain('Up to date')
-    await unmount()
+    try {
+      await pass(2000)
+      expect(container.textContent).toContain('Up to date')
+    } finally {
+      await unmount()
+    }
   })
 
   test('an 8 s read with 5 s ticks still lands: the window shows Home, and the ticks did not pile reads up', async () => {
     jest.useFakeTimers()
     const calls = installBackend(8000)
     const { container, unmount } = await mountMacApp()
-    expect(container.textContent).toContain('Loading…')
-    await pass(9000)
-    expect(container.textContent).not.toContain('Loading…')
-    expect(container.textContent).toContain('Up to date')
-    // The first read was never cancelled or doubled: the ticks at 5 s (while it was in flight) started nothing.
-    expect(calls.filter((name) => name === 'popover_snapshot')).toHaveLength(1)
-    await pass(11000)
-    // After it landed, the ticks read again, one at a time.
-    const reads = calls.filter((name) => name === 'popover_snapshot').length
-    expect(reads).toBeGreaterThanOrEqual(2)
-    expect(reads).toBeLessThanOrEqual(3)
-    expect(container.textContent).toContain('Up to date')
-    await unmount()
+    try {
+      expect(container.textContent).toContain('Loading…')
+      await pass(9000)
+      expect(container.textContent).not.toContain('Loading…')
+      expect(container.textContent).toContain('Up to date')
+      // The first read was never cancelled or doubled: the ticks at 5 s (while it was in flight) started nothing.
+      expect(calls.filter((name) => name === 'popover_snapshot')).toHaveLength(1)
+      await pass(11000)
+      // After it landed, the ticks read again, one at a time.
+      const reads = calls.filter((name) => name === 'popover_snapshot').length
+      expect(reads).toBeGreaterThanOrEqual(2)
+      expect(reads).toBeLessThanOrEqual(3)
+      expect(container.textContent).toContain('Up to date')
+    } finally {
+      await unmount()
+    }
   })
 })

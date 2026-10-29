@@ -176,6 +176,26 @@ macro_rules! session_command {
     }};
 }
 
+/// Work a command starts as a task of its own, which may outlive the command (the popover's storage fetch), is bound to
+/// the session when it is created: on Windows a lock cancels it and waits for what it holds to drop, and once the
+/// session is closed it never starts (#139 review P1; tests/windows_session_wiring.rs guards the callers).
+fn session_bound<T>(
+    work: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+{
+    #[cfg(target_os = "windows")]
+    {
+        let bound = SESSION_COMMANDS.bind(work);
+        async move { bound?.await }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        work
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn close_session_commands() -> Result<(), String> {
     let revoked = SESSION_COMMANDS.close();
@@ -308,6 +328,9 @@ pub struct AppState {
     /// The set-up step a password sign-in without a key left open, for the life of the process (review P2-3 on the Mac
     /// sign-in PR): see [`PendingSetup`].
     pending_setup: Mutex<Option<HeldSetup>>,
+    /// The account's storage summary for `popover_snapshot` (task 2179). Here, not on the popover's runtime, so
+    /// sign-out clears it with the rest of the account (#139 review P2-3).
+    pub(crate) popover_storage: Arc<Mutex<popover_data::StorageCache>>,
 }
 
 impl AppState {
@@ -353,6 +376,7 @@ impl Default for AppState {
             finder_setup: std::sync::OnceLock::new(),
             sign_out: sign_out::SignOutState::default(),
             pending_setup: Mutex::new(None),
+            popover_storage: Arc::new(Mutex::new(popover_data::StorageCache::default())),
         }
     }
 }
@@ -3372,6 +3396,9 @@ async fn clear_session_impl(
     // Drop the cached account profile so a subsequent `account_profile` IPC
     // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
     clear_cached_profile(state);
+    // And the storage summary (task 1887's rule: nothing of the account survives sign-out). The session is gone by
+    // now, so no new fetch can start with its token; one still running answers into nothing (#139 review P2-3).
+    popover_data::clear_storage(&state.popover_storage);
     // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
     // partial token can't linger (and is zeroized) past a logout.
     if let Ok(mut guard) = state.pending_2fa.lock() {
@@ -10201,15 +10228,18 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
 }
 
 /// Everything the menu-bar popover needs for its first frame, in one call (task 1683
-/// slice 2, spec section 9). The UI calls it when the popover is shown (the
-/// `popover-shown` event) and after its own actions; nothing polls it.
+/// slice 2, spec section 9). The popover calls it when it is shown (the `popover-shown`
+/// event) and after its own actions; the macOS main window reads it a few seconds after
+/// each read while it is open (slice 1).
 ///
 /// Reads, in this order: the session (locked / signed out / session ended), the live
 /// pause flag, the engine's last `engine-status` (real state, progress, last
 /// successful check, reason), the Finder install state (macOS only), the storage
 /// summary (cached for five minutes, refetched after an unlock, never when the vault
-/// is locked), and the state DB (queue, recent transfers, conflicts). File names are
-/// read only while the vault is unlocked, like `desktop_file_overview`.
+/// is locked; a refetch holds this call for `popover_data::STORAGE_WAIT` at most and
+/// a failed one is not tried again for `STORAGE_FAILURE_BACKOFF_SECS`, task 2179), and
+/// the state DB (queue, recent transfers, conflicts). File names are read only while
+/// the vault is unlocked, like `desktop_file_overview`.
 #[tauri::command]
 async fn popover_snapshot(
     state: State<'_, AppState>,
@@ -10247,22 +10277,27 @@ async fn popover_snapshot(
             (crate::surfaces::phase::FinderSetup::Ready, None)
         };
 
-        let storage = match token {
-            Some(token) if vault_unlocked => {
-                cached_storage(
-                    &runtime.storage,
-                    now,
-                    VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
-                    || async move { fetch_storage_usage(&runner::api_base_url(), &token).await },
-                )
-                .await
+        // The storage wait (at most `STORAGE_WAIT`) and the state DB read run side by side, not one after the other
+        // (#139 review P3-10).
+        let storage = async {
+            match token {
+                Some(token) if vault_unlocked => {
+                    cached_storage(
+                        &state.popover_storage,
+                        now,
+                        VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
+                        || session_bound(async move { fetch_storage_usage(&runner::api_base_url(), &token).await }),
+                    )
+                    .await
+                }
+                _ => None,
             }
-            _ => None,
         };
-
-        let board = runtime.transfers.active();
         let limit = activity_limit.unwrap_or(popover_data::DEFAULT_ACTIVITY_LIMIT);
-        let db_view = if vault_unlocked {
+        let db_view = async {
+            if !vault_unlocked {
+                return Ok(None);
+            }
             tokio::task::spawn_blocking(move || -> Result<_, String> {
                 let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
                     return Ok(None);
@@ -10270,10 +10305,12 @@ async fn popover_snapshot(
                 popover_data::gather_db_view(&db, limit, now).map(Some)
             })
             .await
-            .map_err(|e| format!("popover data task failed: {e}"))??
-        } else {
-            None
+            .map_err(|e| format!("popover data task failed: {e}"))?
         };
+        let (storage, db_view) = tokio::join!(storage, db_view);
+        let db_view = db_view?;
+        // The transfers as of now, after the wait (a file moving now is syncing, `assemble`).
+        let board = runtime.transfers.active();
         let popover_data::DbView {
             backlog,
             conflicts,
@@ -21165,12 +21202,19 @@ mod popover_wiring_tests {
         // that was put in memory while the sign-out ran; and a re-sign-in whose kept key the server no longer accepts
         // bumps when it ended a session in memory (spec §5.6).
         assert_eq!(source.matches("bump_vault_epoch();\n").count(), 6);
-        assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                    || async move { fetch_storage_usage"));
+        // The fetch is bound to the session (#139 review P1; tests/windows_session_wiring.rs pins the binding).
+        assert!(source.contains(
+            "VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                        || session_bound(async move { fetch_storage_usage"
+        ));
         // Spec 2026-10-06: the snapshot reads the reconciler's view and never probes the OS.
         let snapshot = {
             let at = source.find("async fn popover_snapshot(").unwrap();
             &source[at..at + source[at..].find("\n}\n").unwrap()]
         };
+        // #139 review: the summary comes from the account's cache on `AppState`, which sign-out clears (P2-3), and its
+        // wait runs beside the state DB read, not before it (P3-10).
+        assert!(snapshot.contains("cached_storage(\n                        &state.popover_storage,"));
+        assert!(snapshot.contains("let (storage, db_view) = tokio::join!(storage, db_view);"));
         assert!(snapshot.contains("state.finder_setup.get()"));
         assert!(
             !snapshot.contains("finder_location_state")
@@ -22284,6 +22328,35 @@ mod signout_teardown_tests {
             "an IPC listener that may still be serving could be handed a copy the purge just removed"
         );
         assert_outside_untouched(&root);
+    }
+
+    /// #139 review P2-3 (task 1887's rule, nothing of the account survives sign-out): the storage summary is gone after
+    /// a sign-out, so a used/quota figure of the account before is not kept in memory.
+    #[tokio::test]
+    async fn sign_out_clears_the_storage_summary() {
+        crate::state_paths::init_for_test();
+        let state = AppState::default();
+        let _acct = test_account(&state, "signout-storage-acct");
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
+        let seeded = crate::popover_data::cached_storage(&state.popover_storage, 1_000, 7, || async {
+            Ok(crate::popover_data::StorageUsage { used_bytes: 84, quota_bytes: 200 })
+        })
+        .await;
+        assert_eq!(seeded.map(|s| s.used_bytes), Some(84));
+        assert!(!state.popover_storage.lock().unwrap().is_empty());
+        set_auth_present(&state, false);
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(state.popover_storage.lock().unwrap().is_empty(), "{:?}", state.popover_storage.lock().unwrap());
     }
 
     /// Bug B: sign-out while already signed out (no auth flag, no in-memory

@@ -35,7 +35,8 @@ const LOCKED = 'Your vault is locked'
 
 const account = (unlocked: boolean) => ({ email: 'sam@example.eu', logged_in: true, vault_unlocked: unlocked, auth_expired: false })
 const snapshot = (unlocked: boolean) => ({
-  phase: unlocked ? 'synced' : 'locked', generated_at: 1000, paused: false, account: account(unlocked),
+  phase: unlocked ? 'synced' : 'locked', sync_phase: unlocked ? 'synced' : 'locked', generated_at: 1000, paused: false,
+  account: account(unlocked),
   engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: null },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
   storage: unlocked ? { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false } : null,

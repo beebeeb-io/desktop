@@ -54,6 +54,8 @@ const snapshot = (over = {}) => ({
   storage: { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false },
   storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [],
   ...over,
+  // Rust's sync part of the state (task 2179; #139 review P2-1): the phase outside a Finder phase, never a Finder phase.
+  sync_phase: over.sync_phase ?? (String(over.phase ?? 'synced').startsWith('finder_') ? 'synced' : over.phase ?? 'synced'),
   account: { email: 'sam@example.eu', logged_in: true, vault_unlocked: true, auth_expired: false, ...(over.account ?? {}) },
 })
 // Slice 5: Security, General's account preferences, Storage details, About's channel / update / speed test.
@@ -362,6 +364,9 @@ try {
           check(r.docScrollHeight <= r.innerHeight, `${label}: the document does not scroll`, `${r.docScrollHeight} vs ${r.innerHeight}`)
           for (const text of sc.has ?? []) check(r.text.includes(text), `${label}: shows "${text}"`)
           for (const text of sc.hasNot ?? []) check(!r.text.includes(text), `${label}: does not show "${text}"`)
+          // #139 review P2-1: a snapshot the contract refuses leaves the window on its load-failure card ("Couldn’t load your
+          // account") in every scenario, and the scenario's own words may not catch it. It must never show.
+          check(!r.text.includes('Couldn’t load your account') && !r.text.includes('unexpected shape'), `${label}: the snapshot was read (no load-failure card)`)
           if (sc.noSidebar) check(r.sidebarWidth === null, `${label}: no sidebar while signed out`)
           else check(r.sidebarWidth === 214, `${label}: the sidebar is 214 pt`, `${r.sidebarWidth}`)
           if (!sc.noSidebar) check(r.toolbarHeight === 52, `${label}: the toolbar is 52 pt`, `${r.toolbarHeight}`)
