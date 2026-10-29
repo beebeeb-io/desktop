@@ -1,119 +1,113 @@
-# Beebeeb Desktop 0.8.17 — Windows: the app stops re-checking files that have not changed
+# Beebeeb Desktop 0.8.18 - changes held since a sign-in expired are sent, and Windows sync starts again
 
-0.8.16 stopped the Windows app from reading its whole database for every file it scanned. It still checked every
-file in the sync folder on every pass, a few seconds apart, and its windows kept reading the database every few
-seconds, even while hidden. 0.8.17 fixes both. The scan now checks only files whose listing or record has
-changed, and the windows read only what they show, only while they are on screen. On the maintainer's PC
-processor use went from 86 % of one core to 25–30 %, and disk reads from about 28 MB to about 5 MB a second.
-This release changes nothing else.
+This release fixes two ways the desktop app stopped sending your changes.
+
+- **Windows:** a person with one account could be told the PC held another account's files, and sync never started.
+- **Windows and Linux:** after a sign-in expired, changes made in the meantime stayed on hold for good, even after you signed in again.
+
+0.8.15's notes promised the second fix for 0.8.16, and it did not ship in 0.8.16 or 0.8.17. It is in this release. Two older problems in the step after an upload are not fixed yet: see the known limitations.
 
 **Known limitations:**
-- The Windows scan still walks the whole sync folder on every pass. It no longer re-checks unchanged files, but
-  listing 37,000 files every few seconds is most of the processor and disk use that is left (tasks 2240 to
-  2242).
-- An edit in a file from before 0.8.13 is still kept on this PC and not sent (task 2191).
-- 0.8.15's notes said 0.8.16 would resume changes held since a sign-in expired, and would repair folders this
-  PC created but never managed to create on the server. Neither is in 0.8.16 or 0.8.17. Both move to a later
-  release, and the app keeps counting those changes as not in sync until then.
+- **A read-only file is not marked as synced after it uploads.**
+  - **What you see:** its upload reaches Beebeeb, but on the PC the file is not shown as synced, and the app keeps the private copy it made for the upload.
+  - **Why:** the app tries to open the file for writing to mark it, and Windows refuses because the file is read-only.
+  - **Your data:** nothing is lost. A fix is planned for 0.8.19.
+- **An edit made while a change was waiting can stay unsent.**
+  - **What you see:** you change a file after its upload was queued, but before it was sent. The queued version reaches Beebeeb, and your newer edit stays on the PC and is not sent. The app still says "Up to date".
+  - **Your data:** your newer edit is safe on the PC.
+  - **How often:** on the maintainer's PC this happened to 4 of 2,984 changes.
+  - **Fix:** planned for 0.8.19. Contact support@beebeeb.io if you think you are affected.
+- **A lost reply can make a new folder wait for a restart.** If the reply to creating a new folder is lost after the server made it, the changes inside that folder wait until the app is opened again.
+- **Some held changes need support.** A change held because an item with the same name is already in Beebeeb stays held. The app says so; contact support to sort it out.
+- **macOS:** this release does not change how macOS handles either problem. macOS starts sync differently and did not have the first one.
 
 ### What's New
 
-- Nothing new to use. This release only makes the Windows app do less work.
+- **[Windows] Settings › Sync asks before sending changes it could not tie to your account.**
+  - **The card:** it says what is waiting, for example "Waiting for your decision: 11 new folders and 145 new files." and "Beebeeb couldn't confirm these came from your account on this PC."
+  - **Upload to my Beebeeb:** sends exactly the changes the card counted.
+  - **Keep on this PC only:** moves those items out of the Beebeeb folder into a dated folder next to it, called "Beebeeb - not uploaded". It only renames, never overwrites, and deletes nothing. When another cloud service syncs that folder too, the button reads **Keep out of Beebeeb** and the question names that service.
+- **[Windows, Linux] The app says why a change is waiting.**
+  - A change whose folder is not in Beebeeb yet reads "waiting for its folder to reach Beebeeb".
+  - A file that is still uploading reads "Not uploaded yet", never "Synced to".
 
 ### Bug Fixes / Hardening
 
-- **[Windows] The scan skips a file that has not changed (desktop #167, task 2229).**
-  - **Before:** every pass classified all 37,381 files on the maintainer's PC. That took about five file-handle
-    opens each, at 40 µs per open, for 10 to 13 seconds of one or two cores per pass.
-  - **Now:**
-    - A file that needs nothing is remembered with two stamps: its listing (size, modification time and, on
-      Windows, its attributes) and a hash of its database record.
-    - Later passes skip it while both stamps match, and classify it again when either changes.
-    - Files of unknown content are held the same way until their bytes or their record change, and edits
-      with no known base until their record holds one.
-    - Every 10 minutes every file is classified again. That covers bytes rewritten with the same size and
-      modification time.
-    - The walk reads each file's size and time from the directory listing instead of opening it.
-  - **Device:** on that PC, after the first pass, each pass classified 3 files and skipped 37,537.
-  - **Verified by:**
-    - `regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_row_changes`
-    - `regression_2229_a_file_passed_over_for_now_is_asked_about_every_pass`
-    - `regression_2229_a_file_of_unknown_content_is_skipped_until_its_bytes_or_its_row_change`
-    - `regression_2229_an_edit_with_no_known_base_is_skipped_until_its_row_records_one`
-    - `regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent`
-    - `a_row_stamp_changes_with_any_write_to_the_row`
+- **[Windows] Sync refused to start for a person with one account (desktop #176, #178, task 2267).**
+  - **Scenario:**
+    1. You signed in to the Windows app with your only account.
+    2. It said "This PC still holds local files of another Beebeeb account, so sync didn't start. Sign out, then sign in again."
+    3. Signing out was refused because changes were waiting, so you were stuck.
 
-    Each test was seen to fail when the behaviour it checks was removed.
-- **The sync folder's cached file hash is not reused for a rewrite that keeps the same size and restores the
-  modification time (task 2232).**
-  - The cache key now includes the file's change time and identity, so such a rewrite is hashed again and its
-    edit is sent.
-  - Verified by `task_2232_a_cached_hash_is_not_reused_for_an_equal_length_rewrite_that_restores_the_mtime`.
-- **[Windows] The windows read the database only for what they show, and only while they are on screen
-  (desktop #168, task 2243).**
-  - **Before:** each read opened the database afresh, and three of them loaded whole sets of records to show a
-    count or a short list:
-    - the status read loaded 5,969 records to count them;
-    - the tray's recent files read all 43,000 records every 5 seconds;
-    - the hold summary looked up every held change.
+    The cause: a session saved before the app kept its account's email left the files on the PC with no recorded owner, and every start treated them as another account's.
+  - **Now:** the app reads your account's file list once and checks every local item the server knows. An item counts as yours when its encrypted name opens with your session's key.
+    - The files are adopted only when every checked item is accounted for. Otherwise sync stays off, nothing is uploaded or deleted, and the app says to contact support.
+    - A change the app cannot tie to a proven item through a real folder link waits for your decision (see What's New). A matching path alone never sends a file's content.
+  - **Evidence, on the maintainer's Windows 11 PC with the real account:**
+    - The installed 0.8.17 refused to start sync, which is the bug.
+    - The fix checked 40,534 of 40,534 items, connected 6 seconds after launch, and held 156 changes for a decision.
+    - Two copies of the data with foreign items mixed in were refused (8 and 6 items the account could not place). Nothing was sent, and the database was restored byte for byte after each.
+    - The card showed "11 new folders and 145 new files". Upload released exactly those, and Keep moved an item into the dated folder.
+  - **Tests:** 48 automated tests for the ownership check, 26 for holding and releasing changes and for Keep, and 45 for the card. Each new test was seen to fail first.
+- **[Windows, Linux] Changes held since a sign-in expired are sent, into the right folders (desktop #180, tasks 1888, 2226).**
+  - **Scenario:**
+    1. The server stopped accepting the app's sign-in (on the maintainer's PC, on 4 October). The app held the changes it had queued until you signed in again, among them the folders it had just made on the PC.
+    2. On Windows and Linux, nothing ever resumed changes held that way. Only macOS did.
+    3. Meanwhile, the same folders reached Beebeeb another way. The PC now knew each of them twice: its own held copy and the copy in Beebeeb.
+    4. New files you added to those folders were queued under the held copy, which Beebeeb had never seen. Each upload was refused with "not found", retried for about 5 hours, then stopped: "stopped after repeated errors" in Settings, "Sync error" in the tray.
+    5. Empty backup folders made for a device with no name were held the same way.
 
-    The tray, the main window and the first-run window stay loaded while hidden, so these reads ran almost all
-    the time. Every window also read the full status once a second to notice a sign-out.
-  - **Now:**
-    - The counts come from an index.
-    - The tray's recent list reads only the newest records.
-    - The hold summary reads one index.
-    - The once-a-second sign-out check reads no file at all.
-    - Every other poll in the Windows app pauses while its window is hidden, and reads at once when the window
-      is shown again.
-  - **Cold-start cost** on a copy of the maintainer's database (43,146 records, a fresh connection per read):
-    one round of these reads went from 7,172 page reads to 99, not counting the cost of opening it. The
-    sign-out check no longer opens it at all.
-  - **Verified by:**
-    - `task_2243_sync_status_counts_without_reading_the_rows`
-    - `task_2243_the_tray_recent_list_reads_only_the_newest_rows`
-    - `task_2243_the_hold_summary_reads_an_index_not_the_held_operations`
-    - `task_2243_the_session_poll_reads_no_file`
-    - 24 frontend tests: `tests/visiblePoll.test.ts` and the session poll in `tests/accountSession.test.ts`
+    On the maintainer's PC this added up to 2,984 changes not sent: 2,924 held since 4 October and 60 stopped. Settings said "2,924 changes from 4 Oct are on hold. An update will repair them."
+  - **Now:** when the app starts or you sign in, it runs a reconcile pass before it sends anything, at the first moment it has heard back from the server.
+    1. A folder that never reached Beebeeb, with exactly one folder of the same name in the same place in Beebeeb, is merged into that folder. Everything inside it moves along.
+    2. A folder with no copy in Beebeeb is created.
+    3. The empty backup folders are removed, deepest first, and only when empty.
+    4. A change that gave up only because its folder was missing gets its retries back.
+    5. Anything ambiguous is held, never guessed. Examples: two folders with the same name that differ only in case, a file that meets a file of the same name, or a folder whose two parent records disagree.
+    6. The held changes resume only if their names open with your current key. If your key was replaced, they stay held and are never sent under the old one.
 
-    Each was seen to fail first.
+    The pass works in batches of 256 folders. A failure undoes only its own batch, and the next start finishes the job.
+  - **A change waits for its folder:** a change inside a folder that is not in Beebeeb yet is not sent, and spends no retries, until that folder exists.
+  - **Evidence, on the maintainer's Windows 11 PC with the real account, release build of this change:**
+
+    | | Before | After |
+    |---|---|---|
+    | Home: state | Not in sync | Up to date |
+    | Not sent | 2,984 | 0 |
+    | Changes that had given up | 60 | 0 |
+    | Folders in Beebeeb | 2,837 | 2,842 (the 5 new folders) |
+    | Duplicate folders in Beebeeb | 0 | 0 |
+
+    - **The pass:** it ran 10 seconds after launch. It merged 2,828 folders into their copies in Beebeeb, created 5, removed 6 empty backup folders, gave 54 changes their retries back and held 0. The 150 held changes then resumed under the current key. The queue was empty about 2 minutes later.
+    - **Downloads still work:** a file inside a merged folder that was only in the cloud downloaded when opened.
+    - **Prediction:** a dry run of the same code on a read-only copy of that database predicted every count of the pass exactly, as did the design's analysis of 26 and 28 October.
+    - **Speed:** on that copy, the longest batch took 343 ms. Three new database indexes make this possible; without them a batch took 5 to 6 seconds.
+  - **Tests:** 87 new automated tests. Each was seen to fail first. They include:
+    - a merge leaves nothing pointing at the old folder;
+    - a failure halfway undoes only its own batch, and a second run completes;
+    - nothing is sent under a replaced key, including changes given their retries back;
+    - a folder with no parent record is held, never created at the top level;
+    - an upload into a folder that is not in Beebeeb yet waits without using its retries;
+    - an older upload of a file still lands before a newer one;
+    - the pass runs only after the server has answered.
 
 ### Verification
 
-- Test suite (Linux, release/0.8.17 at `aab7ab6`):
-  - `cargo test` lib reported `test result: ok. 1701 passed; 0 failed; 7 ignored`, 11 more than 0.8.16: the
-    tests named above. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0
-    failed.
-  - `bun test` 1237 pass / 0 fail (0.8.16: 1213), `tsc --noEmit` 0 errors, `eslint` clean.
-- Test suite (native Windows, a clean clone at `aab7ab6`):
+- Test suite (Linux, at `4a4ac7c`; the release carries its code unchanged, these notes aside):
+  - `cargo test --locked` lib reported `test result: ok. 1861 passed; 0 failed; 8 ignored`. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
+  - `bun test` 1290 pass / 0 fail, `tsc --noEmit` 0 errors.
+- Test suite (native Windows, a clean clone at `4a4ac7c`, rustc 1.98 MSVC):
   - `cargo check --locked --all-targets` exit 0.
-  - `cargo test --locked` lib reported `test result: ok. 1503 passed; 0 failed; 6 ignored`. `keychain` 31,
-    `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
-- Test suite (macOS, at `aab7ab6`):
-  - `cargo test --locked` lib reported `test result: ok. 2020 passed; 0 failed; 9 ignored`. `keychain` 31,
-    `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
-  - `bun test` 1237 pass / 0 fail.
-- Real hardware smoke test on the maintainer's Windows 11 PC, the one with the 43,000-record database.
-  - **Builds:** local release builds of main with these two changes, unsigned, run in place against the real
-    sync folder and state on 2026-10-27. Main carries other changes that this release does not, so the release
-    build itself is checked again on that PC once 0.8.17 is installed.
-  - **Scan (desktop #167):** processor 86 % of one core in 0.8.16, then 24 to 31 % in three 30-second samples.
-  - **Windows (desktop #168):** measured back to back with the main window shown, then closed to the tray.
-    - Disk reads: 25.3 to 26.1 MB a second without #168, 5.0 to 5.6 MB a second with it.
-    - Reads in a quiet second, the median: 3,300 to 3,356 without #168, 15 to 42 with it.
-    - Processor: 24.6 to 29.7 % of one core.
-    - What remains is the scan's walk (first known limitation above).
-- The macOS sign-out device checks that 0.8.12 shipped without were waived again for this release, by the
-  maintainer on 2026-10-27:
-  - to the Windows session: "Waive for 0.8.17";
-  - to the macOS session, after first typing "waive for 0.8.16": "Yes, waive for 0.8.17", then "17".
-
-  The blocker stays listed on main for later releases.
+  - `cargo test --locked` lib reported `test result: ok. 1670 passed; 0 failed; 7 ignored`. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed. 1,712 tests run in total.
+- Test suite (macOS): the macOS release script runs it before the macOS build is signed. Its count is not in these notes.
+- Continuous integration on the change: 6 of 6 checks passed (Linux tests, Windows and macOS builds, frontend tests, the macOS release script check).
+- Real hardware: the maintainer's Windows 11 PC, real account and sync folder, release builds of these changes run in place before release. The two device runs are in the fixes above.
+- The macOS sign-out device checks that 0.8.12 shipped without were waived for this release by the maintainer on 2026-10-29: "Waive for 0.8.18". The blocker stays listed on main for later releases.
 - Not verified:
-  - sending an edit in a file from before 0.8.13 (task 2191);
-  - the 0.8.17 build itself on the maintainer's PC (it runs after install).
+  - the 0.8.18 build itself on the maintainer's PC (it runs after install);
+  - Linux on real hardware (the Linux test suite above ran; there was no device run);
+  - sending an edit in a file from before 0.8.13 (task 2191).
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a
-fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
