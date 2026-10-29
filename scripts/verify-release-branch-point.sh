@@ -10,7 +10,12 @@
 #   (b) that starting point -- the first first-parent commit that is not such a merge -- is the
 #       commit of a `desktop-v*` tag with a PUBLISHED GitHub release, or a commit on main.
 #       A tag alone is not trusted: pushing a tag is not reviewed, so only a release created
-#       through the release workflow counts. A 404 / draft / failed lookup is not published.
+#       through the release workflow counts, AND the tag's commit must itself be reviewed: the
+#       merge commit of a pull request merged into main or into a `release/*` branch (same
+#       `gh api` lookup as (a), with those bases). Without that second condition anyone with
+#       write access could tag an unreviewed commit and publish a release on it; a tag ruleset
+#       cannot prevent that (GitHub refuses the Actions app as a bypass actor, HTTP 422).
+#       A 404 / draft / failed lookup is not published.
 #
 # main is protected by pull requests, so a dispatch from main skips this check: release.yml's
 # `verify-branch-point` job only runs for refs/heads/release/*.
@@ -53,17 +58,38 @@ git rev-parse --verify --quiet "$HEAD_SHA^{commit}" >/dev/null || fail "commit '
 git rev-parse --verify --quiet "$MAIN_REF^{commit}" >/dev/null ||
   fail "main ref '$MAIN_REF' is not in this checkout; fetch main before running this check"
 
-# True when <sha> is a merge commit of a pull request merged into $BRANCH (its merge commit).
+# Set to the base ref of the pull request that matched, when is_pr_merge returns 0.
+IS_PR_MERGE_BASE=""
+
+# True when <sha> is the merge commit of a pull request merged into one of the allowed bases.
+# Each base is an exact ref ("release/0.8.20") or a prefix pattern ("release/*").
 is_pr_merge() {
-  local sha="$1" pulls count
+  local sha="$1" pulls bases base allowed prefix
+  shift
+  IS_PR_MERGE_BASE=""
   if ! pulls="$(gh api "repos/$REPO/commits/$sha/pulls" --paginate)"; then
     fail "gh api repos/$REPO/commits/$sha/pulls failed; refusing to guess whether $sha is a merged pull request"
   fi
-  if ! count="$(printf '%s\n' "$pulls" | jq -s --arg branch "$BRANCH" --arg sha "$sha" \
-    '[.[][]? | select(.merged_at != null and .base.ref == $branch and .merge_commit_sha == $sha)] | length')"; then
+  if ! bases="$(printf '%s\n' "$pulls" | jq -s -r --arg sha "$sha" \
+    '.[][]? | select(.merged_at != null and .merge_commit_sha == $sha) | .base.ref // empty')"; then
     fail "could not read the pull requests GitHub returned for $sha"
   fi
-  [[ "$count" -gt 0 ]]
+  while IFS= read -r base; do
+    [[ -n "$base" ]] || continue
+    for allowed in "$@"; do
+      if [[ "$allowed" == *'*' ]]; then
+        prefix="${allowed%\*}"
+        if [[ "$base" == "$prefix"* ]]; then
+          IS_PR_MERGE_BASE="$base"
+          return 0
+        fi
+      elif [[ "$base" == "$allowed" ]]; then
+        IS_PR_MERGE_BASE="$base"
+        return 0
+      fi
+    done
+  done <<<"$bases"
+  return 1
 }
 
 # Reads the GitHub release for tag <tag> into RELEASE_STATUS and RELEASE_BODY.
@@ -133,7 +159,7 @@ start_is_merge=0
 merge_count=0
 while read -r sha _ p2 _rest; do
   [[ -n "${sha:-}" ]] || continue
-  if [[ -n "${p2:-}" ]] && is_pr_merge "$sha"; then
+  if [[ -n "${p2:-}" ]] && is_pr_merge "$sha" "$BRANCH"; then
     merge_count=$((merge_count + 1))
     continue
   fi
@@ -157,8 +183,13 @@ if [[ -n "$tag_line" ]]; then
 fi
 
 if [[ -n "$tag_ref" ]]; then
-  note "OK: $BRANCH starts at $start, the commit of tag ${tag_ref#refs/tags/} (GitHub release published $tag_published_at: $tag_url); $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
-  exit 0
+  tag_name="${tag_ref#refs/tags/}"
+  # A published release is not enough: the tagged commit must be reviewed too.
+  if is_pr_merge "$start" main 'release/*'; then
+    note "OK: $BRANCH starts at $start, the commit of tag $tag_name (GitHub release published $tag_published_at: $tag_url), which is the merge commit of a pull request merged into $IS_PR_MERGE_BASE; $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
+    exit 0
+  fi
+  printf 'verify-release-branch-point: the tag does not count: %s at %s is not the merge commit of a pull request merged into main or a release/* branch\n' "$tag_name" "$start" >&2
 fi
 
 if git merge-base --is-ancestor "$start" "$MAIN_REF" 2>/dev/null; then
@@ -172,4 +203,4 @@ else
   pr_reason="it is not a merge commit of a pull request merged into '$BRANCH'"
 fi
 
-fail "release branch '$BRANCH' is refused: commit $start ('$subject') is neither the commit of a published desktop-v* tag nor a commit on main ($MAIN_REF), and $pr_reason. Every commit from the dispatched head back to the starting point must have arrived through a pull request merged into '$BRANCH', and the starting point must be a reviewed commit."
+fail "release branch '$BRANCH' is refused: commit $start ('$subject') is neither the reviewed commit of a published desktop-v* tag nor a commit on main ($MAIN_REF), and $pr_reason. Every commit from the dispatched head back to the starting point must have arrived through a pull request merged into '$BRANCH', and the starting point must be a commit on main or the commit of a published desktop-v* tag that is itself the merge commit of a pull request merged into main or a release/* branch."

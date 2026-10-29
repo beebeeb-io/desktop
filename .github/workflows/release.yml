@@ -175,9 +175,10 @@ jobs:
     # branch's STARTING commit (creation is not a pull request, and required checks do not run on
     # create), so an admin token could create release/x.y.z at an unreviewed commit and dispatch
     # this workflow to sign it. Refuse that here, before `build` gets the `desktop-release`
-    # environment and an Azure signing token: the branch must have started at a published
-    # desktop-v* tag commit or a commit on main, and every first-parent commit since then must
-    # have arrived through a pull request merged into this same branch. A dispatch from main
+    # environment and an Azure signing token: the branch must have started at a commit on main or
+    # at the commit of a published desktop-v* tag whose commit is itself a pull request merge into
+    # main or a release/* branch, and every first-parent commit since then must have arrived
+    # through a pull request merged into this same branch. A dispatch from main
     # skips this job, because main is protected by pull requests. No `environment:` here, so the
     # job never receives an Azure token.
     if: >-
