@@ -517,14 +517,19 @@ pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
 }
 
 /// Whether a custody write was refused because this deployment has no custody:
-/// the shared-folders feature gate answers `501 {"error":"shared_folders_v1"}`
-/// (server `feature_gate::require_shared_folders_enabled`) and a mount without
-/// the route answers 405. That is a state, not a failed write to retry.
+/// a mount without the route answers 405, and the shared-folders feature gate
+/// answers `501 {"error":"shared_folders_v1"}` (server
+/// `feature_gate::require_shared_folders_enabled`). That is a state, not a
+/// failed write to retry. The 501 counts only when it names that gate: any
+/// other 501 is a server failure the caller must see (task 2276 P3-D).
 pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
-    matches!(crate::engine_bridge::error_http_status(error), Some(405 | 501))
-        || ["HTTP 405 ", "HTTP 501 "]
-            .iter()
-            .any(|prefix| error.to_string().starts_with(prefix))
+    let text = error.to_string();
+    let missing_route =
+        matches!(crate::engine_bridge::error_http_status(error), Some(405)) || text.starts_with("HTTP 405 ");
+    let feature_gate = (matches!(crate::engine_bridge::error_http_status(error), Some(501))
+        || text.starts_with("HTTP 501 "))
+        && text.contains("shared_folders_v1");
+    missing_route || feature_gate
 }
 
 pub struct ApiClient {
