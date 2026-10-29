@@ -251,6 +251,14 @@ pub(crate) fn hostname_or_unknown() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Spec D9 (tasks 1888, 2226): this machine's name, or `None` when the OS will not give one that is valid Unicode. The
+/// backup mirror and the backup source key use this: with `None` they make nothing, so a lossy name never starts a
+/// second `Backups/<device>` folder. [`hostname_or_unknown`] stays for the device row's display name and the lock file.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn device_name() -> Option<String> {
+    hostname::get().ok().and_then(|s| s.into_string().ok())
+}
+
 /// The desktop crate version, surfaced on the device row as `bb_version`.
 fn bb_version() -> &'static str {
     env!("CARGO_PKG_VERSION")

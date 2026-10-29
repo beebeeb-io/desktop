@@ -1058,11 +1058,35 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// Spec D5: whether `dir` holds a file anywhere under it. A missing directory holds none; anything that is not a
+/// directory (a file, a link, a reparse point) counts as a file, and a directory that cannot be read counts as holding
+/// one, so the pass never drops what it could not look at. Links are never followed.
+pub(crate) fn tree_holds_a_file(dir: &Path) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return true };
+        match std::fs::symlink_metadata(entry.path()) {
+            Ok(meta) if meta.file_type().is_dir() => {
+                if tree_holds_a_file(&entry.path()) {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// Tasks 1888 + 2226 (spec §3): the rows and ops the reconcile pass plans over, read in one transaction. Rows in rowid
 /// order, so folders at the same depth are decided in the order they were written; ops in the queue's order.
 fn reconcile_plan_conn(
     conn: &Connection,
     opts: &crate::held_queue::Options,
+    disk_has_file: &dyn Fn(&str) -> bool,
 ) -> Result<(Vec<crate::held_queue::Unit>, crate::held_queue::Counts)> {
     use crate::held_queue::{Op, Row};
     let rows = conn
@@ -1109,7 +1133,7 @@ fn reconcile_plan_conn(
             })
         })?
         .collect::<Result<Vec<_>>>()?;
-    Ok(crate::held_queue::plan(&rows, &ops, opts, &|path| Path::new(path).exists()))
+    Ok(crate::held_queue::plan(&rows, &ops, opts, &|path| Path::new(path).exists(), disk_has_file))
 }
 
 /// Spec D8: due again now with a fresh retry budget. Never touches `created_at` or `rowid` (the queue's order), nor
@@ -1173,8 +1197,15 @@ fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, 
             )?;
         }
         Unit::Rearm { op_id } => rearm_operation_conn(conn, op_id, now)?,
-        Unit::ResolveParent { .. } | Unit::DropScaffold { .. } => {
-            // Tasks 2 and 3 apply these; the planner does not make them before then.
+        Unit::ResolveParent { .. } => {
+            // Task 3 (D6) applies this; the planner does not make it before then.
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("reconcile: unit not applied yet".into()),
+            ));
+        }
+        Unit::DropScaffold { .. } => {
+            // Task 2 (D5) applies this; the planner does not make it before then.
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
                 Some("reconcile: unit not applied yet".into()),
@@ -7356,8 +7387,14 @@ impl StateDb {
     /// plan in transactions of at most [`RECONCILE_UNITS_PER_TX`] whole units, re-planning after each, until the plan
     /// has no unit left or a round applied nothing. Returns the first round's counts: the plan the dry run shows.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn reconcile_held_queue(&self, opts: &crate::held_queue::Options, now: i64) -> Result<crate::held_queue::Counts> {
-        self.reconcile_in_batches(opts, now, RECONCILE_UNITS_PER_TX, &mut |_, _| {})
+    /// `disk_has_file` says whether a sync-root-relative directory holds any file (D5); see [`tree_holds_a_file`].
+    pub fn reconcile_held_queue(
+        &self,
+        opts: &crate::held_queue::Options,
+        now: i64,
+        disk_has_file: &dyn Fn(&str) -> bool,
+    ) -> Result<crate::held_queue::Counts> {
+        self.reconcile_in_batches(opts, now, RECONCILE_UNITS_PER_TX, disk_has_file, &mut |_, _| {})
     }
 
     /// The pass with its batch size, and `between` called after each committed batch (its 1-based number) while no
@@ -7367,6 +7404,7 @@ impl StateDb {
         opts: &crate::held_queue::Options,
         now: i64,
         per_tx: usize,
+        disk_has_file: &dyn Fn(&str) -> bool,
         between: &mut dyn FnMut(&StateDb, usize),
     ) -> Result<crate::held_queue::Counts> {
         let per_tx = per_tx.max(1);
@@ -7376,7 +7414,7 @@ impl StateDb {
             let applied = {
                 let mut conn = self.0.lock().expect("state_db mutex poisoned");
                 let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let (units, counts) = reconcile_plan_conn(&tx, opts)?;
+                let (units, counts) = reconcile_plan_conn(&tx, opts, disk_has_file)?;
                 let rounds_allowed = first.get_or_insert((units.len(), counts)).0 / per_tx + 2;
                 // Every unit removes its own cause, so the plan shrinks each round; a plan that does not is a bug, and
                 // the pass stops rather than loop.
@@ -7404,10 +7442,14 @@ impl StateDb {
 
     /// Spec D14: the plan's counts, from one read transaction; writes nothing.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn reconcile_dry_run(&self, opts: &crate::held_queue::Options) -> Result<crate::held_queue::Counts> {
+    pub fn reconcile_dry_run(
+        &self,
+        opts: &crate::held_queue::Options,
+        disk_has_file: &dyn Fn(&str) -> bool,
+    ) -> Result<crate::held_queue::Counts> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
-        let (_, counts) = reconcile_plan_conn(&tx, opts)?;
+        let (_, counts) = reconcile_plan_conn(&tx, opts, disk_has_file)?;
         tx.rollback()?;
         Ok(counts)
     }
@@ -15469,6 +15511,22 @@ mod reconcile_tests {
         Options { device_segment: Some("PC-1".to_string()), case_insensitive: true }
     }
 
+    /// Every directory holds a file: the pass never drops scaffolding (D5) in these tests.
+    fn holds_a_file(_: &str) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_tree_holds_a_file_only_when_a_file_is_somewhere_under_it() {
+        let root = tempdir().unwrap();
+        assert!(!tree_holds_a_file(&root.path().join("missing")), "a missing directory holds no file");
+        std::fs::create_dir_all(root.path().join("a/b/c")).unwrap();
+        assert!(!tree_holds_a_file(&root.path().join("a")), "empty nested directories hold no file");
+        std::fs::write(root.path().join("a/b/c/f.txt"), b"x").unwrap();
+        assert!(tree_holds_a_file(&root.path().join("a")), "a file three levels down counts");
+        assert!(tree_holds_a_file(&root.path().join("a/b/c")));
+    }
+
     type RowTuple = (String, Option<String>, String, i64);
     type OpTuple = (String, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>);
 
@@ -15641,7 +15699,7 @@ mod reconcile_tests {
     fn reconcile_remaps_a_ghost_and_leaves_no_reference_to_it() {
         let pc = Pc::new();
         pc.ghost_with_twin(1, "Photos");
-        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         assert_eq!(counts, Counts { remapped: 1, rearmed: 1, ..Counts::default() });
         assert_eq!(pc.references("g1"), 0);
         assert!(!pc.has_op("op-g1"));
@@ -15658,10 +15716,10 @@ mod reconcile_tests {
         pc.folder("new", None, "New", 0);
         pc.create_folder("op-new", "new", None);
         let before = pc.snapshot();
-        let dry = pc.db.reconcile_dry_run(&opts()).unwrap();
+        let dry = pc.db.reconcile_dry_run(&opts(), &holds_a_file).unwrap();
         assert_eq!(pc.snapshot(), before, "a dry run writes nothing");
         assert_eq!(dry, Counts { remapped: 2, rearmed: 2, replay: 1, ..Counts::default() });
-        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW).unwrap(), dry);
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap(), dry);
     }
 
     /// I3: a second pass applies nothing; only the standing counts repeat (the ghost kept for replay).
@@ -15671,9 +15729,9 @@ mod reconcile_tests {
         pc.ghost_with_twin(1, "Photos");
         pc.folder("new", None, "New", 0);
         pc.create_folder("op-new", "new", None);
-        pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         let after_first = pc.snapshot();
-        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW + 60).unwrap(), Counts { replay: 1, ..Counts::default() });
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW + 60, &holds_a_file).unwrap(), Counts { replay: 1, ..Counts::default() });
         assert_eq!(pc.snapshot(), after_first);
     }
 
@@ -15687,7 +15745,7 @@ mod reconcile_tests {
         untouched.six_ghosts();
         let before = pc.snapshot();
         pc.fail_deleting("g4");
-        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).is_err());
+        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).is_err());
         for g in ["g1", "g2"] {
             assert_eq!(pc.references(g), 0, "{g}: batch 1 committed");
         }
@@ -15705,8 +15763,8 @@ mod reconcile_tests {
         let rest = ["g3", "f3", "g4", "f4", "g5", "f5", "g6", "f6"];
         assert_eq!(of(&rest), of_before(&rest), "batch 2 rolled back, batch 3 never ran");
         pc.stop_failing();
-        pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
-        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        pc.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).unwrap();
+        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).unwrap();
         assert_eq!(pc.snapshot(), untouched.snapshot());
     }
 
@@ -15719,7 +15777,7 @@ mod reconcile_tests {
         untouched.six_ghosts();
         let before = pc.snapshot();
         pc.fail_deleting("g5");
-        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).is_err());
+        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).is_err());
         for g in ["g1", "g2", "g3", "g4"] {
             assert_eq!(pc.references(g), 0, "{g}: batches 1 and 2 committed");
         }
@@ -15733,8 +15791,8 @@ mod reconcile_tests {
         };
         assert_eq!(pick(&rows, &ops), pick(&before.0, &before.1));
         pc.stop_failing();
-        pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
-        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        pc.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).unwrap();
+        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &holds_a_file, &mut |_, _| {}).unwrap();
         assert_eq!(pc.snapshot(), untouched.snapshot());
     }
 
@@ -15744,7 +15802,7 @@ mod reconcile_tests {
         let pc = Pc::new();
         pc.ghost_with_twin(1, "Photos");
         assert_eq!(pc.count("SELECT remote_updated_at FROM files WHERE file_id = 't1'", []), 0);
-        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW).unwrap().remapped, 1);
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap().remapped, 1);
     }
 
     /// D8 order (lead review of #243, fix 2): a re-armed upload keeps its place, so it runs before a newer upload of the
@@ -15754,7 +15812,7 @@ mod reconcile_tests {
         let pc = Pc::new();
         pc.ghost_with_twin(1, "Photos");
         pc.upload("op-newer", "f1", Some("g1"), 500);
-        pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         assert_eq!(pc.due(), vec!["op-f1".to_string(), "op-newer".to_string()]);
         assert!(matches!(pc.db.claim_operation("op-newer", NOW).unwrap(), ClaimOutcome::Wait));
         let ClaimOutcome::Claimed(older) = pc.db.claim_operation("op-f1", NOW).unwrap() else {
@@ -15771,7 +15829,7 @@ mod reconcile_tests {
         pc.ghost_with_twin(1, "A");
         pc.ghost_with_twin(2, "B");
         pc.db
-            .reconcile_in_batches(&opts(), NOW, 1, &mut |db, batch| {
+            .reconcile_in_batches(&opts(), NOW, 1, &holds_a_file, &mut |db, batch| {
                 if batch == 1 {
                     db.0.lock()
                         .unwrap()
@@ -15795,7 +15853,7 @@ mod reconcile_tests {
         let pc = Pc::new();
         pc.ghost_with_twin(1, "Photos");
         pc.pause("op-f1", "found_while_paused");
-        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         assert_eq!(counts, Counts { remapped: 1, rearmed_paused: 1, ..Counts::default() });
         assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, Some("found_while_paused".to_string())));
         assert!(pc.due().is_empty(), "still held: the pass never releases a change held for the person");
@@ -15812,7 +15870,7 @@ mod reconcile_tests {
         pc.ghost_with_twin(1, "Photos");
         pc.gave_up("op-f1", SERVER_ERROR);
         pc.pause("op-f1", "found_while_paused");
-        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
         assert_eq!(counts, Counts { remapped: 1, ..Counts::default() });
         assert_eq!(
             pc.op("op-f1"),
