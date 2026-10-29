@@ -1058,6 +1058,132 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// Tasks 1888 + 2226 (spec §3): the rows and ops the reconcile pass plans over, read in one transaction. Rows in rowid
+/// order, so folders at the same depth are decided in the order they were written; ops in the queue's order.
+fn reconcile_plan_conn(
+    conn: &Connection,
+    opts: &crate::held_queue::Options,
+) -> Result<(Vec<crate::held_queue::Unit>, crate::held_queue::Counts)> {
+    use crate::held_queue::{Op, Row};
+    let rows = conn
+        .prepare(
+            "SELECT file_id, NULLIF(parent_id, ''), path, item_kind = 'folder',
+                    current_version > 0 OR remote_updated_at > 0, current_version
+             FROM files ORDER BY rowid",
+        )?
+        .query_map([], |row| {
+            Ok(Row {
+                file_id: row.get(0)?,
+                parent_id: row.get(1)?,
+                path: row.get(2)?,
+                is_folder: row.get(3)?,
+                server_known: row.get(4)?,
+                current_version: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    let ops = conn
+        .prepare(&format!(
+            "SELECT op_id, kind, NULLIF(file_id, ''), NULLIF(parent_id, ''), target_path,
+                    kind IN ('upload_version', 'upload_file') AND COALESCE(CASE WHEN json_valid(metadata_json)
+                        THEN json_extract(metadata_json, '$.operation') = 'create_file' END, 0),
+                    paused_reason,
+                    attempts >= max_attempts AND paused_reason IS NULL AND last_error_class IS NULL,
+                    last_error_class IS NOT NULL, last_error, payload_path, base_version
+             FROM operation_queue {DUE_ORDER_SQL}"
+        ))?
+        .query_map([], |row| {
+            Ok(Op {
+                op_id: row.get(0)?,
+                kind: row.get(1)?,
+                file_id: row.get(2)?,
+                parent_id: row.get(3)?,
+                target_path: row.get(4)?,
+                create_file: row.get(5)?,
+                paused_reason: row.get(6)?,
+                given_up: row.get(7)?,
+                parked: row.get(8)?,
+                last_error: row.get(9)?,
+                payload_path: row.get(10)?,
+                base_version: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(crate::held_queue::plan(&rows, &ops, opts, &|path| Path::new(path).exists()))
+}
+
+/// Spec D8: due again now with a fresh retry budget. Never touches `created_at` or `rowid` (the queue's order), nor
+/// `paused_reason` (D8 amendment: a change held for the person stays held).
+fn rearm_operation_conn(conn: &Connection, op_id: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE operation_queue SET attempts = 0, next_retry_at = ?2, last_error = NULL, updated_at = ?2 WHERE op_id = ?1",
+        params![op_id, now],
+    )?;
+    Ok(())
+}
+
+/// One whole unit of the reconcile plan, inside the caller's transaction.
+fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_queue::Unit, now: i64) -> Result<()> {
+    use crate::held_queue::Unit;
+    let needs_review = OperationPauseReason::NeedsReview.as_str();
+    let hold = |op_id: &str| {
+        conn.execute(
+            "UPDATE operation_queue SET paused_reason = ?2, updated_at = ?3 WHERE op_id = ?1",
+            params![op_id, needs_review, now],
+        )
+    };
+    match unit {
+        Unit::DropLanded { op_id } => {
+            conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
+            drop_orphaned_upload_resumes(conn)?;
+        }
+        Unit::Remap { ghost, twin, ghost_op, rearm, hold: superseded } => {
+            conn.execute("UPDATE files SET parent_id = ?2 WHERE parent_id = ?1", params![ghost, twin])?;
+            conn.execute(
+                "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
+                params![ghost, twin, now],
+            )?;
+            for op_id in rearm {
+                rearm_operation_conn(conn, op_id, now)?;
+            }
+            for op_id in superseded {
+                hold(op_id)?;
+            }
+            conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![ghost_op])?;
+            conn.execute("DELETE FROM files WHERE file_id = ?1", params![ghost])?;
+            // I1: nothing names the ghost any more, or the whole unit rolls back with its transaction.
+            let left: i64 = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
+                      + (SELECT COUNT(*) FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1)",
+                params![ghost],
+                |row| row.get(0),
+            )?;
+            if left != 0 {
+                return Err(rusqlite::Error::StatementChangedRows(left as usize));
+            }
+        }
+        Unit::Hold { op_id } => {
+            hold(op_id)?;
+        }
+        Unit::Release { op_id } => {
+            conn.execute(
+                "UPDATE operation_queue SET paused_reason = NULL, next_retry_at = ?2, updated_at = ?2
+                 WHERE op_id = ?1 AND paused_reason = ?3",
+                params![op_id, now, needs_review],
+            )?;
+        }
+        Unit::Rearm { op_id } => rearm_operation_conn(conn, op_id, now)?,
+        Unit::ResolveParent { .. } | Unit::DropScaffold { .. } => {
+            // Tasks 2 and 3 apply these; the planner does not make them before then.
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("reconcile: unit not applied yet".into()),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Drop every persisted upload session whose queued op no longer exists.
 /// Called by the bulk `operation_queue` purges so a session never outlives
 /// its op (`finish_claimed` already clears its own row).
@@ -2271,6 +2397,10 @@ pub enum SnapshotVersion {
 /// `base_pending` is 1 + the successful snapshots that did not report the file (plan Spec
 /// issue 3). The op parks when the count would pass 10 (spec §6.3.3).
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+/// Tasks 1888 + 2226 (spec I4): whole units per reconcile transaction. Provisional until the measurement on a copy of
+/// the maintainer's database (plan Task 1 Step 7).
+pub const RECONCILE_UNITS_PER_TX: usize = 256;
+
 const BASE_PENDING_PARK_AT: i64 = 11;
 
 /// One op the runner may run now. Every later write for this attempt names `claim_id`
@@ -2352,6 +2482,11 @@ pub enum OperationPauseReason {
     /// the top level, or in a folder that is not proven its own, such as a shared one), found when Beebeeb adopted the
     /// data on this PC. It is never sent on its own: the person uploads it or keeps it on this PC only.
     FoundWhilePaused,
+    /// Tasks 1888 + 2226 (spec D4, D8): the reconcile pass could not fold a folder made on this PC into its server twin
+    /// safely (two twins, an op acting on it, parents that disagree, a busy twin), or a re-armed upload would make old
+    /// content current. It waits; the next pass looks again.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    NeedsReview,
 }
 
 impl OperationPauseReason {
@@ -2363,6 +2498,7 @@ impl OperationPauseReason {
             OperationPauseReason::Locked => "locked",
             OperationPauseReason::KeyReplaced => "key_replaced",
             OperationPauseReason::FoundWhilePaused => "found_while_paused",
+            OperationPauseReason::NeedsReview => crate::held_queue::NEEDS_REVIEW,
         }
     }
 }
@@ -7214,6 +7350,66 @@ impl StateDb {
             params![op_id, attempts, next_retry_at, last_error],
         )?;
         Ok(())
+    }
+
+    /// Tasks 1888 + 2226 (spec D1-D4, D8, D14; I1-I4): the reconcile pass. Plans over the whole queue and applies the
+    /// plan in transactions of at most [`RECONCILE_UNITS_PER_TX`] whole units, re-planning after each, until the plan
+    /// has no unit left or a round applied nothing. Returns the first round's counts: the plan the dry run shows.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn reconcile_held_queue(&self, opts: &crate::held_queue::Options, now: i64) -> Result<crate::held_queue::Counts> {
+        self.reconcile_in_batches(opts, now, RECONCILE_UNITS_PER_TX, &mut |_, _| {})
+    }
+
+    /// The pass with its batch size, and `between` called after each committed batch (its 1-based number) while no
+    /// lock is held: the tests' seam for a change made between two batches.
+    pub(crate) fn reconcile_in_batches(
+        &self,
+        opts: &crate::held_queue::Options,
+        now: i64,
+        per_tx: usize,
+        between: &mut dyn FnMut(&StateDb, usize),
+    ) -> Result<crate::held_queue::Counts> {
+        let per_tx = per_tx.max(1);
+        let mut first: Option<(usize, crate::held_queue::Counts)> = None;
+        let mut batch = 0;
+        loop {
+            let applied = {
+                let mut conn = self.0.lock().expect("state_db mutex poisoned");
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let (units, counts) = reconcile_plan_conn(&tx, opts)?;
+                let rounds_allowed = first.get_or_insert((units.len(), counts)).0 / per_tx + 2;
+                // Every unit removes its own cause, so the plan shrinks each round; a plan that does not is a bug, and
+                // the pass stops rather than loop.
+                if batch >= rounds_allowed {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                        Some("reconcile: the plan did not shrink".into()),
+                    ));
+                }
+                let take = units.len().min(per_tx);
+                for unit in &units[..take] {
+                    apply_reconcile_unit_conn(&tx, unit, now)?;
+                }
+                tx.commit()?;
+                take
+            };
+            if applied == 0 {
+                break;
+            }
+            batch += 1;
+            between(self, batch);
+        }
+        Ok(first.map(|(_, counts)| counts).unwrap_or_default())
+    }
+
+    /// Spec D14: the plan's counts, from one read transaction; writes nothing.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn reconcile_dry_run(&self, opts: &crate::held_queue::Options) -> Result<crate::held_queue::Counts> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let (_, counts) = reconcile_plan_conn(&tx, opts)?;
+        tx.rollback()?;
+        Ok(counts)
     }
 
     /// Lead ruling F9 (spec 2026-10-06 R8): make every operation paused because the server refused the session
@@ -15255,5 +15451,375 @@ mod tests {
             )
             .unwrap();
         assert_eq!(untouched, 2);
+    }
+}
+
+/// Tasks 1888 + 2226 (spec §4 D1-D4, D8, D14; I1-I4, §5): the reconcile pass against a real database.
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use crate::held_queue::{Counts, Options};
+    use tempfile::{tempdir, TempDir};
+
+    const NOT_FOUND: &str = "HTTP status client error (404 Not Found) for url (https://api.example/api/v1/uploads/init)";
+    const SERVER_ERROR: &str = "HTTP status server error (500 Internal Server Error) for url (https://api.example/x)";
+    const NOW: i64 = 1_800_000_000;
+
+    fn opts() -> Options {
+        Options { device_segment: Some("PC-1".to_string()), case_insensitive: true }
+    }
+
+    type RowTuple = (String, Option<String>, String, i64);
+    type OpTuple = (String, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>);
+
+    struct Pc {
+        dir: TempDir,
+        db: StateDb,
+    }
+
+    impl Pc {
+        fn new() -> Self {
+            let dir = tempdir().unwrap();
+            let db = StateDb::open(dir.path().join("state.db")).unwrap();
+            Self { dir, db }
+        }
+
+        fn sql(&self, sql: &str, args: impl rusqlite::Params) {
+            self.db.0.lock().unwrap().execute(sql, args).unwrap();
+        }
+
+        /// A row: `version` > 0 is server-known (the snapshot's shape: `remote_updated_at` stays 0).
+        fn row(&self, id: &str, parent: Option<&str>, path: &str, folder: bool, version: i64) {
+            self.sql(
+                "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)",
+                params![id, path, if version > 0 { "synced" } else { "local" }, if folder { "folder" } else { "file" }, version, parent],
+            );
+        }
+
+        fn folder(&self, id: &str, parent: Option<&str>, path: &str, version: i64) {
+            self.row(id, parent, path, true, version);
+        }
+
+        fn file(&self, id: &str, parent: Option<&str>, path: &str, version: i64) {
+            self.row(id, parent, path, false, version);
+        }
+
+        /// A folder's create, paused for `auth` as on 4 Oct.
+        fn create_folder(&self, op_id: &str, file_id: &str, parent: Option<&str>) {
+            self.sql(
+                "INSERT INTO operation_queue (op_id, kind, file_id, parent_id, attempts, max_attempts, paused_reason, created_at, updated_at)
+                 VALUES (?1, 'create_folder', ?2, ?3, 0, 25, 'auth', 1, 1)",
+                params![op_id, file_id, parent],
+            );
+        }
+
+        /// A new file's upload as the scan queues it, with its staged payload on disk.
+        fn upload(&self, op_id: &str, file_id: &str, parent: Option<&str>, created_at: i64) {
+            let payload = self.dir.path().join(format!("staged-{op_id}"));
+            std::fs::write(&payload, op_id.as_bytes()).unwrap();
+            self.sql(
+                "INSERT INTO operation_queue (op_id, kind, file_id, parent_id, metadata_json, payload_path, attempts, max_attempts,
+                                              next_retry_at, created_at, updated_at)
+                 VALUES (?1, 'upload_version', ?2, ?3, '{\"operation\":\"create_file\"}', ?4, 0, 25, 0, ?5, ?5)",
+                params![op_id, file_id, parent, payload.to_string_lossy(), created_at],
+            );
+        }
+
+        /// The op used its retries on `error`.
+        fn gave_up(&self, op_id: &str, error: &str) {
+            self.sql("UPDATE operation_queue SET attempts = 25, last_error = ?2 WHERE op_id = ?1", params![op_id, error]);
+        }
+
+        fn pause(&self, op_id: &str, reason: &str) {
+            self.sql("UPDATE operation_queue SET paused_reason = ?2 WHERE op_id = ?1", params![op_id, reason]);
+        }
+
+        fn count(&self, sql: &str, args: impl rusqlite::Params) -> i64 {
+            self.db.0.lock().unwrap().query_row(sql, args, |row| row.get(0)).unwrap()
+        }
+
+        /// How many rows and ops still name `id` (I1).
+        fn references(&self, id: &str) -> i64 {
+            self.count(
+                "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
+                      + (SELECT COUNT(*) FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1)",
+                params![id],
+            )
+        }
+
+        fn parent_of_row(&self, id: &str) -> Option<String> {
+            self.db.0.lock().unwrap().query_row("SELECT parent_id FROM files WHERE file_id = ?1", params![id], |row| row.get(0)).unwrap()
+        }
+
+        /// (parent, attempts, next_retry_at, last_error, paused_reason)
+        fn op(&self, op_id: &str) -> (Option<String>, i64, i64, Option<String>, Option<String>) {
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT parent_id, attempts, next_retry_at, last_error, paused_reason FROM operation_queue WHERE op_id = ?1",
+                    params![op_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .unwrap()
+        }
+
+        fn has_op(&self, op_id: &str) -> bool {
+            self.count("SELECT COUNT(*) FROM operation_queue WHERE op_id = ?1", params![op_id]) == 1
+        }
+
+        fn due(&self) -> Vec<String> {
+            self.db.list_due_operations(NOW).unwrap().into_iter().map(|op| op.op_id).collect()
+        }
+
+        /// Every row and op, sorted: what "unchanged" and "equal" compare.
+        fn snapshot(&self) -> (Vec<RowTuple>, Vec<OpTuple>) {
+            let conn = self.db.0.lock().unwrap();
+            let rows = conn
+                .prepare("SELECT file_id, parent_id, path, current_version FROM files ORDER BY file_id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let ops = conn
+                .prepare(
+                    "SELECT op_id, file_id, parent_id, attempts, next_retry_at, last_error, paused_reason
+                     FROM operation_queue ORDER BY op_id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (rows, ops)
+        }
+
+        /// A server folder `t<n>`, the ghost `g<n>` made here at the same path (its create paused for `auth`), and a
+        /// new file under the ghost whose upload gave up on the parent 404 the ghost caused.
+        fn ghost_with_twin(&self, n: usize, name: &str) {
+            let (t, g, f) = (format!("t{n}"), format!("g{n}"), format!("f{n}"));
+            self.folder(&t, None, name, 3);
+            self.folder(&g, None, name, 0);
+            self.file(&f, Some(&g), &format!("{name}/{n}.jpg"), 0);
+            self.create_folder(&format!("op-{g}"), &g, None);
+            self.upload(&format!("op-{f}"), &f, Some(&g), 10 + n as i64);
+            self.gave_up(&format!("op-{f}"), NOT_FOUND);
+        }
+
+        fn six_ghosts(&self) {
+            for (n, name) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+                self.ghost_with_twin(n + 1, name);
+            }
+        }
+
+        /// A test-only trigger that makes deleting row `id` fail, so the transaction that deletes it rolls back.
+        fn fail_deleting(&self, id: &str) {
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER stop_here BEFORE DELETE ON files WHEN OLD.file_id = '{id}'
+                     BEGIN SELECT RAISE(ABORT, 'test'); END;"
+                ))
+                .unwrap();
+        }
+
+        fn stop_failing(&self) {
+            self.db.0.lock().unwrap().execute_batch("DROP TRIGGER stop_here;").unwrap();
+        }
+    }
+
+    /// I1: after the pass no row and no op names the ghost; its child and its child's change moved to the twin, and the
+    /// change that gave up on the ghost's 404 is due again (D8: attempts 0, no error, due now).
+    #[test]
+    fn reconcile_remaps_a_ghost_and_leaves_no_reference_to_it() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        assert_eq!(counts, Counts { remapped: 1, rearmed: 1, ..Counts::default() });
+        assert_eq!(pc.references("g1"), 0);
+        assert!(!pc.has_op("op-g1"));
+        assert_eq!(pc.parent_of_row("f1").as_deref(), Some("t1"));
+        assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, None));
+    }
+
+    /// I3: the dry run's counts are the run's, and the dry run writes nothing.
+    #[test]
+    fn the_dry_run_counts_equal_the_run_and_change_nothing() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        pc.ghost_with_twin(2, "Music");
+        pc.folder("new", None, "New", 0);
+        pc.create_folder("op-new", "new", None);
+        let before = pc.snapshot();
+        let dry = pc.db.reconcile_dry_run(&opts()).unwrap();
+        assert_eq!(pc.snapshot(), before, "a dry run writes nothing");
+        assert_eq!(dry, Counts { remapped: 2, rearmed: 2, replay: 1, ..Counts::default() });
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW).unwrap(), dry);
+    }
+
+    /// I3: a second pass applies nothing; only the standing counts repeat (the ghost kept for replay).
+    #[test]
+    fn a_second_pass_changes_nothing() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        pc.folder("new", None, "New", 0);
+        pc.create_folder("op-new", "new", None);
+        pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        let after_first = pc.snapshot();
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW + 60).unwrap(), Counts { replay: 1, ..Counts::default() });
+        assert_eq!(pc.snapshot(), after_first);
+    }
+
+    /// I4 (lead review of #243, fix 1): a failure inside a batch undoes that batch only; a rerun completes, and ends
+    /// where an uninterrupted run ends.
+    #[test]
+    fn a_failure_mid_batch_undoes_only_that_batch_and_a_rerun_completes() {
+        let pc = Pc::new();
+        pc.six_ghosts();
+        let untouched = Pc::new();
+        untouched.six_ghosts();
+        let before = pc.snapshot();
+        pc.fail_deleting("g4");
+        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).is_err());
+        for g in ["g1", "g2"] {
+            assert_eq!(pc.references(g), 0, "{g}: batch 1 committed");
+        }
+        let (rows, ops) = pc.snapshot();
+        let of = |ids: &[&str]| {
+            let rows: Vec<_> = rows.iter().filter(|r| ids.contains(&r.0.as_str())).cloned().collect();
+            let ops: Vec<_> = ops.iter().filter(|o| ids.iter().any(|id| o.0 == format!("op-{id}"))).cloned().collect();
+            (rows, ops)
+        };
+        let of_before = |ids: &[&str]| {
+            let rows: Vec<_> = before.0.iter().filter(|r| ids.contains(&r.0.as_str())).cloned().collect();
+            let ops: Vec<_> = before.1.iter().filter(|o| ids.iter().any(|id| o.0 == format!("op-{id}"))).cloned().collect();
+            (rows, ops)
+        };
+        let rest = ["g3", "f3", "g4", "f4", "g5", "f5", "g6", "f6"];
+        assert_eq!(of(&rest), of_before(&rest), "batch 2 rolled back, batch 3 never ran");
+        pc.stop_failing();
+        pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        assert_eq!(pc.snapshot(), untouched.snapshot());
+    }
+
+    /// I4: a failure at the first unit of a batch keeps every batch committed before it.
+    #[test]
+    fn a_failure_at_a_batch_boundary_keeps_the_committed_batches_and_a_rerun_completes() {
+        let pc = Pc::new();
+        pc.six_ghosts();
+        let untouched = Pc::new();
+        untouched.six_ghosts();
+        let before = pc.snapshot();
+        pc.fail_deleting("g5");
+        assert!(pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).is_err());
+        for g in ["g1", "g2", "g3", "g4"] {
+            assert_eq!(pc.references(g), 0, "{g}: batches 1 and 2 committed");
+        }
+        let (rows, ops) = pc.snapshot();
+        let ids = ["g5", "f5", "g6", "f6"];
+        let pick = |rows: &[RowTuple], ops: &[OpTuple]| {
+            (
+                rows.iter().filter(|r| ids.contains(&r.0.as_str())).cloned().collect::<Vec<_>>(),
+                ops.iter().filter(|o| ids.iter().any(|id| o.0 == format!("op-{id}"))).cloned().collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(pick(&rows, &ops), pick(&before.0, &before.1));
+        pc.stop_failing();
+        pc.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        untouched.db.reconcile_in_batches(&opts(), NOW, 2, &mut |_, _| {}).unwrap();
+        assert_eq!(pc.snapshot(), untouched.snapshot());
+    }
+
+    /// Spec §3 (corrected 2026-10-28): a twin the snapshot wrote (`current_version` 3, `remote_updated_at` 0) is found.
+    #[test]
+    fn a_twin_written_by_the_snapshot_is_found() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        assert_eq!(pc.count("SELECT remote_updated_at FROM files WHERE file_id = 't1'", []), 0);
+        assert_eq!(pc.db.reconcile_held_queue(&opts(), NOW).unwrap().remapped, 1);
+    }
+
+    /// D8 order (lead review of #243, fix 2): a re-armed upload keeps its place, so it runs before a newer upload of the
+    /// same file, and the newer content lands last.
+    #[test]
+    fn a_rearmed_upload_runs_before_a_newer_upload_of_the_same_file() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        pc.upload("op-newer", "f1", Some("g1"), 500);
+        pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        assert_eq!(pc.due(), vec!["op-f1".to_string(), "op-newer".to_string()]);
+        assert!(matches!(pc.db.claim_operation("op-newer", NOW).unwrap(), ClaimOutcome::Wait));
+        let ClaimOutcome::Claimed(older) = pc.db.claim_operation("op-f1", NOW).unwrap() else {
+            panic!("the re-armed upload is claimed first")
+        };
+        assert!(pc.db.finish_claimed("op-f1", &older.claim_id, None).unwrap());
+        assert!(matches!(pc.db.claim_operation("op-newer", NOW).unwrap(), ClaimOutcome::Claimed(_)));
+    }
+
+    /// A child written between two batches is re-pointed by its ghost's unit.
+    #[test]
+    fn a_child_added_between_batches_moves_with_its_ghost() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "A");
+        pc.ghost_with_twin(2, "B");
+        pc.db
+            .reconcile_in_batches(&opts(), NOW, 1, &mut |db, batch| {
+                if batch == 1 {
+                    db.0.lock()
+                        .unwrap()
+                        .execute(
+                            "INSERT INTO files (file_id, path, status, item_kind, current_version, parent_id, size_bytes, remote_updated_at)
+                             VALUES ('late', 'B/late.txt', 'local', 'file', 0, 'g2', 0, 0)",
+                            [],
+                        )
+                        .unwrap();
+                }
+            })
+            .unwrap();
+        assert_eq!(pc.parent_of_row("late").as_deref(), Some("t2"));
+        assert_eq!(pc.references("g2"), 0);
+    }
+
+    /// D8 amendment (lead ruling 2026-10-29): a change held for the person that used its retries on the 404 its ghost
+    /// caused gets its budget back in the pass and keeps its pause; "Upload to my Beebeeb" then makes it due, and it runs.
+    #[test]
+    fn a_held_upload_exhausted_on_a_parent_404_under_a_remapped_ghost_uploads_after_upload() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        pc.pause("op-f1", "found_while_paused");
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        assert_eq!(counts, Counts { remapped: 1, rearmed_paused: 1, ..Counts::default() });
+        assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, Some("found_while_paused".to_string())));
+        assert!(pc.due().is_empty(), "still held: the pass never releases a change held for the person");
+        assert_eq!(pc.db.release_found_while_paused(&["op-f1".to_string()], NOW).unwrap(), 1);
+        assert_eq!(pc.due(), vec!["op-f1".to_string()]);
+        assert!(matches!(pc.db.claim_operation("op-f1", NOW).unwrap(), ClaimOutcome::Claimed(_)));
+    }
+
+    /// D8 amendment: a held change that used its retries on another error keeps them; after Upload it stays stopped,
+    /// with its own error.
+    #[test]
+    fn a_held_upload_exhausted_on_another_error_stays_stopped_after_upload() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        pc.gave_up("op-f1", SERVER_ERROR);
+        pc.pause("op-f1", "found_while_paused");
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW).unwrap();
+        assert_eq!(counts, Counts { remapped: 1, ..Counts::default() });
+        assert_eq!(
+            pc.op("op-f1"),
+            (Some("t1".to_string()), 25, 0, Some(SERVER_ERROR.to_string()), Some("found_while_paused".to_string()))
+        );
+        assert_eq!(pc.db.release_found_while_paused(&["op-f1".to_string()], NOW).unwrap(), 1);
+        assert!(pc.due().is_empty(), "stopped after repeated errors: Upload only clears the pause");
+        assert_eq!(pc.op("op-f1").3.as_deref(), Some(SERVER_ERROR));
     }
 }

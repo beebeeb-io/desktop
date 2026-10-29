@@ -90,6 +90,9 @@ pub struct Counts {
     pub held_parents_disagree: usize,
     pub held_twin_busy: usize,
     pub rearmed: usize,
+    /// D8 amendment (lead ruling 2026-10-29): an op paused for the person (2267's `found_while_paused`, quota, a
+    /// replaced key) whose retry budget is re-armed on a parent 404; its pause stays.
+    pub rearmed_paused: usize,
     pub rearm_no_payload: usize,
     pub rearm_superseded: usize,
     pub parent_resolved: usize,
@@ -241,7 +244,10 @@ pub fn plan(rows: &[Row], ops: &[Op], opts: &Options, payload_exists: &dyn Fn(&s
     }
 
     // D8: an op re-pointed off a remapped ghost (its unit carries it) or under a ghost kept for replay, whose last error
-    // is a parent 404, given up or still retrying. A park, a pause and any other error stay as they are.
+    // is a parent 404, given up or still retrying. A park, a pause the pass owns (`auth`, `needs_review`) and any other
+    // error stay as they are. D8 amendment (lead ruling 2026-10-29): an op paused for the person gets its retry budget
+    // back and keeps its pause, so "Upload to my Beebeeb" (which only clears the pause) sends it; it is never re-labelled,
+    // so a superseded one is left as it is.
     let mut rearmed: HashSet<&str> = HashSet::new();
     for op in ops {
         let Some(parent) = op.parent_id.as_deref() else { continue };
@@ -250,7 +256,8 @@ pub fn plan(rows: &[Row], ops: &[Op], opts: &Options, payload_exists: &dyn Fn(&s
             Some(Fate::Replay) => None,
             _ => continue,
         };
-        if op.paused_reason.is_some()
+        let person_paused = op.paused_reason.is_some() && !pass_decides(op);
+        if (op.paused_reason.is_some() && !person_paused)
             || op.parked
             || landed_ops.contains(op.op_id.as_str())
             || !op.last_error.as_deref().is_some_and(is_parent_404)
@@ -264,6 +271,9 @@ pub fn plan(rows: &[Row], ops: &[Op], opts: &Options, payload_exists: &dyn Fn(&s
                 || (op.kind == "upload_version" && !op.create_file && op.base_version.is_some_and(|b| row.current_version > b))
         });
         let op_id = op.op_id.clone();
+        if superseded && person_paused {
+            continue;
+        }
         if superseded {
             counts.rearm_superseded += 1;
             match remap.map(|at| &mut remaps[at]) {
@@ -273,7 +283,11 @@ pub fn plan(rows: &[Row], ops: &[Op], opts: &Options, payload_exists: &dyn Fn(&s
         } else if UPLOAD_KINDS.contains(&op.kind.as_str()) && !op.payload_path.as_deref().is_some_and(payload_exists) {
             counts.rearm_no_payload += 1;
         } else {
-            counts.rearmed += 1;
+            if person_paused {
+                counts.rearmed_paused += 1;
+            } else {
+                counts.rearmed += 1;
+            }
             rearmed.insert(op.op_id.as_str());
             match remap.map(|at| &mut remaps[at]) {
                 Some(Unit::Remap { rearm, .. }) => rearm.push(op_id),
@@ -537,6 +551,67 @@ mod tests {
         let (units, counts) = run(&rows, &ops);
         assert_eq!(units, vec![remap("g", "t", "op-g", &["op-404"])]);
         assert_eq!(counts, Counts { remapped: 1, rearmed: 1, ..Counts::default() });
+    }
+
+    /// D8 amendment (lead ruling 2026-10-29): a change held for the person that gave up on the 404 its ghost caused gets
+    /// its retry budget back in the remap, keeps its pause, and is never re-labelled; a park or another error is left.
+    #[test]
+    fn a_person_paused_upload_on_a_parent_404_under_a_remapped_ghost_gets_its_budget_back_and_keeps_its_pause() {
+        let rows = [
+            folder("t", None, "Photos", true),
+            folder("g", None, "Photos", false),
+            file("f1", Some("g"), "Photos/1.jpg", false, 0),
+            file("f2", Some("g"), "Photos/2.jpg", false, 0),
+            file("f3", Some("g"), "Photos/3.jpg", false, 0),
+            file("f4", Some("g"), "Photos/4.jpg", false, 0),
+        ];
+        let not_found = |op: Op| Op { last_error: Some(NOT_FOUND.to_string()), ..op };
+        let ops = [
+            paused(create_folder("op-g", "g", None), "auth"),
+            paused(not_found(upload("op-held", "f1", Some("g"))), "found_while_paused"),
+            paused(not_found(upload("op-quota", "f2", Some("g"))), "quota"),
+            paused(Op { parked: true, ..not_found(upload("op-park", "f3", Some("g"))) }, "found_while_paused"),
+            paused(
+                Op {
+                    last_error: Some("HTTP status server error (500 Internal Server Error) for url (https://api.example/x)".to_string()),
+                    ..upload("op-500", "f4", Some("g"))
+                },
+                "found_while_paused",
+            ),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![remap("g", "t", "op-g", &["op-held", "op-quota"])]);
+        assert_eq!(counts, Counts { remapped: 1, rearmed_paused: 2, ..Counts::default() });
+    }
+
+    /// D8 amendment: the same under a ghost kept for replay (no twin).
+    #[test]
+    fn a_person_paused_upload_on_a_parent_404_under_a_replayed_ghost_gets_its_budget_back() {
+        let rows = [folder("g", None, "New", false), file("f1", Some("g"), "New/1.jpg", false, 0)];
+        let ops = [
+            create_folder("op-g", "g", None),
+            paused(Op { last_error: Some(NOT_FOUND.to_string()), ..upload("op-held", "f1", Some("g")) }, "found_while_paused"),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![Unit::Rearm { op_id: "op-held".to_string() }]);
+        assert_eq!(counts, Counts { replay: 1, rearmed_paused: 1, ..Counts::default() });
+    }
+
+    /// D8 amendment: a held change the server already superseded is left as it is: no budget, no `needs_review`.
+    #[test]
+    fn a_superseded_person_paused_upload_is_left_as_it_is() {
+        let rows = [
+            folder("t", None, "Photos", true),
+            folder("g", None, "Photos", false),
+            file("f1", Some("g"), "Photos/1.jpg", true, 4),
+        ];
+        let ops = [
+            paused(create_folder("op-g", "g", None), "auth"),
+            paused(Op { last_error: Some(NOT_FOUND.to_string()), ..upload("op-held", "f1", Some("g")) }, "found_while_paused"),
+        ];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![remap("g", "t", "op-g", &[])]);
+        assert_eq!(counts, Counts { remapped: 1, ..Counts::default() });
     }
 
     #[test]
