@@ -2610,6 +2610,51 @@ pub struct TreeRow {
 /// seconds and OS-extension callbacks are infrequent.
 pub struct StateDb(Mutex<Connection>);
 
+/// Task 2274: the reads of the duplicates repair tool (`crate::duplicate_repair`). Only in a build with its feature.
+#[cfg(feature = "duplicate-repair")]
+impl StateDb {
+    /// Every path more than one row shares, with its row count, in path order. Slashes are folded to '/', as
+    /// [`StateDb::file_rows_at_path`] reads both separators.
+    pub(crate) fn shared_paths(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT replace(path, '\\', '/') AS folded, COUNT(*) FROM files GROUP BY folded HAVING COUNT(*) > 1
+             ORDER BY folded",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|(path, count)| (path, usize::try_from(count).unwrap_or(usize::MAX))).collect())
+    }
+
+    /// The rows at `folded` (a [`StateDb::shared_paths`] path), whichever separator each was stored with.
+    pub(crate) fn rows_at_folded_path(&self, folded: &str) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let sql = FILE_BY_PATH_SQL.replace("WHERE path = ?1", "WHERE replace(path, '\\', '/') = ?1 ORDER BY file_id");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![folded], file_entry_from_path_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Whether any table of pending work names `file_id` (spec L3, L3b): a queued operation, an upload finalization,
+    /// a kept copy, an unknown orphan, an upload to resume, or an id alias. `unknown_checks` is not one: its insert
+    /// trigger leaves a row for every file that arrived without known content, and a pending mark counts only while the
+    /// row is guarded (`list_mark_pending` clears the rest), which a row with known content never is.
+    pub(crate) fn names_pending_work(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM upload_finalizations WHERE server_file_id = ?1 OR local_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM kept_copies WHERE original_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM unknown_orphans WHERE file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM upload_resume WHERE server_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM id_aliases WHERE provisional_id = ?1 OR server_id = ?1)",
+            params![file_id],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+}
+
 impl StateDb {
     /// Open or create the state database at `path`. Idempotent — the
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens

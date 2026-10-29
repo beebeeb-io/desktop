@@ -12,6 +12,11 @@
 
 use crate::lockfile::LockFile;
 
+pub(crate) mod list;
+pub(crate) mod model;
+
+#[cfg(test)]
+mod list_tests;
 #[cfg(test)]
 mod tests;
 
