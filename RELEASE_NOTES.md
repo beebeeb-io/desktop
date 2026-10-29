@@ -93,14 +93,16 @@ This release fixes two ways the desktop app stopped sending your changes.
 
 ### Verification
 
-- Test suite (Linux, at `4a4ac7c`; the release carries its code unchanged, these notes aside):
-  - `cargo test --locked` lib reported `test result: ok. 1861 passed; 0 failed; 8 ignored`. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed.
+- Release code: `4a4ac7c` plus one test-only change (`38ec576`) that skips one queue test on macOS, where the behaviour it tests does not exist. Off macOS it changes nothing: the Linux library run at `38ec576` reported the same `1861 passed; 0 failed; 8 ignored`.
+- Test suite (Linux, at `4a4ac7c`):
+  - `cargo test --locked`: the library reported `test result: ok. 1861 passed; 0 failed; 8 ignored`, and three integration suites ran 31, 8 and 3 tests, all with 0 failed.
   - `bun test` 1290 pass / 0 fail, `tsc --noEmit` 0 errors.
 - Test suite (native Windows, a clean clone at `4a4ac7c`, rustc 1.98 MSVC):
   - `cargo check --locked --all-targets` exit 0.
-  - `cargo test --locked` lib reported `test result: ok. 1670 passed; 0 failed; 7 ignored`. `keychain` 31, `windows_session_wiring` 8 and `windows_signout_cleanup` 3, all with 0 failed. 1,712 tests run in total.
-- Test suite (macOS): the macOS release script runs it before the macOS build is signed. Its count is not in these notes.
-- Continuous integration on the change: 6 of 6 checks passed (Linux tests, Windows and macOS builds, frontend tests, the macOS release script check).
+  - `cargo test --locked`: the library reported `test result: ok. 1670 passed; 0 failed; 7 ignored`, and three integration suites ran 31, 8 and 3 tests, all with 0 failed. 1,712 tests ran in total.
+- Test suite (macOS, Apple Silicon, at `38ec576`):
+  - `cargo test --locked`: the library reported `test result: ok. 2170 passed; 0 failed; 10 ignored`, and three integration suites ran 31, 8 and 3 tests, all with 0 failed. 2,212 tests ran in total.
+- Continuous integration on the change: 6 of 6 checks passed (Linux tests, Windows and macOS builds, frontend tests, the macOS release script check). The macOS job builds the app but runs no tests; the macOS run above is the one that did.
 - Real hardware: the maintainer's Windows 11 PC, real account and sync folder, release builds of these changes run in place before release. The two device runs are in the fixes above.
 - The macOS sign-out device checks that 0.8.12 shipped without were waived for this release by the maintainer on 2026-10-29: "Waive for 0.8.18". The blocker stays listed on main for later releases.
 - Not verified:
@@ -110,4 +112,4 @@ This release fixes two ways the desktop app stopped sending your changes.
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets; for macOS, the `.dmg` from the same release.
