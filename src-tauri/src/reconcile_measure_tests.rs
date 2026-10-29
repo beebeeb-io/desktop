@@ -25,11 +25,15 @@ fn reconcile_on_a_copy() {
         device_segment: crate::runner::device_name().map(|n| crate::known_folder::sanitize_device_segment(&n)),
         case_insensitive: cfg!(windows),
     };
-    let keep = |_: &str| true;
+    // `BB_RECONCILE_SYNC_ROOT`: the real sync folder, only listed (never written), so D5 sees what is on disk. Without
+    // it every directory counts as holding a file and no scaffolding is dropped.
+    let sync_root = std::env::var("BB_RECONCILE_SYNC_ROOT").ok().map(std::path::PathBuf::from);
+    let keep = |rel: &str| sync_root.as_ref().map_or(true, |root| tree_holds_a_file(&root.join(rel)));
     let now = chrono::Utc::now().timestamp();
 
     let runs: Vec<(usize, bool)> = match std::env::var("BB_RECONCILE_RUNS").as_deref() {
         Ok("index") => vec![(256, true), (128, true), (64, true)],
+        Ok("dry") => vec![(RECONCILE_UNITS_PER_TX, false)],
         _ => vec![(usize::MAX, false), (512, false), (256, false), (128, false), (64, false)],
     };
     for (per_tx, with_index) in runs {
