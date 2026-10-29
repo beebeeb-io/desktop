@@ -21,7 +21,7 @@ import {
 } from '../src/windows/foundWhilePaused'
 import type { HeldGroup, SyncActivitySummary } from '../src/windows/syncActivityModel'
 
-const KEPT = 'C:\\Users\\Fixture\\Beebeeb - kept on this PC\\2026-10-28'
+const KEPT = 'C:\\Users\\Fixture\\Beebeeb - not uploaded\\2026-10-28'
 
 function keep(patch: Partial<KeepResult> = {}): KeepResult {
   return { moved_files: 0, moved_items: 0, kept_path: null, not_moved: 0, stays_held: 0, synced_by: null, ...patch }
@@ -48,12 +48,12 @@ const group = (reason: string, count: number): HeldGroup => ({ reason, count, ol
 describe('the card’s words (exact)', () => {
   test('title, buttons and the inline confirmation', () => {
     expect(FOUND_WHILE_PAUSED).toBe('found_while_paused')
-    expect(KEPT_FOLDER_NAME).toBe('Beebeeb - kept on this PC')
+    expect(KEPT_FOLDER_NAME).toBe('Beebeeb - not uploaded')
     expect(FOUND_WHILE_PAUSED_COPY).toEqual({
       title: 'Files Beebeeb found while sync was paused. They haven’t been uploaded yet.',
       upload: 'Upload to my Beebeeb',
       keep: 'Keep on this PC only',
-      confirm: 'They’ll be moved out of your Beebeeb folder into a folder named “Beebeeb - kept on this PC” next to it. Nothing is uploaded or deleted.',
+      confirm: 'They’ll be moved out of your Beebeeb folder into a folder named “Beebeeb - not uploaded” next to it. Nothing is uploaded or deleted.',
       move: 'Move them',
       cancel: 'Cancel',
       showInExplorer: 'Show in Explorer',
@@ -260,7 +260,7 @@ describe('a kept folder OneDrive or Dropbox syncs', () => {
     expect(keepLabel('OneDrive')).toBe('Keep out of Beebeeb')
     expect(keepConfirm(null)).toBe(FOUND_WHILE_PAUSED_COPY.confirm)
     expect(keepConfirm('OneDrive')).toBe(
-      'They’ll be moved out of your Beebeeb folder into a folder named “Beebeeb - kept on this PC” next to it. Nothing is uploaded to Beebeeb or deleted. This folder is synced by OneDrive.',
+      'They’ll be moved out of your Beebeeb folder into a folder named “Beebeeb - not uploaded” next to it. Nothing is uploaded to Beebeeb or deleted. This folder is synced by OneDrive.',
     )
   })
 

@@ -12,7 +12,7 @@ import type { SyncActivitySummary } from '../src/windows/syncActivityModel'
 import { Card, NavIcon, T } from '../src/windows/ui'
 import { mount, textOf, type Handler, type Mounted } from './fixtures/componentHarness'
 
-const KEPT = 'C:\\Users\\Fixture\\Beebeeb - kept on this PC\\2026-10-28'
+const KEPT = 'C:\\Users\\Fixture\\Beebeeb - not uploaded\\2026-10-28'
 const COPY = model.FOUND_WHILE_PAUSED_COPY
 
 const mounted: Mounted[] = []
