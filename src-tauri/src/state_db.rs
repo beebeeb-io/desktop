@@ -3500,8 +3500,10 @@ impl StateDb {
         self.get_file_by_exact_path(&alt)
     }
 
-    /// Task 2229: a stamp of the row [`Self::get_file_by_path`] finds at `path`, over every column,
-    /// so any write to the row changes it; `None` without a row. Valid within this process only.
+    /// Task 2229: a stamp of the rows [`Self::file_rows_at_path`] finds at `path`, over every column,
+    /// so any write to any of them changes it; `None` without a row. Valid within this process only.
+    /// Task 2271: every row, not only the first: when several share a path the scan may judge the
+    /// bytes by another one.
     pub fn file_row_stamp_by_path(&self, path: &str) -> Result<Option<u64>> {
         use rusqlite::types::ValueRef;
         use std::hash::{Hash, Hasher};
@@ -3509,8 +3511,10 @@ impl StateDb {
         let mut stmt = conn.prepare_cached(FILE_ROW_BY_PATH_SQL)?;
         for candidate in [path.to_string(), toggled_slash(path)] {
             let mut rows = stmt.query(params![candidate])?;
-            if let Some(row) = rows.next()? {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                found = true;
                 for column in 0..row.as_ref().column_count() {
                     match row.get_ref(column)? {
                         ValueRef::Null => 0u8.hash(&mut hasher),
@@ -3520,6 +3524,8 @@ impl StateDb {
                         ValueRef::Blob(b) => (4u8, b).hash(&mut hasher),
                     }
                 }
+            }
+            if found {
                 return Ok(Some(hasher.finish()));
             }
         }
@@ -3545,6 +3551,34 @@ impl StateDb {
             conn.execute_batch(&format!("PRAGMA cache_size = -{limit}"))?;
         }
         Ok(limit)
+    }
+
+    /// Task 2271: every row at `path`, in the order [`Self::get_file_by_path`] meets them (its first
+    /// is that one), in the stored slash shape it finds; empty without a row.
+    pub fn file_rows_at_path(&self, path: &str) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
+        for candidate in [path.to_string(), toggled_slash(path)] {
+            let entries = stmt
+                .query_map(params![candidate], |row| {
+                    Ok(FileEntry {
+                        file_id: row.get(0)?,
+                        path: row.get(1)?,
+                        status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                        size_bytes: row.get(3)?,
+                        modified_at: row.get(4)?,
+                        content_hash: row.get(5)?,
+                        remote_updated_at: row.get(6)?,
+                        parent_id: row.get(7)?,
+                        item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+        }
+        Ok(Vec::new())
     }
 
     fn get_file_by_exact_path(&self, path: &str) -> Result<Option<FileEntry>> {
@@ -9480,6 +9514,26 @@ mod tests {
             db.0.lock().unwrap().execute(write, []).unwrap();
             assert_ne!(db.file_row_stamp_by_path("docs/a.txt").unwrap(), before, "{write}");
         }
+    }
+
+    /// Task 2271: when several rows share a path the scan may judge the bytes by any of them, so a write to the second
+    /// row changes the stamp too, and `file_rows_at_path` lists them all in the order `get_file_by_path` meets them.
+    #[test]
+    fn a_row_stamp_covers_every_row_at_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        {
+            let conn = db.0.lock().unwrap();
+            conn.execute("INSERT INTO files (file_id, path) VALUES ('first', 'docs/a.txt')", []).unwrap();
+            conn.execute("INSERT INTO files (file_id, path) VALUES ('second', 'docs/a.txt')", []).unwrap();
+        }
+        let ids = |path: &str| db.file_rows_at_path(path).unwrap().into_iter().map(|e| e.file_id).collect::<Vec<_>>();
+        assert_eq!(ids("docs/a.txt"), ["first", "second"]);
+        assert_eq!(ids("/docs/a.txt"), ["first", "second"], "the other slash shape finds them too");
+        assert_eq!(db.get_file_by_path("docs/a.txt").unwrap().unwrap().file_id, "first");
+        let before = db.file_row_stamp_by_path("docs/a.txt").unwrap();
+        db.0.lock().unwrap().execute("UPDATE files SET local_hash = 'h2' WHERE file_id = 'second'", []).unwrap();
+        assert_ne!(db.file_row_stamp_by_path("docs/a.txt").unwrap(), before, "a write to the second row");
     }
 
     #[test]
