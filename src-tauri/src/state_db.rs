@@ -3023,9 +3023,6 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             -- Task 2243: the tray's recent list reads the newest rows through it, not every row.
             CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
-            -- Tasks 1888 + 2226: the reconcile pass re-points a ghost folder's children by `parent_id`, once per
-            -- remapped folder (`REMAP_FILES_SQL`); without this each remap scans every row.
-            CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id);
             -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone. It starts
             -- with `paused_reason`, so it also serves every lookup the old `idx_operation_queue_paused` did, and
             -- that index is dropped: one index to keep up to date on each queue write, not two.
@@ -3163,10 +3160,13 @@ impl StateDb {
         )?;
         // Tasks 1888, 2226 (spec D7): `queue_hold_summary`'s `waiting_for_folder` group reads these two alone, so the
         // tray's poll stays inside task 2243's budget. The first holds only the folder creates; the second finds the
-        // changes in a folder. Indexes only, no table or column change. macOS has no parent-first gate.
+        // changes in a folder, and with `idx_files_parent_id` serves the reconcile pass's remaps (`REMAP_FILES_SQL`,
+        // `REMAP_OPS_SQL`), which would otherwise scan every row once per remapped folder. Indexes only, no table or
+        // column change. macOS has neither the parent-first gate nor the pass.
         #[cfg(not(target_os = "macos"))]
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_operation_queue_create_folder
+            "CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id);
+             CREATE INDEX IF NOT EXISTS idx_operation_queue_create_folder
                  ON operation_queue(parent_id, file_id, paused_reason, attempts, max_attempts)
                  WHERE kind = 'create_folder';
              CREATE INDEX IF NOT EXISTS idx_operation_queue_parent
@@ -15630,6 +15630,7 @@ mod reconcile_tests {
         true
     }
 
+    #[cfg(not(target_os = "macos"))]
     /// The query plan of `sql`, one line per step.
     fn query_plan(db: &StateDb, sql: &str) -> String {
         let conn = db.0.lock().unwrap();
@@ -15639,12 +15640,14 @@ mod reconcile_tests {
         steps.map(Result::unwrap).collect::<Vec<_>>().join("\n")
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_remap_reads_the_files_table_through_an_index() {
         let pc = Pc::new();
-        for sql in [REMAP_FILES_SQL, GHOST_REFERENCES_SQL] {
+        for sql in [REMAP_FILES_SQL, REMAP_OPS_SQL, GHOST_REFERENCES_SQL] {
             let plan = query_plan(&pc.db, sql);
             assert!(!plan.contains("SCAN files"), "a remap must not scan every row:\n{plan}");
+            assert!(!plan.contains("SCAN operation_queue"), "a remap must not scan every op:\n{plan}");
         }
     }
 
