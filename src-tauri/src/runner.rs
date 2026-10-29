@@ -31,7 +31,7 @@
 //! popover snapshot consume this stream.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -240,15 +240,23 @@ fn platform_str() -> &'static str {
 /// This machine's hostname, or `"unknown"` if the OS won't tell us. Cross-
 /// platform via the `hostname` crate (already a dependency for the lock file).
 ///
-/// `pub(crate)` so the known-folder backup mirror can derive its
-/// `Backup/<device>/<folder>` destination from the SAME value this device
-/// registers with the server (`register_session`), keeping the backup path and
-/// the device row in lockstep.
+/// The device row's display name (`register_session`) uses it, and on macOS the
+/// backup source tag (spec §2: no macOS change). The Windows and Linux backup
+/// uses [`device_name`], which has no fallback, so a lossy name never starts a
+/// `Backups/unknown` folder (spec D9, tasks 1888, 2226).
 pub(crate) fn hostname_or_unknown() -> String {
     hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Spec D9 (tasks 1888, 2226): this machine's name, or `None` when the OS will not give one that is valid Unicode. The
+/// backup mirror and the backup source key use this: with `None` they make nothing, so a lossy name never starts a
+/// second `Backups/<device>` folder. [`hostname_or_unknown`] stays for the device row's display name and the lock file.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn device_name() -> Option<String> {
+    hostname::get().ok().and_then(|s| s.into_string().ok())
 }
 
 /// The desktop crate version, surfaced on the device row as `bb_version`.
@@ -726,6 +734,21 @@ async fn next_wake(
     }
 }
 
+/// Spec D11 (task 1888): the account's resume requests, shared with the engine. `asked` counts the sign-ins that asked
+/// for the operations paused for `auth` to be due again (`ask_to_resume_auth_paused`); `done` is the ask the last
+/// resume served. Off macOS the engine serves them itself, after its reconcile pass and the key check
+/// ([`crate::engine_bridge::EngineBridge::reconcile_then_resume`]); a Mac serves them in the engine start.
+#[derive(Debug, Clone, Default)]
+pub struct ResumeTicket {
+    pub asked: Arc<AtomicU64>,
+    pub done: Arc<AtomicU64>,
+    /// Review P2 (task 1888): the releases that asked for a pass ("Upload to my Beebeeb" on a held change, Windows).
+    /// Separate from `asked`, so a release never resumes the operations paused for `auth`.
+    pub pass_wanted: Arc<AtomicU64>,
+    /// The release ask the last committed pass served: a pass serves what it read before it planned.
+    pub pass_served: Arc<AtomicU64>,
+}
+
 /// Owned handle to a running engine task. Drop it (or call
 /// [`Self::abort`]) to stop the engine.
 pub struct EngineRunner {
@@ -759,6 +782,8 @@ impl EngineRunner {
     /// The token and the key arrive as `Zeroizing` values (R10, lead ruling 2): the copy that travelled
     /// from the session to here is wiped when `run` is done with it, and only `ApiClient` (which wipes
     /// its own on drop) keeps a plain one.
+    ///
+    /// `resume` is the account's resume requests (spec D11): off macOS the engine serves them after its reconcile pass.
     pub fn spawn(
         app: AppHandle,
         sync_root: PathBuf,
@@ -766,6 +791,7 @@ impl EngineRunner {
         master_key: zeroize::Zeroizing<[u8; 32]>,
         sync_paused: Arc<AtomicBool>,
         auth_health: Arc<AuthHealth>,
+        resume: ResumeTicket,
     ) -> Self {
         let (tx, rx) = oneshot::channel::<()>();
         let ipc_bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -788,6 +814,7 @@ impl EngineRunner {
                     ipc_bind_error: ipc_bind_error_for_task,
                     stopping: stopping_for_task,
                     send_phase: send_phase_for_task,
+                    resume,
                 },
             )
             .await;
@@ -1059,6 +1086,8 @@ struct RunnerControls {
     stopping: Arc<AtomicBool>,
     /// The sign-out's send phase (spec 2026-10-10 §6.2): the loop's third wake.
     send_phase: Arc<SendPhaseLink>,
+    /// Spec D11: the account's resume requests, served after the reconcile pass (Windows and Linux).
+    resume: ResumeTicket,
 }
 
 /// The runner task body. Acquires the lock, opens the state DB,
@@ -1083,6 +1112,7 @@ async fn run(
         ipc_bind_error,
         stopping,
         send_phase,
+        resume,
     } = controls;
 
     // Only consumed inside the `#[cfg(unix)]` IPC block below — Windows has
@@ -1252,8 +1282,13 @@ async fn run(
         .try_state::<crate::popover_data::PopoverRuntime>()
         .map(|runtime| runtime.transfers.clone())
         .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    let bridge =
-        Arc::new(EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping).with_transfers(transfers.clone()));
+    // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
+    // waits for a pass.
+    let bridge = Arc::new(
+        EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping)
+            .with_transfers(transfers.clone())
+            .with_resume(resume.clone()),
+    );
     // What each request saw of the link (offline vs server did not answer).
     let link = api.link();
     send_phase.attach(link.clone());
@@ -1443,6 +1478,10 @@ async fn run(
     let mut last_alias_sweep = std::time::Instant::now();
     // Spec 2026-10-10 §6.2: when the send phase's wake last ran the queue step.
     let mut last_phase_run: Option<std::time::Instant> = None;
+    // Spec D11, D11b (task 1888): whether this engine run's first reconcile pass, with its key check and resume, has
+    // committed. Until it has, the send phase's wake sends nothing.
+    #[cfg(not(target_os = "macos"))]
+    let mut reconciled_this_run = false;
 
     loop {
         match next_wake(&mut cancel, &mut tick, &send_phase).await {
@@ -1584,6 +1623,23 @@ async fn run(
                         // (timestamp ≈ now) doesn't get auto-resolved
                         // on the very same tick.
                         sweep_auto_resolutions(&app, &bridge, &sync_root).await;
+                        // Spec D11, D12, I6 (task 1888): the reconcile pass, then the key check and the resume of what
+                        // a refused session paused, before this tick's queue step sends anything. A pass that fails
+                        // resumes nothing and is tried again next tick; the queue step still runs (the parent-first
+                        // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
+                        // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
+                        // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
+                        #[cfg(not(target_os = "macos"))]
+                        if tick.reached_server
+                            && let Err(error) = bridge
+                                .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)
+                                .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "the reconcile pass did not complete; held changes stay paused, next tick retries"
+                            );
+                        }
                         let completed_sync_work = queue_step(
                             &bridge,
                             &sync_root,
@@ -1730,6 +1786,11 @@ async fn run(
                     last_phase_run,
                     now,
                 ) {
+                    continue;
+                }
+                // Spec D11b (task 1888): nothing is sent before this run's first pass committed; the next tick runs it.
+                #[cfg(not(target_os = "macos"))]
+                if !reconciled_this_run {
                     continue;
                 }
                 last_phase_run = Some(now);

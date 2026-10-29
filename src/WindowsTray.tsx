@@ -238,13 +238,18 @@ function parentFolder(path: string): string {
   return parts.length >= 2 ? parts[parts.length - 2] : 'Beebeeb'
 }
 
-/** Honest per-status subline. `<F>` is the parent folder. */
+/**
+ * Honest per-status subline. `<F>` is the parent folder. A file still uploading is not in Beebeeb yet, so it is never
+ * shown as synced (spec 1888/2226 D13).
+ */
 function statusSubline(status: string, folder: string): string {
   switch (status) {
     case 'cloud_only':
       return `Online-only in ${folder}`
     case 'downloading':
       return `Downloading to ${folder}`
+    case 'uploading':
+      return `Not uploaded yet — ${folder}`
     case 'conflict':
       return `Needs review — ${folder}`
     case 'error':
@@ -252,7 +257,6 @@ function statusSubline(status: string, folder: string): string {
     case 'moved_to_trash':
       return 'Moved to trash'
     case 'local':
-    case 'uploading':
     default:
       return `Synced to ${folder}`
   }

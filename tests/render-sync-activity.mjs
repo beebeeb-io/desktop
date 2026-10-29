@@ -27,7 +27,7 @@ try {
 }
 await mkdir(output, { recursive: true })
 
-const HELD = '2,924 changes from 4 Oct are on hold. An update will repair them.'
+const HELD = '2,924 changes from 4 Oct are on hold until you sign in again.'
 const GAVE_UP = '43 changes stopped after repeated errors and are not retried.'
 const now = Math.floor(Date.now() / 1000)
 const summaries = {
