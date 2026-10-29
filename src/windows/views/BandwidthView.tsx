@@ -51,6 +51,7 @@ import {
   type BandwidthSample,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { pollWhileVisible } from '../visiblePoll'
 import { BandwidthChart } from './BandwidthChart'
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -800,15 +801,15 @@ function TrafficChartPanel() {
       }
       setLoaded(true)
     })()
-    // Refresh every 30 s to pick up new heartbeat samples.
-    const id = window.setInterval(async () => {
+    // Refresh every 30 s to pick up new heartbeat samples, while the window is on screen (task 2243).
+    const stop = pollWhileVisible(async () => {
       const r = await getBandwidthHistory(20)
       if (cancelled) return
       if (r.ok) setSamples(r.value)
-    }, 30_000)
+    }, 30_000, { leading: false })
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 
@@ -857,7 +858,8 @@ export default function BandwidthView() {
   // Initial fetch + poll for live updates.
   useEffect(() => {
     const cancel = load()
-    const id = window.setInterval(() => {
+    // Task 2243: only while the window is on screen.
+    const stop = pollWhileVisible(() => {
       // Poll silently: do not reset to loading on subsequent polls so the UI
       // never flickers to a skeleton when it already has data.
       void (async () => {
@@ -869,11 +871,11 @@ export default function BandwidthView() {
           return { phase: 'ready', sessions }
         })
       })()
-    }, POLL_INTERVAL_MS)
+    }, POLL_INTERVAL_MS, { leading: false })
 
     return () => {
       cancel?.()
-      window.clearInterval(id)
+      stop()
     }
   }, [])
 

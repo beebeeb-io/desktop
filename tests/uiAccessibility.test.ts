@@ -10,11 +10,18 @@ describe('windows ui accessibility helpers', () => {
   })
 
   test('keeps generic success toasts off the amber brand accent', () => {
-    expect(toastToneForVariant('success')).toEqual({
-      background: 'oklch(0.96 0.04 155)',
-      border: 'oklch(0.84 0.08 155)',
-      color: 'oklch(0.28 0.09 155)',
-      iconBackground: 'oklch(0.44 0.11 155)',
+    // Task 1683 slice 5: the tone is now theme tokens (no oklch literals); the success variant
+    // is still the green ok-* pair, never an amber token. Contrast: tests/toastContrast.test.tsx.
+    const tone = toastToneForVariant('success')
+    expect(tone).toEqual({
+      background: 'var(--ok-bg)',
+      border: 'var(--ok-line)',
+      iconBackground: 'var(--ok-icon)',
+      iconGlyph: 'var(--paper)',
+      title: 'var(--ink)',
+      message: 'var(--ink-2)',
+      close: 'var(--ink-3)',
     })
+    expect(Object.values(tone).join(' ')).not.toContain('amber')
   })
 })

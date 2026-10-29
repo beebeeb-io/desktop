@@ -104,7 +104,8 @@
       "exceptionDomain": "",
       "signingIdentity": null,
       "entitlements": "entitlements.plist",
-      "providerShortName": null
+      "providerShortName": null,
+      "minimumSystemVersion": "14.0"
     }
   }
 }

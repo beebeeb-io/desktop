@@ -3,10 +3,13 @@ import {
   command,
   commandUnavailableLabel,
   desktopSearchFiles,
+  finderRevealableResults,
   formatBytes,
   type DesktopSearchResponse,
   type DesktopSearchResult,
 } from './desktopApi'
+import { finderShowFileFailedToast } from './finderSetup'
+import { usePlatformName } from './platform'
 import { useToast } from './windows/ui'
 
 const SEARCH_LIMIT = 12
@@ -56,6 +59,7 @@ export default function DesktopQuickSearch({
   onClose: () => void
 }) {
   const { showToast } = useToast()
+  const platform = usePlatformName()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState<DesktopSearchResponse | null>(null)
@@ -66,7 +70,7 @@ export default function DesktopQuickSearch({
   const requestId = useRef(0)
 
   const trimmedQuery = query.trim()
-  const results = response?.results ?? EMPTY_RESULTS
+  const results = useMemo(() => finderRevealableResults(platform, response?.results ?? EMPTY_RESULTS), [platform, response])
   const indexedFileCount = response?.indexed_file_count ?? 0
   const indexSyncing = response?.index_state === 'syncing'
 
@@ -111,7 +115,7 @@ export default function DesktopQuickSearch({
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
-      void desktopSearchFiles(trimmedQuery, SEARCH_LIMIT).then((result) => {
+      void desktopSearchFiles(trimmedQuery, SEARCH_LIMIT, { forFinder: true }).then((result) => {
         if (cancelled || requestId.current !== currentRequest) return
         if (result.ok) {
           setResponse(result.value)
@@ -141,14 +145,19 @@ export default function DesktopQuickSearch({
     if (opened.ok) {
       onClose()
     } else {
-      showToast({
-        variant: 'error',
-        title: 'Couldn’t open in Finder',
-        message: opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason,
-      })
+      // A Mac's error is never shown: the toast is the one sentence (task 17b, fix round 1).
+      showToast(
+        platform === 'macos'
+          ? finderShowFileFailedToast()
+          : {
+              variant: 'error',
+              title: 'Couldn’t open in Finder',
+              message: opened.unsupported ? commandUnavailableLabel('open_in_finder') : opened.reason,
+            },
+      )
     }
     setOpeningId(null)
-  }, [onClose, showToast])
+  }, [onClose, platform, showToast])
 
   const onInputKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown' && results.length > 0) {

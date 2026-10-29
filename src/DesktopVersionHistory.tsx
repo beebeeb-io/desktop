@@ -196,7 +196,7 @@ export default function DesktopVersionHistory({
     if (result.ok) {
       showToast({
         title: 'Restore queued',
-        message: `${selectedFile.name} ${versionLabel(version)} will be restored by the sync engine.`,
+        message: `${selectedFile.name} goes back to version ${version.version_number ?? version.id} on the next sync.`,
         variant: 'success',
       })
       return

@@ -50,6 +50,11 @@ pub struct VersionInfo {
 /// `true` when both sides moved away from the last shared base AND
 /// they moved to different states. The order of checks doesn't
 /// matter — they all have to hold for a real conflict.
+///
+/// Task 2190 (plan §7.1 E1): the tick's detector no longer calls it. A `Local` row has no pending
+/// write, so a concurrent edit is the parked op the server's stale-base refusal makes. Kept, with
+/// its tests, for a `Conflict` row's three-way rule.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_conflict(local: &VersionInfo, remote: &VersionInfo, base: &VersionInfo) -> bool {
     local.hash != base.hash && remote.hash != base.hash && local.hash != remote.hash
 }

@@ -1,0 +1,839 @@
+/*
+ * The Beebeeb window on a Mac (task 1683 slice 1; spec docs/specs/2026-10-24-macos-two-surface-app.md §7, §11).
+ * Imported by main.tsx; every rule is scoped to a `.mw-` class, so it cannot touch another window. The Settings pane
+ * inside it keeps macSettings.css's `.ms-` rows unchanged.
+ *
+ * Measurements are design/hifi/macos-two-surface.html's: a 214 pt sidebar on --paper-2, a 52 pt toolbar with the
+ * section's name, the traffic lights over the top of the sidebar (overlay title bar). Colours are design.css tokens
+ * only (tests/noHardcodedThemeColors). The layout rules of macSettings.css hold here too and are pinned by
+ * tests/macSettingsLayout.test.ts: the window is exactly the viewport and clips, only a pane scrolls, grid tracks are
+ * minmax(0, 1fr), every flexible text block is min-width: 0, text that can hold user data wraps anywhere.
+ */
+
+.mw-window {
+  box-sizing: border-box;
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 214px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.mw-window--solo {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 52px minmax(0, 1fr);
+  background: var(--paper-2);
+}
+
+/* ── The sidebar: Home (and the account with the gear), or the Settings list ── */
+
+.mw-sidebar {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 54px 10px 10px;
+  background: var(--paper-2);
+  border-right: 1px solid var(--line);
+}
+
+.mw-sidebar--settings {
+  padding-top: 44px;
+}
+
+/* The band beside the traffic lights (review item 7): a drag region over the sidebar's top padding. Out of flow, so
+   the list below it does not move; the sidebar (position: relative) is its positioning box. */
+.mw-drag-band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+}
+
+.mw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mw-item {
+  min-width: 0;
+}
+
+.mw-item--apart {
+  margin-top: 10px;
+}
+
+.mw-nav {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+}
+
+.mw-nav .ms-icon {
+  color: var(--ink-3);
+  flex: none;
+}
+
+.mw-nav[aria-current='page'] {
+  background: var(--paper-3);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.mw-nav[aria-current='page'] .ms-icon {
+  color: var(--ink);
+}
+
+.mw-nav-tile {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-3);
+  color: var(--ink-2);
+}
+
+.mw-nav[aria-current='page'] .mw-nav-tile {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.mw-back {
+  align-self: flex-start;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px 0 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: default;
+}
+
+.mw-settings-heading {
+  margin: 0;
+  padding: 6px 9px 8px;
+  font-size: 17px;
+  line-height: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.mw-account-row {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.mw-account-row[aria-current='page'] {
+  background: var(--paper-3);
+}
+
+.mw-account-row[aria-current='page'] .mw-plan {
+  color: var(--ink-2);
+}
+
+.mw-foot {
+  margin-top: auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 2px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.mw-avatar {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mw-avatar--large {
+  width: 32px;
+  height: 32px;
+  font-size: 13px;
+}
+
+.mw-account-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mw-email {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.mw-plan {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.mw-gear {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: default;
+}
+
+.mw-gear:hover,
+.mw-nav:hover,
+.mw-back:hover {
+  background: var(--paper-3);
+}
+
+/* ── The pane: a 52 pt toolbar with the section's name, then the content ── */
+
+.mw-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  background: var(--paper);
+}
+
+.mw-toolbar {
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.mw-toolbar--solo {
+  border-bottom: 0;
+  background: var(--paper-2);
+}
+
+.mw-title {
+  margin: 0;
+  min-width: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 700;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.mw-chip {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mw-chip .ms-icon {
+  color: var(--amber-deep);
+}
+
+.mw-pane {
+  background: var(--paper-2);
+}
+
+.mw-content {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px;
+}
+
+/* ── Home ── */
+
+/* The one-time hint at the top of Home (hi-fi section 3, `.hint`): an info glyph, a bold line, the sentence, "Got it". */
+.mw-hint {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.mw-hint-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ink-2);
+  display: inline-flex;
+}
+
+.mw-hint-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.mw-hint-title {
+  font-weight: 600;
+}
+
+.mw-hint-body {
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+
+.mw-card {
+  min-width: 0;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.mw-card > * + * {
+  border-top: 1px solid var(--line);
+}
+
+.mw-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.mw-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.mw-row-title {
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.mw-row-hint {
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.mw-tile {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper-2);
+  color: var(--ink-3);
+}
+
+.mw-tile--amber {
+  border-color: var(--amber-soft);
+  background: var(--amber-bg);
+  color: var(--amber-deep);
+}
+
+.mw-status-disc {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--paper-3);
+  color: var(--ink-2);
+}
+
+.mw-status-disc--ok {
+  background: var(--ok-icon);
+  color: var(--paper);
+}
+
+.mw-status-disc--alert {
+  background: var(--red);
+  color: var(--paper);
+}
+
+.mw-locked {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+}
+
+.mw-columns {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+/* Home's groups hold only notes or one block, whose square backgrounds would paint over the card's rounded corners
+   (in Settings › Sync the notes sit between rows). Clipping is not scrolling: nothing here can scroll. */
+.mw-columns .ms-card {
+  overflow: hidden;
+}
+
+/* Side by side, not stacked: macSettings.css's space between stacked groups does not apply. */
+.mw-columns > .ms-group + .ms-group {
+  margin-top: 0;
+}
+
+.mw-storage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+/* The shared bar grows along a row (`flex: 1 1 0`); in this column it keeps its 4 pt height instead. */
+.mw-storage .ms-bar {
+  flex: none;
+}
+
+.mw-storage-line {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ── Signed out: one centred card ── */
+
+.mw-solo-main,
+.mw-solo-body {
+  min-width: 0;
+  min-height: 0;
+}
+
+.mw-solo-body {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 0 24px 52px;
+}
+
+/* Centred with auto margins, not `justify-content: center`: a card taller than the window (the recovery phrase at the
+   760 x 520 minimum) must scroll from its top. `justify-content: center` puts the overflow above the start, where no scroll
+   reaches it. The margins fall to zero when there is no room to spare. */
+.mw-solo-body > :first-child {
+  margin-top: auto;
+}
+
+.mw-solo-body > :last-child {
+  margin-bottom: auto;
+}
+
+.mw-solo-note {
+  width: min(100%, 400px);
+  min-width: 0;
+}
+
+/*
+ * The sign-in cards (task 1683 slice 2; hi-fi design/hifi/macos-two-surface.html section 2, `.scard`): one centred card
+ * at a time, left-aligned, the amber b mark, the heading, the words, then the card's own body. 380 pt wide; 440 for the
+ * recovery phrase and Finder, 460 for the account switch. `min(100%, …)` keeps it inside the window's 760 pt minimum.
+ */
+.mw-scard {
+  box-sizing: border-box;
+  width: min(100%, 380px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  padding: 28px 28px 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+  box-shadow: var(--shadow-2);
+}
+
+.mw-scard--wide {
+  width: min(100%, 440px);
+}
+
+.mw-scard--switch {
+  width: min(100%, 460px);
+}
+
+.mw-mark {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--amber);
+  color: var(--amber-ink);
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.mw-scard-title {
+  margin: 2px 0 0;
+  font-size: 20px;
+  line-height: 26px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.mw-scard-copy {
+  margin: 0;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* A hint under a control, and the address of a page the browser did not open. */
+.mw-scard-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.mw-scard-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.mw-scard-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.mw-scard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mw-center {
+  text-align: center;
+}
+
+/* A link that does something in the window (a button) or leaves it (an anchor): the hi-fi's `.lnk`. */
+.mw-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.mw-link:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mw-link--quiet {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.mw-link:focus-visible,
+.mw-input:focus-visible,
+.mw-scard .ms-btn:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.mw-btn--full {
+  width: 100%;
+  height: 34px;
+  font-size: 13px;
+}
+
+.mw-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mw-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.mw-field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.mw-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.mw-input::placeholder {
+  color: var(--ink-3);
+}
+
+.mw-input:disabled {
+  opacity: 0.55;
+}
+
+/* The six or eight digits of a second factor are a machine's string: mono, spaced. */
+.mw-input--code {
+  height: 38px;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.25em;
+}
+
+/* The device code of the browser sign-in: part of the encrypted hand-off, so mono on amber (spec §10.1). */
+.mw-code {
+  padding: 16px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 10px;
+  background: var(--amber-bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 26px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mw-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* The recovery phrase: twelve boxes, three to a row. */
+.mw-words {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mw-word {
+  box-sizing: border-box;
+  min-width: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.mw-word-index {
+  flex: none;
+  width: 14px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.mw-word-input {
+  box-sizing: border-box;
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+/* Cancel is the safe choice and holds focus when the account switch opens (hi-fi `.btn.focus`): its ring shows whenever it
+   has focus, not only for keyboard focus, which a script-set focus after a click is not. */
+.mw-scard-actions .ms-btn:first-child:focus {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* The ring is the box's, not the input's inside it (the input would ring over the index number). */
+.mw-word:focus-within {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.mw-word-input:focus-visible {
+  outline: none;
+}
+
+/* The Finder status line while Beebeeb adds itself. */
+.mw-adding {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2);
+  font-size: 13px;
+}
+
+.mw-spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--ink-2);
+  border-radius: 50%;
+  animation: mw-spin 0.9s linear infinite;
+}
+
+@keyframes mw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-spinner {
+    animation: none;
+  }
+}
+
+/* A note inside a card is its own box: the error wash for a failure (ink on --err-bg, never red text), paper-2 for a
+   neutral line. In Settings the same note is a row of its group, with no border of its own. */
+.mw-scard .ms-note {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+
+.mw-scard .ms-note--alert {
+  border-color: var(--err-line);
+  background: var(--err-bg);
+}
+
+/* ── Focus: the same ring as the Settings rows ── */
+
+.mw-nav:focus-visible,
+.mw-back:focus-visible,
+.mw-gear:focus-visible,
+.mw-account-row:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
