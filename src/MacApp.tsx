@@ -737,7 +737,12 @@ export default function MacApp() {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
         {view.section === 'general' ? <GeneralTab settings={settings} signedIn={signedIn} /> : null}
-        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} onSetUpThisMac={() => moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)} /> : null}
+        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} onSetUpThisMac={() => {
+          // Review P2: the card is drawn in `main`, so the click also leaves Settings — otherwise the Account tab stays up and
+          // the recovery-phrase form the person just asked for never appears.
+          go({ to: 'home' })
+          moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
+        }} /> : null}
         {view.section === 'sync' ? <SyncTab settings={settings} /> : null}
         {view.section === 'security' ? <SecurityTab unlocked={unlocked} /> : null}
         {view.section === 'about' ? <AboutTab settings={settings} signedIn={signedIn} /> : null}

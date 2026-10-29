@@ -11,7 +11,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, jest, test } from 'bun:test'
 import { IDLE_FLOW } from '../src/signInModel'
 import { getSignInFlow, resetSignInFlow, setSignInFlow } from '../src/signInFlowStore'
-import { installMiniDom, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
+import { allElements, click, installMiniDom, type MiniDomInstall, type MiniElement } from './fixtures/miniDom'
 
 let dom: MiniDomInstall
 let React: typeof import('react')
@@ -234,6 +234,40 @@ describe('a window that opens signed in and locked follows the Keychain route (1
     expect(getSignInFlow().step).toBeNull()
     expect(frames.at(-1)).toContain(LOCKED)
     expect(frames.at(-1)).not.toContain(SET_UP)
+    await unmount()
+  })
+
+  // Review P2 (window): the route asked at a click in Settings › Account must actually show the card. Settings is a mode of
+  // the one window and the card is drawn in `main`, so the callback has to leave Settings; otherwise the click did nothing
+  // visible and the person stayed on the locked Account tab.
+  test('Settings › Account Unlock with no key anywhere leaves Settings and shows Set up this Mac', async () => {
+    jest.useFakeTimers()
+    const script: { reads: boolean[]; route: 'keychain' | 'recovery_phrase' } = { reads: [false], route: 'keychain' }
+    const calls = installBackend(script)
+    const { container, unmount } = await mountMacApp()
+    await pass(2000, container, () => {})
+    // The window opened locked with the key in the Keychain: Home's locked card, not the card.
+    expect(container.textContent).toContain(LOCKED)
+    const gear = allElements(container).find((element) => element.getAttribute('id') === 'mw-gear')
+    expect(gear).toBeDefined()
+    await React.act(async () => { click(container, gear as MiniElement) })
+    await pass(500, container, () => {})
+    const accountRow = allElements(container).find((element) => element.getAttribute('id') === 'mw-settings-account')
+    expect(accountRow).toBeDefined()
+    await React.act(async () => { click(container, accountRow as MiniElement) })
+    await pass(1500, container, () => {})
+    expect(container.textContent).toContain('Vault is locked')
+    // The Keychain was read at the open; at this click it answers that there is no key anywhere.
+    script.route = 'recovery_phrase'
+    const unlock = allElements(container).find((element) => element.tagName === 'BUTTON' && element.textContent === 'Unlock')
+    expect(unlock).toBeDefined()
+    await React.act(async () => { click(container, unlock as MiniElement) })
+    await pass(1500, container, () => {})
+    expect(calls.filter((name) => name === 'vault_unlock_route')).toHaveLength(2)
+    expect(calls.filter((name) => name === 'unlock_vault')).toEqual([])
+    // The card, not the locked Account tab: Settings is left.
+    expect(container.textContent).toContain(SET_UP)
+    expect(container.textContent).not.toContain('Vault is locked')
     await unmount()
   })
 })
