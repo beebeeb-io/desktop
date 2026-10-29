@@ -2852,14 +2852,30 @@ impl StateDb {
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens
     /// are cheap.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // Base schema. `CREATE TABLE IF NOT EXISTS` covers both the
-        // first-run case and subsequent opens against an existing DB
-        // that already has every column we need.
+        // Task 2278: the journal mode cannot be changed inside a transaction, so it is set first, on its own.
+        enable_wal(&conn)?;
+        // Task 2278: the schema and every column migration run under ONE write lock. Two connections opening a
+        // fresh database at the same moment used to both see a column missing — `has_column`, then `ALTER TABLE
+        // ... ADD COLUMN`, with no transaction around them — and the second ALTER returned "duplicate column
+        // name: fetched_min_version" (macOS CI, 2026-10-29, `a_sign_out_leaves_no_account_row_and_no_owner`).
+        // A second opener now waits on the busy timeout above for this transaction, then finds the schema done.
+        {
+            let migration = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            Self::migrate_schema(&migration)?;
+            migration.commit()?;
+        }
+        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+    }
+
+    /// The schema of a state database, created if missing and brought up to today's columns. Runs inside
+    /// [`StateDb::open`]'s `BEGIN IMMEDIATE`, so one opener applies it and any other opener waits and then finds it
+    /// finished. `CREATE TABLE IF NOT EXISTS` covers both the first-run case and a re-open of a database that already
+    /// has every column.
+    fn migrate_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
-            PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS owned_key_records (
                 file_id TEXT PRIMARY KEY,
                 record TEXT NOT NULL
@@ -2982,58 +2998,58 @@ impl StateDb {
             );
         ",
         )?;
-        ensure_column(&conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "namespace", "TEXT NOT NULL DEFAULT 'my_files'")?;
-        ensure_column(&conn, "files", "parent_id", "TEXT")?;
-        ensure_column(&conn, "files", "shared_root_id", "TEXT")?;
-        ensure_column(&conn, "files", "share_id", "TEXT")?;
-        ensure_column(&conn, "files", "owner_email", "TEXT")?;
-        ensure_column(&conn, "files", "permission_bits", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "item_kind", "TEXT NOT NULL DEFAULT 'file'")?;
-        ensure_column(&conn, "files", "content_type", "TEXT")?;
-        ensure_column(&conn, "files", "current_version", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "current_object_version_id", "TEXT")?;
-        ensure_column(&conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "local_hash", "TEXT")?;
+        ensure_column(conn, "files", "remote_updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "namespace", "TEXT NOT NULL DEFAULT 'my_files'")?;
+        ensure_column(conn, "files", "parent_id", "TEXT")?;
+        ensure_column(conn, "files", "shared_root_id", "TEXT")?;
+        ensure_column(conn, "files", "share_id", "TEXT")?;
+        ensure_column(conn, "files", "owner_email", "TEXT")?;
+        ensure_column(conn, "files", "permission_bits", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "item_kind", "TEXT NOT NULL DEFAULT 'file'")?;
+        ensure_column(conn, "files", "content_type", "TEXT")?;
+        ensure_column(conn, "files", "current_version", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "current_object_version_id", "TEXT")?;
+        ensure_column(conn, "files", "local_base_version", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "local_hash", "TEXT")?;
         // Task 1640 (review N1, F1): what the fetches put on disk (see `record_fetched_version` and
         // docs/design/1640-local-content-identity.md). -1, the default, is "not known": every row from
         // before this column, and every new one until its placeholder is created where nothing was. A
         // new name (self-review #2): a database from a round-2 build has `fetched_version` DEFAULT 0, which
         // no ALTER can change; that column is left unused.
-        ensure_column(&conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
-        ensure_column(&conn, "files", "fetched_hash", "TEXT")?;
-        ensure_column(&conn, "files", "cache_path", "TEXT")?;
-        ensure_column(&conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
+        ensure_column(conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
+        ensure_column(conn, "files", "fetched_hash", "TEXT")?;
+        ensure_column(conn, "files", "cache_path", "TEXT")?;
+        ensure_column(conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
         ensure_column(
-            &conn,
+            conn,
             "files",
             "inherited_pin_state",
             "TEXT NOT NULL DEFAULT 'unpinned'",
         )?;
-        ensure_column(&conn, "files", "last_opened_at", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "operation_queue", "last_error_class", "TEXT")?;
-        ensure_column(&conn, "operation_queue", "paused_reason", "TEXT")?;
+        ensure_column(conn, "files", "last_opened_at", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "operation_queue", "last_error_class", "TEXT")?;
+        ensure_column(conn, "operation_queue", "paused_reason", "TEXT")?;
         // Task 0811: additive backup-origin tag. Existing rows migrate to NULL
         // (untagged → treated as normal ops, never purged by a folder disable).
-        ensure_column(&conn, "operation_queue", "backup_source_key", "TEXT")?;
+        ensure_column(conn, "operation_queue", "backup_source_key", "TEXT")?;
         // Task 1697: which local write created the row (watcher paths set this;
         // Finder-queue paths do not) — the change-log recorder reads it.
-        ensure_column(&conn, "files", "creator_for_fp", "TEXT")?;
+        ensure_column(conn, "files", "creator_for_fp", "TEXT")?;
         // Spec 2026-10-09 §5.2: the write token. Additive and nullable, no backfill;
         // only the dedicated functions write them.
-        ensure_column(&conn, "files", "held_write_id", "TEXT")?;
-        ensure_column(&conn, "files", "held_base", "INTEGER")?;
-        ensure_column(&conn, "files", "held_version", "INTEGER")?;
-        ensure_column(&conn, "files", "held_object_version_id", "TEXT")?;
-        ensure_column(&conn, "files", "version_filled", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "operation_queue", "write_id", "TEXT")?;
-        ensure_column(&conn, "operation_queue", "write_origin", "TEXT")?;
-        ensure_column(&conn, "operation_queue", "after_write_id", "TEXT")?;
-        ensure_column(&conn, "operation_queue", "base_pending", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(&conn, "operation_queue", "claim_id", "TEXT")?;
-        ensure_column(&conn, "operation_queue", "claimed_at", "INTEGER")?;
+        ensure_column(conn, "files", "held_write_id", "TEXT")?;
+        ensure_column(conn, "files", "held_base", "INTEGER")?;
+        ensure_column(conn, "files", "held_version", "INTEGER")?;
+        ensure_column(conn, "files", "held_object_version_id", "TEXT")?;
+        ensure_column(conn, "files", "version_filled", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "operation_queue", "write_id", "TEXT")?;
+        ensure_column(conn, "operation_queue", "write_origin", "TEXT")?;
+        ensure_column(conn, "operation_queue", "after_write_id", "TEXT")?;
+        ensure_column(conn, "operation_queue", "base_pending", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "operation_queue", "claim_id", "TEXT")?;
+        ensure_column(conn, "operation_queue", "claimed_at", "INTEGER")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
@@ -3161,9 +3177,9 @@ impl StateDb {
             );
             ",
         )?;
-        ensure_column(&conn, "upload_resume", "completed_version", "INTEGER")?;
-        ensure_column(&conn, "upload_resume", "completed_object_version_id", "TEXT")?;
-        ensure_column(&conn, "upload_resume", "completed_mime_type", "TEXT")?;
+        ensure_column(conn, "upload_resume", "completed_version", "INTEGER")?;
+        ensure_column(conn, "upload_resume", "completed_object_version_id", "TEXT")?;
+        ensure_column(conn, "upload_resume", "completed_mime_type", "TEXT")?;
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_operation_queue_write_id ON operation_queue(write_id);
@@ -3192,10 +3208,10 @@ impl StateDb {
                  ON operation_queue(parent_id, paused_reason, attempts, max_attempts, created_at);",
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
-        ensure_column(&conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
+        ensure_column(conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
         // Task 1640 (review-151d P2-1): the person dismissed the entry of a file still kept where it
         // is; the row stays as a tombstone, so its folder is still the server's deletion.
-        ensure_column(&conn, "kept_copies", "dismissed", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(conn, "kept_copies", "dismissed", "INTEGER NOT NULL DEFAULT 0")?;
         // Task 1640 (review F1, design T6): a file that goes cloud-only may still hold some of its
         // bytes (a placeholder partly on disk reads as cloud-only on every tick, and no dehydration is
         // known to remove them all). Its agreed content no longer describes every byte, so it joins
@@ -3257,7 +3273,7 @@ impl StateDb {
             "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
             [],
         )?;
-        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+        Ok(())
     }
 
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
@@ -9005,9 +9021,61 @@ pub struct BandwidthSample {
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     if !has_column(conn, table, column)? {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        add_column(conn, table, column, definition)?;
     }
     Ok(())
+}
+
+/// The `ALTER TABLE` alone, after [`has_column`] said the column is missing. Task 2278, belt and braces: another
+/// connection may have added it in that window, and SQLite answers "duplicate column name". That is success, so the
+/// column is looked up again rather than trusted on the error's text alone. Any other failure still propagates.
+/// (`migrate_schema` now holds one write lock for the whole migration, so this cannot be reached by two openers; it
+/// is here so a duplicate column is never an error whatever order a caller runs these in.)
+fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    match conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), []) {
+        Ok(_) => Ok(()),
+        Err(error) if is_duplicate_column(&error) => {
+            if has_column(conn, table, column)? {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// SQLite's "duplicate column name: <column>" from an `ALTER TABLE ... ADD COLUMN` that another connection won.
+fn is_duplicate_column(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(_, Some(text)) if text.contains("duplicate column name"))
+}
+
+/// Task 2278: putting a database into WAL mode takes a brief exclusive lock, and SQLite does NOT run the busy
+/// handler for a journal-mode change — it answers `SQLITE_BUSY` ("database is locked") at once, whatever
+/// `busy_timeout` says. On a fresh file several first opens therefore meet here, before they ever reach the schema
+/// transaction. The pragma is idempotent, so it is retried for the time the busy timeout would have bought: the
+/// connection that converts the file wins, and every other one then reads back `wal`.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+    let deadline = std::time::Instant::now() + BUDGET;
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode = WAL;") {
+            Ok(()) => return Ok(()),
+            Err(error) if is_lock_contention(&error) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(PAUSE);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -9125,6 +9193,74 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    /// Task 2278: a fresh state database opened by several connections at the same moment is migrated once and
+    /// every open succeeds. `ensure_column` checked `has_column` and then ran `ALTER TABLE ... ADD COLUMN` with no
+    /// transaction around it, so two first opens could both see `fetched_min_version` missing and the second ALTER
+    /// failed with "duplicate column name: fetched_min_version" — the macOS CI flake of 2026-10-29. 50 rounds because
+    /// the window between the check and the ALTER is short; one round names the real code in its failure message.
+    #[test]
+    fn every_concurrent_first_open_of_a_fresh_database_succeeds() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 50;
+        // Eight threads on fewer cores still interleave between `has_column` and the `ALTER`; the count only has to be
+        // enough for two openers to meet. No CPU-count premise is asserted: CI runners have four.
+        for round in 0..ROUNDS {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.db");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let failures: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let path = path.clone();
+                        let barrier = barrier.clone();
+                        scope.spawn(move || {
+                            barrier.wait();
+                            StateDb::open(&path).map(|_| ())
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .filter_map(|handle| handle.join().expect("no opener panics").err().map(|e| e.to_string()))
+                    .collect()
+            });
+            assert!(
+                failures.is_empty(),
+                "round {round}: {THREADS} threads opened one fresh database and {} of them failed: {failures:?}",
+                failures.len()
+            );
+        }
+    }
+
+    /// Task 2278, belt and braces: the ALTER that loses a column race is tolerated, and nothing else is. The window is
+    /// made here instead of waited for: the column is added by another connection before `add_column` runs, exactly what
+    /// a second opener did between `has_column` and the `ALTER`. Remove the tolerance and this test goes red on the
+    /// duplicate; a missing table must still be an error, so the tolerance cannot swallow a real failure.
+    #[test]
+    fn a_column_added_by_another_connection_is_not_an_error_but_a_missing_table_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = StateDb::open(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        {
+            let reader = db.0.lock().unwrap();
+            assert!(
+                !has_column(&reader, "files", "race_probe").unwrap(),
+                "the premise: the column is missing"
+            );
+            // The other connection wins the race between that check and the ALTER.
+            conn.execute("ALTER TABLE files ADD COLUMN race_probe TEXT", [])
+                .unwrap();
+            add_column(&reader, "files", "race_probe", "TEXT").expect("a duplicate column is success");
+            assert!(has_column(&reader, "files", "race_probe").unwrap());
+            let error = add_column(&reader, "no_such_table", "race_probe", "TEXT")
+                .expect_err("a real failure still propagates");
+            assert!(format!("{error}").contains("no such table"), "{error}");
+        }
+        // And the migration's own entry point is idempotent over it, on this database too.
+        ensure_column(&conn, "files", "race_probe", "TEXT").unwrap();
+    }
+
     /// The Windows sign-out leaves no account data behind, whatever `ACCOUNT_TABLES` and `DEVICE_TABLES` list: one row
     /// goes into every listed table it does not refuse on (a dummy value per column, from the schema), and after
     /// `finish_windows_signout` every listed table is empty and `has_account_data` is false. A table added to either list
