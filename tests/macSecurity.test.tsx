@@ -8,7 +8,7 @@
  * alert with Try again, and one group failing leaves the others alone), and that a locked vault shows no account data.
  * What it does NOT prove: layout (tests/render-mac-app.mjs measures that in Chromium) or anything on a Mac.
  */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import * as parts from '../src/macSettingsParts'
@@ -62,10 +62,12 @@ function backendOf(over: Record<string, (args: any) => unknown> = {}) {
 /** What the page moved focus to, in order (`focusById` needs a document; the id is the whole story). */
 const focused: string[] = []
 
-function openSecurity(backend: Record<string, (args: any) => unknown> = backendOf(), props: object = { unlocked: true }) {
+function openSecurity(backend: Record<string, (args: any) => unknown> = backendOf(), props: object = { unlocked: true }, honest = false) {
   const m = mount('MacSecurity.tsx', 'SecurityTab', {
     backend: backend as any,
     expand: true,
+    // Honest: a flush re-renders only when a state setter changed something, as React does (PR #147 review, P3-a).
+    honestRender: honest,
     props,
     bindings: { ...desktopApi, ...securityModel, ...parts, ConfirmSheet, focusById: (id: string) => { focused.push(id) } },
   })
@@ -347,7 +349,15 @@ describe('Security: a group that did not load', () => {
   })
 })
 
-describe('Security: the authenticator row is read fresh (review P2-B)', () => {
+describe('Security: the authenticator row is read fresh (review P2-B) and not more often than a minute (review P3-4)', () => {
+  /** The page's clock, which the re-check interval reads (`Date.now()`); the real one is back after every test. */
+  const realNow = Date.now
+  let at = 1_800_000_000_000
+  const advance = (ms: number) => { at += ms }
+  beforeEach(() => { at = 1_800_000_000_000; Date.now = () => at })
+  afterEach(() => { Date.now = realNow })
+  const MINUTE = 60_000
+
   /** The `focus` listeners the page registered on the window, so a test can focus it. */
   function watchFocus(): { fire: () => void; live: () => number } {
     const listeners = new Set<() => void>()
@@ -381,6 +391,7 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
     on = false
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
     expect(called(m, 'account_profile_fresh')).toHaveLength(2)
@@ -388,17 +399,273 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
   })
 
-  test('a re-check that fails does not leave the old answer standing as current', async () => {
+  // P3-4: a failed quiet re-check changes nothing. The answer on screen was seen; an alert would pop up under a person who
+  // asked for nothing, and one failed request on a flaky connection would replace a correct row.
+  test('a re-check made by looking at the window that fails keeps the last answer and raises no alert', async () => {
     let fail = false
     const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
     const focus = watchFocus()
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
     fail = true
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
-    expect(visibleText(m)).not.toContain('Authenticator app (TOTP) · On')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+    expect(visibleText(m)).not.toContain('Couldn’t check your authenticator app')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('looking at the window again within a minute does not ask the server again', async () => {
+    const m = openSecurity()
+    const focus = watchFocus()
+    await settle(m)
+    for (let look = 0; look < 5; look++) {
+      advance(10_000)
+      focus.fire()
+      await settle(m)
+    }
+    expect(called(m, 'account_profile_fresh')).toHaveLength(1)
+    advance(MINUTE)
+    focus.fire()
+    await settle(m)
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+  })
+
+  test('a first look that failed is the alert, and a later look at the window that works replaces it', async () => {
+    let fail = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(false) } }))
+    const focus = watchFocus()
+    await settle(m)
     expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    fail = false
+    advance(MINUTE + 1000)
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    expect(visibleErrorSurfaces(m)).toEqual([])
+  })
+
+  test('a first look that failed stays the alert when the next quiet look fails too', async () => {
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { throw new Error('offline') } }))
+    const focus = watchFocus()
+    await settle(m)
+    advance(MINUTE + 1000)
+    focus.fire()
+    await settle(m)
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    expect(visibleText(m)).not.toMatch(/Authenticator app \(TOTP\) · /)
+  })
+
+  // Lead ruling on #147: the age of a stale answer is said, in the row's secondary text.
+  describe('an answer older than five minutes says so', () => {
+    /**
+     * The page's timers, captured so a test can let time pass: `setTimeout` (the first age is scheduled for the moment the
+     * answer goes stale) and `setInterval` (then every minute, so the age grows). `fire` runs what is pending, as the clock
+     * would; `live` counts what has not been cleared.
+     */
+    function watchTimers() {
+      const timeouts = new Map<number, { fn: () => void; ms: number }>()
+      const intervals = new Map<number, () => void>()
+      let id = 0
+      const w = (globalThis as any).window
+      w.setTimeout = (fn: () => void, ms: number) => { id += 1; timeouts.set(id, { fn, ms }); return id }
+      w.clearTimeout = (which: number) => { timeouts.delete(which) }
+      w.setInterval = (fn: () => void) => { id += 1; intervals.set(id, fn); return id }
+      w.clearInterval = (which: number) => { intervals.delete(which) }
+      return {
+        fire: () => {
+          for (const [which, { fn }] of [...timeouts]) { timeouts.delete(which); fn() }
+          for (const fn of [...intervals.values()]) fn()
+        },
+        pendingDelays: () => [...timeouts.values()].map((t) => t.ms),
+        live: () => timeouts.size + intervals.size,
+      }
+    }
+
+    test('under five minutes the row is as it was: no age', async () => {
+      const m = openSecurity()
+      watchFocus()
+      await settle(m)
+      advance(5 * MINUTE - 1000)
+      m.render()
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    test('a quiet re-check that fails after six minutes keeps the answer and adds "Last checked 6 minutes ago." AT ONCE', async () => {
+      // Honest rendering: the failed look sets no answer, so the page has to ask for the render itself (review P3-a).
+      let fail = false
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }), { unlocked: true }, true)
+      const focus = watchFocus()
+      watchTimers()
+      await settle(m)
+      expect(visibleText(m)).not.toContain('Last checked')
+      fail = true
+      advance(6 * MINUTE)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).toContain('A second factor is required when you sign in. Manage or reset it on beebeeb.io. Last checked 6 minutes ago.')
+      expect(visibleErrorSurfaces(m)).toEqual([])
+    })
+
+    test('the first age is scheduled for the moment the answer goes stale, not for an arbitrary minute', async () => {
+      const m = openSecurity(backendOf(), { unlocked: true }, true)
+      const timers = watchTimers()
+      watchFocus()
+      await settle(m)
+      expect(timers.pendingDelays()).toEqual([5 * MINUTE])
+      advance(5 * MINUTE - 1000)
+      timers.fire()
+      await settle(m)
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    test('from exactly five minutes, and not a second before', async () => {
+      const m = openSecurity(backendOf(), { unlocked: true }, true)
+      const timers = watchTimers()
+      watchFocus()
+      await settle(m)
+      advance(5 * MINUTE - 1000)
+      m.render()
+      expect(visibleText(m)).not.toContain('Last checked')
+      advance(1000)
+      timers.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 5 minutes ago.')
+    })
+
+    test('the age keeps growing while nobody looks: after the first, every minute', async () => {
+      const m = openSecurity(backendOf({ account_profile_fresh: () => profile(false) }), { unlocked: true }, true)
+      const timers = watchTimers()
+      watchFocus()
+      await settle(m)
+      advance(10 * MINUTE)
+      timers.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+      expect(visibleText(m)).toContain('Set it up on beebeeb.io. Last checked 10 minutes ago.')
+      advance(2 * 60 * MINUTE)
+      timers.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 2 hours ago.')
+    })
+
+    test('an answer that works again is fresh again: the age is gone', async () => {
+      let fail = false
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }), { unlocked: true }, true)
+      const focus = watchFocus()
+      watchTimers()
+      await settle(m)
+      fail = true
+      advance(6 * MINUTE)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked 6 minutes ago.')
+      fail = false
+      advance(MINUTE + 1000)
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    // Review P3-b: a clock put back (sleep, a manual change) makes `now - at` negative. Nothing is current about that.
+    test('a clock put back is not "current": the row says it was checked a while ago, and the next look at the window asks again at once', async () => {
+      const m = openSecurity(backendOf(), { unlocked: true }, true)
+      const focus = watchFocus()
+      const timers = watchTimers()
+      await settle(m)
+      expect(called(m, 'account_profile_fresh')).toHaveLength(1)
+      advance(-10 * MINUTE)
+      timers.fire()
+      await settle(m)
+      expect(visibleText(m)).toContain('Last checked a while ago.')
+      focus.fire()
+      await settle(m)
+      expect(called(m, 'account_profile_fresh'), 'the minute-interval guard does not hold a look back when the clock went backwards').toHaveLength(2)
+      expect(visibleText(m)).not.toContain('Last checked')
+    })
+
+    // Review P3-c: a look at the window that takes over a look the person asked for, and fails, must not leave "Checking…".
+    test('a look at the window that fails while the first look is still out ends in the alert with Try again, never in "Checking…" for good', async () => {
+      let n = 0
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { n += 1; if (n === 1) return new Promise(() => {}); throw new Error('offline') } }), { unlocked: true }, true)
+      const focus = watchFocus()
+      watchTimers()
+      await settle(m)
+      expect(visibleText(m)).toContain('Checking…')
+      focus.fire()
+      await settle(m)
+      expect(visibleText(m)).not.toContain('Checking…')
+      expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+      expect(buttons(m)).toContain('Try again')
+    })
+
+    // Review P3-d: only an answer is a look. A failure learns nothing, so the next look at the window may try at once.
+    test('a failed look does not hold the next look back for a minute', async () => {
+      let n = 0
+      const m = openSecurity(backendOf({ account_profile_fresh: () => { n += 1; if (n === 1) throw new Error('offline'); return profile(false) } }), { unlocked: true }, true)
+      const focus = watchFocus()
+      watchTimers()
+      await settle(m)
+      expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+      advance(5_000)
+      focus.fire()
+      await settle(m)
+      expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+      expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')
+    })
+
+    test('only a state that is claimed carries an age: not "Checking…", not an answer that says nothing, not the alert', async () => {
+      const unknown = openSecurity(backendOf({ account_profile_fresh: () => profile(null) }), { unlocked: true }, true)
+      const timers = watchTimers()
+      await settle(unknown)
+      advance(20 * MINUTE)
+      timers.fire()
+      await settle(unknown)
+      expect(visibleText(unknown)).not.toContain('Last checked')
+      const failed = openSecurity(backendOf({ account_profile_fresh: () => { throw new Error('offline') } }), { unlocked: true }, true)
+      const failedTimers = watchTimers()
+      await settle(failed)
+      advance(20 * MINUTE)
+      failedTimers.fire()
+      await settle(failed)
+      expect(visibleText(failed)).not.toContain('Last checked')
+    })
+
+    test('a locked vault runs no timer', async () => {
+      const m = openSecurity(backendOf(), { unlocked: false })
+      const timers = watchTimers()
+      await settle(m)
+      expect(timers.live()).toBe(0)
+    })
+
+    test('leaving the page stops the timers', async () => {
+      const m = openSecurity()
+      const timers = watchTimers()
+      await settle(m)
+      expect(timers.live()).toBe(1)
+      m.unmount()
+      expect(timers.live()).toBe(0)
+    })
+  })
+
+  test('Try again is the person asking: it reads at once, inside the minute, and its failure is the alert', async () => {
+    let fail = true
+    const m = openSecurity(backendOf({ account_profile_fresh: () => { if (fail) throw new Error('offline'); return profile(true) } }))
+    await settle(m)
+    advance(5_000)
+    await press(m, 'Try again')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(2)
+    expect(visibleText(m)).toContain('Couldn’t check your authenticator app')
+    fail = false
+    advance(5_000)
+    await press(m, 'Try again')
+    expect(called(m, 'account_profile_fresh')).toHaveLength(3)
+    expect(visibleText(m)).toContain('Authenticator app (TOTP) · On')
   })
 
   test('a slow answer from an earlier look cannot overwrite a later one', async () => {
@@ -408,6 +675,7 @@ describe('Security: the authenticator row is read fresh (review P2-B)', () => {
     const m = openSecurity(backendOf({ account_profile_fresh: async () => { n += 1; if (n === 1) { await gate; return profile(true) } return profile(false) } }))
     const focus = watchFocus()
     await m.flush()
+    advance(MINUTE + 1000)
     focus.fire()
     await settle(m)
     expect(visibleText(m)).toContain('Authenticator app (TOTP) · Off')

@@ -125,7 +125,7 @@ Service coordinates (non-secret):
 | Resource group / account | `beebeeb-signing` / `beebeebsigning` |
 | Endpoint | `https://weu.codesigning.azure.net/` |
 | Certificate profile | `beebeeb-publictrust` (PublicTrust; 3-day certs, auto-rotating) |
-| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:ref:refs/heads/main` |
+| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:environment:desktop-release` (GitHub environment `desktop-release`, deployment branches `main` and `release/*`) |
 | Role | `Artifact Signing Certificate Profile Signer`, scoped to the account |
 
 How a release build signs (all in `release.yml`, Windows job only):
@@ -159,8 +159,90 @@ How a release build signs (all in `release.yml`, Windows job only):
    gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
    fixture. Any failure blocks the release.
 
-Dispatch `release.yml` **from `main`** — the federated credential's subject is
-`ref:refs/heads/main`, so a run from any other ref cannot authenticate.
+Dispatch `release.yml` from `main` or from a `release/*` branch. No Azure step is
+needed per release. The trust boundary has four parts, and each one is checked:
+
+- **Azure trusts one subject:** `repo:beebeeb-io/desktop:environment:desktop-release`.
+  Only a job that names the GitHub environment `desktop-release` gets that subject in
+  its OIDC token. In `release.yml` that is the `build` job.
+- **The environment deploys only from `main` and `release/*`** (custom deployment
+  branch policies; admins cannot bypass them). A run from any other branch is refused
+  before the job starts, so it never gets a token Azure accepts.
+- **Two repository rulesets protect `release/*`:**
+  - **"release branches (create/delete: admin only)":** only a repository admin can
+    create or delete a `release/*` branch. A bot, an app or a collaborator without the
+    admin role cannot make a branch that is allowed to sign.
+  - **"release branches (PR + checks)", with no bypass for anyone, admins included:**
+    - every update to an existing release branch goes through a pull request (merge
+      method "merge", review threads resolved);
+    - the six CI jobs every release branch runs must pass: Frontend, Rust check
+      (Windows), Rust check (macOS), Rust test (Linux), File Provider Swift (macOS), and
+      the macOS release script check;
+    - force-pushes are refused.
+  - A release-branch merge is a plain `gh pr merge --merge` once those checks are
+    green. `--admin` is neither needed nor used. A direct push, even with an admin
+    token, is refused with "Changes must be made through a pull request".
+  - This was proven on 2026-10-29 with a scratch release branch:
+    - an admin creation succeeded;
+    - a direct admin push was refused;
+    - a merge was refused while a required check was red;
+    - the same PR merged after the re-run turned green;
+    - the scratch branches were then deleted.
+  - Until 2026-10-29 a single ruleset blocked every update, and merges needed the
+    admin bypass. 0.8.19's #184 and #185 were merged that way, before the rule was
+    changed.
+  - **What the rulesets do not cover: a branch's starting commit.**
+    - Creating a release branch is not a pull request. The required checks are not
+      enforced on creation, and CI does not run on pushes to `release/*`.
+    - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
+      unreviewed commit gets a branch that `release.yml` can sign.
+    - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
+    - The rule: cut a release branch only from a `desktop-v*` tag whose commit is the merge
+      commit of a pull request merged into `main` or a `release/*` branch, and which has a
+      published GitHub release, or from a commit on `main`. Keep the cut commit in the release
+      record.
+    - A published release alone is not enough: anyone with write access, including a session
+      using an admin token, can tag an unreviewed commit and publish a release on it. So the
+      tagged commit must also be reviewed.
+    - A tag ruleset that limits tagging to the release workflow is not possible: GitHub refuses
+      the Actions app as a bypass actor (HTTP 422). That is why the check below tests the tag
+      commit itself instead of protecting the tag.
+    - `release.yml` enforces that rule (task 2281, next bullet): it refuses any other
+      branch point before signing.
+  - Neither ruleset limits who holds an admin token. A tool or session acting with an
+    admin's token can still create, delete or recreate a release branch.
+- **`release.yml` refuses an unreviewed branch point:** `verify-branch-point` runs before
+  `build`, so before any job holds the `desktop-release` environment or an Azure token. For a
+  dispatch from a `release/*` branch it walks the branch's first-parent history from the
+  dispatched commit back to its starting point (the first commit that is not a merge of a pull
+  request into that branch). Every commit on that walk must be a merge of a PR that was merged
+  into this same branch, and the starting point must be the commit of a `desktop-v*` tag with a
+  published GitHub release (`draft == false`) whose commit is itself the merge commit of a pull
+  request merged into `main` or a `release/*` branch, or a commit on `main`; otherwise the run
+  stops before signing and names the offending commit. A tag whose commit is not such a PR merge
+  is printed and then treated like any other unreviewed commit: it only passes if it is on
+  `main`. `desktop-v0.8.19` is the first tag that meets the tag rule: its commit `db648a6` is the
+  merge of #185 into `release/0.8.19`. Older tags whose commit was a direct push (for example
+  0.8.18's `e06c55b`) no longer count, which is intended. A dispatch from `main` skips the
+  job, because `main` is protected by pull requests. The ruleset
+  above cannot gate branch creation, which is why this check exists (task 2281). Branches created
+  before that ruleset hold direct commits of their own (for example `release/0.8.19`), so a fresh
+  dispatch from them is refused; promoting an existing release with `publish_existing=true` does
+  not run the check.
+
+The workflow has no reviewer gate on the environment: a release stays one dispatch.
+`signing-login-check.yml` proves the boundary without building or signing anything. It
+runs only the Azure login through the environment. From `main` it must pass. From any
+other branch it must fail with "not allowed to deploy to desktop-release". Run both
+after any change to the environment, the rulesets or the federated credential.
+
+History: until 0.8.18 the credential named one branch (`ref:refs/heads/main`, then one
+added per release branch, `release/0.8.13` to `release/0.8.18`). A release branch without
+its own credential failed at the Azure login with AADSTS700213 (0.8.18's first run).
+0.8.19 was the first release to sign through the environment (2026-10-29). After that,
+the seven per-branch credentials were deleted with the maintainer's confirmation, and
+only the environment credential remains. The two-way check was run again afterwards:
+from `main` it passed, and from another branch it was refused.
 
 SmartScreen honesty: signing removes the "unknown publisher" warning
 immediately, but SmartScreen *reputation* accrues with download volume and
@@ -295,6 +377,7 @@ update or downgrade is actually installed from that channel.
 6. Promote the same build to another channel by rerunning `.github/workflows/release.yml` with the same `version`, the new `channel`, and `publish_existing=true`.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
+9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
 
 ## Style Notes
 

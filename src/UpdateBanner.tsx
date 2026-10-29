@@ -6,7 +6,7 @@ import { useCapabilities, canInstallUpdate } from './capabilities'
  * a stalled updater never leaves the action stuck in progress.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command, openUrl } from './desktopApi'
 import { updateAvailableLine } from './macUpdateCopy'
@@ -31,6 +31,9 @@ export default function UpdateBanner() {
   const [update, setUpdate] = useState<UpdatePayload | null>(null)
   const [installState, setInstallState] = useState<InstallState>('idle')
   const [installError, setInstallError] = useState<string | null>(null)
+  // The install state belongs to a version: the 4-hourly announcement of the same one must not reset a failed install to
+  // "Restart to update" and show the toast again (review P3-e).
+  const announcedVersion = useRef<string | null>(null)
   // What a Mac is offered for it: the newest stable image for a stable update, that release's page for another channel.
   // The toast's effect depends on the offer's three strings and not on the object: a new object every render would show
   // the toast again on every render, and `App.tsx`'s 5 s status poll renders this banner (review P2-A).
@@ -45,8 +48,11 @@ export default function UpdateBanner() {
     const unlisten = listen<UpdatePayload>('update-available', (event) => {
       if (cancelled) return
       setUpdate(event.payload)
-      setInstallState('idle')
-      setInstallError(null)
+      if (announcedVersion.current !== event.payload.version) {
+        announcedVersion.current = event.payload.version
+        setInstallState('idle')
+        setInstallError(null)
+      }
     })
 
     return () => {
@@ -86,19 +92,24 @@ export default function UpdateBanner() {
     }
   }, [installSupported])
 
+  // The same goes for the update itself: the updater announces it again with every 4-hourly check, each time as a new
+  // payload object, and a person who dismissed the toast for this version has answered it (review P3-1). So the toast's
+  // effect lists the update's strings, never the object.
+  const version = update?.version ?? null
+  const body = update?.body ?? ''
   const releaseNotesUrl = useMemo(() => {
-    if (!update) return null
-    return update.release_notes_url ?? releasePageUrl(update.version)
-  }, [update])
+    if (version === null) return null
+    return update?.release_notes_url ?? releasePageUrl(version)
+  }, [update?.release_notes_url, version])
 
   useEffect(() => {
-    if (!update || !releaseNotesUrl) return
+    if (version === null || !releaseNotesUrl) return
 
     const installFailed = installState === 'error' && installError != null
     showToast({
       id: 'desktop-update',
       variant: installFailed ? 'error' : 'info',
-      title: installFailed ? 'Update install failed' : updateAvailableLine(update.version),
+      title: installFailed ? 'Update install failed' : updateAvailableLine(version),
       message: (
         <>
           <span style={{ color: T.ink2 }}>{offerHint !== null ? offerHint : installSupported ? 'Restart to apply the update.' : caps?.update_format === 'package_manager' ? 'Update with your package manager.' : 'Download an installer to update this installation.'}</span>
@@ -120,7 +131,7 @@ export default function UpdateBanner() {
           >
             Release notes
           </button>
-          {update.body && (
+          {body && (
             <span
               style={{
                 display: 'block',
@@ -133,7 +144,7 @@ export default function UpdateBanner() {
                 textOverflow: 'ellipsis',
               }}
             >
-              {update.body}
+              {body}
             </span>
           )}
           {installFailed && (
@@ -151,7 +162,7 @@ export default function UpdateBanner() {
       } : { label: 'Downloads', onClick: () => { void openUrl('https://beebeeb.io/download') } },
       durationMs: null,
     })
-  }, [caps?.update_format, offerHint, offerLabel, offerUrl, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, update])
+  }, [body, caps?.update_format, offerHint, offerLabel, offerUrl, installSupported, handleInstall, installError, installState, releaseNotesUrl, showToast, version])
 
   return <ManualUpdateFeedback />
 }

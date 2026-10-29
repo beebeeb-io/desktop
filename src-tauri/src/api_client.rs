@@ -496,6 +496,42 @@ pub struct HeartbeatBody {
 /// upload watcher, the heartbeat producer) is dropped with it, and this Drop
 /// impl is what actually erases the key from memory rather than leaving it
 /// to linger in a freed allocation.
+/// The server refused a custody write because the folder still has legacy key
+/// rows and the owner must upgrade it first (task 2258, decision L11). Kept as
+/// its own type so no caller can mistake it for a transport error or retry it
+/// as a legacy write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpgradeRequired;
+
+impl std::fmt::Display for UpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the owner must upgrade this folder before its keys can be shared here")
+    }
+}
+
+impl std::error::Error for UpgradeRequired {}
+
+/// Whether `error` is the typed L11 refusal (`409 upgrade_required`).
+pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UpgradeRequired>().is_some()
+}
+
+/// Whether a custody write was refused because this deployment has no custody:
+/// a mount without the route answers 405, and the shared-folders feature gate
+/// answers `501 {"error":"shared_folders_v1"}` (server
+/// `feature_gate::require_shared_folders_enabled`). That is a state, not a
+/// failed write to retry. The 501 counts only when it names that gate: any
+/// other 501 is a server failure the caller must see (task 2276 P3-D).
+pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    let missing_route =
+        matches!(crate::engine_bridge::error_http_status(error), Some(405)) || text.starts_with("HTTP 405 ");
+    let feature_gate = (matches!(crate::engine_bridge::error_http_status(error), Some(501))
+        || text.starts_with("HTTP 501 "))
+        && text.contains("shared_folders_v1");
+    missing_route || feature_gate
+}
+
 pub struct ApiClient {
     // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
     // strong count (which reaches zero before its destructor runs).
@@ -572,6 +608,19 @@ impl ApiClient {
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
         }
+    }
+
+    /// This client with `timeout` for each request in place of the app's
+    /// [`crate::link_health::API_REQUEST_TIMEOUT_SECS`]: for a listing that may move a whole tree on a slow link and
+    /// that nobody waits on (task 2267's ownership proof, self-review F5).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.client = Client::builder()
+            .timeout(timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        self
     }
 
     /// The shared record of whether the last requests reached the server.
@@ -844,6 +893,83 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    pub async fn sent_folder_invites(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_typed("/api/v1/shares/invites/sent").await
+    }
+
+    /// `PUT /api/v1/shared-folders/{id}/key` — the folder's custody record.
+    ///
+    /// `format` declares the key format of the write (task 2258, L10):
+    /// `Some("l7")` for a custody folder, `None` for a no-custody (legacy)
+    /// write, where the field must be absent rather than null.
+    pub async fn register_shared_folder_key(
+        &self,
+        id: &str,
+        wrapped: &str,
+        version: i32,
+        format: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/shared-folders/{}/key", encode(id)));
+        let mut body = serde_json::json!({"owner_wrapped_folder_key":wrapped,"key_version":version});
+        if let Some(format) = format {
+            body["format"] = serde_json::Value::String(format.to_string());
+        }
+        let response = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
+        Ok(response.json().await?)
+    }
+
+    pub async fn shared_folder_activity(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/activity", encode(id))).await
+    }
+
+    pub async fn shared_index_manifest(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/search-index/shards", encode(id))).await
+    }
+
+    pub async fn shared_index_get(&self, id: &str, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}",encode(id)));
+        let response=self.client.get(url).header("Authorization",format!("Bearer {}",self.token)).send().await?;
+        if response.status()==reqwest::StatusCode::NOT_FOUND{return Ok(None);}
+        Ok(Self::check_status(response).await?.bytes().await?.to_vec().into())
+    }
+
+    pub async fn shared_index_write(&self, id: &str, bucket: u32, page: u32, version: i64, blob: Option<&[u8]>) -> anyhow::Result<()> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}?if_version={version}",encode(id)));
+        self.send_with_retry(|| match blob {
+            Some(blob)=>self.client.put(&url).header("Content-Type","application/octet-stream").body(blob.to_vec()),
+            None=>self.client.delete(&url),
+        }).await?;
+        Ok(())
+    }
+
+    /// Paginated listing for a bounded shared-index rebuild; ordinary sync
+    /// retains its snapshot/delta transport.
+    pub async fn list_owned_folder_page(&self, parent: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let url=self.list_files_url(ListFilesScope {parent_id:Some(parent),cursor,..Default::default()});
+        Ok(self.send_with_retry(||self.client.get(&url)).await?.json().await?)
+    }
+
+    pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}", encode(id))).await
+    }
+
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let mut path = format!("/api/v1/shared-folders/{}/keys?limit=500", encode(id));
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", encode(cursor)));
+        }
+        self.get_typed(&path).await
+    }
+
+    pub async fn adopt_owner_key(&self, id: &str, owner_wrap_b64: &str) -> anyhow::Result<bool> {
+        let url = self.url(&format!("/api/v1/files/{}/owner-key", encode(id)));
+        let response = self.send_with_retry(|| self.client.post(&url).json(&serde_json::json!({
+            "owner_wrapped_file_key": owner_wrap_b64
+        }))).await?;
+        let result: serde_json::Value = response.json().await?;
+        result["adopted"].as_bool().ok_or_else(|| anyhow::anyhow!("invalid adoption response"))
     }
 
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
@@ -1262,6 +1388,15 @@ impl ApiClient {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
+        // L11: a custody write over a folder that still has legacy key rows is
+        // refused until the owner upgrades it. It is its own state — never a
+        // generic error and never a reason to retry as a legacy write.
+        if status == reqwest::StatusCode::CONFLICT
+            && serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|value| value["error"] == "upgrade_required")
+        {
+            return Err(anyhow::Error::new(UpgradeRequired));
+        }
         let snippet: String = body.chars().take(300).collect();
         anyhow::bail!("HTTP {status}: {snippet}")
     }

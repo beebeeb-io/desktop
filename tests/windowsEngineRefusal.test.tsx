@@ -1,6 +1,7 @@
 /**
  * Must-render row 10, lead ruling FT-row10: Windows has no Status page, so an engine refusal
- * (`OTHER_ACCOUNT_ON_WINDOWS`: "This PC still holds local files of another Beebeeb account…") is
+ * (`OTHER_ACCOUNT_ON_WINDOWS`: "Beebeeb couldn’t confirm that the files on this PC belong to the account
+ * you’re signed in to…"; task 2267: it never tells a person they have another account) is
  * rendered on the existing sync-status card, the main window's live status strip on Home, sentence
  * only (no action: W2's way out stays a Windows decision, 1748 / spec C). Ruling P made the refusal a
  * sentence so that it is never silent.
@@ -11,6 +12,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
+import { homeSyncMetrics } from '../src/windows/homeSyncMetrics'
 
 const mounted: Mounted[] = []
 afterEach(() => { while (mounted.length) mounted.pop()!.close() })
@@ -23,6 +25,10 @@ function openHome(syncStatus: unknown) {
     backend: {},
     props: { status: syncStatus, usage: null, storage: null },
     bindings: {
+      // 0.8.15: State comes from the sync activity model (tests/homeSyncMetrics.test.tsx); here the summary is not read yet.
+      useSyncActivitySummary: () => ({ summary: undefined, refresh: async () => undefined }),
+      homeSyncMetrics,
+      command: async () => ({ ok: false, reason: 'not scripted', unsupported: false }),
       usePlatformName: () => 'windows',
       thisDeviceNoun: () => 'this PC',
       formatBytes: (n: number) => `${n} B`,

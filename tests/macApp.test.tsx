@@ -280,6 +280,31 @@ describe('Settings in System Settings style (ruling 1, §7.8)', () => {
   })
   }
 
+  // PR #140 delta review, P3-5: nothing navigates under a sheet (§8.2), and an ended session is no exception. The Repair
+  // sheet lives in Sync; taking Sync away under it would unmount the sheet and lose what the repair then says.
+  test('a session that ends under an open sheet leaves the section alone until the sheet is closed, then falls back to General', async () => {
+    let current: unknown = snapshot()
+    let modals = 0
+    const { m } = openWindow({ snap: () => current, bindings: { openModalCount: () => modals } })
+    const ticks: Array<() => void> = []
+    ;(globalThis as any).window.setInterval = (fn: () => void) => { ticks.push(fn); return 1 }
+    await settle(m)
+    await click(m, 'Settings')
+    await click(m, 'Sync')
+    expect(shown(m)).toEqual(['sync'])
+    modals = 1
+    m.render()
+    await settle(m)
+    current = snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false } })
+    ticks.forEach((tickFn) => tickFn())
+    await settle(m)
+    expect(shown(m), 'a sheet is open: the section stays').toEqual(['sync'])
+    modals = 0
+    m.render()
+    await settle(m)
+    expect(shown(m)).toEqual(['general'])
+  })
+
   test('back returns to Home and puts focus on the gear (§11)', async () => {
     const { m } = openWindow()
     await settle(m)
