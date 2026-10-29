@@ -355,7 +355,8 @@ and "Upload to my Beebeeb" releases exactly the ids it showed, never a change he
 this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
 `Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
 so a crash is settled at the next engine start) and forgets their rows. It removes only the staged copies
-the journal names; one whose live file is gone is copied into the dated folder first. When OneDrive or
+the journal names; one whose live file is gone is copied into the dated folder first, before the rows are
+forgotten (a restart after that copy does not make it twice). When OneDrive or
 Dropbox syncs the folder it is made in, the card says so (`synced_by`) instead of "on this PC". This is the
 only other place an owner is recorded; two different user ids are never questioned.
 

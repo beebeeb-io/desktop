@@ -341,17 +341,19 @@ pub fn keep(
     Ok(result)
 }
 
-/// After the move: forget the item's rows and changes in one transaction, then remove the staged copies its uploads
-/// held. Only a copy the journal names (`staged_payloads`) is removed, never one in the Beebeeb folder or the kept
-/// folder (a person's file). A copy whose live file is gone holds the only copy of those bytes: it is copied into the
-/// dated kept folder first, never over a name, and kept where it is when that copy fails (lead review round 3, P3-3).
+/// After the move: keep the only copies, forget the item's rows and changes in one transaction, then remove the staged
+/// copies its uploads held. Only a copy the journal names (`staged_payloads`) is removed, never one in the Beebeeb
+/// folder or the kept folder (a person's file). A copy whose live file is gone holds the only copy of those bytes: it
+/// is copied into the dated kept folder BEFORE the forget (self-review of round 3, F3), never over a name, and kept
+/// where it is when that copy fails (lead review round 3, P3-3).
 fn finish(db: &StateDb, sync_root: &Path, journal: &Journal) -> Result<(), String> {
     let staged = db
-        .finish_keep(&journal.item.ids, &journal.kept_dir)
-        .map_err(|e| format!("forget the kept item: {e}"))?;
+        .keep_staged_copies(&journal.item.ids)
+        .map_err(|e| format!("read the kept item's staged copies: {e}"))?;
     let kept_dir = Path::new(&journal.kept_dir);
     let kept_root = kept_dir.parent().unwrap_or(kept_dir);
     let moved_from = crate::engine_bridge::local_file_path_under_sync_root(sync_root, journal.item.rel_path.trim_matches('/')).ok();
+    let mut remove: Vec<&Path> = Vec::new();
     for copy in staged.iter().map(Path::new) {
         if !copy.is_absolute() || inside(copy, sync_root) || inside(copy, kept_root) {
             continue;
@@ -374,19 +376,61 @@ fn finish(db: &StateDb, sync_root: &Path, journal: &Journal) -> Result<(), Strin
             _ => PathBuf::from(source),
         });
         if live.is_some_and(|live| std::fs::symlink_metadata(live).is_ok()) {
-            crate::staged_payload::remove_or_log(db, copy);
+            remove.push(copy);
             continue;
         }
         let name = source.as_deref().and_then(|source| Path::new(source).file_name()).or_else(|| copy.file_name());
         let Some(name) = name.map(|name| name.to_string_lossy().into_owned()) else {
             continue;
         };
-        match copy_no_replace(copy, &unique_target(kept_dir, &name)) {
-            Ok(()) => crate::staged_payload::remove_or_log(db, copy),
+        match keep_only_copy(copy, kept_dir, &name) {
+            Ok(()) => remove.push(copy),
             Err(error) => tracing::warn!(kind = ?error.kind(), "keep: an only copy could not be kept; it stays where it is"),
         }
     }
+    #[cfg(test)]
+    run_before_forget();
+    db.finish_keep(&journal.item.ids, &journal.kept_dir)
+        .map_err(|e| format!("forget the kept item: {e}"))?;
+    for copy in remove {
+        crate::staged_payload::remove_or_log(db, copy);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once, on this thread, right before a keep forgets an item's rows and changes (tests only).
+    static BEFORE_FORGET: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` at the next keep on this thread, right before it forgets an item's rows and changes.
+#[cfg(test)]
+fn before_forget_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_FORGET.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_forget() {
+    if let Some(hook) = BEFORE_FORGET.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+/// Keep the only copy `copy` in `dir` as `name`, never over a name. A file already there under one of its numbered
+/// names with the same bytes is that copy, made by a keep that stopped before it forgot the item (self-review of
+/// round 3, F3): it is not made twice.
+fn keep_only_copy(copy: &Path, dir: &Path, name: &str) -> std::io::Result<()> {
+    for candidate in numbered(dir, name) {
+        match std::fs::symlink_metadata(&candidate) {
+            Err(_) => return copy_no_replace(copy, &candidate),
+            Ok(metadata) if metadata.is_file() && crate::staged_payload::same_bytes(copy, &candidate).unwrap_or(false) => {
+                return Ok(());
+            }
+            Ok(_) => {}
+        }
+    }
+    unreachable!("the numbered names never end")
 }
 
 /// Copy `from` to a new file at `to`, never over one; a partial copy is removed.
@@ -475,21 +519,20 @@ fn inside(path: &Path, dir: &Path) -> bool {
     path == dir || path.strip_prefix(dir).is_some_and(|rest| rest.starts_with(['/', '\\']))
 }
 
-/// The first of `name`, `stem (2).ext`, `stem (3).ext` … that does not exist in `dir` (lead ruling (a) 3). A name
-/// that starts with its only dot has no extension.
+/// The first of `name`, `stem (2).ext`, `stem (3).ext` … that does not exist in `dir` (lead ruling (a) 3).
 pub fn unique_target(dir: &Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if std::fs::symlink_metadata(&first).is_err() {
-        return first;
-    }
+    numbered(dir, name)
+        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
+        .expect("an unused name")
+}
+
+/// `name`, `stem (2).ext`, `stem (3).ext` … in `dir`. A name that starts with its only dot has no extension.
+fn numbered<'n>(dir: &'n Path, name: &'n str) -> impl Iterator<Item = PathBuf> + 'n {
     let (stem, extension) = match name.rfind('.') {
         Some(0) | None => (name, ""),
         Some(dot) => (&name[..dot], &name[dot..]),
     };
-    (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){extension}")))
-        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
-        .expect("an unused name")
+    std::iter::once(dir.join(name)).chain((2..).map(move |n| dir.join(format!("{stem} ({n}){extension}"))))
 }
 
 /// Every file under `path` (or 1 for a file), without following links.
@@ -1111,6 +1154,51 @@ mod tests {
         assert!(!pc.staging.join("new-photo.staged").exists(), "then the staged copy goes");
         assert!(!pc.staging.join("new-note.staged").exists(), "a copy whose file moved with the item goes");
         assert!(pc.db.staged_payloads_for_signout().unwrap().is_empty(), "the journal forgets both");
+    }
+
+    /// Self-review of round 3 (F3): the only copy of a file's bytes is in the kept folder before the keep forgets the
+    /// item, so a crash right after the forget cannot leave that copy named by nothing.
+    #[test]
+    fn an_only_copy_is_kept_before_the_item_is_forgotten() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-photo", "Trip/photo.jpg", Some("new-folder"), b"only copy");
+        std::fs::remove_file(pc.on_disk("Trip/photo.jpg")).unwrap();
+        pc.hold_all();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let (kept, db, seen_in_hook) = (pc.kept_dir().join("photo.jpg"), pc.db.clone(), seen.clone());
+        before_forget_for_test(move || {
+            *seen_in_hook.borrow_mut() = Some((std::fs::read(&kept).ok(), db.own_data_proof_ops().unwrap().len()));
+        });
+
+        assert_eq!(pc.keep().moved_items, 1);
+
+        assert_eq!(
+            seen.borrow().clone(),
+            Some((Some(b"only copy".to_vec()), 2)),
+            "copied while the item's changes were still there"
+        );
+    }
+
+    /// Self-review of round 3 (F3): a keep that stopped after copying an only copy and before forgetting the item is
+    /// finished at the next start, and the copy already in the kept folder is not made twice.
+    #[test]
+    fn a_keep_stopped_after_the_copy_is_finished_at_the_next_start_with_one_copy() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-photo", "Trip/photo.jpg", Some("new-folder"), b"only copy");
+        std::fs::remove_file(pc.on_disk("Trip/photo.jpg")).unwrap();
+        pc.hold_all();
+        before_forget_for_test(|| panic!("the process ends here"));
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pc.keep()));
+        assert!(crashed.is_err(), "precondition: the keep was interrupted");
+
+        assert_eq!(recover(&pc.db, &pc.root).unwrap(), Recovery::Finished);
+
+        assert_eq!(std::fs::read(pc.kept_dir().join("photo.jpg")).unwrap(), b"only copy");
+        assert!(!pc.kept_dir().join("photo (2).jpg").exists(), "one copy, not two");
+        assert!(!pc.staging.join("new-photo.staged").exists());
+        assert!(pc.db.staged_payloads_for_signout().unwrap().is_empty());
     }
 
     /// Lead review round 3, P3-3: Keep removes only the staged copies the journal names; any other file a queued change
