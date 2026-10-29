@@ -27,6 +27,9 @@ mod config;
 mod conflict;
 mod desktop_capabilities;
 mod desktop_search;
+// Task 2274: the duplicates repair tool, only in a build with the `duplicate-repair` feature (never a shipped one).
+#[cfg(feature = "duplicate-repair")]
+pub mod duplicate_repair;
 mod diagnostic_redaction;
 mod engine_bridge;
 mod engine_status;
