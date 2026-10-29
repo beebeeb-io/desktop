@@ -24,6 +24,10 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use urlencoding::encode;
+use zeroize::Zeroize;
+
+mod direct;
+pub(crate) use direct::{ChunkApiError, GrantReply, fetch_from_storage, now_ms};
 
 // ── Writer-provenance headers (task 1436, the desktop/web half of 1392) ────────
 //
@@ -225,11 +229,179 @@ pub struct DesktopUploadInitResponse {
     pub region: String,
 }
 
+/// The server's 409 messages at `init` (spec §8.4); a test pins both.
+pub const STALE_BASE_MESSAGE: &str = "stale base version for replacement upload";
+pub const IN_PROGRESS_MESSAGE: &str = "upload is already in progress for this file";
+
+/// Why `init` answered 409 (spec §8.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitConflictClass {
+    /// The base is not the file's current version; it never becomes valid again.
+    StaleBase,
+    /// Another upload of the file is in progress.
+    InProgress,
+    /// Anything else, a changed message included: retried, as before.
+    Other,
+}
+
+impl InitConflictClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InitConflictClass::StaleBase => "stale_base",
+            InitConflictClass::InProgress => "in_progress",
+            InitConflictClass::Other => "other",
+        }
+    }
+}
+
+/// A changed server message falls back to `Other` (retry), today's behaviour.
+pub fn classify_init_conflict(message: &str) -> InitConflictClass {
+    match message {
+        STALE_BASE_MESSAGE => InitConflictClass::StaleBase,
+        IN_PROGRESS_MESSAGE => InitConflictClass::InProgress,
+        _ => InitConflictClass::Other,
+    }
+}
+
+/// `init` answered 409. Carries the class only: the server's text never reaches a log.
+#[derive(Debug)]
+pub struct InitConflict {
+    pub class: InitConflictClass,
+    /// The server's code, when it is one the client acts on (the upload gate's 409s).
+    pub refusal: Option<UploadRefusalCode>,
+}
+
+/// The server's code on a refused upload request (`{"error": <code>, ...}`), for the codes the
+/// client acts on: each is a refusal the person cures (free space, subscribe, pay), spec §8.4.
+/// Read from the `error` field by exact match. Nothing else of the body is kept, and the body's
+/// text never reaches a log or a stored error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadRefusalCode {
+    /// 413: the account is over its storage quota.
+    QuotaExceeded,
+    /// 403: the account has reached its stored-object limit.
+    ObjectBudgetExceeded,
+    /// 403: the account is read-only for an unpaid invoice.
+    BillingReadOnly,
+    /// 409 (the upload gate): the trial ended and the account is read-only.
+    AccountLapsed,
+    /// 409 (the upload gate): the account has no plan.
+    PlanRequired,
+    /// 409 (the upload gate): a never-paid trial was cancelled, so uploads are paused.
+    TrialCancelledReadOnly,
+}
+
+impl UploadRefusalCode {
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "quota_exceeded" => Some(UploadRefusalCode::QuotaExceeded),
+            "object_budget_exceeded" => Some(UploadRefusalCode::ObjectBudgetExceeded),
+            "billing_read_only" => Some(UploadRefusalCode::BillingReadOnly),
+            "account_lapsed" => Some(UploadRefusalCode::AccountLapsed),
+            "plan_required" => Some(UploadRefusalCode::PlanRequired),
+            "trial_cancelled_read_only" => Some(UploadRefusalCode::TrialCancelledReadOnly),
+            _ => None,
+        }
+    }
+}
+
+/// An upload request (init, a chunk, complete) the server answered with a non-2xx status, other
+/// than init's 409 ([`InitConflict`]). It shows, and has as its source, the `reqwest` error
+/// `error_for_status` gives (the status and the URL, never the body), so every reading of the
+/// error's text and status stays as it was. It adds the server's code when the client acts on it.
+#[derive(Debug)]
+pub struct UploadRefused {
+    pub code: Option<UploadRefusalCode>,
+    status_error: reqwest::Error,
+}
+
+impl UploadRefused {
+    pub fn status(&self) -> Option<u16> {
+        self.status_error.status().map(|status| status.as_u16())
+    }
+}
+
+impl std::fmt::Display for UploadRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.status_error.fmt(f)
+    }
+}
+
+impl std::error::Error for UploadRefused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.status_error)
+    }
+}
+
+/// `resp` when it is a 2xx; else an [`UploadRefused`] with the server's code read from the body's
+/// `error` field.
+async fn upload_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status_error = resp.error_for_status_ref().err();
+    let Some(status_error) = status_error else {
+        return Ok(resp);
+    };
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let code = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .and_then(UploadRefusalCode::from_code);
+    Err(anyhow::Error::new(UploadRefused { code, status_error }))
+}
+
+impl std::fmt::Display for InitConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload init refused with 409 Conflict ({})", self.class.as_str())
+    }
+}
+
+impl std::error::Error for InitConflict {}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadChunkResponse {
     pub index: u32,
     pub size: i64,
     pub skipped: Option<bool>,
+}
+
+/// The parent a metadata update (`PATCH /api/v1/files/{id}`) sends. The server reads an
+/// omitted `parent_id` as "leave the parent alone", an explicit `null` as "move to the top
+/// level", and an id as "move into that folder".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentChange<'a> {
+    /// The field is omitted.
+    Unchanged,
+    /// `"parent_id": null`.
+    TopLevel,
+    /// `"parent_id": "<id>"`.
+    Folder(&'a str),
+}
+
+impl<'a> ParentChange<'a> {
+    /// A move to `parent`: that folder, or the top level when there is none.
+    pub fn to(parent: Option<&'a str>) -> Self {
+        parent.map_or(Self::TopLevel, Self::Folder)
+    }
+}
+
+/// The body of a metadata update.
+fn metadata_update_body(
+    name_encrypted: Option<&str>,
+    parent: ParentChange<'_>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = name_encrypted {
+        body.insert("name_encrypted".into(), serde_json::json!(name));
+    }
+    match parent {
+        ParentChange::Unchanged => {}
+        ParentChange::TopLevel => {
+            body.insert("parent_id".into(), serde_json::Value::Null);
+        }
+        ParentChange::Folder(parent_id) => {
+            body.insert("parent_id".into(), serde_json::json!(parent_id));
+        }
+    }
+    body
 }
 
 /// One entry in `GET /api/v1/search-index/shards`.
@@ -313,14 +485,108 @@ pub struct HeartbeatBody {
 /// Cloning is intentionally not implemented — the master key has the
 /// same security invariant as in the Tauri `Session` struct: exactly
 /// one authoritative copy in memory at a time.
+///
+/// Unlike `Session` (which derives `ZeroizeOnDrop`), this doesn't derive it
+/// — `client: reqwest::Client` isn't `Zeroize` — so [`Drop`] is implemented
+/// by hand below, wiping `master_key` and the bearer token. Task 1538 Codex P1 (PR #49,
+/// lib.rs:1087 thread, "invalidate the session key the engine holds"): once
+/// `EngineRunner::abort` confirms the engine's task has actually terminated
+/// (not just detached — see that function's doc comment), every `Arc<Self>`
+/// clone the task held (the tick loop, the IPC socket server, the Windows
+/// upload watcher, the heartbeat producer) is dropped with it, and this Drop
+/// impl is what actually erases the key from memory rather than leaving it
+/// to linger in a freed allocation.
+/// The server refused a custody write because the folder still has legacy key
+/// rows and the owner must upgrade it first (task 2258, decision L11). Kept as
+/// its own type so no caller can mistake it for a transport error or retry it
+/// as a legacy write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpgradeRequired;
+
+impl std::fmt::Display for UpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the owner must upgrade this folder before its keys can be shared here")
+    }
+}
+
+impl std::error::Error for UpgradeRequired {}
+
+/// Whether `error` is the typed L11 refusal (`409 upgrade_required`).
+pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UpgradeRequired>().is_some()
+}
+
+/// Whether a custody write was refused because this deployment has no custody:
+/// a mount without the route answers 405, and the shared-folders feature gate
+/// answers `501 {"error":"shared_folders_v1"}` (server
+/// `feature_gate::require_shared_folders_enabled`). That is a state, not a
+/// failed write to retry. The 501 counts only when it names that gate: any
+/// other 501 is a server failure the caller must see (task 2276 P3-D).
+pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    let missing_route =
+        matches!(crate::engine_bridge::error_http_status(error), Some(405)) || text.starts_with("HTTP 405 ");
+    let feature_gate = (matches!(crate::engine_bridge::error_http_status(error), Some(501))
+        || text.starts_with("HTTP 501 "))
+        && text.contains("shared_folders_v1");
+    missing_route || feature_gate
+}
+
 pub struct ApiClient {
+    // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
+    // strong count (which reaches zero before its destructor runs).
+    #[cfg(any(target_os = "windows", test))]
+    credential_lifetime: std::sync::Arc<()>,
     base_url: String,
     token: String,
     master_key: [u8; 32],
     client: Client,
+    /// Outcome of the most recent request, read by the runner after each tick
+    /// (see `link_health`). Not secret.
+    link: std::sync::Arc<crate::link_health::LinkMonitor>,
+    /// Task 2173: what the server's direct-transfer discovery said, asked lazily and trusted for
+    /// at most 10 minutes (`beebeeb_core::direct_transfer::DiscoveryCache`). It lives and dies
+    /// with this client, i.e. with the signed-in session: nothing of it outlives a sign-out or
+    /// an account switch.
+    direct_discovery: tokio::sync::Mutex<beebeeb_core::direct_transfer::DiscoveryCache>,
+    /// Task 2173: the client for presigned storage links, built on first use. Never `client`:
+    /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
+    /// refused, https only (loopback http when the API itself is on loopback http).
+    storage_client: std::sync::OnceLock<Option<Client>>,
+}
+
+impl Drop for ApiClient {
+    fn drop(&mut self) {
+        self.master_key.zeroize();
+        self.token.zeroize();
+    }
+}
+
+// Hand-implemented (can't `#[derive(ZeroizeOnDrop)]` — `client: reqwest::Client`
+// isn't `Zeroize` — see the struct's doc comment). `ZeroizeOnDrop` is a plain,
+// safe marker trait with no required methods (zeroize 1.x); implementing it
+// here is what lets a test assert, at compile time, that dropping an
+// `ApiClient` is guaranteed to wipe its key material — the same guarantee
+// `Session::ZeroizeOnDrop` gives, verified the same way in `lib.rs`'s
+// `session_zeroizes_master_key_on_drop` test.
+impl zeroize::ZeroizeOnDrop for ApiClient {}
+
+/// The `PUT /api/v1/me/region` body (task 2050): the chosen id, and `region_strict` only when the
+/// caller states it.
+fn set_region_body(preferred_region: Option<&str>, region_strict: Option<bool>) -> serde_json::Value {
+    let mut body = serde_json::json!({ "preferred_region": preferred_region });
+    if let Some(strict) = region_strict {
+        body["region_strict"] = serde_json::json!(strict);
+    }
+    body
 }
 
 impl ApiClient {
+    #[cfg(any(target_os = "windows", test))]
+    pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
+        std::sync::Arc::downgrade(&self.credential_lifetime)
+    }
+
     /// Build a new client. `base_url` should NOT have a trailing slash
     /// (e.g. `https://api.beebeeb.io`). The 30-second timeout is the
     /// upper bound for any single chunk request — bigger files arrive
@@ -328,15 +594,38 @@ impl ApiClient {
     /// download.
     pub fn new(base_url: String, token: String, master_key: [u8; 32]) -> Self {
         Self {
+            #[cfg(any(target_os = "windows", test))]
+            credential_lifetime: std::sync::Arc::new(()),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
             master_key,
             client: Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
                 .default_headers(provenance_headers())
                 .build()
                 .expect("reqwest client"),
+            link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
+            direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
         }
+    }
+
+    /// This client with `timeout` for each request in place of the app's
+    /// [`crate::link_health::API_REQUEST_TIMEOUT_SECS`]: for a listing that may move a whole tree on a slow link and
+    /// that nobody waits on (task 2267's ownership proof, self-review F5).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.client = Client::builder()
+            .timeout(timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        self
+    }
+
+    /// The shared record of whether the last requests reached the server.
+    pub fn link(&self) -> std::sync::Arc<crate::link_health::LinkMonitor> {
+        self.link.clone()
     }
 
     /// Helper for tests + downloaders: full URL of a single chunk.
@@ -606,6 +895,83 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    pub async fn sent_folder_invites(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_typed("/api/v1/shares/invites/sent").await
+    }
+
+    /// `PUT /api/v1/shared-folders/{id}/key` — the folder's custody record.
+    ///
+    /// `format` declares the key format of the write (task 2258, L10):
+    /// `Some("l7")` for a custody folder, `None` for a no-custody (legacy)
+    /// write, where the field must be absent rather than null.
+    pub async fn register_shared_folder_key(
+        &self,
+        id: &str,
+        wrapped: &str,
+        version: i32,
+        format: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = self.url(&format!("/api/v1/shared-folders/{}/key", encode(id)));
+        let mut body = serde_json::json!({"owner_wrapped_folder_key":wrapped,"key_version":version});
+        if let Some(format) = format {
+            body["format"] = serde_json::Value::String(format.to_string());
+        }
+        let response = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
+        Ok(response.json().await?)
+    }
+
+    pub async fn shared_folder_activity(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/activity", encode(id))).await
+    }
+
+    pub async fn shared_index_manifest(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}/search-index/shards", encode(id))).await
+    }
+
+    pub async fn shared_index_get(&self, id: &str, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}",encode(id)));
+        let response=self.client.get(url).header("Authorization",format!("Bearer {}",self.token)).send().await?;
+        if response.status()==reqwest::StatusCode::NOT_FOUND{return Ok(None);}
+        Ok(Self::check_status(response).await?.bytes().await?.to_vec().into())
+    }
+
+    pub async fn shared_index_write(&self, id: &str, bucket: u32, page: u32, version: i64, blob: Option<&[u8]>) -> anyhow::Result<()> {
+        let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}?if_version={version}",encode(id)));
+        self.send_with_retry(|| match blob {
+            Some(blob)=>self.client.put(&url).header("Content-Type","application/octet-stream").body(blob.to_vec()),
+            None=>self.client.delete(&url),
+        }).await?;
+        Ok(())
+    }
+
+    /// Paginated listing for a bounded shared-index rebuild; ordinary sync
+    /// retains its snapshot/delta transport.
+    pub async fn list_owned_folder_page(&self, parent: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let url=self.list_files_url(ListFilesScope {parent_id:Some(parent),cursor,..Default::default()});
+        Ok(self.send_with_retry(||self.client.get(&url)).await?.json().await?)
+    }
+
+    pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_typed(&format!("/api/v1/shared-folders/{}", encode(id))).await
+    }
+
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let mut path = format!("/api/v1/shared-folders/{}/keys?limit=500", encode(id));
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", encode(cursor)));
+        }
+        self.get_typed(&path).await
+    }
+
+    pub async fn adopt_owner_key(&self, id: &str, owner_wrap_b64: &str) -> anyhow::Result<bool> {
+        let url = self.url(&format!("/api/v1/files/{}/owner-key", encode(id)));
+        let response = self.send_with_retry(|| self.client.post(&url).json(&serde_json::json!({
+            "owner_wrapped_file_key": owner_wrap_b64
+        }))).await?;
+        let result: serde_json::Value = response.json().await?;
+        result["adopted"].as_bool().ok_or_else(|| anyhow::anyhow!("invalid adoption response"))
+    }
+
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
     /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
     pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
@@ -687,9 +1053,17 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(body)
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            // `error_for_status` would drop the message the class is read from (spec §8.4).
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let message = body.get("error").and_then(|value| value.as_str()).unwrap_or_default();
+            return Err(anyhow::Error::new(InitConflict {
+                class: classify_init_conflict(message),
+                refusal: UploadRefusalCode::from_code(message),
+            }));
+        }
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn upload_session_chunk(
@@ -705,9 +1079,8 @@ impl ApiClient {
             .header("Content-Type", "application/octet-stream")
             .body(data.to_vec())
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn complete_upload_session(&self, upload_session_id: &str) -> anyhow::Result<serde_json::Value> {
@@ -717,9 +1090,8 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(&serde_json::json!({}))
             .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .await?;
+        Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn list_shared_folder_files(
@@ -861,15 +1233,9 @@ impl ApiClient {
         &self,
         file_id: &str,
         name_encrypted: Option<&str>,
-        parent_id: Option<&str>,
+        parent: ParentChange<'_>,
     ) -> anyhow::Result<serde_json::Value> {
-        let mut body = serde_json::Map::new();
-        if let Some(name) = name_encrypted {
-            body.insert("name_encrypted".into(), serde_json::json!(name));
-        }
-        if let Some(parent_id) = parent_id {
-            body.insert("parent_id".into(), serde_json::json!(parent_id));
-        }
+        let body = metadata_update_body(name_encrypted, parent);
         let resp = self
             .client
             .patch(self.file_url(file_id))
@@ -980,10 +1346,18 @@ impl ApiClient {
         let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
-            let resp = build()
+            let resp = match build()
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send()
-                .await?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.link.note_reqwest_error(&e, now_unix_secs() as i64);
+                    return Err(e.into());
+                }
+            };
+            self.link.note_status(resp.status(), now_unix_secs() as i64);
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Self::check_status(resp).await;
             }
@@ -1014,6 +1388,15 @@ impl ApiClient {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
+        // L11: a custody write over a folder that still has legacy key rows is
+        // refused until the owner upgrades it. It is its own state — never a
+        // generic error and never a reason to retry as a legacy write.
+        if status == reqwest::StatusCode::CONFLICT
+            && serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|value| value["error"] == "upgrade_required")
+        {
+            return Err(anyhow::Error::new(UpgradeRequired));
+        }
         let snippet: String = body.chars().take(300).collect();
         anyhow::bail!("HTTP {status}: {snippet}")
     }
@@ -1034,24 +1417,27 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/me/region` — the user's preferred region + available list.
-    /// Mirrors the webapp `getUserRegion()` contract so the desktop resolves
-    /// the effective region's CITY the same way (never the provider).
+    /// Mirrors the webapp `getUserRegion()` contract: the list is by COUNTRY
+    /// (task 2050), never a city and never the provider.
     pub async fn account_region(&self) -> anyhow::Result<crate::account_dto::UserRegionResponse> {
         self.get_typed("/api/v1/me/region").await
     }
 
-    /// `PUT /api/v1/me/region` — set or clear the user's preferred region.
+    /// `PUT /api/v1/me/region` — set or clear the user's preferred region (`europe` or a country
+    /// id). `region_strict` is "only store in <country>"; the server replaces the whole choice, so
+    /// an omitted value means false there. `None` leaves it out of the body.
     pub async fn set_preferred_region(
         &self,
         preferred_region: Option<&str>,
+        region_strict: Option<bool>,
     ) -> anyhow::Result<crate::account_dto::SetPreferredRegionResponse> {
+        let body = set_region_body(preferred_region, region_strict);
         #[cfg(test)]
-        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, preferred_region)? {
+        if let Some(response) = region_set_fixture::try_handle(&self.base_url, &self.token, &body)? {
             return Ok(response);
         }
 
         let url = self.url("/api/v1/me/region");
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         let resp = self.send_with_retry(|| self.client.put(&url).json(&body)).await?;
         Ok(resp.json().await?)
     }
@@ -1339,7 +1725,7 @@ mod region_set_fixture {
     pub(super) fn try_handle(
         base_url: &str,
         token: &str,
-        preferred_region: Option<&str>,
+        body: &Value,
     ) -> anyhow::Result<Option<SetPreferredRegionResponse>> {
         let Some(id) = base_url.strip_prefix("fixture://") else {
             return Ok(None);
@@ -1351,7 +1737,6 @@ mod region_set_fixture {
             .cloned()
             .with_context(|| format!("region fixture {id} missing"))?;
         let mut fixture = fixture.lock().unwrap();
-        let body = serde_json::json!({ "preferred_region": preferred_region });
         fixture.requests.push(RegionRequest {
             method: "PUT".to_string(),
             path: "/api/v1/me/region".to_string(),
@@ -1390,6 +1775,111 @@ mod tests {
             .block_on(future)
     }
 
+    // ── link monitor (task 1683 slice 2) ─────────────────────────────────────────
+    //
+    // `send_with_retry` is the one path every engine request that is retried on 429
+    // goes through (`sync_ops`, `sync_snapshot`, `list_files`, every typed GET). It
+    // must record what happened to the request, because `sync_tick` swallows a failed
+    // `/sync/ops` and returns `Ok`.
+
+    /// Serve ONE request on loopback with the given raw HTTP response (or hang up
+    /// without answering when `None`), then stop. Returns the base URL.
+    fn one_shot_server(raw_response: Option<&'static str>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.read(&mut buf);
+                if let Some(raw) = raw_response {
+                    let _ = stream.write_all(raw.as_bytes());
+                }
+            }
+        });
+        url
+    }
+
+    fn link_client(base: String) -> ApiClient {
+        ApiClient::new(base, "tok".into(), [0u8; 32])
+    }
+
+    #[test]
+    fn a_typed_get_that_is_answered_records_an_answer() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap();
+        let snap = link.snapshot();
+        assert!(snap.last_ok_at.is_some(), "a 200 is an answer");
+        assert_eq!(snap.failure, None);
+    }
+
+    #[test]
+    fn a_typed_get_answered_with_503_records_the_server_not_answering() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\nconnection: close\r\n\r\ndown",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        let (failure, _) = link.snapshot().failure.expect("a 503 is a link failure");
+        assert_eq!(failure.kind, crate::link_health::LinkFailureKind::ServerDidNotAnswer);
+        assert_eq!(failure.reason, crate::link_health::LinkReason::Http5xx(503));
+        assert_eq!(link.snapshot().last_ok_at, None);
+        // The error the caller gets is unchanged (tick code keys on its text).
+        assert!(err.to_string().starts_with("HTTP 503"), "{err}");
+    }
+
+    #[test]
+    fn a_typed_get_answered_with_401_is_an_answer_not_a_link_failure() {
+        let base = one_shot_server(Some(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno",
+        ));
+        let client = link_client(base);
+        let link = client.link();
+        let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        assert!(err.to_string().starts_with("HTTP 401"), "{err}");
+        assert_eq!(link.snapshot().failure, None, "a 401 means the server answered");
+        assert!(link.snapshot().last_ok_at.is_some());
+    }
+
+    #[test]
+    fn a_typed_get_with_nothing_listening_records_offline() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = link_client(format!("http://127.0.0.1:{port}"));
+        let link = client.link();
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        let (failure, _) = link.snapshot().failure.expect("connection refused is a link failure");
+        assert_eq!(failure.kind, crate::link_health::LinkFailureKind::Offline);
+    }
+
+    #[test]
+    fn a_failure_then_an_answer_leaves_the_link_up() {
+        // Two requests on one client: the second one's answer clears the first one's
+        // failure (the latest outcome wins).
+        let link_url = one_shot_server(Some(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+        ));
+        let client = link_client(link_url);
+        let link = client.link();
+        link.note_failure(
+            crate::link_health::LinkFailure {
+                kind: crate::link_health::LinkFailureKind::Offline,
+                reason: crate::link_health::LinkReason::Connect,
+            },
+            1,
+        );
+        run_async(client.get_typed::<serde_json::Value>("/x")).unwrap();
+        assert_eq!(link.snapshot().failure, None);
+    }
+
     #[test]
     fn test_chunk_url() {
         let client = ApiClient::new("https://api.beebeeb.io".into(), "tok".into(), [0u8; 32]);
@@ -1397,6 +1887,34 @@ mod tests {
             client.chunk_url("file123", 0),
             "https://api.beebeeb.io/api/v1/files/file123/chunks/0"
         );
+    }
+
+    /// Task 1538 Codex P1 (PR #49, lib.rs:1087 thread, "invalidate the
+    /// session key the engine holds"): once `EngineRunner::abort` confirms
+    /// the engine's task is actually gone, every `Arc<ApiClient>` it held
+    /// drops with it — this must actually wipe the master key from memory,
+    /// not just deallocate it holding its last plaintext value. Verified the
+    /// same way `lib.rs`'s `session_zeroizes_master_key_on_drop` verifies
+    /// `Session`: a compile-time guarantee (the type implements
+    /// `ZeroizeOnDrop`, which requires `Drop`) plus exercising the real drop
+    /// path without panicking.
+    #[test]
+    fn api_client_zeroizes_master_key_on_drop() {
+        // Compile-time guarantee: if `Drop`/`ZeroizeOnDrop` for `ApiClient`
+        // is ever removed, this stops compiling.
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<ApiClient>();
+
+        // Sanity-check the underlying operation the `Drop` impl performs.
+        let mut key = [7u8; 32];
+        key.zeroize();
+        assert_eq!(key, [0u8; 32]);
+
+        // Exercise the real drop path (no panic / double-free) on a
+        // populated client; the wipe itself runs inside `Drop` where the
+        // bytes are no longer observably aliased.
+        let client = ApiClient::new("https://api.beebeeb.io".into(), "tok".into(), [9u8; 32]);
+        drop(client);
     }
 
     #[test]
@@ -1434,20 +1952,40 @@ mod tests {
     fn set_preferred_region_puts_region_and_parses_response() {
         let server = RegionMockServer::start(vec![(
             "200 OK".to_string(),
-            serde_json::json!({ "preferred_region": "us" }),
+            serde_json::json!({ "preferred_region": "de", "region_strict": true }),
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let result = run_async(client.set_preferred_region(Some("us"))).unwrap();
+        let result = run_async(client.set_preferred_region(Some("de"), Some(true))).unwrap();
 
-        assert_eq!(result.preferred_region.as_deref(), Some("us"));
+        assert_eq!(result.preferred_region.as_deref(), Some("de"));
+        assert!(result.region_strict);
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "PUT");
         assert_eq!(requests[0].path, "/api/v1/me/region");
         assert_eq!(requests[0].authorization.as_deref(), Some("Bearer tok"));
         let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
-        assert_eq!(body, serde_json::json!({ "preferred_region": "us" }));
+        assert_eq!(
+            body,
+            serde_json::json!({ "preferred_region": "de", "region_strict": true })
+        );
+    }
+
+    #[test]
+    fn set_preferred_region_leaves_strict_out_when_the_caller_does_not_state_it() {
+        let server = RegionMockServer::start(vec![(
+            "200 OK".to_string(),
+            serde_json::json!({ "preferred_region": "europe", "region_strict": false }),
+        )]);
+        let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
+
+        let result = run_async(client.set_preferred_region(Some("europe"), None)).unwrap();
+
+        assert!(!result.region_strict);
+        let requests = server.finish();
+        let body: serde_json::Value = serde_json::from_slice(requests[0].body.as_bytes()).unwrap();
+        assert_eq!(body, serde_json::json!({ "preferred_region": "europe" }));
     }
 
     #[test]
@@ -1461,7 +1999,7 @@ mod tests {
         )]);
         let client = ApiClient::new(server.base_url.clone(), "tok".into(), [0u8; 32]);
 
-        let err = run_async(client.set_preferred_region(Some("mars")))
+        let err = run_async(client.set_preferred_region(Some("mars"), None))
             .unwrap_err()
             .to_string();
 
@@ -1762,5 +2300,100 @@ mod tests {
             Some(expected_version),
             "X-Beebeeb-Client-Version missing or stale on a real ApiClient request"
         );
+    }
+
+    /// Spec 2026-10-09 §7.2 (final review): the three parents a metadata update sends, as the
+    /// server reads them: omitted (leave it alone), `null` (the top level), an id (that folder).
+    #[test]
+    fn a_metadata_update_body_names_each_parent_state() {
+        let body = |name, parent| serde_json::Value::Object(metadata_update_body(name, parent));
+        assert_eq!(
+            body(Some("name"), ParentChange::Unchanged),
+            serde_json::json!({ "name_encrypted": "name" }),
+            "unchanged: no parent_id key"
+        );
+        assert_eq!(
+            body(Some("name"), ParentChange::TopLevel),
+            serde_json::json!({ "name_encrypted": "name", "parent_id": null }),
+            "the top level: an explicit null"
+        );
+        assert_eq!(
+            body(None, ParentChange::Folder("folder-1")),
+            serde_json::json!({ "parent_id": "folder-1" }),
+            "a folder: its id"
+        );
+        assert_eq!(ParentChange::to(None), ParentChange::TopLevel);
+        assert_eq!(ParentChange::to(Some("folder-1")), ParentChange::Folder("folder-1"));
+    }
+
+    /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
+    /// its text is the status error's alone: the body (its code, its numbers, its message) never
+    /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
+    #[tokio::test]
+    async fn an_upload_refusal_keeps_the_servers_code_and_never_its_body() {
+        use std::io::{Read, Write};
+        async fn refused(status: &'static str, body: &'static str) -> anyhow::Error {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let response = reqwest::Client::new().get(&url).send().await.unwrap();
+            let error = upload_response(response).await.unwrap_err();
+            server.join().unwrap();
+            error
+        }
+        let quota = refused(
+            "413 Payload Too Large",
+            r#"{"error":"quota_exceeded","limit_bytes":5368709120,"used_bytes":5368709120,"is_trial_cap":false}"#,
+        )
+        .await;
+        let refusal = quota.downcast_ref::<UploadRefused>().expect("typed");
+        assert_eq!(refusal.code, Some(UploadRefusalCode::QuotaExceeded));
+        assert_eq!(refusal.status(), Some(413));
+        let text = quota.to_string();
+        assert!(text.contains("413 Payload Too Large"), "{text}");
+        assert!(
+            !text.contains("quota_exceeded") && !text.contains("5368709120"),
+            "the body never reaches the text: {text}"
+        );
+        assert!(
+            quota
+                .chain()
+                .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some()),
+            "the status error stays in the chain"
+        );
+        // Matched exactly: another spelling, or another code, is no code.
+        for body in [
+            r#"{"error":"Quota_Exceeded"}"#,
+            r#"{"error":"quota exceeded"}"#,
+            r#"{"error":"payload_too_large"}"#,
+            "not json",
+        ] {
+            let error = refused("413 Payload Too Large", body).await;
+            assert_eq!(
+                error.downcast_ref::<UploadRefused>().expect("typed").code,
+                None,
+                "{body}"
+            );
+        }
+        for (code, expected) in [
+            ("object_budget_exceeded", UploadRefusalCode::ObjectBudgetExceeded),
+            ("billing_read_only", UploadRefusalCode::BillingReadOnly),
+            ("account_lapsed", UploadRefusalCode::AccountLapsed),
+            ("plan_required", UploadRefusalCode::PlanRequired),
+            ("trial_cancelled_read_only", UploadRefusalCode::TrialCancelledReadOnly),
+        ] {
+            assert_eq!(UploadRefusalCode::from_code(code), Some(expected));
+        }
+        // The share gate's `trial_ended` is no upload refusal: no upload route sends it.
+        assert_eq!(UploadRefusalCode::from_code("trial_ended"), None);
     }
 }

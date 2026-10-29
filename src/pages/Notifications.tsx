@@ -71,8 +71,8 @@ export default function Notifications() {
         showToast({
           id: 'notification-config-defaults',
           variant: 'warning',
-          title: 'Notification settings using defaults',
-          message: 'Notification preferences are not wired up yet; toggles shown are defaults and will not persist.',
+          title: 'Couldn’t load these settings',
+          message: 'Showing the default settings.',
           durationMs: 9000,
         })
       })
@@ -83,7 +83,10 @@ export default function Notifications() {
   const toggle = (key: ToggleSpec['key']) => {
     const next = { ...config, [key]: !config[key] }
     setConfig(next)
-    invoke('set_desktop_config', { config: next }).catch((e: unknown) => {
+    // Only the switch that was flipped is written (task 1889, fix round 1 M5): the config this page read on mount is
+    // never sent back, so a pause made from the tray meanwhile is not undone.
+    const patch = { [key]: next[key] }
+    invoke('set_desktop_config', { config: patch }).catch((e: unknown) => {
       console.warn('set_desktop_config failed:', e)
       showToast({
         id: 'notification-config-save-error',

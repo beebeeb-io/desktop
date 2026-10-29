@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "accounts": [
+    "alice",
+    "bob"
+  ],
+  "chunk_size": 8,
+  "scenarios": [
+    {
+      "id": "nested-tree",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000001",
+        "16120000-0000-4000-8000-000000000002",
+        "16120000-0000-4000-8000-000000000003",
+        "16120000-0000-4000-8000-000000000004",
+        "16120000-0000-4000-8000-000000000005",
+        "16120000-0000-4000-8000-000000000006"
+      ]
+    },
+    {
+      "id": "edit-conflict",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000007"
+      ]
+    },
+    {
+      "id": "subtree-trash",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000008",
+        "16120000-0000-4000-8000-000000000009"
+      ]
+    },
+    {
+      "id": "interrupted-upload",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000010"
+      ]
+    },
+    {
+      "id": "image-thumbnail",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000011"
+      ]
+    },
+    {
+      "id": "video-poster",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000012"
+      ]
+    },
+    {
+      "id": "expired-session",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000004"
+      ]
+    },
+    {
+      "id": "revoked-share",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000013"
+      ]
+    },
+    {
+      "id": "two-accounts",
+      "object_ids": [
+        "16120000-0000-4000-8000-000000000004",
+        "16120000-0000-4000-8000-000000000014"
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "id": "16120000-0000-4000-8000-000000000001",
+      "owner": "alice",
+      "path": "Projects",
+      "parent_id": null,
+      "kind": "folder",
+      "mime_type": "inode/directory",
+      "versions": [],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000002",
+      "owner": "alice",
+      "path": "Projects/Europa",
+      "parent_id": "16120000-0000-4000-8000-000000000001",
+      "kind": "folder",
+      "mime_type": "inode/directory",
+      "versions": [],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000003",
+      "owner": "alice",
+      "path": "Projects/Europa/日本語",
+      "parent_id": "16120000-0000-4000-8000-000000000002",
+      "kind": "folder",
+      "mime_type": "inode/directory",
+      "versions": [],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000004",
+      "owner": "alice",
+      "path": "Projects/Europa/日本語/readme.txt",
+      "parent_id": "16120000-0000-4000-8000-000000000003",
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/nested.txt",
+          "size": 21,
+          "sha256": "68a12e1c3bdbb05519dc7c988eb968882240b3cbe5153e21377edcca433f3ef0"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000005",
+      "owner": "alice",
+      "path": "Projects/readme.txt",
+      "parent_id": "16120000-0000-4000-8000-000000000001",
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/other.txt",
+          "size": 27,
+          "sha256": "e6d8acadbdb8825ef5155ec2644e85bed1f9657bb56946b6366508a9ad7bb197"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000006",
+      "owner": "alice",
+      "path": "empty.txt",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/empty.txt",
+          "size": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000007",
+      "owner": "alice",
+      "path": "conflict.txt",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/base.txt",
+          "size": 17,
+          "sha256": "897d83653e483302b1c6954a0d3bbadcfd3999bb940b796f608de73b92c83a7f"
+        },
+        {
+          "number": 2,
+          "source": "plaintext/local.txt",
+          "size": 18,
+          "sha256": "9255821e38d84d6e5080a0b801ee5f4346a83b1f57579e76ed6b7af45072f142"
+        },
+        {
+          "number": 2,
+          "source": "plaintext/remote.txt",
+          "size": 19,
+          "sha256": "354e12fb5e3062b3618400aacbb32cd9e36e732283873ceb908497ff20088276"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000008",
+      "owner": "alice",
+      "path": "Trash me",
+      "parent_id": null,
+      "kind": "folder",
+      "mime_type": "inode/directory",
+      "versions": [],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000009",
+      "owner": "alice",
+      "path": "Trash me/child.txt",
+      "parent_id": "16120000-0000-4000-8000-000000000008",
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/trash.txt",
+          "size": 29,
+          "sha256": "754c26805a1c6fd3db180d932c9f46af8032c4b47f5884dbeb855d9804691b34"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000010",
+      "owner": "alice",
+      "path": "upload.bin",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "application/octet-stream",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/upload.bin",
+          "size": 20,
+          "sha256": "9a1a9a142c95725ec5ca76ae3c6228966ddb9299280feafabf6a7d0fc0dfbc7e"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000011",
+      "owner": "alice",
+      "path": "image.png",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "image/png",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/image.png",
+          "size": 99,
+          "sha256": "aa7a0b514b7cf0918747bdd6d2847456daab2c4fc2140187bcf6297a72da71ff"
+        }
+      ],
+      "thumbnails": [
+        {
+          "number": 1,
+          "source": "plaintext/image.png",
+          "size": 99,
+          "sha256": "aa7a0b514b7cf0918747bdd6d2847456daab2c4fc2140187bcf6297a72da71ff",
+          "variant": "medium"
+        },
+        {
+          "number": 1,
+          "source": "plaintext/image.png",
+          "size": 99,
+          "sha256": "aa7a0b514b7cf0918747bdd6d2847456daab2c4fc2140187bcf6297a72da71ff",
+          "variant": "large"
+        }
+      ]
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000012",
+      "owner": "alice",
+      "path": "video.mp4",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "video/mp4",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/video.mp4",
+          "size": 1702,
+          "sha256": "2dc79e590897a78d4f9e7bb30eb0bf6c9281d81b69e7ace5cdfd259ee8f08501"
+        }
+      ],
+      "thumbnails": [
+        {
+          "number": 1,
+          "source": "plaintext/poster.png",
+          "size": 97,
+          "sha256": "610f0f2ec25341f55056410a1e7dbe00c6434d6ae1c83f367df8f6505166ed6c",
+          "variant": "medium"
+        },
+        {
+          "number": 1,
+          "source": "plaintext/poster.png",
+          "size": 97,
+          "sha256": "610f0f2ec25341f55056410a1e7dbe00c6434d6ae1c83f367df8f6505166ed6c",
+          "variant": "large"
+        }
+      ]
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000013",
+      "owner": "alice",
+      "path": "shared.txt",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/shared.txt",
+          "size": 26,
+          "sha256": "9a82f3d8c822697db8ee44ec06fc7035aeea7c1c36b52c1e7a2af037488a34cd"
+        }
+      ],
+      "thumbnails": []
+    },
+    {
+      "id": "16120000-0000-4000-8000-000000000014",
+      "owner": "bob",
+      "path": "private.txt",
+      "parent_id": null,
+      "kind": "file",
+      "mime_type": "text/plain",
+      "versions": [
+        {
+          "number": 1,
+          "source": "plaintext/bob.txt",
+          "size": 26,
+          "sha256": "76a415dab92ebc51ed4c4caa6d9b0ce39381b81b3102e0307365bb38a62076a2"
+        }
+      ],
+      "thumbnails": []
+    }
+  ]
+}

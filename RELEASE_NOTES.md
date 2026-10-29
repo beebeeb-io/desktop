@@ -1,23 +1,103 @@
-# Beebeeb Desktop 0.8.3 — closed a local privilege-escalation gap in the sync daemon
+# Beebeeb Desktop 0.8.12 — Finder saves on macOS
 
-This release fixes a security issue in the background sync daemon's internal communication channel (used by the Linux/macOS file-system integration to ask the daemon to decrypt and write a file to disk). It required an attacker to already be running code as the same user as the daemon — it was not remotely exploitable, and there is no evidence it was ever exploited — but a local attacker with that level of access could have made the daemon decrypt and write any of your files to a location of their choosing, including a race condition that could redirect where the plaintext landed even after the destination was checked. We're treating this as serious enough to ship on its own, ahead of the next batch of feature work.
+0.8.12 lets you create and save files in Finder on macOS, and adds a sign-out
+flow for saves that are still waiting to upload. Read the Verification section
+before you rely on that sign-out flow: of the twelve planned device checks for
+it, one was run before this release.
 
 ### What's New
 
-- Nothing new — this release is a single security fix.
+- **[macOS] Create and save files in Finder.** Finder writes enter a durable
+  staging queue and the desktop engine sends them to the server (PR #118).
+- **[macOS] Signing out with changes still waiting.**
+  - **Sending first.** A sign-out first tries to send waiting changes for up to
+    60 seconds, with a visible count and a "Stop waiting" button.
+  - **When it asks.** If everything is sent, it signs out without asking. If
+    changes are still waiting, it asks first.
+  - **What is kept.** On "Sign out", it copies each waiting **file save** to a
+    dated "Changes not sent" folder on this Mac, then clears the local account
+    state. Settings → Sync can show that folder or dismiss the notice.
+  - **What is dropped.** Other waiting changes (renames, moves, deletions, new
+    folders, restores) are not copied. Signing out drops them, and those items
+    stay as they are on the server. A save whose staged copy is missing cannot
+    be kept either. The question before signing out says both.
+  - **Testing.** Automated tests cover the flow. On a device, only the case
+    where everything was sent was checked (PR #130).
+- **[macOS] Finder setup.** The app adds its Finder location itself after launch
+  and sign-in, and offers a retry when that fails. The manual "Install in Finder"
+  button is gone on macOS. If a session expires and you sign in again to the same
+  account, its waiting changes and Finder location are kept. Signing in to a
+  different account goes through the account-switch step (PR #117).
+- **Storage location by country.** Settings shows the countries the server
+  returns, with their availability. Germany is the only live location today, and
+  other countries are listed as coming soon. Europe remains the default. "Only
+  store in" asks the server to keep new uploads in one country (PRs #128 and
+  #129). If the server refuses an upload under that setting, the app shows its
+  standard upload error, not a specific message.
 
 ### Bug Fixes / Hardening
 
-- **The sync daemon's local communication socket now authenticates the calling process.** Previously, any process running as the same OS user could connect and issue commands with no credential check at all. The daemon now verifies the connecting process's identity before accepting any request, and the socket file's own permissions are explicitly hardened rather than left to the system default.
-- **Closed a time-of-check-to-time-of-use (TOCTOU) gap in how the daemon writes decrypted files to disk.** The daemon validates a destination path before decrypting and writing to it, but the validation and the write are necessarily two separate steps. A local attacker could previously exploit that gap — by swapping a symlink into place at exactly the right moment — to redirect the decrypted output somewhere the daemon never intended to write. The fix eliminates the gap structurally rather than narrowing it: the daemon now resolves the destination directory once, holds it open, and writes through that held reference for the rest of the operation, so nothing can be swapped out from underneath it afterward. A related gap that could leave a decrypted file world-readable if an attacker had planted a file at the destination beforehand is also closed — the daemon now always resets the file's permissions to owner-only, regardless of whether the file already existed.
-- This fix went through four rounds of independent adversarial security review before shipping, each one specifically trying to find a way around the previous attempt. The third review found a real gap in the second attempt, and on its own follow-up re-examination later retracted part of that finding as not actually exploitable — both the original finding and the correction are kept in this project's history rather than only keeping the parts that make a cleaner story.
+- **Concurrent Settings changes preserve each other.** Configuration updates now
+  serialize the read, change and write, and Settings sends only the fields that
+  changed. An older Settings snapshot can no longer overwrite a newer tray pause
+  or another preference update (PR #124; automated coverage in
+  `config_write_pin_tests` and `settingsWriteOnlyChangedFields.test.tsx`).
+- **[macOS] Open in Finder reports the actual result.** The app opens the
+  security-scoped File Provider URL through the native bridge. It reports when
+  opening fails, instead of treating a successfully spawned process as success
+  (PR #122).
+- **[macOS] Quick search shows only what Finder has.** Files shared with you are
+  not in the Finder location, so a Mac's quick search no longer lists them
+  (PR #122).
+- **[macOS] Finder removal requests preservation of unsynced files.** Removal uses
+  macOS's preserve-dirty-data mode, and shows a kept folder when that folder has
+  contents or cannot be inspected. Saves that macOS already handed to the app but
+  that are still queued are covered by the sign-out flow above (PRs #119 and #130).
 
 ### Verification
 
-- `cargo test --locked` — 332 passed, 0 failed (up from the prior release's 321), including new tests that specifically exercise the fixed attack paths: a malicious request over the real IPC socket with a destination outside the allowed area, a symlink swapped into place mid-operation, a directory renamed mid-operation, and a file planted in advance with the wrong permissions. Each of these tests was independently proven load-bearing — the underlying defense was temporarily removed, the corresponding test was confirmed to genuinely fail, then the defense was restored and the suite confirmed green again.
-- Four independent adversarial security reviews were run against this fix, each one starting fresh rather than confirming the previous round's assumptions. The first three each found a real, additional gap in the prior attempt; the fourth found none.
-- Not verified: real-hardware device testing on Windows/Linux/macOS for this specific release. The fix affects only the Linux and macOS sync daemon (Windows uses a different, unaffected code path); macOS itself remains parked pending separate build tooling and does not ship from this release.
+- **Product code:** desktop `680ea7ca` (PR #130 merged). The release commit adds
+  only release documentation on top of it.
+- **Frontend:** `bun test` 1163 pass / 0 fail across 69 files (in CI on
+  `680ea7ca`, and again on a Mac on 2026-10-24).
+- **Rust**, `cargo test --locked` on `680ea7ca`:
+  - **Linux (CI):** library `test result: ok. 1587 passed; 0 failed; 6 ignored`.
+    Keychain 31 passed, Windows session wiring 8 passed, Windows sign-out
+    cleanup 3 passed.
+  - **Windows (CI):** library `test result: ok. 1388 passed; 0 failed; 5 ignored`.
+    The same three integration suites: 31, 8 and 3 passed.
+  - **macOS (Apple Silicon, 2026-10-24):** library
+    `test result: ok. 1904 passed; 0 failed; 8 ignored`. The same three suites:
+    31, 8 and 3 passed.
+- **Other CI on `680ea7ca`:** the File Provider Swift build and the macOS
+  release-script test passed
+  ([run 39310409598](https://github.com/beebeeb-io/desktop/actions/runs/39310409598)).
+- **Device check of the sign-out flow** (macOS, signed debug build, local test
+  server). One of the twelve planned cases was run: signing out with the server
+  reachable while one Finder save was waiting.
+  - The app counted 1 waiting file and sent it in about 1 second.
+  - It then signed out without asking and without copying anything aside.
+  - After signing back in, the file's SHA-256 matched the original.
+- **Device cases not run before this release** (eleven, tracked for a later
+  release):
+  - server unreachable
+  - Cancel
+  - the menu shortcut
+  - a failed copy
+  - several saves of one file
+  - the 60-second limit
+  - account switch
+  - two kept folders
+  - closing Settings while sending
+  - closing Settings while asking
+  - held changes
+- **Not verified before publication:** installing 0.8.12 fresh, and updating to it
+  from 0.8.11, on physical hardware.
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the release assets below.
+Existing desktop installs receive this release through the in-app updater. On a
+Mac, that starts once the signed and notarized Mac build has been added to this
+release, which happens after the Windows and Linux builds. For a fresh Windows
+install, download the NSIS `setup.exe`; the MSI is also available. For a fresh
+Mac install, download the `.dmg` (Apple Silicon, macOS 14 or later).

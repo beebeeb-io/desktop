@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Beebeeb desktop windows. Targets the compact settings/app window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers the Windows onboarding webview (`windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work on Windows webviews.",
+  "description": "Default capability for the Beebeeb desktop windows. Targets the compact settings/app window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers the Windows onboarding webview (`windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work in all webviews. The macOS Beebeeb window (`main`) has its own macOS-only capability, `macos-main.json`; the retired macOS Settings window (`macos-settings`) is granted nowhere (task 1683 slice 1).",
   "windows": [
     "settings",
     "onboarding",
@@ -14,6 +14,7 @@
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-minimize",
+    "core:window:allow-start-dragging",
     "opener:default",
     "window-state:default",
     "updater:default",

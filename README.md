@@ -1,3 +1,17 @@
+> **Correction — 2026-09-29, task 1611:** The historical architecture/build
+> descriptions below are retained for provenance, not current instructions.
+> Shipping entrypoints are desktop-owned `src/main.tsx` and `src-tauri/src/lib.rs`;
+> `runner.rs`, `engine_bridge.rs`, and `state_db.rs` own scheduling and sync.
+> `repos/web` is not this frontend; core provides shared primitives.
+> Run `bun run tauri:dev` / `bun run tauri:build` from the desktop root.
+> macOS uses the active ~~`macos/FileProviderExtension`~~ `BeebeebFileProvider/`
+> (path corrected on resume, 2026-09-29; built by `scripts/build-fileprovider-extension.sh`), Windows
+> uses `src-tauri/src/windows_cf` (CFAPI), and Linux FUSE is an unmounted prototype.
+> The legacy native-shell build recipes and Linux online-only claims below are
+> historical. Spec 030 is historical and never authorizes raw keys in config.
+> Credentials belong in the OS store; Linux currently fails closed.
+> See [the current capability contract](docs/CAPABILITIES.md) for shell reachability and limitations.
+
 <p align="center">
   <a href="https://beebeeb.io"><img src="https://beebeeb.io/assets/beebeeb-icon.png" alt="beebeeb" width="72" height="72" /></a>
 </p>
@@ -7,7 +21,7 @@
 <p align="center">
   <a href="https://github.com/beebeeb-io/desktop/releases/latest"><img src="https://img.shields.io/github/v/release/beebeeb-io/desktop?label=release" alt="Release" /></a> &nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-555.svg" alt="License: AGPL-3.0" /></a> &nbsp;
-  <img src="https://img.shields.io/badge/Windows%20%C2%B7%20Linux%20%C2%B7%20macOS%20soon-555.svg" alt="Windows · Linux · macOS soon" /> &nbsp;
+  <img src="https://img.shields.io/badge/Windows%20%C2%B7%20Linux%20%C2%B7%20macOS%20(Apple%20Silicon)-555.svg" alt="Windows · Linux · macOS (Apple Silicon)" /> &nbsp;
   <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-555.svg" alt="Security policy" /></a>
 </p>
 <p align="center"><a href="https://beebeeb.io">Website</a> &nbsp;·&nbsp; <a href="https://beebeeb.io/security">How it works</a> &nbsp;·&nbsp; <a href="SECURITY.md">Report a vulnerability</a></p>
@@ -15,26 +29,22 @@
 
 ---
 
-## Status — Windows + Linux released, macOS not yet
+## Status — Windows, Linux and macOS (Apple Silicon) released
 
-> **[desktop-v0.8.3](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
-> release** — `.msi`/`.exe` (NSIS) for Windows and `.AppImage`/`.deb`/`.rpm` for Linux,
-> each with a minisign `.sig` for the auto-updater. v0.8.3's assets are signed with key ID
-> `545D7BA77EDEA7E1` (the pre-rotation key). **Known problem: in-app updates do not work for
-> installs on 0.3.0 or later.** Those versions trust only the new key `C6FADFD59D732197`, but
-> every release through 0.8.3 was still signed with the old one, so the updater rejects them. If
-> you are on 0.3.0-0.8.2, install 0.8.3 manually from the GitHub release — it carries a
-> security fix for the sync daemon. The next release is signed with the new key and restores
-> in-app updates for 0.3.0+; installs older than 0.3.0 will need one manual reinstall then
-> (see `docs/RELEASING.md`). **Neither
-> installer carries an OS-trusted code-signing certificate yet** — Windows shows an "unknown
-> publisher" SmartScreen warning until that's wired up. **macOS has no published release yet** (development-signed builds already run on real Mac
-> hardware with the Finder File Provider mount — see `docs/MACOS_BRINGUP_BRIEF.md`): the
-> macOS entry in the release workflow's build matrix is commented out (the File Provider
-> extension doesn't yet support universal arm64+x86_64 builds, and no Developer ID/notary
-> credentials are configured in CI). The site's [/download](https://beebeeb.io/download) page
-> links directly to whatever is current once desktop apps are announced there; until then,
-> grab a release straight from GitHub.
+> **[desktop-v0.8.5](https://github.com/beebeeb-io/desktop/releases/latest) is the latest
+> release** — `.msi`/`.exe` (NSIS) for Windows, `.AppImage`/`.deb`/`.rpm` for Linux, and a
+> notarized `.dmg` for macOS (Apple Silicon only — Intel is not built yet), each with a
+> minisign `.sig` for the auto-updater. Assets are signed with key ID `C6FADFD59D732197` (see
+> `docs/RELEASING.md` for the key-rotation history). **Windows and Linux installers do not carry
+> an OS-trusted code-signing certificate yet** — Windows shows an "unknown publisher" SmartScreen
+> warning until that's wired up. **macOS IS Developer ID signed and notarized by Apple** —
+> Gatekeeper accepts it with no warning. macOS builds locally on a Mac holding the Developer ID
+> keychain identity rather than in CI (see the matrix comment in
+> `.github/workflows/release.yml`) — CI has no Developer ID credentials wired in, and the File
+> Provider extension doesn't yet support a universal arm64+x86_64 build, so only Apple Silicon
+> ships today. The site's [/download](https://beebeeb.io/download) page always links to
+> whatever is current.
+
 
 The [beebeeb](https://beebeeb.io) desktop client gives you a native sync folder on macOS, Windows, and Linux. Drop files into your beebeeb folder and they are encrypted on your machine and synced to the cloud — the server only ever sees ciphertext. The UI and the sync engine are shared with the rest of beebeeb: a [web](https://github.com/beebeeb-io/web) frontend in a native WebView, plus the Rust sync engine and cryptography from [core](https://github.com/beebeeb-io/core).
 
@@ -69,7 +79,7 @@ graph TD
 
 | Platform | Shell | Integration | Status |
 |---|---|---|---|
-| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | Not released — dev-signed builds run on real hardware; release build + Developer ID/notarization not wired into CI |
+| **macOS** | Tauri + Swift File Provider | Menu bar, Finder File Provider location | [Released](https://github.com/beebeeb-io/desktop/releases/latest) — Apple Silicon only, Developer ID signed + notarized (built locally, not in CI — see Status above) |
 | **Windows** | Tauri (WinUI WebView) | System tray, Explorer overlay icons | [Released](https://github.com/beebeeb-io/desktop/releases/latest), not code-signed (SmartScreen warns) |
 | **Linux** | Tauri (WebKitGTK) | Tray indicator, FUSE mount for online-only files | [Released](https://github.com/beebeeb-io/desktop/releases/latest) (AppImage/.deb/.rpm) |
 

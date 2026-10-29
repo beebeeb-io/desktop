@@ -1,0 +1,21 @@
+# desktop.toml as desktop 0.8.11 writes it (DesktopConfig at a46146b), carrying the Finder
+# failure a developer Mac saved on 2026-10-06. Values are fixtures; the key set is what matters.
+account_id = "11111111-2222-3333-4444-555555555555"
+last_signed_in_email = "sam@beebeeb.io"
+sync_root = "/Users/sam/Library/Application Support/beebeeb/file-provider-state"
+upload_kbps_limit = 0
+download_kbps_limit = 0
+pause_sync = false
+notify_conflicts = true
+notify_sync_complete = false
+notify_quota_warnings = true
+known_folder_backup = []
+known_folder_onboarding_seen = false
+finder_install_status = "error"
+finder_install_last_error = "The file couldn’t be saved because a file with the same name already exists. (NSCocoaErrorDomain 516)"
+finder_install_last_attempt_at = 1791291909
+finder_install_reason_category = "unknown"
+theme = "system"
+local_cache_limit_bytes = 0
+release_channel = "alpha"
+installed_release_channel = "alpha"

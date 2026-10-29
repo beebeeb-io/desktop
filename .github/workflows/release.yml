@@ -112,6 +112,24 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Refuse while RELEASE_BLOCKERS.md lists an item
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          blockers_path="RELEASE_BLOCKERS.md"
+          items=""
+          if [[ -f "$blockers_path" ]]; then
+            items="$(grep -nE '^[[:space:]]*[-*][[:space:]]' "$blockers_path" || true)"
+          fi
+
+          if [[ -n "$items" ]]; then
+            echo "::error file=$blockers_path::RELEASE_BLOCKERS.md lists release blockers. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
+            printf '%s\n' "$items"
+            exit 1
+          fi
+          echo "RELEASE_BLOCKERS.md lists no item"
+
   test:
     name: Run release test gate
     if: github.event_name == 'workflow_dispatch'
@@ -156,26 +174,100 @@ jobs:
           mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
           cargo test --locked
 
-  build:
-    name: Build ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
-    needs: test
-    runs-on: ${{ matrix.os }}
+  verify-branch-point:
+    name: Verify release branch point
+    # Task 2281: the ruleset gates every update to an existing release/* branch, but not the
+    # branch's STARTING commit (creation is not a pull request, and required checks do not run on
+    # create), so an admin token could create release/x.y.z at an unreviewed commit and dispatch
+    # this workflow to sign it. Refuse that here, before `build` gets the `desktop-release`
+    # environment and an Azure signing token: the branch must have started at a commit on main or
+    # at the commit of a published desktop-v* tag whose commit is itself a pull request merge into
+    # main or a release/* branch, and every first-parent commit since then must have arrived
+    # through a pull request merged into this same branch. A dispatch from main
+    # skips this job, because main is protected by pull requests. No `environment:` here, so the
+    # job never receives an Azure token.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      !inputs.publish_existing &&
+      startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the check walks first-parent from the dispatched head back to the
+          # branch's starting point.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release branch started from reviewed commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          MAIN_REF: origin/main
+        run: bash scripts/verify-release-branch-point.sh
+
+  build:
+    name: Build ${{ matrix.name }}
+    # `verify-branch-point` is skipped for a dispatch from main (main is protected by PRs), so
+    # this job tolerates `skipped` there; whenever the check ran, it must have passed. Signing
+    # happens in this job, so a refused branch point must stop it before it starts.
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event_name == 'workflow_dispatch' &&
+        !inputs.publish_existing &&
+        needs.test.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped')
+      }}
+    needs:
+      - test
+      - verify-branch-point
+    runs-on: ${{ matrix.os }}
+    # Signing trust boundary (docs/RELEASING.md, "Windows Authenticode"): Azure trusts this job's OIDC token only
+    # through the GitHub environment `desktop-release` (subject repo:beebeeb-io/desktop:environment:desktop-release),
+    # and that environment deploys only from `main` and `release/*`. A release branch needs no per-branch Azure
+    # credential any more; a run from any other branch is refused before the job starts.
+    environment: desktop-release
+    # Baseline for Build Windows is ~14 min (0.8.7 runs); signing adds the
+    # per-file Artifact Signing calls. A hang (the first signed run hung ~60
+    # min in "Build Tauri app" with zero sign requests — cancelled) must fail
+    # the job, not park it for the 6-hour default.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Windows Authenticode signing authenticates to Azure Artifact Signing via
+      # GitHub OIDC (federated credential on beebeeb-desktop-release, for the
+      # environment above). Only the Windows matrix leg signs; the permission is
+      # harmless on Linux.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS is disabled for now: the File Provider extension doesn't support universal
-          # builds yet (arch-detection gap in scripts/build-fileprovider-extension.sh) and
-          # Developer ID/notary credentials aren't wired into CI (see task 0342). Re-add once
-          # both are sorted — the macOS-only steps below are already gated on `runner.os` and
-          # need no other change.
+          # macOS is disabled in CI for now: Developer ID/notary credentials aren't wired into
+          # CI as secrets (doing so would need Guus to export the Developer ID private key from
+          # his keychain as a .p12 — deliberately not done; see task 1608's route decision).
+          # macOS releases are instead built + Developer ID signed + notarized LOCALLY on a Mac
+          # holding the keychain identity, then the resulting assets are uploaded to the same
+          # GitHub release by hand and this workflow is re-run with publish_existing=true to
+          # backfill the manifest's darwin-aarch64 entry (see "Generate desktop channel
+          # manifest" below). Task 1608 (2026-09-29) launched macOS Apple Silicon (arm64) only —
+          # the File Provider extension isn't built/tested for x86_64 or as a universal binary,
+          # so target/rust-targets below are single-arch on purpose, not `universal-apple-darwin`.
+          # Re-add once real CI signing credentials exist for this identity.
           # - name: macOS
           #   os: macos-latest
-          #   target: universal-apple-darwin
-          #   rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          #   target: aarch64-apple-darwin
+          #   rust-targets: aarch64-apple-darwin
           - name: Windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -238,6 +330,63 @@ jobs:
           mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           echo "BEEBEEB_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
+      # Windows Authenticode signing (task 1617): Azure Artifact Signing,
+      # certificate profile beebeeb-publictrust, publisher CN=Initlabs B.V.
+      # Auth is the ambient az login (AzureCliCredential inside the dlib's
+      # DefaultAzureCredential). TIMING CONSTRAINT (measured, runs 5-7):
+      # azure/login's OIDC client assertion is valid ~5 minutes and the az
+      # CLI exchanges it once for an access token it caches ~1h — so the
+      # login step sits AFTER the cargo pre-build step below and the first
+      # sign call happens ~2 minutes after login (tauri build then only
+      # rebuilds the frontend and bundles). Compiling cargo BETWEEN login
+      # and sign fails with AADSTS700024 (assertion expired at first
+      # exchange). Dispatch this workflow from main.
+      #
+      # The expensive part of tauri build is the cargo compile (~12 min) —
+      # run it BEFORE the login step so the pre-build is a warm cache and
+      # tauri build's own cargo invocation is a no-op. Both this step and
+      # the pre-build must stay AFTER every config-mutating step above
+      # (version + signCommand injection) so build.rs sees the final inputs
+      # and nothing triggers a recompile between here and the sign.
+      - name: Enable Azure Artifact Signing (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          SIGN_SCRIPT: ${{ github.workspace }}\scripts\windows\sign-artifact.ps1
+        run: |
+          set -euo pipefail
+          # bundle.windows.signCommand is injected at release time (not
+          # committed) so local Windows bundling keeps working without signing
+          # tooling. Tauri splits the string on single spaces and substitutes
+          # %1 with the file to sign; the absolute script path keeps it
+          # independent of the bundler's working directory. sign-artifact.ps1
+          # signs the app binary before packaging plus the NSIS/MSI installers
+          # and the NSIS uninstaller, and fails closed in CI (BEEBEEB_REQUIRE_SIGNING).
+          SIGN_CMD="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${SIGN_SCRIPT} %1"
+          jq --arg cmd "$SIGN_CMD" '.bundle.windows.signCommand = $cmd' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+          mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
+          grep -F 'sign-artifact.ps1' src-tauri/tauri.conf.json
+          echo "BEEBEEB_REQUIRE_SIGNING=1" >> "$GITHUB_ENV"
+
+      - name: Pre-build cargo artifacts (Windows, before az login)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Through the Tauri CLI (not raw cargo) so the build.rs inputs
+          # (TAURI_CONFIG env etc.) match tauri-action's invocation exactly
+          # and its cargo run is a no-op; --no-bundle skips packaging (and
+          # therefore signing - the az login has not happened yet).
+          bun run tauri build --no-bundle --target x86_64-pc-windows-msvc -- --locked
+
+      - name: Azure login for Artifact Signing (OIDC)
+        if: runner.os == 'Windows'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Validate release config
         if: runner.os == 'macOS'
         run: bash scripts/macos-release-preflight.sh
@@ -255,14 +404,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           MACOS_APP_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_APP_PROVISION_PROFILE_BASE64 }}
           MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_FILE_PROVIDER_PROVISION_PROFILE_BASE64 }}
-          TAURI_WINDOWS_CERTIFICATE: ${{ secrets.TAURI_WINDOWS_CERTIFICATE }}
-          TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # Windows Authenticode is NOT certificate-based and needs no signing secret:
+          # the ambient az login (set up two steps above, close to sign time)
+          # drives the Artifact Signing dlib. See the timing-constraint comment
+          # above.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: bun run tauri
-          args: --target ${{ matrix.target }} -- --locked
+          # -v: the bundler hides the custom sign command's output otherwise
+          # (tauri-apps/tauri#11778); verbose makes every signing invocation
+          # and its output visible in the job log.
+          args: -v --target ${{ matrix.target }} -- --locked
 
       - name: Validate signed macOS artifact
         if: runner.os == 'macOS'
@@ -288,8 +441,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-assets/
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg.sig release-assets/
+          # The updater artifact (createUpdaterArtifacts: true) is bundled
+          # alongside the .app, not the .dmg, and Tauri names it from
+          # productName alone — no version or arch suffix (confirmed by a
+          # real local build, task 1608, 2026-09-29) — unlike the
+          # dmg/msi/nsis installer bundles, which DO embed version+arch.
+          # Do not "fix" this filename to look more like the others.
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz release-assets/
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Beebeeb.app.tar.gz.sig release-assets/
 
       - name: Stage release assets (Windows)
         if: runner.os == 'Windows'
@@ -301,6 +462,38 @@ jobs:
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig release-assets/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe release-assets/
           cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig release-assets/
+
+      # Fail-closed Authenticode gate (task 1617), step 1/2: the guard must
+      # reject its unsigned + wrong-signer fixtures before it is trusted to
+      # pass anything (a test is only trusted after it has been seen to fail).
+      # In-process invocation (&) is deliberate: `powershell -File` binds only
+      # the FIRST element of an array argument and drops the rest into unbound
+      # $args (proven on PS 5.1), which would silently skip all but one
+      # installer. In-process, the guard's `exit` lands in $LASTEXITCODE and
+      # does NOT stop the step, so each step re-checks it and throws.
+      - name: Authenticode gate - self-test
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & .\scripts\windows\verify-authenticode.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "verify-authenticode self-test failed: the gate accepted a bad fixture (exit $LASTEXITCODE)" }
+
+      # Step 2/2: every staged installer is verified directly AND via the
+      # executables INSIDE its payload (NSIS: 7z; MSI: msiexec /a). Do NOT also
+      # verify target/.../release/*.exe: the Tauri bundler deliberately
+      # restores the UNSIGNED main binary after packaging ("Restore unsigned
+      # and unpatched binary"), so the only signed copies of the app exe are
+      # the ones inside the installer payloads, which -ExtractInstallers
+      # verifies.
+      - name: Authenticode gate - verify release artifacts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $assets = @(Get-ChildItem 'release-assets/*' -File | Where-Object { $_.Name -match '\.(exe|msi)$' })
+          Write-Host ("installer assets: {0}" -f $assets.Count)
+          if ($assets.Count -ne 2) { throw "expected exactly 2 Windows installer assets (NSIS .exe + MSI), found $($assets.Count)" }
+          & .\scripts\windows\verify-authenticode.ps1 -Files @($assets.FullName) -ExtractInstallers @($assets.FullName)
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode gate failed (exit $LASTEXITCODE): refusing to publish unsigned or wrongly-signed Windows artifacts (task 1617)" }
 
       - name: Stage release assets (Linux)
         if: runner.os == 'Linux'
@@ -428,6 +621,9 @@ jobs:
       - build
       - release
     runs-on: ubuntu-latest
+    # Every GitHub request in the manifest step is bounded (timeout 120 s, 3 attempts); this
+    # bounds the job as a whole, so a stalled connection fails it instead of hanging for hours.
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -461,10 +657,41 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
+          # Command substitutions keep errexit, so a failing command inside $(fetch_sig ...)
+          # fails the step even where no explicit `|| return 1` guards it (#164's empty-signature
+          # hole was exactly such a command).
+          shopt -s inherit_errexit
 
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
-          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
+          WORK_DIR=$(mktemp -d)
+
+          # The release and its signatures are read through the authenticated REST API, never the
+          # public releases/download URL: on 2026-10-26 github.com answered one .sig URL with a
+          # cached 504 for about 15 minutes while the assets API served the same file, and the
+          # 0.8.15 alpha promotion failed twice. The retries ride out blips of seconds, not an
+          # outage of that length; re-run the job once the API answers again.
+          #
+          # gh_api_to <file> <endpoint> [gh api flags...]: up to 3 attempts of at most 120 s each;
+          # on success the file holds that attempt's response only.
+          gh_api_to() {
+            local out="$1" endpoint="$2" attempt
+            shift
+            for attempt in 1 2 3; do
+              if timeout 120 gh api "$@" > "$out"; then
+                return 0
+              fi
+              echo "::warning::GitHub API request $endpoint failed (attempt $attempt of 3)" >&2
+              if [ "$attempt" -lt 3 ]; then
+                sleep $((attempt * 10))
+              fi
+            done
+            echo "::error::GitHub API request $endpoint failed 3 times" >&2
+            return 1
+          }
+
+          gh_api_to "$WORK_DIR/release.json" "repos/$REPO/releases/tags/$TAG"
+          NOTES=$(jq -r '.body // ""' "$WORK_DIR/release.json")
 
           if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Desktop release version '$VER' must be plain semver like 0.2.1. Channel is selected separately by the workflow input."
@@ -486,11 +713,26 @@ jobs:
 
           # The Tauri updater verifies update bundles against the embedded pubkey
           # in tauri.conf.json using the .sig files produced at build time.
-          # Windows and Linux must fail closed if their signatures are absent.
-          # macOS is still disabled in the release matrix, so its updater bundle
-          # filename is a best-effort carry-forward until macOS release output is
-          # verified. Missing macOS signatures omit darwin entries instead of
-          # blocking Windows/Linux manifest publishing.
+          # Windows and Linux must fail closed if their bundles or signatures are absent.
+          # macOS is still disabled in the release matrix (built + signed locally instead, see
+          # the matrix comment above), so the CI-created release has no macOS assets until
+          # scripts/release-macos-local.sh uploads them. darwin is all-or-nothing: a release
+          # with no macOS asset at all (no dmg, no updater bundle, no signature, in any upload
+          # state) omits the darwin entry instead of blocking Windows/Linux manifest publishing.
+          # Any other macOS state (a dmg without the bundle, an upload still in progress, a
+          # signature that is missing, empty, unfetchable or not for this bundle) fails the job:
+          # publishing without darwin would silently stop offering Macs the update.
+          #
+          # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
+          # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
+          # build, not a guess): the updater artifact is named from productName ALONE — no
+          # version or arch suffix, unlike the dmg/msi/nsis installer bundles below, which do
+          # embed version+arch. Only a darwin-aarch64 manifest entry is emitted (no
+          # darwin-x86_64) — an Intel Mac must not be offered an arm64-only binary it cannot
+          # run. Re-add darwin-x86_64 only once a real universal build is verified (see
+          # scripts/build-fileprovider-extension.sh's arch-detection gap) — and re-check the
+          # bundle filename again then, since `--target universal-apple-darwin` may name it
+          # differently.
           #
           # Keep the Windows updater targets split by installer type. The
           # Tauri updater first searches windows-x86_64-{nsis,msi} based on
@@ -498,27 +740,78 @@ jobs:
           # windows-x86_64. Fresh Windows installs are documented as NSIS
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
-          MACOS_BUNDLE="Beebeeb_${VER}_universal.app.tar.gz"
+          MACOS_BUNDLE="Beebeeb.app.tar.gz"
+          MACOS_DMG="Beebeeb_${VER}_aarch64.dmg"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
+          # asset_id <name>: the id of the release's fully uploaded, non-empty asset with exactly
+          # that name, or nothing.
+          asset_id() {
+            jq -r --arg name "$1" \
+              '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' \
+              "$WORK_DIR/release.json"
+          }
+
+          # fetch_sig <bundle>: print the bundle's signature. Fails unless the bundle and its .sig
+          # are uploaded, non-empty assets of $TAG and the .sig is a Tauri (minisign) signature
+          # whose trusted comment names this bundle. Failure paths also return non-zero
+          # explicitly, on top of inherit_errexit.
           fetch_sig() {
-            curl --proto '=https' --tlsv1.2 -fsSL "$1"
-          }
+            local bundle="$1" sig_id untrusted trusted
 
-          fetch_optional_sig() {
-            local url="$1"
-
-            if ! curl --proto '=https' --tlsv1.2 -fsSL "$url"; then
-              echo "::notice::Optional macOS signature not found at $url; omitting macOS manifest entries" >&2
+            if [ -z "$(asset_id "$bundle")" ]; then
+              echo "::error::$bundle is not an uploaded asset of $TAG" >&2
+              return 1
             fi
+            sig_id=$(asset_id "$bundle.sig")
+            if [ -z "$sig_id" ]; then
+              echo "::error::$bundle.sig is not an uploaded asset of $TAG" >&2
+              return 1
+            fi
+            gh_api_to "$WORK_DIR/$bundle.sig" "repos/$REPO/releases/assets/$sig_id" \
+              -H 'Accept: application/octet-stream' || return 1
+            if ! grep -q '[^[:space:]]' "$WORK_DIR/$bundle.sig"; then
+              echo "::error::$bundle.sig on $TAG is empty" >&2
+              return 1
+            fi
+            # Decoded, a signature reads "untrusted comment: ...", the signature line, then
+            # "trusted comment: timestamp:<n><TAB>file:<bundle>". An error page, the asset's
+            # JSON metadata or another bundle's signature must not reach the manifest. (Which
+            # key signed it is not checked here: a key-rotation release ships old-key signatures.)
+            if ! base64 -d "$WORK_DIR/$bundle.sig" > "$WORK_DIR/$bundle.sig.txt" 2>/dev/null; then
+              echo "::error::$bundle.sig on $TAG is not base64" >&2
+              return 1
+            fi
+            untrusted=$(sed -n 1p "$WORK_DIR/$bundle.sig.txt")
+            trusted=$(sed -n 3p "$WORK_DIR/$bundle.sig.txt")
+            if [[ "$untrusted" != "untrusted comment: "* || "$trusted" != "trusted comment: "* ||
+              $'\t'"${trusted#trusted comment: }"$'\t' != *$'\t'"file:$bundle"$'\t'* ]]; then
+              echo "::error::$bundle.sig on $TAG is not a Tauri signature of $bundle" >&2
+              return 1
+            fi
+            cat "$WORK_DIR/$bundle.sig" || return 1
           }
 
-          SIG_MACOS=$(fetch_optional_sig "${BASE_URL}/${MACOS_BUNDLE}.sig")
-          SIG_LINUX=$(fetch_sig "${BASE_URL}/${LINUX_BUNDLE}.sig")
-          SIG_WINDOWS_NSIS=$(fetch_sig "${BASE_URL}/${WINDOWS_NSIS_BUNDLE}.sig")
-          SIG_WINDOWS_MSI=$(fetch_sig "${BASE_URL}/${WINDOWS_MSI_BUNDLE}.sig")
+          # fetch_optional_sig <bundle>: like fetch_sig, but prints nothing when the release has
+          # no macOS asset at all, in any upload state (the darwin all-or-nothing rule above).
+          fetch_optional_sig() {
+            local bundle="$1"
+
+            if ! jq -e --arg a "$bundle" --arg b "$bundle.sig" --arg c "$MACOS_DMG" \
+              'any(.assets[]; .name == $a or .name == $b or .name == $c)' \
+              "$WORK_DIR/release.json" > /dev/null; then
+              echo "::notice::No macOS asset is on $TAG; omitting macOS manifest entries" >&2
+              return 0
+            fi
+            fetch_sig "$bundle"
+          }
+
+          SIG_MACOS=$(fetch_optional_sig "$MACOS_BUNDLE")
+          SIG_LINUX=$(fetch_sig "$LINUX_BUNDLE")
+          SIG_WINDOWS_NSIS=$(fetch_sig "$WINDOWS_NSIS_BUNDLE")
+          SIG_WINDOWS_MSI=$(fetch_sig "$WINDOWS_MSI_BUNDLE")
 
           mkdir -p releases-repo/desktop
 
@@ -564,10 +857,6 @@ jobs:
                   else
                     {
                       "darwin-aarch64": {
-                        url: ($base_url + "/" + $macos_bundle),
-                        signature: $sig_macos
-                      },
-                      "darwin-x86_64": {
                         url: ($base_url + "/" + $macos_bundle),
                         signature: $sig_macos
                       }

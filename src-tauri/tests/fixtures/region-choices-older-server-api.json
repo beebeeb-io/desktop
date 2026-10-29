@@ -1,0 +1,68 @@
+{
+    "preferred_region": null,
+    "available_regions": [
+        {
+            "continent": "europe",
+            "display_name": "Europe",
+            "example_city": "Falkenstein",
+            "is_default": true
+        }
+    ],
+    "choices": [
+        {
+            "id": "europe",
+            "kind": "region",
+            "name": "Europe",
+            "city": null,
+            "country": null,
+            "country_code": null,
+            "status": "live",
+            "selectable": true,
+            "is_default": true
+        },
+        {
+            "id": "fsn1",
+            "kind": "datacenter",
+            "name": "Falkenstein",
+            "city": "Falkenstein",
+            "country": "Germany",
+            "country_code": "DE",
+            "status": "live",
+            "selectable": true,
+            "is_default": false
+        },
+        {
+            "id": "hel1",
+            "kind": "datacenter",
+            "name": "Helsinki",
+            "city": "Helsinki",
+            "country": "Finland",
+            "country_code": "FI",
+            "status": "live",
+            "selectable": true,
+            "is_default": false
+        },
+        {
+            "id": "nbg1",
+            "kind": "datacenter",
+            "name": "Nuremberg",
+            "city": "Nuremberg",
+            "country": "Germany",
+            "country_code": "DE",
+            "status": "live",
+            "selectable": true,
+            "is_default": false
+        },
+        {
+            "id": "ede",
+            "kind": "datacenter",
+            "name": "Ede",
+            "city": "Ede",
+            "country": "Netherlands",
+            "country_code": "NL",
+            "status": "coming_soon",
+            "selectable": false,
+            "is_default": false
+        }
+    ]
+}
