@@ -560,7 +560,8 @@ async fn a_class_the_server_read_does_not_give_is_refused() {
     assert_eq!(run.pairs[0].class, Class::AGone, "precondition");
     run.pairs[0].class = Class::Identical;
     run.pairs[0].action = Action::TrashB;
-    let mock = RepairMockServer::start(a_gone);
+    // The op log answers empty, so only the class check stands between this pair and a trash.
+    let mock = RepairMockServer::start([a_gone, vec![ops(&[])]].concat());
 
     let error = pc.apply(&mock, &mut run, at_a()).await.unwrap_err().to_string();
 
