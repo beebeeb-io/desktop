@@ -7135,9 +7135,9 @@ impl StateDb {
     /// Lead ruling, F9 review I-1 (spec 2026-10-06 R8, §5.6): the vault key this Mac kept is no longer the account's,
     /// so every operation paused for `auth` (queued with names encrypted under that key) is paused for `key_replaced`
     /// instead: kept, never sent, and never made due by [`Self::resume_operations_paused_for_auth`]. Operations paused
-    /// for any other reason are untouched. Returns how many were re-marked. Only the macOS reconciler's re-sign-in
-    /// path holds them; Windows and Linux keep today's flow (spec R8).
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    /// for any other reason are untouched. Returns how many were re-marked. A Mac's re-sign-in path holds them; on
+    /// Windows and Linux the engine's key check does, when a queued name does not open under the session's key (spec
+    /// D12, task 1888).
     pub fn hold_operations_paused_for_auth_as_key_replaced(&self, now: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -7151,6 +7151,17 @@ impl StateDb {
                 OperationPauseReason::Auth.as_str()
             ],
         )
+    }
+
+    /// Spec D12 (task 1888): every operation paused for `auth`, for the key check before a resume (Windows and Linux).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub fn operations_paused_for_auth(&self) -> Result<Vec<PendingOperation>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE paused_reason = ?1 ORDER BY rowid"
+        ))?;
+        let rows = stmt.query_map(params![OperationPauseReason::Auth.as_str()], pending_operation_from_row)?;
+        rows.collect()
     }
 
     /// Unguarded; the runner records a pause with [`Self::record_pause_claimed`]

@@ -112,21 +112,9 @@ pub fn eligible(owner: Option<&Identity>, session: &Identity, has_local_data: bo
     }
 }
 
-/// Whether `sealed` (a `name_encrypted` envelope) opens under a file key derived from `master_key` and `file_id`, in
-/// every format the engine reads: the string id (as every client seals today) and the 16-byte binary id (the old CLI),
-/// each in both envelopes (`engine_bridge::decrypt_shared_name_with_key`). The key is derived from this id, so a name
-/// sealed for another file, or under another account's key, never opens. Task 1888's key check reads names the same
-/// way.
-pub fn name_opens(master_key: &[u8; 32], file_id: &str, sealed: &str) -> bool {
-    let master = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
-    let by_string = beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes());
-    let by_binary = uuid::Uuid::parse_str(file_id)
-        .ok()
-        .map(|id| beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()));
-    std::iter::once(by_string).chain(by_binary).any(|file_key| {
-        crate::engine_bridge::decrypt_shared_name_with_key(&file_key, sealed).is_some_and(|name| !name.trim().is_empty())
-    })
-}
+/// Whether a sealed name opens under this session's master key, by its own file id. It lives in the engine bridge since
+/// task 1888, whose key check (spec D12) reads names the same way on Windows and Linux, where this module is not built.
+pub use crate::engine_bridge::name_opens;
 
 /// Judge one node of this account's tree against this session's master key.
 pub fn probe(master_key: &[u8; 32], node: &serde_json::Value) -> Probe {

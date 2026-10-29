@@ -1144,8 +1144,8 @@ async fn restore_stored_session(state: &AppState, acct: &AccountRuntime, base_ur
     // must never be logged out by startup. Still inside the spawned startup
     // task: setup() is never blocked by this.
     let probe = probe_startup_session(base_url, &session.token).await;
-    // Lead ruling, F9 review I-2: on a Mac, a token the server confirmed resumes the queue below.
-    #[cfg(target_os = "macos")]
+    // Lead ruling, F9 review I-2, on every OS since spec D11 (task 1888): a token the server confirmed resumes the
+    // queue below.
     let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });
     let probed = match probe {
         StartupSessionCheck::Unauthorized => {
@@ -1199,11 +1199,10 @@ async fn restore_stored_session(state: &AppState, acct: &AccountRuntime, base_ur
                 *cached = Some(profile);
             }
         }
-        // Lead ruling, F9 review I-2: the server confirmed the stored token and the Keychain unlocked the vault, so on a
-        // Mac sync resumes as after a sign-in: the edits paused for `auth` are due before the engine's first tick (the
-        // relaunch "Quit and reopen Beebeeb" asks for). Those held as `key_replaced` stay held. Windows and Linux keep
-        // today's flow (spec R8).
-        #[cfg(target_os = "macos")]
+        // Lead ruling, F9 review I-2: the server confirmed the stored token and the Keychain unlocked the vault, so
+        // sync resumes as after a sign-in (the relaunch "Quit and reopen Beebeeb" asks for). A Mac makes the edits
+        // paused for `auth` due before the engine's first tick; Windows and Linux after the engine's reconcile pass and
+        // key check (spec D11, task 1888). Those held as `key_replaced` stay held.
         if token_confirmed {
             ask_to_resume_auth_paused(&write, acct);
         }
@@ -2093,9 +2092,7 @@ fn install_recovered_session(
         });
         drop(guard);
         set_auth_present(state, true);
-        // Ruling F9: the vault is unlocked now (after a replaced key too), so on a Mac sync resumes. Windows and Linux
-        // keep today's flow (spec R8).
-        #[cfg(target_os = "macos")]
+        // Ruling F9: the vault is unlocked now (after a replaced key too), so sync resumes; on every OS since spec D11.
         ask_to_resume_auth_paused(&write, acct);
         drop(write);
     }
@@ -2699,8 +2696,7 @@ fn install_new_session(
     drop(guard);
     set_auth_present(state, true);
     set_auth_email(state, email);
-    // Ruling F9: on a Mac, sync resumes. Windows and Linux keep today's flow (spec R8).
-    #[cfg(target_os = "macos")]
+    // Ruling F9: sync resumes; on every OS since spec D11 (task 1888).
     ask_to_resume_auth_paused(&write, acct);
     drop(write);
     Ok(NewSession::Installed)
@@ -6453,7 +6449,7 @@ fn reauth_swap_token(
     sources: &LocalSources,
     token: &str,
     profile: &account_dto::AccountProfile,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] handoff_key: Option<&[u8; 32]>,
+    handoff_key: Option<&[u8; 32]>,
     turn: &mut account::SessionGeneration,
 ) -> Result<bool, ReauthError> {
     let email = session_email(Some(profile));
@@ -6490,12 +6486,11 @@ fn reauth_swap_token(
         *cached = Some(profile.clone());
     }
     reauth_settle_flags(&write, state, acct, email.as_deref().unwrap_or_default());
-    // Ruling F9: unlocked, so on a Mac sync resumes; Linux keeps today's flow (spec R8). Without keys here the
-    // recovery-phrase unlock asks instead. F9 re-review N-1: a browser sign-in whose handed-over key replaces the kept
-    // one is decided here, before the ask, and does not ask: `reauth_in_place` holds what is queued under the kept key
-    // as `key_replaced`, and a hold that fails must not leave an open request for a later start to serve with that key.
-    // The handoff's own install (`apply_session`) asks once the new key is in memory.
-    #[cfg(target_os = "macos")]
+    // Ruling F9: unlocked, so sync resumes; on Linux too since spec D11 (task 1888; Windows does not build this).
+    // Without keys here the recovery-phrase unlock asks instead. F9 re-review N-1: a browser sign-in whose handed-over
+    // key replaces the kept one is decided here, before the ask, and does not ask: `reauth_in_place` holds what is
+    // queued under the kept key as `key_replaced`, and a hold that fails must not leave an open request for a later
+    // start to serve with that key. The handoff's own install (`apply_session`) asks once the new key is in memory.
     if vault_unlocked && !handoff_replaces_kept_key(acct, handoff_key) {
         ask_to_resume_auth_paused(&write, acct);
     }
@@ -7329,7 +7324,9 @@ fn start_engine_bound(
 ) -> Result<EngineStart, String> {
     let turn = acct.session_generation();
     // Ruling F9: the ask is read before the keys are, so it is served only by a start that holds the session of the
-    // sign-in that asked, or a later one.
+    // sign-in that asked, or a later one. A Mac's only: off macOS the engine serves it after its reconcile pass (spec
+    // D11, task 1888).
+    #[cfg(target_os = "macos")]
     let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);
     let (token, key) = match authorize_engine_start(state, acct, &*engine_slot, paths)
         .inspect_err(|error| record_engine_refusal(acct, turn, error))?
@@ -7338,6 +7335,7 @@ fn start_engine_bound(
         StartPermit::NoSession => return Ok(EngineStart::NoSession),
         StartPermit::FinderRemovalOwed => return Ok(EngineStart::FinderRemovalOwed),
     };
+    #[cfg(target_os = "macos")]
     resume_operations_paused_for_auth(acct, paths, resume_asked);
     // Task 2267 (fix round 2): a "Keep on this PC only" a crash interrupted is settled before the engine exists.
     #[cfg(target_os = "windows")]
@@ -7350,13 +7348,12 @@ fn start_engine_bound(
     Ok(EngineStart::Started)
 }
 
-/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in on a Mac that has put a session in memory asks the
-/// engine start that applies it to make the operations paused for `auth` due again, and so does the startup check that
-/// confirmed the stored token (F9 review I-2). Only inside the writer's checked turn (`_write`) and after the session is
-/// in memory, so a start that sees the ask also holds that session (see [`resume_operations_paused_for_auth`]). macOS
-/// only: Windows and Linux keep today's flow (spec R8), so nothing asks there and every start returns before it resumes
-/// anything.
-#[cfg(target_os = "macos")]
+/// Lead ruling F9 (spec 2026-10-06 R8: "sync resumes"): a sign-in that has put a session in memory asks for the
+/// operations paused for `auth` to be due again, and so does the startup check that confirmed the stored token (F9
+/// review I-2). Only inside the writer's checked turn (`_write`) and after the session is in memory. A Mac's engine
+/// start serves the ask (see [`resume_operations_paused_for_auth`]); since spec D11 (task 1888) Windows and Linux ask
+/// too, and their engine serves it after its reconcile pass and the key check
+/// ([`engine_bridge::EngineBridge::reconcile_then_resume`]).
 fn ask_to_resume_auth_paused(_write: &SessionWrite, acct: &AccountRuntime) {
     acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
 }
@@ -7408,11 +7405,13 @@ async fn stop_the_outgoing_engine_and_hold_auth_paused(
 }
 
 /// Lead ruling F9 (spec 2026-10-06 R8 and §5.6): when a sign-in asked for it (`asked`, read before this start read its
-/// keys) and no start has served that ask yet, every operation paused for `auth` becomes due now, its attempts kept.
-/// It runs under the engine slot, after the binding (so another account's operations were already reset) and before
-/// the engine exists (so its first tick sends them). Operations paused for any other reason stay paused, those held as
+/// keys) and no start has served that ask yet, every operation paused for `auth` becomes due now, its attempts kept. It
+/// runs under the engine slot, after the binding (so another account's operations were already reset) and before the
+/// engine exists (so its first tick sends them). Operations paused for any other reason stay paused, those held as
 /// `key_replaced` included (F9 review I-1). A database that cannot be written leaves the ask open, so the next engine
-/// start tries again (F9 review M3); the engine starts either way.
+/// start tries again (F9 review M3); the engine starts either way. macOS only (spec D11, task 1888): off macOS the
+/// engine resumes them after its reconcile pass.
+#[cfg(target_os = "macos")]
 fn resume_operations_paused_for_auth(acct: &AccountRuntime, paths: &LocalDataPaths, asked: u64) {
     if asked <= acct.auth_resume_done.load(Ordering::SeqCst) {
         return;
@@ -7487,6 +7486,10 @@ fn spawn_bound_engine(
             key,
             acct.sync_paused.clone(),
             acct.auth_health.clone(),
+            runner::ResumeTicket {
+                asked: acct.auth_resume_asked.clone(),
+                done: acct.auth_resume_done.clone(),
+            },
         )
     });
     // W12: the R10 reset's kept folder is surfaced as the app-start sweep surfaces macOS's: the row, then one alert.
@@ -7828,8 +7831,22 @@ async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<Strin
     })
     .await
     .map_err(|e| format!("upload task failed: {e}"))??;
+    ask_for_a_pass_after_a_release(&state, released);
     tracing::info!(released, "found while paused: released to upload");
     Ok(FoundWhilePausedReleased { released })
+}
+
+/// Task 1888 (Task 1's ruling on 2267's held changes): a released change may be a ghost folder's create the reconcile
+/// pass left to the person; sent before a pass sees it, it would make a folder the server already has a second time.
+/// So a release asks for a pass: the engine's next successful tick runs it, with the key check and the resume behind
+/// it (spec D11), before its queue step.
+#[cfg(target_os = "windows")]
+fn ask_for_a_pass_after_a_release(state: &AppState, released: usize) {
+    if released > 0
+        && let Ok(acct) = state.active_account()
+    {
+        acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Task 2267 (fix round 2), Settings › Sync, "Keep on this PC only" (lead ruling (a)): every item made on this PC that
@@ -29687,14 +29704,15 @@ mod reauth_tests {
         assert!(in_place.contains("-> Result<bool, ReauthError>"), "{in_place}");
     }
 
-    /// Lead ruling F9: the operations paused for `auth` are resumed in the one engine start and nowhere else. The start
-    /// reads the ask before it reads the keys (so an ask is served only by a start that holds the session of the sign-in
-    /// that asked, or a later one), and resumes after the binding and before the engine exists. Exactly four writers
-    /// ask, in their turn and after their session is in memory: the re-sign-in in place (only when unlocked), the
-    /// browser handoff's install, the recovery-phrase unlock and (F9 review I-2) the startup restore whose probe
-    /// confirmed the stored token. The key-replaced re-sign-in and the Keychain unlock after a Lock never ask. After a
-    /// key replacement (F9 review I-1, M2) the `auth` pauses are held as `key_replaced`, under the engine slot, before
-    /// the kept key is removed or the slot is released. Compared with `squeeze`.
+    /// Lead ruling F9: on a Mac the operations paused for `auth` are resumed in the one engine start and nowhere else
+    /// in this file (spec D11, task 1888: off macOS the engine resumes them after its reconcile pass). The start reads
+    /// the ask before it reads the keys (so an ask is served only by a start that holds the session of the sign-in that
+    /// asked, or a later one), and resumes after the binding and before the engine exists. Exactly four writers ask, in
+    /// their turn and after their session is in memory: the re-sign-in in place (only when unlocked), the browser
+    /// handoff's install, the recovery-phrase unlock and (F9 review I-2) the startup restore whose probe confirmed the
+    /// stored token. The key-replaced re-sign-in and the Keychain unlock after a Lock never ask. After a key
+    /// replacement (F9 review I-1, M2) the `auth` pauses are held as `key_replaced`, under the engine slot, before the
+    /// kept key is removed or the slot is released. Compared with `squeeze`.
     #[test]
     fn the_queue_resumes_in_the_one_engine_start_after_a_sign_in_put_its_session_in_memory() {
         use crate::source_pin::squeeze;
@@ -29852,28 +29870,11 @@ mod reauth_tests {
             "the ask is made only inside a checked turn:\n{writer}"
         );
 
-        // Ruling F9, round 2: only a Mac asks; Windows and Linux keep today's flow (spec R8). Each ask is gated where it
-        // is made, the function too, so what the other platforms compile names it nowhere: nothing is asked there, and
-        // every start returns before it resumes anything.
+        // Ruling F9, round 2, as spec D11 (task 1888) amends it: every OS asks (see
+        // `windows_and_linux_ask_for_the_resume_at_the_four_sign_in_points`); the holds under the engine slot stay a
+        // Mac's (off macOS the engine's key check holds them, spec D12), and so does the resume in the engine start.
         let macos_only = squeeze("#[cfg(target_os = \"macos\")]");
         for (signature, gated) in [
-            ("fn install_new_session(", format!("{macos_only}{ask}")),
-            ("fn install_recovered_session(", format!("{macos_only}{ask}")),
-            ("fn reauth_swap_token(", format!("{macos_only}{asks_when_unlocked}")),
-            (
-                "async fn restore_stored_session(",
-                format!(
-                    "{macos_only}{}",
-                    squeeze("if token_confirmed { ask_to_resume_auth_paused(&write, acct); }")
-                ),
-            ),
-            (
-                "async fn restore_stored_session(",
-                format!(
-                    "{macos_only}{}",
-                    squeeze("let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });")
-                ),
-            ),
             (
                 "fn reauth_swap_token_without_key(",
                 format!(
@@ -29903,8 +29904,8 @@ mod reauth_tests {
                 "{signature} asks or holds on macOS only:\n{body}"
             );
         }
-        // What Windows and Linux compile names none of it: no ask, no hold, no slot taken around the swap, no startup
-        // check that resumes. Every start there returns before it resumes anything (spec R8: today's flow).
+        // What Windows and Linux compile names no hold under the slot and no resume in the engine start: the engine
+        // resumes there, after its reconcile pass and the key check (spec D11, D12).
         let other_platforms =
             super::finder_setup_command_tests::without_items(&production, &["#[cfg(target_os = \"macos\")]"]);
         let named = other_platforms
@@ -29912,10 +29913,10 @@ mod reauth_tests {
             .filter(|line| {
                 !line.trim_start().starts_with("//")
                     && [
-                        "ask_to_resume_auth_paused",
                         "hold_auth_paused_for_the_replaced_key",
                         "stop_the_outgoing_engine_and_hold_auth_paused",
-                        "token_confirmed",
+                        "resume_operations_paused_for_auth",
+                        "let resume_asked",
                     ]
                     .iter()
                     .any(|name| line.contains(name))
@@ -29934,6 +29935,152 @@ mod reauth_tests {
                 .count(),
             2,
             "and both holds"
+        );
+    }
+
+    /// Spec D11 (task 1888; the lead lifted the F9/R8 macOS-only ruling): every sign-in point that asks for the resume
+    /// asks on every OS that has it. No `#[cfg(target_os = "macos")]` stands in the four lines above any of the four
+    /// asks, nor above the writer or the startup check's `token_confirmed`. `reauth_swap_token` keeps its own
+    /// `not(windows)` gate (builder check Q2), so Windows has three asks and Linux four.
+    #[test]
+    fn windows_and_linux_ask_for_the_resume_at_the_four_sign_in_points() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let lines: Vec<&str> = production.lines().collect();
+        let macos_only = "#[cfg(target_os = \"macos\")]";
+        let asks: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.contains("ask_to_resume_auth_paused(")
+                    && !line.contains("fn ask_to_resume_auth_paused(")
+                    && !line.trim_start().starts_with("//")
+            })
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(asks.len(), 4, "four sign-in points ask");
+        for at in asks {
+            let above = lines[at.saturating_sub(4)..at].join("\n");
+            assert!(!above.contains(macos_only), "an ask gated to macOS:\n{above}\n{}", lines[at]);
+        }
+        for item in [
+            "fn ask_to_resume_auth_paused(",
+            "let token_confirmed = matches!(probe, StartupSessionCheck::Authorized { .. });",
+        ] {
+            let at = lines.iter().position(|line| line.contains(item)).unwrap_or_else(|| panic!("{item}"));
+            let above = lines[at.saturating_sub(4)..at].join("\n");
+            assert!(!above.contains(macos_only), "{item} gated to macOS:\n{above}");
+        }
+        let swap = lines
+            .iter()
+            .position(|line| line.starts_with("fn reauth_swap_token("))
+            .expect("fn reauth_swap_token(");
+        assert_eq!(lines[swap - 1], "#[cfg(not(target_os = \"windows\"))]", "its own gate is kept");
+        let ask = squeeze("ask_to_resume_auth_paused(&write, acct);");
+        let linux = squeeze(&super::finder_setup_command_tests::without_items(
+            &production,
+            &[macos_only, "#[cfg(target_os = \"windows\")]"],
+        ));
+        assert_eq!(linux.matches(&ask).count(), 4, "Linux compiles all four asks");
+        let windows = squeeze(&super::finder_setup_command_tests::without_items(
+            &production,
+            &[macos_only, "#[cfg(not(target_os = \"windows\"))]", "#[cfg(target_os = \"linux\")]"],
+        ));
+        assert_eq!(windows.matches(&ask).count(), 3, "Windows compiles three: no reauth_swap_token");
+    }
+
+    /// Spec D11: a Mac resumes in the engine start, before the engine exists; Windows and Linux do not resume there
+    /// (the engine does, after its pass). The start reads the ask, and resumes, on macOS only.
+    #[test]
+    fn start_engine_bound_resumes_before_the_spawn_on_macos_only() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let macos_only = squeeze("#[cfg(target_os = \"macos\")]");
+        let bound = squeeze(&code_of(&production, "fn start_engine_bound("));
+        for gated in [
+            "let resume_asked = acct.auth_resume_asked.load(Ordering::SeqCst);",
+            "resume_operations_paused_for_auth(acct, paths, resume_asked);",
+        ] {
+            assert!(bound.contains(&format!("{macos_only}{}", squeeze(gated))), "{gated} on macOS only:\n{bound}");
+        }
+        let resumed = bound.find("resume_operations_paused_for_auth(acct,paths,resume_asked);").unwrap();
+        assert!(resumed < bound.find("spawn(paths.sync_root.clone()").unwrap(), "before the spawn:\n{bound}");
+        let other_platforms =
+            super::finder_setup_command_tests::without_items(&production, &["#[cfg(target_os = \"macos\")]"]);
+        let other_bound = code_of(&other_platforms, "fn start_engine_bound(");
+        assert!(
+            !other_bound.contains("resume_operations_paused_for_auth") && !other_bound.contains("resume_asked"),
+            "Windows and Linux do not resume in the start:\n{other_bound}"
+        );
+        assert!(
+            !other_platforms.contains("fn resume_operations_paused_for_auth("),
+            "the start's resume is a Mac's"
+        );
+        // The engine gets the account's resume requests on every OS.
+        let spawn = squeeze(&code_of(&production, "fn spawn_bound_engine("));
+        assert!(
+            spawn.contains(&squeeze(
+                "runner::ResumeTicket { asked: acct.auth_resume_asked.clone(), done: acct.auth_resume_done.clone(), }"
+            )),
+            "{spawn}"
+        );
+    }
+
+    /// Spec D11 and I6: off macOS the engine runs the reconcile pass, then the key check and the resume, inside the
+    /// successful tick's arm (the pull proved the server accepts this session's token) and before that tick's queue
+    /// step. D11b: the send phase's wake runs no queue step until this run's first pass has committed.
+    #[test]
+    fn the_engine_reconciles_then_resumes_in_the_successful_tick_before_its_queue_step() {
+        use crate::source_pin::squeeze;
+        let runner = include_str!("runner.rs").replace("\r\n", "\n");
+        let runner = &runner[..runner.find("#[cfg(test)]\nmod tests").expect("runner's tests")];
+        let tick = &runner[runner.find("Ok(tick) => {").expect("the successful tick's arm")..];
+        let tick = squeeze(&tick[..tick.find("Err(e) => {").unwrap()]);
+        let pass = tick
+            .find(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 if let Err(error) = bridge.reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run).await {",
+            ))
+            .unwrap_or_else(|| panic!("the pass, off macOS, in the arm:\n{tick}"));
+        assert!(tick.find("auth_health.note_result(None);").unwrap() < pass, "after the pull succeeded");
+        assert!(pass < tick.find("queue_step(").unwrap(), "before the tick's queue step:\n{tick}");
+        assert_eq!(squeeze(runner).matches("reconcile_then_resume(").count(), 1, "one call");
+        assert!(
+            squeeze(runner).contains(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 let mut reconciled_this_run = false;"
+            )),
+            "per engine run"
+        );
+        // D11b.
+        let phase = &runner[runner.find("Wake::Phase => {").expect("the phase's arm")..];
+        let phase = squeeze(&phase[..phase.find("\n            }\n").unwrap()]);
+        let waits = phase
+            .find(&squeeze(
+                "#[cfg(not(target_os = \"macos\"))]
+                 if !reconciled_this_run { continue; }",
+            ))
+            .unwrap_or_else(|| panic!("the phase waits for the first pass:\n{phase}"));
+        assert!(waits < phase.find("queue_step(").unwrap(), "{phase}");
+    }
+
+    /// Task 1 ruling (1888 ledger, on 2267's held changes): "Upload to my Beebeeb" makes a held ghost folder's create
+    /// due again, so it asks for a pass after the release: the engine's next successful tick reconciles before it
+    /// sends.
+    #[test]
+    fn a_released_held_change_asks_for_a_pass() {
+        use crate::source_pin::squeeze;
+        let production = production_source();
+        let upload = squeeze(&code_of(&production, "async fn found_while_paused_upload("));
+        let released = upload.find("db.release_found_while_paused(").expect("the release");
+        let asked = upload
+            .find(&squeeze("ask_for_a_pass_after_a_release(&state, released);"))
+            .unwrap_or_else(|| panic!("asks for a pass:\n{upload}"));
+        assert!(released < asked, "after the release:\n{upload}");
+        let ask = squeeze(&code_of(&production, "fn ask_for_a_pass_after_a_release("));
+        assert!(
+            ask.contains(&squeeze("if released > 0")) && ask.contains(&squeeze("acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);")),
+            "{ask}"
         );
     }
 
