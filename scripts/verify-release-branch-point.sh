@@ -8,7 +8,9 @@
 #       (`gh api repos/{repo}/commits/{sha}/pulls`: merged_at set, base.ref this branch,
 #       merge_commit_sha this commit); and
 #   (b) that starting point -- the first first-parent commit that is not such a merge -- is the
-#       commit of a published `desktop-v*` tag, or a commit on main.
+#       commit of a `desktop-v*` tag with a PUBLISHED GitHub release, or a commit on main.
+#       A tag alone is not trusted: pushing a tag is not reviewed, so only a release created
+#       through the release workflow counts. A 404 / draft / failed lookup is not published.
 #
 # main is protected by pull requests, so a dispatch from main skips this check: release.yml's
 # `verify-branch-point` job only runs for refs/heads/release/*.
@@ -64,9 +66,21 @@ is_pr_merge() {
   [[ "$count" -gt 0 ]]
 }
 
-# Prints the desktop-v* tag ref that points at <commit>, or nothing when none does.
+# Reads the GitHub release for tag <tag> into RELEASE_STATUS and RELEASE_BODY.
+# `--include` makes `gh api` print the status line, which is how a 404 (no release) is told
+# apart from a real API failure. Never exits the script.
+release_lookup() {
+  local tag="$1" response
+  response="$(gh api "repos/$REPO/releases/tags/$tag" --include 2>&1)" || true
+  RELEASE_STATUS="$(printf '%s\n' "$response" | sed -n 's|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*|\1|p' | tail -1)"
+  RELEASE_BODY="$(printf '%s\n' "$response" | sed '1,/^[[:space:]]*$/d')"
+}
+
+# Prints "<ref>\t<published_at>\t<html_url>" for the desktop-v* tag that points at <commit> and
+# has a published GitHub release (draft == false), or nothing when no such tag does.
+# A tag with no release (404) or a draft does not count; any other lookup failure fails closed.
 tag_at_commit() {
-  local commit="$1" refs listing ref type sha
+  local commit="$1" refs listing ref type sha tag draft published_at url
   if ! refs="$(gh api "repos/$REPO/git/matching-refs/tags/desktop-v" --paginate)"; then
     fail "gh api repos/$REPO/git/matching-refs/tags/desktop-v failed"
   fi
@@ -82,10 +96,32 @@ tag_at_commit() {
         fail "could not resolve the tag object for $ref"
       fi
     fi
-    if [[ "$sha" == "$commit" ]]; then
-      printf '%s\n' "$ref"
-      return 0
-    fi
+    [[ "$sha" == "$commit" ]] || continue
+    tag="${ref#refs/tags/}"
+    release_lookup "$tag"
+    case "$RELEASE_STATUS" in
+      200)
+        if ! draft="$(printf '%s\n' "$RELEASE_BODY" | jq -r 'if .draft == true then "true" else "false" end')"; then
+          fail "could not read the GitHub release for tag $tag"
+        fi
+        if [[ "$draft" != "true" ]]; then
+          # `published_at`/`html_url` are printed in the success note; require them.
+          if ! published_at="$(printf '%s\n' "$RELEASE_BODY" | jq -r '.published_at // empty')" ||
+            ! url="$(printf '%s\n' "$RELEASE_BODY" | jq -r '.html_url // empty')"; then
+            fail "could not read the GitHub release for tag $tag"
+          fi
+          printf '%s\t%s\t%s\n' "$ref" "$published_at" "$url"
+          return 0
+        fi
+        printf 'verify-release-branch-point: tag %s at %s has a draft GitHub release, which is not published; the tag does not count\n' "$tag" "$commit" >&2
+        ;;
+      404)
+        printf 'verify-release-branch-point: tag %s at %s has no GitHub release; the tag does not count\n' "$tag" "$commit" >&2
+        ;;
+      *)
+        fail "gh api repos/$REPO/releases/tags/$tag failed (HTTP ${RELEASE_STATUS:-no response}); refusing to guess whether $tag is a published release"
+        ;;
+    esac
   done <<<"$listing"
   return 1
 }
@@ -109,10 +145,19 @@ done < <(git rev-list --first-parent --parents "$HEAD_SHA")
 [[ -n "$start" ]] || fail "could not walk the first-parent history of $HEAD_SHA"
 
 subject="$(git log -1 --format=%s "$start")"
-tag_ref="$(tag_at_commit "$start" || true)"
+tag_line="$(tag_at_commit "$start" || true)"
+tag_ref=""
+tag_published_at=""
+tag_url=""
+if [[ -n "$tag_line" ]]; then
+  tag_ref="${tag_line%%$'\t'*}"
+  tag_rest="${tag_line#*$'\t'}"
+  tag_published_at="${tag_rest%%$'\t'*}"
+  tag_url="${tag_rest#*$'\t'}"
+fi
 
 if [[ -n "$tag_ref" ]]; then
-  note "OK: $BRANCH starts at $start, the commit of tag ${tag_ref#refs/tags/}; $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
+  note "OK: $BRANCH starts at $start, the commit of tag ${tag_ref#refs/tags/} (GitHub release published $tag_published_at: $tag_url); $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
   exit 0
 fi
 

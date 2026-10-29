@@ -7,13 +7,17 @@
 # It builds a real local git repository and puts a fake `gh`
 # (scripts/fixtures/release-branch-point-fake-gh.sh) on PATH, so no network and no GitHub are
 # involved. Scenarios:
-#   1. cut from a tag, PR merges only            -> passes, names the tag;
+#   1. cut from a tag with a published release, PR merges only -> passes, names the tag, the
+#      release's published_at and URL;
 #   2. cut from a main commit, PR merges only    -> passes, names main;
 #   3. starting point on neither tag nor main    -> fails, names that commit;
 #   4. a direct, non-PR commit after the start   -> fails, names that commit;
 #   5. a PR merge whose base was another branch  -> fails, names that merge commit;
 #   6. a non-release ref                         -> fails (defense in depth; release.yml only
-#      calls this for refs/heads/release/*).
+#      calls this for refs/heads/release/*);
+#   7. a tag with no GitHub release              -> fails: a tag alone is not trusted;
+#   8. a tag whose release is a draft            -> fails: a draft is not published;
+#   9. the release lookup fails                  -> fails closed (never accepts).
 #
 # The truth line is a COUNT ("release-branch-point: N passed, 0 failed"). CI asserts it against
 # EXPECTED_CHECKS with `--assert-log` on the run's own log, and `--self-test` proves that same
@@ -27,7 +31,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=22
+EXPECTED_CHECKS=34
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -148,6 +152,14 @@ git -C "$REPO_DIR" switch -q -c legacy "$M0"
 TAGGED="$(commit "legacy: the commit desktop-v0.8.18 points at")"
 git -C "$REPO_DIR" tag -a desktop-v0.8.18 -m "desktop-v0.8.18" "$TAGGED"
 TAG_OBJECT="$(git -C "$REPO_DIR" rev-parse desktop-v0.8.18)"
+# Three more tagged commits, all off the TAGGED history, never on main: their tags must not
+# count because GitHub has no published release for them.
+NOREL="$(commit "legacy: tagged desktop-v0.8.17 with no GitHub release")"
+git -C "$REPO_DIR" tag desktop-v0.8.17 "$NOREL"
+DRAFT="$(commit "legacy: tagged desktop-v0.8.16, release is a draft")"
+git -C "$REPO_DIR" tag desktop-v0.8.16 "$DRAFT"
+APIERR="$(commit "legacy: tagged desktop-v0.8.15, the release lookup fails")"
+git -C "$REPO_DIR" tag desktop-v0.8.15 "$APIERR"
 git -C "$REPO_DIR" switch -q main
 M1="$(commit "main: after the legacy branch")"
 git -C "$REPO_DIR" update-ref "$MAIN_REF" "$M1"
@@ -183,6 +195,11 @@ commit "feat: four reviewed changes" >/dev/null
 git -C "$REPO_DIR" switch -q release/0.8.23
 MERGE4="$(merge feat/4 "Merge pull request #104 from feat/4")"
 
+# Scenario 7-9: release branches cut exactly at a tagged commit whose tag does not count.
+git -C "$REPO_DIR" switch -q -c release/0.8.26 "$NOREL"
+git -C "$REPO_DIR" switch -q -c release/0.8.27 "$DRAFT"
+git -C "$REPO_DIR" switch -q -c release/0.8.28 "$APIERR"
+
 # Scenario 5: a merge commit whose pull request was merged into ANOTHER branch.
 git -C "$REPO_DIR" switch -q -c release/0.8.24 "$M1"
 git -C "$REPO_DIR" switch -q -c feat/5 "$M1"
@@ -191,7 +208,17 @@ git -C "$REPO_DIR" switch -q release/0.8.24
 MERGE5="$(merge feat/5 "Merge pull request #105 from feat/5 (into release/0.8.25)")"
 
 # ---------------------------------------------------------------- fake GitHub data
-printf '[{"ref":"refs/tags/desktop-v0.8.18","object":{"type":"tag","sha":"%s"}}]\n' "$TAG_OBJECT" >"$FIX/tags.json"
+printf '[{"ref":"refs/tags/desktop-v0.8.18","object":{"type":"tag","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.17","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.16","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.15","object":{"type":"commit","sha":"%s"}}]\n' \
+  "$TAG_OBJECT" "$NOREL" "$DRAFT" "$APIERR" >"$FIX/tags.json"
+
+mkdir -p "$FIX/releases" "$FIX/release-errors"
+release_json() { # <tag> <published_at> <html_url> <draft> <prerelease>
+  printf '{"tag_name":"%s","draft":%s,"prerelease":%s,"published_at":"%s","html_url":"%s"}\n' \
+    "$1" "$4" "$5" "$2" "$3" >"$FIX/releases/$1.json"
+}
+release_json desktop-v0.8.18 2026-10-28T09:15:00Z https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.18 false false
+release_json desktop-v0.8.16 2026-10-27T09:00:00Z https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.16 true false
+printf 'HTTP 500\n' >"$FIX/release-errors/desktop-v0.8.15"
 printf '{"sha":"%s","object":{"type":"commit","sha":"%s"}}\n' "$TAG_OBJECT" "$TAGGED" >"$FIX/tag-objects/$TAG_OBJECT.json"
 pr_json() { # <merge sha> <number> <base ref>
   printf '[{"number":%s,"merged_at":"2026-10-29T10:00:00Z","merge_commit_sha":"%s","base":{"ref":"%s"},"head":{"ref":"feat"}}]\n' \
@@ -236,6 +263,9 @@ check "tag start: counts the PR merge it walked" grep -q '1 first-parent commit'
 check "tag start: asked GitHub for the pulls of the walked commit" grep -q "api repos/$FAKE_REPO/commits/$MERGE1/pulls" "$GH_LOG"
 check "tag start: asked GitHub for the desktop-v tags" grep -q "api repos/$FAKE_REPO/git/matching-refs/tags/desktop-v" "$GH_LOG"
 check "tag start: resolved the annotated tag object to its commit" grep -q "api repos/$FAKE_REPO/git/tags/$TAG_OBJECT" "$GH_LOG"
+check "tag start: asked GitHub for the release of the tag" grep -q "api repos/$FAKE_REPO/releases/tags/desktop-v0.8.18" "$GH_LOG"
+check "tag start: prints the release's published_at" grep -q '2026-10-28T09:15:00Z' "$OUT"
+check "tag start: prints the release's URL" grep -q 'https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.8.18' "$OUT"
 
 # --- 2. cut from a main commit, PR merges only
 FX="main-start"
@@ -265,6 +295,27 @@ run_case refs/heads/release/0.8.24 "$MERGE5"
 check "other base: fails" test "$CODE" -ne 0
 check "other base: names the merge commit" grep -q "$MERGE5" "$OUT"
 check "other base: says the pull request was not merged into this branch" grep -q "release/0.8.24" "$OUT"
+
+# --- 7. a tag with no GitHub release does not count
+FX="tag-without-release"
+run_case refs/heads/release/0.8.26 "$NOREL"
+check "tag without release: fails" test "$CODE" -ne 0
+check "tag without release: names the offending commit" grep -q "$NOREL" "$OUT"
+check "tag without release: says the tag has no GitHub release" grep -q 'no GitHub release' "$OUT"
+
+# --- 8. a draft release is not published
+FX="draft-release"
+run_case refs/heads/release/0.8.27 "$DRAFT"
+check "draft release: fails" test "$CODE" -ne 0
+check "draft release: names the offending commit" grep -q "$DRAFT" "$OUT"
+check "draft release: says the release is a draft" grep -q 'draft' "$OUT"
+
+# --- 9. a failing release lookup fails closed
+FX="release-api-error"
+run_case refs/heads/release/0.8.28 "$APIERR"
+check "release lookup error: fails" test "$CODE" -ne 0
+check "release lookup error: names the tag and the HTTP status" grep -q 'desktop-v0.8.15.*500\|500.*desktop-v0.8.15' "$OUT"
+check "release lookup error: says it refuses to guess" grep -q 'refusing to guess' "$OUT"
 
 # --- 6. a non-release ref is refused (release.yml only calls this for release/*)
 FX="non-release-ref"

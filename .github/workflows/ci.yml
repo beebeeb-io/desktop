@@ -336,8 +336,9 @@ jobs:
     # was never reviewed (task 2281): the branch must start at a published desktop-v* tag commit
     # or a commit on main, and every first-parent commit since then must be a pull request merged
     # into that branch. This job tests the script offline against a real local git repository with
-    # a fake `gh`: a tag start, a main start, an unreviewed start, a direct (non-PR) commit, a PR
-    # merged into another branch, and a non-release ref. The truth line is a count
+    # a fake `gh`: a tag with a published release, a main start, an unreviewed start, a direct
+    # (non-PR) commit, a PR merged into another branch, a non-release ref, a tag with no release,
+    # a draft release, and a failing release lookup. The truth line is a count
     # ("release-branch-point: N passed, 0 failed"), asserted on the run's own log by the same
     # count guard its self-test proves can go red.
     name: Release branch point (fake gh test)
