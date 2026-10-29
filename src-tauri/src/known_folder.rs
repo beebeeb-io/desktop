@@ -165,7 +165,13 @@ pub fn backup_source_key_for_rel_path(rel_path: &str, expected_device: &str) -> 
 /// segment. Use this at op-enqueue and purge-decision sites; the explicit-device
 /// form stays pure for unit tests.
 pub fn backup_source_key_for_this_device(rel_path: &str) -> Option<String> {
-    backup_source_key_for_device(rel_path, crate::runner::device_name().as_deref())
+    // macOS keeps its fallback name (spec §2: no macOS change). It has no backup mirror, and the tag only drives the
+    // purge when a backup is turned off.
+    #[cfg(target_os = "macos")]
+    let device = Some(crate::runner::hostname_or_unknown());
+    #[cfg(not(target_os = "macos"))]
+    let device = crate::runner::device_name();
+    backup_source_key_for_device(rel_path, device.as_deref())
 }
 
 /// Spec D9 (tasks 1888, 2226): `None` when this PC's name cannot be read. The mirror makes no backup folder then, so
