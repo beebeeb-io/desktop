@@ -97,7 +97,7 @@ jobs:
 
       - name: Upload Rust test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-test-linux
           path: |
@@ -173,7 +173,7 @@ jobs:
 
       - name: Upload Rust evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-${{ matrix.name }}
           path: |
@@ -236,7 +236,7 @@ jobs:
 
       - name: Upload File Provider Swift evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fileprovider-swift
           path: |
@@ -280,7 +280,7 @@ jobs:
 
       - name: Upload release script test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-script-test
           path: ${{ runner.temp }}/release-script-test.log
@@ -326,7 +326,7 @@ jobs:
 
       - name: Upload manifest step test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-manifest-test
           path: ${{ runner.temp }}/release-manifest-test.log
@@ -374,7 +374,7 @@ jobs:
 
       - name: Upload branch point test evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-branch-point-test
           path: ${{ runner.temp }}/release-branch-point-test.log
