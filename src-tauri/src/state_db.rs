@@ -1174,12 +1174,16 @@ const REMAP_OPS_SQL: &str = "UPDATE operation_queue SET parent_id = ?2, updated_
 const GHOST_REFERENCES_SQL: &str = "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
       + (SELECT COUNT(*) FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1)";
 
-/// Spec D8: due again now with a fresh retry budget. Never touches `created_at` or `rowid` (the queue's order), nor
-/// `paused_reason` (D8 amendment: a change held for the person stays held).
+/// Spec D8: a fresh retry budget, due from now. Never touches `created_at` or `rowid` (the queue's order). A change
+/// held for the person keeps its pause (D8 amendment). Any other goes under `auth` (Goal 2, I6; cross-lane review
+/// P2-2): its name was sealed under the key in force when it was queued, so the key check that follows every pass
+/// (D11, D12) resumes it under this session's key or holds it as `key_replaced`, as every other `auth` change.
 fn rearm_operation_conn(conn: &Connection, op_id: &str, now: i64) -> Result<()> {
     conn.execute(
-        "UPDATE operation_queue SET attempts = 0, next_retry_at = ?2, last_error = NULL, updated_at = ?2 WHERE op_id = ?1",
-        params![op_id, now],
+        "UPDATE operation_queue
+         SET attempts = 0, next_retry_at = ?2, last_error = NULL, updated_at = ?2, paused_reason = COALESCE(paused_reason, ?3)
+         WHERE op_id = ?1",
+        params![op_id, now, OperationPauseReason::Auth.as_str()],
     )?;
     Ok(())
 }
@@ -15850,7 +15854,25 @@ mod reconcile_tests {
         assert_eq!(pc.references("g1"), 0);
         assert!(!pc.has_op("op-g1"));
         assert_eq!(pc.parent_of_row("f1").as_deref(), Some("t1"));
-        assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, None));
+        // Re-armed into the key check (cross-lane review P2-2), which resumes it under this session's key.
+        assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, Some("auth".to_string())));
+        assert_eq!(pc.db.resume_operations_paused_for_auth(NOW).unwrap(), 1);
+        assert_eq!(pc.due(), vec!["op-f1".to_string()]);
+    }
+
+    /// Goal 2, cross-lane review P2-2: a change D8 gives its retries back to was queued with its name sealed under the
+    /// key in force then, like every `auth` change. The pass puts it under `auth`, so the key check that follows the
+    /// pass decides it too: under a replaced key it is held as `key_replaced`, never sent.
+    #[test]
+    fn a_change_the_pass_rearms_goes_through_the_key_check() {
+        let pc = Pc::new();
+        pc.ghost_with_twin(1, "Photos");
+        let counts = pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        assert_eq!(counts, Counts { remapped: 1, rearmed: 1, ..Counts::default() });
+        assert!(pc.due().is_empty(), "re-armed into the key check, never straight to due: {:?}", pc.due());
+        assert_eq!(pc.db.hold_operations_paused_for_auth_as_key_replaced(NOW).unwrap(), 1);
+        assert_eq!(pc.op("op-f1"), (Some("t1".to_string()), 0, NOW, None, Some("key_replaced".to_string())));
+        assert!(pc.due().is_empty());
     }
 
     /// I3: the dry run's counts are the run's, and the dry run writes nothing.
@@ -15959,6 +15981,9 @@ mod reconcile_tests {
         pc.ghost_with_twin(1, "Photos");
         pc.upload("op-newer", "f1", Some("g1"), 500);
         pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
+        // Under `auth` until the key check (cross-lane review P2-2), it already holds its place: the newer one waits.
+        assert!(matches!(pc.db.claim_operation("op-newer", NOW).unwrap(), ClaimOutcome::Wait));
+        assert_eq!(pc.db.resume_operations_paused_for_auth(NOW).unwrap(), 1);
         assert_eq!(pc.due(), vec!["op-f1".to_string(), "op-newer".to_string()]);
         assert!(matches!(pc.db.claim_operation("op-newer", NOW).unwrap(), ClaimOutcome::Wait));
         let ClaimOutcome::Claimed(older) = pc.db.claim_operation("op-f1", NOW).unwrap() else {
