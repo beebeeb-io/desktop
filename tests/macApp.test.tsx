@@ -1035,7 +1035,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
   })
 
   test('locked: one card with the popover\'s sentence and Unlock vault, nothing else', async () => {
-    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => null })
+    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { vault_unlock_route: () => 'keychain', unlock_vault: () => null })
     await settleHome(m)
     const text = homeText(m)
     expect(text).toContain('Your vault is locked')
@@ -1051,7 +1051,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
   // (not "unlock vault key from Keychain: secret not found"), and the card offers the one thing that helps.
   test('locked with no key on this Mac: no toast, the approved sentence, and “Use your recovery phrase” opens Set up this Mac (P2-3)', async () => {
     const noKey = 'This Mac does not have your encryption keys yet. Restore them to continue.'
-    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw noKey } })
+    const { m, refreshed } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { vault_unlock_route: () => 'keychain', unlock_vault: () => { throw noKey } })
     await settleHome(m)
     expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
     await homeButton(m, 'Unlock vault').props.onClick()
@@ -1067,12 +1067,82 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
   })
 
   test('any other unlock failure is still the toast, with no recovery offer (P2-3)', async () => {
-    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { unlock_vault: () => { throw new Error('Keychain is locked') } })
+    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { vault_unlock_route: () => 'keychain', unlock_vault: () => { throw new Error('Keychain is locked') } })
     await settleHome(m)
     await homeButton(m, 'Unlock vault').props.onClick()
     await settleHome(m)
     expect(m.toasts.map((t) => t.title)).toEqual(['Couldn’t unlock the vault'])
     expect(hasHomeButton(m, 'Use your recovery phrase')).toBe(false)
+  })
+
+  // Task 1747 Part 2 (items 11 and 12): "Unlock vault" asks the Keychain's route AT THE CLICK. A key that appeared or vanished since
+  // the window opened is honoured; a Mac with no key is taken to Set up this Mac instead of to a Keychain error.
+  describe('Unlock vault follows the Keychain route (1747 Part 2)', () => {
+    const lockedHome = (route: () => unknown, extra: Record<string, (args: any) => unknown> = {}) =>
+      openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { vault_unlock_route: route, unlock_vault: () => null, ...extra })
+
+    test('route keychain: unlock_vault runs in place and no step is set', async () => {
+      const { m, refreshed } = lockedHome(() => 'keychain')
+      await settleHome(m)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(m.calls.filter((c) => c.name === 'vault_unlock_route')).toHaveLength(1)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      expect(m.calls.filter((c) => c.name === 'set_pending_setup')).toEqual([])
+      expect(signInStore.getSignInFlow()).toEqual(signInModel.IDLE_FLOW)
+      expect(refreshed()).toBe(1)
+    })
+
+    test('route recovery_phrase: Set up this Mac opens (and Rust is told), and unlock_vault is not invoked', async () => {
+      const { m } = lockedHome(() => 'recovery_phrase')
+      await settleHome(m)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toEqual([])
+      expect(signInStore.getSignInFlow()).toEqual({ ...signInModel.IDLE_FLOW, step: 'unlock' })
+      expect(m.calls.filter((c) => c.name === 'set_pending_setup').map((c) => c.args)).toEqual([{ keyReplaced: false }])
+      expect(m.toasts).toEqual([])
+    })
+
+    // Item 12: the card was drawn before the key vanished (or appeared); the click honours the Keychain as it is now.
+    test('the click re-reads the route every time: a key that vanished since the window opened, and one that appeared', async () => {
+      const answers = ['keychain', 'recovery_phrase', 'keychain']
+      let read = 0
+      const { m } = lockedHome(() => answers[read++])
+      await settleHome(m)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(signInStore.getSignInFlow().step).toBe('unlock')
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      signInStore.resetSignInFlow()
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(2)
+      expect(m.calls.filter((c) => c.name === 'vault_unlock_route')).toHaveLength(3)
+    })
+
+    test('a build without the command unlocks as before (the Keychain unlock, the route being unknowable)', async () => {
+      const { m } = lockedHome(() => { throw new Error('unknown command vault_unlock_route') })
+      await settleHome(m)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      expect(m.toasts).toEqual([])
+    })
+
+    test('a route read that fails for another reason fails the click with its reason: one toast, no unlock', async () => {
+      const { m, refreshed } = lockedHome(() => { throw new Error('the Keychain service did not answer') })
+      await settleHome(m)
+      await homeButton(m, 'Unlock vault').props.onClick()
+      await settleHome(m)
+      // An error that is not "the command is missing" is the unlock failing, in the unlock's own words and surface.
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toEqual([])
+      expect(m.toasts.map((t) => [t.title, t.message])).toEqual([['Couldn’t unlock the vault', 'the Keychain service did not answer']])
+      expect(refreshed()).toBe(1)
+    })
   })
 
   test('a Finder failure is one inline notice under the row, never a toast (one failure, one surface)', async () => {

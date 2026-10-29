@@ -199,6 +199,11 @@ export function heldSentence(group: HeldGroup, now: Date = new Date()): string {
       return `${changes} ${are} on hold: ${n === 1 ? 'it was' : 'they were'} made with a key this account no longer uses.`
     case 'found_while_paused':
       return `${changes} found while sync was paused ${are} not uploaded yet.`
+    case 'not_marked_synced':
+      return (
+        `${plural(n, 'file was', 'files were')} uploaded, but this PC couldn't mark ${n === 1 ? 'it' : 'them'} as synced. ` +
+        "Contact support@beebeeb.io and we'll sort it out with you."
+      )
     default:
       return `${changes}${datePhrase(group, now)} ${are} on hold.`
   }
