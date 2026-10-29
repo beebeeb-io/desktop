@@ -1579,7 +1579,7 @@ mod tests {
         assert!(matches!(prove(&pc, &session(), MINE, &own_server()), Outcome::Adopted(_)));
         pc.db.0.record_operation_pause("op-auth", crate::state_db::OperationPauseReason::Auth, None, 5).unwrap();
 
-        assert_eq!(pc.db.0.release_found_while_paused(5).unwrap(), 1);
+        assert_eq!(pc.db.0.release_found_while_paused(&["op-folder".to_string(), "op-auth".to_string()], 5).unwrap(), 1);
 
         let mut now_due = due(&pc);
         now_due.sort();

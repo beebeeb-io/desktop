@@ -2,7 +2,8 @@
 //! ownership proof (`own_data_proof.rs`) holds every queued change it cannot tie to the account's proven data as
 //! `found_while_paused`; Settings › Sync shows them in one entry with two actions, and neither deletes anything:
 //!
-//! - "Upload to my Beebeeb" releases them (`StateDb::release_found_while_paused`).
+//! - The card first reads them by kind ([`review`]); "Upload to my Beebeeb" releases exactly the changes it showed
+//!   (`StateDb::release_found_while_paused`), never one held after that read (lead review round 3, P2-2 and P3-1).
 //! - "Keep on this PC only" (the lead's ruling (a)) moves each item made on this PC that a held change acts on out of
 //!   the Beebeeb folder, into `Beebeeb - kept on this PC\YYYY-MM-DD\` next to it, and forgets its rows and queued
 //!   changes:
@@ -14,11 +15,15 @@
 //!   4. A change to an item the server already has (a file in a shared folder, say) cannot be kept off Beebeeb by a
 //!      move: it stays held. So does an item whose upload had already begun, or one whose bytes are not all on this
 //!      PC.
+//!   5. Only a staged copy the journal names is removed after the move; one whose live file is gone is the only copy
+//!      of those bytes and is copied into the dated folder first (lead review round 3, P3-3).
+//!   6. When OneDrive or Dropbox syncs the folder the kept folder is made in, the card says so instead of "on this
+//!      PC" ([`synced_by`], P3-4).
 //!
 //! Names and paths are never logged; the result carries counts and the one folder the person is shown.
 #![cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 
-use crate::state_db::{ProofOp, ProofRow, StateDb};
+use crate::state_db::{HeldChange, ProofOp, ProofRow, StateDb};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,6 +44,83 @@ pub struct KeepResult {
     pub not_moved: usize,
     /// Held changes to items the server already has (or whose upload had begun): still held.
     pub stays_held: usize,
+    /// The service that syncs the folder the kept folder is in ("OneDrive", "Dropbox"), if one does: the kept items
+    /// are not uploaded to Beebeeb, but may not stay on this PC only (lead review round 3, P3-4).
+    pub synced_by: Option<String>,
+}
+
+/// Task 2267 (lead review round 3, P2-2 and P3-1): what the card shows before the person decides, by kind, and the
+/// held changes "Upload to my Beebeeb" releases: exactly these, never one held after the card read them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Review {
+    pub new_folders: usize,
+    pub new_files: usize,
+    /// Changes to items that exist: new content, a rename, a move.
+    pub edits: usize,
+    /// Items the change moves to the trash.
+    pub deletions: usize,
+    /// Any change to an item in a folder shared with this account (counted here only).
+    pub in_shared_folders: usize,
+    pub op_ids: Vec<String>,
+    /// As [`KeepResult::synced_by`], for the question before a keep.
+    pub synced_by: Option<String>,
+}
+
+/// The card's counts for the held `changes`, in order.
+pub fn review(changes: &[HeldChange]) -> Review {
+    let mut review = Review::default();
+    for change in changes {
+        let count = if change.shared {
+            &mut review.in_shared_folders
+        } else if change.kind == "create_folder" {
+            &mut review.new_folders
+        } else if change.creates {
+            &mut review.new_files
+        } else if change.kind == "trash_file" {
+            &mut review.deletions
+        } else {
+            &mut review.edits
+        };
+        *count += 1;
+        review.op_ids.push(change.op_id.clone());
+    }
+    review
+}
+
+/// Which service syncs `dir`: the name of the first of `roots` it is in (or is), ignoring case.
+pub fn synced_by(dir: &Path, roots: &[(PathBuf, &'static str)]) -> Option<&'static str> {
+    roots.iter().find(|(root, _)| inside(dir, root)).map(|(_, name)| *name)
+}
+
+/// The folders Dropbox syncs, from its `info.json` (`{"personal": {"path": …}, "business": {"path": …}}`).
+fn dropbox_roots(info_json: &str) -> Vec<PathBuf> {
+    let Ok(serde_json::Value::Object(accounts)) = serde_json::from_str::<serde_json::Value>(info_json) else {
+        return Vec::new();
+    };
+    accounts
+        .values()
+        .filter_map(|account| account.get("path")?.as_str())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// The folders OneDrive and Dropbox sync on this PC: OneDrive's from its environment variables, Dropbox's from its
+/// `info.json` in the roaming and the local application data. Whatever cannot be read is left out.
+pub fn cloud_synced_roots() -> Vec<(PathBuf, &'static str)> {
+    let mut roots: Vec<(PathBuf, &'static str)> = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter(|root| !root.is_empty())
+        .map(|root| (PathBuf::from(root), "OneDrive"))
+        .collect();
+    for base in ["APPDATA", "LOCALAPPDATA"].into_iter().filter_map(std::env::var_os) {
+        let info = PathBuf::from(base).join("Dropbox").join("info.json");
+        if let Ok(raw) = std::fs::read_to_string(info) {
+            roots.extend(dropbox_roots(&raw).into_iter().map(|root| (root, "Dropbox")));
+        }
+    }
+    roots
 }
 
 /// One item to move: the topmost row made on this PC that held changes act on, with every row under it.
@@ -260,18 +342,63 @@ pub fn keep(
 }
 
 /// After the move: forget the item's rows and changes in one transaction, then remove the staged copies its uploads
-/// held. A copy in the Beebeeb folder or the kept folder is a person's file and is never removed.
+/// held. Only a copy the journal names (`staged_payloads`) is removed, never one in the Beebeeb folder or the kept
+/// folder (a person's file). A copy whose live file is gone holds the only copy of those bytes: it is copied into the
+/// dated kept folder first, never over a name, and kept where it is when that copy fails (lead review round 3, P3-3).
 fn finish(db: &StateDb, sync_root: &Path, journal: &Journal) -> Result<(), String> {
     let staged = db
         .finish_keep(&journal.item.ids, &journal.kept_dir)
         .map_err(|e| format!("forget the kept item: {e}"))?;
-    let kept_root = Path::new(&journal.kept_dir).parent().unwrap_or(Path::new(&journal.kept_dir));
+    let kept_dir = Path::new(&journal.kept_dir);
+    let kept_root = kept_dir.parent().unwrap_or(kept_dir);
+    let moved_from = crate::engine_bridge::local_file_path_under_sync_root(sync_root, journal.item.rel_path.trim_matches('/')).ok();
     for copy in staged.iter().map(Path::new) {
-        if copy.is_absolute() && !inside(copy, sync_root) && !inside(copy, kept_root) {
+        if !copy.is_absolute() || inside(copy, sync_root) || inside(copy, kept_root) {
+            continue;
+        }
+        let source = match db.staged_payload_source(&copy.to_string_lossy()) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                tracing::info!("keep: a copy no journal names is left where it is");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "keep: a staged copy's journal could not be read; the copy stays");
+                continue;
+            }
+        };
+        let live = source.as_deref().map(|source| match moved_from.as_deref() {
+            Some(from) if inside(Path::new(source), from) => {
+                Path::new(&journal.target).join(Path::new(source).components().skip(from.components().count()).collect::<PathBuf>())
+            }
+            _ => PathBuf::from(source),
+        });
+        if live.is_some_and(|live| std::fs::symlink_metadata(live).is_ok()) {
             crate::staged_payload::remove_or_log(db, copy);
+            continue;
+        }
+        let name = source.as_deref().and_then(|source| Path::new(source).file_name()).or_else(|| copy.file_name());
+        let Some(name) = name.map(|name| name.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        match copy_no_replace(copy, &unique_target(kept_dir, &name)) {
+            Ok(()) => crate::staged_payload::remove_or_log(db, copy),
+            Err(error) => tracing::warn!(kind = ?error.kind(), "keep: an only copy could not be kept; it stays where it is"),
         }
     }
     Ok(())
+}
+
+/// Copy `from` to a new file at `to`, never over one; a partial copy is removed.
+fn copy_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut source = std::fs::File::open(from)?;
+    let mut target = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = std::io::copy(&mut source, &mut target).and_then(|_| target.sync_all());
+    if copied.is_err() {
+        drop(target);
+        let _ = std::fs::remove_file(to);
+    }
+    copied
 }
 
 /// At a start, before sync runs: finish or undo the move a crash interrupted (lead ruling (a) 4). Moved (the target
@@ -496,11 +623,32 @@ mod tests {
             self.row(id, path, parent, false, false, Namespace::MyFiles);
             let staged = self.staging.join(format!("{id}.staged"));
             std::fs::write(&staged, bytes).unwrap();
-            self.db.track_staged_payload(&staged.to_string_lossy(), None, false).unwrap();
-            self.queue(&format!("op-{id}"), OperationKind::UploadVersion, Some(id), parent, Some(&staged));
+            self.db
+                .track_staged_payload(&staged.to_string_lossy(), Some(&self.on_disk(path).to_string_lossy()), false)
+                .unwrap();
+            self.queue_create_file(&format!("op-{id}"), Some(id), parent, Some(&staged));
         }
 
+        /// A queued change to an item that already exists (no create).
         fn queue(&self, op_id: &str, kind: OperationKind, file_id: Option<&str>, parent: Option<&str>, payload: Option<&Path>) {
+            self.enqueue(op_id, kind, file_id, parent, payload, None);
+        }
+
+        /// A new file's upload, which says it creates the file, as the scan queues it (`engine_bridge`'s
+        /// `"operation": "create_file"`): only then does its row count as made on this PC (lead review round 2, P2-1).
+        fn queue_create_file(&self, op_id: &str, file_id: Option<&str>, parent: Option<&str>, payload: Option<&Path>) {
+            self.enqueue(op_id, OperationKind::UploadVersion, file_id, parent, payload, Some(r#"{"operation":"create_file"}"#));
+        }
+
+        fn enqueue(
+            &self,
+            op_id: &str,
+            kind: OperationKind,
+            file_id: Option<&str>,
+            parent: Option<&str>,
+            payload: Option<&Path>,
+            metadata: Option<&str>,
+        ) {
             self.db
                 .enqueue_operation(&PendingOperation {
                     op_id: op_id.to_string(),
@@ -508,7 +656,7 @@ mod tests {
                     file_id: file_id.map(str::to_string),
                     parent_id: parent.map(str::to_string),
                     target_path: Some("x".to_string()),
-                    metadata_json: None,
+                    metadata_json: metadata.map(str::to_string),
                     payload_path: payload.map(|path| path.to_string_lossy().into_owned()),
                     base_version: None,
                     base_object_version_id: None,
@@ -593,6 +741,7 @@ mod tests {
                 kept_path: Some(kept.to_string_lossy().into_owned()),
                 not_moved: 0,
                 stays_held: 0,
+                synced_by: None,
             }
         );
         assert_eq!(std::fs::read(kept.join("Trip").join("Day 1").join("photo.jpg")).unwrap(), b"jpg");
@@ -850,7 +999,7 @@ mod tests {
         std::fs::write(pc.on_disk("todo.txt"), b"todo").unwrap();
         std::fs::write(pc.on_disk("keep-me.txt"), b"mine").unwrap();
         pc.row("new-top", "todo.txt", None, false, false, Namespace::MyFiles);
-        pc.queue("op-new-top", OperationKind::UploadVersion, Some("new-top"), None, Some(&pc.on_disk("keep-me.txt")));
+        pc.queue_create_file("op-new-top", Some("new-top"), None, Some(&pc.on_disk("keep-me.txt")));
         pc.hold_all();
         assert_eq!(pc.keep().moved_items, 1);
         assert_eq!(std::fs::read(pc.on_disk("keep-me.txt")).unwrap(), b"mine");
@@ -879,8 +1028,8 @@ mod tests {
         assert_eq!(pc.held(), strings(&["op-new-folder", "op-new-top", "op-no-row"]), "precondition");
 
         pc.queue("op-saved-again", OperationKind::UploadVersion, Some("new-top"), None, None);
-        pc.queue("op-new-inside", OperationKind::UploadVersion, Some("new-inside"), Some("new-folder"), None);
-        pc.queue("op-new-top", OperationKind::UploadVersion, Some("new-top"), None, None);
+        pc.queue_create_file("op-new-inside", Some("new-inside"), Some("new-folder"), None);
+        pc.queue_create_file("op-new-top", Some("new-top"), None, None);
         pc.queue("op-no-row", OperationKind::CreateFolder, None, None, None);
         pc.queue("op-elsewhere", OperationKind::UploadVersion, Some("own-file"), Some("own-folder"), None);
 
@@ -891,6 +1040,119 @@ mod tests {
         );
         let due: Vec<String> = pc.db.list_due_operations(i64::MAX).unwrap().into_iter().map(|op| op.op_id).collect();
         assert_eq!(due, strings(&["op-elsewhere"]), "a change to anything else is due");
+    }
+
+    /// Lead review round 3, P2-2: the card counts the held changes by kind (a change in a folder shared with this
+    /// account under that kind only) and names exactly the changes it counted.
+    #[test]
+    fn the_review_counts_the_held_changes_by_kind() {
+        let pc = Pc::new();
+        pc.row("server-file", "Report.pdf", None, false, true, Namespace::MyFiles);
+        pc.row("server-old", "Old.pdf", None, false, true, Namespace::MyFiles);
+        pc.row("shared-folder", "Shared", None, true, true, Namespace::SharedWithMe);
+        pc.row("shared-file", "Shared/Plan.txt", Some("shared-folder"), false, true, Namespace::SharedWithMe);
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-photo", "Trip/photo.jpg", Some("new-folder"), b"jpg");
+        pc.queue("op-edit", OperationKind::UploadVersion, Some("server-file"), None, None);
+        pc.queue("op-rename", OperationKind::RenameFile, Some("server-file"), None, None);
+        pc.queue("op-trash", OperationKind::TrashFile, Some("server-old"), None, None);
+        pc.queue_create_file("op-new-in-shared", Some("new-in-shared"), Some("shared-folder"), None);
+        pc.queue("op-shared-edit", OperationKind::UploadVersion, Some("shared-file"), Some("shared-folder"), None);
+        pc.hold_all();
+
+        let review = review(&pc.db.found_while_paused_changes().unwrap());
+        assert_eq!(
+            (review.new_folders, review.new_files, review.edits, review.deletions, review.in_shared_folders),
+            (1, 1, 2, 1, 2),
+            "{review:?}"
+        );
+        let mut shown = review.op_ids.clone();
+        shown.sort();
+        assert_eq!(shown, pc.held(), "the card names exactly the held changes");
+        assert_eq!(review.synced_by, None, "the backend says which service syncs the kept folder, not the review");
+    }
+
+    /// Lead review round 3, P3-1: "Upload to my Beebeeb" releases the changes the card showed: never one held after
+    /// the card read them, and a change released once is not counted again.
+    #[test]
+    fn upload_releases_only_the_changes_the_card_showed() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-top", "todo.txt", None, b"todo");
+        pc.hold_all();
+        let shown = pc.held();
+        assert_eq!(shown, strings(&["op-new-folder", "op-new-top"]), "precondition");
+        pc.queue_create_file("op-new-inside", Some("new-inside"), Some("new-folder"), None);
+        assert!(pc.held().contains(&"op-new-inside".to_string()), "precondition: held after the card read them");
+
+        assert_eq!(pc.db.release_found_while_paused(&shown, 5).unwrap(), 2);
+        assert_eq!(pc.held(), strings(&["op-new-inside"]), "the change the card did not show stays held");
+        assert_eq!(pc.db.release_found_while_paused(&shown, 5).unwrap(), 0, "released once");
+    }
+
+    /// Lead review round 3, P3-3: a staged copy whose live file is gone holds the only copy of those bytes. Keep copies
+    /// it into the kept folder (never over a name there) before it removes it; a copy whose live file moved with the
+    /// item goes.
+    #[test]
+    fn an_orphaned_staged_copy_is_copied_into_the_kept_folder_never_destroyed() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        pc.new_file("new-photo", "Trip/photo.jpg", Some("new-folder"), b"only copy");
+        pc.new_file("new-note", "Trip/note.txt", Some("new-folder"), b"note");
+        std::fs::remove_file(pc.on_disk("Trip/photo.jpg")).unwrap();
+        std::fs::create_dir_all(pc.kept_dir()).unwrap();
+        std::fs::write(pc.kept_dir().join("photo.jpg"), b"already there").unwrap();
+        pc.hold_all();
+
+        assert_eq!(pc.keep().moved_items, 1);
+        assert_eq!(std::fs::read(pc.kept_dir().join("photo (2).jpg")).unwrap(), b"only copy", "the only copy is kept");
+        assert_eq!(std::fs::read(pc.kept_dir().join("photo.jpg")).unwrap(), b"already there", "never over a name");
+        assert_eq!(std::fs::read(pc.kept_dir().join("Trip").join("note.txt")).unwrap(), b"note");
+        assert!(!pc.staging.join("new-photo.staged").exists(), "then the staged copy goes");
+        assert!(!pc.staging.join("new-note.staged").exists(), "a copy whose file moved with the item goes");
+        assert!(pc.db.staged_payloads_for_signout().unwrap().is_empty(), "the journal forgets both");
+    }
+
+    /// Lead review round 3, P3-3: Keep removes only the staged copies the journal names; any other file a queued change
+    /// names as its copy is left where it is.
+    #[test]
+    fn a_staged_copy_the_journal_does_not_name_is_never_deleted() {
+        let pc = Pc::new();
+        pc.new_folder("new-folder", "Trip", None);
+        std::fs::write(pc.on_disk("Trip/photo.jpg"), b"jpg").unwrap();
+        pc.row("new-photo", "Trip/photo.jpg", Some("new-folder"), false, false, Namespace::MyFiles);
+        let unjournalled = pc.staging.join("not-journalled.bin");
+        std::fs::write(&unjournalled, b"someone's file").unwrap();
+        pc.queue_create_file("op-new-photo", Some("new-photo"), Some("new-folder"), Some(&unjournalled));
+        pc.hold_all();
+
+        assert_eq!(pc.keep().moved_items, 1);
+        assert_eq!(std::fs::read(&unjournalled).unwrap(), b"someone's file");
+    }
+
+    /// Lead review round 3, P3-4: the kept folder is made next to the Beebeeb folder. When OneDrive or Dropbox syncs
+    /// that place, the card says which instead of claiming the items stay on this PC.
+    #[test]
+    fn a_folder_in_a_onedrive_or_dropbox_folder_says_which_syncs_it() {
+        let roots = vec![
+            (PathBuf::from("/home/user/OneDrive - Initlabs"), "OneDrive"),
+            (PathBuf::from("/home/user/Dropbox"), "Dropbox"),
+        ];
+        assert_eq!(synced_by(Path::new("/home/user/OneDrive - Initlabs"), &roots), Some("OneDrive"), "the root itself");
+        assert_eq!(synced_by(Path::new("/home/user/onedrive - initlabs/Docs"), &roots), Some("OneDrive"), "any case");
+        assert_eq!(synced_by(Path::new("/home/user/Dropbox/Work"), &roots), Some("Dropbox"));
+        assert_eq!(synced_by(Path::new("/home/user/Dropbox Old"), &roots), None, "a name that only starts the same");
+        assert_eq!(synced_by(Path::new("/home/user"), &roots), None, "above it");
+    }
+
+    #[test]
+    fn dropbox_names_its_personal_and_business_folders_in_info_json() {
+        let info = r#"{"personal": {"path": "C:\\Users\\a\\Dropbox", "host": 1}, "business": {"path": "C:\\Users\\a\\Dropbox (Initlabs)"}, "other": 3}"#;
+        let mut roots = dropbox_roots(info);
+        roots.sort();
+        assert_eq!(roots, vec![PathBuf::from(r"C:\Users\a\Dropbox"), PathBuf::from(r"C:\Users\a\Dropbox (Initlabs)")]);
+        assert!(dropbox_roots("not json").is_empty());
+        assert!(dropbox_roots(r#"{"personal": {"path": ""}}"#).is_empty(), "an empty path is no folder");
     }
 
     /// The real scan of the Beebeeb folder, as the watcher runs it.
@@ -991,6 +1253,9 @@ mod tests {
                 .unwrap()
         );
         pc.row("cloud", "Trip/cloud.bin", Some("new-folder"), false, false, Namespace::MyFiles);
+        // Made on this PC: a queued create names it (lead review round 2, P2-1); else it is the server's and the
+        // item stays held for that reason instead.
+        pc.queue_create_file("op-cloud", Some("cloud"), Some("new-folder"), None);
         pc.hold_all();
 
         let started = std::time::Instant::now();
@@ -999,7 +1264,7 @@ mod tests {
 
         assert_eq!((result.moved_items, result.not_moved), (0, 1), "{result:?}");
         assert!(pc.on_disk("Trip").is_dir());
-        assert_eq!(pc.held(), strings(&["op-new-folder"]));
+        assert_eq!(pc.held(), strings(&["op-cloud", "op-new-folder"]));
         assert!(took < std::time::Duration::from_secs(20), "nothing asked for the bytes: {took:?}");
         let attributes = std::os::windows::fs::MetadataExt::file_attributes(
             &std::fs::symlink_metadata(pc.on_disk("Trip/cloud.bin")).unwrap(),
