@@ -197,10 +197,16 @@ needed per release. The trust boundary has four parts, and each one is checked:
     - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
       unreviewed commit gets a branch that `release.yml` can sign.
     - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
-    - The rule: cut a release branch only from a `desktop-v*` tag with a published GitHub
-      release, or a commit on `main`, and keep the cut commit in the release record.
-    - The tag itself is not protected, so a published GitHub release is what is trusted,
-      not the tag. A tag ruleset is proposed separately (the maintainer decides).
+    - The rule: cut a release branch only from a `desktop-v*` tag whose commit is the merge
+      commit of a pull request merged into `main` or a `release/*` branch, and which has a
+      published GitHub release, or from a commit on `main`. Keep the cut commit in the release
+      record.
+    - A published release alone is not enough: anyone with write access, including a session
+      using an admin token, can tag an unreviewed commit and publish a release on it. So the
+      tagged commit must also be reviewed.
+    - A tag ruleset that limits tagging to the release workflow is not possible: GitHub refuses
+      the Actions app as a bypass actor (HTTP 422). That is why the check below tests the tag
+      commit itself instead of protecting the tag.
     - `release.yml` enforces that rule (task 2281, next bullet): it refuses any other
       branch point before signing.
   - Neither ruleset limits who holds an admin token. A tool or session acting with an
@@ -211,9 +217,14 @@ needed per release. The trust boundary has four parts, and each one is checked:
   dispatched commit back to its starting point (the first commit that is not a merge of a pull
   request into that branch). Every commit on that walk must be a merge of a PR that was merged
   into this same branch, and the starting point must be the commit of a `desktop-v*` tag with a
-  published GitHub release (`draft == false`) or a commit on `main`; otherwise the run stops
-  before signing and names the offending commit. A
-  dispatch from `main` skips the job, because `main` is protected by pull requests. The ruleset
+  published GitHub release (`draft == false`) whose commit is itself the merge commit of a pull
+  request merged into `main` or a `release/*` branch, or a commit on `main`; otherwise the run
+  stops before signing and names the offending commit. A tag whose commit is not such a PR merge
+  is printed and then treated like any other unreviewed commit: it only passes if it is on
+  `main`. `desktop-v0.8.19` is the first tag that meets the tag rule: its commit `db648a6` is the
+  merge of #185 into `release/0.8.19`. Older tags whose commit was a direct push (for example
+  0.8.18's `e06c55b`) no longer count, which is intended. A dispatch from `main` skips the
+  job, because `main` is protected by pull requests. The ruleset
   above cannot gate branch creation, which is why this check exists (task 2281). Branches created
   before that ruleset hold direct commits of their own (for example `release/0.8.19`), so a fresh
   dispatch from them is refused; promoting an existing release with `publish_existing=true` does
