@@ -142,9 +142,9 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "c08defc70c35428926be6784d18ff091be6d004c" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "3831a05" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
