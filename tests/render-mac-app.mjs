@@ -91,6 +91,8 @@ const base = {
   config: { upload_kbps_limit: 0, download_kbps_limit: 5000, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true, theme: 'system' },
   subscription: { plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: '2026-11-14T00:00:00Z', quota_bytes: 200_000_000_000, used_bytes: 84_300_000_000 },
   keptUnsent: null, kept: null,
+  // Home's one-time hint (slice 6): dismissed in every scenario but the ones that draw it.
+  hintSeen: true,
   // The shape `account_region` answers with (Rust's DTO, as tests/render-location-by-country.mjs maps it).
   region: {
     preferred_region: null,
@@ -169,6 +171,8 @@ function installBackend({ caps, fx }) {
         case 'finder_setup_state': return f.finder
         case 'kept_unsent_folder': return f.keptUnsent
         case 'kept_unsynced_folder': return f.kept
+        case 'get_menu_bar_hint_seen': return f.hintSeen
+        case 'mark_menu_bar_hint_seen': f.hintSeen = true; return null
         case 'list_remote_tree': return [{ id: 'f1', name: 'Photos', is_folder: true, excluded: false, size_bytes: 1, file_count: 1, on_disk_bytes: 0, pinned: true, children: [] }]
         case 'account_region': return f.region
         case 'account_profile': return f.profile
@@ -254,7 +258,8 @@ const gear = async (p) => { await p.getByRole('button', { name: 'Settings', exac
 const section = (label) => async (p) => { await gear(p); await p.getByRole('button', { name: label }).first().click() }
 
 const SCENARIOS = [
-  { name: 'home', bar: true, has: ['Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', `${gb(84.3)} of ${gb(200)}`, 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
+  { name: 'home', bar: true, fx: { hintSeen: false }, has: ['Beebeeb lives in the menu bar', 'Click the b at the top of your screen to see what’s syncing. You can close this window; Beebeeb keeps running.', 'Got it', 'Home', 'End-to-end encrypted', 'Up to date', 'Last checked 1 min ago', 'Beebeeb in Finder', 'Your vault appears under Locations in Finder.', 'Open in Finder', 'Storage', `${gb(84.3)} of ${gb(200)}`, 'sam@example.eu', 'Basic plan'], hasNot: ['Needs your attention', 'control center', 'daemon'], hifi: 'hifi-s3-fig0' },
+  { name: 'home-hint-dismissed', fx: { hintSeen: false }, act: async (p) => { await p.getByRole('button', { name: 'Got it' }).click(); await p.waitForFunction(() => !document.body.innerText.includes('Beebeeb lives in the menu bar')) }, has: ['Up to date', 'Beebeeb in Finder'], hasNot: ['Beebeeb lives in the menu bar', 'Got it'] },
   { name: 'home-kept', fx: { keptUnsent: KEPT_OURS, kept: KEPT_MACOS }, has: ['Needs your attention', KEPT_OURS, KEPT_MACOS, 'Show in Finder', 'Dismiss'] },
   { name: 'home-locked', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }) }, has: ['Your vault is locked', 'Unlock vault', 'Vault locked'], hasNot: ['Beebeeb in Finder'], hifi: 'hifi-s3-fig3' },
   { name: 'home-long-email', fx: { snapshot: snapshot({ account: { email: LONG_EMAIL } }) }, has: [LONG_EMAIL] },
@@ -303,7 +308,7 @@ const SCENARIOS = [
   // P2-3 a: a window reopened (⌘W destroyed the earlier one) while a password sign-in was waiting for the recovery phrase.
   { name: 'reopened-pending-setup', fx: { snapshot: snapshot({ phase: 'locked', account: { vault_unlocked: false }, storage: null }), pending: { key_replaced: false } }, has: ['Set up this Mac', 'This Mac does not have your encryption keys yet. Restore them to continue.'], hasNot: ['Your vault is locked'], noSidebar: true, card: 440, title: 'Set up this Mac' },
   // P3-1: `open_reauth_window` asks for Sign in again whatever the session says.
-  { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Signed in before as sam@example.eu'], noSidebar: true, card: 380, title: 'Sign in again' },
+  { name: 'sign-in-again-asked', fx: { nav: { to: 'reauth' } }, has: ['Sign in again', 'Beebeeb couldn’t send some changes with this sign-in. Sign in again to retry them.', 'Signed in before as sam@example.eu', 'Back to Home'], hasNot: ['Sync is paused'], noSidebar: true, card: 380, title: 'Sign in again' },
   { name: 'signed-out-settings', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=general', has: ['Sign in', 'Settings', 'General', 'About', 'Open Beebeeb at login', 'Appearance', 'Tell me about'], hasNot: ['From your account'], sidebar: ['Back to Sign in', 'General', 'About'], hifi: 'hifi-s4-fig6' },
   { name: 'signed-out-about', fx: { snapshot: snapshot({ phase: 'signed_out', account: { email: null, logged_in: false, vault_unlocked: false }, storage: null }) }, open: '&tab=about', has: ['Beebeeb for Mac', 'Release channel'], hasNot: ['Test connection speed'] },
 ]

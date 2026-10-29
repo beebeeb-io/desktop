@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +26,11 @@ import {
  * person-facing string is told from a machine value. `GUARD_ROOT` points the scan at another checkout, which is how it
  * was proven red on the tree before this slice.
  */
+// Every test here reads, scans or copies the real source tree, which takes seconds when the machine is loaded (a gate at
+// load 60 timed three of them out at bun's default 5 s; the same tests take under 4 s together at load 14). Their results do
+// not depend on the time, so a slow run must not be a red one (PR #147, lead's gate).
+setDefaultTimeout(30_000)
+
 const ROOT = process.env.GUARD_ROOT ?? fileURLToPath(new URL('..', import.meta.url))
 
 /**

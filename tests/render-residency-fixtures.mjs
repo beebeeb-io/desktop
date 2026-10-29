@@ -40,6 +40,7 @@ try {
               if (name === 'get_known_folder_onboarding_seen') return true
               if (name === 'get_known_folder_backup') return []
               if (name === 'desktop_file_overview') return { total_files: 2, total_bytes: 10, by_status: [], recent: [], pinned_count: 0, pinned_bytes: 0 }
+              if (name === 'desktop_recent_files') return []
               if (name === 'desktop_config') return { theme: 'system', local_cache_limit_bytes: 0, upload_kbps_limit: 0, download_kbps_limit: 0 }
               if (name === 'desktop_storage_summary') return { used_bytes: 10, quota_bytes: 100, cache_bytes: 0, pinned_bytes: 0 }
               if (name === 'account_usage') return { used_bytes: 10, quota_bytes: 100, percentage: 0.1 }

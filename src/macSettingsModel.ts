@@ -496,13 +496,9 @@ export function appearanceHint(theme: unknown): string {
 
 export type NotificationKey = 'notify_conflicts' | 'notify_sync_complete' | 'notify_quota_warnings'
 
-/**
- * "Tell me about": the three preferences the desktop config already has (keys unchanged), in the
- * plain words of spec section 5. "Local cache almost full" is the same setting the old page
- * called "Local cache warnings"; it is about this Mac's cache limit, not its disk.
- */
+/** Device-only notification labels follow the full-speed L2 Settings IA; config keys are unchanged. */
 export const NOTIFICATION_ROWS: ReadonlyArray<{ key: NotificationKey; label: string; hint?: string }> = [
-  { key: 'notify_conflicts', label: 'Conflicts', hint: 'When two versions of a file need a decision.' },
-  { key: 'notify_sync_complete', label: 'Sync finished' },
-  { key: 'notify_quota_warnings', label: 'Local cache almost full' },
+  { key: 'notify_conflicts', label: 'Conflict alerts', hint: 'When two versions of a file need a decision.' },
+  { key: 'notify_sync_complete', label: 'Sync complete' },
+  { key: 'notify_quota_warnings', label: 'Local cache warnings' },
 ]

@@ -54,6 +54,7 @@ import {
 } from './macSettingsModel'
 import { Btn, Note, SettingsGroup, SettingsIcon } from './macSettingsParts'
 import { moveFlow, SignInWindow } from './macSignIn'
+import { MenuBarHint } from './MenuBarHint'
 import { AboutTab, AccountTab, GeneralTab, showSignOutOutcome, SyncTab, useSettingsConfig } from './MacSettings'
 import { SecurityTab } from './MacSecurity'
 import {
@@ -237,6 +238,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
 
   return (
     <div className="mw-content">
+      <MenuBarHint />
       <div className="mw-card" data-home="status">
         <div className="mw-row" data-row="status">
           <span className={`mw-status-disc mw-status-disc--${status.tone}`} aria-hidden="true">
@@ -341,8 +343,6 @@ export default function MacApp() {
   const signInFlow = useSyncExternalStore(subscribeSignInFlow, getSignInFlow, getSignInFlow)
   const account = snapshot?.account ?? null
   const signedIn = account?.logged_in === true
-  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
-  const view = coerceSettingsView(rawView, signedIn)
   const unlocked = account?.vault_unlocked === true
   // The flow is checked ONCE, against the first snapshot this window reads (`normalizeFlow`): a step of an account that
   // left is dropped, so the window shown again after a sign-out starts at sign-in. Never against a later snapshot, which
@@ -356,6 +356,9 @@ export default function MacApp() {
   const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
   const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
+  // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
+  // Not under a sheet: nothing navigates under one (§8.2), and the Repair sheet lives in Sync. The move comes when it closes.
+  const view = sheetOpen ? rawView : coerceSettingsView(rawView, signedIn)
 
   // The listeners below are registered once; they read the window's current state through these.
   const viewRef = useRef(view)
@@ -437,6 +440,14 @@ export default function MacApp() {
     reader.refresh()
   }, [reader, signInFlow.step])
 
+  // The question is for a window that OPENS locked (delta review P3-3): a Lock can only follow keys that arrived, and keys
+  // arriving forget the step in Rust, so after a Lock nothing is owed and asking would only paint "Loading…" for a round
+  // trip. A window whose first read is not that case is done with it for good.
+  useEffect(() => {
+    if (account === null || setupAsk !== 'idle') return
+    if (!setupCheckWanted(account, flowNow)) setSetupAsk('done')
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the first read decides; `flowNow` is that read's.
+  }, [account, setupAsk])
   useEffect(() => {
     if (!askingForSetup || setupAsk !== 'idle') return
     setSetupAsk('asking')

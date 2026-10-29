@@ -83,6 +83,39 @@ pub(crate) fn unfinished_at(path: &Path) -> Result<Vec<String>, String> {
     Ok(DesktopConfig::load_from(path)?.kept_unsent_unfinished)
 }
 
+/// Task 2190 (D1): a copy "Keep the other" kept, added to its list (once). The sign-out's folder and
+/// unfinished list are not touched.
+pub(crate) fn record_conflict_copy(cfg: &mut DesktopConfig, copy: &str) -> bool {
+    if cfg.kept_conflict_copies.iter().any(|known| known == copy) {
+        return false;
+    }
+    cfg.kept_conflict_copies.push(copy.to_string());
+    true
+}
+
+/// Task 2190: the row's "Dismiss" forgets the copy (never deletes it). `false`: it was not listed.
+pub(crate) fn dismiss_conflict_copy(cfg: &mut DesktopConfig, copy: &str) -> bool {
+    let before = cfg.kept_conflict_copies.len();
+    cfg.kept_conflict_copies.retain(|known| known != copy);
+    cfg.kept_conflict_copies.len() != before
+}
+
+/// Task 2190 (D1): the copy is recorded in ONE durable save before the decision drops the write.
+pub(crate) fn save_conflict_copy_durably(path: &Path, copy: &str, fs_steps: &dyn ConfigFs) -> Result<(), String> {
+    DesktopConfig::update_at_durable_with(path, |cfg| (record_conflict_copy(cfg, copy), ()), fs_steps)
+}
+
+pub(crate) fn dismiss_saved_conflict_copy_at(path: &Path, copy: &str) -> Result<bool, String> {
+    DesktopConfig::update_at(path, |cfg| {
+        let dismissed = dismiss_conflict_copy(cfg, copy);
+        (dismissed, dismissed)
+    })
+}
+
+pub(crate) fn saved_conflict_copies_at(path: &Path) -> Result<Vec<String>, String> {
+    Ok(DesktopConfig::load_from(path)?.kept_conflict_copies)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

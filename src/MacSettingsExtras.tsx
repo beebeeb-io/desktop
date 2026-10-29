@@ -70,7 +70,7 @@ export function AccountPreferencesGroup() {
   const values = state.status === 'ready' ? state.values : null
 
   return (
-    <SettingsGroup title="From your account">
+    <SettingsGroup title="Account notifications">
       {state.status === 'failed' ? (
         <Note
           kind="alert"

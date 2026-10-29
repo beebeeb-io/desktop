@@ -129,7 +129,8 @@ describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', 
     expect(missing).toEqual([])
     const windowFlexible = win.rules.filter((r) => /^1( |$)/.test(r.decls.get('flex') ?? ''))
     // Slice 2: the recovery phrase's input fills its box (`.mw-word-input`; the box clips nothing, the input is min-width: 0).
-    expect(windowFlexible.flatMap((r) => r.selectors).sort()).toEqual(['.mw-account-text', '.mw-row-text', '.mw-word-input'].sort())
+    // Slice 6: the one-time hint's text block (`.mw-hint-text`).
+    expect(windowFlexible.flatMap((r) => r.selectors).sort()).toEqual(['.mw-account-text', '.mw-hint-text', '.mw-row-text', '.mw-word-input'].sort())
     expect(windowFlexible.filter((r) => r.decls.get('min-width') !== '0').flatMap((r) => r.selectors)).toEqual([])
   })
 
@@ -137,7 +138,7 @@ describe('screenshot 3, defect 2: one unbreakable string cannot widen a track', 
     for (const selector of ['.ms-pane', '.ms-group', '.ms-card', '.ms-row', '.ms-row-control', '.ms-account', '.ms-note', '.ms-storage']) {
       expect({ selector, minWidth: declOf(selector, 'min-width') }).toEqual({ selector, minWidth: '0' })
     }
-    for (const selector of ['.mw-window', '.mw-sidebar', '.mw-main', '.mw-toolbar', '.mw-content', '.mw-card', '.mw-row', '.mw-columns', '.mw-nav', '.mw-account-row', '.mw-foot']) {
+    for (const selector of ['.mw-window', '.mw-sidebar', '.mw-main', '.mw-toolbar', '.mw-content', '.mw-card', '.mw-hint', '.mw-row', '.mw-columns', '.mw-nav', '.mw-account-row', '.mw-foot']) {
       expect({ selector, minWidth: winDecl(selector, 'min-width') }).toEqual({ selector, minWidth: '0' })
     }
   })

@@ -35,10 +35,10 @@ describe('the SessionActionOutcome contract', () => {
     // Task 1882 (rebase onto main): the command also takes the app handle, to raise the kept-folder alert; rustfmt
     // puts its arguments on their own lines, so compare without whitespace. Task 1887: and the calling window (a result
     // that needs showing waits for that window's acknowledgement) and `keep_unsent`, which `clearSession`'s
-    // `keepUnsent` fills.
+    // `keepUnsent` fills. Task 2191: and `unknown_files`, which `clearSession`'s `unknownFiles` fills (Windows).
     const squeezed = lib.replace(/\s+/g, '')
     expect(squeezed).toContain(
-      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,)->Result<SessionActionOutcome,String>{',
+      'asyncfnclear_session(app:tauri::AppHandle,window:tauri::WebviewWindow,state:State<\'_,AppState>,forget_email:Option<bool>,keep_unsent:Option<KeepUnsentArg>,unknown_files:Option<UnknownFilesArg>,kept_folder:Option<String>,)->Result<SessionActionOutcome,String>{',
     )
     expect(lib).toContain('async fn lock_vault(state: State<\'_, AppState>) -> Result<SessionActionOutcome, String> {')
   })
@@ -193,6 +193,19 @@ describe('the answer of a command that ends the session itself stands when the r
       const result = await command<unknown>(name)
       expect(seen.atAnswer).toBe(native.revision)
       expect({ name, result }).toEqual({ name, result: { ok: true, value: outcome } })
+      start += 10
+    }
+  })
+
+  // PR #146 review, P3: the hint's answer is a flag of this Mac, not of an account. A sign-in or a lock that moves the revision
+  // while the read is out must not turn it into "Account changed" (which hides the hint) or lose a "Got it".
+  test('the one-time hint\'s two commands carry no account data: their answers stand', async () => {
+    let start = 780
+    for (const [name, answer] of [['get_menu_bar_hint_seen', false], ['mark_menu_bar_hint_seen', null]] as const) {
+      const { native, seen } = await revisionMovesWhileRunning(name, answer, start)
+      const result = await command<unknown>(name)
+      expect(seen.atAnswer).toBe(native.revision)
+      expect({ name, result }).toEqual({ name, result: { ok: true, value: answer } })
       start += 10
     }
   })

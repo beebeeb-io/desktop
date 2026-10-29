@@ -68,7 +68,7 @@ pub fn create_placeholder(
     size_bytes: i64,
     modified_at: i64,
     is_dir: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
         .encode_utf16()
@@ -166,16 +166,25 @@ pub fn create_placeholder(
         // windows 0.58 takes the placeholder array as a `&mut [..]` slice
         // (the length is derived from it) plus an optional
         // `entriesprocessed` out-pointer — four args total, not five.
+        // A placeholder that already exists is the steady state on every
+        // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
+        // (0x800700B7). Treat it as success: the desired end state holds. It
+        // is `Ok(false)`, not created: task 1640 marks a placeholder "nothing
+        // fetched on disk" only when it really was created.
+        const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
         let entries = std::slice::from_mut(&mut entry);
         if let Err(e) = CfCreatePlaceholders(PCWSTR(parent_wide.as_ptr()), entries, CF_CREATE_FLAG_NONE, None) {
-            // A placeholder that already exists is the steady state on every
-            // tick after the first — `HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)`
-            // (0x800700B7). Treat it as success: the desired end state holds.
-            const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
             if e.code() == ALREADY_EXISTS {
-                return Ok(());
+                return Ok(false);
             }
             return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
+        }
+        // Task 1640 (self-review #3): the entry's own result decides, not only the call's.
+        if entries[0].Result == ALREADY_EXISTS {
+            return Ok(false);
+        }
+        if entries[0].Result.is_err() {
+            return Err(anyhow::anyhow!("CfCreatePlaceholders entry: {:?}", entries[0].Result));
         }
     }
 
@@ -183,7 +192,7 @@ pub fn create_placeholder(
     // filename (and the parent path, which can carry decrypted folder names)
     // must never reach the logs.
     tracing::debug!(file_id = %file_id, is_dir, "cloud placeholder created");
-    Ok(())
+    Ok(true)
 }
 
 /// Remove the on-disk Cloud Files placeholder at `path` as part of reconciling a
@@ -712,6 +721,295 @@ const _: () = {
     assert!(FILE_ATTRIBUTE_UNPINNED.0 == 0x0010_0000);
 };
 
+/// Task 1640: whether every byte of the placeholder at `path` is on disk (no
+/// `RECALL_ON_DATA_ACCESS`). Reading one that is not would fetch the rest of it.
+pub fn fully_on_disk(path: &std::path::Path) -> bool {
+    read_os_placeholder_state(path).is_some_and(|attrs| attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
+}
+
+/// Task 1640 (review F9): [`fully_on_disk`], read through an open handle.
+fn handle_fully_on_disk(file: &std::fs::File) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    file.metadata()
+        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
+}
+
+/// Desktop 0.8.15 (the hydration storm): open `path` to read its placeholder state, as the reparse
+/// point and with attribute access only (`FILE_READ_ATTRIBUTES`, no `FILE_READ_DATA`). 0.8.14
+/// opened these with read access, and on Windows that open of a cloud-only placeholder asks this
+/// provider for the WHOLE file: the native probe
+/// `desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it` counts one
+/// FETCH_DATA for all 8 MiB of its file, requested by the test's own process, after one such
+/// open, and none after these reads. On Guus's PC the 0.8.14 start-up guard's opens fetched
+/// 5,294 cloud-only files whole, one after another in the guard's own row order, ~42 GB in two
+/// hours, until C: was full. `CfGetPlaceholderInfo` needs no more than this handle.
+fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+}
+
+/// Task 2232: what a file's modification time cannot show. Windows moves `ChangeTime` on every write
+/// and on every change of the file's times, and an ordinary tool cannot set it back; a file renamed
+/// over the path has another file index.
+pub struct ChangeStamp {
+    pub change_time: std::time::SystemTime,
+    pub volume_serial: u32,
+    pub file_index: u64,
+}
+
+/// [`ChangeStamp`] of the file at `path`, read through [`open_for_state`], so nothing is fetched.
+pub fn change_stamp(path: &std::path::Path) -> std::io::Result<ChangeStamp> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    };
+    let file = open_for_state(path)?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut basic = FILE_BASIC_INFO::default();
+    let mut by_handle = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is open for both calls (`file` outlives them), and each writes only into the
+    // struct whose size it is given.
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        GetFileInformationByHandle(handle, &mut by_handle).map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    Ok(ChangeStamp {
+        change_time: filetime_ticks_to_system_time(basic.ChangeTime),
+        volume_serial: by_handle.dwVolumeSerialNumber,
+        file_index: (u64::from(by_handle.nFileIndexHigh) << 32) | u64::from(by_handle.nFileIndexLow),
+    })
+}
+
+/// A `FILETIME` tick count (100 ns since 1601) as a `SystemTime`; one before 1970 as the Unix epoch.
+fn filetime_ticks_to_system_time(ticks: i64) -> std::time::SystemTime {
+    const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+    ticks
+        .checked_sub(UNIX_EPOCH_TICKS)
+        .and_then(|since_epoch| u64::try_from(since_epoch).ok())
+        .and_then(|since_epoch| {
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(since_epoch.saturating_mul(100)))
+        })
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
+/// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
+/// it when the file's bytes change; this engine sets it only on content it agrees with the
+/// server on. Opened as the reparse point with attribute access only ([`open_for_state`]), so
+/// nothing is fetched.
+pub fn placeholder_in_sync(path: &std::path::Path) -> Option<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    let file = open_for_state(path).ok()?;
+    let handle = HANDLE(file.as_raw_handle());
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `handle` is open for the whole call (`file` outlives it); the buffer is
+    // 8-byte aligned and its length is passed, so the call writes only inside it.
+    unsafe {
+        CfGetPlaceholderInfo(
+            handle,
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    }
+    .ok()?;
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    Some(info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC)
+}
+
+/// Task 1640: whether the engine may mark the placeholder at `path` in sync or free its bytes:
+/// they are the content this device last agreed with the server on. A placeholder in sync is;
+/// one that is not is agreed only when it is wholly on disk and its hash is the agreed one.
+/// Anything not known to be agreed (an unsent edit, a queued upload, no agreed content
+/// recorded) is not: its bytes stay.
+pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> bool {
+    let in_sync = placeholder_in_sync(path);
+    if in_sync != Some(true) && !fully_on_disk(path) {
+        return false;
+    }
+    matches!(
+        crate::engine_bridge::sync_folder_content(db, file_id, path, in_sync),
+        Ok(crate::engine_bridge::SyncFolderContent::Agreed)
+    )
+}
+
+/// Task 1640 (review N2, N6): what the entry at `path` holds, as the platform reports it: in sync
+/// with no modified data, no data on disk, every byte on disk (also a plain file, which is what an
+/// atomic save leaves), or only some. Opened as the reparse point, so nothing is fetched. Anything
+/// that cannot be read reports "unreadable" (self-review #5), which keeps the entry and retries it.
+pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::LocalEntry {
+    placeholder_local_entry_trusting(path, true)
+}
+
+/// Task 2191 (G-engine, review-114 F-P1-4): [`placeholder_local_entry`], trusting the platform's
+/// in-sync state only when `trust_in_sync` (the file has agreed content recorded). 0.8.12 marked
+/// edits in sync, so a file of unknown content is read by its size on disk alone.
+pub fn placeholder_local_entry_trusting(path: &std::path::Path, trust_in_sync: bool) -> crate::engine_bridge::LocalEntry {
+    use crate::engine_bridge::LocalEntry;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
+    let Ok(file) = open_for_state(path) else {
+        return LocalEntry::Unreadable;
+    };
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
+    // passed, so the call writes only inside it.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => {
+            return LocalEntry::WhollyLocal;
+        }
+        Err(_) => return LocalEntry::Unreadable,
+    }
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    if trust_in_sync && info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC && info.ModifiedDataSize == 0 {
+        LocalEntry::InSync
+    } else if info.OnDiskDataSize == 0 && info.ModifiedDataSize == 0 {
+        LocalEntry::NothingLocal
+    } else if fully_on_disk(path) {
+        LocalEntry::WhollyLocal
+    } else {
+        LocalEntry::PartlyLocal
+    }
+}
+
+/// Task 1640 (review N1, condition 2): make the file's range-fetch candidate its agreed content,
+/// under ONE exclusive handle: the platform's state is read through it (in sync, no modified
+/// data), the file must be wholly on disk, and its bytes are hashed through it, so no write lands
+/// between the check and the hash. The decision and the re-read of the row are
+/// [`crate::engine_bridge::promote_fetched_content`]. `Ok(false)`: not promoted (also when the
+/// file is open elsewhere: the next pass tries again).
+pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
+    use crate::engine_bridge::LocalEntry;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
+    // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
+    // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
+    // opened. Read from the path's attributes; the handle below checks again.
+    if !fully_on_disk(path) {
+        return Ok(false);
+    }
+    // share_mode(0): while this handle is open no other handle can be opened to write.
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+    else {
+        return Ok(false);
+    };
+    // Review F9: read through the handle too, so it describes the file the hash then reads.
+    let wholly = handle_fully_on_disk(&file);
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
+    // passed, so the call writes only inside it.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    if read.is_err() {
+        return Ok(false);
+    }
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let local = if info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC && info.ModifiedDataSize == 0 {
+        LocalEntry::InSync
+    } else {
+        LocalEntry::PartlyLocal
+    };
+    crate::engine_bridge::promote_fetched_content(db, file_id, local, wholly, &mut || {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
+    })
+}
+
+/// Task 1640 (review P2-4): mark the placeholder at `path` in sync when its bytes are the agreed
+/// content, holding ONE exclusive handle across the hash and the mark (as
+/// [`complete_upload_placeholder`] does), so no write can land between them. `Ok(false)`: not
+/// marked (already in sync, not wholly on disk, an upload queued, no agreed content, other bytes,
+/// or the file is open elsewhere: the next pass tries again).
+pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
+        return Ok(false);
+    }
+    if db.sync_folder_upload_queued(file_id)? {
+        return Ok(false);
+    }
+    let Some(agreed) = db.get_file_contract_state(file_id)?.and_then(|contract| contract.local_hash) else {
+        return Ok(false);
+    };
+    // share_mode(0): while this handle is open no other handle can be opened to write.
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+    else {
+        return Ok(false);
+    };
+    // Review F9: re-read through the handle: reading a file not wholly on disk would fetch the rest.
+    if !handle_fully_on_disk(&file) {
+        return Ok(false);
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    if format!("{:x}", hasher.finalize()) != agreed {
+        return Ok(false);
+    }
+    // SAFETY: the handle belongs to `file`, open for the whole call.
+    unsafe {
+        CfSetInSyncState(
+            HANDLE(file.as_raw_handle()),
+            CF_IN_SYNC_STATE_IN_SYNC,
+            CF_SET_IN_SYNC_FLAG_NONE,
+            None,
+        )
+    }?;
+    Ok(true)
+}
+
 pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
     let path_wide: Vec<u16> = path
         .to_string_lossy()
@@ -725,6 +1023,23 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
         return None;
     }
     Some(attrs)
+}
+
+/// Task 2240 slice 2: every entry of `dir` by its exact name, with the attribute word the folder listing
+/// carries (`FindFirstFile`/`FindNextFile` data: no file is opened). An entry whose name is not valid
+/// Unicode or whose metadata cannot be read is left out, so its row falls back to
+/// [`read_os_placeholder_state`]. An error listing `dir` itself is returned.
+pub fn list_dir_attributes(dir: &std::path::Path) -> std::io::Result<std::collections::HashMap<String, u32>> {
+    use std::os::windows::fs::MetadataExt;
+    let mut entries = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(entry) = entry else { continue };
+        let (Ok(name), Ok(meta)) = (entry.file_name().into_string(), entry.metadata()) else {
+            continue;
+        };
+        entries.insert(name, meta.file_attributes());
+    }
+    Ok(entries)
 }
 
 /// Resize the Cloud Files placeholder at `path` so its `FileSize` matches
@@ -756,8 +1071,10 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
 /// Date Modified. `CF_UPDATE_FLAG_MARK_IN_SYNC` re-anchors the placeholder to
 /// the corrected metadata so Windows does not treat the resize as a local
 /// edit needing re-upload. We pass `None` for the file identity (keep the
-/// existing UTF-8 `file_id` blob) and no dehydrate range (the whole file is
-/// already cloud-only after the failed fetch).
+/// existing UTF-8 `file_id` blob) and no dehydrate range. The failed fetch
+/// delivered nothing, but ranges an earlier fetch put on disk may stay (task
+/// 1640 review F1/F8), so the caller marks the file's local content mixed
+/// first (`StateDb::poison_local_content`).
 ///
 /// Best-effort: opens an exclusive, write CF handle via `CfOpenFileWithOplock`
 /// and always closes it before returning. A failure here leaves the
@@ -768,6 +1085,14 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
 /// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
 /// exit path.
 pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    // Task 1640: marked in sync only when it already was. A placeholder out of sync may hold
+    // local writes in ranges the failed fetch did not cover; marking it in sync would let the
+    // platform free them.
+    let flags = if placeholder_in_sync(path) == Some(true) {
+        CF_UPDATE_FLAG_MARK_IN_SYNC
+    } else {
+        CF_UPDATE_FLAG_NONE
+    };
     let path_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -807,12 +1132,13 @@ pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyho
             // None means "do not touch the identity".
             None,
             0,
-            // No dehydrate range: the file is fully cloud-only after the failed
-            // fetch, so there is no hydrated range to invalidate.
+            // No dehydrate range. The failed fetch delivered nothing, but ranges an
+            // earlier fetch put on disk may stay (task 1640 review F1/F8): the caller
+            // marks the file's local content mixed before this resize.
             None,
-            // MARK_IN_SYNC: the corrected metadata IS the latest truth, so don't
-            // let Windows read the resize as a local modification.
-            CF_UPDATE_FLAG_MARK_IN_SYNC,
+            // MARK_IN_SYNC (when it was in sync): the corrected metadata IS the latest
+            // truth, so don't let Windows read the resize as a local modification.
+            flags,
             None,
             None,
         );
@@ -869,4 +1195,163 @@ fn unix_to_filetime(modified_at: i64) -> i64 {
     unix_secs
         .saturating_add(FILETIME_UNIX_EPOCH_OFFSET_SECS)
         .saturating_mul(10_000_000)
+}
+
+/// Task 2191 (D2, D12): the platform's view of `path` for the unknown-content guard: how much
+/// is on disk, whether it reads in sync (whatever its modified size), and the file id its
+/// identity names. Opened as the reparse point with attribute access only ([`open_for_state`]),
+/// so nothing is fetched.
+pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformView {
+    use crate::unknown_check::{OnDisk, PlatformView};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
+    if std::fs::symlink_metadata(path).is_err() {
+        return PlatformView::Missing;
+    }
+    let Ok(file) = open_for_state(path) else {
+        return PlatformView::Unreadable;
+    };
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
+    // passed, so the call writes only inside it.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match read {
+        Ok(()) => {}
+        Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0) => return PlatformView::PlainFile,
+        Err(_) => return PlatformView::Unreadable,
+    }
+    // SAFETY: a successful CF_PLACEHOLDER_INFO_STANDARD call wrote that struct at the start, and
+    // its identity (at most 4 KiB, inside the buffer) right after it.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+    let identity = std::str::from_utf8(identity).ok().filter(|id| !id.is_empty()).map(str::to_string);
+    let on_disk = if info.OnDiskDataSize == 0 && info.ModifiedDataSize == 0 {
+        OnDisk::Nothing
+    } else if fully_on_disk(path) {
+        OnDisk::Wholly
+    } else {
+        OnDisk::Partly
+    };
+    PlatformView::Placeholder { on_disk, in_sync: info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC, identity }
+}
+
+/// Task 2191 (D2): mark `path` NOT in sync, so Explorer's "Free up space" and Storage Sense can't
+/// free it; a failure is returned for the tick's retry.
+///
+/// Desktop 0.8.15: through a handle with no data access (`WRITE_DAC` and attributes, as the
+/// reparse point) first. The guard marks files that hold bytes, a partly downloaded one
+/// included, and the 0.8.14 handle (`CfOpenFileWithOplock`, which opens for reading) asks for
+/// the whole file: the native probe in `callbacks.rs` counts one whole-file fetch after it on a
+/// cloud-only placeholder, and none after this mark, which leaves the file reading not in sync.
+/// Only when this handle can't be had (no `WRITE_DAC` on a file someone else owns) is the 0.8.14
+/// handle used.
+pub fn mark_not_in_sync_path(path: &std::path::Path) -> anyhow::Result<()> {
+    match mark_not_in_sync_without_data_access(path) {
+        Ok(()) => return Ok(()),
+        Err(e) => tracing::debug!(error = %e, "guard: no handle without data access; marking through an oplock handle"),
+    }
+    let path_wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `path_wide` is NUL-terminated and alive for the call; the handle is closed below.
+    let handle = unsafe { CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE) }?;
+    // SAFETY: `handle` is the open CF handle from above.
+    let result = unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) };
+    // SAFETY: closed exactly once.
+    unsafe { CfCloseHandle(handle) };
+    result?;
+    Ok(())
+}
+
+/// Desktop 0.8.15: [`mark_not_in_sync_path`] through a handle that cannot read data.
+fn mark_not_in_sync_without_data_access(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, WRITE_DAC,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0 | WRITE_DAC.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)?;
+    // SAFETY: `file` is open for the whole call.
+    unsafe { CfSetInSyncState(HANDLE(file.as_raw_handle()), CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) }?;
+    Ok(())
+}
+
+/// Task 2191 (D11): the byte ranges of `file` that are on this PC, `(offset, length)`, for a
+/// sign-out copy of a partly downloaded placeholder (nothing else can be read: the engine is
+/// stopped, so nothing is fetched).
+pub fn on_disk_ranges(file: &std::fs::File, size: u64) -> anyhow::Result<Vec<(u64, u64)>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
+    let mut out = Vec::new();
+    let mut buffer = vec![CF_FILE_RANGE::default(); 4096];
+    let end = i64::try_from(size).unwrap_or(i64::MAX);
+    let mut from = 0i64;
+    // Self-review: a file can have more ranges than one buffer holds; read on from the last one.
+    while from < end {
+        let mut returned = 0u32;
+        // SAFETY: `file` is open for the call; the buffer's byte length is passed.
+        let result = unsafe {
+            CfGetPlaceholderRangeInfo(
+                HANDLE(file.as_raw_handle()),
+                CF_PLACEHOLDER_RANGE_INFO_ONDISK,
+                from,
+                end - from,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * std::mem::size_of::<CF_FILE_RANGE>()) as u32,
+                Some(&mut returned),
+            )
+        };
+        let more = match result {
+            Ok(()) => false,
+            Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_MORE_DATA.0) => true,
+            Err(e) => return Err(e.into()),
+        };
+        let count = returned as usize / std::mem::size_of::<CF_FILE_RANGE>();
+        out.extend(buffer[..count].iter().map(|range| (range.StartingOffset.max(0) as u64, range.Length.max(0) as u64)));
+        match (more, buffer[..count].last()) {
+            (true, Some(last)) => from = last.StartingOffset + last.Length,
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Task 2191 (D11, self-review): whether `file` is a placeholder, and the file id its identity
+/// names, read through the handle sign-out holds.
+pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: `file` is open for the call; the buffer is 8-byte aligned and its length passed.
+    let read = unsafe {
+        CfGetPlaceholderInfo(
+            HANDLE(file.as_raw_handle()),
+            CF_PLACEHOLDER_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    if read.is_err() {
+        return (false, None);
+    }
+    // SAFETY: a successful call wrote the struct, and its identity inside the buffer.
+    let info = unsafe { &*buffer.as_ptr().cast::<CF_PLACEHOLDER_STANDARD_INFO>() };
+    let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) };
+    (true, std::str::from_utf8(identity).ok().filter(|id| !id.is_empty()).map(str::to_string))
+}
+
+/// Task 2191 (D11): [`handle_fully_on_disk`], for sign-out's held handle.
+pub fn held_fully_on_disk(file: &std::fs::File) -> bool {
+    handle_fully_on_disk(file)
 }
