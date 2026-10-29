@@ -500,6 +500,21 @@ const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modifi
             parent_id, item_kind
      FROM files WHERE path = ?1";
 
+/// A [`FILE_BY_PATH_SQL`] row as a [`FileEntry`], for every lookup that runs it.
+fn file_entry_from_path_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileEntry> {
+    Ok(FileEntry {
+        file_id: row.get(0)?,
+        path: row.get(1)?,
+        status: FileStatus::from_str(&row.get::<_, String>(2)?),
+        size_bytes: row.get(3)?,
+        modified_at: row.get(4)?,
+        content_hash: row.get(5)?,
+        remote_updated_at: row.get(6)?,
+        parent_id: row.get(7)?,
+        item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+    })
+}
+
 /// Task 2229: every column of the row at a path, for [`StateDb::file_row_stamp_by_path`]. The scan
 /// runs it for every file it skips, so it too goes through `idx_files_path`.
 const FILE_ROW_BY_PATH_SQL: &str = "SELECT * FROM files WHERE path = ?1";
@@ -3270,19 +3285,7 @@ impl StateDb {
         let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
         for candidate in [path.to_string(), toggled_slash(path)] {
             let entries = stmt
-                .query_map(params![candidate], |row| {
-                    Ok(FileEntry {
-                        file_id: row.get(0)?,
-                        path: row.get(1)?,
-                        status: FileStatus::from_str(&row.get::<_, String>(2)?),
-                        size_bytes: row.get(3)?,
-                        modified_at: row.get(4)?,
-                        content_hash: row.get(5)?,
-                        remote_updated_at: row.get(6)?,
-                        parent_id: row.get(7)?,
-                        item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
-                    })
-                })?
+                .query_map(params![candidate], file_entry_from_path_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             if !entries.is_empty() {
                 return Ok(entries);
@@ -3295,20 +3298,9 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare_cached(FILE_BY_PATH_SQL)?;
         let mut rows = stmt.query(params![path])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(FileEntry {
-                file_id: row.get(0)?,
-                path: row.get(1)?,
-                status: FileStatus::from_str(&row.get::<_, String>(2)?),
-                size_bytes: row.get(3)?,
-                modified_at: row.get(4)?,
-                content_hash: row.get(5)?,
-                remote_updated_at: row.get(6)?,
-                parent_id: row.get(7)?,
-                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
-            }))
-        } else {
-            Ok(None)
+        match rows.next()? {
+            Some(row) => Ok(Some(file_entry_from_path_row(row)?)),
+            None => Ok(None),
         }
     }
 
