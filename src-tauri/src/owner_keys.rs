@@ -32,6 +32,9 @@ struct Custody {
 struct Batch {
     rows: HashMap<String, Value>,
     custody: HashMap<String, Option<Custody>>,
+    /// Typed per-folder failures, so a batch asks once per folder whether its
+    /// custody is usable instead of once per row (review P3-4).
+    failures: HashMap<String, SharedFolderKeyError>,
     inventory: HashMap<String, HashMap<String, Value>>,
     invites: Option<Vec<Value>>,
 }
@@ -59,6 +62,11 @@ pub(crate) enum SharedFolderKeyError {
     /// The folder still has legacy key rows and its owner must upgrade it
     /// before custody can exist (task 2258, L11).
     UpgradeRequired,
+    /// There is no custody key here: either the invite copy was only proven as
+    /// a legacy key (read-only for one batch, L11), or the deployment's
+    /// shared-folders feature gate answered that custody is unavailable
+    /// (review P2-1/P2-2). Never a reason to write a key.
+    NoCustody,
 }
 
 impl std::fmt::Display for SharedFolderKeyError {
@@ -68,6 +76,7 @@ impl std::fmt::Display for SharedFolderKeyError {
             Self::UpgradeRequired => {
                 f.write_str("The owner must upgrade this folder before its keys can be used here.")
             }
+            Self::NoCustody => f.write_str("This folder has no custody key here."),
         }
     }
 }
@@ -173,6 +182,9 @@ impl Batch {
         if self.custody.contains_key(id) {
             return Ok(());
         }
+        if let Some(error) = self.failures.get(id) {
+            return Err(anyhow::Error::new(*error));
+        }
         scope.check()?;
         let response = scope.api.get_shared_folder(id).await;
         scope.check()?;
@@ -199,7 +211,15 @@ impl Batch {
                     self.custody.insert(id.to_string(), None);
                     return Ok(());
                 }
-                self.invite_owner_key(scope, &master, id).await?
+                match self.invite_owner_key(scope, &master, id).await {
+                    Ok(custody) => custody,
+                    Err(error) => {
+                        if let Some(typed) = error.downcast_ref::<SharedFolderKeyError>() {
+                            self.failures.insert(id.to_string(), *typed);
+                        }
+                        return Err(error);
+                    }
+                }
             }
             Err(error) => return Err(error),
         };
@@ -255,6 +275,9 @@ impl Batch {
                 .unwrap_or_default()
                 .cmp(a["created_at"].as_str().unwrap_or_default())
         });
+        // Review P3-6: every approved purpose-bound copy is tried before any
+        // legacy copy. A newer legacy invite must not beat an older
+        // purpose-bound one.
         for invite in &approved {
             let Some(copy) = normalize_wrap(&invite["encrypted_owner_folder_key"]).ok().flatten() else {
                 continue;
@@ -262,10 +285,24 @@ impl Batch {
             if let Some(key) = invite_owner_copy(master, id, &copy) {
                 return self.register_custody(scope, master, id, key).await;
             }
+        }
+        for invite in &approved {
+            let Some(copy) = normalize_wrap(&invite["encrypted_owner_folder_key"]).ok().flatten() else {
+                continue;
+            };
             let Some(invite_id) = invite["id"].as_str() else {
                 continue;
             };
-            let rows = self.invite_rows(scope, invite_id).await?;
+            // Review P3-5: one invite's rows can be gone (for example a race
+            // made it unapproved between the two reads). Skip it and let
+            // another approved invite try to prove the folder key.
+            let rows = match self.invite_rows(scope, invite_id).await {
+                Ok(rows) => rows,
+                Err(_) => {
+                    scope.check()?;
+                    continue;
+                }
+            };
             if let Some(key) = beebeeb_core::kdf::open_legacy_invite_owner_copy(
                 master,
                 id.as_bytes(),
@@ -321,6 +358,13 @@ impl Batch {
             Ok(_) => {}
             Err(error) if crate::api_client::upgrade_required(&error) => {
                 return Err(anyhow::Error::new(SharedFolderKeyError::UpgradeRequired));
+            }
+            // Review P2-2: with the feature gate off, web main still writes
+            // purpose-bound owner copies but this deployment cannot hold
+            // custody. That is a typed "no custody here", swallowed for the
+            // row like `UpgradeRequired`; never a legacy write or a retry.
+            Err(error) if crate::api_client::custody_unavailable(&error) => {
+                return Err(anyhow::Error::new(SharedFolderKeyError::NoCustody));
             }
             // Another client registered a newer wrap first; re-read below.
             Err(error) if error.to_string().contains("key_version_conflict") => {}
@@ -575,9 +619,17 @@ impl crate::engine_bridge::EngineBridge {
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {
                         record.shared_root_id = Some(root.clone());
-                        record.folder_key_version = batch.custody[&root].as_ref().and_then(|c| c.version);
-                        record.folder_wrap = batch.child_wrap(&scope, &root, id).await?;
-                        if let Some(custody) = batch.custody[&root].as_ref() {
+                        // Review P2-1: a legacy-proven key (`remember == false`)
+                        // is not custody — the server may have chosen it
+                        // (core Attack B). It never resolves an L7 child wrap
+                        // and never pins an L8 envelope; in the honest case a
+                        // no-custody folder holds only legacy rows.
+                        let durable = batch.custody[&root].as_ref().is_some_and(|c| c.remember);
+                        if durable {
+                            record.folder_key_version = batch.custody[&root].as_ref().and_then(|c| c.version);
+                            record.folder_wrap = batch.child_wrap(&scope, &root, id).await?;
+                        }
+                        if let Some(custody) = batch.custody[&root].as_ref().filter(|c| c.remember) {
                             let wrap = record.folder_wrap.as_deref().map(|wrapped_key| FolderWrap {
                                 shared_folder_id: &root,
                                 kind: if folder(&row) { 2 } else { 1 },
@@ -683,14 +735,18 @@ impl crate::engine_bridge::EngineBridge {
         let scope = self.owner_key_scope();
         let mut batch = Batch::default();
         batch.custody(&scope, id).await?;
-        Ok(Arc::new(
-            batch
-                .custody
-                .remove(id)
-                .flatten()
-                .ok_or_else(|| anyhow::anyhow!("folder custody unavailable"))?
-                .key,
-        ))
+        let custody = batch
+            .custody
+            .remove(id)
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("folder custody unavailable"))?;
+        // Review P2-1: a legacy-proven key is readable for one batch only. It
+        // is not custody, so the shared-index repair must never seal names
+        // under it.
+        if !custody.remember {
+            return Err(anyhow::Error::new(SharedFolderKeyError::NoCustody));
+        }
+        Ok(Arc::new(custody.key))
     }
 
     pub async fn shared_folder_activity(&self, id: &str) -> anyhow::Result<Vec<Value>> {

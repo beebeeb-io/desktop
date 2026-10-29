@@ -516,6 +516,17 @@ pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
     error.downcast_ref::<UpgradeRequired>().is_some()
 }
 
+/// Whether a custody write was refused because this deployment has no custody:
+/// the shared-folders feature gate answers `501 {"error":"shared_folders_v1"}`
+/// (server `feature_gate::require_shared_folders_enabled`) and a mount without
+/// the route answers 405. That is a state, not a failed write to retry.
+pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
+    matches!(crate::engine_bridge::error_http_status(error), Some(405 | 501))
+        || ["HTTP 405 ", "HTTP 501 "]
+            .iter()
+            .any(|prefix| error.to_string().starts_with(prefix))
+}
+
 pub struct ApiClient {
     // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
     // strong count (which reaches zero before its destructor runs).
