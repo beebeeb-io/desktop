@@ -192,7 +192,6 @@ async fn rv173_deleted_before_sparse_update_does_not_pin_cursor() {
     assert!(reopened.get_file(ID).unwrap().is_none());
 }
 
-#[test]
 /// L7d (review 2279 F2): the custody memory belongs to the device. A sign-out,
 /// an R10 reset or an account switch keeps it, so a server 404 after the next
 /// sign-in still refuses instead of falling back to the legacy reader.
@@ -252,8 +251,7 @@ fn rv173_l7d_custody_memory_survives_sign_out_and_account_switch() {
         LEGACY_CHILD_READS.with(|n| n.set(0));
         let error = runtime()
             .block_on(bridge.shared_folder_material(&root))
-            .err()
-            .expect("a seen-custody 404 after sign-out must refuse");
+            .expect_err("a seen-custody 404 after sign-out must refuse");
         assert_eq!(
             error.to_string(),
             "This folder's keys are unavailable",

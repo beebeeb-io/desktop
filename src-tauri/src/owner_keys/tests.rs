@@ -1760,7 +1760,7 @@ fn sf2279_prepare_owned_rows_revives_a_deferred_root() {
     );
     // The owner upgrades the folder; its rows do not change.
     *available.lock().unwrap() = true;
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).unwrap();
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].readable, "the walk opens the row: {seen:?}");
     assert_eq!(
