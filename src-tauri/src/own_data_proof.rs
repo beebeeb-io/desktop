@@ -1335,7 +1335,13 @@ mod tests {
         let outcome = prove(&pc, &session(), MINE, &Server::new(tree));
 
         assert!(matches!(outcome, Outcome::Adopted(t) if t.proven_changes == 3 && t.held_for_review == 0), "{outcome:?}");
-        assert_eq!(due(&pc).len(), 3);
+        let mut due = due(&pc);
+        due.sort();
+        #[cfg(target_os = "macos")]
+        assert_eq!(due, ["held-1", "op-file", "op-sub"]);
+        // Tasks 1888, 2226 (spec D7): released, the new file still waits for its folder's create to land.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(due, ["held-1", "op-sub"]);
     }
 
     /// 128 of the 2,979 nested rows made on the maintainer's PC have no parent link, only their path. A new file whose
