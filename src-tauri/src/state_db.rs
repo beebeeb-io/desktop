@@ -6361,20 +6361,46 @@ impl StateDb {
     }
 
     /// Task 2267 (lead review round 3, P2-2): every change held as `found_while_paused`, by kind, for the card,
-    /// oldest first.
+    /// oldest first. A change is in a shared folder when its row, or any folder up the parent links from its row or
+    /// from the folder it acts in, is not a My Files row (self-review of round 3, F8: not only the direct parent).
     #[cfg(any(target_os = "windows", test))]
     pub fn found_while_paused_changes(&self) -> Result<Vec<HeldChange>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut rows: std::collections::HashMap<String, (Option<String>, bool)> = std::collections::HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT file_id, NULLIF(parent_id, ''), namespace != 'my_files' FROM files")?;
+            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?))))? {
+                let (id, row) = row?;
+                rows.insert(id, row);
+            }
+        }
+        let shared = |anchor: Option<String>| {
+            let mut seen = std::collections::HashSet::new();
+            let mut id = anchor;
+            while let Some(current) = id.filter(|current| seen.insert(current.clone())) {
+                match rows.get(&current) {
+                    Some((_, true)) => return true,
+                    Some((parent, false)) => id = parent.clone(),
+                    None => return false,
+                }
+            }
+            false
+        };
         let mut stmt = conn.prepare(&format!(
-            "SELECT o.op_id, o.kind, {CREATE_OP_SQL},
-                    EXISTS (SELECT 1 FROM files f WHERE f.namespace != 'my_files' AND f.file_id IN (o.file_id, o.parent_id))
+            "SELECT o.op_id, o.kind, {CREATE_OP_SQL}, NULLIF(o.file_id, ''), NULLIF(o.parent_id, '')
              FROM operation_queue o WHERE o.paused_reason = ?1
              ORDER BY o.created_at ASC, o.rowid ASC"
         ))?;
-        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
-            Ok(HeldChange { op_id: row.get(0)?, kind: row.get(1)?, creates: row.get(2)?, shared: row.get(3)? })
+        let changes = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
+            let (file_id, parent_id): (Option<String>, Option<String>) = (row.get(3)?, row.get(4)?);
+            Ok(HeldChange {
+                op_id: row.get(0)?,
+                kind: row.get(1)?,
+                creates: row.get(2)?,
+                shared: shared(file_id) || shared(parent_id),
+            })
         })?;
-        rows.collect()
+        changes.collect()
     }
 
     /// Task 2267, "Upload to my Beebeeb": the changes in `op_ids` still held as `found_while_paused` are due again at

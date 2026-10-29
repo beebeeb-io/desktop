@@ -122,6 +122,28 @@ describe('when it shows', () => {
     expect(card.buttons().every((button) => button.props.disabled === false)).toBe(true)
   })
 
+  test('a slow read lands although the panel polls meanwhile, and is not asked again while it runs', async () => {
+    // Self-review of round 3, F6: each poll's new summary dropped the read in flight and asked again, so a read slower
+    // than the poll (the session-transition lock held) never landed and the choices waited for ever.
+    let answer: (value: unknown) => void = () => undefined
+    let reads = 0
+    const card = open(3, {
+      found_while_paused_review: () => {
+        reads += 1
+        return new Promise((resolve) => { answer = resolve })
+      },
+    })
+    await card.m.flush()
+    card.props.summary = summaryHolding(3)
+    card.m.render()
+    await card.m.flush()
+    expect(reads).toBe(1)
+    answer(reviewOf(3))
+    await card.m.flush()
+    expect(card.text()).toContain('Waiting for your decision: 3 new files.')
+    expect(card.buttons().every((button) => button.props.disabled === false)).toBe(true)
+  })
+
   test('nothing is focused for the person: no element takes the focus on its own', async () => {
     const card = open(3)
     await card.m.flush()
@@ -204,7 +226,8 @@ describe('Keep on this PC only', () => {
     await card.m.click(COPY.keep)
     await card.m.click(COPY.move)
     expect(commandsSent(card.m).slice(0, 2)).toEqual(['found_while_paused_review', 'found_while_paused_keep'])
-    expect(card.m.calls[1].args).toEqual({})
+    // Self-review of round 3, F7: like Upload, Keep acts on exactly the changes the card counted.
+    expect(card.m.calls[1].args).toEqual({ opIds: ['op-1', 'op-2', 'op-3'] })
     expect(card.refreshes.length).toBe(1)
 
     // The poll now reads no held group: the result stays.

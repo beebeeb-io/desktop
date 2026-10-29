@@ -7830,21 +7830,25 @@ async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<Strin
 }
 
 /// Task 2267 (fix round 2), Settings › Sync, "Keep on this PC only" (lead ruling (a)): every item made on this PC that
-/// a held change acts on moves next to the Beebeeb folder and is forgotten (`found_while_paused::keep`). Only on the
+/// a held change the card showed (`op_ids`, self-review of round 3, F7) acts on moves next to the Beebeeb folder and is
+/// forgotten (`found_while_paused::keep`). Only on the
 /// signed-in account's own data, and under the session-transition lock. Counts only in the log.
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn found_while_paused_keep(state: State<'_, AppState>) -> Result<found_while_paused::KeepResult, String> {
+async fn found_while_paused_keep(
+    state: State<'_, AppState>,
+    op_ids: Vec<String>,
+) -> Result<found_while_paused::KeepResult, String> {
     let _transition = SESSION_TRANSITION.lock().await;
     let identity = decision_identity(&state)?;
     let kept = tokio::task::spawn_blocking(move || -> Result<found_while_paused::KeepResult, String> {
         let (db, sync_root) = own_local_data_for_decision(&identity)?;
-        let mut kept =
-            found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)
-                .map_err(|error| {
-                    tracing::warn!(%error, "found while paused: the keep stopped");
-                    FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
-                })?;
+        let today = found_while_paused::today();
+        let mut kept = found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)
+            .map_err(|error| {
+                tracing::warn!(%error, "found while paused: the keep stopped");
+                FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
+            })?;
         kept.synced_by = kept_folder_synced_by(&sync_root);
         Ok(kept)
     })
@@ -26307,12 +26311,13 @@ mod account_binding_tests {
                 ][..],
             ),
             (
-                "async fn found_while_paused_keep(state: State<'_, AppState>) -> Result<found_while_paused::KeepResult, String> {",
+                // Self-review of round 3, F7: only the changes the card showed.
+                "async fn found_while_paused_keep(\n    state: State<'_, AppState>,\n    op_ids: Vec<String>,\n) -> Result<found_while_paused::KeepResult, String> {",
                 &[
                     "let _transition = SESSION_TRANSITION.lock().await;",
                     "let identity = decision_identity(&state)?;",
                     "own_local_data_for_decision(&identity)?",
-                    "found_while_paused::keep(&db, &sync_root, &found_while_paused::today(), &found_while_paused::rename_no_replace)",
+                    "found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)",
                     "kept.synced_by = kept_folder_synced_by(&sync_root);",
                 ][..],
             ),
@@ -26412,7 +26417,9 @@ mod account_binding_tests {
                 panic!("the process ends here");
             };
             let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::found_while_paused::keep(&local.data.db, &root, "2026-10-28", &crash_after_moving)
+                let held: Vec<String> =
+                    local.data.db.found_while_paused_ops().unwrap().into_iter().map(|op| op.op_id).collect();
+                crate::found_while_paused::keep(&local.data.db, &root, "2026-10-28", &crash_after_moving, &held)
             }));
             assert!(
                 crashed.is_err() && local.data.db.keep_journal().unwrap().is_some(),

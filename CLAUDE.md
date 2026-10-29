@@ -351,8 +351,9 @@ all, needs one anchor tied to an own row by real parent links, never by a twin o
 (also not on the walk up from a row gone from the tree). Held changes are never sent and
 never deleted until the person decides in Settings › Sync. The card shows them by kind
 (`found_while_paused_review`: new folders, new files, edits, deletions, changes in folders shared with you)
-and "Upload to my Beebeeb" releases exactly the ids it showed, never a change held after that read; "Keep on
-this PC only" (`found_while_paused.rs`) MOVES the items made on this PC out of the sync root into
+(a change anywhere inside a shared folder counts there), and both choices act on exactly the ids it showed,
+never a change held after that read: "Upload to my Beebeeb" releases them; "Keep on this PC only"
+(`found_while_paused.rs`) MOVES the items made on this PC they act on out of the sync root into
 `Beebeeb - kept on this PC\YYYY-MM-DD` next to it (same volume, rename only, never over a name, journaled
 so a crash is settled at the next engine start) and forgets their rows. It removes only the staged copies
 the journal names; one whose live file is gone is copied into the dated folder first, before the rows are

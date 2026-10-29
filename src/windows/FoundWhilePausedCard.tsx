@@ -6,8 +6,9 @@
  * sentence. No command takes a path: the backend knows which items and which folder.
  *
  * Lead review round 3 of #176: the card reads what is held, by kind (`found_while_paused_review`), and both choices
- * wait for that read; Upload sends back exactly the ids it counted (P2-2, P3-1). Nothing takes the focus on its own.
- * A read is made when the held count needs one, at most once per summary the panel polls.
+ * wait for that read; Upload and Keep send back exactly the ids it counted (P2-2, P3-1; self-review F7). Nothing takes
+ * the focus on its own. A read is made when the held count needs one, at most once per summary the panel polls, and
+ * never while one is in flight: a poll does not drop a read that is slower than it (self-review F6).
  *
  * Mounted always by the Sync panel and draws nothing while there is nothing to show, so a keep result survives the
  * poll that no longer reports the group (it stays until dismissed or the panel unmounts).
@@ -63,6 +64,15 @@ export function FoundWhilePausedCard({
   const [reviewError, setReviewError] = useState<string | null>(null)
   // The summary the last read was made for: one read per poll at most, however the counts compare.
   const readFor = useRef<SyncActivitySummary | null | undefined>(undefined)
+  // A read in flight is never asked again; its answer counts unless the card was reset or decided since (`epoch`).
+  const reading = useRef(false)
+  const epoch = useRef(0)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   const count = foundWhilePausedCount(summary)
   const visible = foundWhilePausedCardVisible(summary, { busy: busy !== null, kept })
@@ -76,14 +86,17 @@ export function FoundWhilePausedCard({
     setReview(null)
     setReviewError(null)
     readFor.current = undefined
+    epoch.current += 1
   }, [visible])
 
   useEffect(() => {
-    if (!needsReview || busy !== null || readFor.current === summary) return
+    if (!needsReview || busy !== null || reading.current || readFor.current === summary) return
     readFor.current = summary
-    let live = true
+    reading.current = true
+    const asked = epoch.current
     void foundWhilePausedReview().then((result) => {
-      if (!live) return
+      reading.current = false
+      if (!mounted.current || asked !== epoch.current) return
       if (result.ok) {
         setReview(result.value)
         setReviewError(null)
@@ -92,13 +105,13 @@ export function FoundWhilePausedCard({
         setReviewError(result.unsupported ? commandUnavailableLabel('found_while_paused_review') : result.reason)
       }
     })
-    return () => { live = false }
   }, [needsReview, summary, busy])
 
-  // After a decision what is held has changed: read it again.
+  // After a decision what is held has changed: read it again (a read still in flight no longer counts).
   const readAgain = () => {
     setReview(null)
     readFor.current = undefined
+    epoch.current += 1
   }
 
   const upload = async () => {
@@ -113,10 +126,10 @@ export function FoundWhilePausedCard({
   }
 
   const keep = async () => {
-    if (busy) return
+    if (busy || !review) return
     setBusy('keep')
     setError(null)
-    const result = await foundWhilePausedKeep()
+    const result = await foundWhilePausedKeep(review.op_ids)
     if (result.ok) setKept(result.value)
     else setError({ text: result.unsupported ? commandUnavailableLabel('found_while_paused_keep') : result.reason, at: 'decision' })
     setConfirming(false)

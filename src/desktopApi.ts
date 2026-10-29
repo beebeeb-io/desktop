@@ -546,12 +546,12 @@ export function foundWhilePausedUpload(opIds: string[]): Promise<CommandResult<F
 }
 
 /**
- * "Keep on this PC only": move each held local-only item out of the sync folder into
- * `<parent of the sync folder>\Beebeeb - kept on this PC\YYYY-MM-DD\` and stop tracking it. An answer outside the
+ * "Keep on this PC only", for the held changes the card showed (`opIds`): move each local-only item they act on out of
+ * the sync folder into `<parent of the sync folder>\Beebeeb - kept on this PC\YYYY-MM-DD\` and stop tracking it. An answer outside the
  * contract's shape is a failure, never a made-up count.
  */
-export async function foundWhilePausedKeep(): Promise<CommandResult<KeepResult>> {
-  const result = await command<unknown>('found_while_paused_keep')
+export async function foundWhilePausedKeep(opIds: string[]): Promise<CommandResult<KeepResult>> {
+  const result = await command<unknown>('found_while_paused_keep', { opIds })
   if (!result.ok) return result
   const kept = parseKeepResult(result.value)
   return kept ? { ok: true, value: kept } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
