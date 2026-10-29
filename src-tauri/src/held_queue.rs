@@ -406,6 +406,7 @@ pub fn plan(
         &busy,
         &by_path.unresolved,
         |row| effective_parent(row, &by_path, &fate),
+        |op| sent_to(op, &by_path, &fate),
         opts,
         &mut counts,
     );
@@ -587,6 +588,16 @@ fn effective_parent<'a>(row: &'a Row, by_path: &ByPath<'a>, fate: &HashMap<&str,
     }
 }
 
+/// The folder an op is sent under (task 2271): its parent once D6 applied, or that parent's twin when the plan remaps
+/// it. A create's row may name no parent while the op names one; the server places the file by the op's.
+fn sent_to<'a>(op: &'a Op, by_path: &ByPath<'a>, fate: &HashMap<&str, Fate<'a>>) -> Option<&'a str> {
+    let parent = by_path.of_op(op);
+    match parent.and_then(|p| fate.get(p)) {
+        Some(Fate::Remapped(twin)) => Some(twin),
+        _ => parent,
+    }
+}
+
 /// What D10 decided.
 struct FileTwins<'a> {
     holds: Vec<Unit>,
@@ -608,6 +619,7 @@ fn file_twins<'a>(
     busy: &HashSet<&str>,
     unresolved: &HashSet<&str>,
     parent_of: impl Fn(&'a Row) -> Option<&'a str>,
+    sent_to: impl Fn(&'a Op) -> Option<&'a str>,
     opts: &Options,
     counts: &mut Counts,
 ) -> FileTwins<'a> {
@@ -627,7 +639,11 @@ fn file_twins<'a>(
             by_parent
         });
         let same_name = |f: &&Row| f.file_id != row.file_id && same_leaf(leaf(&f.path), leaf(&row.path), ci);
-        let twin = server_files.get(&parent_of(row)).is_some_and(|files| files.iter().any(same_name));
+        let twin_under = |parent: Option<&str>| server_files.get(&parent).is_some_and(|files| files.iter().any(same_name));
+        // Under the folder the create is sent to; and under the row's own parent when it names another one. A row that
+        // names no parent names no folder: it is never matched at the top level.
+        let (sent, named) = (sent_to(op), parent_of(row));
+        let twin = twin_under(sent) || (named.is_some() && named != sent && twin_under(named));
         let held = op.paused_reason.as_deref() == Some(NEEDS_REVIEW);
         if twin {
             counts.file_twin += 1;
@@ -1311,6 +1327,51 @@ mod tests {
         let (units, counts) = run(&rows, &ops);
         assert_eq!(units, vec![remap("g", "t", "op-g", &[]), hold("op-n")]);
         assert_eq!(counts, Counts { remapped: 1, file_twin: 1, ..Counts::default() });
+    }
+
+    /// Task 2271, the shape on the maintainer's PC (128 of 145 held new files): the file's row names no parent, its
+    /// create names the ghost. The create is sent under the ghost's twin, so D10 must look there: the twin's file of the
+    /// same name makes it a file twin, held, never sent as a second file of that name.
+    #[test]
+    fn a_new_file_whose_row_names_no_parent_is_judged_under_the_folder_its_create_is_sent_to() {
+        let rows = [
+            folder("a", None, "A", true),
+            folder("t", Some("a"), "A/Photos", true),
+            folder("g", Some("a"), "A/Photos", false),
+            file("s", Some("t"), "A/Photos/1.jpg", true, 1),
+            file("n", None, "A/Photos/1.jpg", false, 0),
+        ];
+        let ops = [create_folder("op-g", "g", Some("a")), paused(upload("op-n", "n", Some("g")), "auth")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![remap("g", "t", "op-g", &[]), hold("op-n")]);
+        assert_eq!(counts, Counts { remapped: 1, file_twin: 1, ..Counts::default() });
+    }
+
+    /// Task 2271: a row that names no parent names no folder, so a top-level server file of the same leaf is no twin;
+    /// a row that names another folder than its create is checked there too, and a twin under either holds it.
+    #[test]
+    fn a_row_parent_counts_only_when_it_names_a_folder() {
+        let rows = [
+            folder("t", None, "Photos", true),
+            folder("g", None, "Photos", false),
+            file("top", None, "1.jpg", true, 1),
+            file("n", None, "Photos/1.jpg", false, 0),
+        ];
+        let ops = [create_folder("op-g", "g", None), paused(upload("op-n", "n", Some("g")), "auth")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![remap("g", "t", "op-g", &[])], "the top-level 1.jpg is not in the folder it is sent to");
+        assert_eq!(counts, Counts { remapped: 1, ..Counts::default() });
+
+        let rows = [
+            folder("p", None, "Docs", true),
+            folder("q", None, "Other", true),
+            file("s", Some("q"), "Other/a.txt", true, 2),
+            file("n", Some("q"), "Docs/a.txt", false, 0),
+        ];
+        let ops = [paused(upload("op-n", "n", Some("p")), "auth")];
+        let (units, counts) = run(&rows, &ops);
+        assert_eq!(units, vec![hold("op-n")], "the row's own folder holds a file of that name");
+        assert_eq!(counts, Counts { file_twin: 1, ..Counts::default() });
     }
 
     /// D10: only a server FILE that no op names is a twin. A server file with a pending change is in flux (the person
