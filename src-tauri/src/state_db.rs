@@ -3372,8 +3372,9 @@ impl StateDb {
     }
 
     /// The runner deletes rows only inside a transaction (`delete_file_conn`, the landing);
-    /// tests set up states with this.
-    #[cfg(test)]
+    /// tests set up states with this. Task 2274: the duplicates repair tool forgets B's row with it,
+    /// with the app stopped (spec D1, D2; the engine tests T2/T3 run this same function).
+    #[cfg(any(test, feature = "duplicate-repair"))]
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         delete_file_conn(&conn, file_id)
