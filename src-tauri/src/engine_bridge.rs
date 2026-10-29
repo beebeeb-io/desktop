@@ -3578,9 +3578,16 @@ impl EngineBridge {
             tracing::debug!(rel_path = %rel, "classify_local_path: the path a pending rename vacated; skipped this pass");
             return LocalPathVerdict::Skip;
         }
-        match self.db.get_file_by_path(&rel) {
-            Ok(Some(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
-            Ok(None) => { /* not tracked — filter 2, then new */ }
+        match self.row_judging_bytes_at(&rel, path) {
+            Ok(RowAtPath::One(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
+            Ok(RowAtPath::Ambiguous) => {
+                tracing::warn!(
+                    rel_path = %rel,
+                    "sync folder: several synced files share this path and its bytes are none of them; kept on this PC, not sent"
+                );
+                return LocalPathVerdict::Settled;
+            }
+            Ok(RowAtPath::None) => { /* not tracked — filter 2, then new */ }
             Err(e) => {
                 tracing::warn!(
                     path = %path.display(),
@@ -3647,6 +3654,51 @@ impl EngineBridge {
     /// transfer or in conflict, agreed bytes, an upload already queued, no agreed content
     /// recorded, or an edit whose base is not known (never sent without one: it would replace
     /// the server's version unseen).
+    /// Task 2271: the row the scan judges the bytes at `rel` by. Normally the one row there. When
+    /// several share the path (0.8.18's reconcile pass left the server's file of that name and the
+    /// copy this PC sent at one path), the row that records content this PC agreed on decides: the
+    /// only such row, or the one whose agreed content the bytes are. With no such row it is the
+    /// path's first, as before. With several and bytes that are none of them, no row is guessed.
+    fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> anyhow::Result<RowAtPath> {
+        let mut rows = self.db.file_rows_at_path(rel)?;
+        if rows.len() < 2 {
+            return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
+        }
+        let mut recorded = Vec::new();
+        for (at, row) in rows.iter().enumerate() {
+            if row.is_dir() {
+                continue;
+            }
+            let agreed = match self.db.get_file_contract_state(&row.file_id)?.and_then(|c| c.local_hash) {
+                Some(hash) => Some(Some(hash)),
+                None => self.db.fetched_content(&row.file_id)?.map(|(_, hash)| hash),
+            };
+            if let Some(agreed) = agreed {
+                recorded.push((at, agreed));
+            }
+        }
+        let at = match recorded[..] {
+            [] => 0,
+            [(at, _)] => at,
+            _ => {
+                let mut matching = Vec::new();
+                for (at, agreed) in &recorded {
+                    // A mixed fetch (no single version) is never agreed.
+                    if let Some(agreed) = agreed
+                        && cached_sha256_file_hex(&rows[*at].file_id, path)? == *agreed
+                    {
+                        matching.push(*at);
+                    }
+                }
+                match matching[..] {
+                    [at] => at,
+                    _ => return Ok(RowAtPath::Ambiguous),
+                }
+            }
+        };
+        Ok(RowAtPath::One(rows.swap_remove(at)))
+    }
+
     fn classify_tracked_edit(
         &self,
         path: &Path,
@@ -5862,6 +5914,14 @@ fn place_holds_bytes(path: &Path) -> bool {
     {
         std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
     }
+}
+
+/// Task 2271: what [`EngineBridge::row_judging_bytes_at`] found at a path.
+enum RowAtPath {
+    None,
+    One(FileEntry),
+    /// Several rows record content this PC agreed on, and the bytes are none of them.
+    Ambiguous,
 }
 
 pub(crate) fn sync_folder_content(
@@ -26712,6 +26772,69 @@ mod tests {
             "a second close or scan queues nothing more while the upload is queued"
         );
         assert_eq!(bridge.db.list_operations_for_file(file).unwrap().len(), 1);
+        drop(server.finish());
+    }
+
+    /// Task 2271: two rows at one path, as the 0.8.18 reconcile pass left 89 on the maintainer's PC. The first is the
+    /// server's own file of that name (no content recorded on this PC), the second the copy this PC sent (its content
+    /// agreed at version 1). The scan judges the bytes by the row that records them: unchanged bytes queue nothing,
+    /// and an edit is queued on that row, never settled as "Up to date" because the other row has nothing to compare.
+    #[tokio::test]
+    async fn regression_2271_a_path_with_two_rows_is_judged_by_the_row_that_records_its_content() {
+        let master_key = [227u8; 32];
+        let server_twin = "22710000-0000-4000-8000-000000000001";
+        let file = "22710000-0000-4000-8000-000000000002";
+        let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+        seed_uploaded_db_row(&bridge, server_twin);
+        seed_uploaded_row(&bridge, &server, file);
+        {
+            let mut s = server.state.lock().unwrap();
+            s.files.get_mut(file).unwrap().versions[0] = vec![regression_1640_chunk(master_key, file, b"version one")];
+            s.serve_downloads = true;
+        }
+        let local = sync_root.join("notes.txt");
+        bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();
+        assert_eq!(
+            bridge.db.get_file_by_path("notes.txt").unwrap().unwrap().file_id,
+            server_twin,
+            "precondition: the path's first row is the server's file, which records no content here"
+        );
+
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "agreed bytes");
+        assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
+
+        std::fs::write(&local, b"edited in the sync folder").unwrap();
+        assert!(crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "the edit is queued");
+        let ops = bridge.db.list_operations_for_file(file).unwrap();
+        assert_eq!(ops.len(), 1, "one upload, on the row that records the content");
+        assert_eq!((ops[0].kind.clone(), ops[0].base_version), (OperationKind::UploadVersion, Some(1)));
+        assert!(bridge.db.list_operations_for_file(server_twin).unwrap().is_empty(), "nothing on the server's file");
+        drop(server.finish());
+    }
+
+    /// Task 2271: several rows at one path that each record content: the bytes pick the row they agree with, and bytes
+    /// that agree with none are never sent, neither as an edit of a guessed row nor as a new file.
+    #[tokio::test]
+    async fn regression_2271_several_rows_with_content_at_one_path_are_never_guessed() {
+        let (_dir, sync_root, server, bridge) = rule3_setup([228u8; 32]);
+        let (a, b) = ("22710000-0000-4000-8000-000000000003", "22710000-0000-4000-8000-000000000004");
+        for (id, bytes) in [(a, b"copy a".as_slice()), (b, b"copy b".as_slice())] {
+            seed_uploaded_db_row(&bridge, id);
+            let mut contract = bridge.db.get_file_contract_state(id).unwrap().unwrap();
+            contract.local_hash = Some(sha256_hex(bytes));
+            contract.local_base_version = 1;
+            bridge.db.set_file_contract_state(&contract).unwrap();
+        }
+        let queued = || -> i64 {
+            bridge.db.hold_lock_for_test().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap()
+        };
+        let local = sync_root.join("notes.txt");
+        std::fs::write(&local, b"copy b").unwrap();
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "the bytes are b's");
+        assert_eq!(queued(), 0);
+        std::fs::write(&local, b"edited, agrees with neither").unwrap();
+        assert!(!crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "scan"), "no row is guessed");
+        assert_eq!(queued(), 0, "nothing sent: no edit of a guessed row, no new file");
         drop(server.finish());
     }
 
