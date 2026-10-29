@@ -45,6 +45,10 @@ struct World {
     writes: usize,
     shards: BTreeMap<(u32, u32), (i64, Vec<u8>)>,
     activity: Vec<Value>,
+    /// The shared-folders feature gate is off: the custody GET answers 404 and
+    /// the custody PUT 501 `shared_folders_v1` (server `feature_gate.rs`).
+    custody_flag_off: bool,
+    invite_owner_copy: Option<String>,
 }
 impl World {
     fn new(nested: bool) -> Self {
@@ -83,6 +87,8 @@ impl World {
             writes: 0,
             shards: BTreeMap::new(),
             activity: Vec::new(),
+            custody_flag_off: false,
+            invite_owner_copy: None,
         }
     }
     fn fixture(world: Arc<Mutex<Self>>) -> Fixture {
@@ -103,7 +109,25 @@ impl World {
             return json_reply(200, json!({"ops":self.ops,"since":self.seq,"head_seq":self.seq}));
         }
         if path == "/api/v1/shares/invites/sent" {
-            return json_reply(200, json!({"invites":[]}));
+            let invites = self
+                .invite_owner_copy
+                .as_ref()
+                .map(|copy| {
+                    vec![json!({"id":"inv-flag-off","file_id":ROOT,"is_folder_share":true,
+                                "status":"approved","created_at":"2026-10-28T00:00:00Z",
+                                "encrypted_owner_folder_key":copy})]
+                })
+                .unwrap_or_default();
+            return json_reply(200, json!({"invites":invites}));
+        }
+        if path == format!("/api/v1/shared-folders/{ROOT}") && self.custody_flag_off {
+            return json_reply(404, json!({}));
+        }
+        if path == format!("/api/v1/shared-folders/{ROOT}/key") && method == "PUT" && self.custody_flag_off {
+            return json_reply(
+                501,
+                json!({"error":"shared_folders_v1","message":"This server does not support shared folders yet."}),
+            );
         }
         if path == format!("/api/v1/shared-folders/{ROOT}/activity") {
             return json_reply(200, json!({"activity":self.activity}));
@@ -459,4 +483,44 @@ fn sf2237d_t4_activity_stays_local() {
         let body = String::from_utf8_lossy(&r.bytes);
         assert!(!body.contains("Family") && !body.contains("Lewis") && !body.contains("holiday"));
     }
+}
+
+#[test]
+fn sf2265_flag_off_501_from_the_custody_put_does_not_fail_the_snapshot() {
+    let world = Arc::new(Mutex::new(World::new(false)));
+    {
+        let mut w = world.lock().unwrap();
+        w.custody_flag_off = true;
+        let blob = beebeeb_core::kdf::wrap_invite_owner_copy(&master(), ROOT.as_bytes(), &folder_key()).unwrap();
+        let mut copy = blob.nonce;
+        copy.extend_from_slice(&blob.ciphertext);
+        w.invite_owner_copy = Some(STANDARD.encode(&copy));
+    }
+    let fixture = World::fixture(world.clone());
+    let temp = tempfile::tempdir().unwrap();
+    let b = bridge(&temp.path().join("db"), &fixture);
+    // P2-2: web main writes purpose-bound owner copies with the flag off. The
+    // 501 must not abort the bootstrap snapshot.
+    tick(&b, temp.path());
+    assert_eq!(b.db().get_sync_cursor().unwrap(), Some(1));
+    let guest = b.db().get_file(GUEST).unwrap().unwrap();
+    assert!(!guest.path.contains("holiday"), "the row stays blocked: {guest:?}");
+    let w = world.lock().unwrap();
+    assert_eq!(
+        w.requests.iter().filter(|r| r.path.ends_with("/owner-key")).count(),
+        0,
+        "no L8 envelope is pinned"
+    );
+    assert_eq!(
+        w.requests
+            .iter()
+            .filter(|r| r.path.ends_with(&format!("/shared-folders/{ROOT}/key")) && r.method == "PUT")
+            .count(),
+        1,
+        "one custody PUT, never a legacy retry"
+    );
+    assert_eq!(
+        w.requests.iter().filter(|r| r.path.ends_with("/folder-keys")).count(),
+        0
+    );
 }
