@@ -2782,7 +2782,10 @@ impl StateDb {
         let Some(key) = Self::custody_lookup_key(folder_id) else {
             return Ok(false);
         };
-        Ok(conn.query_row("SELECT 1 FROM sync_state WHERE key=?1", [key], |_| Ok(())).optional()?.is_some())
+        Ok(conn
+            .query_row("SELECT 1 FROM sync_state WHERE key=?1", [key], |_| Ok(()))
+            .optional()?
+            .is_some())
     }
 
     /// Serialize legacy key opening with custody observation. An old inventory
@@ -2802,8 +2805,10 @@ impl StateDb {
         if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
-            [key])?;
+        conn.execute(
+            "INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO NOTHING",
+            [key],
+        )?;
         Ok(())
     }
 
@@ -6843,7 +6848,10 @@ impl StateDb {
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute("DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'", [])?;
+        tx.execute(
+            "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'",
+            [],
+        )?;
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
@@ -7268,7 +7276,10 @@ impl StateDb {
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute("DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'", [])?;
+        tx.execute(
+            "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'",
+            [],
+        )?;
         let mark = if owe_finder_removal {
             FINDER_REMOVAL_OWED_KEY
         } else {
