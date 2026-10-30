@@ -91,10 +91,14 @@ fn place(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> Result<(), Strin
     let screens: Vec<Screen> = displays
         .iter()
         .enumerate()
-        .map(|(i, display)| Screen {
-            frame: display.frame,
-            visible: display.work_area,
-            primary: i == primary,
+        .map(|(i, display)| {
+            // `window_state` and `anchor` each have their own logical rectangle; same fields, distinct types.
+            let logical = |r: surfaces::window_state::LRect| LRect::new(r.x, r.y, r.w, r.h);
+            Screen {
+                frame: logical(display.frame),
+                visible: logical(display.work_area),
+                primary: i == primary,
+            }
         })
         .collect();
     let position = anchor::place_popover(icon, &screens).ok_or("Beebeeb couldn’t find a display for its menu.")?;
