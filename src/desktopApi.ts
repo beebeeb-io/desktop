@@ -728,7 +728,6 @@ export interface Subscription {
   extra_storage_tb?: number
   extra_users?: number
   is_mock?: boolean | null
-  stripe_configured?: boolean | null
   billing_state?: string | null
   pending_downgrade_plan?: string | null
   downgrade_cooldown_until?: string | null
