@@ -135,7 +135,7 @@ impl Drop for LockFile {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     // SAFETY: `kill(pid, 0)` is safe — it sends no signal, only
     // checks deliverability. Returns 0 if the process exists.
     // ESRCH (3) means no such process; EPERM (1) means it exists
@@ -149,7 +149,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 

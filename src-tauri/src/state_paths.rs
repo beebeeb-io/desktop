@@ -88,6 +88,14 @@ pub(crate) fn init_for_test() -> PathBuf {
     BEEBEEB_STATE_DIR.get().cloned().expect("state dir set just above")
 }
 
+/// Task 2274: the duplicates repair tool has no `AppHandle`; it resolves the same app-local-data dir itself and sets
+/// it here, as `init_from_app` does at the app's startup.
+#[cfg(feature = "duplicate-repair")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn init_for_tool(state_dir: PathBuf) {
+    let _ = BEEBEEB_STATE_DIR.set(state_dir);
+}
+
 pub(crate) fn beebeeb_state_dir_from_app_local_data(app_local_data_dir: &Path) -> PathBuf {
     app_local_data_dir.to_path_buf()
 }

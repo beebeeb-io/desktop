@@ -2610,6 +2610,92 @@ pub struct TreeRow {
 /// seconds and OS-extension callbacks are infrequent.
 pub struct StateDb(Mutex<Connection>);
 
+/// Task 2274: the reads of the duplicates repair tool (`crate::duplicate_repair`). Only in a build with its feature.
+#[cfg(feature = "duplicate-repair")]
+impl StateDb {
+    /// Every path more than one row shares, with its row count, in path order. Slashes are folded to '/', as
+    /// [`StateDb::file_rows_at_path`] reads both separators.
+    pub(crate) fn shared_paths(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT replace(path, '\\', '/') AS folded, COUNT(*) FROM files GROUP BY folded HAVING COUNT(*) > 1
+             ORDER BY folded",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|(path, count)| (path, usize::try_from(count).unwrap_or(usize::MAX))).collect())
+    }
+
+    /// GL-0003: how many groups of paths are equal once case is ignored but differ as written, slashes folded as in
+    /// [`StateDb::shared_paths`]. A case-insensitive sync root shows each group as one file; the list reads paths
+    /// exactly, so these are counted, never listed. Case is folded by Unicode lowercase, which may differ from the
+    /// file system's own table for a few characters.
+    pub(crate) fn case_only_groups(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT DISTINCT replace(path, '\\', '/') FROM files")?;
+        let paths = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut spellings = std::collections::HashMap::<String, usize>::new();
+        for path in &paths {
+            *spellings.entry(path.to_lowercase()).or_default() += 1;
+        }
+        Ok(spellings.values().filter(|&&count| count > 1).count())
+    }
+
+    /// The rows at `folded` (a [`StateDb::shared_paths`] path), whichever separator each was stored with.
+    pub(crate) fn rows_at_folded_path(&self, folded: &str) -> Result<Vec<FileEntry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let sql = FILE_BY_PATH_SQL.replace("WHERE path = ?1", "WHERE replace(path, '\\', '/') = ?1 ORDER BY file_id");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![folded], file_entry_from_path_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Whether any table of pending work names `file_id` (spec L3, L3b): a queued operation, an upload finalization,
+    /// a kept copy, an unknown orphan, an upload to resume, or an id alias. `unknown_checks` is not one: its insert
+    /// trigger leaves a row for every file that arrived without known content, and a pending mark counts only while the
+    /// row is guarded (`list_mark_pending` clears the rest), which a row with known content never is.
+    pub(crate) fn names_pending_work(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM upload_finalizations WHERE server_file_id = ?1 OR local_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM kept_copies WHERE original_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM unknown_orphans WHERE file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM upload_resume WHERE server_file_id = ?1)
+                 OR EXISTS(SELECT 1 FROM id_aliases WHERE provisional_id = ?1 OR server_id = ?1)",
+            params![file_id],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    /// Task 2274 (review F7): whether pending work is keyed by `folded` itself (a [`StateDb::shared_paths`] path)
+    /// rather than by a file id: a queued operation's target, an upload finalization's target, a kept copy's original or
+    /// copy, or an unknown orphan. Matched with either separator, without a leading slash, and in any ASCII case
+    /// (Windows paths are case-insensitive), so it errs towards busy. `staged_payloads.path` is a payload file, not a
+    /// sync path, and is not consulted.
+    #[cfg(any(test, feature = "duplicate-repair"))]
+    pub(crate) fn pending_work_at_path(&self, folded: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let at = |column: &str| format!("lower(ltrim(replace({column}, '\\', '/'), '/')) = lower(ltrim(?1, '/'))");
+        Ok(conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE {})
+                     OR EXISTS(SELECT 1 FROM upload_finalizations WHERE {})
+                     OR EXISTS(SELECT 1 FROM kept_copies WHERE {} OR {})
+                     OR EXISTS(SELECT 1 FROM unknown_orphans WHERE {})",
+                at("target_path"),
+                at("target_path"),
+                at("original_path"),
+                at("copy_path"),
+                at("path")
+            ),
+            params![folded],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+}
+
 impl StateDb {
     /// Open or create the state database at `path`. Idempotent — the
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens
@@ -3327,8 +3413,9 @@ impl StateDb {
     }
 
     /// The runner deletes rows only inside a transaction (`delete_file_conn`, the landing);
-    /// tests set up states with this.
-    #[cfg(test)]
+    /// tests set up states with this. Task 2274: the duplicates repair tool forgets B's row with it,
+    /// with the app stopped (spec D1, D2; the engine tests T2/T3 run this same function).
+    #[cfg(any(test, feature = "duplicate-repair"))]
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         delete_file_conn(&conn, file_id)
@@ -4150,7 +4237,7 @@ impl StateDb {
     // deletion-reconciliation bug (the snapshot path prunes server-deleted
     // rows; the ops path applies trash/delete ops).
 
-    const SYNC_CURSOR_KEY: &'static str = "sync_ops_cursor";
+    pub(crate) const SYNC_CURSOR_KEY: &'static str = "sync_ops_cursor";
     const NEEDS_RESNAPSHOT_KEY: &'static str = "sync_needs_resnapshot";
 
     /// Read the persisted `/sync/ops` cursor (highest applied `seq_id`).

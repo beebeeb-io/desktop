@@ -327,3 +327,11 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "test"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Task 2274: the duplicates repair tool (`src/duplicate_repair`, host `examples/duplicate_repair.rs`). Never enabled by a
+# shipped build: release.yml and ci.yml build without it.
+duplicate-repair = []
+
+# Task 2274: the duplicates repair tool's host; it builds only with the feature, so a plain build never compiles it.
+[[example]]
+name = "duplicate_repair"
+required-features = ["duplicate-repair"]

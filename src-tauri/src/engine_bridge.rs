@@ -6717,7 +6717,7 @@ fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOperation) ->
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-fn decrypt_downloaded_chunk(
+pub(crate) fn decrypt_downloaded_chunk(
     file_key: &beebeeb_core::kdf::FileKey,
     chunk_bytes: &[u8],
 ) -> Result<Vec<u8>, beebeeb_core::CoreError> {
@@ -29972,5 +29972,12 @@ mod tests {
             assert!(!root.join("Backups/other").exists(), "the parent goes once its child is gone");
             assert!(root.join("Backups").exists(), "what was not listed stays");
         }
+    }
+
+    /// Task 2274: the duplicates repair tool's premises on the app's own apply paths (spec D1, D2; plan T2, T3).
+    /// Included rather than `#[path]`ed: an inline module's `#[path]` resolves under `src/engine_bridge/tests/`.
+    #[cfg(feature = "duplicate-repair")]
+    mod duplicate_repair_engine_tests {
+        include!("duplicate_repair/engine_tests.rs");
     }
 }

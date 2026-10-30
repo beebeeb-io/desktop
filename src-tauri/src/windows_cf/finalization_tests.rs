@@ -685,3 +685,8 @@ fn a_pending_row_does_not_read_its_staged_copy() {
     assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick finishes it");
     assert_eq!(payloads_read() - before, 1, "read once, with the file open for its hash");
 }
+
+/// Task 2274: the duplicates repair tool's platform read, on this fixture's sync root and fetch counter.
+#[cfg(feature = "duplicate-repair")]
+#[path = "../duplicate_repair/observe_tests.rs"]
+mod duplicate_repair_observe_tests;
