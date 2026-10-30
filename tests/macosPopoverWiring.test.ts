@@ -63,6 +63,15 @@ describe('the shipping macOS popover boundary', () => {
     expect(data).toContain(`pub const POPOVER_HIDDEN_EVENT: &str = "${POPOVER_HIDDEN_EVENT}";`)
   })
 
+  test('while sign-out sends, a failed count leaves the count out, never the whole snapshot (review P3-5 of #160)', () => {
+    const lib = read('src-tauri/src/lib.rs')
+    const start = lib.indexOf('let sending = state.sign_out.phase')
+    expect(start).toBeGreaterThan(0)
+    const branch = lib.slice(start, lib.indexOf('Ok(snapshot)', start))
+    expect(branch).toContain('macos_popover::changes_left(')
+    expect(branch).not.toContain('??')
+  })
+
   test('the gear uses a native menu and the existing handlers, including pause and update checks', () => {
     expect(native()).toContain('popup_menu_at(')
     for (const id of ['MENU_PREFERENCES_ID', 'MENU_CHECK_UPDATES_ID', 'MENU_TOGGLE_SYNC_ID', 'MENU_QUIT_ID', 'MENU_HELP_DOCS_ID', 'MENU_HELP_SHORTCUTS_ID', 'MENU_HELP_REPORT_ID', 'MENU_HELP_STATUS_ID']) expect(native(), id).toContain(id)

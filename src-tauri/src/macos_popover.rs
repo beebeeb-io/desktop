@@ -11,6 +11,23 @@ pub(crate) struct UpdateOffer {
 pub(crate) struct Sending {
     pub changes_left: usize,
 }
+
+/// The count the popover shows while sign-out sends the last changes. A read that fails leaves the count out for that
+/// tick (`progressLine` shows none for 0), never the whole snapshot of the popover and the Beebeeb window (review P3-5
+/// of #160).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn changes_left(read: Result<crate::sign_out::waiting::WaitingChanges, String>) -> usize {
+    match read {
+        Ok(waiting) => {
+            let counts = waiting.counts();
+            counts.files.saturating_add(counts.others)
+        }
+        Err(_) => {
+            tracing::warn!("could not count the changes sign-out is still sending");
+            0
+        }
+    }
+}
 static UPDATE: Mutex<Option<(String, String)>> = Mutex::new(None);
 
 pub(super) fn note_update(channel: &str, version: Option<&str>) {
@@ -368,8 +385,23 @@ pub(super) fn popover_gear_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::popover_frame;
+    use super::{changes_left, popover_frame};
+    use crate::sign_out::waiting::{OtherChange, WaitingChanges, WaitingFile};
     use crate::surfaces::anchor::{LSize, Placement};
+
+    /// Review P3-5 (#160): during sign-out's send phase, one failed read of the waiting changes failed the whole
+    /// snapshot, so the popover and the Beebeeb window showed a read failure for that tick. It leaves the count out
+    /// instead (`progressLine` shows none for 0); a read that works counts files and other changes.
+    #[test]
+    fn a_failed_count_while_sign_out_sends_leaves_the_count_out() {
+        assert_eq!(changes_left(Err("database is locked".into())), 0);
+        let file = |id: &str| WaitingFile { file_id: id.into(), path: None, writes: Vec::new() };
+        let waiting = WaitingChanges {
+            files: vec![file("a"), file("b")],
+            others: vec![OtherChange { op_id: "op".into(), live: false }],
+        };
+        assert_eq!(changes_left(Ok(waiting)), 3);
+    }
 
     /// Review P2 (#160, `place`): tao turns a physical position into points with the scale of the display the window
     /// is on NOW (tao 0.35.3 `set_outer_position`), not the display it is placed on. With a 2x laptop and a 1x

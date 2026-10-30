@@ -10346,10 +10346,12 @@ async fn popover_snapshot(
         {
             let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
             if sending {
-                let waiting = tokio::task::spawn_blocking(read_waiting_changes).await
-                    .map_err(|e| e.to_string())??.counts();
+                let read = tokio::task::spawn_blocking(read_waiting_changes)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|read| read);
                 snapshot.sign_out_sending = Some(macos_popover::Sending {
-                    changes_left: waiting.files.saturating_add(waiting.others),
+                    changes_left: macos_popover::changes_left(read),
                 });
             }
         }
