@@ -54,8 +54,15 @@ fn clock_ms() -> u64 {
 #[cfg(target_os = "macos")]
 pub(super) fn hide(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("popover") {
-        let _ = win.hide();
+        let _ = conceal(&win);
     }
+}
+
+/// Hides the popover and tells it, so it stops reading its snapshot until it is shown again (review P2-2 of #160: the
+/// window is hidden, never destroyed). Every way the popover hides goes through here.
+fn conceal(win: &tauri::WebviewWindow) -> tauri::Result<()> {
+    win.hide()?;
+    win.emit(crate::popover_data::POPOVER_HIDDEN_EVENT, ())
 }
 
 #[cfg(target_os = "macos")]
@@ -147,7 +154,7 @@ fn show(app: &tauri::AppHandle) -> Result<(), String> {
                             BLUR.lock()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .record_blur_hide(clock_ms());
-                            let _ = target.hide();
+                            let _ = conceal(&target);
                         }
                     }
                 }
@@ -173,7 +180,7 @@ fn show(app: &tauri::AppHandle) -> Result<(), String> {
     unhide_app(app);
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
-    win.emit("popover-shown", ()).map_err(|e| e.to_string())
+    win.emit(crate::popover_data::POPOVER_SHOWN_EVENT, ()).map_err(|e| e.to_string())
 }
 
 /// Both mouse buttons behave alike. A revoked session goes straight to the in-window sign-in flow.
@@ -205,7 +212,7 @@ pub(super) fn toggle(app: &tauri::AppHandle) {
 #[tauri::command]
 pub(super) fn popover_hide(window: tauri::WebviewWindow) -> Result<(), String> {
     require_popover(&window)?;
-    window.hide().map_err(|e| e.to_string())
+    conceal(&window).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -348,7 +355,7 @@ pub(super) fn popover_gear_menu(
             BLUR.lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .record_blur_hide(clock_ms());
-            let _ = window.hide();
+            let _ = conceal(&window);
         }
         result
     }

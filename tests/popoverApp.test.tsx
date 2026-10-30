@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import { SnapshotReader } from '../src/mainWindowModel'
-import { POPOVER_SHOWN_EVENT } from '../src/popoverContract'
+import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT } from '../src/popoverContract'
 import * as app from '../src/PopoverApp'
 import { MACOS_DOWNLOAD_URL, popoverView } from '../src/popoverModel'
 import { expand, mount, textOf, type Mounted } from './fixtures/componentHarness'
@@ -51,6 +51,7 @@ function openPopover(opts: { snap?: () => unknown; backend?: Record<string, (arg
       ...appScope,
       SnapshotReader,
       POPOVER_SHOWN_EVENT,
+      POPOVER_HIDDEN_EVENT,
       popoverView,
       listen: bus.listen,
       command: desktopApi.command,
@@ -105,6 +106,26 @@ describe('reading and rendering', () => {
     bus.emit(POPOVER_SHOWN_EVENT)
     await m.flush()
     expect(calls(m, 'popover_snapshot').length).toBe(2)
+  })
+
+  test('hidden, it reads nothing until it is shown again, then reads at once and on its timer (review P2-2 of #160)', async () => {
+    // The window is hidden, never destroyed: a timer left running read config, the state DB and (every 5 min while
+    // unlocked) the API every 5 s for the app's lifetime after the first click.
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5 } })
+    await m.flush()
+    await sleep(100)
+    expect(calls(m, 'popover_snapshot').length).toBeGreaterThan(1)
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await m.flush()
+    const atHide = calls(m, 'popover_snapshot').length
+    await sleep(100)
+    expect(calls(m, 'popover_snapshot').length).toBe(atHide)
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    expect(calls(m, 'popover_snapshot').length).toBe(atHide + 1)
+    await sleep(100)
+    expect(calls(m, 'popover_snapshot').length).toBeGreaterThan(atHide + 1)
   })
 
   test('no session: the popover hides itself and shows nothing', async () => {

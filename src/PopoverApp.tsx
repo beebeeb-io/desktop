@@ -17,7 +17,7 @@ import { BILLING_URL, command, type CommandResult } from './desktopApi'
 import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
 import { FINDER_ACTION_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
-import { parsePopoverSnapshot, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
+import { parsePopoverSnapshot, POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
 import { updateOffer } from './macUpdateOffer'
 import {
@@ -359,15 +359,21 @@ export default function PopoverApp() {
 
   useEffect(() => {
     reader.start(POPOVER_REFRESH_MS)
-    let unlisten: (() => void) | null = null
+    const unlisten: Array<() => void> = []
     let closed = false
-    void listen(POPOVER_SHOWN_EVENT, () => {
+    const on = (event: string, handler: () => void) => {
+      void listen(event, handler).then((stop) => {
+        if (closed) stop()
+        else unlisten.push(stop)
+      })
+    }
+    on(POPOVER_SHOWN_EVENT, () => {
       setFailureBoth(null)
+      reader.resume()
       void reader.refresh()
-    }).then((stop) => {
-      if (closed) stop()
-      else unlisten = stop
     })
+    // The window is hidden, never destroyed: reading stops while it is hidden (review P2-2 of #160).
+    on(POPOVER_HIDDEN_EVENT, () => reader.stop())
     const onKey = (event: KeyboardEvent) => {
       const key = popoverKey(event)
       if (key === null) return
@@ -379,7 +385,7 @@ export default function PopoverApp() {
     window.addEventListener('keydown', onKey)
     return () => {
       closed = true
-      unlisten?.()
+      for (const stop of unlisten) stop()
       window.removeEventListener('keydown', onKey)
       reader.stop()
     }

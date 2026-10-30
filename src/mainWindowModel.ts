@@ -316,7 +316,8 @@ export const RETRY_JOIN_MS = 2000
  *   read), and otherwise starts a fresh one, so a stuck read is never the only answer to a click.
  * - Only the current epoch's read holds the ticks. One that never answers is given up after `watchdogMs`; one whose
  *   `read()` throws synchronously fails like one that rejected.
- * - `stop` (the window unmounted) applies nothing more and cancels the next tick; `resume` undoes it (StrictMode).
+ * - `stop` (the window unmounted, or the popover hidden) applies nothing more and cancels the next tick; `resume` undoes
+ *   it (StrictMode, the popover shown again).
  */
 export class SnapshotReader<R extends ReadResult> {
   private epoch = 0

@@ -13,6 +13,8 @@
 
 /** Event Rust emits when the popover is shown; the UI refreshes its snapshot then. */
 export const POPOVER_SHOWN_EVENT = 'popover-shown'
+/** Event Rust emits each time the popover is hidden; the UI stops reading until it is shown again (review P2-2 of #160). */
+export const POPOVER_HIDDEN_EVENT = 'popover-hidden'
 /** Event that points the single `review` window at another file. */
 export const REVIEW_OPEN_EVENT = 'review:open'
 /** The engine's status stream (unchanged name). */

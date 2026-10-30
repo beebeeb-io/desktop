@@ -39,10 +39,16 @@ use crate::surfaces::phase::{FinderFailureReason, FinderSetup, PopoverPhase, Pop
 use crate::transfer_progress::{Direction, Transfer, TransferBoard, display_name, parent_folder};
 
 /// Event Rust emits when the popover is shown; the UI refreshes its snapshot then.
-/// Emitted by slice 6 (the window code). The constant lives here so the contract
-/// has one home.
-#[allow(dead_code)]
+/// Emitted by the window code (`macos_popover.rs`). The constant lives here so the
+/// contract has one home.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const POPOVER_SHOWN_EVENT: &str = "popover-shown";
+
+/// Event Rust emits each time the popover is hidden; the UI stops reading its
+/// snapshot until it is shown again (review P2-2 of #160: the window is hidden,
+/// never destroyed).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const POPOVER_HIDDEN_EVENT: &str = "popover-hidden";
 
 /// How long a storage summary is trusted (spec section 9: "5 minutes, refetched
 /// after unlock; never fetched on every open").
