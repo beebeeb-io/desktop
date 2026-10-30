@@ -24,7 +24,12 @@ const React = { createElement, Fragment }
 const { default: _component, ...appScope } = app
 const mounted: Mounted[] = []
 afterEach(() => {
-  while (mounted.length) mounted.pop()!.close()
+  // Unmount first: `close` only restores `window`, and a reader left running reads into the next mount's backend.
+  while (mounted.length) {
+    const m = mounted.pop()!
+    m.unmount()
+    m.close()
+  }
 })
 
 const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/popover/${name}.json`, import.meta.url), 'utf8'))
@@ -111,21 +116,24 @@ describe('reading and rendering', () => {
   test('hidden, it reads nothing until it is shown again, then reads at once and on its timer (review P2-2 of #160)', async () => {
     // The window is hidden, never destroyed: a timer left running read config, the state DB and (every 5 min while
     // unlocked) the API every 5 s for the app's lifetime after the first click.
+    // It counts this popover's own reads: a reader another test file left running reads into this mount's backend too.
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5 } })
+    let reads = 0
+    const readPopoverSnapshot = () => { reads += 1; return app.readPopoverSnapshot() }
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, readPopoverSnapshot } })
     await m.flush()
     await sleep(100)
-    expect(calls(m, 'popover_snapshot').length).toBeGreaterThan(1)
+    expect(reads).toBeGreaterThan(1)
     bus.emit(POPOVER_HIDDEN_EVENT)
     await m.flush()
-    const atHide = calls(m, 'popover_snapshot').length
+    const atHide = reads
     await sleep(100)
-    expect(calls(m, 'popover_snapshot').length).toBe(atHide)
+    expect(reads).toBe(atHide)
     bus.emit(POPOVER_SHOWN_EVENT)
     await m.flush()
-    expect(calls(m, 'popover_snapshot').length).toBe(atHide + 1)
+    expect(reads).toBe(atHide + 1)
     await sleep(100)
-    expect(calls(m, 'popover_snapshot').length).toBeGreaterThan(atHide + 1)
+    expect(reads).toBeGreaterThan(atHide + 1)
   })
 
   test('no session: the popover hides itself and shows nothing', async () => {
