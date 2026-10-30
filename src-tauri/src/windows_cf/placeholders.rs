@@ -370,6 +370,27 @@ fn open_exclusive_without_data(path: &std::path::Path) -> std::io::Result<std::f
         .open(path)
 }
 
+/// Task 2284 (tests only): run once, right before the data open of [`finalize_wholly_local`], [`stamp_if_agreed`] or
+/// [`promote_fetched_content`], so a native test can dehydrate the file between the state check and that open.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_DATA_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&std::path::Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_data_open(path: &std::path::Path) {
+    BEFORE_DATA_OPEN.with(|hook| {
+        if let Some(mut fire) = hook.borrow_mut().take() {
+            fire(path);
+        }
+    });
+}
+
+#[cfg(not(test))]
+#[inline]
+fn before_data_open(_: &std::path::Path) {}
+
 /// The placeholder identity read through `handle`: `None` for a file that is not a placeholder.
 fn read_identity(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<Vec<u8>>> {
     Ok(read_standard_info(handle)?.map(|(identity, _)| identity))
@@ -458,7 +479,8 @@ pub fn restamp_cloud_only(path: &std::path::Path, local_id: &str, server_id: &st
 pub enum Local {
     /// The server identity, in sync or not as judged.
     Finalized(crate::upload_finalization_plan::Judged),
-    /// Not every byte is on disk: nothing was read (spec F6).
+    /// Not every byte is on disk: nothing was read (spec F6). Also when it changed since the view (dehydrated, its
+    /// fetch refused inside the no-fetch scope): pending (Task 2284 F7d).
     NotWhollyLocal,
     /// A placeholder whose identity names another file: nothing was changed (spec F4).
     OtherFile,
@@ -478,11 +500,25 @@ pub fn finalize_wholly_local(
     use crate::upload_finalization_plan::Judged;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
+    // Task 2284 A1.2: this process's own fetch of either identity is refused until the pass returns, so a
+    // dehydration that lands between the checks and the data open cannot make the open fetch.
+    let _scope = crate::no_fetch_scope::enter(&[local_id, server_id]);
     // Before the data open, from the attributes alone: that open fetches a file that is not wholly on disk.
     if !fully_on_disk(path) {
         return Ok(Local::NotWhollyLocal);
     }
-    let mut file = open_exclusive_without_write_data(path)?;
+    before_data_open(path);
+    let mut file = match open_exclusive_without_write_data(path) {
+        Ok(file) => file,
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            // Task 2284 A1.2: dehydrated since the pre-check; the scope refused this open's fetch (os 389).
+            if win32_code(&error) == Some(windows::Win32::Foundation::ERROR_CLOUD_FILE_UNSUCCESSFUL.0) {
+                return Ok(Local::NotWhollyLocal);
+            }
+            return Err(error);
+        }
+    };
     // Review F9 of 1640: read through the handle too, so it describes the file the hash then reads.
     if !handle_fully_on_disk(&file) {
         return Ok(Local::NotWhollyLocal);
@@ -1068,6 +1104,8 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     use crate::engine_bridge::LocalEntry;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
+    // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S2).
+    let _scope = crate::no_fetch_scope::enter(&[file_id]);
     // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
     // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
     // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
@@ -1077,6 +1115,7 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     }
     // Task 2270 (spec S2): without write-data access, so a read-only file is promoted too. Exclusive: while this
     // handle is open no other handle can be opened to write.
+    before_data_open(path);
     let Ok(mut file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
     };
@@ -1120,6 +1159,8 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
 pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
+    // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S1).
+    let _scope = crate::no_fetch_scope::enter(&[file_id]);
     if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
         return Ok(false);
     }
@@ -1131,6 +1172,7 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     };
     // Task 2270 (spec S1): without write-data access, so a read-only file is marked too. Exclusive: while this
     // handle is open no other handle can be opened to write.
+    before_data_open(path);
     let Ok(mut file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
     };
@@ -1356,8 +1398,8 @@ pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformVi
     use crate::unknown_check::{OnDisk, PlatformView};
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
-    if std::fs::symlink_metadata(path).is_err() {
-        return PlatformView::Missing;
+    if let Err(error) = std::fs::symlink_metadata(path) {
+        return crate::unknown_check::view_of_metadata_error(&error);
     }
     let Ok(file) = open_for_state(path) else {
         return PlatformView::Unreadable;
