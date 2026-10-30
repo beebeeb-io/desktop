@@ -35,6 +35,8 @@ export type MainNav =
   | { to: 'back' }
   /** “Sign in again”, asked for by an opener (`open_reauth_window`), whatever the session says (review P3-1). */
   | { to: 'reauth' }
+  /** A popover unlock found no local key; continue in the existing recovery card. */
+  | { to: 'setup' }
 
 export interface NavContext {
   signedIn: boolean
@@ -56,6 +58,7 @@ export function navigate(view: MainView, nav: MainNav, ctx: NavContext): MainVie
   switch (nav.to) {
     case 'home':
     case 'reauth':
+    case 'setup':
       return HOME
     case 'back':
       return view.mode === 'settings' ? { mode: 'main', section: view.returnTo } : view
@@ -92,7 +95,7 @@ export function coerceSettingsView(view: MainView, signedIn: boolean): MainView 
 export function parseMainNav(raw: unknown): MainNav | null {
   if (typeof raw !== 'object' || raw === null) return null
   const value = raw as { to?: unknown; section?: unknown }
-  if (value.to === 'home' || value.to === 'back' || value.to === 'reauth') return { to: value.to }
+  if (value.to === 'home' || value.to === 'back' || value.to === 'reauth' || value.to === 'setup') return { to: value.to }
   if (value.to !== 'settings') return null
   if (value.section === undefined || value.section === null) return { to: 'settings', section: null }
   const section = typeof value.section === 'string' ? parseSettingsTab(value.section) : null

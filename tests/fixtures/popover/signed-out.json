@@ -1,0 +1,35 @@
+{
+  "phase": "signed_out",
+  "sync_phase": "signed_out",
+  "generated_at": 1761390000,
+  "account": {
+    "email": null,
+    "logged_in": false,
+    "vault_unlocked": false,
+    "auth_expired": false
+  },
+  "paused": false,
+  "engine": {
+    "state": "idle",
+    "files_remaining": 0,
+    "bytes_total": null,
+    "bytes_done": null,
+    "last_tick_ok_at": 1761389970
+  },
+  "reason": null,
+  "finder": {
+    "setup": "ready",
+    "reason": null,
+    "reason_line": null
+  },
+  "storage": null,
+  "storage_full": false,
+  "pending_changes": 0,
+  "conflicts": {
+    "count": 0,
+    "files": []
+  },
+  "activity": [],
+  "update": null,
+  "sign_out_sending": null
+}

@@ -6,7 +6,7 @@
 //! 7396 JSON Merge Patch (`tauri_utils::config::parse::read_from` calls
 //! `json_patch::merge`), which REPLACES arrays wholesale. That is the whole
 //! reason the macOS config drops `tray`, `windows-onboarding` and `main-app` by
-//! declaring its own `app.windows` (two-surface slice 1: `main` alone). Only the
+//! declaring its own `app.windows` (`main` and `popover`, created on demand). Only the
 //! bundled result needs a Mac.
 
 use super::registry::MACOS_LABELS;
@@ -48,8 +48,8 @@ fn merged_config(target: &str) -> Value {
 // retired `macos-settings` window (two-surface slice 1) is gone from it; macOS replaces the whole list with its own.
 const BASE_WINDOWS: [&str; 3] = ["tray", "windows-onboarding", "main-app"];
 
-/// The one window the macOS config declares (two-surface spec §4, §7.1, slice 1).
-const MACOS_WINDOWS: [&str; 1] = ["main"];
+/// The two windows the macOS config declares (two-surface spec §4, slices 1 and 3).
+const MACOS_WINDOWS: [&str; 2] = ["main", "popover"];
 
 fn window(config: &Value, label: &str) -> Value {
     config
@@ -102,15 +102,17 @@ fn only_the_macos_platform_file_exists() {
 }
 
 #[test]
-fn macos_builds_only_the_beebeeb_window_and_only_on_demand() {
+fn macos_builds_only_the_two_surfaces_and_only_on_demand() {
     // Spec §3's cause of the stray Windows shell on a Mac: `main-app`, `tray` and `windows-onboarding` were in the
     // shared list and built hidden on every platform. The macOS file replaces the list, so a Mac declares `main`
-    // alone, `create: false`, built by `show_main_window` when an opener needs it.
+    // and `popover`, `create: false`, built when an opener needs them.
     let merged = merged_config("macos");
     assert_eq!(window_labels(&merged), MACOS_WINDOWS);
-    let main = window(&merged, "main");
-    assert_eq!(main.get("create"), Some(&Value::Bool(false)));
-    assert_eq!(main.get("visible"), Some(&Value::Bool(false)));
+    for label in MACOS_WINDOWS {
+        let surface = window(&merged, label);
+        assert_eq!(surface.get("create"), Some(&Value::Bool(false)));
+        assert_eq!(surface.get("visible"), Some(&Value::Bool(false)));
+    }
     // Prove the real macOS file WAS merged and not silently skipped: its template-icon patch is visible in the
     // result, and absent from the base.
     let base = read_json(&manifest_dir().join("tauri.conf.json"));
@@ -275,14 +277,6 @@ fn the_retired_settings_window_is_granted_nowhere() {
 }
 
 #[test]
-fn registry_labels_covered_today_are_main_only() {
-    // The pinned gap: slice 3 builds the popover and adds its capability, which makes this fail on purpose; delete
-    // it then and un-ignore `every_macos_registry_label_is_covered`.
-    assert_eq!(uncovered("macOS", &MACOS_LABELS), ["popover"]);
-}
-
-#[test]
-#[ignore = "two-surface slice 3 adds the popover window and its capability; remove this ignore then"]
 fn every_macos_registry_label_is_covered() {
     assert_eq!(uncovered("macOS", &MACOS_LABELS), Vec::<String>::new());
 }

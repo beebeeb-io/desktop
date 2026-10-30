@@ -209,6 +209,13 @@ describe('the other steps', () => {
 describe('flowForNav: a “Sign in again” request is the card, whatever the session says (P3-1)', () => {
   const idle = { signedIn: true, sheetOpen: false }
 
+  test('the popover’s no-key handoff opens setup and waits under a sheet', () => {
+    expect(flowForNav({ to: 'setup' }, idle, IDLE_FLOW)).toEqual({ flow: step('unlock'), held: false })
+    expect(flowForNav({ to: 'setup' }, { ...idle, sheetOpen: true }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: true })
+    expect(flowForNav({ to: 'setup' }, idle, step('finder'))).toEqual({ flow: step('finder'), held: false })
+    expect(flowForNav({ to: 'setup' }, { ...idle, signedIn: false }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
+  })
+
   test('a signed-in window with no step in progress shows the card', () => {
     expect(flowForNav({ to: 'reauth' }, idle, IDLE_FLOW)).toEqual({ flow: step('reauth'), held: false })
     expect(windowScreen(live, flowForNav({ to: 'reauth' }, idle, IDLE_FLOW).flow)).toBe('reauth')

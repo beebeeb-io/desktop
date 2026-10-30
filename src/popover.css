@@ -1,0 +1,416 @@
+/*
+ * The menu-bar popover (task 1683 slice 3). Measurements and colours from the two-surface hi-fi
+ * (`design/hifi/macos-two-surface.html`, `.pop` and its parts), on design.css's tokens, so light and dark
+ * follow the same theme as the Beebeeb window. The window is 372 × 488 pt and never resizes (§6.1).
+ */
+html.popover-window,
+html.popover-window body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.pop-root {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/18px var(--font-sans);
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+.pop-root *,
+.pop-root *::before,
+.pop-root *::after {
+  box-sizing: border-box;
+}
+.pop-root button {
+  cursor: default;
+}
+.pop-root button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* Header: the account, its storage line and bar */
+.pop-header {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.pop-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.pop-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--paper-3);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  color: var(--ink-2);
+  flex: none;
+}
+.pop-account-text {
+  min-width: 0;
+  flex: 1;
+}
+.pop-email {
+  font-weight: 600;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pop-usage {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.pop-gear {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  border: 0;
+  background: transparent;
+  padding: 0;
+  flex: none;
+}
+.pop-gear:active {
+  background: var(--paper-3);
+}
+.pop-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--paper-3);
+  margin-top: 10px;
+  overflow: hidden;
+}
+.pop-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--ink-3);
+}
+.pop-bar--red > i {
+  background: var(--red);
+}
+.pop-skeleton {
+  height: 10px;
+  width: 60%;
+  border-radius: 5px;
+  background: var(--paper-3);
+}
+
+/* The rows on top: an update, and files that need a decision */
+.pop-update {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 4px;
+  font-size: 12.5px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  flex: none;
+}
+.pop-update-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+}
+.pop-update-hint {
+  grid-column: 2 / 4;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.pop-attention {
+  margin: 8px 12px 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  flex: none;
+}
+.pop-attention > .pop-i {
+  color: var(--warn-icon);
+  flex: none;
+}
+.pop-attention-text {
+  flex: 1;
+  min-width: 0;
+}
+.pop-attention-text b {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Body */
+.pop-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.pop-label {
+  padding: 12px 16px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.pop-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 16px;
+}
+.pop-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--paper-2);
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  flex: none;
+}
+.pop-row-text {
+  flex: 1;
+  min-width: 0;
+}
+.pop-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pop-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pop-dir {
+  color: var(--ink-3);
+  display: grid;
+  flex: none;
+}
+.pop-progress {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--paper-3);
+  margin-top: 5px;
+  overflow: hidden;
+}
+.pop-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ink-3);
+}
+.pop-progress--encrypting > i {
+  background: var(--amber);
+}
+.pop-summary {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.pop-summary-top {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+.pop-summary-top span:last-child:not(:first-child) {
+  font-weight: 400;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One message, one action */
+.pop-message {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px 26px;
+  gap: 8px;
+}
+.pop-disc {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-2);
+  background: var(--paper-2);
+  color: var(--ink-2);
+  margin-bottom: 6px;
+}
+.pop-disc--error {
+  background: var(--err-bg);
+  border-color: var(--err-line);
+  color: var(--red);
+}
+.pop-disc--encryption {
+  background: var(--amber-bg);
+  border-color: var(--amber);
+  color: var(--ink);
+}
+.pop-message-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 700;
+}
+.pop-message-line {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 18px;
+  max-width: 32ch;
+}
+.pop-reason {
+  font: 12px/1 var(--font-mono);
+  color: var(--ink-2);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 8px;
+}
+
+/* Buttons: the Settings window's system */
+.pop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 600 12.5px/1 var(--font-sans);
+  white-space: nowrap;
+  flex: none;
+}
+.pop-btn--primary {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: var(--amber-ink);
+}
+.pop-btn--large {
+  height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.pop-btn[disabled] {
+  opacity: 0.55;
+}
+
+/* Status row */
+.pop-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  height: 44px;
+  border-top: 1px solid var(--line);
+  font-weight: 600;
+  flex: none;
+}
+.pop-ok {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ok-icon);
+  color: var(--paper);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.pop-encrypted {
+  margin-left: auto;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: 12px;
+}
+.pop-encrypted > .pop-i {
+  color: var(--amber-deep);
+}
+.pop-spin {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--ink-2);
+  flex: none;
+}
+.pop-spin--large {
+  width: 28px;
+  height: 28px;
+  border-width: 3px;
+  margin-bottom: 6px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pop-spin--live {
+    animation: pop-spin 1s linear infinite;
+  }
+}
+@keyframes pop-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Footer: the same three actions in every state */
+.pop-footer {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+  height: 58px;
+  flex: none;
+}
+.pop-footer-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font: 600 12px var(--font-sans);
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.pop-footer-button > .pop-i {
+  color: var(--ink-2);
+}
+.pop-footer-button[disabled],
+.pop-footer-button[disabled] > .pop-i {
+  color: var(--ink-3);
+}

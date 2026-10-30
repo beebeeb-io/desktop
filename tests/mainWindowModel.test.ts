@@ -125,6 +125,10 @@ describe('parseMainNav: what Rust sends on main:navigate', () => {
     expect(parseMainNav({ to: 'reauth' })).toEqual({ to: 'reauth' })
   })
 
+  test('missing keys can request Set up this Mac in the existing window', () => {
+    expect(parseMainNav({ to: 'setup' })).toEqual({ to: 'setup' })
+  })
+
   test('anything else is no request', () => {
     for (const raw of [null, undefined, 'home', {}, { to: 'files' }, { to: 'settings', section: 'status' }, { to: 'settings', section: 7 }]) {
       expect(parseMainNav(raw)).toBeNull()

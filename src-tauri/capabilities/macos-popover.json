@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-popover",
+  "description": "The macOS menu-bar popover: snapshot, events and browser links. No updater, dialog or window-state plugin.",
+  "platforms": [
+    "macOS"
+  ],
+  "windows": [
+    "popover"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "opener:default"
+  ]
+}

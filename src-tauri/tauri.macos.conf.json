@@ -18,11 +18,27 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "create": false
+      },
+      {
+        "label": "popover",
+        "title": "Beebeeb",
+        "url": "index.html?window=popover&platform=macos",
+        "width": 372,
+        "height": 488,
+        "resizable": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
+        "create": false
       }
     ],
     "trayIcon": {
       "iconPath": "icons/tray-template@2x.png",
-      "iconAsTemplate": true
+      "iconAsTemplate": true,
+      "showMenuOnLeftClick": false
     }
   }
 }
