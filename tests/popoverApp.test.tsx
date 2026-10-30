@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { createElement, Fragment } from 'react'
 import * as desktopApi from '../src/desktopApi'
 import { SnapshotReader } from '../src/mainWindowModel'
-import { POPOVER_SHOWN_EVENT } from '../src/popoverContract'
+import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT } from '../src/popoverContract'
 import * as app from '../src/PopoverApp'
 import { MACOS_DOWNLOAD_URL, popoverView } from '../src/popoverModel'
 import { expand, mount, textOf, type Mounted } from './fixtures/componentHarness'
@@ -24,7 +24,12 @@ const React = { createElement, Fragment }
 const { default: _component, ...appScope } = app
 const mounted: Mounted[] = []
 afterEach(() => {
-  while (mounted.length) mounted.pop()!.close()
+  // Unmount first: `close` only restores `window`, and a reader left running reads into the next mount's backend.
+  while (mounted.length) {
+    const m = mounted.pop()!
+    m.unmount()
+    m.close()
+  }
 })
 
 const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/popover/${name}.json`, import.meta.url), 'utf8'))
@@ -51,9 +56,12 @@ function openPopover(opts: { snap?: () => unknown; backend?: Record<string, (arg
       ...appScope,
       SnapshotReader,
       POPOVER_SHOWN_EVENT,
+      POPOVER_HIDDEN_EVENT,
       popoverView,
       listen: bus.listen,
       command: desktopApi.command,
+      popoverSnapshot: desktopApi.popoverSnapshot,
+      getCurrentWindow: () => ({ isVisible: async () => true }),
       ...opts.bindings,
     },
     expand: true,
@@ -84,7 +92,7 @@ describe('reading and rendering', () => {
     const { m } = openPopover({ snap: () => new Promise(() => {}) })
     await m.flush()
     expect(m.elements().some((e) => e.props.role === 'status' && e.props['aria-label'] === 'Loading')).toBe(true)
-    for (const id of ['open_location', 'view_online', 'add_storage']) expect(byId(m, app.actionId(id as any))?.props.disabled).toBe(true)
+    for (const id of ['open_location', 'view_online', 'add_storage'] as const) expect(byId(m, app.footerId(id))?.props.disabled).toBe(true)
   })
 
   test('a first read that fails says so once, and Try again reads again', async () => {
@@ -105,6 +113,105 @@ describe('reading and rendering', () => {
     bus.emit(POPOVER_SHOWN_EVENT)
     await m.flush()
     expect(calls(m, 'popover_snapshot').length).toBe(2)
+  })
+
+  test('hidden, it reads nothing until it is shown again, then reads at once and on its timer (review P2-2 of #160)', async () => {
+    // The window is hidden, never destroyed: a timer left running read config, the state DB and (every 5 min while
+    // unlocked) the API every 5 s for the app's lifetime after the first click.
+    // It counts this popover's own reads: a reader another test file left running reads into this mount's backend too.
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let reads = 0
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot } })
+    await m.flush()
+    await sleep(100)
+    expect(reads).toBeGreaterThan(1)
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await m.flush()
+    const atHide = reads
+    await sleep(100)
+    expect(reads).toBe(atHide)
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    expect(reads).toBe(atHide + 1)
+    await sleep(100)
+    expect(reads).toBeGreaterThan(atHide + 1)
+  })
+
+  test('hidden before it could listen, it stops reading once it can (self-review of #202)', async () => {
+    // A click away right after the first click hides the window before the listeners exist, and that popover-hidden is
+    // lost: once they exist, the popover asks the window whether it is shown.
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let reads = 0
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
+    const getCurrentWindow = () => ({ isVisible: async () => false })
+    const { m } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot, getCurrentWindow } })
+    await m.flush()
+    await sleep(30)
+    const settled = reads
+    await sleep(100)
+    expect(reads).toBe(settled)
+  })
+
+  test('a show that comes while that question is out wins over its answer (self-review of #202)', async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let reads = 0
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
+    let answer: ((visible: boolean) => void) | null = null
+    const getCurrentWindow = () => ({ isVisible: () => new Promise<boolean>((resolve) => { answer = resolve }) })
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot, getCurrentWindow } })
+    await m.flush()
+    bus.emit(POPOVER_SHOWN_EVENT)
+    answer?.(false)
+    await m.flush()
+    const at = reads
+    await sleep(100)
+    expect(reads).toBeGreaterThan(at)
+  })
+
+  test('hidden longer than one refresh, it drops what it showed: shown again, it is busy until the new answer (self-review of #202)', async () => {
+    // The window paints before `popover-shown` reaches it, so an answer kept while hidden would show an old state
+    // (an hour-old "3 files left") as current. A quick reopen keeps it: it is no older than the timer would have let it be.
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const loading = (m: Mounted) => m.elements().some((e) => e.props.role === 'status' && e.props['aria-label'] === 'Loading')
+    let release: (() => void) | null = null
+    let hold = false
+    const snap = () => hold ? new Promise((resolve) => { release = () => resolve(fixture('synced')) }) : fixture('synced')
+    const { m, bus } = openPopover({ snap, bindings: { POPOVER_REFRESH_MS: 100 } })
+    await m.flush()
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+    await sleep(250)
+    await m.flush()
+    expect(loading(m)).toBe(true)
+    expect(text(m)).not.toContain('Recent activity')
+    hold = true
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    expect(loading(m)).toBe(true)
+    release!()
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+  })
+
+  test('a quick hide and show keeps what it showed and never drops it later (self-review of #202)', async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let hold = false
+    const snap = () => hold ? new Promise(() => {}) : fixture('synced')
+    const { m, bus } = openPopover({ snap, bindings: { POPOVER_REFRESH_MS: 200 } })
+    await m.flush()
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await sleep(20)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    // Later reads never answer, so what is on screen after this is what the show's read left there.
+    hold = true
+    await sleep(300)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
   })
 
   test('no session: the popover hides itself and shows nothing', async () => {
@@ -179,7 +286,7 @@ describe('actions (§6.3, §6.4)', () => {
     answer(fixture('synced'))
     await m.flush()
     expect(text(m)).toContain('Recent activity')
-    expect(byId(m, app.actionId('open_location'))?.props.disabled).toBe(false)
+    expect(byId(m, app.footerId('open_location'))?.props.disabled).toBe(false)
   })
 })
 
@@ -241,6 +348,16 @@ describe('one error surface: a failed action replaces the body, never a toast', 
   test('a failed Open in Finder says the shipped sentence (task 17b), and every action has one', () => {
     expect(app.ACTION_FAILED.open_location).toBe('Beebeeb couldn’t open its Finder location.')
     for (const [what, sentence] of Object.entries(app.ACTION_FAILED)) expect([what, sentence.length > 10]).toEqual([what, true])
+  })
+
+  test('no two elements share an id, the footer included (review P3-11 of #160)', async () => {
+    // Storage full shows Add storage in the body and in the footer: two buttons, one id.
+    for (const name of ['storage-full', 'synced', 'syncing', 'paused', 'needs-decision', 'update-available', 'offline', 'error']) {
+      const { m } = openPopover({ snap: () => fixture(name) })
+      await m.flush()
+      const ids = m.elements().map((e) => e.props.id).filter((id): id is string => typeof id === 'string')
+      expect([name, ids.length > 0, ids.filter((id, i) => ids.indexOf(id) !== i)]).toEqual([name, true, []])
+    }
   })
 
   test('the popover never mounts a toast host or calls a toast', () => {
