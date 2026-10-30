@@ -232,8 +232,17 @@ pub(super) fn popover_open_window(
 #[tauri::command]
 pub(super) async fn popover_retry_sync(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
     require_popover(&window)?;
-    let state = app.state::<AppState>();
-    start_engine_unless_running(app.clone(), &state).await
+    // `start_engine_unless_running` is not built on Windows, and only macOS has the popover.
+    #[cfg(target_os = "macos")]
+    {
+        let state = app.state::<AppState>();
+        start_engine_unless_running(app.clone(), &state).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("The menu-bar popover is available on macOS.".into())
+    }
 }
 
 #[tauri::command]
