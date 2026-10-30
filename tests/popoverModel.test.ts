@@ -299,6 +299,39 @@ describe('precedence', () => {
     expect([v.body.doneLabel, v.body.done.map((r) => r.id)]).toEqual([null, []])
   })
 
+  test('syncing with no count from the engine counts the moving files, not the ones that need a decision (self-review of #202)', () => {
+    const input = fixture('syncing')
+    const v = state({
+      ...input,
+      engine: { ...input.engine, files_remaining: null },
+      activity: [input.activity[0], ...input.activity.slice(3)],
+      conflicts: { count: 1, files: [{ file_id: 'f2', file_name: 'Interview notes.md' }] },
+    })
+    if (v.body.kind !== 'syncing') throw new Error(v.body.kind)
+    expect(v.body.left).toBe('1 file left')
+  })
+
+  test('syncing: a file that could not sync is never listed under Done (self-review of #202)', () => {
+    // Like a file that needs a decision, it is not finished: it follows the moving files.
+    const input = fixture('syncing')
+    const failed = { ...input.activity[3], state: 'failed' }
+    const v = state({ ...input, activity: [input.activity[0], failed, ...input.activity.slice(4)] })
+    if (v.body.kind !== 'syncing') throw new Error(v.body.kind)
+    expect(v.body.active.map((r) => r.id)).toEqual(['a1', 'f1'])
+    expect(v.body.done.map((r) => r.id)).not.toContain('f1')
+  })
+
+  test('syncing: a moving file that also needs a decision is listed once, as the decision (self-review of #202)', () => {
+    const input = fixture('syncing')
+    const v = state({
+      ...input,
+      activity: [input.activity[0], input.activity[1], ...input.activity.slice(3)],
+      conflicts: { count: 1, files: [{ file_id: 'a1', file_name: input.activity[0].name }] },
+    })
+    if (v.body.kind !== 'syncing') throw new Error(v.body.kind)
+    expect(v.body.active.map((r) => r.id)).toEqual(['a2', 'conflict-a1'])
+  })
+
   test('syncing shows at most 4 rows: moving files first, then Done', () => {
     const many = fixture('syncing')
     const moving = Array.from({ length: 6 }, (_, i) => ({ ...many.activity[0], id: `m${i}` }))

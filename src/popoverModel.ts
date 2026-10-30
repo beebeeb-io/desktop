@@ -281,11 +281,14 @@ function listBody(input: PopoverInput, phase: PopoverPhase, topRows: number, now
   const rows = input.activity.map((row) => rowView(row, nowSeconds, tz))
   if (phase === 'syncing') {
     const budget = Math.max(1, SYNCING_ROWS - ROWS_PER_TOP_ROW * topRows)
-    // Moving files first, then the files that need a decision (never under "Done": they are not finished, review P2-4
-    // of #160), then "Done".
-    const active = [...rows.filter((r) => r.progress !== null), ...conflicts].slice(0, budget)
-    const done = rows.filter((r) => r.progress === null && !conflicted.has(r.id)).slice(0, budget - active.length)
-    const left = input.engine.files_remaining ?? active.length
+    // Moving files first, then the files that need a decision and the ones that could not sync (never under "Done":
+    // they are not finished, review P2-4 of #160 and self-review of #202), then "Done". A file that needs a decision
+    // is listed once, as the decision.
+    const listed = rows.filter((r) => !conflicted.has(r.id))
+    const moving = listed.filter((r) => r.progress !== null)
+    const active = [...moving, ...conflicts, ...listed.filter((r) => r.failed)].slice(0, budget)
+    const done = listed.filter((r) => r.progress === null && !r.failed).slice(0, budget - active.length)
+    const left = input.engine.files_remaining ?? moving.length
     const { bytes_total: total, bytes_done: doneBytes } = input.engine
     const percent = total !== null && doneBytes !== null && total > 0 ? Math.min(100, Math.round((doneBytes / total) * 100)) : null
     return {
