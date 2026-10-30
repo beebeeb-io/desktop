@@ -51,7 +51,8 @@ describe('the shipping macOS popover boundary', () => {
     // Esc, the blur, a blur after the gear menu, the tray click and opening the Beebeeb window all hide the window;
     // each must go through the one function that also emits the hidden event.
     const src = native()
-    expect(src.match(/\.hide\(\)/g)).toHaveLength(1)
+    const code = src.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
+    expect(code.match(/\.hide\(\)/g)).toHaveLength(1)
     const start = src.indexOf('fn conceal(')
     expect(start).toBeGreaterThan(0)
     const body = src.slice(start, src.indexOf('\n}\n', start))
@@ -61,6 +62,22 @@ describe('the shipping macOS popover boundary', () => {
     const data = read('src-tauri/src/popover_data.rs')
     expect(data).toContain(`pub const POPOVER_SHOWN_EVENT: &str = "${POPOVER_SHOWN_EVENT}";`)
     expect(data).toContain(`pub const POPOVER_HIDDEN_EVENT: &str = "${POPOVER_HIDDEN_EVENT}";`)
+  })
+
+  test('closing the popover (⌘W, Close Window) goes through the same function (self-review of #202)', () => {
+    // The app-wide close handler hides every window whose close policy is Hide, the popover included: a plain hide
+    // there left the popover reading every 5 s with nothing on screen.
+    const lib = read('src-tauri/src/lib.rs')
+    const start = lib.indexOf('== surfaces::registry::ClosePolicy::Hide')
+    expect(start).toBeGreaterThan(0)
+    const branch = lib.slice(start, lib.indexOf('refresh_macos_dock_icon(', start))
+    expect(branch).toContain('hide_on_close(window)')
+    expect(branch).not.toContain('window.hide()')
+    const helper = lib.indexOf('fn hide_on_close(')
+    expect(helper).toBeGreaterThan(0)
+    const body = lib.slice(helper, lib.indexOf('\n}\n', helper))
+    expect(body).toMatch(/if window\.label\(\) == "popover" \{\s+macos_popover::hide\(window\.app_handle\(\)\);\s+return;/)
+    expect(body.indexOf('macos_popover::hide(')).toBeLessThan(body.indexOf('window.hide()'))
   })
 
   test('while sign-out sends, a failed count leaves the count out, never the whole snapshot (review P3-5 of #160)', () => {

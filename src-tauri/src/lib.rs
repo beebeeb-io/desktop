@@ -15522,6 +15522,17 @@ fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
     }
 }
 
+/// Hides a window whose close policy is Hide. On a Mac the popover goes through `macos_popover::hide`, which tells it,
+/// so it stops reading its snapshot (self-review of #202: ⌘W on the popover hid it without telling it).
+fn hide_on_close(window: &tauri::Window) {
+    #[cfg(target_os = "macos")]
+    if window.label() == "popover" {
+        macos_popover::hide(window.app_handle());
+        return;
+    }
+    let _ = window.hide();
+}
+
 /// The Dock icon for the windows that exist now, leaving out `gone` (a window being destroyed or hidden).
 #[cfg(target_os = "macos")]
 fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
@@ -16063,7 +16074,7 @@ pub fn run() {
                     == surfaces::registry::ClosePolicy::Hide
                 {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_on_close(window);
                     // Two-surface §9.1: a hidden onboarding or conflict window no longer holds the Dock icon.
                     #[cfg(target_os = "macos")]
                     refresh_macos_dock_icon(window.app_handle(), Some(window.label()));
