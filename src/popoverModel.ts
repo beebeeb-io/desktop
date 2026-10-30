@@ -284,8 +284,10 @@ function listBody(input: PopoverInput, phase: PopoverPhase, topRows: number, now
   const rows = input.activity.map((row) => rowView(row, nowSeconds, tz))
   if (phase === 'syncing') {
     const budget = Math.max(1, SYNCING_ROWS - ROWS_PER_TOP_ROW * topRows)
-    const active = rows.filter((r) => r.progress !== null).slice(0, budget)
-    const done = [...conflicts, ...rows.filter((r) => r.progress === null && !conflicted.has(r.id))].slice(0, budget - active.length)
+    // Moving files first, then the files that need a decision (never under "Done": they are not finished, review P2-4
+    // of #160), then "Done".
+    const active = [...rows.filter((r) => r.progress !== null), ...conflicts].slice(0, budget)
+    const done = rows.filter((r) => r.progress === null && !conflicted.has(r.id)).slice(0, budget - active.length)
     const left = input.engine.files_remaining ?? active.length
     const { bytes_total: total, bytes_done: doneBytes } = input.engine
     const percent = total !== null && doneBytes !== null && total > 0 ? Math.min(100, Math.round((doneBytes / total) * 100)) : null

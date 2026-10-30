@@ -285,6 +285,20 @@ describe('precedence', () => {
     ])
   })
 
+  test('syncing: a file that needs a decision is never listed under Done (review P2-4 of #160)', () => {
+    // It is not finished: it follows the moving files, above "Done". The attention row on top leaves room for 2 rows.
+    const input = fixture('syncing')
+    const v = state({
+      ...input,
+      activity: [input.activity[0], ...input.activity.slice(3)],
+      conflicts: { count: 1, files: [{ file_id: 'f2', file_name: 'Interview notes.md' }] },
+    })
+    if (v.body.kind !== 'syncing') throw new Error(v.body.kind)
+    expect(v.attention?.title).toBe('1 file needs a decision')
+    expect(v.body.active.map((r) => r.id)).toEqual(['a1', 'conflict-f2'])
+    expect([v.body.doneLabel, v.body.done.map((r) => r.id)]).toEqual([null, []])
+  })
+
   test('syncing shows at most 4 rows: moving files first, then Done', () => {
     const many = fixture('syncing')
     const moving = Array.from({ length: 6 }, (_, i) => ({ ...many.activity[0], id: `m${i}` }))
