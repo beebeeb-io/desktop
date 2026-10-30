@@ -15133,11 +15133,12 @@ fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, cl
 // The compact "settings" window (App.tsx) doubles as the macOS/Linux tray
 // flyout. Pre-1384 it always opened decorated and `.center()`-ed — a
 // 680×540pt window landing mid-screen instead of under the status item.
-// macOS gets its own anchor math here, mirroring the DPI-correct approach
-// 307b826 established for Windows above, but anchored from the tray click
-// event's `rect` (the icon's own bounds) rather than the raw click point,
-// since a click can land anywhere inside the icon. Linux keeps the
-// original centered/decorated behaviour untouched (see the `#[cfg(not(any(
+// macOS had its own anchor math here, anchored from the tray click event's
+// `rect`. It retired with the menu-bar popover (task 1683 slice 3, review P3-7
+// of #160): the tray click opens the popover, placed by `surfaces::anchor`, and
+// nothing hands this window an anchor any more. The statics and the `Popover`
+// mode below remain until GL-0009 retires them. Linux keeps the original
+// centered/decorated behaviour untouched (see the `#[cfg(not(any(
 // target_os = "windows", target_os = "macos")))]` branch in
 // `setup_tray`'s click handler, and the `#[cfg(not(target_os = "macos"))]`
 // branch in `show_compact_app_window_with_nav` below).
@@ -15145,9 +15146,10 @@ fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, cl
 const MACOS_SETTINGS_WINDOW_WIDTH: f64 = 680.0;
 const MACOS_SETTINGS_WINDOW_HEIGHT: f64 = 540.0;
 
-/// A one-shot handoff from the tray click handler to
-/// `show_compact_app_window_with_nav`: the physical position the flyout
-/// should open at, computed from the clicked status item's rect. `take()`n
+/// A one-shot handoff to `show_compact_app_window_with_nav`: the physical
+/// position the flyout should open at. The tray click handler set it before
+/// the menu-bar popover replaced the flyout; nothing sets it now (review P3-7
+/// of #160), so every open reads `None` until GL-0009 retires it. `take()`n
 /// (consumed) the moment it's read, so an unrelated open of the same
 /// window (the "Open Beebeeb" menu item, a notification, a deep link) that
 /// didn't go through the tray click falls back to centering instead of
@@ -15180,8 +15182,9 @@ static MACOS_FLYOUT_IS_POPOVER: std::sync::atomic::AtomicBool = std::sync::atomi
 /// Which chrome/behavior the shared macOS settings window should adopt for
 /// this open. Pure decision, extracted from `show_compact_app_window_with_nav`
 /// so it's unit-testable without a live `AppHandle`/`WebviewWindow`: an
-/// anchor is present only when the open came from the tray click handler
-/// (`MACOS_TRAY_FLYOUT_ANCHOR`, consumed via `take()`); every other caller
+/// anchor is present only when one was handed off through
+/// `MACOS_TRAY_FLYOUT_ANCHOR` (consumed via `take()`; nothing sets it since
+/// the menu-bar popover, so today every open is `Regular`); every other caller
 /// ("Open Beebeeb", Preferences/Settings menu items, a notification, a deep
 /// link) passes `None` and gets the regular window treatment.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -17803,8 +17806,9 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 /// treatment to every macOS open, breaking "Open Beebeeb", the Preferences/
 /// Settings menu items, and `show_main_app_window`). Which behavior it gets
 /// is decided per-open by `macos_window_mode_for_anchor`, purely from
-/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set only by
-/// the tray click handler in `setup_tray`, consumed here via `take()`):
+/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (consumed here
+/// via `take()`; the tray click set it before the menu-bar popover replaced
+/// the flyout, and nothing sets it now, so every open is `Regular`):
 /// - `Popover` (anchor present): chrome-less, always-on-top, positioned
 ///   under the status item, hides on focus loss — reads as a system
 ///   popover.
