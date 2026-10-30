@@ -13,11 +13,11 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { BILLING_URL, command, type CommandResult } from './desktopApi'
+import { BILLING_URL, command, popoverSnapshot, type CommandResult } from './desktopApi'
 import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
 import { FINDER_ACTION_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
-import { parsePopoverSnapshot, POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
+import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
 import { updateOffer } from './macUpdateOffer'
 import {
@@ -114,12 +114,8 @@ export function withFailure(view: PopoverView, failure: ActionFailure): PopoverV
   return { ...view, update: null, attention: null, status: null, body, focus: failure.what }
 }
 
-export async function readPopoverSnapshot(): Promise<CommandResult<PopoverInput>> {
-  const answer = await command<unknown>('popover_snapshot')
-  if (!answer.ok) return answer
-  const snapshot = parsePopoverSnapshot(answer.value)
-  return snapshot ? { ok: true, value: snapshot as PopoverInput } : { ok: false, reason: 'unexpected snapshot', unsupported: false }
-}
+/** The one snapshot read, shared with the Beebeeb window (`desktopApi.popoverSnapshot`, review P3-9 of #160). */
+export const readPopoverSnapshot = (): Promise<CommandResult<PopoverInput>> => popoverSnapshot()
 
 export function popoverReadFailure(cause: 'threw' | 'rejected' | 'timed out', error?: unknown): CommandResult<PopoverInput> {
   return { ok: false, reason: error instanceof Error ? error.message : cause, unsupported: false }

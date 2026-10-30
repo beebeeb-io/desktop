@@ -22,13 +22,10 @@ export { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL } from 
 import { updateAvailableLine } from './macUpdateCopy'
 import { updateOffer } from './macUpdateOffer'
 
-/** The snapshot plus the two parts the popover reads beyond the reducer's phase (task 1683 slice 3, lead-approved). */
-export type PopoverInput = PopoverSnapshot & {
-  /** An update the updater offered, kept by Rust so a popover built later still sees it. */
-  update?: { version: string; channel?: string | null } | null
-  /** Task 1887's send phase, while it runs: the changes still waiting. */
-  sign_out_sending?: { changes_left: number } | null
-}
+/** What the popover reads: the snapshot, whose contract carries the two parts beyond the reducer's phase (task 1683
+ * slice 3, lead-approved): `update`, an update the updater offered, kept by Rust so a popover built later still sees
+ * it; and `sign_out_sending`, task 1887's send phase while it runs, with the changes still waiting. */
+export type PopoverInput = PopoverSnapshot
 
 export type PopoverCommand =
   | 'open_review'
