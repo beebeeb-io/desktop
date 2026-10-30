@@ -699,6 +699,10 @@ impl ApiClient {
         self.url(&format!("/api/v1/files/{}", encode(file_id)))
     }
 
+    pub fn upload_abandon_url(&self, file_id: &str) -> String {
+        self.url(&format!("/api/v1/files/{}/upload/abandon", encode(file_id)))
+    }
+
     pub fn restore_file_url(&self, file_id: &str) -> String {
         self.url(&format!("/api/v1/files/{}/restore", encode(file_id)))
     }
@@ -1208,6 +1212,27 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    /// SF-0001 (L13): abandon an in-progress upload session's server row.
+    ///
+    /// `POST /api/v1/files/{id}/upload/abandon` with no body. This is the
+    /// create-session abandonment path: unlike `trash_file` it never removes
+    /// the item from the user's listing, it only discards the unfinished
+    /// session. A `404` means the row (or its session) is already gone, which
+    /// counts as done.
+    pub async fn abandon_upload(&self, file_id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .post(self.upload_abandon_url(file_id))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        resp.error_for_status()?;
+        Ok(())
     }
 
     pub async fn restore_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {

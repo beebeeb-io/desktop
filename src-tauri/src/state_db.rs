@@ -1320,6 +1320,11 @@ pub struct UploadResume {
     /// The op created a NEW server file (no prior version): on abandonment
     /// its `is_uploading` row is an orphan the client may trash.
     pub is_create: bool,
+    /// SF-0001 (L13): the session was opened under an id the desktop itself
+    /// chose. Every session created by the new code sets this; a CREATE row
+    /// written by an older version (server-chosen id) has `false` and must
+    /// never be resumed.
+    pub self_minted: bool,
     /// §8.6 rule 1: the version `complete` produced, recorded before any local
     /// bookkeeping. A row with it is never abandoned and lands without the network.
     pub completed_version: Option<i64>,
@@ -3258,6 +3263,9 @@ impl StateDb {
         ensure_column(conn, "upload_resume", "completed_version", "INTEGER")?;
         ensure_column(conn, "upload_resume", "completed_object_version_id", "TEXT")?;
         ensure_column(conn, "upload_resume", "completed_mime_type", "TEXT")?;
+        // SF-0001 (L13): sessions persisted before this flag existed were opened
+        // under a server-chosen id; only a self-minted CREATE may be resumed.
+        ensure_column(conn, "upload_resume", "self_minted", "INTEGER NOT NULL DEFAULT 0")?;
         // Task 2270 (spec M1): a finalization that cannot complete for a lasting reason is held for review.
         ensure_column(conn, "upload_finalizations", "review", "TEXT")?;
         ensure_column(conn, "upload_finalizations", "review_at", "INTEGER")?;
@@ -8256,10 +8264,10 @@ impl StateDb {
             "INSERT INTO upload_resume (
                 op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                 server_file_id, object_version_id, chunk_size_bytes, chunk_count,
-                acked_chunks, metadata_applied, is_create, updated_at
+                acked_chunks, metadata_applied, is_create, self_minted, updated_at
              )
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now')
-             WHERE EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?13)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%s','now')
+             WHERE EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?14)
              ON CONFLICT(op_id) DO UPDATE SET
                 payload_path = excluded.payload_path,
                 payload_size = excluded.payload_size,
@@ -8272,6 +8280,7 @@ impl StateDb {
                 acked_chunks = excluded.acked_chunks,
                 metadata_applied = excluded.metadata_applied,
                 is_create = excluded.is_create,
+                self_minted = excluded.self_minted,
                 updated_at = excluded.updated_at",
             params![
                 resume.op_id,
@@ -8286,6 +8295,7 @@ impl StateDb {
                 resume.acked_chunks,
                 resume.metadata_applied,
                 resume.is_create,
+                resume.self_minted,
                 claim_id,
             ],
         )?;
@@ -8617,8 +8627,8 @@ impl StateDb {
             "INSERT INTO upload_resume (
                 op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                 server_file_id, object_version_id, chunk_size_bytes, chunk_count,
-                acked_chunks, metadata_applied, is_create, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now'))
+                acked_chunks, metadata_applied, is_create, self_minted, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%s','now'))
              ON CONFLICT(op_id) DO UPDATE SET
                 payload_path = excluded.payload_path,
                 payload_size = excluded.payload_size,
@@ -8631,6 +8641,7 @@ impl StateDb {
                 acked_chunks = excluded.acked_chunks,
                 metadata_applied = excluded.metadata_applied,
                 is_create = excluded.is_create,
+                self_minted = excluded.self_minted,
                 updated_at = excluded.updated_at",
             params![
                 resume.op_id,
@@ -8645,6 +8656,7 @@ impl StateDb {
                 resume.acked_chunks,
                 resume.metadata_applied,
                 resume.is_create,
+                resume.self_minted,
             ],
         )?;
         Ok(())
@@ -8655,7 +8667,7 @@ impl StateDb {
         conn.query_row(
             "SELECT op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                     server_file_id, object_version_id, chunk_size_bytes, chunk_count,
-                    acked_chunks, metadata_applied, is_create, completed_version,
+                    acked_chunks, metadata_applied, is_create, self_minted, completed_version,
                     completed_object_version_id, completed_mime_type
              FROM upload_resume WHERE op_id = ?1",
             params![op_id],
@@ -8673,9 +8685,10 @@ impl StateDb {
                     acked_chunks: row.get(9)?,
                     metadata_applied: row.get(10)?,
                     is_create: row.get(11)?,
-                    completed_version: row.get(12)?,
-                    completed_object_version_id: row.get(13)?,
-                    completed_mime_type: row.get(14)?,
+                    self_minted: row.get(12)?,
+                    completed_version: row.get(13)?,
+                    completed_object_version_id: row.get(14)?,
+                    completed_mime_type: row.get(15)?,
                 })
             },
         )
@@ -12017,6 +12030,7 @@ mod tests {
                 ("upload_resume", "completed_version"),
                 ("upload_resume", "completed_object_version_id"),
                 ("upload_resume", "completed_mime_type"),
+                ("upload_resume", "self_minted"),
             ] {
                 let _ = conn.execute(&format!("DROP INDEX IF EXISTS idx_{table}_{column}"), []);
                 conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
@@ -12075,6 +12089,7 @@ mod tests {
             "completed_version",
             "completed_object_version_id",
             "completed_mime_type",
+            "self_minted",
         ] {
             assert!(
                 columns("upload_resume").contains(&column.to_string()),
@@ -12696,6 +12711,7 @@ mod tests {
             acked_chunks: 0,
             metadata_applied: false,
             is_create: false,
+            self_minted: false,
             completed_version: None,
             completed_object_version_id: None,
             completed_mime_type: None,
@@ -13117,6 +13133,7 @@ mod tests {
                     acked_chunks: 1,
                     metadata_applied: true,
                     is_create: false,
+                    self_minted: false,
                     completed_version: None,
                     completed_object_version_id: None,
                     completed_mime_type: None,
@@ -13432,6 +13449,7 @@ mod tests {
             acked_chunks: 1,
             metadata_applied: true,
             is_create: true,
+            self_minted: false,
             completed_version: None,
             completed_object_version_id: None,
             completed_mime_type: None,
@@ -14366,6 +14384,7 @@ mod tests {
             acked_chunks: 1,
             metadata_applied: true,
             is_create: true,
+            self_minted: false,
             completed_version: None,
             completed_object_version_id: None,
             completed_mime_type: None,

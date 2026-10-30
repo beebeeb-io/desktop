@@ -1021,6 +1021,7 @@ mod tests {
                 acked_chunks: 0,
                 metadata_applied: false,
                 is_create: true,
+                self_minted: false,
                 completed_version: None,
                 completed_object_version_id: None,
                 completed_mime_type: None,
