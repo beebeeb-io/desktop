@@ -130,6 +130,8 @@ export function popoverKey(event: { key: string; metaKey?: boolean; ctrlKey?: bo
 
 export const GEAR_ID = 'pop-gear'
 export const actionId = (what: PopoverCommand) => `pop-action-${what}`
+/** The footer's own ids: its Add storage sits next to the body's when storage is full (review P3-11 of #160). */
+export const footerId = (what: 'open_location' | 'view_online' | 'add_storage') => `pop-footer-${what}`
 
 /** §11: focus starts on the first primary action, else the gear. */
 export function focusIdFor(view: PopoverView | null): string {
@@ -305,7 +307,7 @@ export function PopoverSurface({ screen, readFailed, busy, onRun, onGear }: Surf
 
 function Footer({ footer, busy, onRun }: { footer: PopoverView['footer']; busy: PopoverCommand | null; onRun: (what: PopoverCommand) => void }) {
   const item = (what: 'open_location' | 'view_online' | 'add_storage', icon: string, label: string) => (
-    <button id={actionId(what)} type="button" className="pop-footer-button" disabled={!footer[what] || busy !== null} onClick={() => onRun(what)}>
+    <button id={footerId(what)} type="button" className="pop-footer-button" disabled={!footer[what] || busy !== null} onClick={() => onRun(what)}>
       <PopoverIcon name={icon} size={18} />
       {label}
     </button>

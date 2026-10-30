@@ -90,7 +90,7 @@ describe('reading and rendering', () => {
     const { m } = openPopover({ snap: () => new Promise(() => {}) })
     await m.flush()
     expect(m.elements().some((e) => e.props.role === 'status' && e.props['aria-label'] === 'Loading')).toBe(true)
-    for (const id of ['open_location', 'view_online', 'add_storage']) expect(byId(m, app.actionId(id as any))?.props.disabled).toBe(true)
+    for (const id of ['open_location', 'view_online', 'add_storage'] as const) expect(byId(m, app.footerId(id))?.props.disabled).toBe(true)
   })
 
   test('a first read that fails says so once, and Try again reads again', async () => {
@@ -208,7 +208,7 @@ describe('actions (§6.3, §6.4)', () => {
     answer(fixture('synced'))
     await m.flush()
     expect(text(m)).toContain('Recent activity')
-    expect(byId(m, app.actionId('open_location'))?.props.disabled).toBe(false)
+    expect(byId(m, app.footerId('open_location'))?.props.disabled).toBe(false)
   })
 })
 
@@ -270,6 +270,16 @@ describe('one error surface: a failed action replaces the body, never a toast', 
   test('a failed Open in Finder says the shipped sentence (task 17b), and every action has one', () => {
     expect(app.ACTION_FAILED.open_location).toBe('Beebeeb couldn’t open its Finder location.')
     for (const [what, sentence] of Object.entries(app.ACTION_FAILED)) expect([what, sentence.length > 10]).toEqual([what, true])
+  })
+
+  test('no two elements share an id, the footer included (review P3-11 of #160)', async () => {
+    // Storage full shows Add storage in the body and in the footer: two buttons, one id.
+    for (const name of ['storage-full', 'synced', 'syncing', 'paused', 'needs-decision', 'update-available', 'offline', 'error']) {
+      const { m } = openPopover({ snap: () => fixture(name) })
+      await m.flush()
+      const ids = m.elements().map((e) => e.props.id).filter((id): id is string => typeof id === 'string')
+      expect([name, ids.length > 0, ids.filter((id, i) => ids.indexOf(id) !== i)]).toEqual([name, true, []])
+    }
   })
 
   test('the popover never mounts a toast host or calls a toast', () => {
