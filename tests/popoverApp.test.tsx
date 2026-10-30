@@ -136,6 +136,51 @@ describe('reading and rendering', () => {
     expect(reads).toBeGreaterThan(atHide + 1)
   })
 
+  test('hidden longer than one refresh, it drops what it showed: shown again, it is busy until the new answer (self-review of #202)', async () => {
+    // The window paints before `popover-shown` reaches it, so an answer kept while hidden would show an old state
+    // (an hour-old "3 files left") as current. A quick reopen keeps it: it is no older than the timer would have let it be.
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    const loading = (m: Mounted) => m.elements().some((e) => e.props.role === 'status' && e.props['aria-label'] === 'Loading')
+    let release: (() => void) | null = null
+    let hold = false
+    const snap = () => hold ? new Promise((resolve) => { release = () => resolve(fixture('synced')) }) : fixture('synced')
+    const { m, bus } = openPopover({ snap, bindings: { POPOVER_REFRESH_MS: 100 } })
+    await m.flush()
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+    await sleep(250)
+    await m.flush()
+    expect(loading(m)).toBe(true)
+    expect(text(m)).not.toContain('Recent activity')
+    hold = true
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    expect(loading(m)).toBe(true)
+    release!()
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+  })
+
+  test('a quick hide and show keeps what it showed and never drops it later (self-review of #202)', async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let hold = false
+    const snap = () => hold ? new Promise(() => {}) : fixture('synced')
+    const { m, bus } = openPopover({ snap, bindings: { POPOVER_REFRESH_MS: 200 } })
+    await m.flush()
+    bus.emit(POPOVER_HIDDEN_EVENT)
+    await sleep(20)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+    bus.emit(POPOVER_SHOWN_EVENT)
+    await m.flush()
+    // Later reads never answer, so what is on screen after this is what the show's read left there.
+    hold = true
+    await sleep(300)
+    await m.flush()
+    expect(text(m)).toContain('Recent activity')
+  })
+
   test('no session: the popover hides itself and shows nothing', async () => {
     const { m } = openPopover({ snap: () => fixture('session-ended') })
     await m.flush()

@@ -330,6 +330,8 @@ export default function PopoverApp() {
   const [busy, setBusy] = useState<PopoverCommand | null>(null)
   const failureRef = useRef<ActionFailure | null>(null)
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverInput>> | null>(null)
+  const answeredAt = useRef(0)
+  const forgetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const setFailureBoth = useCallback((next: ActionFailure | null) => {
     failureRef.current = next
@@ -344,6 +346,7 @@ export default function PopoverApp() {
           setReadFailed(true)
           return
         }
+        answeredAt.current = Date.now()
         setReadFailed(false)
         setSnapshot(result.value)
         if (failureRef.current && failureRef.current.phase !== result.value.phase) setFailureBoth(null)
@@ -363,13 +366,28 @@ export default function PopoverApp() {
         else unlisten.push(stop)
       })
     }
+    const keep = () => {
+      if (forgetTimer.current !== null) clearTimeout(forgetTimer.current)
+      forgetTimer.current = null
+    }
     on(POPOVER_SHOWN_EVENT, () => {
+      keep()
       setFailureBoth(null)
       reader.resume()
       void reader.refresh()
     })
-    // The window is hidden, never destroyed: reading stops while it is hidden (review P2-2 of #160).
-    on(POPOVER_HIDDEN_EVENT, () => reader.stop())
+    // The window is hidden, never destroyed: reading stops while it is hidden (review P2-2 of #160). It paints before
+    // `popover-shown` reaches it, so once the answer is older than one refresh it is dropped, and the popover is busy
+    // until the next one: it never shows an old state as current (self-review of #202).
+    on(POPOVER_HIDDEN_EVENT, () => {
+      reader.stop()
+      keep()
+      forgetTimer.current = setTimeout(() => {
+        forgetTimer.current = null
+        setSnapshot(null)
+        setReadFailed(false)
+      }, Math.max(0, answeredAt.current + POPOVER_REFRESH_MS - Date.now()))
+    })
     const onKey = (event: KeyboardEvent) => {
       const key = popoverKey(event)
       if (key === null) return
@@ -384,6 +402,7 @@ export default function PopoverApp() {
       for (const stop of unlisten) stop()
       window.removeEventListener('keydown', onKey)
       reader.stop()
+      keep()
     }
   }, [reader, setFailureBoth])
 
