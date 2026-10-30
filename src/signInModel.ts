@@ -12,6 +12,7 @@
  * outside the boundary; the Beebeeb window is inside it because 1887's sign-out relies on the remount.
  */
 import { SET_UP_COPY } from './accountViewCopy'
+import type { VaultUnlockRoute } from './desktopApi'
 import type { MainNav } from './mainWindowModel'
 import type { SignInSettled } from './onboardingSignIn'
 import type { AskCounts } from './signOutCopy'
@@ -53,7 +54,12 @@ export type WindowScreen = 'home' | 'signin' | 'reauth' | 'switch' | 'unlock' | 
 export interface RoutingAccount {
   logged_in: boolean
   auth_expired: boolean
+  /** Read only for the Keychain route below; an account read without it is never locked-without-key. */
+  vault_unlocked?: boolean
 }
+
+/** What the window knows of the Keychain route: `unknown` while `vault_unlock_route` is out (1747 Part 2). */
+export type VaultRoute = VaultUnlockRoute | 'unknown'
 
 export const settling = (): SignInFlow => ({ ...IDLE_FLOW, step: 'settling' })
 
@@ -64,10 +70,19 @@ export const settling = (): SignInFlow => ({ ...IDLE_FLOW, step: 'settling' })
  * threw the next screen away, and showed the card the person had just signed in on again). The switch is a screen of an
  * account that is still on this Mac while another waits; the others follow a session that is there.
  */
-export function windowScreen(account: RoutingAccount, flow: SignInFlow): WindowScreen {
+export function windowScreen(account: RoutingAccount, flow: SignInFlow, route: VaultRoute = 'keychain'): WindowScreen {
   if (flow.step !== null) return flow.step
   if (!account.logged_in) return 'signin'
-  return account.auth_expired ? 'reauth' : 'home'
+  if (account.auth_expired) return 'reauth'
+  // Plan D4 (task 1747 Part 2): a signed-in, locked Mac with no key anywhere opens on Set up this Mac BY STATE, not only after a
+  // click. An interrupted first run (a session without keys, the window closed or the app quit before the phrase) is exactly
+  // this, and Home's locked card would offer an unlock with no key to read. While the Keychain's answer is out the window
+  // settles, so Home is not drawn for a moment and then replaced. With the key in the Keychain the window is Home.
+  if (account.vault_unlocked === false) {
+    if (route === 'unknown') return 'settling'
+    if (route === 'recovery_phrase') return 'unlock'
+  }
+  return 'home'
 }
 
 /**

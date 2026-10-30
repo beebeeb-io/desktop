@@ -21,6 +21,11 @@ on:
         required: true
         default: false
         type: boolean
+      updater_key_transition:
+        description: ONLY for a deliberate updater-key transition release N (docs/RELEASING.md) - downgrade the signature-key guard to a warning
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -69,7 +74,7 @@ jobs:
 
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
@@ -77,35 +82,12 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          notes_path="RELEASE_NOTES.md"
-
-          if [[ ! -f "$notes_path" ]]; then
-            echo "::error file=$notes_path::Missing RELEASE_NOTES.md for Beebeeb Desktop $RELEASE_VERSION. Author the release notes at the repo root, commit them, then rerun this workflow. See docs/RELEASING.md."
-            exit 1
-          fi
-
-          python3 <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-
-          version = os.environ["RELEASE_VERSION"]
-          notes_path = pathlib.Path("RELEASE_NOTES.md")
-          notes = notes_path.read_text(encoding="utf-8")
-          exact_version = re.compile(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z-]|\.[0-9A-Za-z])")
-
-          if not exact_version.search(notes):
-              print(
-                  f"::error file=RELEASE_NOTES.md::RELEASE_NOTES.md must mention the exact release version {version}. "
-                  "Update the title/body for this release and commit it before rerunning the workflow. See docs/RELEASING.md.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          PY
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        # Fails closed if RELEASE_NOTES.md is missing, does not name the exact version,
+        # or promises automatic delivery to existing installs while the release is
+        # published to alpha/beta only (desktop-v0.8.3 did exactly that and sat in
+        # alpha for 57 days). Covered by tests/releaseChannelChecks.test.ts.
+        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md
 
       - name: Refuse while RELEASE_BLOCKERS.md lists an item
         shell: bash
@@ -135,7 +117,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Install Linux dependencies
         run: |
@@ -169,11 +151,69 @@ jobs:
           mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
           cargo test --locked
 
+  verify-branch-point:
+    name: Verify release branch point
+    # Task 2281: the ruleset gates every update to an existing release/* branch, but not the
+    # branch's STARTING commit (creation is not a pull request, and required checks do not run on
+    # create), so an admin token could create release/x.y.z at an unreviewed commit and dispatch
+    # this workflow to sign it. Refuse that here, before `build` gets the `desktop-release`
+    # environment and an Azure signing token: the branch must have started at a commit on main or
+    # at the commit of a published desktop-v* tag whose commit is itself a pull request merge into
+    # main or a release/* branch, and every first-parent commit since then must have arrived
+    # through a pull request merged into this same branch. A dispatch from main
+    # skips this job, because main is protected by pull requests. No `environment:` here, so the
+    # job never receives an Azure token.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      !inputs.publish_existing &&
+      startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # Full history: the check walks first-parent from the dispatched head back to the
+          # branch's starting point.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release branch started from reviewed commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          MAIN_REF: origin/main
+        run: bash scripts/verify-release-branch-point.sh
+
   build:
     name: Build ${{ matrix.name }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
-    needs: test
+    # `verify-branch-point` is skipped for a dispatch from main (main is protected by PRs), so
+    # this job tolerates `skipped` there; whenever the check ran, it must have passed. Signing
+    # happens in this job, so a refused branch point must stop it before it starts.
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event_name == 'workflow_dispatch' &&
+        !inputs.publish_existing &&
+        needs.test.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped')
+      }}
+    needs:
+      - test
+      - verify-branch-point
     runs-on: ${{ matrix.os }}
+    # Signing trust boundary (docs/RELEASING.md, "Windows Authenticode"): Azure trusts this job's OIDC token only
+    # through the GitHub environment `desktop-release` (subject repo:beebeeb-io/desktop:environment:desktop-release),
+    # and that environment deploys only from `main` and `release/*`. A release branch needs no per-branch Azure
+    # credential any more; a run from any other branch is refused before the job starts.
+    environment: desktop-release
     # Baseline for Build Windows is ~14 min (0.8.7 runs); signing adds the
     # per-file Artifact Signing calls. A hang (the first signed run hung ~60
     # min in "Build Tauri app" with zero sign requests — cancelled) must fail
@@ -182,8 +222,9 @@ jobs:
     permissions:
       contents: read
       # Windows Authenticode signing authenticates to Azure Artifact Signing via
-      # GitHub OIDC (federated credential on beebeeb-desktop-release). Only the
-      # Windows matrix leg signs; the permission is harmless on Linux.
+      # GitHub OIDC (federated credential on beebeeb-desktop-release, for the
+      # environment above). Only the Windows matrix leg signs; the permission is
+      # harmless on Linux.
       id-token: write
     strategy:
       fail-fast: false
@@ -215,7 +256,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -328,7 +369,7 @@ jobs:
         run: bash scripts/macos-release-preflight.sh
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -443,9 +484,27 @@ jobs:
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm release-assets/
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig release-assets/
 
+      # Every updater signature must be made by the key baked into this build's
+      # tauri.conf.json. 0.3.0-0.8.3 baked C6FADFD59D732197 while CI signed with
+      # 545D7BA77EDEA7E1, so every install >= 0.3.0 rejected every update and no
+      # step noticed. Fail here, before anything is published.
+      - name: Check updater signature key matches baked pubkey
+        shell: bash
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sigs=(release-assets/*.sig)
+          if [[ ${#sigs[@]} -eq 0 ]]; then
+            echo "::error::No updater .sig files staged in release-assets/"
+            exit 1
+          fi
+          node scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG --sig "${sigs[@]}"
+
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-macos
           path: release-assets/*
@@ -453,7 +512,7 @@ jobs:
 
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-windows
           path: release-assets/*
@@ -461,7 +520,7 @@ jobs:
 
       - name: Upload Linux artifacts
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beebeeb-desktop-linux
           path: release-assets/*
@@ -487,23 +546,28 @@ jobs:
 
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
       - name: Create release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: desktop-v${{ inputs.version }}
           name: Beebeeb Desktop ${{ inputs.version }}
           target_commitish: ${{ github.sha }}
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
+          # GitHub "Latest" is what beebeeb.io/download hands to fresh installs, so it must
+          # track the stable updater manifest (desktop/latest.json). An alpha/beta release is
+          # never marked Latest here; publish-manifest marks it Latest when it is promoted to
+          # stable. (desktop-v0.8.3 was marked Latest while stable still served 0.8.2.)
+          make_latest: ${{ inputs.channel == 'stable' && 'true' || 'false' }}
           fail_on_unmatched_files: false
           # Single catch-all instead of a per-extension allowlist — the upload steps above now
           # glob whole bundle directories, so every real bundle type flows through automatically
@@ -539,18 +603,33 @@ jobs:
       - build
       - release
     runs-on: ubuntu-latest
+    # Every GitHub request in the manifest step is bounded (timeout 120 s, 3 attempts); this
+    # bounds the job as a whole, so a stalled connection fails it instead of hanging for hours.
+    timeout-minutes: 15
     permissions:
-      contents: read
+      # write: only to mark the GitHub release "Latest" on a stable publish (final step).
+      contents: write
 
     steps:
       - name: Checkout releases repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: beebeeb-io/releases
           ref: main
           token: ${{ secrets.RELEASES_PUSH_TOKEN }}
           persist-credentials: false
           path: releases-repo
+
+      - name: Checkout updater key guard at the release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: desktop-v${{ inputs.version }}
+          persist-credentials: false
+          path: desktop-src
+          sparse-checkout: |
+            scripts/check-updater-signature-key.mjs
+            src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
 
       - name: Generate desktop channel manifest
         env:
@@ -561,10 +640,41 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
+          # Command substitutions keep errexit, so a failing command inside $(fetch_sig ...)
+          # fails the step even where no explicit `|| return 1` guards it (#164's empty-signature
+          # hole was exactly such a command).
+          shopt -s inherit_errexit
 
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           BASE_URL="https://github.com/$REPO/releases/download/$TAG"
-          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
+          WORK_DIR=$(mktemp -d)
+
+          # The release and its signatures are read through the authenticated REST API, never the
+          # public releases/download URL: on 2026-10-26 github.com answered one .sig URL with a
+          # cached 504 for about 15 minutes while the assets API served the same file, and the
+          # 0.8.15 alpha promotion failed twice. The retries ride out blips of seconds, not an
+          # outage of that length; re-run the job once the API answers again.
+          #
+          # gh_api_to <file> <endpoint> [gh api flags...]: up to 3 attempts of at most 120 s each;
+          # on success the file holds that attempt's response only.
+          gh_api_to() {
+            local out="$1" endpoint="$2" attempt
+            shift
+            for attempt in 1 2 3; do
+              if timeout 120 gh api "$@" > "$out"; then
+                return 0
+              fi
+              echo "::warning::GitHub API request $endpoint failed (attempt $attempt of 3)" >&2
+              if [ "$attempt" -lt 3 ]; then
+                sleep $((attempt * 10))
+              fi
+            done
+            echo "::error::GitHub API request $endpoint failed 3 times" >&2
+            return 1
+          }
+
+          gh_api_to "$WORK_DIR/release.json" "repos/$REPO/releases/tags/$TAG"
+          NOTES=$(jq -r '.body // ""' "$WORK_DIR/release.json")
 
           if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Desktop release version '$VER' must be plain semver like 0.2.1. Channel is selected separately by the workflow input."
@@ -586,12 +696,15 @@ jobs:
 
           # The Tauri updater verifies update bundles against the embedded pubkey
           # in tauri.conf.json using the .sig files produced at build time.
-          # Windows and Linux must fail closed if their signatures are absent.
+          # Windows and Linux must fail closed if their bundles or signatures are absent.
           # macOS is still disabled in the release matrix (built + signed locally instead, see
-          # the matrix comment above) so its updater bundle filename is a best-effort
-          # carry-forward until the macOS assets for this VER are actually uploaded to the
-          # release. Missing macOS signatures omit the darwin entry instead of blocking
-          # Windows/Linux manifest publishing.
+          # the matrix comment above), so the CI-created release has no macOS assets until
+          # scripts/release-macos-local.sh uploads them. darwin is all-or-nothing: a release
+          # with no macOS asset at all (no dmg, no updater bundle, no signature, in any upload
+          # state) omits the darwin entry instead of blocking Windows/Linux manifest publishing.
+          # Any other macOS state (a dmg without the bundle, an upload still in progress, a
+          # signature that is missing, empty, unfetchable or not for this bundle) fails the job:
+          # publishing without darwin would silently stop offering Macs the update.
           #
           # Task 1608 (2026-09-29): macOS launched Apple Silicon (arm64) ONLY. The bundle name
           # below is Tauri's real, verified output (a real local `--target aarch64-apple-darwin`
@@ -611,26 +724,77 @@ jobs:
           # setup.exe installs, so the generic fallback intentionally points at
           # NSIS; MSI-installed clients still receive MSI through the typed key.
           MACOS_BUNDLE="Beebeeb.app.tar.gz"
+          MACOS_DMG="Beebeeb_${VER}_aarch64.dmg"
           LINUX_BUNDLE="Beebeeb_${VER}_amd64.AppImage"
           WINDOWS_NSIS_BUNDLE="Beebeeb_${VER}_x64-setup.exe"
           WINDOWS_MSI_BUNDLE="Beebeeb_${VER}_x64_en-US.msi"
 
+          # asset_id <name>: the id of the release's fully uploaded, non-empty asset with exactly
+          # that name, or nothing.
+          asset_id() {
+            jq -r --arg name "$1" \
+              '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' \
+              "$WORK_DIR/release.json"
+          }
+
+          # fetch_sig <bundle>: print the bundle's signature. Fails unless the bundle and its .sig
+          # are uploaded, non-empty assets of $TAG and the .sig is a Tauri (minisign) signature
+          # whose trusted comment names this bundle. Failure paths also return non-zero
+          # explicitly, on top of inherit_errexit.
           fetch_sig() {
-            curl --proto '=https' --tlsv1.2 -fsSL "$1"
-          }
+            local bundle="$1" sig_id untrusted trusted
 
-          fetch_optional_sig() {
-            local url="$1"
-
-            if ! curl --proto '=https' --tlsv1.2 -fsSL "$url"; then
-              echo "::notice::Optional macOS signature not found at $url; omitting macOS manifest entries" >&2
+            if [ -z "$(asset_id "$bundle")" ]; then
+              echo "::error::$bundle is not an uploaded asset of $TAG" >&2
+              return 1
             fi
+            sig_id=$(asset_id "$bundle.sig")
+            if [ -z "$sig_id" ]; then
+              echo "::error::$bundle.sig is not an uploaded asset of $TAG" >&2
+              return 1
+            fi
+            gh_api_to "$WORK_DIR/$bundle.sig" "repos/$REPO/releases/assets/$sig_id" \
+              -H 'Accept: application/octet-stream' || return 1
+            if ! grep -q '[^[:space:]]' "$WORK_DIR/$bundle.sig"; then
+              echo "::error::$bundle.sig on $TAG is empty" >&2
+              return 1
+            fi
+            # Decoded, a signature reads "untrusted comment: ...", the signature line, then
+            # "trusted comment: timestamp:<n><TAB>file:<bundle>". An error page, the asset's
+            # JSON metadata or another bundle's signature must not reach the manifest. (Which
+            # key signed it is not checked here: a key-rotation release ships old-key signatures.)
+            if ! base64 -d "$WORK_DIR/$bundle.sig" > "$WORK_DIR/$bundle.sig.txt" 2>/dev/null; then
+              echo "::error::$bundle.sig on $TAG is not base64" >&2
+              return 1
+            fi
+            untrusted=$(sed -n 1p "$WORK_DIR/$bundle.sig.txt")
+            trusted=$(sed -n 3p "$WORK_DIR/$bundle.sig.txt")
+            if [[ "$untrusted" != "untrusted comment: "* || "$trusted" != "trusted comment: "* ||
+              $'\t'"${trusted#trusted comment: }"$'\t' != *$'\t'"file:$bundle"$'\t'* ]]; then
+              echo "::error::$bundle.sig on $TAG is not a Tauri signature of $bundle" >&2
+              return 1
+            fi
+            cat "$WORK_DIR/$bundle.sig" || return 1
           }
 
-          SIG_MACOS=$(fetch_optional_sig "${BASE_URL}/${MACOS_BUNDLE}.sig")
-          SIG_LINUX=$(fetch_sig "${BASE_URL}/${LINUX_BUNDLE}.sig")
-          SIG_WINDOWS_NSIS=$(fetch_sig "${BASE_URL}/${WINDOWS_NSIS_BUNDLE}.sig")
-          SIG_WINDOWS_MSI=$(fetch_sig "${BASE_URL}/${WINDOWS_MSI_BUNDLE}.sig")
+          # fetch_optional_sig <bundle>: like fetch_sig, but prints nothing when the release has
+          # no macOS asset at all, in any upload state (the darwin all-or-nothing rule above).
+          fetch_optional_sig() {
+            local bundle="$1"
+
+            if ! jq -e --arg a "$bundle" --arg b "$bundle.sig" --arg c "$MACOS_DMG" \
+              'any(.assets[]; .name == $a or .name == $b or .name == $c)' \
+              "$WORK_DIR/release.json" > /dev/null; then
+              echo "::notice::No macOS asset is on $TAG; omitting macOS manifest entries" >&2
+              return 0
+            fi
+            fetch_sig "$bundle"
+          }
+
+          SIG_MACOS=$(fetch_optional_sig "$MACOS_BUNDLE")
+          SIG_LINUX=$(fetch_sig "$LINUX_BUNDLE")
+          SIG_WINDOWS_NSIS=$(fetch_sig "$WINDOWS_NSIS_BUNDLE")
+          SIG_WINDOWS_MSI=$(fetch_sig "$WINDOWS_MSI_BUNDLE")
 
           mkdir -p releases-repo/desktop
 
@@ -685,6 +849,29 @@ jobs:
               )
             }' > "releases-repo/$MANIFEST_PATH"
 
+      # Same guard as the build job, on what installs will actually fetch. This
+      # also covers publish_existing=true promotions, which never run the build.
+      # Tags cut before this guard existed lack the script and are refused without
+      # the transition flag. 0.8.4-0.8.20 are signed with the baked key, 0.8.3 and
+      # older are not: promote such a tag only after checking its .sig files by hand
+      # (docs/RELEASING.md, "Promoting a tag cut before the guard").
+      - name: Check manifest signatures match the baked updater key
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f desktop-src/scripts/check-updater-signature-key.mjs ]]; then
+            if [[ -n "$KEY_TRANSITION_FLAG" ]]; then
+              echo "::warning::desktop-v${{ inputs.version }} predates the updater key guard; publishing under updater_key_transition=true without a key check."
+              exit 0
+            fi
+            echo "::error::desktop-v${{ inputs.version }} predates the updater key guard, so its signatures cannot be checked. Cut a new release, or check its .sig files by hand and rerun with updater_key_transition=true (docs/RELEASING.md, Promoting a tag cut before the guard)."
+            exit 1
+          fi
+          node desktop-src/scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG \
+            --config desktop-src/src-tauri/tauri.conf.json \
+            --manifest "releases-repo/$DESKTOP_MANIFEST_PATH"
+
       - name: Commit and push to releases repo
         working-directory: releases-repo
         run: |
@@ -704,3 +891,16 @@ jobs:
         env:
           RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
           TAG: desktop-v${{ inputs.version }}
+
+      - name: Mark stable release as GitHub Latest
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Keep GitHub's Latest (served by beebeeb.io/download) equal to the stable
+          # updater manifest. `node scripts/release-channel-checks.mjs delivery` checks
+          # the two live values after the releases site has redeployed.
+          gh release edit "$TAG" --repo "$REPO" --latest

@@ -29,6 +29,7 @@ import {
   lockVault,
   openUrl,
   popoverSnapshot,
+  vaultUnlockRoute,
   type DesktopConfig,
   type DesktopTheme,
   type CommandResult,
@@ -257,7 +258,7 @@ export function GeneralTab({ settings, signedIn }: { settings: SettingsConfig; s
         <SettingRow
           name="appearance"
           tall
-          label="Appearance"
+          label="Theme"
           hint={appearanceHint(theme)}
           control={
             <ChoiceSelect
@@ -273,7 +274,7 @@ export function GeneralTab({ settings, signedIn }: { settings: SettingsConfig; s
       {settings.state.status === 'failed' ? (
         <ConfigLoadFailed onRetry={() => void settings.reload()} />
       ) : (
-        <SettingsGroup title="Tell me about">
+        <SettingsGroup title="On this device">
           {NOTIFICATION_ROWS.map((row) => (
             <ToggleRow
               key={row.key}
@@ -334,7 +335,7 @@ function DataResidencyGroup() {
 
   if (loading) {
     return (
-      <SettingsGroup title="Where your files are stored">
+      <SettingsGroup title="Storage location">
         <SettingRow name="region-loading" label="Loading…" />
       </SettingsGroup>
     )
@@ -342,7 +343,7 @@ function DataResidencyGroup() {
   const summary = residencySummary(view)
   if (loadError !== null || (summary === null && !view.preferenceUnavailable)) {
     return (
-      <SettingsGroup title="Where your files are stored">
+      <SettingsGroup title="Storage location">
         <Note
           kind="alert"
           surface="data-residency-load"
@@ -354,7 +355,7 @@ function DataResidencyGroup() {
   }
 
   return (
-    <SettingsGroup title="Where your files are stored">
+    <SettingsGroup title="Storage location">
       <SettingRow
         name="region-summary"
         label={view.preferenceUnavailable ? 'Your chosen location isn’t available right now.' : summary}
@@ -414,7 +415,18 @@ type AccountBusy = 'lock_vault' | 'unlock_vault' | null
  * The sign-out runs through the window's one flow (spec 2026-10-10 §5.1), which the root owns and hands in with its
  * view and a count of its outcomes: this tab mounts on every visit, so it builds no flow and consumes no request.
  */
-export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow; flowView: FlowView; flowOutcomes: number }) {
+export function AccountTab({
+  flow,
+  flowView,
+  flowOutcomes,
+  onSetUpThisMac,
+}: {
+  flow: SignOutFlow
+  flowView: FlowView
+  flowOutcomes: number
+  /** Opens Set up this Mac (the window's flow step `unlock`): Unlock on a Mac with no vault key anywhere (task 1747 Part 2). */
+  onSetUpThisMac: () => void
+}) {
   const { showToast } = useToast()
   const [load, setLoad] = useState<AccountLoad>({ status: 'loading' })
   const [plan, setPlan] = useState<Subscription | null | undefined>(undefined)
@@ -473,6 +485,19 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
     }
     await refresh()
     return result
+  }
+
+  // Task 1747 Part 2 (plan O4): the same Keychain route as Home's “Unlock vault”, asked at the click. A Mac with no key anywhere
+  // opens Set up this Mac instead of failing with the Keychain's own words; a build without the command cannot tell and
+  // unlocks as before; any other failure of the read is the unlock failing.
+  const unlockByRoute = async (): Promise<CommandResult<unknown>> => {
+    const routed = await vaultUnlockRoute()
+    if (routed.ok && routed.value === 'recovery_phrase') {
+      onSetUpThisMac()
+      return { ok: true, value: undefined }
+    }
+    if (!routed.ok && !routed.unsupported) return routed
+    return command<void>('unlock_vault')
   }
 
   const lock = async () => {
@@ -603,7 +628,7 @@ export function AccountTab({ flow, flowView, flowOutcomes }: { flow: SignOutFlow
             }
             hint="Sync is paused until you unlock it."
             control={
-              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', () => command<void>('unlock_vault'), 'Couldn’t unlock the vault')}>
+              <Btn primary disabled={busy === 'unlock_vault'} onClick={() => void run('unlock_vault', unlockByRoute, 'Couldn’t unlock the vault')}>
                 {busy === 'unlock_vault' ? 'Unlocking…' : 'Unlock'}
               </Btn>
             }

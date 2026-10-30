@@ -15,6 +15,7 @@ import {
   type VersionConflictEntry,
 } from '../desktopApi'
 import { reviewCounts } from '../reviewCounts'
+import { reviewKindLabel } from '../reviewKindLabel'
 import { useToast } from '../windows/ui'
 
 function formatTimestamp(value: string | number | null | undefined): string {
@@ -27,29 +28,6 @@ function formatTimestamp(value: string | number | null | undefined): string {
     return Number.isNaN(parsed) ? value : new Date(parsed).toLocaleString()
   }
   return 'Time unknown'
-}
-
-function kindLabel(kind: VersionConflictEntry['kind']): string {
-  switch (kind) {
-    case 'quota_failure':
-      return 'Quota'
-    case 'permission_failure':
-      return 'Permission'
-    case 'stale_base':
-      return 'Stale base'
-    case 'failed_upload':
-      return 'Upload'
-    case 'metadata':
-      return 'Metadata'
-    case 'delete':
-      return 'Delete'
-    case 'restore':
-      return 'Restore'
-    case 'kept_copy':
-      return 'Kept copy'
-    default:
-      return 'Conflict'
-  }
 }
 
 export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: number }) {
@@ -129,6 +107,8 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
       fileId: entry.file_id,
       fileName: entry.file_name,
       isText: false,
+      // Task 2190: a parked conflict is decided by its queued write.
+      opId: entry.kind === 'stale_base' ? (entry.op_id ?? null) : null,
     })
     if (!result.ok) {
       showToast({
@@ -249,7 +229,7 @@ export default function VersionCenter({ refreshSignal = 0 }: { refreshSignal?: n
                   <span>
                     <span className="row-title">{entry.file_name}</span>
                     <span className="row-detail">
-                      {kindLabel(entry.kind)} · {entry.status} · {formatTimestamp(entry.updated_at)}
+                      {reviewKindLabel(entry.kind)} · {entry.status} · {formatTimestamp(entry.updated_at)}
                     </span>
                     <span className="row-detail">{entry.detail}</span>
                   </span>

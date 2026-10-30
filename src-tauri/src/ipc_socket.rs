@@ -2055,17 +2055,10 @@ async fn handle_connection(
             }
             IpcRequest::GetSyncSummary => {
                 let syncing = db
-                    .list_by_status(crate::state_db::FileStatus::Downloading)
-                    .map(|v| v.len() as u32)
+                    .count_by_status(crate::state_db::FileStatus::Downloading)
                     .unwrap_or(0);
-                let cloud_only = db
-                    .list_by_status(crate::state_db::FileStatus::CloudOnly)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
-                let conflicts = db
-                    .list_by_status(crate::state_db::FileStatus::Conflict)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
+                let cloud_only = db.count_by_status(crate::state_db::FileStatus::CloudOnly).unwrap_or(0);
+                let conflicts = db.count_by_status(crate::state_db::FileStatus::Conflict).unwrap_or(0);
                 IpcResponse::SyncSummary {
                     syncing,
                     cloud_only,

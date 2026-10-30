@@ -41,6 +41,7 @@ import { useRegionLabel } from '../useRegion'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listVaultFolders, setSelectiveSync, formatBytes, type VaultItem } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn, useToast } from '../ui'
+import { pollWhileVisible } from '../visiblePoll'
 
 const RED = 'oklch(0.5 0.18 25)'
 
@@ -747,12 +748,11 @@ export default function SelectiveSyncView() {
 
   useEffect(() => {
     const cancel = load()
-    const id = window.setInterval(() => {
-      void refresh()
-    }, POLL_INTERVAL_MS)
+    // Task 2243: `list_vault_folders` reads every row of the state DB; only while the window is on screen.
+    const stop = pollWhileVisible(() => void refresh(), POLL_INTERVAL_MS, { leading: false })
     return () => {
       cancel?.()
-      window.clearInterval(id)
+      stop()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

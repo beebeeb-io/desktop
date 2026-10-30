@@ -20,6 +20,7 @@ import { subscribeKeptFolderChanged } from './finderSetup'
 import { KEPT_FOLDER_ROW_SENTENCE, keptFolderAfterDismiss, preservedFilesNote, type DismissKeptFolderResult } from './macSettingsModel'
 import { Btn, Note } from './macSettingsParts'
 import { K2_DISMISS, K2_ROW, K2_SHOW, K3_TOAST } from './signOutCopy'
+import { PARKED_COPY_ROW } from './parkedConflict'
 import { useToast } from './windows/ui'
 
 export interface KeptFolders {
@@ -33,6 +34,10 @@ export interface KeptFolders {
   showKeptUnsent: () => Promise<void>
   dismissKeptUnsent: () => Promise<void>
   dismissKept: () => Promise<void>
+  /** Task 2190: every copy "Keep Theirs" kept of this Mac's changes, oldest first. */
+  conflictCopies: string[]
+  showConflictCopy: (path: string) => Promise<void>
+  dismissConflictCopy: (path: string) => Promise<void>
 }
 
 export function useKeptFolders(): KeptFolders {
@@ -59,10 +64,6 @@ export function useKeptFolders(): KeptFolders {
     const result = await command<string | null>('kept_unsent_folder')
     setKeptUnsent(result.ok ? result.value : null)
   }, [])
-  useEffect(
-    () => subscribeKeptFolderChanged(() => void loadKeptUnsent(), { onSubscribed: () => void loadKeptUnsent() }),
-    [loadKeptUnsent],
-  )
 
   // "Show in Finder" fails only when the folder is gone (K3); the row stays until Dismiss.
   const showKeptUnsent = async () => {
@@ -101,7 +102,43 @@ export function useKeptFolders(): KeptFolders {
     setKept(keptFolderAfterDismiss(result.value))
   }
 
-  return { kept, setKept, loadKept, keptUnsent, showKeptUnsent, dismissKeptUnsent, dismissKept }
+  // Task 2190 (review-169 blocker): a conflict's kept copies are their own list, one row each, so a
+  // decision never hides the sign-out's folder and every copy can be shown. Read by the same listener
+  // as the sign-out's folder: one more read, no more listeners.
+  const [conflictCopies, setConflictCopies] = useState<string[]>([])
+  const loadConflictCopies = useCallback(async () => {
+    const result = await command<string[]>('kept_conflict_copies')
+    setConflictCopies(result.ok ? result.value : [])
+  }, [])
+  const loadUnsentAndCopies = useCallback(async () => {
+    await loadKeptUnsent()
+    await loadConflictCopies()
+  }, [loadKeptUnsent, loadConflictCopies])
+  useEffect(
+    () => subscribeKeptFolderChanged(() => void loadUnsentAndCopies(), { onSubscribed: () => void loadUnsentAndCopies() }),
+    [loadUnsentAndCopies],
+  )
+  const showConflictCopy = async (path: string) => {
+    const result = await command<void>('show_kept_conflict_copy', { path })
+    if (!result.ok) showToast({ variant: 'error', message: K3_TOAST })
+  }
+  const dismissConflictCopy = async (path: string) => {
+    const result = await command<boolean>('dismiss_kept_conflict_copy', { path })
+    if (result.ok) setConflictCopies((copies) => copies.filter((copy) => copy !== path))
+  }
+
+  return {
+    kept,
+    setKept,
+    loadKept,
+    keptUnsent,
+    showKeptUnsent,
+    dismissKeptUnsent,
+    dismissKept,
+    conflictCopies,
+    showConflictCopy,
+    dismissConflictCopy,
+  }
 }
 
 /** The rows themselves: ours first, then 1882's. Nothing when neither folder is saved. */
@@ -123,6 +160,22 @@ export function KeptFolderNotes({ folders }: { folders: KeptFolders }) {
           {K2_ROW}
         </Note>
       ) : null}
+      {folders.conflictCopies.map((copy) => (
+        <Note
+          key={copy}
+          kind="status"
+          reason={copy}
+          reasonWraps
+          actions={
+            <>
+              <Btn onClick={() => void folders.showConflictCopy(copy)}>{K2_SHOW}</Btn>
+              <Btn onClick={() => void folders.dismissConflictCopy(copy)}>{K2_DISMISS}</Btn>
+            </>
+          }
+        >
+          {PARKED_COPY_ROW}
+        </Note>
+      ))}
       {folders.kept !== null ? (
         <Note
           kind="status"

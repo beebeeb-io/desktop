@@ -315,7 +315,7 @@ describe('account', () => {
 describe('General', () => {
   test('"Tell me about" uses the three existing preference keys, unchanged, in the spec\'s words', () => {
     expect(NOTIFICATION_ROWS.map((r) => r.key)).toEqual(DESKTOP_NOTIFICATION_PREF_META.map((m) => m.key))
-    expect(NOTIFICATION_ROWS.map((r) => r.label)).toEqual(['Conflicts', 'Sync finished', 'Local cache almost full'])
+    expect(NOTIFICATION_ROWS.map((r) => r.label)).toEqual(['Conflict alerts', 'Sync complete', 'Local cache warnings'])
     expect(NOTIFICATION_ROWS[0].hint).toBe('When two versions of a file need a decision.')
   })
 })
