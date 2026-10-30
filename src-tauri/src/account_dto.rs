@@ -64,6 +64,10 @@ pub struct AccountProfile {
 // free-user default. The free branch sets created_at / current_period_end
 // to null, so both are Option. quota_bytes/used_bytes are i64; percentage
 // is an f64 ratio (0.0..=1.0).
+//
+// The billing-provider configuration flag the server used to send alongside
+// the plan is gone (task 2285): the server no longer emits it and this DTO
+// carries no field for it.
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Subscription {
@@ -86,8 +90,6 @@ pub struct Subscription {
     pub extra_users: i32,
     #[serde(default)]
     pub is_mock: Option<bool>,
-    #[serde(default)]
-    pub stripe_configured: Option<bool>,
     #[serde(default)]
     pub billing_state: Option<String>,
     /// RFC3339 timestamp the account first went past-due, or null. Lets the
@@ -828,7 +830,6 @@ mod tests {
             "seats": 1,
             "region": "falkenstein",
             "is_mock": false,
-            "stripe_configured": true,
             "created_at": "2026-01-01T00:00:00Z",
             "current_period_end": "2027-01-01T00:00:00Z",
             "quota_bytes": 2199023255552,
@@ -860,7 +861,6 @@ mod tests {
             "region": "falkenstein",
             "status": "active",
             "is_mock": true,
-            "stripe_configured": false,
             "created_at": null,
             "current_period_end": null,
             "quota_bytes": 10737418240,
@@ -875,6 +875,32 @@ mod tests {
         assert_eq!(s.quota_bytes, 10737418240);
         // Absent from the free-plan branch → defaults to None (no parse error).
         assert_eq!(s.past_due_since, None);
+    }
+
+    #[test]
+    fn subscription_carries_no_provider_configuration_flag() {
+        // Task 2285: the server stopped sending the billing-provider
+        // configuration flag on /billing/subscription. The DTO must not keep a
+        // slot for it, and must not resurrect one when it serialises back out.
+        let json = r#"{
+            "plan": "pro",
+            "billing_cycle": "yearly",
+            "status": "active",
+            "seats": 1,
+            "region": "falkenstein",
+            "is_mock": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "current_period_end": "2027-01-01T00:00:00Z",
+            "quota_bytes": 2199023255552,
+            "used_bytes": 12345
+        }"#;
+        let s: Subscription = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_value(&s).unwrap();
+        let obj = out.as_object().expect("subscription object");
+        assert!(
+            !obj.keys().any(|k| k.ends_with("_configured")),
+            "the subscription payload may carry no provider-configuration flag: {out}"
+        );
     }
 
     #[test]
