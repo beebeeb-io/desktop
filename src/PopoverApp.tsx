@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { BILLING_URL, command, popoverSnapshot, type CommandResult } from './desktopApi'
 import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
 import { FINDER_ACTION_FAILED } from './finderSetupCopy'
@@ -360,26 +361,23 @@ export default function PopoverApp() {
     reader.start(POPOVER_REFRESH_MS)
     const unlisten: Array<() => void> = []
     let closed = false
-    const on = (event: string, handler: () => void) => {
-      void listen(event, handler).then((stop) => {
+    let events = 0
+    const on = (event: string, handler: () => void) =>
+      listen(event, () => {
+        events += 1
+        handler()
+      }).then((stop) => {
         if (closed) stop()
         else unlisten.push(stop)
       })
-    }
     const keep = () => {
       if (forgetTimer.current !== null) clearTimeout(forgetTimer.current)
       forgetTimer.current = null
     }
-    on(POPOVER_SHOWN_EVENT, () => {
-      keep()
-      setFailureBoth(null)
-      reader.resume()
-      void reader.refresh()
-    })
     // The window is hidden, never destroyed: reading stops while it is hidden (review P2-2 of #160). It paints before
     // `popover-shown` reaches it, so once the answer is older than one refresh it is dropped, and the popover is busy
     // until the next one: it never shows an old state as current (self-review of #202).
-    on(POPOVER_HIDDEN_EVENT, () => {
+    const hidden = () => {
       reader.stop()
       keep()
       forgetTimer.current = setTimeout(() => {
@@ -387,7 +385,25 @@ export default function PopoverApp() {
         setSnapshot(null)
         setReadFailed(false)
       }, Math.max(0, answeredAt.current + POPOVER_REFRESH_MS - Date.now()))
-    })
+    }
+    const listening = Promise.all([
+      on(POPOVER_SHOWN_EVENT, () => {
+        keep()
+        setFailureBoth(null)
+        reader.resume()
+        void reader.refresh()
+      }),
+      on(POPOVER_HIDDEN_EVENT, hidden),
+    ])
+    // A hide before the listeners exist is lost (a click away right after the first click), so once they do the
+    // window is asked; an event that arrives while it answers wins over the answer (self-review of #202).
+    void listening.then(() => {
+      if (closed) return
+      const seen = events
+      return getCurrentWindow().isVisible().then((visible) => {
+        if (!closed && !visible && events === seen) hidden()
+      })
+    }).catch(() => {})
     const onKey = (event: KeyboardEvent) => {
       const key = popoverKey(event)
       if (key === null) return
