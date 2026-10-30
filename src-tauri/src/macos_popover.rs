@@ -102,13 +102,22 @@ fn place(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> Result<(), Strin
         })
         .collect();
     let position = anchor::place_popover(icon, &screens).ok_or("Beebeeb couldn’t find a display for its menu.")?;
-    // Convert the chosen display's logical origin back to physical pixels, never the hidden window's old display.
-    let scale = displays[position.screen].scale;
-    win.set_position(tauri::PhysicalPosition::new(
-        (position.origin_x * scale).round() as i32,
-        (position.origin_y * scale).round() as i32,
-    ))
-    .map_err(|e| e.to_string())
+    let (origin, size) = popover_frame(&position);
+    win.set_size(size).map_err(|e| e.to_string())?;
+    win.set_position(origin).map_err(|e| e.to_string())
+}
+
+/// The popover's frame from its placement, in points (review P2 of #160). tao turns a physical position into points
+/// with the scale of the display the window is on now (tao 0.35.3 `set_outer_position`), which for a hidden window is
+/// the display it was last shown on, so a physical origin is right only when both displays share a scale. macOS uses
+/// points across every display, as `place_main_window` does. The size is the one `place_popover` fitted to the
+/// display's usable area (review P3: a short display).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn popover_frame(placement: &surfaces::anchor::Placement) -> (tauri::Position, tauri::Size) {
+    (
+        tauri::Position::Logical(tauri::LogicalPosition::new(placement.origin_x, placement.origin_y)),
+        tauri::Size::Logical(tauri::LogicalSize::new(placement.size.w, placement.size.h)),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -347,5 +356,36 @@ pub(super) fn popover_gear_menu(
     {
         let _ = (app, x, y);
         Err("The menu-bar menu is available on macOS.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::popover_frame;
+    use crate::surfaces::anchor::{LSize, Placement};
+
+    /// Review P2 (#160, `place`): tao turns a physical position into points with the scale of the display the window
+    /// is on NOW (tao 0.35.3 `set_outer_position`), not the display it is placed on. With a 2x laptop and a 1x
+    /// external display, a physical origin computed for one display lands at double or half the coordinates on the
+    /// other. The frame is set in points, which macOS uses across every display, whatever the target's scale. And the
+    /// size `place_popover` fitted to a short display is applied (review P3), so the window never runs over the Dock.
+    #[test]
+    fn the_popover_frame_is_set_in_points_on_any_display() {
+        let placement = Placement {
+            origin_x: 1512.5,
+            origin_y: 33.0,
+            size: LSize { w: 372.0, h: 420.0 },
+            screen: 1,
+            used_fallback: false,
+        };
+        let (origin, size) = popover_frame(&placement);
+        match origin {
+            tauri::Position::Logical(origin) => assert_eq!((origin.x, origin.y), (1512.5, 33.0)),
+            other => panic!("the origin is not in points: {other:?}"),
+        }
+        match size {
+            tauri::Size::Logical(size) => assert_eq!((size.width, size.height), (372.0, 420.0)),
+            other => panic!("the fitted size is not set in points: {other:?}"),
+        }
     }
 }
