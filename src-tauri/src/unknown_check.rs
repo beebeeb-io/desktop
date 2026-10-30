@@ -175,6 +175,16 @@ pub(crate) enum PlatformView {
     Placeholder { on_disk: OnDisk, in_sync: bool, identity: Option<String> },
 }
 
+/// Task 2284 A1.1: a metadata error means "missing" only when the path is not there; any other
+/// error (a denied folder, a held handle) is something that is there but could not be read.
+pub(crate) fn view_of_metadata_error(error: &std::io::Error) -> PlatformView {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        PlatformView::Missing
+    } else {
+        PlatformView::Unreadable
+    }
+}
+
 /// What the guard does for one guarded row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GuardDecision {
@@ -1012,6 +1022,24 @@ mod tests {
         assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("k"), Some(("b.txt", true))), "a file with agreed content: ordinary rules");
         assert!(!unknown_at_signout(&candidate, "a.txt", true, Some("u"), Some(("a.txt", false))), "its own place");
         assert!(!unknown_at_signout(&candidate, "a.txt", false, None, None), "a plain file: ordinary rules");
+    }
+
+    /// Task 2284 A1.1: a metadata error says "missing" only when it is NotFound.
+    #[test]
+    fn a_metadata_error_other_than_not_found_is_unreadable() {
+        use std::io;
+        assert_eq!(
+            crate::unknown_check::view_of_metadata_error(&io::Error::from(io::ErrorKind::NotFound)),
+            PlatformView::Missing
+        );
+        assert_eq!(
+            crate::unknown_check::view_of_metadata_error(&io::Error::from(io::ErrorKind::PermissionDenied)),
+            PlatformView::Unreadable
+        );
+        assert_eq!(
+            crate::unknown_check::view_of_metadata_error(&io::Error::other("x")),
+            PlatformView::Unreadable
+        );
     }
 
     #[test]
