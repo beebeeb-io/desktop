@@ -14,8 +14,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { BILLING_URL, command, popoverSnapshot, type CommandResult } from './desktopApi'
-import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
-import { FINDER_ACTION_FAILED } from './finderSetupCopy'
+import { runFinderSetupAction } from './finderSetup'
+import { FINDER_ACTION_FAILED, FINDER_OPEN_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
 import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
@@ -40,9 +40,6 @@ export const WEB_APP_URL = 'https://app.beebeeb.io'
 /** The one sentence a first read that failed shows, with Try again. */
 export const READ_FAILED = 'Beebeeb couldn’t check its status.'
 
-/** The one sentence a failed Open in Finder says on a Mac (task 17b: mapped once, by the helper), here without a toast. */
-const OPEN_IN_FINDER_FAILED = ((message) => (typeof message === 'string' ? message : ''))(finderOpenFailedToast().message)
-
 /** The sentence each action's failure shows, in place of the body (one error surface, §6.4). */
 export const ACTION_FAILED: Readonly<Record<PopoverCommand, string>> = {
   open_review: 'Beebeeb couldn’t open its window.',
@@ -53,7 +50,8 @@ export const ACTION_FAILED: Readonly<Record<PopoverCommand, string>> = {
   resume: 'Beebeeb couldn’t resume sync.',
   retry_sync: 'Beebeeb couldn’t start syncing.',
   unlock: 'Beebeeb couldn’t unlock the vault.',
-  open_location: OPEN_IN_FINDER_FAILED,
+  // The one sentence a failed Open in Finder says on a Mac (task 17b), here without a toast.
+  open_location: FINDER_OPEN_FAILED,
   finder_try_again: FINDER_ACTION_FAILED.try_again,
   finder_open_system_settings: FINDER_ACTION_FAILED.open_system_settings,
   finder_show_in_finder: FINDER_ACTION_FAILED.show_in_finder,
