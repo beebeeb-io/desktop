@@ -113,9 +113,6 @@ export function withFailure(view: PopoverView, failure: ActionFailure): PopoverV
   return { ...view, update: null, attention: null, status: null, body, focus: failure.what }
 }
 
-/** The one snapshot read, shared with the Beebeeb window (`desktopApi.popoverSnapshot`, review P3-9 of #160). */
-export const readPopoverSnapshot = (): Promise<CommandResult<PopoverInput>> => popoverSnapshot()
-
 export function popoverReadFailure(cause: 'threw' | 'rejected' | 'timed out', error?: unknown): CommandResult<PopoverInput> {
   return { ok: false, reason: error instanceof Error ? error.message : cause, unsupported: false }
 }
@@ -132,7 +129,10 @@ export function popoverKey(event: { key: string; metaKey?: boolean; ctrlKey?: bo
 export const GEAR_ID = 'pop-gear'
 export const actionId = (what: PopoverCommand) => `pop-action-${what}`
 /** The footer's own ids: its Add storage sits next to the body's when storage is full (review P3-11 of #160). */
-export const footerId = (what: 'open_location' | 'view_online' | 'add_storage') => `pop-footer-${what}`
+/** A footer button: the footer's own ids, apart from the body's actions (review P3-11 of #160). */
+type FooterCommand = keyof PopoverView['footer']
+
+export const footerId = (what: FooterCommand) => `pop-footer-${what}`
 
 /** §11: focus starts on the first primary action, else the gear. */
 export function focusIdFor(view: PopoverView | null): string {
@@ -307,7 +307,7 @@ export function PopoverSurface({ screen, readFailed, busy, onRun, onGear }: Surf
 }
 
 function Footer({ footer, busy, onRun }: { footer: PopoverView['footer']; busy: PopoverCommand | null; onRun: (what: PopoverCommand) => void }) {
-  const item = (what: 'open_location' | 'view_online' | 'add_storage', icon: string, label: string) => (
+  const item = (what: FooterCommand, icon: string, label: string) => (
     <button id={footerId(what)} type="button" className="pop-footer-button" disabled={!footer[what] || busy !== null} onClick={() => onRun(what)}>
       <PopoverIcon name={icon} size={18} />
       {label}
@@ -341,7 +341,8 @@ export default function PopoverApp() {
 
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
-      readPopoverSnapshot,
+      // The one snapshot read, shared with the Beebeeb window (review P3-9 of #160).
+      popoverSnapshot,
       (result) => {
         if (!result.ok) {
           setReadFailed(true)

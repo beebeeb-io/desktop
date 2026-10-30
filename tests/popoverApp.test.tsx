@@ -60,6 +60,7 @@ function openPopover(opts: { snap?: () => unknown; backend?: Record<string, (arg
       popoverView,
       listen: bus.listen,
       command: desktopApi.command,
+      popoverSnapshot: desktopApi.popoverSnapshot,
       getCurrentWindow: () => ({ isVisible: async () => true }),
       ...opts.bindings,
     },
@@ -120,8 +121,8 @@ describe('reading and rendering', () => {
     // It counts this popover's own reads: a reader another test file left running reads into this mount's backend too.
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
     let reads = 0
-    const readPopoverSnapshot = () => { reads += 1; return app.readPopoverSnapshot() }
-    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, readPopoverSnapshot } })
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot } })
     await m.flush()
     await sleep(100)
     expect(reads).toBeGreaterThan(1)
@@ -142,9 +143,9 @@ describe('reading and rendering', () => {
     // lost: once they exist, the popover asks the window whether it is shown.
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
     let reads = 0
-    const readPopoverSnapshot = () => { reads += 1; return app.readPopoverSnapshot() }
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
     const getCurrentWindow = () => ({ isVisible: async () => false })
-    const { m } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, readPopoverSnapshot, getCurrentWindow } })
+    const { m } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot, getCurrentWindow } })
     await m.flush()
     await sleep(30)
     const settled = reads
@@ -155,10 +156,10 @@ describe('reading and rendering', () => {
   test('a show that comes while that question is out wins over its answer (self-review of #202)', async () => {
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
     let reads = 0
-    const readPopoverSnapshot = () => { reads += 1; return app.readPopoverSnapshot() }
+    const popoverSnapshot = () => { reads += 1; return desktopApi.popoverSnapshot() }
     let answer: ((visible: boolean) => void) | null = null
     const getCurrentWindow = () => ({ isVisible: () => new Promise<boolean>((resolve) => { answer = resolve }) })
-    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, readPopoverSnapshot, getCurrentWindow } })
+    const { m, bus } = openPopover({ bindings: { POPOVER_REFRESH_MS: 5, popoverSnapshot, getCurrentWindow } })
     await m.flush()
     bus.emit(POPOVER_SHOWN_EVENT)
     answer?.(false)
