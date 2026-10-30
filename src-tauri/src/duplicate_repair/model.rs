@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Class {
+    /// Review P2 (lead, 2026-10-30): A or B is a folder, on this PC or on the server. Never acted on: a trash of a
+    /// folder trashes everything under it.
+    NotAFile,
     /// L1: nothing at the path, unreadable, a plain file, or the identity names neither row.
     Unbound,
     /// L2: the file on this PC is bound to the row with no known content, while the other row has it.
@@ -191,6 +194,9 @@ pub(crate) enum Reason {
     PendingOps,
     /// The app's cursor moved since the try that failed: stop and report (review F3).
     AppRanSinceTheTry,
+    /// Review P1: the server holds a change to a listed B whose row is still on this PC. The app would apply it to B's
+    /// row, whose path is A's file (D1, 2283): the app must not start.
+    BChangePending,
 }
 
 /// The run file in the out dir on this PC: every pair, what was marked and what was done.
@@ -284,6 +290,9 @@ pub(crate) struct ServerFacts {
     pub via_share: bool,
     /// `chunk_count`: how many chunks the compare downloads.
     pub chunk_count: i64,
+    /// `is_folder` (review P2): a folder is never half of a file pair.
+    #[serde(default)]
+    pub is_folder: bool,
 }
 
 /// A file the server read: gone (404) or found.

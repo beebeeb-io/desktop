@@ -87,6 +87,7 @@ pub(super) fn file(parent: &str, size: i64, trashed: bool, version: i64) -> Stri
         "chunk_count": 1,
         "download_version": { "version_number": version },
         "acted_via_share_id": null,
+        "is_folder": false,
     })
     .to_string()
 }
@@ -229,6 +230,57 @@ async fn a_shared_or_versioned_b_is_your_call() {
     assert_eq!(counts[7], (Some(0), Some(0)));
     let invites_read = mock.requests().iter().filter(|line| line.contains("/shares/invites/sent")).count();
     assert_eq!(invites_read, 1, "the invites list is read once a run");
+}
+
+/// Review P2: `GET /shares/by-file` lists only the owner's links and answers 404 for a B in a folder shared with this
+/// account (server `shares.rs` ~1848). A B the read already makes your call (a share on this PC or on the server, a
+/// second version) is decided before that call, which is never sent for it, so one such B no longer stops the read.
+#[tokio::test]
+async fn a_b_already_your_call_is_decided_without_the_owner_only_links_call() {
+    let mut routes = vec![get("/api/v1/shares/invites/sent", 200, invites(&[]))];
+    for n in 1..=3 {
+        routes.push(get(&format!("/api/v1/files/a{n}"), 200, file("p", 10, false, 1)));
+        let mut b: serde_json::Value = serde_json::from_str(&file("p", 10, false, if n == 3 { 2 } else { 1 })).unwrap();
+        if n == 2 {
+            b["acted_via_share_id"] = serde_json::json!("share-1");
+        }
+        routes.push(get(&format!("/api/v1/files/b{n}"), 200, b.to_string()));
+    }
+    let mock = RepairMockServer::start(routes);
+    let mut pairs: Vec<Pair> = (1..=3).map(|n| pair(n, &format!("a{n}"), &format!("b{n}"))).collect();
+    pairs[0].b.shared = true;
+    read(&mock, &mut pairs).await.unwrap();
+    assert!(pairs.iter().all(|pair| pair.class == Class::YourCall), "{:?}", pairs.iter().map(|p| p.class).collect::<Vec<_>>());
+    assert!(!mock.requests().iter().any(|line| line.contains("/shares/by-file/")), "{:?}", mock.requests());
+    assert!(pairs.iter().all(|pair| pair.server.as_ref().unwrap().live_links.is_none()));
+}
+
+/// Review P2: A or B a folder on the server is never a file pair, and no action is allowed for it: a trash of a folder
+/// trashes everything under it. Neither the links nor the invites are read for it.
+#[tokio::test]
+async fn a_folder_on_the_server_is_not_a_file_pair() {
+    let folder = || {
+        let mut folder: serde_json::Value = serde_json::from_str(&file("p", 0, false, 0)).unwrap();
+        folder["is_folder"] = serde_json::json!(true);
+        folder["chunk_count"] = serde_json::json!(0);
+        folder.to_string()
+    };
+    let mock = RepairMockServer::start(vec![
+        get("/api/v1/files/a1", 200, folder()),
+        get("/api/v1/files/b1", 200, file("p", 0, false, 1)),
+        get("/api/v1/files/a2", 200, file("p", 0, false, 1)),
+        get("/api/v1/files/b2", 200, folder()),
+        get("/api/v1/shares/by-file/b1", 200, links(&[])),
+        get("/api/v1/shares/by-file/b2", 200, links(&[])),
+        get("/api/v1/shares/invites/sent", 200, invites(&[])),
+    ]);
+    let mut pairs = vec![pair(1, "a1", "b1"), pair(2, "a2", "b2")];
+    read(&mock, &mut pairs).await.unwrap();
+    assert_eq!((pairs[0].class, pairs[1].class), (Class::NotAFile, Class::NotAFile));
+    use super::model::Action;
+    assert!(!Class::NotAFile.allows(Action::TrashB) && !Class::NotAFile.allows(Action::ForgetB));
+    assert_eq!(Class::NotAFile.proposed(), Action::None);
+    assert!(!mock.requests().iter().any(|line| line.contains("/shares/")), "{:?}", mock.requests());
 }
 
 /// L9, and L10 kept for the compare: equal size stays unknown, with the server's facts recorded.

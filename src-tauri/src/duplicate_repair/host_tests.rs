@@ -1,9 +1,9 @@
 //! Task 2274, plan Task 7: the host, every phase on a scratch PC and the loopback server. T13: no name, path or id
 //! reaches the screen, an error or a log line, while the run file and the list on this PC hold them.
 use super::Command;
-use super::host::{DO_NOT_RESTORE, Env, FOLDER_SHARES, LIST_FILE, RUN_FILE, execute, list};
+use super::host::{DO_NOT_RESTORE, Env, FOLDER_SHARES, LIST_FILE, RUN_FILE, applied, execute, list};
 use super::list::Observed;
-use super::model::{Applied, Outcome, RunFile};
+use super::model::{Applied, Outcome, Reason, RunFile};
 use super::server::RepairApi;
 use super::server_tests::{RepairMockServer, file, get, invites, links};
 use crate::api_client::ApiClient;
@@ -360,6 +360,27 @@ fn the_list_says_what_was_not_checked_and_when_b_is_purged() {
     let text = list(&run);
     assert!(text.contains("Trash retention: 30 days"), "{text}");
     assert!(text.contains("purged after 2026-11-28"), "{text}");
+}
+
+/// Review P1: after a skip for a pending change to a listed B the screen says not to start the app; the screens that
+/// say to start it say instead to wait while some pair is unsafe to start, with how many.
+#[test]
+fn the_screen_never_says_to_start_the_app_while_that_would_touch_an_a() {
+    let (code, text) = applied(1, &Outcome::Skipped { reason: Reason::BChangePending }, 0);
+    assert_eq!(code, 1);
+    assert!(text.contains("Do not start the app; ask first."), "{text}");
+    for outcome in [Outcome::Trashed { seq: 12, b_trashed_at: None }, Outcome::Forgotten] {
+        let (_, text) = applied(1, &outcome, 0);
+        assert!(text.contains("Start the app, then run check-echo 1."), "{text}");
+        let (_, text) = applied(1, &outcome, 2);
+        assert!(!text.contains("Start the app"), "{text}");
+        assert!(text.contains("Do not start the app yet: 2 pairs"), "{text}");
+    }
+    let (_, text) = applied(1, &Outcome::Skipped { reason: Reason::PendingOps }, 0);
+    assert!(text.contains("start the app, let it sync, stop it"), "{text}");
+    let (_, text) = applied(1, &Outcome::Skipped { reason: Reason::PendingOps }, 2);
+    assert!(!text.contains("start the app, let it sync"), "{text}");
+    assert!(text.contains("Do not start the app yet: 2 pairs"), "{text}");
 }
 
 /// T13's other half (spec I5): the tool's one print is the screen `execute` returns, and the example prints only the

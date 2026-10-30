@@ -63,6 +63,7 @@ impl RepairApi {
                 version_number: json.pointer("/download_version/version_number").and_then(|n| n.as_i64()).unwrap_or(0),
                 via_share: json.get("acted_via_share_id").is_some_and(|id| !id.is_null()),
                 chunk_count: json.get("chunk_count")?.as_i64()?,
+                is_folder: json.get("is_folder")?.as_bool()?,
             })
         })();
         facts.map(ServerFile::Found).ok_or(Failure(None))
@@ -139,15 +140,21 @@ pub(crate) async fn server_read(api: &RepairApi, pairs: &mut [Pair]) -> anyhow::
         let a = api.file(&pair.a.file_id).await.map_err(|failure| failure.at(n))?;
         let mut read = ServerRead { a: a.clone(), b: None, live_links: None, live_invites: None };
         let class = match a {
+            // Review P2: a folder is never half of a file pair; B is not read.
+            ServerFile::Found(a) if a.is_folder => Class::NotAFile,
             ServerFile::Gone => Class::AGone,
             ServerFile::Found(a) if a.trashed => Class::AGone,
             ServerFile::Found(a) => {
                 let b = api.file(&pair.b.file_id).await.map_err(|failure| failure.at(n))?;
                 read.b = Some(b.clone());
                 match b {
+                    ServerFile::Found(b) if b.is_folder => Class::NotAFile,
                     ServerFile::Gone => Class::BGone,
                     ServerFile::Found(b) if b.trashed => Class::BInTrash,
                     ServerFile::Found(b) if b.parent_id != a.parent_id => Class::Moved,
+                    // Review P2: the links call lists only the owner's links and answers 404 for a B in a folder shared
+                    // with this account, so what makes B your call without it is decided first, and it is not sent.
+                    ServerFile::Found(b) if pair.b.shared || b.via_share || b.version_number > 1 => Class::YourCall,
                     ServerFile::Found(b) => {
                         let links = api.live_links(&pair.b.file_id).await.map_err(|failure| failure.at(n))?;
                         if invites.is_none() {
@@ -156,7 +163,7 @@ pub(crate) async fn server_read(api: &RepairApi, pairs: &mut [Pair]) -> anyhow::
                         let invited = invites.as_ref().and_then(|live| live.get(&pair.b.file_id)).copied().unwrap_or(0);
                         read.live_links = Some(links);
                         read.live_invites = Some(invited);
-                        if pair.b.shared || b.via_share || b.version_number > 1 || links > 0 || invited > 0 {
+                        if links > 0 || invited > 0 {
                             Class::YourCall
                         } else if b.size_bytes != a.size_bytes {
                             Class::DiffersBySize

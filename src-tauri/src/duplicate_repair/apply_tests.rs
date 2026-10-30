@@ -273,6 +273,7 @@ async fn t4_a_b_changed_on_the_server_since_the_read_is_skipped_without_a_write(
         b[change] = if change == "updated_at" { serde_json::json!("2026-10-29T11:00:00+00:00") } else { serde_json::json!(11) };
         let mut routes = read(10, 1);
         routes[1] = get(&format!("/api/v1/files/{B}"), 200, b.to_string());
+        routes.push(ops(&[]));
         let mock = RepairMockServer::start(routes);
 
         let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
@@ -384,6 +385,217 @@ async fn t10_a_b_in_the_trash_or_gone_is_forgotten_without_a_trash() {
     }
 }
 
+/// Review P1 (a): a forget-b pair whose only pending ops are B's own trash or delete is forgotten. With B's row gone,
+/// the app's apply of those ops finds no row and touches nothing (D2, `engine_tests` T1), so they are no reason to stop.
+#[tokio::test]
+async fn a_forget_b_pair_whose_only_pending_ops_are_b_s_own_removal_is_forgotten() {
+    let cases: [(Class, Option<Route>, &[(i64, &str, &str)]); 3] = [
+        (Class::BInTrash, Some(found(B, 10, true, 1)), &[(12, "file_trash", B)]),
+        (Class::BGone, None, &[(12, "file_delete", B)]),
+        (Class::BGone, None, &[(12, "file_trash", B), (13, "file_delete", B)]),
+    ];
+    for (class, b_route, pending) in cases {
+        let pc = Pc::new();
+        let routes: Vec<Route> = std::iter::once(found(A, 10, false, 1)).chain(b_route).collect();
+        let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
+        let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
+        server_read(&api(&RepairMockServer::start(routes.clone())), &mut run.pairs).await.unwrap();
+        assert_eq!(run.pairs[0].class, class, "precondition");
+        run.pairs[0].action = class.proposed();
+        let a_before = pc.columns(A);
+        let mock = RepairMockServer::start(routes.into_iter().chain([ops(pending)]).collect());
+
+        let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Forgotten, "{class:?} {pending:?}");
+        assert!(pc.db.get_file(B).unwrap().is_none(), "{class:?} {pending:?}");
+        assert_eq!(pc.columns(A), a_before, "{class:?} {pending:?}");
+        assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{:?}", mock.requests());
+    }
+}
+
+/// A second pair at `other.txt` (A2 with known content, B2 without), listed after pair 1 and left unmarked.
+const A2: &str = "a2";
+const B2: &str = "b2";
+fn with_second_pair(pc: &Pc, run: &mut RunFile) {
+    row(&pc.db, A2, "other.txt", Some("cc"));
+    row(&pc.db, B2, "other.txt", None);
+    let mut other = run.pairs[0].clone();
+    other.n = 2;
+    other.path = "other.txt".into();
+    other.a.file_id = A2.into();
+    other.b.file_id = B2.into();
+    other.action = Action::None;
+    run.pairs.push(other);
+}
+
+/// Review P1 (b): an op after the cursor that names a listed B whose row is still on this PC is one the app would apply
+/// to B's row, at A's path (D1, 2283; `engine_tests` T2). apply-one refuses before any write and says not to start the
+/// app: for another pair's B (a trash, or any other change), for this pair's own B when the server changed since the
+/// read, and for a forget-b pair whose pending ops are not B's own removal alone.
+#[tokio::test]
+async fn a_pending_op_on_a_listed_b_still_here_is_refused_before_any_write() {
+    // Another pair's B, trashed or moved on the server while the app was stopped; pair 1 is as listed.
+    for kind in ["file_trash", "file_delete", "file_move"] {
+        let pc = Pc::new();
+        let mut run = identical(&pc).await;
+        with_second_pair(&pc, &mut run);
+        let mut routes = read(10, 1);
+        routes.push(ops(&[(12, kind, B2)]));
+        let mock = RepairMockServer::start(routes);
+        let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+        assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "{kind}");
+        assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "{kind}: nothing written");
+        assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{kind}: {:?}", mock.requests());
+    }
+
+    // This pair's B, trashed on the server since the read, its trash op pending and its row still here.
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    let mock = RepairMockServer::start(vec![found(A, 10, false, 1), b_in_trash(), ops(&[(12, "file_trash", B)])]);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "own B changed on the server");
+    assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "nothing written");
+
+    // A forget-b pair whose B's trash is pending next to another change: not B's own removal alone.
+    let pc = Pc::new();
+    let routes = vec![found(A, 10, false, 1), found(B, 10, true, 1)];
+    let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
+    server_read(&api(&RepairMockServer::start(routes.clone())), &mut run.pairs).await.unwrap();
+    run.pairs[0].action = Action::ForgetB;
+    let mock = RepairMockServer::start(
+        routes.into_iter().chain([ops(&[(11, "file_update", "other"), (12, "file_trash", B)])]).collect(),
+    );
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "forget-b with another op pending");
+    assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "nothing written");
+
+    // A forget-b pair whose B went from the trash to gone since the read: skipped as changed, so B's row stays, and
+    // B's own pending delete is then a reason not to start the app.
+    let pc = Pc::new();
+    let routes = vec![found(A, 10, false, 1), found(B, 10, true, 1)];
+    let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
+    let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
+    server_read(&api(&RepairMockServer::start(routes)), &mut run.pairs).await.unwrap();
+    run.pairs[0].action = Action::ForgetB;
+    let mock = RepairMockServer::start(vec![found(A, 10, false, 1), ops(&[(12, "file_delete", B)])]);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "forget-b, B gone since the read");
+    assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "nothing written");
+
+    // Only a forget-b pair's own B, only its removal, and only for a forget-b pair: next to it, a removal of another
+    // listed B still here; B's own move; and B's own trash pending for a trash-b pair the server still shows as listed
+    // (B trashed after the re-check read it).
+    let forget_b = |pending: &'static [(i64, &'static str, &'static str)]| async move {
+        let pc = Pc::new();
+        let routes = vec![found(A, 10, false, 1), found(B, 10, true, 1)];
+        let listing = list_pairs(&pc.db, Path::new("C:/root"), &|_: &Path| at_a()).unwrap();
+        let mut run = RunFile { pairs: listing.pairs, more_than_two: 0, case_only: 0, retention_days: None };
+        server_read(&api(&RepairMockServer::start(routes.clone())), &mut run.pairs).await.unwrap();
+        run.pairs[0].action = Action::ForgetB;
+        with_second_pair(&pc, &mut run);
+        let mock = RepairMockServer::start(routes.into_iter().chain([ops(pending)]).collect());
+        (pc.apply(&mock, &mut run, at_a()).await.unwrap(), pc)
+    };
+    for pending in [&[(11, "file_trash", B2), (12, "file_trash", B)][..], &[(12, "file_move", B)][..]] {
+        let (outcome, pc) = forget_b(pending).await;
+        assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "{pending:?}");
+        assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "{pending:?}: nothing written");
+    }
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    let mut routes = read(10, 1);
+    routes.push(ops(&[(12, "file_trash", B)]));
+    let mock = RepairMockServer::start(routes);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "trash-b with its own trash pending");
+    assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "nothing written");
+    assert!(mock.requests().iter().all(|line| line.starts_with("GET ")), "{:?}", mock.requests());
+}
+
+/// The folder half of review P1 (b): a trash or delete of a folder this PC holds no row for prunes that folder's
+/// children by `parent_id` (`delete_orphaned_children_of_absent_folder`), so it reaches a listed B whose row names that
+/// folder as its parent, and removes the placeholder at B's row's path, which is A's file. Such an op refuses the pair
+/// like an op naming B. A folder this PC holds a row for prunes by path, and B's row is not under it: no refusal.
+#[tokio::test]
+async fn a_removal_of_a_listed_b_s_parent_folder_with_no_row_here_is_refused() {
+    const FOLDER: &str = "f-absent";
+    for kind in ["file_trash", "file_delete"] {
+        let pc = Pc::new();
+        let mut run = identical(&pc).await;
+        with_second_pair(&pc, &mut run);
+        let b2 = pc.db.get_file(B2).unwrap().unwrap();
+        pc.db.upsert_file_with_contract(&b2, |contract| contract.parent_id = Some(FOLDER.into())).unwrap();
+        assert_eq!(pc.db.get_file(B2).unwrap().unwrap().parent_id.as_deref(), Some(FOLDER), "precondition");
+        let mut routes = read(10, 1);
+        routes.push(ops(&[(12, kind, FOLDER)]));
+        let mock = RepairMockServer::start(routes);
+        let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+        assert_eq!(outcome, Outcome::Skipped { reason: Reason::BChangePending }, "{kind}");
+        assert!(pc.db.get_file(B).unwrap().is_some() && pc.backups().is_empty(), "{kind}: nothing written");
+
+        // The same folder with a row here (elsewhere on this PC): pruned by path, B2's row is not under it.
+        let pc = Pc::new();
+        let mut run = identical(&pc).await;
+        with_second_pair(&pc, &mut run);
+        row(&pc.db, FOLDER, "elsewhere", None);
+        let folder = pc.db.get_file(FOLDER).unwrap().unwrap();
+        pc.db.upsert_file_with_contract(&folder, |contract| contract.item_kind = ItemKind::Folder).unwrap();
+        let b2 = pc.db.get_file(B2).unwrap().unwrap();
+        pc.db.upsert_file_with_contract(&b2, |contract| contract.parent_id = Some(FOLDER.into())).unwrap();
+        let mut routes = read(10, 1);
+        routes.push(ops(&[(12, kind, FOLDER)]));
+        let mock = RepairMockServer::start(routes);
+        let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+        assert_eq!(outcome, Outcome::Skipped { reason: Reason::PendingOps }, "{kind}: a folder with a row here");
+    }
+
+    // A move of that absent folder: `process_metadata_row` writes the folder's own row alone, no child's. No refusal.
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    with_second_pair(&pc, &mut run);
+    let b2 = pc.db.get_file(B2).unwrap().unwrap();
+    pc.db.upsert_file_with_contract(&b2, |contract| contract.parent_id = Some(FOLDER.into())).unwrap();
+    let mut routes = read(10, 1);
+    routes.push(ops(&[(12, "folder_move", FOLDER)]));
+    let mock = RepairMockServer::start(routes);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::PendingOps }, "a move of the absent folder");
+}
+
+/// Review P1, the snapshot half (`engine_tests` :154): a listed pair whose B is gone or in the trash while B's row is
+/// still on this PC would lose A's file on the app's next full re-sync. Those pairs are counted, so the screen after an
+/// apply can say not to start the app until they are forgotten.
+#[tokio::test]
+async fn pairs_whose_b_is_gone_or_trashed_with_its_row_here_are_unsafe_to_start() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    with_second_pair(&pc, &mut run);
+    assert_eq!(super::apply::unsafe_to_start(&pc.db, &run).unwrap(), 0, "nothing gone or trashed");
+    for class in [Class::BInTrash, Class::BGone] {
+        run.pairs[1].class = class;
+        assert_eq!(super::apply::unsafe_to_start(&pc.db, &run).unwrap(), 1, "{class:?}");
+    }
+    pc.db.delete_file(B2).unwrap();
+    assert_eq!(super::apply::unsafe_to_start(&pc.db, &run).unwrap(), 0, "B2's row forgotten");
+}
+
+/// Review P1: ops after the cursor that name no listed B still on this PC keep the old answer (start the app, let it
+/// sync, stop it), and a B whose row is gone already (forgotten by an earlier pair) is no reason to stop.
+#[tokio::test]
+async fn pending_ops_that_name_no_listed_b_still_here_ask_for_a_sync_first() {
+    let pc = Pc::new();
+    let mut run = identical(&pc).await;
+    with_second_pair(&pc, &mut run);
+    pc.db.delete_file(B2).unwrap();
+    let mut routes = read(10, 1);
+    routes.push(ops(&[(11, "file_update", "other"), (12, "file_trash", B2)]));
+    let mock = RepairMockServer::start(routes);
+    let outcome = pc.apply(&mock, &mut run, at_a()).await.unwrap();
+    assert_eq!(outcome, Outcome::Skipped { reason: Reason::PendingOps });
+}
+
 /// T11: a run file with a pair number twice, missing or out of order, a mark its class does not allow, or a pair it
 /// does not hold is refused whole, before any read or write. An unknown action does not even load, and the error does
 /// not repeat what the file holds (I5).
@@ -480,6 +692,7 @@ async fn a_first_try_that_finds_b_in_the_trash_is_skipped() {
     let mut run = identical(&pc).await;
     let mut routes = read(10, 1);
     routes[1] = b_in_trash();
+    routes.push(ops(&[]));
     let mock = RepairMockServer::start(routes);
     assert_eq!(pc.apply(&mock, &mut run, at_a()).await.unwrap(), Outcome::Skipped { reason: Reason::ChangedOnServer });
     assert!(pc.db.get_file(B).unwrap().is_some());

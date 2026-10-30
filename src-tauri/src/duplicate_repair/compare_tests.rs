@@ -39,6 +39,7 @@ fn waiting(n: u32, b: &str, a_content: &[u8], size: usize) -> Pair {
         version_number: 1,
         via_share: false,
         chunk_count: 1,
+        is_folder: false,
     };
     pair.server = Some(ServerRead {
         a: ServerFile::Found(facts.clone()),

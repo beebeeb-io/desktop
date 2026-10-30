@@ -9,7 +9,7 @@
 //! Every phase but `check-echo` holds the app's sync lock, so the app cannot start meanwhile (T15). `check-echo` runs
 //! while the app runs and only reads.
 use super::Command;
-use super::apply::{Local, apply_one};
+use super::apply::{Local, apply_one, unsafe_to_start};
 use super::compare::compare;
 use super::echo::{EchoResult, check_echo};
 use super::list::{Observed, list_pairs};
@@ -116,7 +116,7 @@ pub(crate) async fn execute(command: Command, env: &Env<'_>) -> anyhow::Result<(
             let local = Local { db: &db, db_path: env.db_path, root: env.root, out_dir: env.out_dir, observe: env.observe };
             let outcome = apply_one(&local, &(env.api)()?, &mut run, pair).await?;
             save(env, &run)?;
-            Ok(applied(pair, &outcome))
+            Ok(applied(pair, &outcome, unsafe_to_start(&db, &run)?))
         }
         Command::CheckEcho { pair } => {
             let run = RunFile::load(&run_path)?;
@@ -139,20 +139,29 @@ pub(crate) async fn execute(command: Command, env: &Env<'_>) -> anyhow::Result<(
 }
 
 /// What `apply-one` did, for the screen.
-fn applied(pair: u32, outcome: &Outcome) -> (i32, String) {
+/// `unsafe_to_start` counts the listed pairs that would lose A's file if the app started now (review P1): while there
+/// are any, no screen says to start it.
+pub(super) fn applied(pair: u32, outcome: &Outcome, unsafe_to_start: usize) -> (i32, String) {
+    let next = |check: String| {
+        if unsafe_to_start == 0 {
+            format!("Start the app, then run {check}.")
+        } else {
+            format!("{} Then start the app and run {check}.", wait(unsafe_to_start))
+        }
+    };
     match outcome {
         Outcome::Trashed { seq, .. } => (
             0,
             format!(
-                "pair {pair}: B's row forgotten on this PC, B moved to Beebeeb's trash (its trash op is {seq}). Start the \
-                 app, then run check-echo {pair}."
+                "pair {pair}: B's row forgotten on this PC, B moved to Beebeeb's trash (its trash op is {seq}). {}",
+                next(format!("check-echo {pair}"))
             ),
         ),
         Outcome::Forgotten => (
             0,
             format!(
-                "pair {pair}: B's row forgotten on this PC (B was in the trash or gone already). Start the app, then run \
-                 check-echo {pair}."
+                "pair {pair}: B's row forgotten on this PC (B was in the trash or gone already). {}",
+                next(format!("check-echo {pair}"))
             ),
         ),
         Outcome::TrashFailed { status } => (
@@ -181,21 +190,35 @@ fn applied(pair: u32, outcome: &Outcome) -> (i32, String) {
         ),
         Outcome::Skipped { reason } => {
             let next = match reason {
-                Reason::PendingOps => {
-                    " The server holds changes the app has not applied yet: start the app, let it sync, stop it, then run \
-                     apply-one again."
+                Reason::PendingOps if unsafe_to_start > 0 => {
+                    format!(" The server holds changes the app has not applied yet. {} Ask first.", wait(unsafe_to_start))
                 }
-                Reason::AppRanSinceTheTry => " The app ran since the try that failed. Stop here.",
-                _ => "",
+                Reason::PendingOps => " The server holds changes the app has not applied yet: start the app, let it sync, \
+                                       stop it, then run apply-one again."
+                    .to_string(),
+                Reason::BChangePending => " The server holds a change to a listed B whose row is still on this PC; the app \
+                                           would apply it at A's path. Do not start the app; ask first."
+                    .to_string(),
+                Reason::AppRanSinceTheTry => " The app ran since the try that failed. Stop here.".to_string(),
+                _ => String::new(),
             };
             (1, format!("pair {pair}: skipped ({}); nothing was changed.{next}", kebab(reason)))
         }
     }
 }
 
+/// Review P1: why the app must not start yet, with how many pairs it would cost A's file.
+fn wait(unsafe_to_start: usize) -> String {
+    format!(
+        "Do not start the app yet: {unsafe_to_start} pairs have B gone or in Beebeeb's trash and B's row still on this \
+         PC, and a full re-sync would remove their A's file. Apply those pairs (forget-b) first."
+    )
+}
+
 /// The count of pairs per class, in the decision table's order.
 fn classes(pairs: &[Pair]) -> String {
     let order = [
+        Class::NotAFile,
         Class::Unbound,
         Class::BoundToB,
         Class::ABusy,

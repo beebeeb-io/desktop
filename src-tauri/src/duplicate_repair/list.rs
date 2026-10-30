@@ -1,7 +1,7 @@
 //! Task 2274, spec phase 1: the read-only list. It reads a copy of the state DB and the platform's view of each path two
 //! rows share. It fetches nothing and changes nothing; the server's rows (L4-L9) come later, in `server-read`.
 use super::model::{Class, Pair, RowFacts, ViewFacts};
-use crate::state_db::{FileEntry, StateDb};
+use crate::state_db::{FileEntry, ItemKind, StateDb};
 use crate::unknown_check::{OnDisk, PlatformView};
 use std::path::Path;
 
@@ -52,6 +52,8 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
         let Ok([first, second]) = <[FileEntry; 2]>::try_from(db.rows_at_folded_path(&path)?) else {
             anyhow::bail!("the state DB changed while it was read; list a fresh copy");
         };
+        // Review P2: a folder row is never half of a file pair (a trash of a folder trashes everything under it).
+        let not_a_file = first.item_kind != ItemKind::File || second.item_kind != ItemKind::File;
         let (first, second) = (row_facts(db, &first)?, row_facts(db, &second)?);
         let (observed, identity) = observe_at(root, &path, observe);
         // A is the row the file on this PC is bound to; bound to neither, the row with known content.
@@ -64,7 +66,8 @@ pub(crate) fn list_pairs(db: &StateDb, root: &Path, observe: &dyn Fn(&Path) -> O
         } else {
             (first, second)
         };
-        let class = local_class(db, &path, &a, &b, &observed, identity.as_deref())?;
+        let class =
+            if not_a_file { Class::NotAFile } else { local_class(db, &path, &a, &b, &observed, identity.as_deref())? };
         listing.pairs.push(Pair {
             n: 0,
             path,

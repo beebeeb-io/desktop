@@ -13,8 +13,6 @@
 // The host runs on Windows only; elsewhere the module is built for its tests.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
-use crate::lockfile::LockFile;
-
 pub(crate) mod apply;
 pub(crate) mod compare;
 pub(crate) mod echo;
@@ -155,14 +153,105 @@ fn windows_run(command: Command) -> anyhow::Result<i32> {
     Ok(code)
 }
 
-/// The app's sync lock, held for the whole of a server phase so the app cannot start syncing meanwhile (T15). Refused
-/// while the app holds it; the refusal names no path.
-pub(crate) fn claim_app_lock() -> anyhow::Result<LockFile> {
-    LockFile::acquire(AGENT).map_err(|error| {
-        if error.contains("already syncing") {
-            anyhow::anyhow!(APP_RUNNING)
-        } else {
-            anyhow::anyhow!("Could not claim the app's sync lock.")
+/// The app's sync lock as this tool holds it: the app's own lock file (`lockfile.rs` format), naming this process.
+pub(crate) struct ToolLock {
+    path: std::path::PathBuf,
+}
+
+impl Drop for ToolLock {
+    /// Removes the lock only while it still names this tool's process: a lock the app wrote is the app's.
+    fn drop(&mut self) {
+        if holder(&self.path).is_some_and(|(pid, agent)| pid == std::process::id() && agent == AGENT) {
+            let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+/// The pid and agent a lock file at `path` names, when it can be read as one.
+fn holder(path: &std::path::Path) -> Option<(u32, String)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let lock: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pid = u32::try_from(lock.get("pid")?.as_u64()?).ok()?;
+    Some((pid, lock.get("agent")?.as_str()?.to_string()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs between the lock check and the write: a test writes the app's lock there (review P2).
+    pub(super) static BEFORE_LOCK_WRITE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The app's sync lock, held for the whole of a server phase so the app cannot start syncing meanwhile (T15). Refused
+/// while the app holds it, and (review P2) while any app process runs: the app holds the lock only while its runner
+/// syncs, not while it is paused, signed out, locked or starting. The refusal names no path.
+pub(crate) fn claim_app_lock() -> anyhow::Result<ToolLock> {
+    claim_app_lock_with(&app_process_running)
+}
+
+/// [`claim_app_lock`], with the check for a running app given. The claim creates the lock file only if no one else has
+/// (review P2: the check and the write are one step), so a lock the app writes after the check is never overwritten.
+/// A stale lock, whose process is gone or which does not read as a lock, is removed first. The app is checked again
+/// once the lock is held, in case it started meanwhile.
+pub(crate) fn claim_app_lock_with(app_running: &dyn Fn() -> bool) -> anyhow::Result<ToolLock> {
+    if app_running() {
+        anyhow::bail!(APP_RUNNING);
+    }
+    let failed = |_| anyhow::anyhow!("Could not claim the app's sync lock.");
+    let dir = crate::state_paths::beebeeb_state_dir().map_err(|_| anyhow::anyhow!("Could not claim the app's sync lock."))?;
+    std::fs::create_dir_all(&dir).map_err(failed)?;
+    let path = dir.join(crate::state_paths::LOCK_FILENAME);
+    if path.exists() {
+        if holder(&path).is_some_and(|(pid, _)| crate::lockfile::pid_alive(pid)) {
+            anyhow::bail!(APP_RUNNING);
+        }
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(failed(error)),
+            _ => {}
+        }
+    }
+    #[cfg(test)]
+    BEFORE_LOCK_WRITE.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(APP_RUNNING),
+        Err(error) => return Err(failed(error)),
+    };
+    let lock = ToolLock { path };
+    std::io::Write::write_all(&mut file, lock_json().as_bytes()).map_err(failed)?;
+    if app_running() {
+        anyhow::bail!(APP_RUNNING);
+    }
+    Ok(lock)
+}
+
+/// The lock's contents, in the app's format (`lockfile.rs` `LockContents`), naming this process.
+fn lock_json() -> String {
+    serde_json::json!({
+        "pid": std::process::id(),
+        "agent": AGENT,
+        "hostname": hostname::get().ok().and_then(|name| name.into_string().ok()).unwrap_or_else(|| "unknown".into()),
+        "started_at": chrono::Utc::now().to_rfc3339(),
     })
+    .to_string()
+}
+
+/// The app's executable, without `.exe`.
+const APP_EXECUTABLE: &str = "beebeeb-desktop";
+
+/// Whether a Beebeeb app process runs on this PC, the person's own or any other build (review P2). Reads the process
+/// list only; it signals nothing.
+fn app_process_running() -> bool {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    system.processes().values().any(|process| is_app_process(process.name()))
+}
+
+/// Whether a process named `name` is the Beebeeb app (Windows names it in any case).
+pub(crate) fn is_app_process(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name) == APP_EXECUTABLE
 }

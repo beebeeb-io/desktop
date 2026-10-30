@@ -172,6 +172,25 @@ fn a_path_with_more_than_two_rows_is_only_counted_and_slashes_fold() {
     assert_eq!(listing.pairs[0].class, Class::Unknown);
 }
 
+/// Review P2 (lead, 2026-10-30): a path where either row is a folder on this PC is never a pair the tool acts on, as
+/// a trash of a folder trashes everything under it.
+#[test]
+fn a_path_where_a_row_is_a_folder_is_not_a_file_pair() {
+    for folder in ["old", "new"] {
+        let (_dir, db) = db();
+        row(&db, "old", "Docs", None);
+        row(&db, "new", "Docs", Some("h1"));
+        // The kind is part of the row's contract, which `upsert_file` leaves alone.
+        let entry = db.get_file(folder).unwrap().unwrap();
+        db.upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::Folder).unwrap();
+        assert_eq!(db.get_file(folder).unwrap().unwrap().item_kind, ItemKind::Folder, "{folder}");
+        let listing = listed(&db, placeholder(Some("new"), true));
+        assert_eq!(listing.pairs.len(), 1, "{folder}");
+        assert_eq!(listing.pairs[0].class, Class::NotAFile, "{folder}");
+        assert_eq!(listing.pairs[0].action, super::model::Action::None, "{folder}");
+    }
+}
+
 /// GL-0003: on a case-insensitive sync root two rows whose paths differ only in case are one file, but the list reads
 /// paths exactly. Such a group is counted, never listed, so the person reviewing the list sees the gap.
 #[test]

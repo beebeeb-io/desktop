@@ -5,7 +5,7 @@
 //! file (D1, 2283).
 use super::list::{self, Observed};
 use super::model::{Action, Applied, Class, Outcome, Pair, Reason, RunFile, ServerFacts, ServerFile};
-use super::server::{RepairApi, server_read};
+use super::server::{Op, RepairApi, server_read};
 use crate::state_db::StateDb;
 use std::path::Path;
 
@@ -66,12 +66,23 @@ pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunF
         return Ok(Outcome::Skipped { reason: Reason::ChangedOnThisPc });
     }
     let server = server_now(api, &pair, retry).await?;
+    // Review P1: every op after the cursor is one the app applies when it starts. One that names a listed B whose row
+    // is still here acts on that row, whose path is A's file (D1, 2283); so does a removal of the folder that row names
+    // as its parent, when this PC holds no row for that folder (see `listed_bs_still_here`). The one exception is this
+    // forget-b pair's own trash or delete with nothing else waiting: the forget below leaves those ops no row to act on
+    // (D2).
+    let ops = api.ops_after(cursor).await.map_err(|failure| failure.at(n))?;
+    let forget_defuses = server == ServerNow::AsListed
+        && pair.action == Action::ForgetB
+        && ops.iter().all(|op| op.id.as_deref() == Some(pair.b.file_id.as_str()) && removes(op));
+    let here = listed_bs_still_here(local.db, run)?;
+    if !forget_defuses && ops.iter().any(|op| here.reached_by(op)) {
+        return Ok(Outcome::Skipped { reason: Reason::BChangePending });
+    }
     match server {
         ServerNow::Changed => return Ok(Outcome::Skipped { reason: Reason::ChangedOnServer }),
         // F3: an op after the cursor is one the stopped app would apply when it starts, with B's row gone.
-        ServerNow::AsListed if !api.ops_after(cursor).await.map_err(|failure| failure.at(n))?.is_empty() => {
-            return Ok(Outcome::Skipped { reason: Reason::PendingOps });
-        }
+        ServerNow::AsListed if !ops.is_empty() && !forget_defuses => return Ok(Outcome::Skipped { reason: Reason::PendingOps }),
         ServerNow::AsListed | ServerNow::BTrashed => {}
     }
 
@@ -97,6 +108,56 @@ pub(crate) async fn apply_one(local: &Local<'_>, api: &RepairApi, run: &mut RunF
         }
     }
     Ok(record(read_back(api, &pair, cursor).await))
+}
+
+/// Whether the app applies `op` by removing the row it names: a trash or a permanent delete (`engine_bridge.rs`
+/// `apply_sync_op`).
+fn removes(op: &Op) -> bool {
+    matches!(op.kind.as_str(), "file_trash" | "file_delete")
+}
+
+/// The listed Bs whose row is still on this PC, and the ops the app would apply to those rows.
+struct ListedBsHere {
+    ids: Vec<String>,
+    /// The parents those rows name that have no row on this PC.
+    absent_parents: Vec<String>,
+}
+
+impl ListedBsHere {
+    /// Whether the app, applying `op`, would act on one of these rows: an op naming the row's own id, or a trash or
+    /// delete of a folder this PC holds no row for, which prunes that folder's children by `parent_id`
+    /// (`delete_orphaned_children_of_absent_folder`). A folder with a row here prunes by path, and a listed B's row is
+    /// at A's path, under a folder only when A's row is too.
+    fn reached_by(&self, op: &Op) -> bool {
+        op.id.as_ref().is_some_and(|id| self.ids.contains(id) || (removes(op) && self.absent_parents.contains(id)))
+    }
+}
+
+fn listed_bs_still_here(db: &StateDb, run: &RunFile) -> anyhow::Result<ListedBsHere> {
+    let mut here = ListedBsHere { ids: Vec::new(), absent_parents: Vec::new() };
+    for pair in &run.pairs {
+        let Some(row) = db.get_file(&pair.b.file_id)? else { continue };
+        here.ids.push(pair.b.file_id.clone());
+        if let Some(parent) = row.parent_id
+            && db.get_file(&parent)?.is_none()
+        {
+            here.absent_parents.push(parent);
+        }
+    }
+    Ok(here)
+}
+
+/// Review P1, the snapshot half (`engine_tests` :154): the listed pairs whose B is gone or in the trash, by the server
+/// read, while B's row is still on this PC. A full re-sync of the folder lists no B there and prunes B's row, at A's
+/// path, so the app must not start until those pairs are forgotten.
+pub(crate) fn unsafe_to_start(db: &StateDb, run: &RunFile) -> anyhow::Result<usize> {
+    let mut count = 0;
+    for pair in run.pairs.iter().filter(|pair| matches!(pair.class, Class::BGone | Class::BInTrash)) {
+        if db.get_file(&pair.b.file_id)?.is_some() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// After the trash: A live, B in the trash, and the ops after the app's cursor are B's `file_trash` alone, the echo the
