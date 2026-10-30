@@ -14,8 +14,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { BILLING_URL, command, popoverSnapshot, type CommandResult } from './desktopApi'
-import { runFinderSetupAction } from './finderSetup'
-import { FINDER_ACTION_FAILED, FINDER_OPEN_FAILED } from './finderSetupCopy'
+import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
+import { FINDER_ACTION_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
 import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
@@ -50,8 +50,8 @@ export const ACTION_FAILED: Readonly<Record<PopoverCommand, string>> = {
   resume: 'Beebeeb couldn’t resume sync.',
   retry_sync: 'Beebeeb couldn’t start syncing.',
   unlock: 'Beebeeb couldn’t unlock the vault.',
-  // The one sentence a failed Open in Finder says on a Mac (task 17b), here without a toast.
-  open_location: FINDER_OPEN_FAILED,
+  // The one sentence a failed Open in Finder says on a Mac, taken from its helper as task 17b requires, without a toast.
+  open_location: String(finderOpenFailedToast().message),
   finder_try_again: FINDER_ACTION_FAILED.try_again,
   finder_open_system_settings: FINDER_ACTION_FAILED.open_system_settings,
   finder_show_in_finder: FINDER_ACTION_FAILED.show_in_finder,
