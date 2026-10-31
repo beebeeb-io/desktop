@@ -86,7 +86,9 @@ jobs:
         # Fails closed if RELEASE_NOTES.md is missing, does not name the exact version,
         # or promises automatic delivery to existing installs while the release is
         # published to alpha/beta only (desktop-v0.8.3 did exactly that and sat in
-        # alpha for 57 days). Covered by tests/releaseChannelChecks.test.ts.
+        # alpha for 57 days). On every channel it also requires the macOS line in the
+        # Install / Update section and refuses delivery wording not scoped to Windows
+        # (task 2176: a Mac cannot install in-app). Covered by tests/releaseChannelChecks.test.ts.
         run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md
 
       - name: Refuse while RELEASE_BLOCKERS.md lists an item
