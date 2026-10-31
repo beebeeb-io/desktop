@@ -196,7 +196,7 @@ const PRODUCTION_API_BASE: &str = "https://api.beebeeb.io";
 /// loopback port, so no lib test can reach the production API (a test that needs a server starts
 /// its own and sets `BB_API_BASE`). After a CLI test once ran against the developer's live session.
 #[cfg(test)]
-const TEST_API_BASE: &str = "http://127.0.0.1:9";
+pub(crate) const TEST_API_BASE: &str = "http://127.0.0.1:9";
 
 /// [`api_base_url`] for a given `BB_API_BASE` value.
 fn api_base_url_from(env: Option<&str>) -> String {
