@@ -62,6 +62,7 @@ try {
               if (scenario === 'overview-error') throw new Error('fixture overview failure')
               return { total_files: scenario === 'populated' ? 2 : 0, total_bytes: scenario === 'populated' ? 10 : 0, by_status: [], recent: [], pinned_count: 0, pinned_bytes: 0 }
             }
+            if (name === 'desktop_recent_files') return []
             if (name === 'desktop_config') return { theme: 'system', local_cache_limit_bytes: 0, upload_kbps_limit: 0, download_kbps_limit: 0 }
             if (name === 'desktop_storage_summary') return { used_bytes: 0, quota_bytes: 100, cache_bytes: 0, pinned_bytes: 0 }
             if (name === 'account_usage') return { storage_used_bytes: 0, storage_quota_bytes: 100 }

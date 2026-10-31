@@ -61,7 +61,11 @@ pub fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyho
     if let Some(root) = root {
         super::upload_finalization::retry(db, root);
     }
-    anyhow::ensure!(db.upload_finalizations()?.is_empty(),
+    // Tasks 2270 / 2280 (spec X1): a row held for review does not block sign-out; the person cannot act on it. Its
+    // staged copy goes with every other staged copy below (`staged_payloads`, not this journal, lists them), and the
+    // row itself with the account data once the sign-out goes ahead (`finish_windows_signout`), never before: a
+    // sign-out refused below keeps it for the tray and the next start (self-review of #195).
+    anyhow::ensure!(db.upload_finalizations()?.iter().all(|row| row.review.is_some()),
         "An uploaded file still needs its local identity repaired. Close open files, unlock and retry sign-out.");
     db.windows_signout_preflight().map_err(|_| {
         anyhow::anyhow!("Pending changes remain. Unlock, finish syncing and resolve failed changes before signing out.")

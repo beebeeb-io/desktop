@@ -101,10 +101,10 @@ if (which === 'conflict') {
 
 createRoot(container).render(
   <StrictMode>
-    {which === 'popover' ? (
-      <AccountSessionBoundary><CapabilityProvider>{component}</CapabilityProvider></AccountSessionBoundary>
-    ) : which === 'onboarding' ? (
+    {which === 'onboarding' ? (
       <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
+    ) : which === 'popover' ? (
+      <AccountSessionBoundary><CapabilityProvider>{component}</CapabilityProvider></AccountSessionBoundary>
     ) : (
       <AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>
     )}

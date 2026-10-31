@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { accountSessionRevision, observeAccountSession, observeSignOutWarning, subscribeAccountSession } from './accountSession'
 import { parsePopoverSnapshot, type PopoverSnapshot } from './popoverContract'
+import { parseSyncActivitySummary, type SyncActivitySummary } from './windows/syncActivityModel'
+import { parseKeepResult, parseReview, type FoundWhilePausedReview, type KeepResult } from './windows/foundWhilePaused'
 import type { AskCounts } from './signOutCopy'
 
 export type CommandResult<T> =
@@ -29,6 +31,12 @@ export interface SyncStatus {
    * PC, or an earlier engine stop was never confirmed. Parsed by `loadSyncStatus`; null otherwise.
    */
   engine_refusal?: EngineRefusal | null
+  /**
+   * Desktop 0.8.15 (engine lane, `fix/0815-guard-nonblocking`): the start-up guard's pass over the files of unknown
+   * content, `{running, done, total}`, live on every status read. Absent from builds without it; the sync activity
+   * model then falls back to the last pass `sync_activity_summary` heard of.
+   */
+  startup_guard?: { running: boolean; done: number; total: number } | null
 }
 
 /** The closed set of `sync_status.engine_refusal` codes (`account_binding::Refusal::code()` in Rust). */
@@ -158,7 +166,30 @@ export interface SharedRoot {
 }
 
 /** Known Review DTO kinds, including forward-compatible entries from the preserved feed. */
-export const REVIEW_ENTRY_KINDS = ['conflict', 'failed_upload', 'quota_failure', 'permission_failure', 'stale_base', 'restore', 'metadata', 'delete', 'auth_failure', 'kept_copy', 'not_sent', 'account_refused', 'other'] as const
+export const REVIEW_ENTRY_KINDS = [
+  'conflict',
+  'failed_upload',
+  'quota_failure',
+  'permission_failure',
+  'stale_base',
+  'restore',
+  'metadata',
+  'delete',
+  // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
+  // Previously fell through to the generic 'failed_upload' bucket with the
+  // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
+  'auth_failure',
+  // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
+  'held_edit',
+  // Task 2190: the one row for files from before 0.8.13 that hold a change not checked yet.
+  'held_unknown',
+  // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+  // were kept as a copy beside it (informational, no action).
+  'kept_copy',
+  'not_sent',
+  'account_refused',
+  'other',
+] as const
 export type ReviewEntryKind = (typeof REVIEW_ENTRY_KINDS)[number]
 
 export interface VersionConflictEntry {
@@ -415,6 +446,8 @@ export interface ConflictContentPreview {
   is_text: boolean
   local: ConflictContentSide
   remote: ConflictContentSide
+  /** Task 2190 (review-169 #1): a parked conflict's file version the person decides against. */
+  version?: number | null
 }
 
 // `is_text` is no longer a caller-supplied argument (task 1546 Codex round 2,
@@ -423,6 +456,31 @@ export interface ConflictContentPreview {
 // flag could never be trusted (VersionCenter's open always guessed `false`).
 export function conflictContentPreview(fileId: string): Promise<CommandResult<ConflictContentPreview>> {
   return command<ConflictContentPreview>('conflict_content_preview', { fileId })
+}
+
+/** Task 2190 (plan §3.2): what the person chose for a parked conflict. */
+export type ParkedChoice = 'local' | 'remote' | 'both'
+
+/** Task 2190: what a decision on a parked conflict did (`engine_bridge::ParkedResolution`). */
+export type ParkedResolution =
+  | { outcome: 'rebased'; version: number }
+  | { outcome: 'kept_other'; kept_copy: string }
+  | { outcome: 'kept_both'; file_id: string; name: string }
+  | { outcome: 'moved' }
+
+/** Task 2190 (plan §3.4): both sides of a parked conflict, by its queued write. Read-only. */
+export function parkedConflictPreview(opId: string): Promise<CommandResult<ConflictContentPreview>> {
+  return command<ConflictContentPreview>('parked_conflict_preview', { opId })
+}
+
+/** Task 2190 (plan §3.2): decide a parked conflict, by its queued write. */
+export function resolveParkedConflict(
+  opId: string,
+  choice: ParkedChoice,
+  shownVersion: number | null,
+): Promise<CommandResult<ParkedResolution>> {
+  // Review-169 #1: decided against the version the preview showed; a file past it is not decided.
+  return command<ParkedResolution>('resolve_parked_conflict', { opId, choice, shownVersion })
 }
 
 /**
@@ -471,9 +529,9 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
 }
 
 /**
- * Everything the menu-bar popover needs for its first frame (task 1683 slice 2).
- * Call it when the popover is shown (`popover-shown`) and after its own actions,
- * never on a timer. Not used by any rendered UI yet (slice 3).
+ * The account and sync state in one read (task 1683 slice 2): what the menu-bar popover shows, and what the macOS
+ * Beebeeb window reads every few seconds while it is open (slice 1). It never waits long on the storage summary: a
+ * fetch holds it `popover_data::STORAGE_WAIT` at most, and a failed one is not tried again for a while (task 2179).
  */
 export async function popoverSnapshot(activityLimit?: number): Promise<CommandResult<PopoverSnapshot>> {
   const result = await command<unknown>('popover_snapshot', activityLimit === undefined ? undefined : { activityLimit })
@@ -484,14 +542,112 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
     : { ok: false, reason: 'The popover snapshot had an unexpected shape.', unsupported: false }
 }
 
+/**
+ * Where "unlock" goes on this Mac (task 1747 Part 2): `keychain` when the vault key is in the Keychain, `recovery_phrase`
+ * when neither Keychain layout holds one (the interrupted first run: a session without keys). Rust answers from the
+ * item's attributes only, never the key, and a Keychain it cannot read is `keychain`, so the existing unlock error reaches
+ * the person rather than a path that would overwrite a key.
+ */
+export type VaultUnlockRoute = 'keychain' | 'recovery_phrase'
+
+/** The same fail-closed answer on this side: only the exact string Rust sends for "no key" sends the person to Set up this Mac. */
+export function parseVaultUnlockRoute(raw: unknown): VaultUnlockRoute {
+  return raw === 'recovery_phrase' ? 'recovery_phrase' : 'keychain'
+}
+
+/**
+ * `vault_unlock_route`: an answer about the ACTIVE account's Keychain, so it keeps the revision guard (a route that arrives
+ * after the session moved is refused as "Account changed", never applied to the next account) and is not part of
+ * `sync_status`, which the window polls every second. macOS only: elsewhere `unsupported` is true.
+ */
+export async function vaultUnlockRoute(): Promise<CommandResult<VaultUnlockRoute>> {
+  const result = await command<unknown>('vault_unlock_route')
+  return result.ok ? { ok: true, value: parseVaultUnlockRoute(result.value) } : result
+}
+
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
   const result = await command<SyncStatus>('sync_status')
-  if (result.ok && result.value.session_revision !== undefined) {
-    // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
-    observeSignOutWarning(result.value.logged_in === true, result.value.session_revision)
-    observeAccountSession(result.value.session_revision)
-  }
+  if (result.ok) observeSession(result.value)
   return result.ok ? { ...result.value, engine_refusal: parseEngineRefusal(result.value.engine_refusal) } : null
+}
+
+/**
+ * Task 2243: only what `AccountSessionBoundary` needs to see a sign-out, `logged_in` and `session_revision`. Rust
+ * answers it from memory (`sync_status` with `sessionOnly`), with no config file and no state DB: the boundary polls
+ * it every second in every window, hidden ones included.
+ */
+export async function observeSessionStatus(): Promise<void> {
+  const result = await command<Pick<SyncStatus, 'logged_in' | 'session_revision'>>('sync_status', { sessionOnly: true })
+  if (result.ok) observeSession(result.value)
+}
+
+function observeSession(status: Pick<SyncStatus, 'logged_in' | 'session_revision'>): void {
+  if (status.session_revision === undefined) return
+  // A sign-in clears a held sign-out sentence first, so the remount it causes does not show it again.
+  observeSignOutWarning(status.logged_in === true, status.session_revision)
+  observeAccountSession(status.session_revision)
+}
+
+/**
+ * What sync is doing, in counts (0.8.15): the live pause flag, the engine's last state, what is moving, the queue held
+ * and given up, and the startup check while it runs. Settings › Sync and the Windows tray popover poll it next to
+ * `sync_status`; `syncActivityView` turns the two into words. Null when it cannot be read or is not the contract's shape.
+ */
+export async function loadSyncActivitySummary(): Promise<SyncActivitySummary | null> {
+  const result = await command<unknown>('sync_activity_summary')
+  return result.ok ? parseSyncActivitySummary(result.value) : null
+}
+
+/**
+ * Pause or resume syncing: the same backend the app menu and the tray menu use (`set_sync_paused` in Rust, through
+ * `tray_pause_sync` / `tray_resume_sync`). It persists `pause_sync` and emits `engine-status`, so every open surface
+ * follows.
+ */
+export function setSyncPaused(paused: boolean): Promise<CommandResult<void>> {
+  return command<void>(paused ? 'tray_pause_sync' : 'tray_resume_sync')
+}
+
+// ── Changes found while sync was paused (task 2267, Windows) ────────────────
+//
+// Local items Beebeeb could not prove were the account's own are held with the pause reason `found_while_paused`
+// until the person decides in Settings › Sync (`windows/FoundWhilePausedCard.tsx`). No command takes a path.
+
+/** `found_while_paused_upload`: how many held operations were released to upload. */
+export interface FoundWhilePausedUploadResult {
+  released: number
+}
+
+/**
+ * What is held, by kind, with the ids "Upload to my Beebeeb" sends back (lead review round 3, P2-2). An answer outside
+ * the contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedReview(): Promise<CommandResult<FoundWhilePausedReview>> {
+  const result = await command<unknown>('found_while_paused_review')
+  if (!result.ok) return result
+  const review = parseReview(result.value)
+  return review ? { ok: true, value: review } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** "Upload to my Beebeeb": release the `found_while_paused` operations the card showed (`opIds`), so they upload. */
+export function foundWhilePausedUpload(opIds: string[]): Promise<CommandResult<FoundWhilePausedUploadResult>> {
+  return command<FoundWhilePausedUploadResult>('found_while_paused_upload', { opIds })
+}
+
+/**
+ * "Keep on this PC only", for the held changes the card showed (`opIds`): move each local-only item they act on out of
+ * the sync folder into `<parent of the sync folder>\Beebeeb - not uploaded\YYYY-MM-DD\` and stop tracking it. An answer outside the
+ * contract's shape is a failure, never a made-up count.
+ */
+export async function foundWhilePausedKeep(opIds: string[]): Promise<CommandResult<KeepResult>> {
+  const result = await command<unknown>('found_while_paused_keep', { opIds })
+  if (!result.ok) return result
+  const kept = parseKeepResult(result.value)
+  return kept ? { ok: true, value: kept } : { ok: false, reason: 'The answer had an unexpected shape.', unsupported: false }
+}
+
+/** Open the last kept folder in Explorer. The backend knows which; the frontend never passes a path. */
+export function showKeptFolder(): Promise<CommandResult<void>> {
+  return command<void>('show_kept_folder')
 }
 
 /** The current engine refusal, or `null` when there is none or the status cannot be read. */
@@ -581,7 +737,6 @@ export interface Subscription {
   extra_storage_tb?: number
   extra_users?: number
   is_mock?: boolean | null
-  stripe_configured?: boolean | null
   billing_state?: string | null
   pending_downgrade_plan?: string | null
   downgrade_cooldown_until?: string | null
@@ -1049,6 +1204,12 @@ export function desktopFileOverview(
   recentLimit?: number,
 ): Promise<CommandResult<FileOverview>> {
   return command<FileOverview>('desktop_file_overview', { recentLimit })
+}
+
+/** The tray's recent list: {@link desktopFileOverview}'s `recent` without its totals, read from the newest rows alone
+ *  (task 2243: the overview read every row, and the tray polls this every few seconds). */
+export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<RecentFile[]>> {
+  return command<RecentFile[]>('desktop_recent_files', { recentLimit })
 }
 
 /** Query the local desktop file-name search index. Results are local mirror

@@ -22,13 +22,10 @@ export { MACOS_DOWNLOAD_URL, UPDATE_DOWNLOAD_HINT, UPDATE_DOWNLOAD_LABEL } from 
 import { updateAvailableLine } from './macUpdateCopy'
 import { updateOffer } from './macUpdateOffer'
 
-/** The snapshot plus the two parts the popover reads beyond the reducer's phase (task 1683 slice 3, lead-approved). */
-export type PopoverInput = PopoverSnapshot & {
-  /** An update the updater offered, kept by Rust so a popover built later still sees it. */
-  update?: { version: string; channel?: string | null } | null
-  /** Task 1887's send phase, while it runs: the changes still waiting. */
-  sign_out_sending?: { changes_left: number } | null
-}
+/** What the popover reads: the snapshot, whose contract carries the two parts beyond the reducer's phase (task 1683
+ * slice 3, lead-approved): `update`, an update the updater offered, kept by Rust so a popover built later still sees
+ * it; and `sign_out_sending`, task 1887's send phase while it runs, with the changes still waiting. */
+export type PopoverInput = PopoverSnapshot
 
 export type PopoverCommand =
   | 'open_review'
@@ -284,9 +281,14 @@ function listBody(input: PopoverInput, phase: PopoverPhase, topRows: number, now
   const rows = input.activity.map((row) => rowView(row, nowSeconds, tz))
   if (phase === 'syncing') {
     const budget = Math.max(1, SYNCING_ROWS - ROWS_PER_TOP_ROW * topRows)
-    const active = rows.filter((r) => r.progress !== null).slice(0, budget)
-    const done = [...conflicts, ...rows.filter((r) => r.progress === null && !conflicted.has(r.id))].slice(0, budget - active.length)
-    const left = input.engine.files_remaining ?? active.length
+    // Moving files first, then the files that need a decision and the ones that could not sync (never under "Done":
+    // they are not finished, review P2-4 of #160 and self-review of #202), then "Done". A file that needs a decision
+    // is listed once, as the decision.
+    const listed = rows.filter((r) => !conflicted.has(r.id))
+    const moving = listed.filter((r) => r.progress !== null)
+    const active = [...moving, ...conflicts, ...listed.filter((r) => r.failed)].slice(0, budget)
+    const done = listed.filter((r) => r.progress === null && !r.failed).slice(0, budget - active.length)
+    const left = input.engine.files_remaining ?? moving.length
     const { bytes_total: total, bytes_done: doneBytes } = input.engine
     const percent = total !== null && doneBytes !== null && total > 0 ? Math.min(100, Math.round((doneBytes / total) * 100)) : null
     return {

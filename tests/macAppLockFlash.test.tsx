@@ -31,7 +31,8 @@ afterAll(() => dom.restore())
 
 const account = (unlocked: boolean) => ({ email: 'sam@example.eu', logged_in: true, vault_unlocked: unlocked, auth_expired: false })
 const snapshot = (unlocked: boolean) => ({
-  phase: unlocked ? 'synced' : 'locked', generated_at: 1000, paused: false, account: account(unlocked),
+  phase: unlocked ? 'synced' : 'locked', sync_phase: unlocked ? 'synced' : 'locked', generated_at: 1000, paused: false,
+  account: account(unlocked),
   engine: { state: 'idle', files_remaining: 0, bytes_total: 0, bytes_done: 0, last_tick_ok_at: null },
   reason: null, finder: { setup: 'ready', reason: null, reason_line: null },
   storage: unlocked ? { used_bytes: 84_300_000_000, quota_bytes: 200_000_000_000, fetched_at: 900, stale: false } : null,
@@ -46,6 +47,8 @@ function installBackend(reads: boolean[]) {
   const handlers: Record<string, (args: any) => unknown> = {
     popover_snapshot: () => snapshot(reads[Math.min(read++, reads.length - 1)]),
     pending_setup: () => new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+    // 1747 Part 2: this Mac's key is in the Keychain; the route is its own file's subject (`macAppVaultRoute.test.tsx`).
+    vault_unlock_route: () => 'keychain',
     set_pending_setup: () => null,
     account_subscription: () => ({ plan: 'basic', billing_cycle: 'yearly', status: 'active', seats: 1, region: 'eu', current_period_end: null, quota_bytes: 1, used_bytes: 0 }),
     consume_main_navigation: () => null,

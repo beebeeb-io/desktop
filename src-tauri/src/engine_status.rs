@@ -519,6 +519,36 @@ pub struct EngineStatusView {
     pub last_tick_ok_at: Option<i64>,
     pub reason_code: Option<String>,
     pub reason_detail: Option<String>,
+    /// The engine's startup check of the files on this PC while it runs (0.8.15, see [`STARTUP_CHECK_KEY`]).
+    pub startup_check: Option<StartupCheck>,
+}
+
+/// How far the engine's startup check of the files on this PC has got: `done` of `total` files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct StartupCheck {
+    pub done: u64,
+    pub total: u64,
+}
+
+/// The `engine-status` key that carries the start-up guard's pass (0.8.15), which on Guus's PC walked 37,169 files with
+/// no sign in any window: `{ "running": bool, "done": n, "total": n }`, as the engine lane writes it (branch
+/// `fix/0815-guard-nonblocking` at 62f794d: `runner::with_startup_guard` on every engine payload, and the same object as
+/// `sync_status.startup_guard`). The pause toggle's bare `{state}` payload does not carry it.
+pub const STARTUP_CHECK_KEY: &str = "startup_guard";
+
+/// The startup check a payload's [`STARTUP_CHECK_KEY`] value reports: `Some` only while a pass runs over at least one
+/// file. A `done` past `total` is clamped.
+pub fn startup_check_from_value(value: &Value) -> Option<StartupCheck> {
+    let check = value.as_object()?;
+    if check.get("running").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let total = check.get("total")?.as_u64()?;
+    let done = check.get("done")?.as_u64()?;
+    (total > 0).then_some(StartupCheck {
+        done: done.min(total),
+        total,
+    })
 }
 
 impl EngineStatusView {
@@ -551,6 +581,11 @@ impl EngineStatusView {
             .and_then(|r| r.get("detail"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        // Like `last_tick_ok_at`: every engine payload carries the key, so it is the truth; only the pause toggle's bare
+        // `{state}` lacks it, and that says nothing about the pass.
+        if let Some(check) = payload.get(STARTUP_CHECK_KEY) {
+            self.startup_check = startup_check_from_value(check);
+        }
     }
 
     /// The connectivity the popover phase reducer takes. `error` with an `auth`
@@ -749,6 +784,38 @@ mod tests {
         let mut view = EngineStatusView::default();
         view.apply(&p);
         assert_eq!(view.connectivity(), Connectivity::Online);
+    }
+
+    /// 0.8.15: the view keeps the start-up guard's pass while payloads report it running, and drops it when one reports
+    /// it at rest (the engine lane's `{running: false, done: 0, total: 0}`). The pause toggle's bare `{state}` leaves it
+    /// as it was. Malformed or empty values are no check.
+    #[test]
+    fn the_view_keeps_the_startup_check_only_while_payloads_report_it_running() {
+        let running = |done: u64, total: u64| json!({ "running": true, "done": done, "total": total });
+        let mut view = EngineStatusView::default();
+        view.apply(&json!({ "state": "running", STARTUP_CHECK_KEY: running(12_400, 37_169) }));
+        assert_eq!(view.startup_check, Some(StartupCheck { done: 12_400, total: 37_169 }));
+        view.apply(&json!({ "state": "running", STARTUP_CHECK_KEY: running(40_000, 37_169) }));
+        assert_eq!(view.startup_check, Some(StartupCheck { done: 37_169, total: 37_169 }), "clamped");
+        view.apply(&json!({ "state": "paused" }));
+        assert_eq!(view.startup_check, Some(StartupCheck { done: 37_169, total: 37_169 }), "a bare {{state}} says nothing");
+        view.apply(&json!({ "state": "idle", STARTUP_CHECK_KEY: { "running": false, "done": 0, "total": 0 } }));
+        assert_eq!(view.startup_check, None, "at rest");
+        view.apply(&json!({ "state": "running", STARTUP_CHECK_KEY: running(1, 9) }));
+        view.apply(&json!({ "state": "idle", STARTUP_CHECK_KEY: null }));
+        assert_eq!(view.startup_check, None, "null is no pass");
+        for malformed in [
+            json!({ "running": true, "done": 1 }),
+            json!({ "running": true, "done": 0, "total": 0 }),
+            json!({ "done": 3, "total": 9 }),
+            json!({ "running": "yes", "done": 3, "total": 9 }),
+            json!("12/40"),
+            json!({ "running": true, "done": -1, "total": 5 }),
+        ] {
+            view.apply(&json!({ "state": "running", STARTUP_CHECK_KEY: running(1, 9) }));
+            view.apply(&json!({ "state": "running", STARTUP_CHECK_KEY: malformed }));
+            assert_eq!(view.startup_check, None, "{malformed}");
+        }
     }
 
     #[test]

@@ -276,7 +276,7 @@ function HiDPAFlow() {
             {[
               ['bit.nl · Amsterdam colocation', true],
               ['Hetzner · Frankfurt failover', true],
-              ['Stripe Payments Europe', true],
+              ['Mollie B.V.', true],
               ['Postmark (EU) · transactional email', true],
             ].map(([l, on], i) => (
               <label key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>

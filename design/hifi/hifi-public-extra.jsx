@@ -25,7 +25,7 @@ function HiStatusPage() {
     { n: 'Desktop sync', s: 'ok' },
     { n: 'Mobile push', s: 'ok' },
     { n: 'Share links', s: 'ok' },
-    { n: 'Billing · Stripe EU', s: 'ok' },
+    { n: 'Billing · Mollie', s: 'ok' },
   ];
   return (
     <PublicShell title="status.beebeeb.io">

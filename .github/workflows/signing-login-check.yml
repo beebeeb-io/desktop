@@ -1,0 +1,34 @@
+name: Signing login check
+
+# Proves the Windows signing trust boundary (docs/RELEASING.md, "Windows Authenticode") without building or
+# signing anything: the Azure login runs through the GitHub environment `desktop-release`, exactly as the
+# release build does. Dispatched from `main` (or a `release/*` branch) it must pass; dispatched from any other
+# branch the environment refuses the job before it starts, and the run must fail.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  azure-login:
+    name: Azure login through desktop-release
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Azure login for Artifact Signing (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: The login reached the signing subscription
+        run: |
+          set -euo pipefail
+          az account show --query id -o tsv > /dev/null
+          echo "Azure login through desktop-release: ok (ref ${GITHUB_REF})"
