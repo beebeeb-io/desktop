@@ -13,6 +13,11 @@
 // 2. GitHub marked it "Latest" (and beebeeb.io/download serves GitHub's latest)
 //    while desktop/latest.json — the stable updater manifest — stayed on 0.8.2.
 //    `delivery` compares the two live values and exits non-zero on drift.
+// 3. Task 2176: on macOS the in-app update cannot install (the App Sandbox denies
+//    replacing the bundle), yet desktop-v0.8.13 to v0.8.20 told every existing install
+//    it would update in-app. `notes` requires MAC_INSTALL_LINE in the Install / Update
+//    section on every channel, and refuses a delivery sentence there that is not
+//    scoped to Windows.
 //
 // Usage:
 //   node scripts/release-channel-checks.mjs notes <version> <channel> [RELEASE_NOTES.md]
@@ -31,16 +36,36 @@ export const LATEST_RELEASE_API = 'https://api.github.com/repos/beebeeb-io/deskt
 const AUTOMATIC_DELIVERY_CLAIM =
   /\b(?:existing|all)\b[^.\n]{0,80}\binstalls?\b[^.\n]{0,120}\bautomatically\b/i
 
-// Task 2176: on macOS the in-app update cannot install (the App Sandbox denies replacing the
-// bundle), so a Mac shows "Download update" and opens the .dmg instead (src/macUpdateCopy.ts).
-// A sentence that promises in-app delivery to existing installs must therefore name Windows, and
-// notes that promise it must say what a Mac does. This holds on every channel, stable included.
-const IN_APP_DELIVERY_CLAIM =
-  /\b(?:receives?|delivered|updates?)\b[^.\n]{0,120}\bin-app updater\b|\bin-app updater\b[^.\n]{0,120}\bautomatically\b/i
-const MAC_DOWNLOAD_LINE = /\bmac(?:os)?\b[^\n]{0,200}(?:\.dmg\b|disk image|download update)/i
+// Task 2176. The one macOS sentence every release's Install / Update section carries. It is
+// true on every channel and for every installed build: builds up to 0.8.20 offer "Restart to
+// update", which fails under the sandbox, and later builds offer a download (stable) or the
+// release page (alpha/beta) instead (src/macUpdateOffer.ts). Every release ships a .dmg.
+export const MAC_INSTALL_LINE =
+  'On macOS the in-app update cannot install: download the `.dmg` from this release and drag Beebeeb into Applications to replace the installed version.'
 
-function sentences(text) {
-  return text.split(/\n|(?<=[.!?;])\s+/).map((s) => s.trim()).filter(Boolean)
+// A sentence about delivering the release to existing installs (hyphen variants included).
+const DELIVERY_WORDS = /\b(?:in[-\u2010\u2011 ]?app|(?:auto[-\u2010\u2011 ]?)?updat(?:e|er|es|ed|ing)|automatically)\b/i
+
+function collapse(text) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+// The text of the `### Install / Update` section, without HTML comments, or null.
+function installUpdateSection(notes) {
+  const match = notes.match(/^#{2,4}\s*Install\s*\/\s*Update\s*$([\s\S]*?)(?=^#{1,4}\s|(?![\s\S]))/im)
+  return match ? match[1].replace(/<!--[\s\S]*?-->/g, '') : null
+}
+
+// Sentences of a section: paragraphs and list items are joined across hard wraps, then split
+// after . ! ? followed by a capital (so version numbers and "i.e." do not split).
+function sentences(section) {
+  return section
+    .split(/\n\s*\n|\n\s*[-*]\s+/)
+    .map(collapse)
+    .filter(Boolean)
+    .flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+(?=[A-Z"`*(])/))
+    .map((s) => s.trim())
+    .filter(Boolean)
 }
 
 function escapeRegExp(value) {
@@ -75,16 +100,26 @@ export function validateReleaseNotes(notes, version, channel) {
     }
   }
 
-  const deliveryClaims = sentences(notes).filter((s) => IN_APP_DELIVERY_CLAIM.test(s))
-  const unscoped = deliveryClaims.find((s) => !/\bWindows\b/.test(s))
-  if (unscoped) {
+  const section = installUpdateSection(notes)
+  if (section === null) {
     errors.push(
-      `RELEASE_NOTES.md promises in-app delivery without naming Windows ("${unscoped}"), but on macOS the in-app update cannot install (task 2176): a Mac shows "Download update" and opens the .dmg. Scope the sentence to Windows and add the macOS line from docs/RELEASING.md.`,
+      'RELEASE_NOTES.md has no "### Install / Update" section. Use the template in docs/RELEASING.md (task 2176: it carries the macOS line).',
     )
-  } else if (deliveryClaims.length > 0 && !MAC_DOWNLOAD_LINE.test(notes)) {
-    errors.push(
-      'RELEASE_NOTES.md promises in-app delivery on Windows but never says what a Mac does: on macOS the app shows "Download update" and the user replaces the app from the .dmg (task 2176). Add the macOS line from docs/RELEASING.md.',
-    )
+  } else {
+    const macLine = collapse(MAC_INSTALL_LINE)
+    if (!collapse(section).includes(macLine)) {
+      errors.push(
+        `RELEASE_NOTES.md's Install / Update section must contain the macOS line, word for word: "${MAC_INSTALL_LINE}" On macOS the in-app update cannot install (task 2176).`,
+      )
+    }
+    for (const sentence of sentences(section)) {
+      if (macLine.includes(sentence) || !DELIVERY_WORDS.test(sentence)) continue
+      if (!/\bwindows\b/i.test(sentence) || /\bmac(?:os)?\b/i.test(sentence)) {
+        errors.push(
+          `RELEASE_NOTES.md's Install / Update section says how existing installs get the release without scoping it to Windows ("${sentence}"). On macOS the in-app update cannot install (task 2176): name Windows only, and say what a Mac does with the macOS line from docs/RELEASING.md.`,
+        )
+      }
+    }
   }
 
   return errors
