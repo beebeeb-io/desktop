@@ -1,0 +1,113 @@
+{
+  "phase": "finder_failed",
+  "sync_phase": "synced",
+  "generated_at": 1761390000,
+  "account": {
+    "email": "sam@example.eu",
+    "logged_in": true,
+    "vault_unlocked": true,
+    "auth_expired": false
+  },
+  "paused": false,
+  "engine": {
+    "state": "idle",
+    "files_remaining": 0,
+    "bytes_total": null,
+    "bytes_done": null,
+    "last_tick_ok_at": 1761389970
+  },
+  "reason": null,
+  "finder": {
+    "setup": "failed",
+    "reason": "timeout",
+    "reason_line": "reason: timeout"
+  },
+  "storage": {
+    "used_bytes": 84300000000,
+    "quota_bytes": 200000000000,
+    "fetched_at": 1761389940,
+    "stale": false
+  },
+  "storage_full": false,
+  "pending_changes": 0,
+  "conflicts": {
+    "count": 0,
+    "files": []
+  },
+  "activity": [
+    {
+      "id": "f1",
+      "name": "Q3 ledger reconciliation.xlsx",
+      "folder": "Investigations",
+      "path": "Investigations/Q3 ledger reconciliation.xlsx",
+      "direction": "up",
+      "state": "done",
+      "at": 1761389880,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    },
+    {
+      "id": "f2",
+      "name": "Source documents, batch 12.pdf",
+      "folder": "Ledger gap",
+      "path": "Ledger gap/Source documents, batch 12.pdf",
+      "direction": "up",
+      "state": "done",
+      "at": 1761389160,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    },
+    {
+      "id": "f3",
+      "name": "IMG_4821.HEIC",
+      "folder": "Photos",
+      "path": "Photos/IMG_4821.HEIC",
+      "direction": "down",
+      "state": "done",
+      "at": 1761386400,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    },
+    {
+      "id": "f4",
+      "name": "Board notes, 29 Sept.md",
+      "folder": "Team shared",
+      "path": "Team shared/Board notes, 29 Sept.md",
+      "direction": "down",
+      "state": "done",
+      "at": 1761296400,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    },
+    {
+      "id": "f5",
+      "name": "Interview 07, transcript.docx",
+      "folder": "Investigations",
+      "path": "Investigations/Interview 07, transcript.docx",
+      "direction": "up",
+      "state": "done",
+      "at": 1761292800,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    },
+    {
+      "id": "f6",
+      "name": "Older notes.md",
+      "folder": "Investigations",
+      "path": "Investigations/Older notes.md",
+      "direction": "up",
+      "state": "done",
+      "at": 1761282000,
+      "size_bytes": 1000,
+      "done_bytes": null,
+      "total_bytes": null
+    }
+  ],
+  "update": null,
+  "sign_out_sending": null
+}

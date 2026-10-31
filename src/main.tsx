@@ -38,12 +38,14 @@ import WindowsTray from './WindowsTray'
 import WindowsFirstRun from './WindowsFirstRun'
 import WindowsApp from './WindowsApp'
 import MacApp from './MacApp'
+import PopoverApp from './PopoverApp'
 import { initializeDesktopThemeFromConfig } from './windows/theme'
 import { ToastProvider } from './windows/ui'
 import { CapabilityProvider, CapabilityGate, useCapabilities } from './capabilities'
 import './design.css'
 import './macSettings.css'
 import './macApp.css'
+import './popover.css'
 
 const container = document.getElementById('root')
 if (!container) {
@@ -78,6 +80,9 @@ if (which === 'conflict') {
   component = <HostOnboarding />
 } else if (which === 'main-app' && platform === 'windows') {
   component = <WindowsApp />
+} else if (which === 'popover' && platform === 'macos') {
+  document.documentElement.classList.add('popover-window')
+  component = <PopoverApp />
 } else if (which === 'main' && platform === 'macos') {
   component = <MacApp />
 } else {
@@ -98,6 +103,8 @@ createRoot(container).render(
   <StrictMode>
     {which === 'onboarding' ? (
       <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
+    ) : which === 'popover' ? (
+      <AccountSessionBoundary><CapabilityProvider>{component}</CapabilityProvider></AccountSessionBoundary>
     ) : (
       <AccountSessionBoundary><ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider></AccountSessionBoundary>
     )}

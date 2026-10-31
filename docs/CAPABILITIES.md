@@ -260,7 +260,7 @@ placeholder default is unreachable for a validated NavId.
 | `lock_vault` | `pages/Account.tsx` | Compact-only; no Windows view action |
 | `sync_status` | `pages/VersionCenter.tsx`, `pages/SyncFolder.tsx`, `desktopApi.ts` | Wired (surface table above) |
 | `desktop_storage_summary` | `WindowsApp.tsx`, `pages/Status.tsx`, `windows/views/SettingsView.tsx` | Wired (surface table above) |
-| `popover_snapshot` | `desktopApi.ts` (`popoverSnapshot`) | Not rendered by any UI yet: the macOS menu-bar popover (task 1683 slice 3) reads it once when shown; cached storage summary, no polling; leases like every credential command |
+| `popover_snapshot` | `desktopApi.ts` (`popoverSnapshot`), `MacApp.tsx` | The macOS Beebeeb window reads it every 5 s while open (task 1683 slice 1), and the menu-bar popover (slice 3) when shown. The storage summary is cached: a fetch holds the call for `STORAGE_WAIT` (1 s) at most, a failed one is not tried again for 30 s, and sign-out clears it (task 2179). Leases like every credential command |
 | `free_up_space` | `windows/views/SettingsView.tsx` | Wired (surface table above) |
 | `export_diagnostics` | No TS literal | Native/internal handler; returns the redacted bundle JSON (format 2, task 1685) and is called by `report_problem`; no direct Windows TS button |
 | `list_version_conflict_center` | `pages/VersionCenter.tsx` | Compact-only; no Windows view action |

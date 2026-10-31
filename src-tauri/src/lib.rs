@@ -95,6 +95,7 @@ mod found_while_paused;
 // memory. Windows and Linux run it; macOS keeps its own resume.
 mod held_queue;
 mod popover_data;
+mod macos_popover;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -174,6 +175,26 @@ macro_rules! session_command {
             $work.await
         }
     }};
+}
+
+/// Work a command starts as a task of its own, which may outlive the command (the popover's storage fetch), is bound to
+/// the session when it is created: on Windows a lock cancels it and waits for what it holds to drop, and once the
+/// session is closed it never starts (#139 review P1; tests/windows_session_wiring.rs guards the callers).
+fn session_bound<T>(
+    work: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+{
+    #[cfg(target_os = "windows")]
+    {
+        let bound = SESSION_COMMANDS.bind(work);
+        async move { bound?.await }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        work
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -308,6 +329,9 @@ pub struct AppState {
     /// The set-up step a password sign-in without a key left open, for the life of the process (review P2-3 on the Mac
     /// sign-in PR): see [`PendingSetup`].
     pending_setup: Mutex<Option<HeldSetup>>,
+    /// The account's storage summary for `popover_snapshot` (task 2179). Here, not on the popover's runtime, so
+    /// sign-out clears it with the rest of the account (#139 review P2-3).
+    pub(crate) popover_storage: Arc<Mutex<popover_data::StorageCache>>,
 }
 
 impl AppState {
@@ -353,6 +377,7 @@ impl Default for AppState {
             finder_setup: std::sync::OnceLock::new(),
             sign_out: sign_out::SignOutState::default(),
             pending_setup: Mutex::new(None),
+            popover_storage: Arc::new(Mutex::new(popover_data::StorageCache::default())),
         }
     }
 }
@@ -1623,6 +1648,15 @@ impl LoginOutcome {
     fn needs_2fa() -> Self {
         Self {
             requires_2fa: true,
+            ..Self::signed_in()
+        }
+    }
+
+    /// A browser sign-in that installed its session: the handoff carried the vault key, so the vault is unlocked (spec C
+    /// C-S1). The password paths cannot say that: they sign in without a key and the recovery phrase follows.
+    fn browser_signed_in() -> Self {
+        Self {
+            vault_unlocked: true,
             ..Self::signed_in()
         }
     }
@@ -3363,6 +3397,9 @@ async fn clear_session_impl(
     // Drop the cached account profile so a subsequent `account_profile` IPC
     // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
     clear_cached_profile(state);
+    // And the storage summary (task 1887's rule: nothing of the account survives sign-out). The session is gone by
+    // now, so no new fetch can start with its token; one still running answers into nothing (#139 review P2-3).
+    popover_data::clear_storage(&state.popover_storage);
     // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
     // partial token can't linger (and is zeroized) past a logout.
     if let Ok(mut guard) = state.pending_2fa.lock() {
@@ -3733,13 +3770,14 @@ async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>
     Err("This works on a Mac only.".into())
 }
 
-/// W11: on macOS the switch step renders a snapshot, owned by the sign-in window, `onboarding`. Its one caller,
-/// `settle_sign_in`, is not built on Windows.
+/// W11: on macOS the switch step renders a snapshot, owned by the window the step runs in: the Beebeeb window (`main`),
+/// which the app destroys on a close, so a close drops it (task 1747 Part 1, review P3-5 on #143; it was owned by the label
+/// `onboarding`, a window a Mac no longer builds). Its one caller, `settle_sign_in`, is not built on Windows.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
     #[cfg(target_os = "macos")]
     {
-        let snapshot = count_ask("onboarding")?;
+        let snapshot = count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?;
         // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
         tracing::info!(
             files = snapshot.counts.files,
@@ -6111,8 +6149,63 @@ fn local_data_owner(sources: &LocalSources) -> Result<Option<account_binding::Id
 /// unlocks and never reads the key (the real Keychain answers from the item's attributes). Fails closed.
 #[cfg(not(target_os = "windows"))]
 fn keychain_vault_key_present(account_id: &str) -> bool {
-    keychain::holds_vault_key(&platform_keychain_store_for(account_id))
-        || keychain::holds_vault_key(&keychain::legacy_platform_keychain_store())
+    vault_key_in_either_layout(
+        &platform_keychain_store_for(account_id),
+        &keychain::legacy_platform_keychain_store(),
+    )
+}
+
+/// The question over any two stores (the id-keyed layout, then the legacy one), so a test can hold a fake in each. A store that
+/// cannot answer counts as holding a key (`keychain::holds_vault_key`'s fail-closed rule): never a reason to say "no key".
+#[cfg(not(target_os = "windows"))]
+fn vault_key_in_either_layout<A: keychain::AuthSecretStore, B: keychain::AuthSecretStore>(
+    id_keyed: &A,
+    legacy: &B,
+) -> bool {
+    keychain::holds_vault_key(id_keyed) || keychain::holds_vault_key(legacy)
+}
+
+/// Where "unlock" goes on this Mac (task 1747 Part 2): `Keychain` when the vault key is in the Keychain, `RecoveryPhrase` when
+/// neither layout holds one (a session without keys: the first password sign-in that was never finished with the phrase). The
+/// window shows Set up this Mac for the second and Home's locked card for the first (plan D4). Serialized snake_case, which is
+/// what `vaultUnlockRoute` in `src/desktopApi.ts` parses (pinned equal in `tests/vaultUnlockRoute.test.ts`).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VaultUnlockRoute {
+    Keychain,
+    RecoveryPhrase,
+}
+
+/// `key_present` is [`keychain_vault_key_present`]'s answer, which fails closed: a Keychain that cannot be read routes to the
+/// Keychain unlock, so the existing unlock error reaches the person, rather than to a path that would overwrite a key.
+#[cfg(target_os = "macos")]
+fn unlock_route(key_present: bool) -> VaultUnlockRoute {
+    if key_present {
+        VaultUnlockRoute::Keychain
+    } else {
+        VaultUnlockRoute::RecoveryPhrase
+    }
+}
+
+/// The route for one account slot. It reaches the Keychain only through [`keychain_vault_key_present`], which reads the item's
+/// attributes and never the key.
+#[cfg(target_os = "macos")]
+fn vault_unlock_route_for(account_id: &str) -> VaultUnlockRoute {
+    unlock_route(keychain_vault_key_present(account_id))
+}
+
+/// The Beebeeb window asks this once, when it opens signed in and locked, and again at the click on “Unlock vault” (and
+/// Settings › Account's Unlock). An answer about the ACTIVE account, so the window keeps its revision guard on it, and it is
+/// not part of `sync_status`, which is polled every second. The Keychain is asked off the async workers; a worker that failed
+/// to answer is the Keychain unlock, the fail-closed side.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn vault_unlock_route(state: State<'_, AppState>) -> Result<VaultUnlockRoute, String> {
+    let account_id = state.active_account()?.id.as_str().to_string();
+    Ok(tokio::task::spawn_blocking(move || vault_unlock_route_for(&account_id))
+        .await
+        .unwrap_or(VaultUnlockRoute::Keychain))
 }
 
 /// Does the Keychain still hold a session token for this account slot (id-keyed or legacy)? A read error counts as
@@ -10136,15 +10229,18 @@ async fn desktop_storage_summary(state: State<'_, AppState>) -> Result<DesktopSt
 }
 
 /// Everything the menu-bar popover needs for its first frame, in one call (task 1683
-/// slice 2, spec section 9). The UI calls it when the popover is shown (the
-/// `popover-shown` event) and after its own actions; nothing polls it.
+/// slice 2, spec section 9). The popover calls it when it is shown (the `popover-shown`
+/// event) and after its own actions; the macOS main window reads it a few seconds after
+/// each read while it is open (slice 1).
 ///
 /// Reads, in this order: the session (locked / signed out / session ended), the live
 /// pause flag, the engine's last `engine-status` (real state, progress, last
 /// successful check, reason), the Finder install state (macOS only), the storage
 /// summary (cached for five minutes, refetched after an unlock, never when the vault
-/// is locked), and the state DB (queue, recent transfers, conflicts). File names are
-/// read only while the vault is unlocked, like `desktop_file_overview`.
+/// is locked; a refetch holds this call for `popover_data::STORAGE_WAIT` at most and
+/// a failed one is not tried again for `STORAGE_FAILURE_BACKOFF_SECS`, task 2179), and
+/// the state DB (queue, recent transfers, conflicts). File names are read only while
+/// the vault is unlocked, like `desktop_file_overview`.
 #[tauri::command]
 async fn popover_snapshot(
     state: State<'_, AppState>,
@@ -10182,22 +10278,27 @@ async fn popover_snapshot(
             (crate::surfaces::phase::FinderSetup::Ready, None)
         };
 
-        let storage = match token {
-            Some(token) if vault_unlocked => {
-                cached_storage(
-                    &runtime.storage,
-                    now,
-                    VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
-                    || async move { fetch_storage_usage(&runner::api_base_url(), &token).await },
-                )
-                .await
+        // The storage wait (at most `STORAGE_WAIT`) and the state DB read run side by side, not one after the other
+        // (#139 review P3-10).
+        let storage = async {
+            match token {
+                Some(token) if vault_unlocked => {
+                    cached_storage(
+                        &state.popover_storage,
+                        now,
+                        VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),
+                        || session_bound(async move { fetch_storage_usage(&runner::api_base_url(), &token).await }),
+                    )
+                    .await
+                }
+                _ => None,
             }
-            _ => None,
         };
-
-        let board = runtime.transfers.active();
         let limit = activity_limit.unwrap_or(popover_data::DEFAULT_ACTIVITY_LIMIT);
-        let db_view = if vault_unlocked {
+        let db_view = async {
+            if !vault_unlocked {
+                return Ok(None);
+            }
             tokio::task::spawn_blocking(move || -> Result<_, String> {
                 let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
                     return Ok(None);
@@ -10205,10 +10306,12 @@ async fn popover_snapshot(
                 popover_data::gather_db_view(&db, limit, now).map(Some)
             })
             .await
-            .map_err(|e| format!("popover data task failed: {e}"))??
-        } else {
-            None
+            .map_err(|e| format!("popover data task failed: {e}"))?
         };
+        let (storage, db_view) = tokio::join!(storage, db_view);
+        let db_view = db_view?;
+        // The transfers as of now, after the wait (a file moving now is syncing, `assemble`).
+        let board = runtime.transfers.active();
         let popover_data::DbView {
             backlog,
             conflicts,
@@ -10218,7 +10321,7 @@ async fn popover_snapshot(
         } = db_view.unwrap_or_default();
 
         let engine = runtime.status.lock().map(|view| view.clone()).unwrap_or_default();
-        Ok(popover_data::assemble(SnapshotInputs {
+        let mut snapshot = popover_data::assemble(SnapshotInputs {
             now,
             logged_in,
             vault_unlocked,
@@ -10237,7 +10340,22 @@ async fn popover_snapshot(
             recent,
             board,
             activity_limit: limit,
-        }))
+        });
+        snapshot.update = macos_popover::update_offer();
+        #[cfg(target_os = "macos")]
+        {
+            let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
+            if sending {
+                let read = tokio::task::spawn_blocking(read_waiting_changes)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|read| read);
+                snapshot.sign_out_sending = Some(macos_popover::Sending {
+                    changes_left: macos_popover::changes_left(read),
+                });
+            }
+        }
+        Ok(snapshot)
     })
 }
 
@@ -14775,7 +14893,10 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
             }
 
             if let Some(payload) = payload {
+                macos_popover::note_update(&payload.channel, Some(&payload.version));
                 let _ = app.emit("update-available", payload);
+            } else {
+                macos_popover::note_update(channel.as_str(), None);
             }
 
             Ok(result)
@@ -14785,6 +14906,7 @@ async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateChec
                 channel = %channel.as_str(),
                 "manual update check found no manifest release"
             );
+            macos_popover::note_update(channel.as_str(), None);
             Ok(manual_update_up_to_date_result(channel))
         }
         Err(error) => Err(format!(
@@ -15011,22 +15133,23 @@ fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, cl
 // The compact "settings" window (App.tsx) doubles as the macOS/Linux tray
 // flyout. Pre-1384 it always opened decorated and `.center()`-ed — a
 // 680×540pt window landing mid-screen instead of under the status item.
-// macOS gets its own anchor math here, mirroring the DPI-correct approach
-// 307b826 established for Windows above, but anchored from the tray click
-// event's `rect` (the icon's own bounds) rather than the raw click point,
-// since a click can land anywhere inside the icon. Linux keeps the
-// original centered/decorated behaviour untouched (see the `#[cfg(not(any(
+// macOS had its own anchor math here, anchored from the tray click event's
+// `rect`. It retired with the menu-bar popover (task 1683 slice 3, review P3-7
+// of #160): the tray click opens the popover, placed by `surfaces::anchor`, and
+// nothing hands this window an anchor any more. The statics and the `Popover`
+// mode below remain until GL-0009 retires them. Linux keeps the original
+// centered/decorated behaviour untouched (see the `#[cfg(not(any(
 // target_os = "windows", target_os = "macos")))]` branch in
 // `setup_tray`'s click handler, and the `#[cfg(not(target_os = "macos"))]`
 // branch in `show_compact_app_window_with_nav` below).
 
 const MACOS_SETTINGS_WINDOW_WIDTH: f64 = 680.0;
 const MACOS_SETTINGS_WINDOW_HEIGHT: f64 = 540.0;
-const MACOS_TRAY_FLYOUT_GAP: i32 = 6;
 
-/// A one-shot handoff from the tray click handler to
-/// `show_compact_app_window_with_nav`: the physical position the flyout
-/// should open at, computed from the clicked status item's rect. `take()`n
+/// A one-shot handoff to `show_compact_app_window_with_nav`: the physical
+/// position the flyout should open at. The tray click handler set it before
+/// the menu-bar popover replaced the flyout; nothing sets it now (review P3-7
+/// of #160), so every open reads `None` until GL-0009 retires it. `take()`n
 /// (consumed) the moment it's read, so an unrelated open of the same
 /// window (the "Open Beebeeb" menu item, a notification, a deep link) that
 /// didn't go through the tray click falls back to centering instead of
@@ -15059,8 +15182,9 @@ static MACOS_FLYOUT_IS_POPOVER: std::sync::atomic::AtomicBool = std::sync::atomi
 /// Which chrome/behavior the shared macOS settings window should adopt for
 /// this open. Pure decision, extracted from `show_compact_app_window_with_nav`
 /// so it's unit-testable without a live `AppHandle`/`WebviewWindow`: an
-/// anchor is present only when the open came from the tray click handler
-/// (`MACOS_TRAY_FLYOUT_ANCHOR`, consumed via `take()`); every other caller
+/// anchor is present only when one was handed off through
+/// `MACOS_TRAY_FLYOUT_ANCHOR` (consumed via `take()`; nothing sets it since
+/// the menu-bar popover, so today every open is `Regular`); every other caller
 /// ("Open Beebeeb", Preferences/Settings menu items, a notification, a deep
 /// link) passes `None` and gets the regular window treatment.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -15079,195 +15203,6 @@ fn macos_window_mode_for_anchor(anchor: Option<tauri::PhysicalPosition<i32>>) ->
     match anchor {
         Some(_) => MacosWindowMode::Popover,
         None => MacosWindowMode::Regular,
-    }
-}
-
-/// Finds the monitor whose PHYSICAL bounds contain the given physical-pixel
-/// point, without needing a scale factor up front. Deliberately does not use
-/// `AppHandle::monitor_from_point`: on macOS that delegates to `tao`'s
-/// CoreGraphics-backed lookup, which tests the point against
-/// `CGDisplayBounds` — a LOGICAL (point) rect — while `tray-icon`'s
-/// `get_tray_rect` (and `Monitor::position()`/`size()`) report PHYSICAL
-/// pixels. On a Retina display a physical x/y routinely falls outside every
-/// monitor's logical-point bounds even though the icon is plainly on
-/// screen, so `monitor_from_point` silently returned `None` here, and the
-/// scale factor fell back to 1.0 — shifting the flyout 340 physical px
-/// (170pt) too far right on a 2x display (1384 follow-up, found on real
-/// 16" MacBook Pro hardware). Comparing against each monitor's own
-/// already-physical bounds instead sidesteps that mismatch entirely.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_monitor_containing_physical_point(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::Monitor> {
-    let monitors = app.available_monitors().ok()?;
-    let bounds: Vec<(f64, f64, f64, f64)> = monitors
-        .iter()
-        .map(|m| {
-            let position = m.position();
-            let size = m.size();
-            (
-                position.x as f64,
-                position.y as f64,
-                size.width as f64,
-                size.height as f64,
-            )
-        })
-        .collect();
-    let index = physical_point_monitor_index(&bounds, x, y)?;
-    monitors.into_iter().nth(index)
-}
-
-/// Pure containment test extracted from `macos_monitor_containing_physical_point`
-/// so it's unit-testable without a live `AppHandle`/`Monitor`. Each monitor is
-/// `(position_x, position_y, width, height)`, all physical pixels — the same
-/// units `tauri::Monitor::position()`/`size()` return.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn physical_point_monitor_index(monitors: &[(f64, f64, f64, f64)], x: f64, y: f64) -> Option<usize> {
-    monitors
-        .iter()
-        .position(|&(min_x, min_y, width, height)| x >= min_x && x < min_x + width && y >= min_y && y < min_y + height)
-}
-
-/// Resolve where the macOS tray flyout should open, from the tray click
-/// event's icon `rect`. Looks up the monitor under the icon for its real
-/// scale factor and physical bounds (so a tray on a non-primary or
-/// negative-origin monitor still anchors and clamps correctly); falls back
-/// to the flyout window's own scale factor, then the primary monitor's, and
-/// only then to an unclamped 1.0-scale placement — logging whichever
-/// fallback fired, since silently guessing 1.0 is exactly what caused the
-/// 1384 follow-up mispositioning bug.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri::PhysicalPosition<i32> {
-    // `rect` comes back from the tray-icon crate already in physical pixels
-    // on macOS (see `tray-icon`'s `get_tray_rect`), but the field type is
-    // the platform-neutral `dpi::Position`/`dpi::Size` enum. A 1.0-scale
-    // extraction is a no-op cast for the already-physical case (see
-    // `dpi::PixelUnit::to_physical`, which just casts when the value is
-    // already `Physical`), so this is safe to use as-is regardless of the
-    // real scale factor.
-    let provisional = rect.position.to_physical::<f64>(1.0);
-    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
-
-    let scale_factor = match monitor
-        .as_ref()
-        .map(|m| m.scale_factor())
-        .filter(|s| s.is_finite() && *s > 0.0)
-    {
-        Some(scale_factor) => scale_factor,
-        None => {
-            // Should be rare now that the lookup above compares physical
-            // bounds directly, but never silently guess 1.0 — prefer the
-            // flyout window's own current scale factor, then the primary
-            // monitor's, and log whichever fallback actually fired.
-            let window_scale = app
-                .get_webview_window("settings")
-                .and_then(|win| win.scale_factor().ok())
-                .filter(|s| s.is_finite() && *s > 0.0);
-            let primary_scale = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .filter(|s| s.is_finite() && *s > 0.0);
-
-            match window_scale.or(primary_scale) {
-                Some(scale_factor) => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        scale_factor,
-                        used_window_scale = window_scale.is_some(),
-                        "macos tray flyout: no monitor found under the icon; falling back to window/primary-monitor scale factor"
-                    );
-                    scale_factor
-                }
-                None => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        "macos tray flyout: no monitor found under the icon and no window/primary-monitor scale factor available; falling back to 1.0 (flyout may mis-position)"
-                    );
-                    1.0
-                }
-            }
-        }
-    };
-
-    let icon_position = rect.position.to_physical::<f64>(scale_factor);
-    let icon_size = rect.size.to_physical::<f64>(scale_factor);
-
-    let (screen_min_x, screen_max_x) = match &monitor {
-        Some(m) => {
-            let position = m.position();
-            let size = m.size();
-            (position.x as f64, position.x as f64 + size.width as f64)
-        }
-        None => (f64::NEG_INFINITY, f64::INFINITY),
-    };
-
-    let result = macos_tray_flyout_position(
-        icon_position.x,
-        icon_position.y,
-        icon_size.width,
-        icon_size.height,
-        MACOS_SETTINGS_WINDOW_WIDTH,
-        scale_factor,
-        screen_min_x,
-        screen_max_x,
-    );
-
-    tracing::info!(
-        icon_x = icon_position.x,
-        icon_y = icon_position.y,
-        icon_width = icon_size.width,
-        icon_height = icon_size.height,
-        scale_factor,
-        monitor_found = monitor.is_some(),
-        result_x = result.x,
-        result_y = result.y,
-        "macos tray flyout: computed anchor position"
-    );
-
-    result
-}
-
-/// Pure anchor math: centers the flyout horizontally under the status item
-/// and places its top edge `MACOS_TRAY_FLYOUT_GAP` points below the icon's
-/// bottom edge, clamped so it never runs off either edge of the containing
-/// monitor. All of `icon_x`/`icon_y`/`icon_width`/`icon_height` and the
-/// returned position are physical pixels; `flyout_width_logical` is the
-/// flyout window's configured logical width, converted internally using
-/// `scale_factor`. Pass `f64::NEG_INFINITY`/`f64::INFINITY` for
-/// `screen_min_x`/`screen_max_x` to skip clamping (no monitor resolved).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_tray_flyout_position(
-    icon_x: f64,
-    icon_y: f64,
-    icon_width: f64,
-    icon_height: f64,
-    flyout_width_logical: f64,
-    scale_factor: f64,
-    screen_min_x: f64,
-    screen_max_x: f64,
-) -> tauri::PhysicalPosition<i32> {
-    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
-    let physical_flyout_width = flyout_width_logical * scale_factor;
-    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
-
-    let icon_center_x = icon_x + icon_width / 2.0;
-    let ideal_x = icon_center_x - physical_flyout_width / 2.0;
-    let max_x = (screen_max_x - physical_flyout_width).max(screen_min_x);
-
-    tauri::PhysicalPosition {
-        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
-        y: (icon_y + icon_height + physical_gap).round() as i32,
-    }
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
-    if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
     }
 }
 
@@ -15298,6 +15233,9 @@ enum MainNav {
     /// Linux's onboarding window does (`mode=reauth`), so the click always lands on it (review P3-1).
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     Reauth,
+    /// The popover found no local vault key: continue in the same Set up this Mac card.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Setup,
 }
 
 impl MainNav {
@@ -15330,6 +15268,7 @@ fn consume_main_navigation(window: tauri::WebviewWindow) -> Option<MainNav> {
 /// Opens (or shows and focuses) the Beebeeb window and asks it to show `nav`.
 #[cfg(target_os = "macos")]
 fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
+    macos_popover::hide(app);
     let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
     store_main_nav(&MAIN_NAV_PENDING, nav);
     // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
@@ -15586,6 +15525,17 @@ fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
     }
 }
 
+/// Hides a window whose close policy is Hide. On a Mac the popover goes through `macos_popover::hide`, which tells it,
+/// so it stops reading its snapshot (self-review of #202: ⌘W on the popover hid it without telling it).
+fn hide_on_close(window: &tauri::Window) {
+    #[cfg(target_os = "macos")]
+    if window.label() == "popover" {
+        macos_popover::hide(window.app_handle());
+        return;
+    }
+    let _ = window.hide();
+}
+
 /// The Dock icon for the windows that exist now, leaving out `gone` (a window being destroyed or hidden).
 #[cfg(target_os = "macos")]
 fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
@@ -15718,6 +15668,8 @@ pub fn run() {
             consume_main_navigation,
             set_pending_setup,
             pending_setup,
+            #[cfg(target_os = "macos")]
+            vault_unlock_route,
             main_window_state,
             check_for_updates_now,
             consume_menu_update_check,
@@ -15731,6 +15683,12 @@ pub fn run() {
             lock_vault,
             sync_status,
             popover_snapshot,
+            macos_popover::popover_hide,
+            macos_popover::popover_quit,
+            macos_popover::popover_open_window,
+            macos_popover::popover_retry_sync,
+            macos_popover::popover_unlock,
+            macos_popover::popover_gear_menu,
             desktop_storage_summary,
             free_up_space,
             export_diagnostics,
@@ -16119,7 +16077,7 @@ pub fn run() {
                     == surfaces::registry::ClosePolicy::Hide
                 {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_on_close(window);
                     // Two-surface §9.1: a hidden onboarding or conflict window no longer holds the Dock icon.
                     #[cfg(target_os = "macos")]
                     refresh_macos_dock_icon(window.app_handle(), Some(window.label()));
@@ -16185,6 +16143,7 @@ async fn check_for_update(app: &tauri::AppHandle) {
                 "update available — notifying frontend"
             );
             let version = update.version.to_string();
+            macos_popover::note_update(channel.as_str(), Some(&version));
             // Emit to the webview so the frontend can show a banner.
             // Frontend listens with: import { listen } from "@tauri-apps/api/event"
             //   await listen("update-available", handler)
@@ -16199,6 +16158,7 @@ async fn check_for_update(app: &tauri::AppHandle) {
             );
         }
         Ok(None) => {
+            macos_popover::note_update(channel.as_str(), None);
             tracing::debug!("no update available");
         }
         Err(e) => {
@@ -17697,8 +17657,8 @@ fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // Read current autostart state so the check mark is correct on launch.
-    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-    let tray_menu = build_tray_menu(app, autostart_enabled)?;
+    #[cfg(not(target_os = "macos"))]
+    let tray_menu = build_tray_menu(app, app.autolaunch().is_enabled().unwrap_or(false))?;
 
     // The tray ICON itself is built declaratively from `app.trayIcon` in
     // tauri.conf.json (iconPath, iconAsTemplate, tooltip,
@@ -17713,12 +17673,13 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .tray_by_id("tray")
         .expect("app.trayIcon in tauri.conf.json did not register a tray with id \"tray\"");
 
+    #[cfg(not(target_os = "macos"))]
     tray.set_menu(Some(tray_menu))?;
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
         "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
-            // A Mac hides the app (⌘H): the Beebeeb window and the compact flyout; the Dock or a reopen unhides.
+            // A Mac hides the app (⌘H): the Beebeeb window and the menu-bar popover; the Dock or a reopen unhides.
             surfaces::policy::TrayHide::App => {
                 #[cfg(target_os = "macos")]
                 if let Err(error) = app.hide() {
@@ -17759,14 +17720,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         // positioned near the bottom-right corner so it appears above the
         // system tray area. The main app opens from the context menu or
         // the tray flyout itself.
-        // On macOS: show/hide the same compact window, but anchored
-        // directly under the status item (from the click event's `rect`,
-        // not the raw click point — anchoring off the icon's own bounds
-        // is correct regardless of where inside it the user clicked) and
-        // without window chrome, so it reads as a system popover (1384).
+        // On macOS: show/hide the menu-bar popover (`macos_popover::toggle`,
+        // task 1683 slice 3), placed under the status item by
+        // `surfaces::anchor` from the status item's own frame.
         // On Linux: toggle the compact app window exactly as before.
         if let TrayIconEvent::Click {
-            button: MouseButton::Left,
+            button,
             button_state: MouseButtonState::Up,
             position,
             rect,
@@ -17774,6 +17733,10 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         } = event
         {
             let app = tray.app_handle();
+            #[cfg(not(target_os = "macos"))]
+            if button != MouseButton::Left { return; }
+            #[cfg(target_os = "macos")]
+            let _ = button;
 
             #[cfg(target_os = "windows")]
             {
@@ -17801,21 +17764,8 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
             #[cfg(target_os = "macos")]
             {
-                let _ = position; // unused — macOS anchors from the icon's own rect
-                let already_visible = app
-                    .get_webview_window("settings")
-                    .map(|win| win.is_visible().unwrap_or(false))
-                    .unwrap_or(false);
-
-                if already_visible {
-                    if let Some(win) = app.get_webview_window("settings") {
-                        let _ = win.hide();
-                    }
-                } else {
-                    let anchor = macos_tray_flyout_anchor(app, &rect);
-                    *MACOS_TRAY_FLYOUT_ANCHOR.lock().unwrap() = Some(anchor);
-                    show_compact_app_window_impl(app);
-                }
+                let _ = (position, rect);
+                macos_popover::toggle(app);
             }
 
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -17856,8 +17806,9 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 /// treatment to every macOS open, breaking "Open Beebeeb", the Preferences/
 /// Settings menu items, and `show_main_app_window`). Which behavior it gets
 /// is decided per-open by `macos_window_mode_for_anchor`, purely from
-/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set only by
-/// the tray click handler in `setup_tray`, consumed here via `take()`):
+/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (consumed here
+/// via `take()`; the tray click set it before the menu-bar popover replaced
+/// the flyout, and nothing sets it now, so every open is `Regular`):
 /// - `Popover` (anchor present): chrome-less, always-on-top, positioned
 ///   under the status item, hides on focus loss — reads as a system
 ///   popover.
@@ -19139,131 +19090,19 @@ mod tests {
     fn macos_tray_flyout_geometry_matches_configured_window() {
         assert_eq!(super::MACOS_SETTINGS_WINDOW_WIDTH, 680.0);
         assert_eq!(super::MACOS_SETTINGS_WINDOW_HEIGHT, 540.0);
-        assert_eq!(super::MACOS_TRAY_FLYOUT_GAP, 6);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_centers_under_icon() {
-        // A 24×22 physical status item near the left of a 2560-wide menu
-        // bar at 1x — the anchored flyout fits without clamping.
-        let position = super::macos_tray_flyout_position(1_000.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 672); // icon center 1012 - 680/2
-        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_scales_with_dpi() {
-        // Same icon at 2x scale (physical coordinates already doubled, as
-        // the tray-icon crate reports them on macOS).
-        let position = super::macos_tray_flyout_position(2_000.0, 0.0, 48.0, 44.0, 680.0, 2.0, 0.0, 5_120.0);
-
-        assert_eq!(position.x, 1_344); // icon center 2024 - (680*2)/2
-        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_clamps_to_right_screen_edge() {
-        let position = super::macos_tray_flyout_position(2_500.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
-
-        // Centering under the icon would push the flyout's right edge past
-        // the monitor; clamp so it stays fully on-screen.
-        assert_eq!(position.x, 1_880); // 2560 - 680
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_clamps_to_left_screen_edge() {
-        // A status item near the left edge of a monitor whose physical
-        // origin is negative (a monitor to the left of the primary one).
-        let position = super::macos_tray_flyout_position(-1_400.0, 0.0, 24.0, 22.0, 680.0, 1.0, -1_440.0, 0.0);
-
-        assert_eq!(position.x, -1_440);
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_unbounded_when_no_monitor_found() {
-        let position =
-            super::macos_tray_flyout_position(500.0, 0.0, 24.0, 22.0, 680.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
-
-        assert_eq!(position.x, 172); // icon center 512 - 340, unclamped
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_matches_measured_regression_case() {
-        // The exact case measured on real 16" MacBook Pro hardware (1384
-        // follow-up): a status item at physical x=2348 (1174pt * 2), width
-        // 72 physical (36pt * 2), on a "More Space" 2056pt-wide display at
-        // backingScaleFactor 2.0. With the correct scale factor the flyout
-        // should land at physical x=1704 (852pt) — centered under the icon.
-        let position = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
-
-        assert_eq!(position.x, 1_704); // icon center 2384 - (680*2)/2
-        assert_eq!(position.y, 34); // 0 + 22 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_documents_pre_fix_scale_fallback_bug() {
-        // Same icon geometry as the measured-regression case above, but
-        // computed with the scale factor incorrectly falling back to 1.0
-        // (what `valid_macos_tray_scale_factor`/`monitor_from_point` used to
-        // silently do when no monitor was resolved). This reproduces the
-        // exact 340-physical-px (170pt) rightward mispositioning bug that
-        // the monitor-lookup fix in `macos_monitor_containing_physical_point`
-        // resolves — the flyout window's width is a LOGICAL constant, so
-        // using scale 1.0 instead of 2.0 halves how much of it gets
-        // subtracted when centering, pushing the flyout right.
-        let correct = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
-        let with_1x_fallback = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 1.0, 0.0, 4_112.0);
-
-        assert_eq!(correct.x, 1_704);
-        assert_eq!(with_1x_fallback.x, 2_044);
-        assert_eq!(with_1x_fallback.x - correct.x, 340);
-    }
-
-    #[test]
-    fn physical_point_monitor_index_finds_containing_monitor() {
-        // Two side-by-side monitors at different scales/positions, mirroring
-        // a MacBook's built-in display plus an external one to its right.
-        let monitors = [
-            (0.0, 0.0, 2_056.0 * 2.0, 1_329.0 * 2.0), // built-in, 2x, origin (0,0)
-            (2_056.0 * 2.0, 0.0, 2_560.0, 1_440.0),   // external, 1x, to the right
-        ];
-
-        // A point on the built-in display's far right edge (this is exactly
-        // the case that broke `monitor_from_point`: physical x=2348 falls
-        // well inside the built-in monitor's PHYSICAL bounds here, but
-        // outside its LOGICAL 2056pt-wide CGDisplayBounds).
-        assert_eq!(super::physical_point_monitor_index(&monitors, 2_348.0, 0.0), Some(0));
-
-        // A point on the external display.
-        assert_eq!(super::physical_point_monitor_index(&monitors, 5_000.0, 0.0), Some(1));
-
-        // A point off every monitor.
-        assert_eq!(super::physical_point_monitor_index(&monitors, -100.0, 0.0), None);
-        assert_eq!(super::physical_point_monitor_index(&[], 0.0, 0.0), None);
-    }
-
-    #[test]
-    fn valid_macos_tray_scale_factor_falls_back_to_one() {
-        assert_eq!(super::valid_macos_tray_scale_factor(2.0), 2.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(0.0), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(-1.0), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(f64::NAN), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
     }
 
     // The anchored Settings window's placement math and its five tests retired with that window (task 1683 slice
     // 1, two-surface spec §2: "The anchored Settings placement (slice 6) retires"). The Beebeeb window's placement is
-    // `surfaces::window_state` and its tests.
+    // `surfaces::window_state` and its tests. The tray flyout's anchor math (`macos_tray_flyout_anchor` and its
+    // position, monitor and scale helpers) and its nine tests retired with the menu-bar popover (review P3-7 of #160):
+    // the tray click opens the popover, placed by `surfaces::anchor`.
 
     #[test]
     fn macos_window_mode_is_popover_when_anchor_present() {
-        // Tray click path: `macos_tray_flyout_anchor` produced a position,
-        // handed off through `MACOS_TRAY_FLYOUT_ANCHOR` — the window must
-        // open as a chrome-less popover anchored under the status item.
+        // An anchor handed off through `MACOS_TRAY_FLYOUT_ANCHOR` (the tray
+        // click set one before the menu-bar popover replaced it; nothing sets
+        // it now) — the window opens as a chrome-less popover.
         let anchor = Some(tauri::PhysicalPosition::new(1_704, 34));
         assert_eq!(
             super::macos_window_mode_for_anchor(anchor),
@@ -21098,12 +20937,19 @@ mod popover_wiring_tests {
         // that was put in memory while the sign-out ran; and a re-sign-in whose kept key the server no longer accepts
         // bumps when it ended a session in memory (spec §5.6).
         assert_eq!(source.matches("bump_vault_epoch();\n").count(), 6);
-        assert!(source.contains("VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                    || async move { fetch_storage_usage"));
+        // The fetch is bound to the session (#139 review P1; tests/windows_session_wiring.rs pins the binding).
+        assert!(source.contains(
+            "VAULT_EPOCH.load(std::sync::atomic::Ordering::SeqCst),\n                        || session_bound(async move { fetch_storage_usage"
+        ));
         // Spec 2026-10-06: the snapshot reads the reconciler's view and never probes the OS.
         let snapshot = {
             let at = source.find("async fn popover_snapshot(").unwrap();
             &source[at..at + source[at..].find("\n}\n").unwrap()]
         };
+        // #139 review: the summary comes from the account's cache on `AppState`, which sign-out clears (P2-3), and its
+        // wait runs beside the state DB read, not before it (P3-10).
+        assert!(snapshot.contains("cached_storage(\n                        &state.popover_storage,"));
+        assert!(snapshot.contains("let (storage, db_view) = tokio::join!(storage, db_view);"));
         assert!(snapshot.contains("state.finder_setup.get()"));
         assert!(
             !snapshot.contains("finder_location_state")
@@ -22217,6 +22063,35 @@ mod signout_teardown_tests {
             "an IPC listener that may still be serving could be handed a copy the purge just removed"
         );
         assert_outside_untouched(&root);
+    }
+
+    /// #139 review P2-3 (task 1887's rule, nothing of the account survives sign-out): the storage summary is gone after
+    /// a sign-out, so a used/quota figure of the account before is not kept in memory.
+    #[tokio::test]
+    async fn sign_out_clears_the_storage_summary() {
+        crate::state_paths::init_for_test();
+        let state = AppState::default();
+        let _acct = test_account(&state, "signout-storage-acct");
+        #[cfg(target_os = "macos")]
+        {
+            let (handle, rx) = crate::finder_setup::driver::FinderSetupHandle::for_test(
+                crate::finder_setup::driver::FinderSetupView::initial(
+                    crate::finder_setup::launch_location::LaunchLocation::Applications,
+                ),
+            );
+            let _ = state.finder_setup.set(handle);
+            tokio::spawn(super::confirm_every_finder_event(rx));
+        }
+        let seeded = crate::popover_data::cached_storage(&state.popover_storage, 1_000, 7, || async {
+            Ok(crate::popover_data::StorageUsage { used_bytes: 84, quota_bytes: 200 })
+        })
+        .await;
+        assert_eq!(seeded.map(|s| s.used_bytes), Some(84));
+        assert!(!state.popover_storage.lock().unwrap().is_empty());
+        set_auth_present(&state, false);
+        let result = clear_session_impl(&state, false, None, crate::UnknownFilesArg::Keep, None).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(state.popover_storage.lock().unwrap().is_empty(), "{:?}", state.popover_storage.lock().unwrap());
     }
 
     /// Bug B: sign-out while already signed out (no auth flag, no in-memory
@@ -39344,8 +39219,11 @@ mod sign_out_keep_tests {
                 "absent while the count worked"
             );
             assert!(
-                state.sign_out.snapshots.drop_owned_by("onboarding"),
-                "owned by the window the switch step runs in"
+                state
+                    .sign_out
+                    .snapshots
+                    .drop_owned_by(surfaces::policy::main_window_label(surfaces::policy::Platform::current())),
+                "owned by the window the switch step runs in (the Beebeeb window on a Mac, not the retired onboarding window)"
             );
             let without = serde_json::to_value(LoginOutcome::account_mismatch(2, None, None)).unwrap();
             assert_eq!(
@@ -39427,8 +39305,9 @@ mod sign_out_keep_tests {
 
     /// U19, from the count to the window (W11): the switch settles with the snapshot it counted (a Mac) or none
     /// (elsewhere); both password sign-ins hand the settlement's snapshot and E3 on to `LoginOutcome`; and the browser
-    /// sign-in puts each in its `account_mismatch` event only when it is there. The sign-ins need a server, so their
-    /// text is read.
+    /// sign-in hands them on in the same call (spec C C-S1, task 1747 Part 1): it returns the `LoginOutcome` the password
+    /// paths return, where it used to put each in an `account_mismatch` event and fail with a raw code. The sign-ins need
+    /// a server, so their text is read.
     #[test]
     fn the_switch_count_reaches_the_sign_in_window() {
         let counts = sign_out::snapshot::AskCounts {
@@ -39472,19 +39351,62 @@ mod sign_out_keep_tests {
                 "{login} hands both on"
             );
         }
-        let browser = squeeze(&include_str!("browser_login.rs").replace("\r\n", "\n"));
-        for step in [
-            "let mut payload = serde_json::json!({ \"pending_changes\": pending_changes });",
-            "if let Some(unsent) = unsent {
-                payload[\"unsent\"] = serde_json::to_value(unsent).unwrap_or(serde_json::Value::Null);
-            }",
-            "if let Some(unsent_error) = unsent_error {
-                payload[\"unsent_error\"] = serde_json::Value::String(unsent_error);
-            }",
-            "emit(app, \"account_mismatch\", payload);",
-        ] {
-            assert!(browser.contains(&squeeze(step)), "the browser sign-in's event: {step}");
-        }
+        // The browser handoff holds the same hand-off as the two password sign-ins, in the same call, through its returned
+        // outcome, and no raw `account_mismatch` event or error string is left in it (C-S1).
+        let browser_source = include_str!("browser_login.rs").replace("\r\n", "\n");
+        // The handoff's own code, not its tests (which hold the words of what must not be there).
+        let browser = squeeze(&browser_source[..browser_source.find("#[cfg(test)]").expect("the tests module")]);
+        assert!(
+            browser.contains(&squeeze(
+                "return Ok(crate::LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));"
+            )),
+            "the browser handoff hands both on"
+        );
+        assert!(
+            !browser.contains(concat!("\"account", "_mismatch\"")),
+            "no raw code is left in the handoff, as an event or as an error"
+        );
+    }
+
+    /// Task 1747 Part 1 (review P3-5 on #143): the switch snapshot is owned by the window the switch step runs in. On a Mac
+    /// that is `main`, which the app destroys on a close, so a close of `main` drops it, and another window's close leaves
+    /// it. It used to be owned by the label `onboarding`, a window a Mac no longer builds, so nothing dropped it.
+    #[tokio::test]
+    async fn the_switch_snapshot_is_dropped_by_the_window_it_runs_in_and_by_no_other() {
+        in_own_dirs(async {
+            let db = state_db_in_scratch();
+            queue_write(&db, "w1", "f1", b"bytes");
+            let state = AppState::default();
+            let owner = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
+            #[cfg(target_os = "macos")]
+            assert_eq!(owner, "main", "the sign-in window of a Mac is the Beebeeb window");
+            if switch_snapshot(&state).unwrap().is_some() {
+                for other in ["settings", "onboarding", "popover", "conflict-7f3a"] {
+                    assert!(
+                        !flow_window_closed(&state.sign_out, other).snapshot_dropped,
+                        "{other}: another window's close leaves the switch snapshot"
+                    );
+                }
+                assert!(state.sign_out.snapshots.newest_ask_id().is_some());
+                assert!(
+                    flow_window_closed(&state.sign_out, owner).snapshot_dropped,
+                    "the window the step runs in drops it"
+                );
+                assert_eq!(state.sign_out.snapshots.newest_ask_id(), None);
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn the_switch_snapshot_is_counted_for_the_window_label_not_a_literal() {
+        let production = super::finder_setup_command_tests::production_source();
+        let snapshot = super::finder_setup_command_tests::body_between(&production, "fn switch_snapshot(", "\n}\n");
+        assert!(
+            snapshot.contains("count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?"),
+            "{snapshot}"
+        );
+        assert!(!snapshot.contains("\"onboarding\""), "no window label as a literal:\n{snapshot}");
     }
 
     // ---- the fix round after the /code-review of the Mac sign-in PR (task 1683 slice 2) ----
@@ -39621,6 +39543,139 @@ mod sign_out_keep_tests {
         // The startup restore's own test of the same failure is untouched: it reads the Keychain's words.
         let restore = super::finder_setup_command_tests::body_between(&production, "async fn restore_session_inner(", "\n}\n");
         assert!(!restore.contains("unlock_failure"), "{restore}");
+    }
+
+    // ---- task 1747 Part 2: the Keychain-presence signal (`vault_unlock_route`) ----
+
+    /// A store that answers ONE question, “is a vault key stored?”, and panics on anything that reads or writes a secret: a
+    /// route that read the key (or anything else) would fail the test that uses it.
+    struct HoldsAKey(fn() -> keychain::AuthResult<bool>);
+
+    impl keychain::AuthSecretStore for HoldsAKey {
+        fn save_session_token(&self, _: &SessionToken) -> keychain::AuthResult<()> {
+            unreachable!("the route writes nothing")
+        }
+        fn load_session_token(&self) -> keychain::AuthResult<Option<SessionToken>> {
+            unreachable!("the route reads no token")
+        }
+        fn delete_session_token(&self) -> keychain::AuthResult<()> {
+            unreachable!("the route deletes nothing")
+        }
+        fn save_wrapped_master_key(&self, _: SecretBytes) -> keychain::AuthResult<()> {
+            unreachable!("the route writes nothing")
+        }
+        fn load_wrapped_master_key(&self) -> keychain::AuthResult<Option<SecretBytes>> {
+            unreachable!("the route never reads the key")
+        }
+        fn delete_wrapped_master_key(&self) -> keychain::AuthResult<()> {
+            unreachable!("the route deletes nothing")
+        }
+        fn holds_wrapped_master_key(&self) -> keychain::AuthResult<bool> {
+            (self.0)()
+        }
+    }
+
+    const ABSENT: HoldsAKey = HoldsAKey(|| Ok(false));
+    const PRESENT: HoldsAKey = HoldsAKey(|| Ok(true));
+    const NOT_FOUND: HoldsAKey = HoldsAKey(|| Err(keychain::AuthStoreError::NotFound));
+    const UNREADABLE: HoldsAKey = HoldsAKey(|| Err(keychain::AuthStoreError::Backend("the Keychain is locked".into())));
+
+    fn route_over(id_keyed: &HoldsAKey, legacy: &HoldsAKey) -> VaultUnlockRoute {
+        unlock_route(vault_key_in_either_layout(id_keyed, legacy))
+    }
+
+    /// Item 1, through the real account-slot function and the in-memory Keychain a test build resolves.
+    #[test]
+    fn the_route_is_keychain_when_the_key_is_there() {
+        use keychain::AuthSecretStore as _;
+        let id = "route-the-key-is-there";
+        AuthVault::new(platform_keychain_store_for(id))
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
+            .unwrap();
+        assert_eq!(vault_unlock_route_for(id), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&PRESENT, &ABSENT), VaultUnlockRoute::Keychain);
+        platform_keychain_store_for(id).delete_wrapped_master_key().unwrap();
+    }
+
+    /// Item 2: a session and no key (the interrupted first run) is the recovery phrase. `NotFound` and a store that cannot hold
+    /// secrets say the same as an empty one.
+    #[test]
+    fn the_route_is_recovery_phrase_when_neither_layout_holds_a_key() {
+        use keychain::AuthSecretStore as _;
+        let id = "route-no-key-anywhere";
+        platform_keychain_store_for(id)
+            .save_session_token(&SessionToken::new("tok-no-key".to_string()).unwrap())
+            .unwrap();
+        assert_eq!(vault_unlock_route_for(id), VaultUnlockRoute::RecoveryPhrase, "a token is not a key");
+        assert_eq!(route_over(&ABSENT, &ABSENT), VaultUnlockRoute::RecoveryPhrase);
+        assert_eq!(route_over(&NOT_FOUND, &NOT_FOUND), VaultUnlockRoute::RecoveryPhrase);
+        platform_keychain_store_for(id).delete_session_token().unwrap();
+    }
+
+    /// Item 3: a key that only the legacy flat layout holds is a key (the unlock reads it as a fallback).
+    #[test]
+    fn the_route_reads_the_legacy_layout_too() {
+        assert_eq!(route_over(&ABSENT, &PRESENT), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&PRESENT, &PRESENT), VaultUnlockRoute::Keychain);
+    }
+
+    /// Item 4, pinned so nobody “fixes” it: a Keychain that cannot be read routes to the Keychain unlock, whose own error then
+    /// reaches the person. Set up this Mac would end by writing a key over one that may well be there.
+    #[test]
+    fn an_unreadable_keychain_routes_to_the_keychain_unlock() {
+        assert_eq!(route_over(&UNREADABLE, &ABSENT), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&ABSENT, &UNREADABLE), VaultUnlockRoute::Keychain);
+        assert_eq!(route_over(&UNREADABLE, &UNREADABLE), VaultUnlockRoute::Keychain);
+    }
+
+    /// What the window parses: snake_case strings, and no other fields.
+    #[test]
+    fn the_route_is_a_snake_case_string_on_the_wire() {
+        assert_eq!(serde_json::to_value(VaultUnlockRoute::Keychain).unwrap(), serde_json::json!("keychain"));
+        assert_eq!(
+            serde_json::to_value(VaultUnlockRoute::RecoveryPhrase).unwrap(),
+            serde_json::json!("recovery_phrase")
+        );
+    }
+
+    /// Item 5: the command reaches the Keychain only through `keychain_vault_key_present`, which asks both layouts and never
+    /// unlocks (`the_vault_key_probe_asks_both_layouts_and_never_unlocks` holds that helper); a worker that failed to answer is
+    /// the Keychain unlock; and the command is registered on a Mac only.
+    #[test]
+    fn the_route_never_reads_the_key() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = |signature: &str| super::finder_setup_command_tests::body_between(&production, signature, "\n}\n").to_string();
+        let route_for = body("fn vault_unlock_route_for(");
+        assert!(route_for.contains("unlock_route(keychain_vault_key_present(account_id))"), "{route_for}");
+        let command = body("async fn vault_unlock_route(");
+        assert!(command.contains("vault_unlock_route_for(&account_id)"), "{command}");
+        assert!(command.contains(".unwrap_or(VaultUnlockRoute::Keychain)"), "fails closed:\n{command}");
+        for (name, text) in [("the command", &command), ("the account function", &route_for), ("the decision", &body("fn unlock_route("))] {
+            for forbidden in ["load_", "AuthVault", "unlock_vault", "master_key", "unlock(", "session", "token", ".ok()", "unwrap_or(false)"] {
+                assert!(!text.contains(forbidden), "{name} must not touch {forbidden}:\n{text}");
+            }
+        }
+        let handler = super::finder_setup_command_tests::body_between(&production, "tauri::generate_handler![", "])");
+        let at = handler.find("vault_unlock_route,").expect("registered");
+        assert!(
+            handler[..at].trim_end().ends_with("#[cfg(target_os = \"macos\")]"),
+            "registered on a Mac only"
+        );
+    }
+
+    /// Item 6 (plan D5): the route is its own command; the 1 Hz `sync_status` poll never reaches the Keychain for it.
+    #[test]
+    fn sync_status_does_not_read_the_keychain() {
+        let production = super::finder_setup_command_tests::production_source();
+        let body = super::finder_setup_command_tests::body_between(&production, "async fn sync_status(", "\n}\n")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        for forbidden in ["keychain", "vault_unlock_route", "unlock_route", "holds_vault_key", "vault_key_in_either_layout"] {
+            assert!(!body.contains(forbidden), "sync_status must not reach {forbidden}");
+        }
     }
 
     /// Review P3-1: `open_reauth_window` on a Mac asks the window for “Sign in again”, whatever the session says; the

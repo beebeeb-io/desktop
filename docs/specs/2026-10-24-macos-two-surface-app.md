@@ -331,7 +331,7 @@ in the popover.
 | Up to date (`synced`) | email, storage line and bar | "Recent activity", 5 rows | ✓ "Up to date" · amber lock "Encrypted" | none | 30 Sep (approved) |
 | Syncing | same | "{n} files left", size and %, rows with per-file progress (upload bar amber: encryption; download neutral), "Done" | spinner "Syncing" · "Encrypted" | none | 30 Sep |
 | Needs a decision (conflicts > 0 over any non-message state) | same | attention row "{n} files need a decision" / "Both changed on two devices." + "Review…", then activity | as the state below it | "Review…" opens the window on Review | new (§10) |
-| Update available (over any non-message state) | same | row "Version {v} is available." + "Restart to update" (amber), then the state's body | as the state below it | "Restart to update" | `macSettingsModel.ts` `updateRow`, `UpdateBanner.tsx` |
+| Update available (over any non-message state) | same | ~~row "Version {v} is available." + "Restart to update" (amber), then the state's body~~ row "Version {v} is available." + "Download update" (amber), and under it "Drag Beebeeb into Applications to replace this version.", then the state's body. — popover slice, 2026-10-25: task 2176's decision (lead, 2026-10-24); the App Sandbox denies the in-app install, so a Mac downloads the disk image (`https://beebeeb.io/download/macos-dmg`) | as the state below it | ~~"Restart to update"~~ "Download update" (task 2176) | `macSettingsModel.ts` `updateRow`, `UpdateBanner.tsx`; task 2176 |
 | Paused | same | "Sync is paused" / "{n} changes on this Mac are waiting. Nothing syncs until you resume." | none | "Resume sync" | 30 Sep |
 | Offline (spec C C-R7; crossed b) | same | "Can’t reach Beebeeb" / "Check your connection. Files on this Mac are unchanged." | none | "Try again" | spec C + 30 Sep (§10) |
 | Error | same | "Sync stopped" / "Beebeeb couldn’t finish syncing. Files on this Mac are unchanged." + mono reason (≤ 30 characters) | none | "Try again" | new (§10) |
@@ -359,6 +359,32 @@ The 1887 ask (A0–A5) is never shown in the popover: a question with consequenc
 - **One error surface:** the popover never shows a toast (popover ruling 7). A transient failure of an action started
   in the popover replaces the body with the error state; everything else waits for the next snapshot.
 - **Data:** `popover_snapshot` and `popover-shown` (`popoverContract.ts`), unchanged; slice 3 renders them.
+
+### 6.5 Decided while building slice 3 (for review)
+
+The table above leaves these open. The popover slice decided each one, pinned it in `tests/popoverModel.test.ts` or
+`tests/popoverApp.test.tsx`, and flags it in its PR for the lead and Guus. — popover slice, 2026-10-25
+
+- **Finder missing** (spec A, "Where `Missing` rests"): the popover claims nothing about Finder. It shows the sync part
+  (`sync_phase`, task 2179), with Open in Finder disabled.
+- **The 1887 send phase** shows over every state except "no session".
+- **The update row and the attention row** both show over a list state, the update row first, and focus starts on the
+  first one. Each takes the room of two activity rows: 5 rows, then 3 under one, then 1 under both. Syncing shows at
+  most 4 rows, moving files first, then "Done".
+- **Singulars:** "1 file left", "1 file needs a decision", "1 change on this Mac is waiting. Nothing syncs until you
+  resume.", "1 change can’t upload until …". With no waiting changes, Paused says "Nothing syncs until you resume."
+- **A row that failed** reads "{folder} · Couldn’t sync" (new copy).
+- **Times:** "Just now", "{n} min ago", "{n} hour(s) ago", "Yesterday", then "22 Oct". VoiceOver hears "2 minutes ago".
+- **A failed action** shows one sentence and Try again (new copy): "Beebeeb couldn’t resume sync.", "Beebeeb couldn’t
+  start syncing.", "Beebeeb couldn’t unlock the vault.", "Beebeeb couldn’t open its window.", "Beebeeb couldn’t open
+  your browser.". The Finder actions keep their shipped sentences (`FINDER_ACTION_FAILED`), and Open in Finder keeps
+  "Beebeeb couldn’t open its Finder location.". The sentence goes when the popover is shown again, or when the state
+  reaches another phase. It never shows the raw reason.
+- **The first read:** before it answers, the busy indicator and no words (as Checking). If it fails: "Beebeeb
+  couldn’t check its status." with Try again (new copy).
+- **The session ends while the popover is open:** it hides itself (no session, no popover).
+- **Links** open in the system browser through the opener only, never `window.open`, so the popover opens no window
+  but the Beebeeb window.
 
 ## 7. The Beebeeb window
 

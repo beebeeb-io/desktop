@@ -73,6 +73,51 @@ describe('windowScreen: the screen per session state', () => {
   })
 })
 
+/**
+ * Task 1747 Part 2 (plan D4): a signed-in, locked Mac with no vault key anywhere opens on Set up this Mac BY STATE, not only
+ * after a click. The route is what the Keychain says (`vault_unlock_route`); the model only reads it.
+ */
+describe('windowScreen: the Keychain route of a locked Mac (1747 Part 2)', () => {
+  const locked = { logged_in: true, auth_expired: false, vault_unlocked: false }
+  const unlocked = { logged_in: true, auth_expired: false, vault_unlocked: true }
+
+  // Item 7, red first: today this is `home`, a Home whose locked card calls `unlock_vault`, which has no key to read.
+  test('locked, no key anywhere (route recovery_phrase), idle flow: Set up this Mac, by state (the interrupted first run)', () => {
+    expect(windowScreen(locked, IDLE_FLOW, 'recovery_phrase')).toBe('unlock')
+  })
+
+  // Item 8
+  test('locked with the key in the Keychain (route keychain): Home, whose locked card unlocks in place', () => {
+    expect(windowScreen(locked, IDLE_FLOW, 'keychain')).toBe('home')
+  })
+
+  // Item 9: no flash of Home while the question is out.
+  test('locked and the route not known yet: settling, never Home', () => {
+    expect(windowScreen(locked, IDLE_FLOW, 'unknown')).toBe('settling')
+  })
+
+  // Item 10
+  test('a flow step still wins over the route (the switch, Finder, Set up this Mac, settling, Sign in again)', () => {
+    for (const route of ['keychain', 'recovery_phrase', 'unknown'] as const) {
+      for (const stepName of ['switch', 'finder', 'unlock', 'settling', 'reauth'] as const) {
+        expect({ route, step: stepName, screen: windowScreen(locked, step(stepName), route) }).toEqual({ route, step: stepName, screen: stepName })
+      }
+    }
+  })
+
+  test('the route is about a locked, signed-in Mac with a good session and nothing else', () => {
+    for (const route of ['keychain', 'recovery_phrase', 'unknown'] as const) {
+      expect(windowScreen(unlocked, IDLE_FLOW, route)).toBe('home')
+      expect(windowScreen(out, IDLE_FLOW, route)).toBe('signin')
+      expect(windowScreen({ ...locked, auth_expired: true }, IDLE_FLOW, route)).toBe('reauth')
+    }
+  })
+
+  test('an account read without a vault state (the routing tests above) is Home, whatever the route', () => {
+    expect(windowScreen(live, IDLE_FLOW, 'recovery_phrase')).toBe('home')
+  })
+})
+
 describe('afterSignIn: Onboarding’s afterSignIn, in the window (R8, C-S1)', () => {
   test('another account is the switch step, with the count, the ask snapshot, the coded E3 and the typed address', () => {
     expect(afterSignIn({ kind: 'account_mismatch', pendingChanges: 3, unsent: ask, unsentError: null }, 'b@example.eu', false)).toEqual({
@@ -163,6 +208,13 @@ describe('the other steps', () => {
 // step now, so the card is shown whatever the session says (Linux's `mode=reauth`).
 describe('flowForNav: a “Sign in again” request is the card, whatever the session says (P3-1)', () => {
   const idle = { signedIn: true, sheetOpen: false }
+
+  test('the popover’s no-key handoff opens setup and waits under a sheet', () => {
+    expect(flowForNav({ to: 'setup' }, idle, IDLE_FLOW)).toEqual({ flow: step('unlock'), held: false })
+    expect(flowForNav({ to: 'setup' }, { ...idle, sheetOpen: true }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: true })
+    expect(flowForNav({ to: 'setup' }, idle, step('finder'))).toEqual({ flow: step('finder'), held: false })
+    expect(flowForNav({ to: 'setup' }, { ...idle, signedIn: false }, IDLE_FLOW)).toEqual({ flow: IDLE_FLOW, held: false })
+  })
 
   test('a signed-in window with no step in progress shows the card', () => {
     expect(flowForNav({ to: 'reauth' }, idle, IDLE_FLOW)).toEqual({ flow: step('reauth'), held: false })

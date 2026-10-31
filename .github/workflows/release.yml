@@ -21,6 +21,11 @@ on:
         required: true
         default: false
         type: boolean
+      updater_key_transition:
+        description: ONLY for a deliberate updater-key transition release N (docs/RELEASING.md) - downgrade the signature-key guard to a warning
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -77,35 +82,12 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          notes_path="RELEASE_NOTES.md"
-
-          if [[ ! -f "$notes_path" ]]; then
-            echo "::error file=$notes_path::Missing RELEASE_NOTES.md for Beebeeb Desktop $RELEASE_VERSION. Author the release notes at the repo root, commit them, then rerun this workflow. See docs/RELEASING.md."
-            exit 1
-          fi
-
-          python3 <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-
-          version = os.environ["RELEASE_VERSION"]
-          notes_path = pathlib.Path("RELEASE_NOTES.md")
-          notes = notes_path.read_text(encoding="utf-8")
-          exact_version = re.compile(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z-]|\.[0-9A-Za-z])")
-
-          if not exact_version.search(notes):
-              print(
-                  f"::error file=RELEASE_NOTES.md::RELEASE_NOTES.md must mention the exact release version {version}. "
-                  "Update the title/body for this release and commit it before rerunning the workflow. See docs/RELEASING.md.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          PY
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        # Fails closed if RELEASE_NOTES.md is missing, does not name the exact version,
+        # or promises automatic delivery to existing installs while the release is
+        # published to alpha/beta only (desktop-v0.8.3 did exactly that and sat in
+        # alpha for 57 days). Covered by tests/releaseChannelChecks.test.ts.
+        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md
 
       - name: Refuse while RELEASE_BLOCKERS.md lists an item
         shell: bash
@@ -502,6 +484,24 @@ jobs:
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm release-assets/
           cp src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm.sig release-assets/
 
+      # Every updater signature must be made by the key baked into this build's
+      # tauri.conf.json. 0.3.0-0.8.3 baked C6FADFD59D732197 while CI signed with
+      # 545D7BA77EDEA7E1, so every install >= 0.3.0 rejected every update and no
+      # step noticed. Fail here, before anything is published.
+      - name: Check updater signature key matches baked pubkey
+        shell: bash
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sigs=(release-assets/*.sig)
+          if [[ ${#sigs[@]} -eq 0 ]]; then
+            echo "::error::No updater .sig files staged in release-assets/"
+            exit 1
+          fi
+          node scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG --sig "${sigs[@]}"
+
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -563,6 +563,11 @@ jobs:
           target_commitish: ${{ github.sha }}
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
+          # GitHub "Latest" is what beebeeb.io/download hands to fresh installs, so it must
+          # track the stable updater manifest (desktop/latest.json). An alpha/beta release is
+          # never marked Latest here; publish-manifest marks it Latest when it is promoted to
+          # stable. (desktop-v0.8.3 was marked Latest while stable still served 0.8.2.)
+          make_latest: ${{ inputs.channel == 'stable' && 'true' || 'false' }}
           fail_on_unmatched_files: false
           # Single catch-all instead of a per-extension allowlist — the upload steps above now
           # glob whole bundle directories, so every real bundle type flows through automatically
@@ -602,7 +607,8 @@ jobs:
     # bounds the job as a whole, so a stalled connection fails it instead of hanging for hours.
     timeout-minutes: 15
     permissions:
-      contents: read
+      # write: only to mark the GitHub release "Latest" on a stable publish (final step).
+      contents: write
 
     steps:
       - name: Checkout releases repo
@@ -613,6 +619,17 @@ jobs:
           token: ${{ secrets.RELEASES_PUSH_TOKEN }}
           persist-credentials: false
           path: releases-repo
+
+      - name: Checkout updater key guard at the release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: desktop-v${{ inputs.version }}
+          persist-credentials: false
+          path: desktop-src
+          sparse-checkout: |
+            scripts/check-updater-signature-key.mjs
+            src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
 
       - name: Generate desktop channel manifest
         env:
@@ -832,6 +849,29 @@ jobs:
               )
             }' > "releases-repo/$MANIFEST_PATH"
 
+      # Same guard as the build job, on what installs will actually fetch. This
+      # also covers publish_existing=true promotions, which never run the build.
+      # Tags cut before this guard existed lack the script and are refused without
+      # the transition flag. 0.8.4-0.8.20 are signed with the baked key, 0.8.3 and
+      # older are not: promote such a tag only after checking its .sig files by hand
+      # (docs/RELEASING.md, "Promoting a tag cut before the guard").
+      - name: Check manifest signatures match the baked updater key
+        env:
+          KEY_TRANSITION_FLAG: ${{ inputs.updater_key_transition && '--allow-key-transition' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f desktop-src/scripts/check-updater-signature-key.mjs ]]; then
+            if [[ -n "$KEY_TRANSITION_FLAG" ]]; then
+              echo "::warning::desktop-v${{ inputs.version }} predates the updater key guard; publishing under updater_key_transition=true without a key check."
+              exit 0
+            fi
+            echo "::error::desktop-v${{ inputs.version }} predates the updater key guard, so its signatures cannot be checked. Cut a new release, or check its .sig files by hand and rerun with updater_key_transition=true (docs/RELEASING.md, Promoting a tag cut before the guard)."
+            exit 1
+          fi
+          node desktop-src/scripts/check-updater-signature-key.mjs $KEY_TRANSITION_FLAG \
+            --config desktop-src/src-tauri/tauri.conf.json \
+            --manifest "releases-repo/$DESKTOP_MANIFEST_PATH"
+
       - name: Commit and push to releases repo
         working-directory: releases-repo
         run: |
@@ -851,3 +891,16 @@ jobs:
         env:
           RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
           TAG: desktop-v${{ inputs.version }}
+
+      - name: Mark stable release as GitHub Latest
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Keep GitHub's Latest (served by beebeeb.io/download) equal to the stable
+          # updater manifest. `node scripts/release-channel-checks.mjs delivery` checks
+          # the two live values after the releases site has redeployed.
+          gh release edit "$TAG" --repo "$REPO" --latest

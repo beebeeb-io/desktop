@@ -62,6 +62,8 @@ interface Native {
   locked?: boolean
   /** What Rust's `pending_setup` answers. */
   pending?: { key_replaced: boolean } | null
+  /** What Rust's `vault_unlock_route` answers (task 1747 Part 2); the key is in the Keychain when absent. */
+  route?: 'keychain' | 'recovery_phrase'
 }
 
 const statusAnswer = (n: Native) => ({
@@ -81,6 +83,8 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
   let callbackId = 0
   const snapshot = () => ({
     phase: 'synced',
+    // Rust's sync part of the state (task 2179): the contract refuses a snapshot without it.
+    sync_phase: 'synced',
     generated_at: 1000,
     account: { email: native.loggedIn ? 'sam@example.eu' : null, logged_in: native.loggedIn, vault_unlocked: native.loggedIn && !native.locked, auth_expired: native.authExpired },
     paused: false,
@@ -114,6 +118,7 @@ function installBackend(native: Native, extra: Record<string, (args: any) => unk
     account_email: () => (native.loggedIn ? 'sam@example.eu' : null),
     last_signed_in_email: () => null,
     pending_setup: () => native.pending ?? null,
+    vault_unlock_route: () => native.route ?? 'keychain',
     set_pending_setup: () => null,
     autostart_enabled: () => false,
     desktop_platform: () => 'macos',
@@ -359,6 +364,35 @@ describe('a window reopened while Set up this Mac was owed (P2-3)', () => {
     await waitFor('Home', () => elements(container).some((el) => el.tagName === 'NAV') && container.textContent.includes('Your vault is locked'))
     expect(card(container)).toBeUndefined()
     expect(native.calls.filter((name) => name === 'pending_setup')).toHaveLength(1)
+  }, SLOW)
+})
+
+describe('the interrupted first run: the app was quit before the phrase (task 1747 Part 2)', () => {
+  // Rust's pending step lives for the process, so a quit forgets it; the Keychain does not: it holds the session and no key. The
+  // window opens on Set up this Mac by state, with no pending step to resume, and never draws Home or its locked card first.
+  test('no pending step, a session and no key in the Keychain: Set up this Mac, by state', async () => {
+    const native: Native = { loggedIn: true, authExpired: false, revision: 100, calls: [], nav: null, locked: true, pending: null, route: 'recovery_phrase' }
+    installBackend(native)
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await settled(container, (c) => card(c) !== undefined)
+    expect(headings(container)).toContain('Set up this Mac')
+    expect(container.textContent).not.toContain('Your vault is locked')
+    expect(native.calls.filter((name) => name === 'vault_unlock_route')).toHaveLength(1)
+    expect(native.calls).not.toContain('unlock_vault')
+  }, SLOW)
+
+  test('the same window with the key in the Keychain is Home’s locked card, and Unlock vault unlocks in place', async () => {
+    const native: Native = { loggedIn: true, authExpired: false, revision: 110, calls: [], nav: null, locked: true, pending: null, route: 'keychain' }
+    installBackend(native, { unlock_vault: () => { native.locked = false; return null } })
+    const { default: MacApp } = await import('../src/MacApp')
+    const container = await mountWindow('?window=main&platform=macos', <MacApp />)
+    await waitFor('Home’s locked card', () => container.textContent.includes('Your vault is locked'))
+    expect(card(container)).toBeUndefined()
+    await press(container, 'button', 'Unlock vault')
+    await waitFor('the unlocked Home', () => !container.textContent.includes('Your vault is locked'))
+    expect(native.calls.filter((name) => name === 'unlock_vault')).toHaveLength(1)
+    expect(headings(container)).not.toContain('Set up this Mac')
   }, SLOW)
 })
 

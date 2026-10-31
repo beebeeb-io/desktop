@@ -38,8 +38,20 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+<!-- Pick the line that matches the channel you pass to the workflow. The release body is
+     written once and reused unchanged on every later promotion, so it must stay true on
+     the first channel. -->
+<!-- stable: --> Existing desktop installs receive this release through the in-app updater automatically.
+<!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
+
+For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
 ```
+
+The release workflow enforces the channel rule: when `channel` is `alpha` or `beta`, notes that
+promise automatic delivery to existing installs fail validation
+(`node scripts/release-channel-checks.mjs notes <version> <channel>`, tested in
+`tests/releaseChannelChecks.test.ts`). desktop-v0.8.3, a security fix, shipped with the
+unconditional stable wording while it was only ever published to `alpha.json`.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
@@ -73,14 +85,63 @@ fingerprint `545D7BA77EDEA7E1`. The replacement private key and passphrase must 
 Guus out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
 or chat. The CI secret change is deliberately not part of this commit.
 
+### State of the task-1240 rotation (checked 2026-10-29): done
+
+- **Release N was 0.3.0** (commit `1fe52ac`/`fc7395d`, 2026-07-25), the first to bake
+  `C6FADFD59D732197`. N+1 was not cut then, so CI kept signing every release from 0.3.0 through
+  **0.8.3** with the old key `545D7BA77EDEA7E1` (0.8.3: 5 of 5 `.sig` files on `545D`). In that
+  time no 0.3.0+ install could apply an update in-app.
+- **Release N+1 was 0.8.4** (#62, 2026-09-25), the first signed with `C6FADFD59D732197`. Every
+  release since is signed with it: 0.8.4 through 0.8.20, 17 releases, every updater `.sig` on the
+  release (5 or 6 each) passes `node scripts/check-updater-signature-key.mjs --sig <files>`. The
+  `latest`, `beta` and `alpha` manifests (all 0.8.20) pass `--manifest`, 5 of 5 each.
+- **Who can update in-app:** every install on 0.3.0 or later. An install older than 0.3.0 trusts
+  only `545D7BA77EDEA7E1`, rejects every release since 0.8.4, and needs one manual reinstall from
+  the GitHub release or beebeeb.io/download.
+- **The published verification key** is the new one: the site's `src/lib/downloads.ts` names
+  `C6FADFD59D732197` (N+1 checklist step 6).
+
+The two checklists below stay for the next rotation.
+
+### Signature-key guard
+
+`scripts/check-updater-signature-key.mjs` decodes the minisign key ID of each updater signature
+and compares it with the key ID of `plugins.updater.pubkey` in `tauri.conf.json`. The release
+workflow runs it twice and fails closed on any mismatch:
+
+- in the build job, on every staged `release-assets/*.sig` (before anything is published), and
+- in `publish-manifest`, on the generated channel manifest (this also covers
+  `publish_existing=true` promotions). That step runs the checker from the release tag, so a tag
+  cut before the guard was merged (0.8.20 and every older tag) has no checker, and the step
+  refuses it.
+
+**Promoting a tag cut before the guard** (for example 0.8.20 to another channel) needs
+`updater_key_transition=true`, and then the manifest step only warns: nothing in the workflow
+checks the key. So check it by hand first, with the checker from `main`, and promote only on OK:
+
+```sh
+gh release download desktop-v<version> -R beebeeb-io/desktop --pattern '*.sig' --dir /tmp/sigs-<version>
+node scripts/check-updater-signature-key.mjs --sig /tmp/sigs-<version>/*.sig
+```
+
+After the promotion, run `--manifest https://releases.beebeeb.io/desktop/<channel>.json` on the
+channel it went to. Tags from 0.8.4 on are signed with the baked key; 0.8.3 and older are not, and
+must never be promoted.
+
+A transition release N is the only legitimate mismatch. For that release, trigger the workflow
+with `updater_key_transition=true`; the guard then reports the mismatch as a warning. The only
+other use is promoting a tag cut before the guard, checked by hand as above. Never set it for
+anything else.
+
 Mechanical checklist for release N:
 
 1. Confirm `src-tauri/tauri.conf.json` contains the new public key fingerprint
    `C6FADFD59D732197`.
 2. Confirm repository/organization secrets still point at the old updater signing key. Do not
    update `TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` yet.
-3. Run the normal release workflow for release N. Its updater packages must be signed by the old
-   key, and the resulting manifest signatures must be the old-key signatures generated by that run.
+3. Run the normal release workflow for release N with `updater_key_transition=true`. Its updater
+   packages must be signed by the old key, and the resulting manifest signatures must be the
+   old-key signatures generated by that run.
 4. Smoke-test updating an existing install built with the old public key to release N.
 5. Record evidence before planning N+1.
 
@@ -95,8 +156,13 @@ Mechanical checklist for release N+1:
    `C6FADFD59D732197`.
 3. Update CI secrets out of band: `TAURI_SIGNING_PRIVATE_KEY` is the new private key contents, and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is the new passphrase.
-4. Run the normal release workflow for release N+1.
-5. Smoke-test updating an install already on release N to release N+1.
+4. Run the normal release workflow for release N+1 with `updater_key_transition=false` (the
+   default). If the CI secret still holds the old key, the signature-key guard fails the build job
+   before any asset is published. The RELEASE_NOTES.md for N+1 must say that installs older than
+   release N need a manual reinstall from the GitHub release.
+5. Smoke-test updating an install already on release N to release N+1, and confirm
+   `node scripts/check-updater-signature-key.mjs --manifest https://releases.beebeeb.io/desktop/<channel>.json`
+   passes for every channel N+1 was published to.
 6. Update the public verification key on beebeeb.io/download: in the site repo, `src/lib/downloads.ts`
    (`DESKTOP_MINISIGN_KEY_ID` / `DESKTOP_MINISIGN_PUBLIC_KEY`) still names the pre-rotation key
    `545D7BA77EDEA7E1` that signs release N's assets. After N+1 is published, switch it to the new key
@@ -378,6 +444,8 @@ update or downgrade is actually installed from that channel.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
 9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
+10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
+11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
 
 ## Style Notes
 

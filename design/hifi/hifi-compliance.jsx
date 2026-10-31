@@ -214,7 +214,7 @@ function HiCompliance() {
               ['Hetzner Online GmbH', 'Object storage', 'DE', '2h ago', 'ok'],
               ['Leaseweb B.V.', 'Object storage', 'NL', '6d ago', 'ok'],
               ['Scaleway SAS', 'Object storage', 'FR', '6d ago', 'ok'],
-              ['Stripe Payments Europe', 'Billing', 'IE', '11d ago', 'ok'],
+              ['Mollie B.V.', 'Billing', 'NL', '11d ago', 'ok'],
             ].map((r, i, arr) => (
               <div key={i} style={{
                 display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 1fr 90px', gap: 14,

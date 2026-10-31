@@ -520,9 +520,9 @@ export async function command<T>(name: string, args?: Record<string, unknown>): 
 }
 
 /**
- * Everything the menu-bar popover needs for its first frame (task 1683 slice 2).
- * Call it when the popover is shown (`popover-shown`) and after its own actions,
- * never on a timer. Not used by any rendered UI yet (slice 3).
+ * The account and sync state in one read (task 1683 slice 2): what the menu-bar popover shows, and what the macOS
+ * Beebeeb window reads every few seconds while it is open (slice 1). It never waits long on the storage summary: a
+ * fetch holds it `popover_data::STORAGE_WAIT` at most, and a failed one is not tried again for a while (task 2179).
  */
 export async function popoverSnapshot(activityLimit?: number): Promise<CommandResult<PopoverSnapshot>> {
   const result = await command<unknown>('popover_snapshot', activityLimit === undefined ? undefined : { activityLimit })
@@ -531,6 +531,29 @@ export async function popoverSnapshot(activityLimit?: number): Promise<CommandRe
   return snapshot
     ? { ok: true, value: snapshot }
     : { ok: false, reason: 'The popover snapshot had an unexpected shape.', unsupported: false }
+}
+
+/**
+ * Where "unlock" goes on this Mac (task 1747 Part 2): `keychain` when the vault key is in the Keychain, `recovery_phrase`
+ * when neither Keychain layout holds one (the interrupted first run: a session without keys). Rust answers from the
+ * item's attributes only, never the key, and a Keychain it cannot read is `keychain`, so the existing unlock error reaches
+ * the person rather than a path that would overwrite a key.
+ */
+export type VaultUnlockRoute = 'keychain' | 'recovery_phrase'
+
+/** The same fail-closed answer on this side: only the exact string Rust sends for "no key" sends the person to Set up this Mac. */
+export function parseVaultUnlockRoute(raw: unknown): VaultUnlockRoute {
+  return raw === 'recovery_phrase' ? 'recovery_phrase' : 'keychain'
+}
+
+/**
+ * `vault_unlock_route`: an answer about the ACTIVE account's Keychain, so it keeps the revision guard (a route that arrives
+ * after the session moved is refused as "Account changed", never applied to the next account) and is not part of
+ * `sync_status`, which the window polls every second. macOS only: elsewhere `unsupported` is true.
+ */
+export async function vaultUnlockRoute(): Promise<CommandResult<VaultUnlockRoute>> {
+  const result = await command<unknown>('vault_unlock_route')
+  return result.ok ? { ok: true, value: parseVaultUnlockRoute(result.value) } : result
 }
 
 export async function loadSyncStatus(): Promise<SyncStatus | null> {
@@ -705,7 +728,6 @@ export interface Subscription {
   extra_storage_tb?: number
   extra_users?: number
   is_mock?: boolean | null
-  stripe_configured?: boolean | null
   billing_state?: string | null
   pending_downgrade_plan?: string | null
   downgrade_cooldown_until?: string | null
