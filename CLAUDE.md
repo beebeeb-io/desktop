@@ -148,6 +148,10 @@ A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `docs/canon/dat
 - Icons: amber rounded square with lowercase `b` (`icons/icon.png`); production set via `bunx tauri icon path/to/source.png`.
 - App name "Beebeeb"; identifier `io.beebeeb.app`.
 
+## Design files
+
+`design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite, and tests read them (`tests/accountViewCopy.test.ts`, `finderSetupCopy.test.ts`, `macSettingsModel.test.ts`, `menuBarHintModel.test.ts`, `reauthInPlace.test.tsx`), so do not move or rename them. All other design files live in the workspace root `../../design/hifi/` — never copy them into this public repo (a snapshot once published a false external-audit claim; removed in task 1365). A code comment or README that names `design/hifi/hifi-*.jsx`, `styles.css` or `hifi-styles.css` means that workspace copy.
+
 ## How we work (evidence, design, done, parallel agents)
 
 The full rules live in the workspace `CLAUDE.md` → "How we work". The repo-specific instantiation:
