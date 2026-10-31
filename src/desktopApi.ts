@@ -165,32 +165,41 @@ export interface SharedRoot {
   finder_path?: string | null
 }
 
+/** Known Review DTO kinds, including forward-compatible entries from the preserved feed. */
+export const REVIEW_ENTRY_KINDS = [
+  'conflict',
+  'failed_upload',
+  'quota_failure',
+  'permission_failure',
+  'stale_base',
+  'restore',
+  'metadata',
+  'delete',
+  // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
+  // Previously fell through to the generic 'failed_upload' bucket with the
+  // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
+  'auth_failure',
+  // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
+  'held_edit',
+  // Task 2190: the one row for files from before 0.8.13 that hold a change not checked yet.
+  'held_unknown',
+  // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
+  // were kept as a copy beside it (informational, no action).
+  'kept_copy',
+  'not_sent',
+  'account_refused',
+  'other',
+] as const
+export type ReviewEntryKind = (typeof REVIEW_ENTRY_KINDS)[number]
+
 export interface VersionConflictEntry {
   id: string
   file_id: string
   file_name: string
-  kind:
-    | 'conflict'
-    | 'failed_upload'
-    | 'quota_failure'
-    | 'permission_failure'
-    | 'stale_base'
-    | 'restore'
-    | 'metadata'
-    | 'delete'
-    // Task 1546 finding 3: a 401/unauthorized/invalid-token operation failure.
-    // Previously fell through to the generic 'failed_upload' bucket with the
-    // raw HTTP error text and no "sign in again" path — see `reviewEntryAction`.
-    | 'auth_failure'
-    // Task 2190: a sync-folder edit held, not sent, because its base is unknown (needs a decision).
-    | 'held_edit'
-    // Task 2190: the one row for files from before 0.8.13 that hold a change not checked yet.
-    | 'held_unknown'
-    // Task 1640: a file deleted elsewhere while it held changes not sent from this PC; they
-    // were kept as a copy beside it (informational, no action).
-    | 'kept_copy'
+  folder?: string | null
+  kind: ReviewEntryKind
   status: string
-  updated_at?: number
+  updated_at?: number | null
   detail: string
   action: 'open_conflict' | 'review_upload' | 'restore_review' | string
   op_id?: string | null

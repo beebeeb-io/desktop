@@ -14,6 +14,7 @@ import {
   lastCheckedLine,
   listAfterKey,
   MAIN_SECTIONS,
+  mainButtonId,
   menuStateFor,
   navigate,
   parseMainNav,
@@ -25,12 +26,15 @@ import {
 } from '../src/mainWindowModel'
 
 const home: MainView = { mode: 'main', section: 'home' }
+const review: MainView = { mode: 'main', section: 'review' }
+const trash: MainView = { mode: 'main', section: 'trash' }
 const signedIn: NavContext = { signedIn: true, lastSettings: null, sheetOpen: false }
 const signedOut: NavContext = { signedIn: false, lastSettings: null, sheetOpen: false }
 
 describe('the two sidebar lists', () => {
-  test('signed in: Home in the window sidebar; the Settings list is Account, General, Sync, Security, About (slice 5 adds Security)', () => {
-    expect(MAIN_SECTIONS.map((s) => s.label)).toEqual(['Home'])
+  test('signed in: Home, Review and Trash in the window sidebar (slice 4); the Settings list is Account, General, Sync, Security, About (slice 5 adds Security)', () => {
+    expect(MAIN_SECTIONS.map((s) => s.label)).toEqual(['Home', 'Review', 'Trash'])
+    expect(MAIN_SECTIONS.map((s) => s.id)).toEqual(['home', 'review', 'trash'])
     expect(settingsSections(true)).toEqual(['account', 'general', 'sync', 'security', 'about'])
   })
 
@@ -95,6 +99,41 @@ describe('navigate (§7.8, §9.3)', () => {
 
   test('back outside Settings changes nothing', () => {
     expect(navigate(home, { to: 'back' }, signedIn)).toBe(home)
+    expect(navigate(review, { to: 'back' }, signedIn)).toBe(review)
+  })
+
+  test('⌘2 and ⌘3 land on Review and Trash, from the main sections and from Settings (§9.3)', () => {
+    expect(navigate(home, { to: 'review' }, signedIn)).toEqual(review)
+    expect(navigate(home, { to: 'trash' }, signedIn)).toEqual(trash)
+    expect(navigate(trash, { to: 'review' }, signedIn)).toEqual(review)
+    const settings: MainView = { mode: 'settings', section: 'sync', returnTo: 'home' }
+    expect(navigate(settings, { to: 'review' }, signedIn)).toEqual(review)
+    expect(navigate(settings, { to: 'trash' }, signedIn)).toEqual(trash)
+  })
+
+  test('asking for the section already showing changes nothing (the same view back, so focus does not jump)', () => {
+    // The views a window holds come from `navigate` and `initialMainView`; asking again for the one it holds is the
+    // same object, which is how `MacApp` tells "nothing changed" from "moved".
+    const showingReview = navigate(home, { to: 'review' }, signedIn)
+    const showingTrash = navigate(home, { to: 'trash' }, signedIn)
+    expect(navigate(showingReview, { to: 'review' }, signedIn)).toBe(showingReview)
+    expect(navigate(showingTrash, { to: 'trash' }, signedIn)).toBe(showingTrash)
+    expect(navigate(initialMainView(''), { to: 'home' }, signedIn)).toBe(initialMainView(''))
+    expect(navigate(navigate(showingReview, { to: 'settings', section: null }, signedIn), { to: 'back' }, signedIn)).toBe(showingReview)
+  })
+
+  test('Settings remembers where it was entered from, and back returns to Review or Trash, not always Home', () => {
+    expect(navigate(review, { to: 'settings', section: null }, signedIn)).toEqual({ mode: 'settings', section: 'general', returnTo: 'review' })
+    const fromTrash = navigate(trash, { to: 'settings', section: 'about' }, signedIn)
+    expect(fromTrash).toEqual({ mode: 'settings', section: 'about', returnTo: 'trash' })
+    expect(navigate(fromTrash, { to: 'back' }, signedIn)).toEqual(trash)
+  })
+
+  test('§8.2: with a sheet open ⌘2 and ⌘3 change nothing either (a conflict sheet over Review, a password sheet over Trash)', () => {
+    const sheet = { ...signedIn, sheetOpen: true }
+    expect(navigate(review, { to: 'trash' }, sheet)).toBe(review)
+    expect(navigate(trash, { to: 'review' }, sheet)).toBe(trash)
+    expect(navigate(trash, { to: 'home' }, sheet)).toBe(trash)
   })
 
   test('switching sections inside Settings keeps the place it returns to', () => {
@@ -112,8 +151,10 @@ describe('navigate (§7.8, §9.3)', () => {
 })
 
 describe('parseMainNav: what Rust sends on main:navigate', () => {
-  test('the three request kinds, and a section only when it is a real one', () => {
+  test('the request kinds, and a section only when it is a real one', () => {
     expect(parseMainNav({ to: 'home' })).toEqual({ to: 'home' })
+    expect(parseMainNav({ to: 'review' })).toEqual({ to: 'review' })
+    expect(parseMainNav({ to: 'trash' })).toEqual({ to: 'trash' })
     expect(parseMainNav({ to: 'back' })).toEqual({ to: 'back' })
     expect(parseMainNav({ to: 'settings', section: 'about' })).toEqual({ to: 'settings', section: 'about' })
     expect(parseMainNav({ to: 'settings', section: null })).toEqual({ to: 'settings', section: null })
@@ -164,6 +205,9 @@ describe('where a held sign-out sentence is shown (accountSession.ts; review P2-
 describe('the back control (§7.8, §10.2 #48)', () => {
   test('names where it returns to, or Sign in while signed out', () => {
     expect(backLabel('home', true)).toBe('Home')
+    expect(backLabel('review', true)).toBe('Review')
+    expect(backLabel('trash', true)).toBe('Trash')
+    expect(backLabel('review', false)).toBe('Sign in')
     expect(backLabel('home', false)).toBe('Sign in')
   })
 })
@@ -171,6 +215,8 @@ describe('the back control (§7.8, §10.2 #48)', () => {
 describe('the toolbar title is the section name (§7.8)', () => {
   test('Home, and each Settings section by its label', () => {
     expect(sectionTitle(home)).toBe('Home')
+    expect(sectionTitle(review)).toBe('Review')
+    expect(sectionTitle(trash)).toBe('Trash')
     expect(sectionTitle({ mode: 'settings', section: 'account', returnTo: 'home' })).toBe('Account')
     expect(sectionTitle({ mode: 'settings', section: 'about', returnTo: 'home' })).toBe('About')
   })
@@ -182,6 +228,14 @@ describe('focus (§11)', () => {
     expect(focusAfterNav(home, settings, { to: 'settings', section: null })).toBe('mw-settings-sync')
     expect(focusAfterNav(settings, home, { to: 'back' })).toBe('mw-gear')
     expect(focusAfterNav(settings, home, { to: 'home' })).toBe('mw-section-home')
+  })
+
+  test('⌘2 and ⌘3 put focus on the section they chose; back from a Settings entered on Review still focuses the gear', () => {
+    expect(focusAfterNav(home, review, { to: 'review' })).toBe('mw-section-review')
+    expect(focusAfterNav(review, trash, { to: 'trash' })).toBe('mw-section-trash')
+    const settings: MainView = { mode: 'settings', section: 'sync', returnTo: 'review' }
+    expect(focusAfterNav(settings, review, { to: 'back' })).toBe('mw-gear')
+    expect(mainButtonId('review')).toBe('mw-section-review')
   })
 
   test('a request that changed nothing moves no focus', () => {
@@ -222,6 +276,13 @@ describe('the first view (§7.8 "Which section opens")', () => {
     expect(initialMainView('?window=main&platform=macos')).toEqual(home)
     expect(initialMainView('?window=main&platform=macos&tab=account')).toEqual({ mode: 'settings', section: 'account', returnTo: 'home' })
     expect(initialMainView('?tab=nonsense')).toEqual(home)
+  })
+
+  test('?section=review or trash opens that section (kept for the render tools, like ?tab=); a Settings tab wins; nonsense is Home', () => {
+    expect(initialMainView('?window=main&platform=macos&section=review')).toEqual(review)
+    expect(initialMainView('?section=trash')).toEqual(trash)
+    expect(initialMainView('?section=settings')).toEqual(home)
+    expect(initialMainView('?section=review&tab=sync')).toEqual({ mode: 'settings', section: 'sync', returnTo: 'home' })
   })
 })
 
@@ -585,6 +646,39 @@ describe('SnapshotReader: one read in flight, ticks skipped, the newest result a
     reads[2].resolve({ ok: true, value: 'third' })
     expect(await third).toBe(false) // nothing applied after the window unmounted
     expect(events).toHaveLength(3)
+  })
+
+  test('discard (stop for a reader that is reused): a read still out never lands after a resume, and does not hold back the next lifetime\'s first tick (review of #142)', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const applied: unknown[] = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, (r: unknown) => applied.push(r), OPTIONS)
+    reader.resume()
+    reader.tick()
+    reader.discard() // the vault locked, or the account was switched
+    reader.resume()
+    reader.tick() // the new lifetime reads at once: the discarded read is not "in flight" for it
+    expect(reads).toHaveLength(2)
+    reads[0].resolve({ ok: true, value: 'old lifetime' })
+    await settle()
+    expect(applied).toEqual([])
+    reads[1].resolve({ ok: true, value: 'new lifetime' })
+    await settle()
+    expect(applied).toEqual([{ ok: true, value: 'new lifetime' }])
+    // The late answer of the old lifetime did not corrupt the count of reads in flight: the next tick starts a read.
+    reader.tick()
+    expect(reads).toHaveLength(3)
+  })
+
+  test('discard with nothing out, and twice, is harmless; a refresh after it reads', async () => {
+    const reads: Array<ReturnType<typeof deferred>> = []
+    const reader = new SnapshotReader(() => { const d = deferred(); reads.push(d); return d.promise }, () => {}, OPTIONS)
+    reader.discard()
+    reader.discard()
+    reader.tick()
+    expect(reads).toHaveLength(0) // stopped until resumed
+    reader.resume()
+    reader.refresh()
+    expect(reads).toHaveLength(1)
   })
 
   test('a refresh whose read failed or timed out resolves false: the window never treats it as shown (#139 review P2-2)', async () => {

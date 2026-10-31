@@ -2,16 +2,20 @@
  * Pure logic behind the macOS Beebeeb window (task 1683 slice 1; spec
  * `docs/specs/2026-10-24-macos-two-surface-app.md` §7.6, §7.8, §8.2, §9.3, §11).
  *
- * The window is one webview with one sidebar. The sidebar shows Home (Review and Trash join in slice 4) or, after
- * the gear, ⌘, or a menu, the Settings list in System Settings style (ruling 1). Every opener reaches the window
+ * The window is one webview with one sidebar. The sidebar shows Home, Review and Trash (slice 4) or, after the gear,
+ * ⌘, or a menu, the Settings list in System Settings style (ruling 1). Every opener reaches the window
  * through one request (`MainNav`, Rust's `main:navigate`), and `navigate` is the only place that turns a request
  * into a view. Nothing here touches React or Tauri, so `tests/mainWindowModel.test.ts` pins each decision.
  */
 import { SETTINGS_TABS, listAfterKey, parseSettingsTab, monoReason, type SettingsTab } from './macSettingsModel'
 import type { PopoverSnapshot } from './popoverContract'
 
-/** The window's own sidebar, top to bottom. Review (⌘2) and Trash (⌘3) arrive with their panes in slice 4. */
-export const MAIN_SECTIONS = [{ id: 'home', label: 'Home', icon: 'home' }] as const
+/** The window's own sidebar, top to bottom: Home ⌘1, Review ⌘2, Trash ⌘3 (§7.6, §9.3). */
+export const MAIN_SECTIONS = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'review', label: 'Review', icon: 'review' },
+  { id: 'trash', label: 'Trash', icon: 'trash' },
+] as const
 export type MainSection = (typeof MAIN_SECTIONS)[number]['id']
 
 /** The Settings list, top to bottom (§7.8): the account row is Account, then General, Sync, Security and, apart, About. */
@@ -30,7 +34,7 @@ export type MainView =
 
 /** One request to the window: from the gear, the menus (⌘1, ⌘[, ⌘,), the sign-out flow and the update check. */
 export type MainNav =
-  | { to: 'home' }
+  | { to: MainSection }
   | { to: 'settings'; section: SettingsTab | null }
   | { to: 'back' }
   /** “Sign in again”, asked for by an opener (`open_reauth_window`), whatever the session says (review P3-1). */
@@ -46,7 +50,15 @@ export interface NavContext {
   sheetOpen: boolean
 }
 
-const HOME: MainView = { mode: 'main', section: 'home' }
+/** One view object per section, so asking for the section already showing returns the very same view (no focus jump). */
+const MAIN_VIEWS: Record<MainSection, MainView> = {
+  home: { mode: 'main', section: 'home' },
+  review: { mode: 'main', section: 'review' },
+  trash: { mode: 'main', section: 'trash' },
+}
+const HOME = MAIN_VIEWS.home
+
+const isMainSection = (value: unknown): value is MainSection => MAIN_SECTIONS.some((s) => s.id === value)
 
 /**
  * Where a request lands. While a sheet is open nothing moves (§8.2: ⌘1, ⌘[ and ⌘, cannot unmount Settings ›
@@ -57,11 +69,14 @@ export function navigate(view: MainView, nav: MainNav, ctx: NavContext): MainVie
   if (ctx.sheetOpen) return view
   switch (nav.to) {
     case 'home':
+    case 'review':
+    case 'trash':
+      return MAIN_VIEWS[nav.to]
     case 'reauth':
     case 'setup':
       return HOME
     case 'back':
-      return view.mode === 'settings' ? { mode: 'main', section: view.returnTo } : view
+      return view.mode === 'settings' ? MAIN_VIEWS[view.returnTo] : view
     case 'settings': {
       const allowed = settingsSections(ctx.signedIn)
       const wanted = nav.section ?? ctx.lastSettings
@@ -95,7 +110,8 @@ export function coerceSettingsView(view: MainView, signedIn: boolean): MainView 
 export function parseMainNav(raw: unknown): MainNav | null {
   if (typeof raw !== 'object' || raw === null) return null
   const value = raw as { to?: unknown; section?: unknown }
-  if (value.to === 'home' || value.to === 'back' || value.to === 'reauth' || value.to === 'setup') return { to: value.to }
+  if (isMainSection(value.to)) return { to: value.to }
+  if (value.to === 'back' || value.to === 'reauth' || value.to === 'setup') return { to: value.to }
   if (value.to !== 'settings') return null
   if (value.section === undefined || value.section === null) return { to: 'settings', section: null }
   const section = typeof value.section === 'string' ? parseSettingsTab(value.section) : null
@@ -152,10 +168,16 @@ export function menuStateFor(view: MainView, sheetOpen: boolean): { settingsShow
   return { settingsShowing: view.mode === 'settings', sheetOpen }
 }
 
-/** The first view: Home, or the Settings section a `?tab=` deep link names (kept for the render tools). */
+/**
+ * The first view: Home, or the Settings section a `?tab=` deep link names, or the section `?section=` names (Review,
+ * Trash). Both links are kept for the render tools; a Settings tab wins when both are given.
+ */
 export function initialMainView(search: string): MainView {
-  const tab = parseSettingsTab(new URLSearchParams(search).get('tab'))
-  return tab === null ? HOME : { mode: 'settings', section: tab, returnTo: 'home' }
+  const params = new URLSearchParams(search)
+  const tab = parseSettingsTab(params.get('tab'))
+  if (tab !== null) return { mode: 'settings', section: tab, returnTo: 'home' }
+  const section = params.get('section')
+  return isMainSection(section) ? MAIN_VIEWS[section] : HOME
 }
 
 // ── Home › status (§7.6: the popover's state in one row) ─────────────────────
@@ -316,7 +338,8 @@ export const RETRY_JOIN_MS = 2000
  *   read), and otherwise starts a fresh one, so a stuck read is never the only answer to a click.
  * - Only the current epoch's read holds the ticks. One that never answers is given up after `watchdogMs`; one whose
  *   `read()` throws synchronously fails like one that rejected.
- * - `stop` (the window unmounted) applies nothing more and cancels the next tick; `resume` undoes it (StrictMode).
+ * - `stop` (the window unmounted, or the popover hidden) applies nothing more and cancels the next tick; `resume` undoes
+ *   it (StrictMode, the popover shown again).
  */
 export class SnapshotReader<R extends ReadResult> {
   private epoch = 0
@@ -346,6 +369,13 @@ export class SnapshotReader<R extends ReadResult> {
     this.stopped = true
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
+  }
+
+  /** End an account/vault lifetime; old results cannot land after a later resume. */
+  discard(): void {
+    this.stop()
+    this.epoch += 1
+    this.current = null
   }
 
   /** The timer, or the first read: skipped while the current epoch's read is in flight. */

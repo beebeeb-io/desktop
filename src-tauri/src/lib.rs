@@ -10346,10 +10346,12 @@ async fn popover_snapshot(
         {
             let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
             if sending {
-                let waiting = tokio::task::spawn_blocking(read_waiting_changes).await
-                    .map_err(|e| e.to_string())??.counts();
+                let read = tokio::task::spawn_blocking(read_waiting_changes)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|read| read);
                 snapshot.sign_out_sending = Some(macos_popover::Sending {
-                    changes_left: waiting.files.saturating_add(waiting.others),
+                    changes_left: macos_popover::changes_left(read),
                 });
             }
         }
@@ -10913,7 +10915,22 @@ mod diagnostics_export_tests {
 // ── IPC commands: conflict/version center ───────────────────────────────────
 
 #[tauri::command]
-fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+async fn list_version_conflict_center() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
+    on_the_blocking_pool("Could not read Review.", || {
+        let mut rows = read_review_entries()?;
+        rows.truncate(200);
+        Ok(rows)
+    }).await
+}
+
+// The existing producer stays in the engine lane. Its efficient SQL count/capped-read changes from #142 are a
+// merge dependency; this adapter keeps the UI compatible with today's DTO without changing engine files.
+#[tauri::command]
+async fn review_item_count() -> Result<usize, String> {
+    on_the_blocking_pool("Could not read Review.", || read_review_entries().map(|rows| rows.len())).await
+}
+
+fn read_review_entries() -> Result<Vec<engine_bridge::VersionConflictEntry>, String> {
     let cfg = DesktopConfig::load()?;
     let Some(_) = cfg.sync_root else {
         return Ok(Vec::new());
@@ -14005,6 +14022,14 @@ pub(crate) fn open_conflict_window_impl(
     is_text: bool,
     op_id: Option<&str>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (file_id, file_name, is_text);
+        show_main_window(app, MainNav::Review);
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
     let label = format!("conflict-{file_id}");
 
     // If the user already has the window open for this file, just
@@ -14032,6 +14057,7 @@ pub(crate) fn open_conflict_window_impl(
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+    }
 }
 
 /// Open a conflict-resolution window for a single file. The label is
@@ -15131,22 +15157,23 @@ fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click_x: f64, cl
 // The compact "settings" window (App.tsx) doubles as the macOS/Linux tray
 // flyout. Pre-1384 it always opened decorated and `.center()`-ed — a
 // 680×540pt window landing mid-screen instead of under the status item.
-// macOS gets its own anchor math here, mirroring the DPI-correct approach
-// 307b826 established for Windows above, but anchored from the tray click
-// event's `rect` (the icon's own bounds) rather than the raw click point,
-// since a click can land anywhere inside the icon. Linux keeps the
-// original centered/decorated behaviour untouched (see the `#[cfg(not(any(
+// macOS had its own anchor math here, anchored from the tray click event's
+// `rect`. It retired with the menu-bar popover (task 1683 slice 3, review P3-7
+// of #160): the tray click opens the popover, placed by `surfaces::anchor`, and
+// nothing hands this window an anchor any more. The statics and the `Popover`
+// mode below remain until GL-0009 retires them. Linux keeps the original
+// centered/decorated behaviour untouched (see the `#[cfg(not(any(
 // target_os = "windows", target_os = "macos")))]` branch in
 // `setup_tray`'s click handler, and the `#[cfg(not(target_os = "macos"))]`
 // branch in `show_compact_app_window_with_nav` below).
 
 const MACOS_SETTINGS_WINDOW_WIDTH: f64 = 680.0;
 const MACOS_SETTINGS_WINDOW_HEIGHT: f64 = 540.0;
-const MACOS_TRAY_FLYOUT_GAP: i32 = 6;
 
-/// A one-shot handoff from the tray click handler to
-/// `show_compact_app_window_with_nav`: the physical position the flyout
-/// should open at, computed from the clicked status item's rect. `take()`n
+/// A one-shot handoff to `show_compact_app_window_with_nav`: the physical
+/// position the flyout should open at. The tray click handler set it before
+/// the menu-bar popover replaced the flyout; nothing sets it now (review P3-7
+/// of #160), so every open reads `None` until GL-0009 retires it. `take()`n
 /// (consumed) the moment it's read, so an unrelated open of the same
 /// window (the "Open Beebeeb" menu item, a notification, a deep link) that
 /// didn't go through the tray click falls back to centering instead of
@@ -15179,8 +15206,9 @@ static MACOS_FLYOUT_IS_POPOVER: std::sync::atomic::AtomicBool = std::sync::atomi
 /// Which chrome/behavior the shared macOS settings window should adopt for
 /// this open. Pure decision, extracted from `show_compact_app_window_with_nav`
 /// so it's unit-testable without a live `AppHandle`/`WebviewWindow`: an
-/// anchor is present only when the open came from the tray click handler
-/// (`MACOS_TRAY_FLYOUT_ANCHOR`, consumed via `take()`); every other caller
+/// anchor is present only when one was handed off through
+/// `MACOS_TRAY_FLYOUT_ANCHOR` (consumed via `take()`; nothing sets it since
+/// the menu-bar popover, so today every open is `Regular`); every other caller
 /// ("Open Beebeeb", Preferences/Settings menu items, a notification, a deep
 /// link) passes `None` and gets the regular window treatment.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -15202,195 +15230,6 @@ fn macos_window_mode_for_anchor(anchor: Option<tauri::PhysicalPosition<i32>>) ->
     }
 }
 
-/// Finds the monitor whose PHYSICAL bounds contain the given physical-pixel
-/// point, without needing a scale factor up front. Deliberately does not use
-/// `AppHandle::monitor_from_point`: on macOS that delegates to `tao`'s
-/// CoreGraphics-backed lookup, which tests the point against
-/// `CGDisplayBounds` — a LOGICAL (point) rect — while `tray-icon`'s
-/// `get_tray_rect` (and `Monitor::position()`/`size()`) report PHYSICAL
-/// pixels. On a Retina display a physical x/y routinely falls outside every
-/// monitor's logical-point bounds even though the icon is plainly on
-/// screen, so `monitor_from_point` silently returned `None` here, and the
-/// scale factor fell back to 1.0 — shifting the flyout 340 physical px
-/// (170pt) too far right on a 2x display (1384 follow-up, found on real
-/// 16" MacBook Pro hardware). Comparing against each monitor's own
-/// already-physical bounds instead sidesteps that mismatch entirely.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_monitor_containing_physical_point(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::Monitor> {
-    let monitors = app.available_monitors().ok()?;
-    let bounds: Vec<(f64, f64, f64, f64)> = monitors
-        .iter()
-        .map(|m| {
-            let position = m.position();
-            let size = m.size();
-            (
-                position.x as f64,
-                position.y as f64,
-                size.width as f64,
-                size.height as f64,
-            )
-        })
-        .collect();
-    let index = physical_point_monitor_index(&bounds, x, y)?;
-    monitors.into_iter().nth(index)
-}
-
-/// Pure containment test extracted from `macos_monitor_containing_physical_point`
-/// so it's unit-testable without a live `AppHandle`/`Monitor`. Each monitor is
-/// `(position_x, position_y, width, height)`, all physical pixels — the same
-/// units `tauri::Monitor::position()`/`size()` return.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn physical_point_monitor_index(monitors: &[(f64, f64, f64, f64)], x: f64, y: f64) -> Option<usize> {
-    monitors
-        .iter()
-        .position(|&(min_x, min_y, width, height)| x >= min_x && x < min_x + width && y >= min_y && y < min_y + height)
-}
-
-/// Resolve where the macOS tray flyout should open, from the tray click
-/// event's icon `rect`. Looks up the monitor under the icon for its real
-/// scale factor and physical bounds (so a tray on a non-primary or
-/// negative-origin monitor still anchors and clamps correctly); falls back
-/// to the flyout window's own scale factor, then the primary monitor's, and
-/// only then to an unclamped 1.0-scale placement — logging whichever
-/// fallback fired, since silently guessing 1.0 is exactly what caused the
-/// 1384 follow-up mispositioning bug.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_tray_flyout_anchor(app: &tauri::AppHandle, rect: &tauri::Rect) -> tauri::PhysicalPosition<i32> {
-    // `rect` comes back from the tray-icon crate already in physical pixels
-    // on macOS (see `tray-icon`'s `get_tray_rect`), but the field type is
-    // the platform-neutral `dpi::Position`/`dpi::Size` enum. A 1.0-scale
-    // extraction is a no-op cast for the already-physical case (see
-    // `dpi::PixelUnit::to_physical`, which just casts when the value is
-    // already `Physical`), so this is safe to use as-is regardless of the
-    // real scale factor.
-    let provisional = rect.position.to_physical::<f64>(1.0);
-    let monitor = macos_monitor_containing_physical_point(app, provisional.x, provisional.y);
-
-    let scale_factor = match monitor
-        .as_ref()
-        .map(|m| m.scale_factor())
-        .filter(|s| s.is_finite() && *s > 0.0)
-    {
-        Some(scale_factor) => scale_factor,
-        None => {
-            // Should be rare now that the lookup above compares physical
-            // bounds directly, but never silently guess 1.0 — prefer the
-            // flyout window's own current scale factor, then the primary
-            // monitor's, and log whichever fallback actually fired.
-            let window_scale = app
-                .get_webview_window("settings")
-                .and_then(|win| win.scale_factor().ok())
-                .filter(|s| s.is_finite() && *s > 0.0);
-            let primary_scale = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .filter(|s| s.is_finite() && *s > 0.0);
-
-            match window_scale.or(primary_scale) {
-                Some(scale_factor) => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        scale_factor,
-                        used_window_scale = window_scale.is_some(),
-                        "macos tray flyout: no monitor found under the icon; falling back to window/primary-monitor scale factor"
-                    );
-                    scale_factor
-                }
-                None => {
-                    tracing::warn!(
-                        icon_x = provisional.x,
-                        icon_y = provisional.y,
-                        "macos tray flyout: no monitor found under the icon and no window/primary-monitor scale factor available; falling back to 1.0 (flyout may mis-position)"
-                    );
-                    1.0
-                }
-            }
-        }
-    };
-
-    let icon_position = rect.position.to_physical::<f64>(scale_factor);
-    let icon_size = rect.size.to_physical::<f64>(scale_factor);
-
-    let (screen_min_x, screen_max_x) = match &monitor {
-        Some(m) => {
-            let position = m.position();
-            let size = m.size();
-            (position.x as f64, position.x as f64 + size.width as f64)
-        }
-        None => (f64::NEG_INFINITY, f64::INFINITY),
-    };
-
-    let result = macos_tray_flyout_position(
-        icon_position.x,
-        icon_position.y,
-        icon_size.width,
-        icon_size.height,
-        MACOS_SETTINGS_WINDOW_WIDTH,
-        scale_factor,
-        screen_min_x,
-        screen_max_x,
-    );
-
-    tracing::info!(
-        icon_x = icon_position.x,
-        icon_y = icon_position.y,
-        icon_width = icon_size.width,
-        icon_height = icon_size.height,
-        scale_factor,
-        monitor_found = monitor.is_some(),
-        result_x = result.x,
-        result_y = result.y,
-        "macos tray flyout: computed anchor position"
-    );
-
-    result
-}
-
-/// Pure anchor math: centers the flyout horizontally under the status item
-/// and places its top edge `MACOS_TRAY_FLYOUT_GAP` points below the icon's
-/// bottom edge, clamped so it never runs off either edge of the containing
-/// monitor. All of `icon_x`/`icon_y`/`icon_width`/`icon_height` and the
-/// returned position are physical pixels; `flyout_width_logical` is the
-/// flyout window's configured logical width, converted internally using
-/// `scale_factor`. Pass `f64::NEG_INFINITY`/`f64::INFINITY` for
-/// `screen_min_x`/`screen_max_x` to skip clamping (no monitor resolved).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_tray_flyout_position(
-    icon_x: f64,
-    icon_y: f64,
-    icon_width: f64,
-    icon_height: f64,
-    flyout_width_logical: f64,
-    scale_factor: f64,
-    screen_min_x: f64,
-    screen_max_x: f64,
-) -> tauri::PhysicalPosition<i32> {
-    let scale_factor = valid_macos_tray_scale_factor(scale_factor);
-    let physical_flyout_width = flyout_width_logical * scale_factor;
-    let physical_gap = MACOS_TRAY_FLYOUT_GAP as f64 * scale_factor;
-
-    let icon_center_x = icon_x + icon_width / 2.0;
-    let ideal_x = icon_center_x - physical_flyout_width / 2.0;
-    let max_x = (screen_max_x - physical_flyout_width).max(screen_min_x);
-
-    tauri::PhysicalPosition {
-        x: ideal_x.clamp(screen_min_x, max_x).round() as i32,
-        y: (icon_y + icon_height + physical_gap).round() as i32,
-    }
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn valid_macos_tray_scale_factor(scale_factor: f64) -> f64 {
-    if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    }
-}
-
 // ── The Beebeeb window on a Mac (task 1683 slice 1) ──────────────────────────
 //
 // Two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §4, §7, §9: one window, label `main`, built on
@@ -15409,6 +15248,8 @@ const MAIN_NAVIGATE_EVENT: &str = "main:navigate";
 enum MainNav {
     /// Home, and out of Settings (⌘1).
     Home,
+    Review,
+    Trash,
     /// Settings on a section (`account`, `general`, `sync`, `about`); `None` opens the last section used in this
     /// window, else General (§7.8).
     Settings { section: Option<&'static str> },
@@ -15710,6 +15551,17 @@ fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
     }
 }
 
+/// Hides a window whose close policy is Hide. On a Mac the popover goes through `macos_popover::hide`, which tells it,
+/// so it stops reading its snapshot (self-review of #202: ⌘W on the popover hid it without telling it).
+fn hide_on_close(window: &tauri::Window) {
+    #[cfg(target_os = "macos")]
+    if window.label() == "popover" {
+        macos_popover::hide(window.app_handle());
+        return;
+    }
+    let _ = window.hide();
+}
+
 /// The Dock icon for the windows that exist now, leaving out `gone` (a window being destroyed or hidden).
 #[cfg(target_os = "macos")]
 fn refresh_macos_dock_icon(app: &tauri::AppHandle, gone: Option<&str>) {
@@ -15757,6 +15609,8 @@ fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMenuState) {
     let _ = items.settings.set_enabled(state.settings);
     let _ = items.check_updates.set_enabled(state.check_updates);
     let _ = items.view_home.set_enabled(state.home);
+    let _ = items.view_review.set_enabled(state.home);
+    let _ = items.view_trash.set_enabled(state.home);
     let _ = items.view_back.set_enabled(state.back);
 }
 
@@ -15867,6 +15721,7 @@ pub fn run() {
             free_up_space,
             export_diagnostics,
             list_version_conflict_center,
+            review_item_count,
             dismiss_review_entry,
             list_file_versions,
             restore_file_version,
@@ -16251,7 +16106,7 @@ pub fn run() {
                     == surfaces::registry::ClosePolicy::Hide
                 {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_on_close(window);
                     // Two-surface §9.1: a hidden onboarding or conflict window no longer holds the Dock icon.
                     #[cfg(target_os = "macos")]
                     refresh_macos_dock_icon(window.app_handle(), Some(window.label()));
@@ -16362,6 +16217,8 @@ const MENU_VIEW_SHARED_ID: &str = "menu_view_shared";
 const MENU_VIEW_TRASH_ID: &str = "menu_view_trash";
 // The Beebeeb window's View items on a Mac (task 1683 slice 1, two-surface F11 and F15).
 const MENU_VIEW_HOME_ID: &str = "menu_view_home";
+const MENU_VIEW_REVIEW_ID: &str = "menu_view_review";
+const MENU_VIEW_MAIN_TRASH_ID: &str = "menu_view_main_trash";
 const MENU_VIEW_BACK_ID: &str = "menu_view_back";
 const MENU_ZOOM_IN_ID: &str = "menu_zoom_in";
 const MENU_ZOOM_OUT_ID: &str = "menu_zoom_out";
@@ -16419,6 +16276,8 @@ impl DesktopMenuView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainMenuNav {
     Home,
+    Review,
+    Trash,
     Back,
 }
 
@@ -16647,6 +16506,18 @@ const MACOS_MENU_SPECS: &[DesktopMenuSpec] = &[
         action: DesktopMenuAction::NavigateMain(MainMenuNav::Home),
     },
     DesktopMenuSpec {
+        id: MENU_VIEW_REVIEW_ID,
+        label: "Review",
+        accelerator: Some("CmdOrCtrl+Digit2"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Review),
+    },
+    DesktopMenuSpec {
+        id: MENU_VIEW_MAIN_TRASH_ID,
+        label: "Trash",
+        accelerator: Some("CmdOrCtrl+Digit3"),
+        action: DesktopMenuAction::NavigateMain(MainMenuNav::Trash),
+    },
+    DesktopMenuSpec {
         id: MENU_VIEW_BACK_ID,
         label: "Back",
         accelerator: Some("CmdOrCtrl+BracketLeft"),
@@ -16779,6 +16650,8 @@ const MACOS_MENU_LAYOUT: &[(&str, &[MacosMenuEntry])] = {
             "View",
             &[
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -16912,6 +16785,8 @@ struct MacosMenuItems {
     check_updates: MenuItem<tauri::Wry>,
     toggle_sync: MenuItem<tauri::Wry>,
     view_home: MenuItem<tauri::Wry>,
+    view_review: MenuItem<tauri::Wry>,
+    view_trash: MenuItem<tauri::Wry>,
     view_back: MenuItem<tauri::Wry>,
 }
 
@@ -16924,6 +16799,8 @@ impl MacosMenuItems {
             MENU_CHECK_UPDATES_ID => Some(&self.check_updates),
             MENU_TOGGLE_SYNC_ID => Some(&self.toggle_sync),
             MENU_VIEW_HOME_ID => Some(&self.view_home),
+            MENU_VIEW_REVIEW_ID => Some(&self.view_review),
+            MENU_VIEW_MAIN_TRASH_ID => Some(&self.view_trash),
             MENU_VIEW_BACK_ID => Some(&self.view_back),
             _ => None,
         }
@@ -16950,6 +16827,8 @@ fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
         check_updates: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_CHECK_UPDATES_ID))?,
         toggle_sync: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_TOGGLE_SYNC_ID))?,
         view_home: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_HOME_ID))?,
+        view_review: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_REVIEW_ID))?,
+        view_trash: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_MAIN_TRASH_ID))?,
         view_back: build_desktop_menu_item(app, desktop_menu_spec_required(MENU_VIEW_BACK_ID))?,
     };
     let mut menus: Vec<Submenu<tauri::Wry>> = Vec::new();
@@ -17328,6 +17207,8 @@ mod main_window_tests {
         assert_eq!(main_nav_for_route(Some("settings")), MainNav::settings(None));
         assert_eq!(main_nav_for_route(None), MainNav::Home);
         assert_eq!(main_nav_for_route(Some("finder")), MainNav::Home);
+        assert_eq!(main_nav_for_route(Some("review")), MainNav::Review);
+        assert_eq!(main_nav_for_route(Some("trash")), MainNav::Trash);
     }
 
     fn mac(id: &str) -> &'static DesktopMenuSpec {
@@ -17339,7 +17220,7 @@ mod main_window_tests {
 
     #[test]
     fn the_macos_items_have_the_words_keys_and_targets_of_f1_to_f11() {
-        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 11] = [
+        let rows: [(&str, &str, Option<&str>, DesktopMenuAction); 13] = [
             (MENU_PREFERENCES_ID, "Settings…", Some("CmdOrCtrl+Comma"), DesktopMenuAction::OpenSettings),
             (MENU_CHECK_UPDATES_ID, "Check for Updates…", Some("CmdOrCtrl+Shift+U"), DesktopMenuAction::CheckForUpdates),
             (MENU_TOGGLE_SYNC_ID, "Pause Sync", Some("CmdOrCtrl+Shift+P"), DesktopMenuAction::ToggleSync),
@@ -17355,6 +17236,8 @@ mod main_window_tests {
                 Some("CmdOrCtrl+Digit1"),
                 DesktopMenuAction::NavigateMain(MainMenuNav::Home),
             ),
+            (MENU_VIEW_REVIEW_ID, "Review", Some("CmdOrCtrl+Digit2"), DesktopMenuAction::NavigateMain(MainMenuNav::Review)),
+            (MENU_VIEW_MAIN_TRASH_ID, "Trash", Some("CmdOrCtrl+Digit3"), DesktopMenuAction::NavigateMain(MainMenuNav::Trash)),
             (
                 MENU_VIEW_BACK_ID,
                 "Back",
@@ -17453,6 +17336,8 @@ mod main_window_tests {
             entries("View"),
             [
                 Item(MENU_VIEW_HOME_ID),
+                Item(MENU_VIEW_REVIEW_ID),
+                Item(MENU_VIEW_MAIN_TRASH_ID),
                 Separator,
                 Item(MENU_VIEW_BACK_ID),
                 Separator,
@@ -17631,6 +17516,8 @@ fn handle_desktop_menu_action(app: &tauri::AppHandle, spec: &'static DesktopMenu
             #[cfg(target_os = "macos")]
             match nav {
                 MainMenuNav::Home => show_main_window(app, MainNav::Home),
+                MainMenuNav::Review => show_main_window(app, MainNav::Review),
+                MainMenuNav::Trash => show_main_window(app, MainNav::Trash),
                 MainMenuNav::Back => back_in_main_window(app),
             }
             #[cfg(not(target_os = "macos"))]
@@ -17853,7 +17740,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
         "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
-            // A Mac hides the app (⌘H): the Beebeeb window and the compact flyout; the Dock or a reopen unhides.
+            // A Mac hides the app (⌘H): the Beebeeb window and the menu-bar popover; the Dock or a reopen unhides.
             surfaces::policy::TrayHide::App => {
                 #[cfg(target_os = "macos")]
                 if let Err(error) = app.hide() {
@@ -17894,11 +17781,9 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         // positioned near the bottom-right corner so it appears above the
         // system tray area. The main app opens from the context menu or
         // the tray flyout itself.
-        // On macOS: show/hide the same compact window, but anchored
-        // directly under the status item (from the click event's `rect`,
-        // not the raw click point — anchoring off the icon's own bounds
-        // is correct regardless of where inside it the user clicked) and
-        // without window chrome, so it reads as a system popover (1384).
+        // On macOS: show/hide the menu-bar popover (`macos_popover::toggle`,
+        // task 1683 slice 3), placed under the status item by
+        // `surfaces::anchor` from the status item's own frame.
         // On Linux: toggle the compact app window exactly as before.
         if let TrayIconEvent::Click {
             button,
@@ -17982,8 +17867,9 @@ fn show_compact_app_window_impl(app: &tauri::AppHandle) {
 /// treatment to every macOS open, breaking "Open Beebeeb", the Preferences/
 /// Settings menu items, and `show_main_app_window`). Which behavior it gets
 /// is decided per-open by `macos_window_mode_for_anchor`, purely from
-/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (set only by
-/// the tray click handler in `setup_tray`, consumed here via `take()`):
+/// whether `MACOS_TRAY_FLYOUT_ANCHOR` has a pending position (consumed here
+/// via `take()`; the tray click set it before the menu-bar popover replaced
+/// the flyout, and nothing sets it now, so every open is `Regular`):
 /// - `Popover` (anchor present): chrome-less, always-on-top, positioned
 ///   under the status item, hides on focus loss — reads as a system
 ///   popover.
@@ -18143,6 +18029,8 @@ fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Option<&str>) {
 fn main_nav_for_route(nav: Option<&str>) -> MainNav {
     match nav {
         Some("settings") => MainNav::settings(None),
+        Some("review") => MainNav::Review,
+        Some("trash") => MainNav::Trash,
         _ => MainNav::Home,
     }
 }
@@ -19265,131 +19153,19 @@ mod tests {
     fn macos_tray_flyout_geometry_matches_configured_window() {
         assert_eq!(super::MACOS_SETTINGS_WINDOW_WIDTH, 680.0);
         assert_eq!(super::MACOS_SETTINGS_WINDOW_HEIGHT, 540.0);
-        assert_eq!(super::MACOS_TRAY_FLYOUT_GAP, 6);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_centers_under_icon() {
-        // A 24×22 physical status item near the left of a 2560-wide menu
-        // bar at 1x — the anchored flyout fits without clamping.
-        let position = super::macos_tray_flyout_position(1_000.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
-
-        assert_eq!(position.x, 672); // icon center 1012 - 680/2
-        assert_eq!(position.y, 28); // 0 + 22 + 6 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_scales_with_dpi() {
-        // Same icon at 2x scale (physical coordinates already doubled, as
-        // the tray-icon crate reports them on macOS).
-        let position = super::macos_tray_flyout_position(2_000.0, 0.0, 48.0, 44.0, 680.0, 2.0, 0.0, 5_120.0);
-
-        assert_eq!(position.x, 1_344); // icon center 2024 - (680*2)/2
-        assert_eq!(position.y, 56); // 0 + 44 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_clamps_to_right_screen_edge() {
-        let position = super::macos_tray_flyout_position(2_500.0, 0.0, 24.0, 22.0, 680.0, 1.0, 0.0, 2_560.0);
-
-        // Centering under the icon would push the flyout's right edge past
-        // the monitor; clamp so it stays fully on-screen.
-        assert_eq!(position.x, 1_880); // 2560 - 680
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_clamps_to_left_screen_edge() {
-        // A status item near the left edge of a monitor whose physical
-        // origin is negative (a monitor to the left of the primary one).
-        let position = super::macos_tray_flyout_position(-1_400.0, 0.0, 24.0, 22.0, 680.0, 1.0, -1_440.0, 0.0);
-
-        assert_eq!(position.x, -1_440);
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_unbounded_when_no_monitor_found() {
-        let position =
-            super::macos_tray_flyout_position(500.0, 0.0, 24.0, 22.0, 680.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
-
-        assert_eq!(position.x, 172); // icon center 512 - 340, unclamped
-        assert_eq!(position.y, 28);
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_matches_measured_regression_case() {
-        // The exact case measured on real 16" MacBook Pro hardware (1384
-        // follow-up): a status item at physical x=2348 (1174pt * 2), width
-        // 72 physical (36pt * 2), on a "More Space" 2056pt-wide display at
-        // backingScaleFactor 2.0. With the correct scale factor the flyout
-        // should land at physical x=1704 (852pt) — centered under the icon.
-        let position = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
-
-        assert_eq!(position.x, 1_704); // icon center 2384 - (680*2)/2
-        assert_eq!(position.y, 34); // 0 + 22 + 6*2 gap
-    }
-
-    #[test]
-    fn macos_tray_flyout_position_documents_pre_fix_scale_fallback_bug() {
-        // Same icon geometry as the measured-regression case above, but
-        // computed with the scale factor incorrectly falling back to 1.0
-        // (what `valid_macos_tray_scale_factor`/`monitor_from_point` used to
-        // silently do when no monitor was resolved). This reproduces the
-        // exact 340-physical-px (170pt) rightward mispositioning bug that
-        // the monitor-lookup fix in `macos_monitor_containing_physical_point`
-        // resolves — the flyout window's width is a LOGICAL constant, so
-        // using scale 1.0 instead of 2.0 halves how much of it gets
-        // subtracted when centering, pushing the flyout right.
-        let correct = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 2.0, 0.0, 4_112.0);
-        let with_1x_fallback = super::macos_tray_flyout_position(2_348.0, 0.0, 72.0, 22.0, 680.0, 1.0, 0.0, 4_112.0);
-
-        assert_eq!(correct.x, 1_704);
-        assert_eq!(with_1x_fallback.x, 2_044);
-        assert_eq!(with_1x_fallback.x - correct.x, 340);
-    }
-
-    #[test]
-    fn physical_point_monitor_index_finds_containing_monitor() {
-        // Two side-by-side monitors at different scales/positions, mirroring
-        // a MacBook's built-in display plus an external one to its right.
-        let monitors = [
-            (0.0, 0.0, 2_056.0 * 2.0, 1_329.0 * 2.0), // built-in, 2x, origin (0,0)
-            (2_056.0 * 2.0, 0.0, 2_560.0, 1_440.0),   // external, 1x, to the right
-        ];
-
-        // A point on the built-in display's far right edge (this is exactly
-        // the case that broke `monitor_from_point`: physical x=2348 falls
-        // well inside the built-in monitor's PHYSICAL bounds here, but
-        // outside its LOGICAL 2056pt-wide CGDisplayBounds).
-        assert_eq!(super::physical_point_monitor_index(&monitors, 2_348.0, 0.0), Some(0));
-
-        // A point on the external display.
-        assert_eq!(super::physical_point_monitor_index(&monitors, 5_000.0, 0.0), Some(1));
-
-        // A point off every monitor.
-        assert_eq!(super::physical_point_monitor_index(&monitors, -100.0, 0.0), None);
-        assert_eq!(super::physical_point_monitor_index(&[], 0.0, 0.0), None);
-    }
-
-    #[test]
-    fn valid_macos_tray_scale_factor_falls_back_to_one() {
-        assert_eq!(super::valid_macos_tray_scale_factor(2.0), 2.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(0.0), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(-1.0), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(f64::NAN), 1.0);
-        assert_eq!(super::valid_macos_tray_scale_factor(f64::INFINITY), 1.0);
     }
 
     // The anchored Settings window's placement math and its five tests retired with that window (task 1683 slice
     // 1, two-surface spec §2: "The anchored Settings placement (slice 6) retires"). The Beebeeb window's placement is
-    // `surfaces::window_state` and its tests.
+    // `surfaces::window_state` and its tests. The tray flyout's anchor math (`macos_tray_flyout_anchor` and its
+    // position, monitor and scale helpers) and its nine tests retired with the menu-bar popover (review P3-7 of #160):
+    // the tray click opens the popover, placed by `surfaces::anchor`.
 
     #[test]
     fn macos_window_mode_is_popover_when_anchor_present() {
-        // Tray click path: `macos_tray_flyout_anchor` produced a position,
-        // handed off through `MACOS_TRAY_FLYOUT_ANCHOR` — the window must
-        // open as a chrome-less popover anchored under the status item.
+        // An anchor handed off through `MACOS_TRAY_FLYOUT_ANCHOR` (the tray
+        // click set one before the menu-bar popover replaced it; nothing sets
+        // it now) — the window opens as a chrome-less popover.
         let anchor = Some(tauri::PhysicalPosition::new(1_704, 34));
         assert_eq!(
             super::macos_window_mode_for_anchor(anchor),
