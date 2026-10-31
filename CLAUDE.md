@@ -20,7 +20,9 @@ unless the released commit contains a root `RELEASE_NOTES.md` whose contents men
 semver value passed to the workflow; author and commit per-release notes before triggering it. It
 also refuses while root `RELEASE_BLOCKERS.md` lists an item. For an `alpha`/`beta` initial channel
 it refuses notes that promise automatic delivery to existing installs, and only a `stable` publish
-marks the GitHub release Latest. `node scripts/release-channel-checks.mjs delivery` checks the live
+marks the GitHub release Latest. On every channel (task 2176: a Mac cannot install in-app) the
+notes' `### Install / Update` section must carry the macOS line from `docs/RELEASING.md` word for
+word, and any other update/delivery sentence there must name Windows and not macOS. `node scripts/release-channel-checks.mjs delivery` checks the live
 stable manifest against GitHub Latest.
 
 ## Architecture

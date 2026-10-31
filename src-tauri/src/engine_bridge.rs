@@ -1838,34 +1838,46 @@ impl EngineBridge {
         // re-send every chunk from zero.
         let mut session: Option<UploadResume> = None;
         if let Some(previous) = self.db.get_upload_resume(&op.op_id)? {
-            let same_payload = previous.payload_path == payload_path_str
-                && previous.payload_size == plaintext_size as i64
-                && previous.payload_mtime_ns == payload_mtime_ns
-                && previous.chunk_size_bytes > 0
-                && previous.chunk_count > 0
-                && previous.acked_chunks >= 0
-                && previous.acked_chunks <= previous.chunk_count;
-            let v2 = owned_key_and_pin(&self.db, self.api.master_key(), &previous.server_file_id)?.1
-                == beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
-            if same_payload && v2 {
-                // A fresh core writer has a fresh stream identity. Never append it to an old v2 stream.
-                // Fresh init can refuse a live lease; preserve the old resume record until it succeeds.
-            } else if same_payload {
+            if previous.is_create && !previous.self_minted {
+                // SF-0001 (L13): an older version let the server mint a create's id.
+                // Such a session can never be ours again, whatever its payload: it
+                // is abandoned and this attempt starts a fresh, self-minted upload.
                 tracing::info!(
                     op_id = %op.op_id,
                     file_id = %previous.server_file_id,
-                    acked_chunks = previous.acked_chunks,
-                    chunk_count = previous.chunk_count,
-                    "upload: resuming persisted upload session"
-                );
-                session = Some(previous);
-            } else {
-                tracing::info!(
-                    op_id = %op.op_id,
-                    file_id = %previous.server_file_id,
-                    "upload: staged payload changed since the persisted session — abandoning it"
+                    "upload: persisted create session was not self-minted — abandoning it and starting a fresh upload"
                 );
                 self.abandon_upload_session(&previous).await?;
+            } else {
+                let same_payload = previous.payload_path == payload_path_str
+                    && previous.payload_size == plaintext_size as i64
+                    && previous.payload_mtime_ns == payload_mtime_ns
+                    && previous.chunk_size_bytes > 0
+                    && previous.chunk_count > 0
+                    && previous.acked_chunks >= 0
+                    && previous.acked_chunks <= previous.chunk_count;
+                let v2 = owned_key_and_pin(&self.db, self.api.master_key(), &previous.server_file_id)?.1
+                    == beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
+                if same_payload && v2 {
+                    // A fresh core writer has a fresh stream identity. Never append it to an old v2 stream.
+                    // Fresh init can refuse a live lease; preserve the old resume record until it succeeds.
+                } else if same_payload {
+                    tracing::info!(
+                        op_id = %op.op_id,
+                        file_id = %previous.server_file_id,
+                        acked_chunks = previous.acked_chunks,
+                        chunk_count = previous.chunk_count,
+                        "upload: resuming persisted upload session"
+                    );
+                    session = Some(previous);
+                } else {
+                    tracing::info!(
+                        op_id = %op.op_id,
+                        file_id = %previous.server_file_id,
+                        "upload: staged payload changed since the persisted session — abandoning it"
+                    );
+                    self.abandon_upload_session(&previous).await?;
+                }
             }
         }
 
@@ -1880,18 +1892,33 @@ impl EngineBridge {
                     is_create,
                     claim.and_then(|claim| claim.write.as_ref()).is_some(),
                 )?;
+                // SF-0001 (L13): this device chooses the item id. A create proposes
+                // its own id when that id is canonical; otherwise (a local-only id)
+                // it mints a fresh one for this init. A replace keeps the row's id.
+                let proposed_id = if is_create && !is_canonical_item_id(local_file_id) {
+                    uuid::Uuid::new_v4().to_string()
+                } else {
+                    local_file_id.to_string()
+                };
                 let init_request = upload_init_request_for_operation(
-                    local_file_id,
+                    &proposed_id,
                     name_encrypted,
                     content_type.clone(),
                     op.parent_id.clone(),
                     plaintext_size,
                     op.base_version,
-                    is_create,
                 );
                 let upload = self.api.init_upload(&init_request).await?;
                 if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
                     return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+                }
+                // Before anything is persisted or sealed: an init that answers with
+                // another id is not this device's item. Exact equality — a re-spelled
+                // echo (upper case, trimming) is a different id.
+                if upload.file_id != proposed_id {
+                    return Err(anyhow::anyhow!(
+                        "server_changed_item_id: the upload init answered with an id this device did not choose"
+                    ));
                 }
                 let session = UploadResume {
                     op_id: op.op_id.clone(),
@@ -1905,9 +1932,10 @@ impl EngineBridge {
                     chunk_count: upload.chunk_count,
                     acked_chunks: 0,
                     metadata_applied: false,
-                    // Only a create (no `file_id` sent to init) owns the server
-                    // row outright; a replace targets the user's existing file.
-                    is_create: init_request.file_id.is_none(),
+                    // The op kind, not whether init carried an id: every init now does.
+                    is_create,
+                    // Every session this code opens sends an id it chose itself.
+                    self_minted: true,
                     completed_version: None,
                     completed_object_version_id: None,
                     completed_mime_type: None,
@@ -1927,6 +1955,9 @@ impl EngineBridge {
                 session
             }
         };
+        // SF-0001 (L13): whatever the session's origin (resumed or fresh), it must
+        // target the item this op writes before any byte or name goes to the server.
+        ensure_session_item_id(&session, local_file_id)?;
 
         let body = self
             .upload_session_body(
@@ -1976,6 +2007,7 @@ impl EngineBridge {
                     return Err(anyhow::Error::new(QueueStateMoved));
                 }
                 let size = completed["size_bytes"].as_u64().unwrap_or(plaintext_size);
+                ensure_session_item_id(&session, local_file_id)?;
                 self.land(
                     local_file_id,
                     op,
@@ -2172,6 +2204,9 @@ impl EngineBridge {
         payload_path: &Path,
         session: &UploadResume,
     ) -> anyhow::Result<serde_json::Value> {
+        // SF-0001 (L13): never seal a name or send a chunk under an id this device
+        // did not choose, even when the session was read back from disk.
+        ensure_session_item_id(session, local_file_id)?;
         let server_file_id = session.server_file_id.clone();
         if !session.metadata_applied {
             let effective_name_encrypted = if server_file_id != local_file_id {
@@ -2314,25 +2349,27 @@ impl EngineBridge {
     }
 
     /// Give up on a persisted upload session (payload changed, session gone,
-    /// or the op exhausted its retries). For a CREATE the server row minted by
-    /// `init` holds no completed content and is only a broken `is_uploading`
-    /// duplicate, so it is trashed (best-effort: the server's stale-upload
-    /// sweep still hard-deletes it after 7 days if this fails). A REPLACE
-    /// targets the user's existing file and is never trashed. The resume row
-    /// is always dropped so the next attempt starts a fresh session.
+    /// not self-minted, or the op exhausted its retries). For a CREATE the
+    /// server row holds no completed content and is only a broken
+    /// `is_uploading` duplicate, so its upload is abandoned — never trashed:
+    /// it is this client's own row, not something the user deleted
+    /// (best-effort: the server's stale-upload sweep still reaps it after 7
+    /// days if this fails). A REPLACE targets the user's existing file and its
+    /// session is only dropped locally. The resume row is always dropped so the
+    /// next attempt starts a fresh session.
     async fn abandon_upload_session(&self, session: &UploadResume) -> anyhow::Result<()> {
         if session.is_create {
-            match self.api.trash_file(&session.server_file_id).await {
-                Ok(_) => tracing::info!(
+            match self.api.abandon_upload(&session.server_file_id).await {
+                Ok(()) => tracing::info!(
                     op_id = %session.op_id,
                     file_id = %session.server_file_id,
-                    "upload: trashed orphaned in-progress server row of an abandoned create"
+                    "upload: abandoned the in-progress server row of an abandoned create"
                 ),
                 Err(e) => tracing::warn!(
                     op_id = %session.op_id,
                     file_id = %session.server_file_id,
                     error = %e,
-                    "upload: could not trash orphaned in-progress server row; the server's stale-upload sweep reaps it"
+                    "upload: could not abandon the in-progress server row; the server's stale-upload sweep reaps it"
                 ),
             }
         }
@@ -6802,18 +6839,21 @@ fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_write_id: b
     }
 }
 
+/// The `init` request for one upload attempt. `proposed_id` is the item id this
+/// device has chosen for the operation — a create's own (possibly freshly
+/// minted) id, a replace's row id — and it is always sent: the server never
+/// picks an id for this client (SF-0001 L13).
 fn upload_init_request_for_operation(
-    file_id: &str,
+    proposed_id: &str,
     name_encrypted: &str,
     content_type: Option<String>,
     parent_id: Option<String>,
     plaintext_size: u64,
     base_version: Option<i64>,
-    is_new_file: bool,
 ) -> DesktopUploadInitRequest {
     let plan = beebeeb_types::plan_chunks(plaintext_size, beebeeb_types::ChunkProfile::Desktop);
     DesktopUploadInitRequest {
-        file_id: if is_new_file { None } else { Some(file_id.to_string()) },
+        file_id: Some(proposed_id.to_string()),
         file_name: name_encrypted.to_string(),
         file_size_bytes: plaintext_size,
         mime_type: None,
@@ -6824,6 +6864,35 @@ fn upload_init_request_for_operation(
         chunk_count: Some(plan.chunk_count),
         base_version_number: base_version.and_then(|version| i32::try_from(version).ok()),
     }
+}
+
+/// SF-0001 (L13): whether `id` is exactly the canonical lowercase hyphenated
+/// form of a UUID — the form a client-chosen item id must have. A UUID in any
+/// other spelling (uppercase, braces, simple form, surrounding whitespace) or a
+/// non-UUID local id is not canonical and must not be sent as the new file id.
+///
+fn is_canonical_item_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id)
+}
+
+/// SF-0001 (L13): assert that a persisted session still targets the item the op
+/// is writing. A create session must be self-minted (its id was chosen by this
+/// desktop); a replace session's `server_file_id` must equal the local id the
+/// op is updating. Anything else means the server handed back a different item
+/// than the client chose, so the op must abort.
+///
+fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: &str) -> anyhow::Result<()> {
+    let ours = if session.is_create {
+        session.self_minted
+    } else {
+        session.server_file_id == local_file_id
+    };
+    if ours {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "server_changed_item_id: the upload init answered with an id this device did not choose"
+    ))
 }
 
 #[cfg(test)]
@@ -10841,7 +10910,9 @@ mod tests {
     }
 
     #[test]
-    fn test_upload_init_request_omits_new_file_id_and_preserves_existing_base() {
+    fn test_upload_init_request_sends_the_proposed_id_and_preserves_existing_base() {
+        // SF-0001 (L13): the init request always carries the id this device chose,
+        // for a create as much as for a replace.
         let req = upload_init_request_for_operation(
             "file-new",
             "{\"cipher_suite\":\"V1Aes256Gcm\"}",
@@ -10849,9 +10920,8 @@ mod tests {
             Some("folder-1".into()),
             11,
             None,
-            true,
         );
-        assert_eq!(req.file_id, None);
+        assert_eq!(req.file_id.as_deref(), Some("file-new"));
         assert_eq!(req.file_size_bytes, 11);
         assert_eq!(req.profile, "desktop");
         assert!(req.is_media);
@@ -10864,7 +10934,6 @@ mod tests {
             None,
             42,
             Some(7),
-            false,
         );
         assert_eq!(replace.file_id.as_deref(), Some("file-existing"));
         assert_eq!(replace.base_version_number, Some(7));
@@ -11190,22 +11259,30 @@ mod tests {
 
     fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool, fail_thumbnails: bool) -> String {
         match (request.method.as_str(), request.path.as_str()) {
-            ("POST", "/api/v1/uploads/init") => http_json(
-                "200 OK",
-                serde_json::json!({
-                    "file_id": "server-file-1",
-                    "tenant_id": "tenant-1",
-                    "object_version_id": "object-init-1",
-                    "upload_session_id": "upload-session-1",
-                    "chunk_size_bytes": 4 * 1024 * 1024,
-                    "chunk_count": 1,
-                    "storage_format_version": 1,
-                    "storage_pool_id": "pool-1",
-                    "region": "local"
-                }),
-            ),
-            ("PATCH", "/api/v1/files/server-file-1") => {
-                http_json("200 OK", serde_json::json!({ "id": "server-file-1" }))
+            ("POST", "/api/v1/uploads/init") => {
+                // SF-0001 (L13): an honest server answers with the item id the
+                // request carried; the client chose it.
+                let file_id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body["file_id"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| "server-file-1".to_string());
+                http_json(
+                    "200 OK",
+                    serde_json::json!({
+                        "file_id": file_id,
+                        "tenant_id": "tenant-1",
+                        "object_version_id": "object-init-1",
+                        "upload_session_id": "upload-session-1",
+                        "chunk_size_bytes": 4 * 1024 * 1024,
+                        "chunk_count": 1,
+                        "storage_format_version": 1,
+                        "storage_pool_id": "pool-1",
+                        "region": "local"
+                    }),
+                )
+            }
+            ("PATCH", path) if path.starts_with("/api/v1/files/") => {
+                http_json("200 OK", serde_json::json!({ "id": path }))
             }
             ("PUT", "/api/v1/uploads/upload-session-1/chunks/0") if fail_chunk => {
                 http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }))
@@ -11224,7 +11301,10 @@ mod tests {
                     "mime_type": "text/plain"
                 }),
             ),
-            ("PUT", path) if path.starts_with("/api/v1/files/server-file-1/thumbnail") => {
+            ("POST", path) if path.ends_with("/upload/abandon") => {
+                http_json("200 OK", serde_json::json!({ "abandoned": true }))
+            }
+            ("PUT", path) if path.starts_with("/api/v1/files/") && path.contains("/thumbnail") => {
                 if fail_thumbnails {
                     http_json(
                         "500 Internal Server Error",
@@ -13325,13 +13405,18 @@ mod tests {
         );
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
         assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
+        // SF-0001 (L13): the create lands under the id it sent to init.
+        let item_id = {
+            let recorded = server.requests.lock().unwrap();
+            init_item_id(&recorded)
+        };
 
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
         assert_eq!(entry.path, "report.txt");
         assert_eq!(entry.size_bytes, 19);
 
-        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(&item_id).unwrap().unwrap();
         assert_eq!(contract.current_version, 1);
         assert_eq!(contract.local_base_version, 1);
         assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
@@ -13360,8 +13445,8 @@ mod tests {
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert!(
-            init_body.get("file_id").is_none(),
-            "new-file uploads must let the server mint the id"
+            init_body["file_id"].as_str().is_some_and(is_canonical_item_id),
+            "a create sends the canonical id this device chose, never none"
         );
         assert_eq!(init_body["file_size_bytes"], 19);
         assert_eq!(init_body["parent_id"], "folder-1");
@@ -13372,7 +13457,7 @@ mod tests {
         assert_ne!(requests[2].body, b"live upload payload");
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
         assert_eq!(
             beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
             b"live upload payload"
@@ -13426,28 +13511,30 @@ mod tests {
             !payload.exists(),
             "staged payload should be removed only after complete succeeds"
         );
+        let requests = server.finish();
+        let item_id = init_item_id(&requests);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
         assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
 
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
         assert_eq!(entry.path, "Reports/report.txt");
         assert_eq!(entry.size_bytes, 19);
 
-        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state(&item_id).unwrap().unwrap();
         assert_eq!(contract.current_version, 1);
         assert_eq!(contract.local_base_version, 1);
         assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
         assert_eq!(contract.content_type.as_deref(), Some("text/plain"));
 
-        let requests = server.finish();
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0].method, "POST");
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert!(
-            init_body.get("file_id").is_none(),
-            "new-file uploads must let the server mint the id"
+        assert_eq!(
+            init_body["file_id"],
+            item_id.as_str(),
+            "a create must send the id this device chose, never let the server mint one"
         );
         assert_eq!(init_body["file_size_bytes"], 19);
         assert_eq!(init_body["parent_id"], "folder-1");
@@ -13458,7 +13545,7 @@ mod tests {
         assert_ne!(requests[2].body, b"live upload payload");
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
         assert_eq!(
             beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
             b"live upload payload"
@@ -13518,11 +13605,12 @@ mod tests {
         );
         assert_eq!(outcome.completed_op_ids, vec!["op-upload-empty".to_string()]);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let requests = server.finish();
+        let item_id = init_item_id(&requests);
+        let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
         assert_eq!(entry.path, "Project/empty.txt");
 
-        let requests = server.finish();
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -13532,7 +13620,7 @@ mod tests {
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
         assert_eq!(requests[2].body.len(), 28, "nonce + tag, no payload");
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
         assert!(
             beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body)
                 .unwrap()
@@ -14063,18 +14151,19 @@ mod tests {
         );
 
         let requests = server.finish();
+        let item_id = init_item_id(&requests);
         let recorded: Vec<String> = requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
         let medium = requests
             .iter()
-            .find(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash="))
+            .find(|r| r.method == "PUT" && r.path.starts_with(&format!("/api/v1/files/{item_id}/thumbnail?blurhash=")))
             .unwrap_or_else(|| panic!("medium thumbnail upload with blurhash query — recorded requests: {recorded:?}"));
         let large = requests
             .iter()
-            .find(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large")
+            .find(|r| r.method == "PUT" && r.path == format!("/api/v1/files/{item_id}/thumbnail/large"))
             .unwrap_or_else(|| panic!("large thumbnail upload — recorded requests: {recorded:?}"));
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
         let medium_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &medium.body).unwrap();
         let large_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &large.body).unwrap();
 
@@ -14173,10 +14262,11 @@ mod tests {
         // failure is server-side, not a lost request. Medium is attempted
         // first and its failure short-circuits, so large is never sent.
         let requests = server.finish();
+        let item_id = init_item_id(&requests);
         assert!(
             requests
                 .iter()
-                .any(|r| r.method == "PUT" && r.path.starts_with("/api/v1/files/server-file-1/thumbnail?blurhash=")),
+                .any(|r| r.method == "PUT" && r.path.starts_with(&format!("/api/v1/files/{item_id}/thumbnail?blurhash="))),
             "the medium thumbnail PUT must reach the server: {:?}",
             requests
                 .iter()
@@ -14186,7 +14276,7 @@ mod tests {
         assert!(
             !requests
                 .iter()
-                .any(|r| r.method == "PUT" && r.path == "/api/v1/files/server-file-1/thumbnail/large"),
+                .any(|r| r.method == "PUT" && r.path == format!("/api/v1/files/{item_id}/thumbnail/large")),
             "the medium failure short-circuits before the large variant"
         );
     }
@@ -14247,9 +14337,10 @@ mod tests {
         );
 
         let requests = server.finish();
+        let item_id = init_item_id(&requests);
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
-        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[1].path, format!("/api/v1/files/{item_id}"));
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
     }
 
@@ -14303,7 +14394,8 @@ mod tests {
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.completed_op_ids, vec!["op-1".to_string()]);
-        server.finish();
+        let requests = server.finish();
+        let item_id = init_item_id(&requests);
 
         assert_eq!(bridge.transfers().finished_bytes(), 19, "the payload is 19 bytes");
         assert!(
@@ -14316,7 +14408,7 @@ mod tests {
         assert_eq!(rows[0].file_name, "report.txt");
         assert_eq!(rows[0].rel_path.as_deref(), Some("Reports/report.txt"));
         assert_eq!(rows[0].bytes, 19);
-        assert_eq!(rows[0].file_id.as_deref(), Some("server-file-1"));
+        assert_eq!(rows[0].file_id.as_deref(), Some(item_id.as_str()));
     }
 
     #[tokio::test]
@@ -14522,12 +14614,18 @@ mod tests {
                 s.inits += 1;
                 s.inits
             };
+            // SF-0001 (L13): the client chooses the item id, so an honest server
+            // answers with the `file_id` the request carried.
+            let file_id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["file_id"].as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("server-file-{n}"));
             return (
                 None,
                 http_json(
                     "201 Created",
                     serde_json::json!({
-                        "file_id": format!("server-file-{n}"),
+                        "file_id": file_id,
                         "tenant_id": "tenant-1",
                         "object_version_id": format!("object-init-{n}"),
                         "upload_session_id": format!("session-{n}"),
@@ -14540,10 +14638,13 @@ mod tests {
                 ),
             );
         }
-        if method == "PATCH" && path.starts_with("/api/v1/files/server-file-") {
+        if method == "PATCH" && path.starts_with("/api/v1/files/") {
             return (None, http_json("200 OK", serde_json::json!({ "ok": true })));
         }
-        if method == "DELETE" && path.starts_with("/api/v1/files/server-file-") {
+        if method == "POST" && path.ends_with("/upload/abandon") {
+            return (None, http_json("200 OK", serde_json::json!({ "abandoned": true })));
+        }
+        if method == "DELETE" && path.starts_with("/api/v1/files/") {
             return (None, http_json("200 OK", serde_json::json!({ "trashed": true })));
         }
         if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
@@ -14634,6 +14735,534 @@ mod tests {
 
     fn count_requests(requests: &[RecordedRequest], method: &str, path: &str) -> usize {
         requests.iter().filter(|r| r.method == method && r.path == path).count()
+    }
+
+    /// SF-0001 (L13): the item id the client sent to `init` — the only id an
+    /// honest server may use for the rest of that upload. Reads the first init's
+    /// recorded body.
+    fn init_item_id(requests: &[RecordedRequest]) -> String {
+        let init = requests
+            .iter()
+            .find(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+            .unwrap_or_else(|| {
+                panic!(
+                    "no init request recorded: {:?}",
+                    requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
+                )
+            });
+        serde_json::from_slice::<serde_json::Value>(&init.body).unwrap()["file_id"]
+            .as_str()
+            .expect("every init now carries the id this device chose")
+            .to_string()
+    }
+
+    // ── SF-0001 (L13): owner-chosen item id upload mock ─────────────────────
+    // The older mocks answer init with a fixed `server-file-N`, which cannot
+    // express "the server echoes the id the client sent". These tests need the
+    // echo, so this mock records every request (like the others) and answers
+    // init with either the request's own `file_id` or a configured stranger id.
+
+    /// SF-0001 (L13): how the mock answers init's `file_id`.
+    #[derive(Clone, Copy, PartialEq)]
+    enum L13InitEcho {
+        /// Echo the `file_id` the client sent; fall back to a server id.
+        Same,
+        /// Ignore what was sent and answer this id (a server that changed it).
+        Fixed(&'static str),
+        /// Echo the `file_id` the client sent, re-spelled in upper case. Not the
+        /// same id: an echo must be byte-identical to count.
+        Uppercase,
+    }
+
+    struct L13MockState {
+        inits: usize,
+        /// upload session id → the file id the init answered with.
+        sessions: std::collections::HashMap<String, String>,
+        /// upload session id → the object version id the init answered with.
+        objects: std::collections::HashMap<String, String>,
+    }
+
+    struct L13UploadMock {
+        base_url: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl L13UploadMock {
+        fn start(echo: L13InitEcho, fail_chunks: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let state = Arc::new(Mutex::new(L13MockState {
+                inits: 0,
+                sessions: std::collections::HashMap::new(),
+                objects: std::collections::HashMap::new(),
+            }));
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_requests = Arc::clone(&requests);
+            let server_state = Arc::clone(&state);
+            let server_stop = Arc::clone(&stop);
+            let handle = thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let requests = Arc::clone(&server_requests);
+                            let state = Arc::clone(&server_state);
+                            thread::spawn(move || {
+                                let request = read_http_request(&mut stream);
+                                requests.lock().unwrap().push(request.clone());
+                                let response = l13_mock_response(&request, &state, echo, fail_chunks);
+                                let _ = stream.write_all(response.as_bytes());
+                            });
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("l13 upload mock accept failed: {e}"),
+                    }
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                stop,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<RecordedRequest> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.handle.join().unwrap();
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn l13_mock_response(
+        request: &RecordedRequest,
+        state: &Arc<Mutex<L13MockState>>,
+        echo: L13InitEcho,
+        fail_chunks: bool,
+    ) -> String {
+        let method = request.method.as_str();
+        let path = request.path.as_str();
+        if method == "POST" && path == "/api/v1/uploads/init" {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+            let sent = body.get("file_id").and_then(serde_json::Value::as_str);
+            let (session, object, file_id) = {
+                let mut s = state.lock().unwrap();
+                s.inits += 1;
+                let n = s.inits;
+                let session = format!("l13-session-{n}");
+                let object = format!("l13-object-{n}");
+                let file_id = match echo {
+                    L13InitEcho::Same => sent.map(str::to_string).unwrap_or_else(|| format!("server-file-{n}")),
+                    L13InitEcho::Fixed(id) => id.to_string(),
+                    L13InitEcho::Uppercase => sent
+                        .map(|id| id.to_uppercase())
+                        .unwrap_or_else(|| format!("SERVER-FILE-{n}")),
+                };
+                s.sessions.insert(session.clone(), file_id.clone());
+                s.objects.insert(session.clone(), object.clone());
+                (session, object, file_id)
+            };
+            return http_json(
+                "201 Created",
+                serde_json::json!({
+                    "file_id": file_id,
+                    "tenant_id": "tenant-1",
+                    "object_version_id": object,
+                    "upload_session_id": session,
+                    "chunk_size_bytes": 8,
+                    "chunk_count": 3,
+                    "storage_format_version": 2,
+                    "storage_pool_id": "pool-1",
+                    "region": "local"
+                }),
+            );
+        }
+        if method == "PATCH" && path.starts_with("/api/v1/files/") {
+            return http_json("200 OK", serde_json::json!({ "ok": true }));
+        }
+        if method == "POST" && path.ends_with("/upload/abandon") {
+            return http_json("200 OK", serde_json::json!({ "abandoned": true }));
+        }
+        if method == "DELETE" && path.starts_with("/api/v1/files/") {
+            // Present so a run of the STUB (which still trashes) does not turn
+            // into an unrelated transport failure; the tests assert it is never hit.
+            return http_json("200 OK", serde_json::json!({ "trashed": true }));
+        }
+        if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
+            let mut parts = rest.split('/');
+            let session = parts.next().unwrap_or_default().to_string();
+            let action = parts.next().unwrap_or_default();
+            if method == "PUT" && action == "chunks" {
+                let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
+                if fail_chunks {
+                    return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
+                }
+                return http_json(
+                    "200 OK",
+                    serde_json::json!({ "index": index, "size": request.body.len() as i64, "skipped": false }),
+                );
+            }
+            if method == "POST" && action == "complete" {
+                let s = state.lock().unwrap();
+                let file_id = s.sessions.get(&session).cloned().unwrap_or_default();
+                let object = s.objects.get(&session).cloned().unwrap_or_default();
+                return http_json(
+                    "200 OK",
+                    serde_json::json!({
+                        "file_id": file_id,
+                        "version_number": 1,
+                        "current_object_version_id": object,
+                        "size_bytes": 20,
+                        "mime_type": "text/plain"
+                    }),
+                );
+            }
+        }
+        http_json(
+            "404 Not Found",
+            serde_json::json!({ "error": format!("unexpected {method} {path}") }),
+        )
+    }
+
+    /// SF-0001 (L13): a create op for `local_id`, 20 bytes of payload.
+    fn l13_create_op(op_id: &str, local_id: &str, payload: &Path) -> PendingOperation {
+        let mut op = resumable_create_op(payload);
+        op.op_id = op_id.into();
+        op.file_id = Some(local_id.into());
+        op
+    }
+
+    /// SF-0001 (L13): a replace/version op updating the existing row `local_id`.
+    fn l13_replace_op(op_id: &str, local_id: &str, payload: &Path) -> PendingOperation {
+        let mut op = resumable_create_op(payload);
+        op.op_id = op_id.into();
+        op.file_id = Some(local_id.into());
+        op.base_version = Some(1);
+        op.metadata_json = Some(
+            serde_json::json!({
+                "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\"}",
+                "display_name": "resume.bin",
+                "content_type": "text/plain"
+            })
+            .to_string(),
+        );
+        op
+    }
+
+    fn l13_resume(is_create: bool, self_minted: bool, server_file_id: &str) -> UploadResume {
+        UploadResume {
+            op_id: "op-l13".into(),
+            payload_path: "/tmp/l13.bin".into(),
+            payload_size: 20,
+            payload_mtime_ns: 0,
+            upload_session_id: "l13-session-existing".into(),
+            server_file_id: server_file_id.into(),
+            object_version_id: "l13-object-existing".into(),
+            chunk_size_bytes: 8,
+            chunk_count: 3,
+            acked_chunks: 0,
+            metadata_applied: false,
+            is_create,
+            self_minted,
+            completed_version: None,
+            completed_object_version_id: None,
+            completed_mime_type: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_a_create_init_sends_the_desktop_own_id() {
+        // SF-0001 (L13): a create whose local id is canonical proposes that id
+        // to init instead of letting the server mint one.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "0f6c1d2e-3a4b-4c5d-8e9f-a0b1c2d3e4f5";
+        let server = L13UploadMock::start(L13InitEcho::Same, false);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [31u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_create_op("op-l13", local_id, &payload))
+            .unwrap();
+
+        bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            init_body["file_id"], local_id,
+            "a create must send the desktop's own canonical id to init"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_a_create_whose_init_echoes_another_id_aborts_before_anything_is_sealed() {
+        // SF-0001 (L13): a server that answers with a different id must abort
+        // the op before the session is persisted or any chunk/name is sent.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        let server = L13UploadMock::start(L13InitEcho::Fixed("stranger-file-id"), false);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [32u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_create_op("op-l13", local_id, &payload))
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        let recorded = bridge
+            .db
+            .get_operation("op-l13")
+            .unwrap()
+            .and_then(|op| op.last_error)
+            .unwrap_or_default();
+        assert!(
+            outcome.retried_op_ids.contains(&"op-l13".to_string())
+                || outcome.paused_op_ids.contains(&"op-l13".to_string()),
+            "the op must not complete"
+        );
+        assert!(
+            recorded.contains("server_changed_item_id"),
+            "error must name server_changed_item_id, got {recorded:?}"
+        );
+        assert!(
+            bridge.db.get_upload_resume("op-l13").unwrap().is_none(),
+            "nothing may be persisted after a changed id"
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "only the init may be sent: {:?}", requests);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_an_uppercased_echo_of_the_own_id_aborts() {
+        // SF-0001 (L13): the comparison is exact string equality. A server that
+        // echoes the id the client sent but spells it in upper case answered
+        // with a different id, so the op must abort.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "6f7a8b9c-0d1e-4f2a-3b4c-5d6e7f8091a2";
+        let server = L13UploadMock::start(L13InitEcho::Uppercase, false);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [37u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_create_op("op-l13", local_id, &payload))
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        let recorded = bridge
+            .db
+            .get_operation("op-l13")
+            .unwrap()
+            .and_then(|op| op.last_error)
+            .unwrap_or_default();
+        assert!(
+            outcome.retried_op_ids.contains(&"op-l13".to_string())
+                || outcome.paused_op_ids.contains(&"op-l13".to_string()),
+            "the op must not complete"
+        );
+        assert!(
+            recorded.contains("server_changed_item_id"),
+            "error must name server_changed_item_id, got {recorded:?}"
+        );
+        assert!(
+            bridge.db.get_upload_resume("op-l13").unwrap().is_none(),
+            "nothing may be persisted for an id this device did not choose"
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "only the init may be sent: {:?}", requests);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_a_replace_whose_init_echoes_another_id_aborts() {
+        // SF-0001 (L13): a replace sends the row's id and aborts if the echo differs.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
+        let server = L13UploadMock::start(L13InitEcho::Fixed("stranger-file-id"), false);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [33u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_replace_op("op-l13", local_id, &payload))
+            .unwrap();
+
+        let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+        let recorded = bridge
+            .db
+            .get_operation("op-l13")
+            .unwrap()
+            .and_then(|op| op.last_error)
+            .unwrap_or_default();
+        assert!(
+            outcome.retried_op_ids.contains(&"op-l13".to_string())
+                || outcome.paused_op_ids.contains(&"op-l13".to_string()),
+            "the op must not complete"
+        );
+        assert!(
+            recorded.contains("server_changed_item_id"),
+            "error must name server_changed_item_id, got {recorded:?}"
+        );
+        assert!(bridge.db.get_upload_resume("op-l13").unwrap().is_none());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "only the init may be sent: {:?}", requests);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_is_create_comes_from_the_op_kind() {
+        // SF-0001 (L13): `is_create` must be derived from the op metadata, not
+        // from whether init sent a `file_id` (which creates now always do).
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e7f";
+        let server = L13UploadMock::start(L13InitEcho::Same, true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [34u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_create_op("op-l13", local_id, &payload))
+            .unwrap();
+
+        bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        let session = bridge
+            .db
+            .get_upload_resume("op-l13")
+            .unwrap()
+            .expect("a failed chunk keeps the session persisted");
+        assert!(session.is_create, "the op kind says create_file");
+        assert!(session.self_minted, "a session opened by the new code is self-minted");
+        let _ = server.finish();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_a_non_canonical_local_id_proposes_a_fresh_own_id() {
+        // SF-0001 (L13): a non-canonical local id cannot be the server id, so
+        // the desktop mints a fresh canonical v4 id for this init.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let server = L13UploadMock::start(L13InitEcho::Same, true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [35u8; 32]);
+        bridge
+            .db
+            .enqueue_operation(&l13_create_op("op-l13", "local-file-1", &payload))
+            .unwrap();
+
+        bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        let requests_snapshot = server.requests.lock().unwrap().clone();
+        assert_eq!(requests_snapshot[0].path, "/api/v1/uploads/init");
+        let init_body: serde_json::Value = serde_json::from_slice(&requests_snapshot[0].body).unwrap();
+        let proposed = init_body["file_id"]
+            .as_str()
+            .expect("a non-canonical local id must not be sent; a fresh one is")
+            .to_string();
+        assert_ne!(proposed, "local-file-1");
+        assert!(
+            is_canonical_item_id(&proposed),
+            "the proposed id must be canonical, got {proposed:?}"
+        );
+        let session = bridge
+            .db
+            .get_upload_resume("op-l13")
+            .unwrap()
+            .expect("a failed chunk keeps the session persisted");
+        assert!(session.self_minted);
+        assert_eq!(session.server_file_id, proposed);
+        let requests = server.finish();
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/init"),
+            1,
+            "exactly one init"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l13_a_pre_update_create_session_is_abandoned_and_restarted() {
+        // SF-0001 (L13): a CREATE session persisted by an older version (server-
+        // chosen id, self_minted=false) must never resume; it is abandoned and a
+        // fresh init runs under the desktop's own id.
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload.bin");
+        std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
+        let local_id = "4d5e6f7a-8b9c-4d0e-1f2a-3b4c5d6e7f80";
+        let old_server_id = "old-server-chosen-id";
+        let server = L13UploadMock::start(L13InitEcho::Same, true);
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [36u8; 32]);
+        let op = l13_create_op("op-l13", local_id, &payload);
+        bridge.db.enqueue_operation(&op).unwrap();
+        // Same path/size/mtime as the op, so the old code would resume it.
+        let mut previous = l13_resume(true, false, old_server_id);
+        previous.op_id = "op-l13".into();
+        previous.payload_path = payload.to_string_lossy().into_owned();
+        previous.payload_size = 20;
+        previous.payload_mtime_ns = payload_mtime_ns(&payload);
+        bridge.db.put_upload_resume(&previous).unwrap();
+
+        bridge.process_due_operations(dir.path(), 200).await.unwrap();
+
+        let requests = server.finish();
+        assert_eq!(
+            count_requests(&requests, "POST", &format!("/api/v1/files/{old_server_id}/upload/abandon")),
+            1,
+            "the pre-update create session must be abandoned: {:?}",
+            requests
+        );
+        assert_eq!(
+            count_requests(&requests, "DELETE", &format!("/api/v1/files/{old_server_id}")),
+            0,
+            "abandoning a create must never trash the item"
+        );
+        let init = requests
+            .iter()
+            .find(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+            .expect("a fresh init must follow the abandon");
+        let init_body: serde_json::Value = serde_json::from_slice(&init.body).unwrap();
+        assert_eq!(init_body["file_id"], local_id);
+        if let Some(session) = bridge.db.get_upload_resume("op-l13").unwrap() {
+            assert!(session.self_minted, "the restarted session is self-minted");
+        }
+    }
+
+    #[test]
+    fn l13_canonical_item_id() {
+        // SF-0001 (L13): only the exact lowercase hyphenated UUID spelling is canonical.
+        let canonical = "0f6c1d2e-3a4b-4c5d-8e9f-a0b1c2d3e4f5";
+        assert!(is_canonical_item_id(canonical));
+        assert!(!is_canonical_item_id(&canonical.to_uppercase()));
+        assert!(!is_canonical_item_id(&format!("{{{canonical}}}")));
+        assert!(!is_canonical_item_id(&canonical.replace('-', "")));
+        assert!(!is_canonical_item_id(&format!(" {canonical}")));
+        assert!(!is_canonical_item_id(&format!("{canonical} ")));
+        assert!(!is_canonical_item_id(""));
+        assert!(!is_canonical_item_id("local-file-1"));
+    }
+
+    #[test]
+    fn l13_session_item_id_must_be_ours() {
+        // SF-0001 (L13): a create needs self_minted; a replace needs the row's id.
+        let local_id = "5e6f7a8b-9c0d-4e1f-2a3b-4c5d6e7f8091";
+        let err = ensure_session_item_id(&l13_resume(true, false, "server-chosen"), local_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("server_changed_item_id"), "got {err:?}");
+        assert!(ensure_session_item_id(&l13_resume(true, true, "whatever-the-server-says"), local_id).is_ok());
+        let err = ensure_session_item_id(&l13_resume(false, true, "another-row"), local_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("server_changed_item_id"), "got {err:?}");
+        assert!(ensure_session_item_id(&l13_resume(false, true, local_id), local_id).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14749,6 +15378,7 @@ mod tests {
         assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
 
         let requests = server.finish();
+        let item_id = init_item_id(&requests);
         let inits = count_requests(&requests, "POST", "/api/v1/uploads/init");
         assert_eq!(
             inits, 1,
@@ -14777,7 +15407,7 @@ mod tests {
             "a resumable session must not be trashed"
         );
 
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
         assert!(
             bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none(),
@@ -14872,6 +15502,8 @@ mod tests {
                 acked_chunks: 1,
                 metadata_applied: true,
                 is_create: true,
+                // A session the new code opened always chose its own id.
+                self_minted: true,
                 completed_version: None,
                 completed_object_version_id: None,
                 completed_mime_type: None,
@@ -14897,7 +15529,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn flow7_gone_session_trashes_orphan_then_reuploads_once() {
+    async fn flow7_gone_session_abandons_orphan_then_reuploads_once() {
         let dir = tempfile::tempdir().unwrap();
         let payload = dir.path().join("resume.bin");
         std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
@@ -14914,7 +15546,7 @@ mod tests {
         assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_some());
 
         // Second pass: the persisted session is gone → the orphan create row is
-        // trashed, resume state dropped, and the op scheduled for retry.
+        // abandoned, resume state dropped, and the op scheduled for retry.
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
         assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
@@ -14925,16 +15557,34 @@ mod tests {
 
         let requests = server.finish();
         assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
+        let init_ids: Vec<String> = requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["file_id"]
+                    .as_str()
+                    .expect("every init carries the id this device chose")
+                    .to_string()
+            })
+            .collect();
+        let first_id = &init_ids[0];
+        let second_id = &init_ids[1];
+        assert_ne!(first_id, second_id, "each fresh create attempt proposes its own id");
         assert_eq!(
-            count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"),
+            count_requests(&requests, "POST", &format!("/api/v1/files/{first_id}/upload/abandon")),
             1,
-            "the orphaned is_uploading row from the dead session must be trashed"
+            "the orphaned is_uploading row from the dead session must be abandoned"
+        );
+        assert_eq!(
+            count_requests(&requests, "DELETE", &format!("/api/v1/files/{first_id}")),
+            0,
+            "abandoning a create session must never trash the item"
         );
         assert_eq!(
             count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"),
             1
         );
-        assert!(bridge.db.get_file("server-file-2").unwrap().is_some());
+        assert!(bridge.db.get_file(second_id).unwrap().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14961,7 +15611,17 @@ mod tests {
 
         let requests = server.finish();
         assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
-        assert_eq!(count_requests(&requests, "DELETE", "/api/v1/files/server-file-1"), 1);
+        let first_id = init_item_id(&requests);
+        assert_eq!(
+            count_requests(&requests, "POST", &format!("/api/v1/files/{first_id}/upload/abandon")),
+            1,
+            "the stale create session is abandoned, not resumed"
+        );
+        assert_eq!(
+            count_requests(&requests, "DELETE", &format!("/api/v1/files/{first_id}")),
+            0,
+            "abandoning a create session must never trash the item"
+        );
         assert_eq!(
             count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
             0
@@ -14973,7 +15633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flow7_given_up_create_upload_trashes_its_orphan_row() {
+    async fn flow7_given_up_create_upload_abandons_its_orphan_row() {
         let dir = tempfile::tempdir().unwrap();
         let payload = dir.path().join("payload.txt");
         std::fs::write(&payload, b"retry me").unwrap();
@@ -14992,10 +15652,16 @@ mod tests {
         assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
 
         let requests = server.finish();
+        let item_id = init_item_id(&requests);
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
-        assert_eq!(requests[3].method, "DELETE");
-        assert_eq!(requests[3].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].path, format!("/api/v1/files/{item_id}/upload/abandon"));
+        assert_eq!(
+            count_requests(&requests, "DELETE", &format!("/api/v1/files/{item_id}")),
+            0,
+            "abandoning a create session must never trash the item"
+        );
     }
 
     #[test]
@@ -18467,10 +19133,14 @@ mod tests {
             "no upload may be refused (identifier {base:?}): {:?}",
             state.init_summary()
         );
+        // SF-0001 (L13): the create's init also names this id, so the replace is the one
+        // that carries a base.
         let replace = state
             .inits
             .iter()
-            .find(|(body, _)| body["file_id"] == serde_json::json!(server_id))
+            .find(|(body, _)| {
+                body["file_id"] == serde_json::json!(server_id) && body["base_version_number"].is_number()
+            })
             .unwrap_or_else(|| panic!("no replace upload was sent: {:?}", state.init_summary()));
         assert_eq!(
             replace.0["base_version_number"],
@@ -19062,9 +19732,10 @@ mod tests {
             files[0].clone()
         };
         assert!(
-            !state.files.contains_key(&local_id),
-            "no file may be created under the provisional id"
+            state.files.contains_key(&local_id),
+            "the create's own id is the server id: the server never mints one"
         );
+        assert_eq!(server_id, local_id, "the create's own id is the server id");
         assert_eq!(state.files[&server_id].versions.len(), 2, "{:?}", state.init_summary());
         assert_eq!(
             state.latest_plaintext(&server_id, master_key),
@@ -19577,6 +20248,7 @@ mod tests {
                 acked_chunks: 1,
                 metadata_applied: true,
                 is_create: false,
+                self_minted: false,
                 completed_version: None,
                 completed_object_version_id: None,
                 completed_mime_type: None,
@@ -19766,23 +20438,23 @@ mod tests {
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!(null), json!(null), 201)],
-            "one create, without a base"
+            vec![(json!(provisional), json!(null), 201)],
+            "one create, under the id this device chose, without a base"
         );
         let server_id = {
             let files = state.files_with_content();
             assert_eq!(files.len(), 1, "exactly one file on the server: {files:?}");
             files[0].clone()
         };
-        assert!(
-            !state.files.contains_key(&provisional),
-            "no file is created under the provisional id"
+        assert_eq!(
+            server_id, provisional,
+            "the create's own id is the server id: the server never mints one"
         );
         assert_eq!(state.files[&server_id].versions.len(), 1, "N's bytes are version 1");
         assert_eq!(state.latest_plaintext(&server_id, master_key), b"created, edited");
         let rows = bridge.db.list_files().unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].file_id, server_id, "the provisional id was swapped");
+        assert_eq!(rows[0].file_id, server_id, "the create's own id");
         assert_eq!(rows[0].status, FileStatus::Local);
         assert!(bridge.db.list_operations_for_file(&provisional).unwrap().is_empty());
         assert!(bridge.db.list_operations_for_file(&server_id).unwrap().is_empty());
@@ -20943,8 +21615,12 @@ mod tests {
         );
 
         drain_upload_queue(&bridge, &sync_root).await;
-        let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
-        assert!(bridge.db.get_file(&p).unwrap().is_none());
+        // SF-0001 (L13): the create proposed its own id, so it lands under it — no swap.
+        let s = p.clone();
+        assert!(
+            bridge.db.get_file(&p).unwrap().is_some(),
+            "the create lands under the id this device chose"
+        );
         assert_eq!(
             name_parent_status(&bridge, &s),
             ("r9-folder/n1.txt".into(), Some("r9-folder".into()), FileStatus::Local),
@@ -21103,7 +21779,12 @@ mod tests {
         );
 
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
-        let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
+        // SF-0001 (L13): the create landed under the id it chose, so P is the server id.
+        let s = p.clone();
+        assert!(
+            bridge.db.get_file(&p).unwrap().is_some(),
+            "the create lands under the id this device chose"
+        );
         assert_eq!(
             name_parent_status(&bridge, &s),
             ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Uploading),
@@ -21290,7 +21971,12 @@ mod tests {
             assert_eq!(ops[0].parent_id, None, "{how}: the write's parent is cleared");
 
             drain_upload_queue(&bridge, &sync_root).await;
-            let s = bridge.db.resolve_alias(&p).unwrap().expect("the create landed");
+            // SF-0001 (L13): the create landed under the id it chose, so P is the server id.
+            let s = p.clone();
+            assert!(
+                bridge.db.get_file(&p).unwrap().is_some(),
+                "{how}: the create lands under the id this device chose"
+            );
             assert_eq!(
                 name_parent_status(&bridge, &s),
                 ("n1.txt".into(), None, FileStatus::Local),
@@ -23152,9 +23838,11 @@ mod tests {
             b"created, edited",
             created.token.as_deref().unwrap(),
         );
-        // The successor's name cannot be re-encrypted for the server id: no display name, no path.
+        // SF-0001 (L13): the create lands under its own id, so there is no second server id to
+        // re-key for. The successor's chain fails on the one thing the queue cannot cure: its
+        // staged copy is gone, so it parks without a second init.
         let successor = bridge.db.list_operations_for_file(&provisional).unwrap().remove(1);
-        bridge.db.set_target_path_for_test(&successor.op_id, None);
+        std::fs::remove_file(successor.payload_path.as_deref().unwrap()).unwrap();
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
         })
@@ -23168,18 +23856,15 @@ mod tests {
         );
         assert_eq!(state.inits.len(), 1, "no second init");
         let server_id = state.files_with_content()[0].clone();
-        assert!(
-            bridge.db.get_file(&provisional).unwrap().is_none(),
-            "the landing was applied"
-        );
-        assert!(bridge.db.get_file(&server_id).unwrap().is_some());
+        assert_eq!(server_id, provisional, "the create landed under the id it chose");
+        assert!(bridge.db.get_file(&server_id).unwrap().is_some(), "the landing was applied");
         let parked = bridge.db.get_operation(&successor.op_id).unwrap().unwrap();
         assert_eq!(
             parked.attempts, parked.max_attempts,
-            "the successor parked with its bytes"
+            "the successor parked at its claim"
         );
-        assert!(std::path::Path::new(parked.payload_path.as_deref().unwrap()).is_file());
-        assert!(logs.contains("rekey_failed"), "{logs}");
+        assert!(!std::path::Path::new(parked.payload_path.as_deref().unwrap()).exists());
+        assert!(logs.contains("reason=\"payload_missing\""), "{logs}");
     }
 
     // T30 (`i1_a_landing_with_a_later_write_queued_keeps_it_uploading`) is with rule 5's status
@@ -23292,8 +23977,8 @@ mod tests {
         crate::state_db::fail_next_landings_for_test(0);
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
-            bridge.db.get_file(&provisional).unwrap().is_none(),
-            "landed once the disk recovers"
+            bridge.db.get_file(&provisional).unwrap().is_some(),
+            "landed once the disk recovers, under the id the create chose"
         );
         drop(server.finish());
     }
@@ -23348,12 +24033,15 @@ mod tests {
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         let server_id = state.files_with_content()[0].clone();
-        assert_eq!(bridge.db.alias_target_for_test(&provisional), Some(server_id.clone()));
-        assert!(bridge.db.get_file(&provisional).unwrap().is_none());
+        // SF-0001 (L13): the create sent its own id, so the server file is that id and the
+        // landing needs no alias to reach it.
+        assert_eq!(server_id, provisional, "the server file carries the id this device chose");
+        assert_eq!(bridge.db.alias_target_for_test(&provisional), None, "no swap, no alias");
+        assert!(bridge.db.get_file(&provisional).unwrap().is_some());
         assert_eq!(
             held_content_version(&bridge, &server_id),
             created.token.unwrap(),
-            "S carries P's create token (§5.4 row 14)"
+            "the landed row carries P's create token (§5.4 row 14)"
         );
     }
 
@@ -25258,7 +25946,10 @@ mod tests {
         let provisional = created.outcome_file_id();
         drain_upload_queue(bridge, sync_root).await;
         let server_id = server.state.lock().unwrap().files_with_content()[0].clone();
-        assert_ne!(provisional, server_id, "the landing swapped the id");
+        assert_eq!(
+            provisional, server_id,
+            "the create lands under the id this device chose, so P is the server id"
+        );
         (provisional, server_id, created.token.unwrap())
     }
 
@@ -25289,7 +25980,10 @@ mod tests {
             b"created bytes, edited",
             &create_token,
         );
-        assert_eq!(reply.present_as.as_deref(), Some(p.as_str()));
+        assert_eq!(
+            reply.present_as, None,
+            "P is now the server id itself, so nothing has to be presented under a provisional id"
+        );
         let ipc = crate::ipc_socket::write_outcome_response("modify", &bridge.db, Ok(reply.clone()));
         let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
             panic!("an item, never None: {ipc:?}")
@@ -25316,11 +26010,15 @@ mod tests {
         assert_eq!(server.finish().trashes, vec![s]);
     }
 
-    /// T58 (m-6): a delete under P that does not name S's held token keeps S.
+    /// T58 (m-6): a delete under P that does not name S's held token keeps S. New creates no
+    /// longer swap ids (SF-0001 L13), so the alias is seeded as an older client left it.
     #[tokio::test]
     async fn a_delete_through_the_alias_needs_the_held_token_as_base() {
-        let (dir, sync_root, server, bridge) = rule3_setup([87u8; 32]);
-        let (p, s, _create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, "kept.txt").await;
+        let (_dir, sync_root, server, bridge) = rule3_setup([87u8; 32]);
+        let s = "3f2a9c1e-0000-4000-8000-0000000000c3".to_string();
+        let p = "3f2a9c1e-0000-4000-8000-0000000000c4".to_string();
+        seed_uploaded_row(&bridge, &server, &s);
+        bridge.db.insert_alias_for_test(&p, &s, now_secs());
         let logs = capture_logs_async(async {
             bridge.queue_finder_delete(&p, Some("1".into())).unwrap();
             drain_upload_queue(&bridge, &sync_root).await;
@@ -25332,6 +26030,7 @@ mod tests {
             "{logs}"
         );
         assert!(bridge.db.get_file(&s).unwrap().is_some());
+        assert!(bridge.db.get_file(&p).unwrap().is_none(), "P is only an alias");
         drop(server.finish());
     }
 
@@ -26232,9 +26931,10 @@ mod tests {
             b"created, edited",
             created.token.as_deref().unwrap(),
         );
-        // The successor's name cannot be re-encrypted for the server id: no display name, no path.
+        // SF-0001 (L13): the create lands under its own id, so the successor parks on the one
+        // thing the queue cannot cure — its staged copy is gone — not on a re-key failure.
         let successor = bridge.db.list_operations_for_file(&provisional).unwrap().remove(1);
-        bridge.db.set_target_path_for_test(&successor.op_id, None);
+        std::fs::remove_file(successor.payload_path.as_deref().unwrap()).unwrap();
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         let server_id = state
@@ -26242,6 +26942,7 @@ mod tests {
             .into_iter()
             .find(|id| id != "modified")
             .expect("the create landed");
+        assert_eq!(server_id, provisional, "the create landed under the id it chose");
         let parked = bridge.db.get_operation(&successor.op_id).unwrap().unwrap();
         assert_eq!(
             parked.attempts, parked.max_attempts,
@@ -26822,11 +27523,16 @@ mod tests {
         assert!(line.contains(&format!("parked_op_id={w_op_id}")), "{line}");
     }
 
-    /// T37: a modify under P after its create landed resolves through the alias (T15).
+    /// T37: a modify under P after its create landed resolves through the alias (T15). New
+    /// creates no longer swap ids (SF-0001 L13), so the alias is seeded as an older client
+    /// left it.
     #[tokio::test]
     async fn log_alias_resolved() {
-        let (dir, sync_root, server, bridge) = rule3_setup([105u8; 32]);
-        let (p, s, create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, PLANTED).await;
+        let (dir, _sync_root, server, bridge) = rule3_setup([105u8; 32]);
+        let s = "3f2a9c1e-0000-4000-8000-0000000000c5".to_string();
+        let p = "3f2a9c1e-0000-4000-8000-0000000000c6".to_string();
+        seed_uploaded_row(&bridge, &server, &s);
+        bridge.db.insert_alias_for_test(&p, &s, now_secs());
         let logs = capture_logs_async(async {
             fp_save(
                 &bridge,
@@ -26834,7 +27540,7 @@ mod tests {
                 &p,
                 PLANTED,
                 b"created bytes, edited",
-                &create_token,
+                &held_content_version(&bridge, &s),
             );
         })
         .await;
@@ -26853,11 +27559,15 @@ mod tests {
         drop(server.finish());
     }
 
-    /// T37: a delete under P that does not name S's held token keeps S (T58).
+    /// T37: a delete under P that does not name S's held token keeps S (T58). New creates no
+    /// longer swap ids (SF-0001 L13), so the alias is seeded as an older client left it.
     #[tokio::test]
     async fn log_alias_delete_kept() {
         let (dir, sync_root, server, bridge) = rule3_setup([106u8; 32]);
-        let (p, s, _create_token) = landed_create(&bridge, &server, dir.path(), &sync_root, PLANTED).await;
+        let s = "3f2a9c1e-0000-4000-8000-0000000000c7".to_string();
+        let p = "3f2a9c1e-0000-4000-8000-0000000000c8".to_string();
+        seed_uploaded_row(&bridge, &server, &s);
+        bridge.db.insert_alias_for_test(&p, &s, now_secs());
         let logs = capture_logs_async(async {
             bridge.queue_finder_delete(&p, Some("1".into())).unwrap();
             drain_upload_queue(&bridge, &sync_root).await;
@@ -29105,7 +29815,10 @@ mod tests {
         let state = server.finish();
         let created: Vec<&serde_json::Value> = state.inits.iter().map(|(body, _)| body).collect();
         assert_eq!(created.len(), 1, "one upload: the copy");
-        assert!(created[0]["file_id"].is_null(), "a new file");
+        assert!(
+            created[0]["file_id"].as_str().is_some_and(is_canonical_item_id),
+            "a create carries the canonical id this device chose"
+        );
         assert!(created[0]["parent_id"].is_null(), "at the top, not under the trashed folder");
         let server_id = state.files_with_content()[0].clone();
         assert_eq!(state.latest_plaintext(&server_id, master_key), b"edited, never sent");

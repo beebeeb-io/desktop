@@ -390,6 +390,7 @@ fn sf2237d_t5_rename_and_replacement_keep_key() {
         acked_chunks: 0,
         metadata_applied: true,
         is_create: false,
+        self_minted: false,
         completed_version: None,
         completed_object_version_id: None,
         completed_mime_type: None,

@@ -41,17 +41,29 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 <!-- Pick the line that matches the channel you pass to the workflow. The release body is
      written once and reused unchanged on every later promotion, so it must stay true on
      the first channel. -->
-<!-- stable: --> Existing desktop installs receive this release through the in-app updater automatically.
-<!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
+<!-- stable: --> Existing Windows installs receive this release through the in-app updater automatically.
+<!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Windows installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
 
-For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+On macOS the in-app update cannot install: download the `.dmg` from this release and drag Beebeeb into Applications to replace the installed version.
+
+For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets; for macOS, the `.dmg` from the same release.
 ```
 
-The release workflow enforces the channel rule: when `channel` is `alpha` or `beta`, notes that
-promise automatic delivery to existing installs fail validation
-(`node scripts/release-channel-checks.mjs notes <version> <channel>`, tested in
-`tests/releaseChannelChecks.test.ts`). desktop-v0.8.3, a security fix, shipped with the
-unconditional stable wording while it was only ever published to `alpha.json`.
+The release workflow enforces these rules (`node scripts/release-channel-checks.mjs notes <version> <channel>`,
+tested in `tests/releaseChannelChecks.test.ts`):
+
+- **Channel.** When `channel` is `alpha` or `beta`, notes that promise automatic delivery to existing installs
+  fail. desktop-v0.8.3, a security fix, shipped with the unconditional stable wording while it was only ever
+  published to `alpha.json`.
+- **macOS (task 2176), on every channel.** On macOS the in-app update cannot install, because the App Sandbox denies
+  replacing the bundle. desktop-v0.8.13 to v0.8.20 (8 releases) still said "Existing desktop installs receive this
+  release through the in-app updater automatically", which was false for every Mac. So:
+  - The `### Install / Update` section must exist and must contain the macOS line above **word for word**
+    (`MAC_INSTALL_LINE` in the script; hard wraps are fine). The line is true on every channel and for every
+    installed build. Builds up to 0.8.20 offer "Restart to update", which fails under the sandbox. Later builds
+    offer a download on stable and the release page on alpha/beta (`src/macUpdateOffer.ts`).
+  - Any other sentence in that section about updating, the updater or automatic delivery must name Windows and
+    must not name macOS. A Linux-scoped sentence fails on purpose, until in-app delivery on Linux is verified.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
