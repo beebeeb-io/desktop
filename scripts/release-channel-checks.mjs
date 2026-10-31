@@ -31,6 +31,18 @@ export const LATEST_RELEASE_API = 'https://api.github.com/repos/beebeeb-io/deskt
 const AUTOMATIC_DELIVERY_CLAIM =
   /\b(?:existing|all)\b[^.\n]{0,80}\binstalls?\b[^.\n]{0,120}\bautomatically\b/i
 
+// Task 2176: on macOS the in-app update cannot install (the App Sandbox denies replacing the
+// bundle), so a Mac shows "Download update" and opens the .dmg instead (src/macUpdateCopy.ts).
+// A sentence that promises in-app delivery to existing installs must therefore name Windows, and
+// notes that promise it must say what a Mac does. This holds on every channel, stable included.
+const IN_APP_DELIVERY_CLAIM =
+  /\b(?:receives?|delivered|updates?)\b[^.\n]{0,120}\bin-app updater\b|\bin-app updater\b[^.\n]{0,120}\bautomatically\b/i
+const MAC_DOWNLOAD_LINE = /\bmac(?:os)?\b[^\n]{0,200}(?:\.dmg\b|disk image|download update)/i
+
+function sentences(text) {
+  return text.split(/\n|(?<=[.!?;])\s+/).map((s) => s.trim()).filter(Boolean)
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -61,6 +73,18 @@ export function validateReleaseNotes(notes, version, channel) {
         `RELEASE_NOTES.md claims automatic delivery to existing installs ("${claim[0].trim()}"), but this release is published to the ${channel} channel only — stable installs will not see it until it is promoted. Use the channel-aware Install / Update wording from docs/RELEASING.md.`,
       )
     }
+  }
+
+  const deliveryClaims = sentences(notes).filter((s) => IN_APP_DELIVERY_CLAIM.test(s))
+  const unscoped = deliveryClaims.find((s) => !/\bWindows\b/.test(s))
+  if (unscoped) {
+    errors.push(
+      `RELEASE_NOTES.md promises in-app delivery without naming Windows ("${unscoped}"), but on macOS the in-app update cannot install (task 2176): a Mac shows "Download update" and opens the .dmg. Scope the sentence to Windows and add the macOS line from docs/RELEASING.md.`,
+    )
+  } else if (deliveryClaims.length > 0 && !MAC_DOWNLOAD_LINE.test(notes)) {
+    errors.push(
+      'RELEASE_NOTES.md promises in-app delivery on Windows but never says what a Mac does: on macOS the app shows "Download update" and the user replaces the app from the .dmg (task 2176). Add the macOS line from docs/RELEASING.md.',
+    )
   }
 
   return errors
