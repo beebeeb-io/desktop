@@ -61,12 +61,12 @@ A native SwiftUI window with sidebar navigation:
 - General: launch at login, Finder sidebar, Spotlight indexing, notifications
 - Account, Sync, Bandwidth, Security, Advanced
 
-See `HiDesktopPrefs` in `design/hifi/hifi-desktop.jsx`.
+See `HiDesktopPrefs` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## Selective sync
 
 Tree-view UI to pick which folders live on disk vs. online-only.
-See `HiSelectiveSync` in `design/hifi/hifi-desktop.jsx`.
+See `HiSelectiveSync` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## Conflict resolver
 
@@ -75,12 +75,12 @@ NEVER silently drops a version -- the user picks Keep Mine / Keep Theirs /
 Keep Both. A Finder save that meets a newer server version is held, not sent;
 Keep Both adds it beside the original as `name (<device name>, HH.MM).ext`
 (task 2190, `keep_both_name` in `src-tauri/src/engine_bridge.rs`).
-See `HiConflict` in `design/hifi/hifi-desktop.jsx`.
+See `HiConflict` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## First-run wizard
 
 Four-step onboarding: unlock, pick vault folder, selective sync,
-Finder integration. See `HiFirstRun` in `design/hifi/hifi-desktop.jsx`.
+Finder integration. See `HiFirstRun` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## Build requirements
 

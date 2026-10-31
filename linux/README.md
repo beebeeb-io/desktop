@@ -53,7 +53,7 @@ The tray icon shows:
 - Recent activity
 - Quick actions: Pause, Open vault, Preferences, Quit
 
-See `HiLinuxTray` in `design/hifi/hifi-misc.jsx`.
+See `HiLinuxTray` in `../../design/hifi/hifi-misc.jsx`.
 
 ## FUSE mount
 
