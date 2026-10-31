@@ -23,13 +23,16 @@ import * as finderSetupCopy from '../src/finderSetupCopy'
 import * as model from '../src/macSettingsModel'
 import * as parts from '../src/macSettingsParts'
 import * as windowModel from '../src/mainWindowModel'
+import * as homeModel from '../src/homeModel'
 import * as reviewModel from '../src/reviewModel'
 import * as signInModel from '../src/signInModel'
 import * as signInStore from '../src/signInFlowStore'
+import { makeReviewActions } from '../src/reviewActions'
+import { systemLocale } from '../src/storageFormat'
 import * as signOutCopy from '../src/signOutCopy'
 import { connectSignOutFlowEvents, connectSignOutFlowMenu, SignOutFlow, signOutFlowApi } from '../src/signOutFlow'
 import { connectNativeUpdateMenu as realConnectNativeUpdateMenu } from '../src/windows/manualUpdateCheck'
-import { expand, loadComponent, mount, textOf, type Mounted, type TreeNode } from './fixtures/componentHarness'
+import { elementsOf, expand, loadComponent, mount, textOf, type Mounted, type TreeNode } from './fixtures/componentHarness'
 import { KeptFolderNotes, useKeptFoldersModule } from './fixtures/keptFolderHarness'
 
 const React = { createElement, Fragment }
@@ -48,6 +51,10 @@ let focused: string[] = []
 const accountLine = loadComponent('MacApp.tsx', 'accountLine', { planShortLine: model.planShortLine })
 /** The sign-in screens are tested in tests/macSignIn.test.tsx; here the window is only asked which one it shows. */
 const SignInWindow = (props: any) => createElement('div', { 'data-signin': 'true', 'data-props': props })
+const ReviewEntryRow = loadComponent('ReviewRow.tsx', 'ReviewEntryRow', { React, Btn: parts.Btn, ...reviewModel })
+const HomeCounts = loadComponent('HomeSections.tsx', 'HomeCounts', { React })
+const HomeAttention = loadComponent('HomeSections.tsx', 'HomeAttention', { React, SettingsGroup: parts.SettingsGroup, Btn: parts.Btn, ReviewEntryRow })
+const HomeActivity = loadComponent('HomeSections.tsx', 'HomeActivity', { React, SettingsGroup: parts.SettingsGroup, SettingsIcon: parts.SettingsIcon })
 
 /** A scripted Tauri event bus: `emit(name)` runs every listener registered for it. */
 function eventBus() {
@@ -131,6 +138,7 @@ function openWindow(opts: WindowOpts = {}) {
       reviewBadge: reviewModel.reviewBadge,
       // The rows are read only while Review shows them (`watchList`); the badge's count is read all the time.
       reviewFeed: { watchList: () => { feedLog.watched += 1; return () => { feedLog.unwatched += 1 } } },
+      HOME_ACTIVITY_ROWS: homeModel.HOME_ACTIVITY_ROWS,
       subscribeReviewFeed: () => () => {},
       reviewFeedState: () => opts.feed ?? { status: 'ready', entries: [], count: 0, rejected: 0, reason: null },
       connectReviewFeed: () => { feedLog.connected += 1; return () => { feedLog.disconnected += 1 } },
@@ -969,10 +977,29 @@ const useFinderSetupModule = () => ({
   },
 })
 
-function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, onRefresh?: () => Promise<boolean>) {
+const useFileOverviewModule = () => ({
+  file: 'fileOverview.ts',
+  name: 'useFileOverview',
+  bindings: { desktopFileOverview: desktopApi.desktopFileOverview, FILE_OVERVIEW_REFRESH_MS: 20_000 },
+})
+
+interface HomeExtra {
+  onRefresh?: () => Promise<boolean>
+  feed?: { status: 'loading' | 'ready' | 'failed'; entries: unknown[]; reason: string | null; count?: number; rejected?: number }
+}
+
+function openHome(snap: unknown, backend: Record<string, (args: any) => unknown> = {}, extra: HomeExtra = {}) {
   let refreshed = 0
+  const events: string[] = []
+  const sheets: Array<{ entry: any; onClose: () => void; onResolved: () => void }> = []
   // The props object itself, so a test can hand HomePane its next snapshot (what the window does on every applied read).
-  const props = { snapshot: snap, onRefresh: () => { refreshed += 1; return onRefresh ? onRefresh() : Promise.resolve(true) } }
+  const props = {
+    snapshot: snap,
+    onRefresh: () => { refreshed += 1; return extra.onRefresh ? extra.onRefresh() : Promise.resolve(true) },
+    feed: extra.feed ?? { status: 'ready', entries: [], reason: null },
+    onFeedChanged: () => { events.push('feed-changed') },
+    onOpenReview: () => { events.push('open-review') },
+  }
   const m = mount('MacApp.tsx', 'HomePane', {
     expand: true,
     backend: {
@@ -980,10 +1007,11 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       sync_status: () => ({ logged_in: true, engine: 'running', sync_root: null, syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal: null }),
       kept_unsynced_folder: () => null,
       kept_unsent_folder: () => null,
+      desktop_file_overview: () => { throw new Error('vault is locked') },
       ...backend,
     } as any,
     props,
-    hookModules: [useFinderSetupModule(), useKeptFoldersModule()],
+    hookModules: [useFinderSetupModule(), useKeptFoldersModule(), useFileOverviewModule()],
     bindings: {
       ...desktopApi,
       ...model,
@@ -998,10 +1026,15 @@ function openHome(snap: unknown, backend: Record<string, (args: any) => unknown>
       KeptFolderNotes,
       // The real hint has hooks and is tested on its own (tests/menuBarHint.test.tsx); here it is a marker, to pin where it is.
       MenuBarHint: () => createElement('div', { 'data-stub': 'menu-bar-hint' }),
+      ...homeModel,
+      makeReviewActions,
+      systemLocale: () => 'en',
+      HomeCounts, HomeAttention, HomeActivity,
+      ConflictSheet: (props: any) => { sheets.push(props); return createElement('div', { 'data-sheet': 'conflict', 'data-file': props.entry.file_id }) },
     },
   })
   mounted.push(m)
-  return { m, refreshed: () => refreshed, props }
+  return { m, refreshed: () => refreshed, events, sheets, props }
 }
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const settleHome = async (m: Mounted) => { await m.flush(); await tick(); await m.flush(); await m.flush() }
@@ -1155,7 +1188,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
     ]
     for (const c of cases) {
       let applied: () => void = () => {}
-      const { m, refreshed } = openHome(c.snap, { vault_unlock_route: () => 'keychain', [c.command]: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
+      const { m, refreshed } = openHome(c.snap, { vault_unlock_route: () => 'keychain', [c.command]: () => null }, { onRefresh: () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }) })
       await settleHome(m)
       const clicked = homeButton(m, c.label).props.onClick()
       await settleHome(m)
@@ -1179,7 +1212,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
       { snap: () => snapshot({ phase: 'paused', pending_changes: 1 }), label: 'Resume sync', busyLabel: 'Resume sync', command: 'tray_resume_sync' },
     ]
     for (const c of cases) {
-      const { m, props } = openHome(c.snap(), { vault_unlock_route: () => 'keychain', [c.command]: () => null }, () => Promise.resolve(false))
+      const { m, props } = openHome(c.snap(), { vault_unlock_route: () => 'keychain', [c.command]: () => null }, { onRefresh: () => Promise.resolve(false) })
       await settleHome(m)
       await homeButton(m, c.label).props.onClick()
       m.render()
@@ -1197,7 +1230,7 @@ describe('Home (§7.6, first cut: status, Finder row, storage, the kept rows)', 
 
   test('each button has its own busy state: Open in Finder finishing does not re-enable a Resume sync still under way (#139 review P3-5)', async () => {
     let applied: () => void = () => {}
-    const { m } = openHome(snapshot({ phase: 'paused', pending_changes: 1 }), { tray_resume_sync: () => null, open_finder_location: () => null }, () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }))
+    const { m } = openHome(snapshot({ phase: 'paused', pending_changes: 1 }), { tray_resume_sync: () => null, open_finder_location: () => null }, { onRefresh: () => new Promise<boolean>((resolve) => { applied = () => resolve(true) }) })
     await settleHome(m)
     const resuming = homeButton(m, 'Resume sync').props.onClick()
     await settleHome(m)
@@ -1481,24 +1514,22 @@ describe('the Review feed is read only while there is something to read (§7.6)'
     expect(out.feedLog.connected).toBe(0)
   })
 
-  test('the rows are read only while Review shows them: watched on Review and nowhere else, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
-    const home = openWindow()
-    await settle(home.m)
-    expect(home.feedLog.watched).toBe(0)
-    await home.request({ to: 'trash' })
-    expect(home.feedLog.watched).toBe(0)
-    await home.request({ to: 'review' })
+  test('the rows are read only while something shows them: Review, and Home\'s "Needs your attention"; not Trash, never while locked or signed out, and let go with the window (review of #142: the list is the costly read)', async () => {
+    const opened = async (search: string, snap?: () => unknown) => {
+      const w = openWindow({ search, snap })
+      await settle(w.m)
+      return w
+    }
+    const home = await opened('')
     expect(home.feedLog.watched).toBe(1)
+    expect((await opened('?section=review')).feedLog.watched).toBe(1)
+    expect((await opened('?section=trash')).feedLog.watched).toBe(0)
     home.m.unmount()
     expect(home.feedLog.unwatched).toBe(1)
-    const locked = openWindow({ snap: () => snapshot({ account: { vault_unlocked: false } }) })
-    await settle(locked.m)
-    await locked.request({ to: 'review' })
-    expect(locked.feedLog.watched).toBe(0)
-    const out = openWindow({ snap: () => snapshot({ account: { logged_in: false, vault_unlocked: false } }) })
-    await settle(out.m)
-    await out.request({ to: 'review' })
-    expect(out.feedLog.watched).toBe(0)
+    for (const search of ['', '?section=review']) {
+      expect((await opened(search, () => snapshot({ account: { vault_unlocked: false } }))).feedLog.watched).toBe(0)
+      expect((await opened(search, () => snapshot({ account: { logged_in: false, vault_unlocked: false } }))).feedLog.watched).toBe(0)
+    }
   })
 
   test('the feed is a new one when the session\'s revision moves, though the account is still signed in and unlocked (a sign-out and a sign-in as the same account between two reads; review of #142, round 2)', async () => {
@@ -1526,6 +1557,28 @@ describe('the Review feed is read only while there is something to read (§7.6)'
     expect(props.feed).toBe(feed)
     props.onChanged()
     expect(feedLog.refreshed).toBe(1)
+  })
+})
+
+describe('Home is given what its additions need (task 1683 slice 4, the Home add-on)', () => {
+  test('the window asks the snapshot for the rows Home shows, not one', async () => {
+    const { m } = openWindow()
+    await settle(m)
+    expect(m.calls.filter((c) => c.name === 'popover_snapshot').map((c) => c.args)).toEqual([{ activityLimit: homeModel.HOME_ACTIVITY_ROWS }])
+  })
+
+  test('Home gets the Review feed, and can open Review and ask for the feed to be read again', async () => {
+    const feed = readyFeed(2)
+    const { m, feedLog } = openWindow({ feed })
+    await settle(m)
+    const props = paneProps(m, 'home')
+    expect(props.feed).toBe(feed)
+    props.onFeedChanged()
+    expect(feedLog.refreshed).toBe(1)
+    props.onOpenReview()
+    await settle(m)
+    expect(shown(m)).toEqual(['review'])
+    expect(focused.at(-1)).toBe('mw-section-review')
   })
 })
 
@@ -1628,5 +1681,155 @@ describe('the toolbar actions are the window\'s, not the panes\' (hi-fi section 
     expect(toolbarButtons().map((b) => String(b.props.className))).toEqual(['ms-btn'])
     await request({ to: 'trash' })
     expect(toolbarButtons().map((b) => String(b.props.className))).toEqual(['ms-btn'])
+  })
+})
+
+
+// ── Home's additions (task 1683 slice 4, the Home add-on; §7.6, §10.2 rows 3, 34, 45) ─────────────────────────────
+
+const overviewFixture = (over: Record<string, unknown> = {}) => ({
+  by_status: [{ status: 'cloud_only', count: 8311, bytes: 9 }, { status: 'local', count: 1204, bytes: 9 }],
+  recent: [], total_files: 9515, total_bytes: 18, pinned_count: 40, pinned_bytes: 4, pinned_folders: 3, ...over,
+})
+const conflictEntry = (id: string, folder: string | null = 'Team shared') => ({
+  id: `conflict:${id}`, file_id: id, file_name: `${id}.md`, folder, kind: 'conflict', status: 'needs review', updated_at: 1000, detail: 'Changed on two devices.', action: 'open_conflict',
+})
+const activityRow = (over: Record<string, unknown> = {}) => ({
+  id: 'a1', name: 'Q3 ledger.xlsx', folder: 'Investigations', path: 'Investigations/Q3 ledger.xlsx', direction: 'up', state: 'done',
+  at: Math.floor(Date.now() / 1000) - 120, size_bytes: 10, done_bytes: 10, total_bytes: 10, ...over,
+})
+const countsParts = (m: Mounted) =>
+  find(m, (el) => el.props['data-row'] === 'counts').flatMap((row) =>
+    elementsOf(row.props.children).filter((el) => el.type === 'span').map((el) => textOf(el.props.children).replace(/\s+/g, ' ').trim()),
+  )
+const groupTitles = (m: Mounted) => find(m, (el) => el.type === 'section').map((el) => el.props['aria-label'])
+
+describe('Home › the counts line, inside the status card (§7.6)', () => {
+  test('the Windows shell\'s two numbers and the folders the person keeps, labelled for a Mac', async () => {
+    const { m } = openHome(snapshot(), { desktop_file_overview: () => overviewFixture() })
+    await settleHome(m)
+    expect(countsParts(m)).toEqual(['On this Mac 1,204 files', 'Online-only 8,311', 'Kept on this Mac 3 folders'])
+    expect(homeText(m)).not.toMatch(/\bPC\b/)
+    expect(m.calls.filter((c) => c.name === 'desktop_file_overview').map((c) => c.args)).toEqual([{ recentLimit: 0 }])
+  })
+
+  test('it is read again on a timer, and a read that fails leaves the numbers on screen', async () => {
+    let fail = false
+    const { m } = openHome(snapshot(), { desktop_file_overview: () => { if (fail) throw new Error('state db busy'); return overviewFixture() } })
+    await settleHome(m)
+    expect(m.intervals()).toHaveLength(1)
+    fail = true
+    m.intervals()[0]()
+    await settleHome(m)
+    expect(m.calls.filter((c) => c.name === 'desktop_file_overview')).toHaveLength(2)
+    expect(countsParts(m)).toHaveLength(3)
+    fail = false
+    m.unmount()
+    expect(m.intervals()).toHaveLength(0)
+  })
+
+  test('an overview with no files (no sync folder, no database) draws no line; so does one that cannot be read', async () => {
+    const empty = openHome(snapshot(), { desktop_file_overview: () => overviewFixture({ by_status: [], total_files: 0, pinned_folders: 0 }) })
+    await settleHome(empty.m)
+    expect(homeText(empty.m)).not.toContain('On this Mac')
+    const failing = openHome(snapshot(), { desktop_file_overview: () => { throw new Error('open state db: unable to open database file') } })
+    await settleHome(failing.m)
+    expect(homeText(failing.m)).not.toContain('On this Mac')
+    expect(m_toasts(failing.m)).toEqual([])
+  })
+
+  test('an overview from a build that reports no folder count leaves that part out', async () => {
+    const { m } = openHome(snapshot(), { desktop_file_overview: () => overviewFixture({ pinned_folders: undefined }) })
+    await settleHome(m)
+    expect(countsParts(m)).toEqual(['On this Mac 1,204 files', 'Online-only 8,311'])
+  })
+
+  test('a locked vault asks for no overview: the locked card is the whole pane', async () => {
+    const { m } = openHome(snapshot({ phase: 'locked', account: { vault_unlocked: false } }), { desktop_file_overview: () => overviewFixture() })
+    await settleHome(m)
+    expect(m.calls.filter((c) => c.name === 'desktop_file_overview')).toHaveLength(0)
+    expect(homeText(m)).not.toContain('On this Mac')
+  })
+})
+const m_toasts = (m: Mounted) => m.toasts
+
+describe('Home › "Needs your attention" holds Review\'s top three and the kept rows (§7.6, §8.3)', () => {
+  test('the first three entries as Review draws them, then how many more are in Review', async () => {
+    const entries = ['a', 'b', 'c', 'd', 'e'].map((id) => conflictEntry(id))
+    const { m, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries, count: entries.length, rejected: 0, reason: null } })
+    await settleHome(m)
+    expect(groupTitles(m)).toContain('Needs your attention')
+    const text = homeText(m)
+    for (const id of ['a', 'b', 'c']) expect(text).toContain(`${id}.md`)
+    for (const id of ['d', 'e']) expect(text).not.toContain(`${id}.md`)
+    expect(text).toContain('Team shared')
+    await homeButton(m, '2 more in Review').props.onClick()
+    expect(events).toEqual(['open-review'])
+  })
+
+  test('"more in Review" counts what waits (the badge\'s number), not the rows a capped list carries (review of #142)', async () => {
+    const entries = ['a', 'b', 'c', 'd'].map((id) => conflictEntry(id))
+    const { m } = openHome(snapshot(), {}, { feed: { status: 'ready', entries, count: 250, rejected: 0, reason: null } })
+    await settleHome(m)
+    expect(hasHomeButton(m, '247 more in Review')).toBe(true)
+    expect(hasHomeButton(m, '1 more in Review')).toBe(false)
+  })
+
+  test('"Decide…" opens the conflict sheet for that file, right here; resolving asks the window to read the feed again', async () => {
+    const { m, sheets, events } = openHome(snapshot(), {}, { feed: { status: 'ready', entries: [conflictEntry('a'), conflictEntry('b')], count: 2, rejected: 0, reason: null } })
+    await settleHome(m)
+    const decide = find(m, (el) => el.type === 'button' && textOf(el.props.children).trim() === 'Decide…')
+    expect(decide).toHaveLength(2)
+    await decide[1].props.onClick()
+    await settleHome(m)
+    expect(find(m, (el) => el.props['data-sheet'] === 'conflict').map((el) => el.props['data-file'])).toEqual(['b'])
+    sheets.at(-1)!.onResolved()
+    expect(events).toEqual(['feed-changed'])
+    sheets.at(-1)!.onClose()
+    m.render()
+    expect(find(m, (el) => el.props['data-sheet'] === 'conflict')).toHaveLength(0)
+  })
+
+  test('the kept rows keep their place in the same group, after Review\'s', async () => {
+    const ours = '/Users/sam/Library/Containers/io.beebeeb.app/Data/Documents/Changes not sent/2026-10-10 at 14.05.12'
+    const { m } = openHome(snapshot(), { kept_unsent_folder: () => ours }, { feed: { status: 'ready', entries: [conflictEntry('a')], count: 1, rejected: 0, reason: null } })
+    await settleHome(m)
+    const text = homeText(m)
+    expect(groupTitles(m).filter((t) => t === 'Needs your attention')).toHaveLength(1)
+    expect(text.indexOf('a.md')).toBeLessThan(text.indexOf(ours))
+  })
+
+  test('nothing waits and nothing was kept: no group, no empty-state words', async () => {
+    const { m } = openHome(snapshot())
+    await settleHome(m)
+    expect(groupTitles(m)).not.toContain('Needs your attention')
+    expect(homeText(m)).not.toContain('Nothing needs your attention')
+  })
+
+  test('a feed that is still loading or failed shows no rows: Home never guesses', async () => {
+    for (const status of ['loading', 'failed'] as const) {
+      const { m } = openHome(snapshot(), {}, { feed: { status, entries: [conflictEntry('a')], count: 1, rejected: 0, reason: null } })
+      await settleHome(m)
+      expect(groupTitles(m)).not.toContain('Needs your attention')
+    }
+  })
+})
+
+describe('Home › "Recent activity" (§7.6: the popover\'s rows, more of them)', () => {
+  test('the snapshot\'s rows, named for what happened and when', async () => {
+    const snap = snapshot({ activity: [activityRow(), activityRow({ id: 'a2', name: 'Plan.pdf', folder: '', direction: 'down', state: 'active', done_bytes: 62, total_bytes: 100, at: Math.floor(Date.now() / 1000) - 5 })] })
+    const { m } = openHome(snap)
+    await settleHome(m)
+    expect(groupTitles(m)).toContain('Recent activity')
+    const text = homeText(m)
+    expect(text).toContain('Q3 ledger.xlsx')
+    expect(text).toContain('Uploaded · Investigations · 2 minutes ago')
+    expect(text).toContain('Downloading · 62 % · just now')
+  })
+
+  test('no rows: the group is not drawn', async () => {
+    const { m } = openHome(snapshot())
+    await settleHome(m)
+    expect(groupTitles(m)).not.toContain('Recent activity')
   })
 })

@@ -989,6 +989,11 @@ export interface FileOverview {
   pinned_count: number
   /** Sum of effectively-pinned file sizes. */
   pinned_bytes: number
+  /**
+   * How many folders the person chose to keep on this device (Home's "Kept on this Mac", task 1683 slice 4); the folders
+   * that only inherit a pin are not counted. A build that does not report it leaves it out.
+   */
+  pinned_folders?: number
 }
 
 export type DesktopSearchIndexState = 'ready' | 'syncing'
