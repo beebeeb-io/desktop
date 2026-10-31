@@ -502,7 +502,7 @@ pub fn finalize_wholly_local(
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of either identity is refused until the pass returns, so a
     // dehydration that lands between the checks and the data open cannot make the open fetch.
-    let _scope = crate::no_fetch_scope::enter(&[local_id, server_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     // Before the data open, from the attributes alone: that open fetches a file that is not wholly on disk.
     if !fully_on_disk(path) {
         return Ok(Local::NotWhollyLocal);
@@ -520,9 +520,7 @@ pub fn finalize_wholly_local(
         }
     };
     // Review F9 of 1640: read through the handle too, so it describes the file the hash then reads.
-    if !handle_fully_on_disk(&file) {
-        return Ok(Local::NotWhollyLocal);
-    }
+    // MUTATION F (task 2284 CI-fix red proof, never merge): the handle re-check is removed.
     let handle = HANDLE(file.as_raw_handle());
     let existing = read_identity(handle)?;
     if existing.as_deref().is_some_and(|identity| !names_this_upload(identity, local_id, server_id)) {
@@ -1105,7 +1103,7 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S2).
-    let _scope = crate::no_fetch_scope::enter(&[file_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
     // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
     // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
@@ -1120,7 +1118,8 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
         return Ok(false);
     };
     // Review F9: read through the handle too, so it describes the file the hash then reads.
-    let wholly = handle_fully_on_disk(&file);
+    // MUTATION F (task 2284 CI-fix red proof, never merge): the handle re-check is removed.
+    let wholly = true;
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `file` is open for the whole call; the buffer is 8-byte aligned and its length is
     // passed, so the call writes only inside it.
@@ -1160,7 +1159,7 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S1).
-    let _scope = crate::no_fetch_scope::enter(&[file_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
         return Ok(false);
     }
@@ -1177,9 +1176,7 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
         return Ok(false);
     };
     // Review F9: re-read through the handle: reading a file not wholly on disk would fetch the rest.
-    if !handle_fully_on_disk(&file) {
-        return Ok(false);
-    }
+    // MUTATION F (task 2284 CI-fix red proof, never merge): the handle re-check is removed.
     // Spec S1: only a placeholder that carries this file's server id is marked; one naming another file, or no
     // file, never is.
     if read_identity(HANDLE(file.as_raw_handle()))?.as_deref() != Some(file_id.as_bytes()) {

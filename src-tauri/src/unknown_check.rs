@@ -178,11 +178,9 @@ pub(crate) enum PlatformView {
 /// Task 2284 A1.1: a metadata error means "missing" only when the path is not there; any other
 /// error (a denied folder, a held handle) is something that is there but could not be read.
 pub(crate) fn view_of_metadata_error(error: &std::io::Error) -> PlatformView {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        PlatformView::Missing
-    } else {
-        PlatformView::Unreadable
-    }
+    // MUTATION D (task 2284 CI-fix red proof, never merge): every metadata error reads as Missing (pre-A1.1).
+    let _ = error;
+    PlatformView::Missing
 }
 
 /// What the guard does for one guarded row.
