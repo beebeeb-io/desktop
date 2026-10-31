@@ -2818,7 +2818,9 @@ impl SignOutRevoke {
 }
 
 /// The token a sign-out ends on the server: the session's in memory, else the one the Keychain holds (a locked computer
-/// keeps only that). Wiped when the revoke is done with it.
+/// keeps only that). Read once, before the sign-out takes the engine slot: from the slot on, nothing in the sign-out
+/// touches the session until its clear (`sign_out_holds_the_engine_slot_until_the_session_is_cleared`). Wiped when the
+/// revoke is done with it.
 fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize::Zeroizing<String>> {
     acct.session
         .lock()
@@ -2837,9 +2839,8 @@ fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize::Zeroizing<
 /// account's session list still showed the computer as signed in. Best effort and bounded by
 /// [`SIGN_OUT_REVOKE_TIMEOUT`]: the local teardown is the authority, so a revoke the server refuses, that cannot reach
 /// it or that is not answered in time is a warning with its closed code (never the token) and the sign-out goes on.
-/// `None`: no token anywhere, so nothing was sent.
-async fn revoke_session_for_sign_out(acct: &AccountRuntime, base_url: &str) -> Option<SignOutRevoke> {
-    let token = session_token_for_revoke(acct)?;
+/// `token` comes from [`session_token_for_revoke`].
+async fn revoke_session_for_sign_out(token: &str, base_url: &str) -> SignOutRevoke {
     let revoke = async {
         let Ok(client) = reqwest::Client::builder()
             .default_headers(api_client::provenance_headers())
@@ -2847,7 +2848,7 @@ async fn revoke_session_for_sign_out(acct: &AccountRuntime, base_url: &str) -> O
         else {
             return SignOutRevoke::NoClient;
         };
-        match revoke_desktop_session(&client, base_url, &token).await {
+        match revoke_desktop_session(&client, base_url, token).await {
             Ok(()) => SignOutRevoke::Revoked,
             Err(LogoutFailure::Status(status)) => SignOutRevoke::Refused(status),
             Err(LogoutFailure::Unreachable) => SignOutRevoke::Unreachable,
@@ -2868,7 +2869,7 @@ async fn revoke_session_for_sign_out(acct: &AccountRuntime, base_url: &str) -> O
             "sign-out: the server could not be asked to end the session; signed out on this computer anyway"
         ),
     }
-    Some(outcome)
+    outcome
 }
 
 #[cfg(test)]
@@ -3274,6 +3275,15 @@ async fn clear_session_impl(
     // every start reads its keys under the slot, so releasing it first would let a start that was waiting
     // for it see keys this sign-out is about to clear. `clear_session_holding_slot` makes that order the
     // only one that compiles. Session installs are ordered against a sign-out separately (Task 12).
+    //
+    // Task 1886: the token whose session this sign-out ends on the server (after the purge, below), read now, before
+    // the slot is taken and while nothing of the session is torn down: from the slot on, nothing here touches the
+    // session until its clear. An already-signed-out sign-out has no session to end.
+    let revoke_token = if already_signed_out {
+        None
+    } else {
+        session_token_for_revoke(&acct)
+    };
     let mut held_engine_slot = if already_signed_out {
         #[cfg(target_os = "windows")]
         tracing::info!("sign-out requested while already signed out; skipping engine stop and Cloud Files teardown");
@@ -3484,12 +3494,13 @@ async fn clear_session_impl(
 
     // Task 1886 (P0): the session ends on the server too, on every OS (it was Windows only, so a Mac's or a Linux
     // computer's signed-out token kept working on the server for up to 30 days). Here: after the purge (and on Windows
-    // the Cloud Files unregister), before the session is cleared below, so the token is still in memory or the
-    // Keychain. Best effort and bounded: whatever the server answers, or if it does not, the sign-out goes on and the
-    // token is never logged. An already-signed-out sign-out has no session to end.
-    if !already_signed_out {
-        let _ = revoke_session_for_sign_out(&acct, &sign_out_api_base()).await;
+    // the Cloud Files unregister), before the session is cleared below, with the token read before the engine slot was
+    // taken. Best effort and bounded: whatever the server answers, or if it does not, the sign-out goes on and the
+    // token is never logged.
+    if let Some(token) = revoke_token.as_deref() {
+        let _ = revoke_session_for_sign_out(token, &sign_out_api_base()).await;
     }
+    drop(revoke_token);
 
     // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
     // §5.3 (5). A logged-out Mac has no File Provider domain pointing at a folder the person is no
@@ -22359,24 +22370,32 @@ mod signout_teardown_tests {
 
     /// Task 1886 (P0): the sign-out ends its session on the server through ONE call that every OS compiles (it was
     /// Windows only). Pinned as text so it holds on Windows too, where no test can drive a signed-in sign-out: no
-    /// `#[cfg(` gates the call, it is the only revoke in the sign-out, and it comes before the session is cleared.
+    /// `#[cfg(` gates the token read or the call, each is the only one in the sign-out, the token is read before the
+    /// engine slot is taken (from the slot on nothing touches the session until its clear), and the revoke is sent
+    /// before the session is cleared.
     #[test]
     fn the_sign_out_ends_its_session_on_the_server_on_every_os() {
         let production = production_source();
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
-        let call = "    if !already_signed_out {\n        let _ = revoke_session_for_sign_out(&acct, &sign_out_api_base()).await;\n    }\n";
-        let at = clear.find(call).unwrap_or_else(|| panic!("the revoke call is in the sign-out:\n{clear}"));
-        let line_before = clear[..at].trim_end().lines().last().unwrap_or_default();
-        assert!(
-            !line_before.contains("#[cfg"),
-            "the revoke is not gated to one platform: {line_before}"
-        );
+        let not_gated = |at: usize, what: &str| {
+            let line_before = clear[..at].trim_end().lines().last().unwrap_or_default();
+            assert!(!line_before.contains("#[cfg"), "{what} is not gated to one platform: {line_before}");
+        };
+        let read = "    let revoke_token = if already_signed_out {\n        None\n    } else {\n        session_token_for_revoke(&acct)\n    };\n";
+        let read_at = clear.find(read).unwrap_or_else(|| panic!("the token read is in the sign-out:\n{clear}"));
+        not_gated(read_at, "the token read");
+        let call = "    if let Some(token) = revoke_token.as_deref() {\n        let _ = revoke_session_for_sign_out(token, &sign_out_api_base()).await;\n    }\n";
+        let call_at = clear.find(call).unwrap_or_else(|| panic!("the revoke call is in the sign-out:\n{clear}"));
+        not_gated(call_at, "the revoke");
+        assert_eq!(clear.matches("session_token_for_revoke(").count(), 1, "{clear}");
         assert_eq!(clear.matches("revoke_session_for_sign_out(").count(), 1, "{clear}");
         assert_eq!(clear.matches("revoke_desktop_session(").count(), 0, "one way to revoke: {clear}");
+        let slot = clear.find("take_slot_and_stop_engine_for_sign_out(").expect("the engine stop");
+        assert!(read_at < slot, "the token is read before the engine slot is taken");
         let cleared = clear
             .find("clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut)")
             .expect("the session clear");
-        assert!(at < cleared, "the token is read before the session is cleared");
+        assert!(call_at < cleared, "the revoke is sent before the session is cleared");
     }
 
     /// User amendment: the email to prefill into the sign-in form must be
@@ -22564,12 +22583,13 @@ mod sign_out_revoke_tests {
         base
     }
 
-    /// Signed in on this computer: the session (token and keys) in memory and the auth flag, as after a sign-in. On a
-    /// Mac the Finder reconciler's stand-in confirms the sign-out's removal.
-    fn signed_in(state: &AppState, id: &str, token: &str) -> Arc<AccountRuntime> {
+    /// Signed in on this computer: the auth flag and, with `in_memory`, the session (token and keys) in memory, as after
+    /// a sign-in (`None`: no session in memory, as on a locked computer). On a Mac the Finder reconciler's stand-in
+    /// confirms the sign-out's removal.
+    fn signed_in(state: &AppState, id: &str, in_memory: Option<&str>) -> Arc<AccountRuntime> {
         synthesize_single_account(state, AccountId(id.to_string()));
         let acct = state.active_account().expect("synthesized account resolves");
-        *acct.session.lock().unwrap() = Some(Session {
+        *acct.session.lock().unwrap() = in_memory.map(|token| Session {
             token: token.to_string(),
             master_key: [7u8; 32],
             email: None,
@@ -22595,9 +22615,18 @@ mod sign_out_revoke_tests {
         token: &str,
         api: &str,
     ) -> (Result<SignedOut, SignOutFailure>, Arc<AccountRuntime>) {
+        sign_out_of(id, Some(token), api).await
+    }
+
+    /// [`signed_in_sign_out`] with `in_memory` as the session in memory (`None`: none).
+    async fn sign_out_of(
+        id: &str,
+        in_memory: Option<&str>,
+        api: &str,
+    ) -> (Result<SignedOut, SignOutFailure>, Arc<AccountRuntime>) {
         crate::state_paths::init_for_test();
         let state = AppState::default();
-        let acct = signed_in(&state, id, token);
+        let acct = signed_in(&state, id, in_memory);
         let result = with_the_shared_state_dir(with_sign_out_api_for_test(
             api.to_string(),
             clear_session_impl(&state, false, None, UnknownFilesArg::Keep, None),
@@ -22707,19 +22736,6 @@ mod sign_out_revoke_tests {
         assert_eq!(silent.requests().len(), 1, "the unanswered revoke reached its API");
     }
 
-    /// An account whose session (when `token` is given) is in memory; nothing else is set up.
-    fn account_with_session(id: &str, token: Option<&str>) -> (AppState, Arc<AccountRuntime>) {
-        let state = AppState::default();
-        synthesize_single_account(&state, AccountId(id.to_string()));
-        let acct = state.active_account().expect("synthesized account resolves");
-        *acct.session.lock().unwrap() = token.map(|token| Session {
-            token: token.to_string(),
-            master_key: [7u8; 32],
-            email: None,
-        });
-        (state, acct)
-    }
-
     /// The revoke reads the server's answer into its closed code: 2xx ended the session, any other status (a 401: it
     /// had ended it already) is `Refused` with that status, and no server is `Unreachable`.
     #[tokio::test]
@@ -22731,14 +22747,20 @@ mod sign_out_revoke_tests {
             ("500 Internal Server Error", SignOutRevoke::Refused(500)),
         ] {
             let api = LogoutApi::start(Answer::Status(status));
-            let (_state, acct) = account_with_session("signout-1886-answers", Some("tok-1886-answers"));
-            assert_eq!(revoke_session_for_sign_out(&acct, &api.base).await, Some(expected), "{status}");
-            assert_eq!(api.requests().len(), 1, "{status}");
+            assert_eq!(revoke_session_for_sign_out("tok-1886-answers", &api.base).await, expected, "{status}");
+            let requests = api.requests();
+            assert_eq!(requests.len(), 1, "{status}");
+            assert!(
+                requests[0]
+                    .to_ascii_lowercase()
+                    .contains("\r\nauthorization: bearer tok-1886-answers\r\n"),
+                "{status}: {}",
+                requests[0]
+            );
         }
-        let (_state, acct) = account_with_session("signout-1886-unreachable", Some("tok-1886-unreachable"));
         assert_eq!(
-            revoke_session_for_sign_out(&acct, &closed_port()).await,
-            Some(SignOutRevoke::Unreachable)
+            revoke_session_for_sign_out("tok-1886-unreachable", &closed_port()).await,
+            SignOutRevoke::Unreachable
         );
     }
 
@@ -22746,13 +22768,15 @@ mod sign_out_revoke_tests {
     #[tokio::test]
     async fn the_revoke_gives_up_after_three_seconds() {
         let api = LogoutApi::start(Answer::Never);
-        let (_state, acct) = account_with_session("signout-1886-bound", Some("tok-1886-bound"));
         let started = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(20), revoke_session_for_sign_out(&acct, &api.base))
-            .await
-            .expect("the revoke is bounded");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            revoke_session_for_sign_out("tok-1886-bound", &api.base),
+        )
+        .await
+        .expect("the revoke is bounded");
         let took = started.elapsed();
-        assert_eq!(outcome, Some(SignOutRevoke::TimedOut));
+        assert_eq!(outcome, SignOutRevoke::TimedOut);
         assert!(
             took >= Duration::from_secs(3) && took < Duration::from_secs(6),
             "given up at the 3 s bound: took {took:?}"
@@ -22760,13 +22784,12 @@ mod sign_out_revoke_tests {
         assert_eq!(api.requests().len(), 1, "the request did reach the server");
     }
 
-    /// No token in memory and none in the Keychain: nothing to end, and nothing is sent.
+    /// Signed in with no token in memory and none in the Keychain: the sign-out has nothing to end and sends nothing.
     #[tokio::test]
-    async fn with_no_token_anywhere_the_revoke_sends_nothing() {
+    async fn a_sign_out_with_no_token_anywhere_sends_nothing() {
         let api = LogoutApi::start(Answer::Status("200 OK"));
-        let (_state, acct) = account_with_session("signout-1886-no-token", None);
-        assert_eq!(revoke_session_for_sign_out(&acct, &api.base).await, None);
-        assert!(api.requests().is_empty(), "{:?}", api.requests());
+        let (result, _acct) = sign_out_of("signout-1886-no-token", None, &api.base).await;
+        assert!(api.requests().is_empty(), "{:?} ({result:?})", api.requests());
     }
 
     /// A locked Mac keeps the token only in the Keychain: a sign-out from there ends that session (the test build's
@@ -22776,11 +22799,10 @@ mod sign_out_revoke_tests {
     async fn a_locked_mac_ends_the_session_the_keychain_holds() {
         let api = LogoutApi::start(Answer::Status("200 OK"));
         let id = "signout-1886-locked";
-        let (_state, acct) = account_with_session(id, None);
         persist_session_token_to_keychain(&SessionWrite::for_test(), id, "tok-1886-in-the-keychain", None).unwrap();
-        assert_eq!(revoke_session_for_sign_out(&acct, &api.base).await, Some(SignOutRevoke::Revoked));
+        let (result, acct) = sign_out_of(id, None, &api.base).await;
         let requests = api.requests();
-        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(requests.len(), 1, "{requests:?} ({result:?})");
         assert!(
             requests[0]
                 .to_ascii_lowercase()
@@ -22788,8 +22810,8 @@ mod sign_out_revoke_tests {
             "{}",
             requests[0]
         );
-        let mut vault = AuthVault::new(platform_keychain_store_for(id));
-        vault.clear_session().unwrap();
+        assert_eq!(result.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
+        assert!(!keychain_session_present(acct.id.as_str()), "and the Keychain's token is cleared");
     }
 }
 
