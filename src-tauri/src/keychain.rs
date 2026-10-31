@@ -714,6 +714,23 @@ pub fn test_fail_account_email_writes(account_prefix: Option<&str>, fail: bool) 
     }
 }
 
+/// Account prefixes whose deletes fail, as a Keychain that refuses a removal would (task 1886). Tests only.
+#[cfg(all(test, target_os = "macos"))]
+static TEST_KEYCHAIN_DELETES_FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Make the test-build store's deletes for this account prefix fail (`true`) or work again (`false`).
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_fail_deletes(account_prefix: Option<&str>, fail: bool) {
+    let mut failing = TEST_KEYCHAIN_DELETES_FAIL.lock().unwrap_or_else(|e| e.into_inner());
+    if fail {
+        failing.insert(account_prefix.map(str::to_string));
+    } else {
+        failing.remove(&account_prefix.map(str::to_string));
+    }
+}
+
 /// Whether any test-build store with this account prefix has been read, written or cleared.
 #[cfg(all(test, target_os = "macos"))]
 #[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
@@ -773,6 +790,15 @@ impl TestKeychainStore {
     }
 
     fn delete(&self, leaf: &str) -> AuthResult<()> {
+        if TEST_KEYCHAIN_DELETES_FAIL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&self.account_prefix)
+        {
+            return Err(AuthStoreError::Backend(
+                "the test Keychain refuses this removal".to_string(),
+            ));
+        }
         TEST_KEYCHAIN
             .lock()
             .unwrap_or_else(|e| e.into_inner())

@@ -643,18 +643,20 @@ fn end_sessions_in_flight(acct: &AccountRuntime, by: account::SessionTransition)
 /// lock is released. So a transition that began before this point is refused at its next check, and one that begins
 /// after it finds nothing to unlock. The caller still holds the engine slot (`_engine_slot`), so no start can read keys
 /// in between. `best_effort`: the already-signed-out path, where a store that cannot answer is not a failure. The
-/// generation moves whatever the result.
+/// generation moves whatever the result. `dropped` gets every session token this turn took (task 1886): what each
+/// Keychain layout held before its clear, and a session put in memory while the sign-out ran, also when the turn fails.
 #[cfg(not(target_os = "windows"))]
 fn finish_sign_out_turn(
     acct: &AccountRuntime,
     _engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
     best_effort: bool,
+    dropped: &mut DroppedTokens,
 ) -> Result<(), String> {
     let (result, cleared_keys) = {
         let write = SessionWrite {
             _writes: lock_session_keychain_writes(),
         };
-        let result = match clear_keychain_session_holding(&write, acct.id.as_str()) {
+        let result = match clear_keychain_session_holding(&write, acct.id.as_str(), dropped) {
             Err(error) if best_effort => {
                 tracing::warn!(%error, "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing");
                 Ok(())
@@ -662,14 +664,16 @@ fn finish_sign_out_turn(
             cleared => cleared,
         };
         let result = result.and_then(|()| ensure_keychain_holds_no_account(acct.id.as_str()));
-        let cleared_keys = match acct.session.lock() {
-            Ok(mut guard) => guard.take().is_some(),
+        let taken = match acct.session.lock() {
+            Ok(mut guard) => guard.take(),
             Err(poisoned) => {
-                let cleared = poisoned.into_inner().take().is_some();
+                let taken = poisoned.into_inner().take();
                 acct.session.clear_poison();
-                cleared
+                taken
             }
         };
+        let cleared_keys = taken.is_some();
+        dropped.add(taken.map(|mut session| zeroize::Zeroizing::new(std::mem::take(&mut session.token))));
         acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::SignOut);
         drop(write);
         (result, cleared_keys)
@@ -862,20 +866,33 @@ fn keychain_session_present(account_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-// Windows' sign-out and startup discard; on macOS and Linux the sign-out clears inside its last turn
+// Windows' startup discard; on macOS and Linux the sign-out clears inside its last turn
 // (`clear_keychain_session_holding`), and only tests call this.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn clear_keychain_session(account_id: &str) -> Result<(), String> {
+    clear_keychain_session_into(account_id, &mut DroppedTokens::default())
+}
+
+/// [`clear_keychain_session`] that hands every session token it clears to `dropped` (Windows' sign-out, task 1886).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn clear_keychain_session_into(account_id: &str, dropped: &mut DroppedTokens) -> Result<(), String> {
     let writes = SessionWrite {
         _writes: lock_session_keychain_writes(),
     };
-    clear_keychain_session_holding(&writes, account_id)
+    clear_keychain_session_holding(&writes, account_id, dropped)
 }
 
-/// [`clear_keychain_session`] inside a turn the caller already holds (the sign-out's last turn).
-fn clear_keychain_session_holding(_write: &SessionWrite, account_id: &str) -> Result<(), String> {
+/// [`clear_keychain_session`] inside a turn the caller already holds (the sign-out's last turn). Task 1886: `dropped`
+/// gets the token each layout holds, read in this same turn just before that layout's clear, so a sign-out ends on the
+/// server what it removes here (also when a later step fails: the caller ends only what is gone).
+fn clear_keychain_session_holding(
+    _write: &SessionWrite,
+    account_id: &str,
+    dropped: &mut DroppedTokens,
+) -> Result<(), String> {
     // Clear the id-segmented trio (the live layout post-migration).
     let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
+    dropped.add(stored_session_token(&vault));
     vault
         .clear_session()
         .map_err(|e| keychain_error("clear Keychain session", e))?;
@@ -884,6 +901,7 @@ fn clear_keychain_session_holding(_write: &SessionWrite, account_id: &str) -> Re
     // legacy fallback had been serving the session). `clear_session` is
     // idempotent (NotFound → Ok), so this is safe when nothing legacy exists.
     let mut legacy = AuthVault::new(keychain::legacy_platform_keychain_store());
+    dropped.add(stored_session_token(&legacy));
     legacy
         .clear_session()
         .map_err(|e| keychain_error("clear legacy Keychain session", e))
@@ -2756,71 +2774,82 @@ async fn fetch_session_profile(
         .map_err(|e| format!("parse session verification response: {e}"))
 }
 
-/// Why `POST /api/v1/auth/logout` did not end a session. Closed (task 1886): a caller can log it without the token, the
-/// request or reqwest's text.
+/// How `POST /api/v1/auth/logout` for one session ended (task 1886). Closed: logged by its code, never with the token,
+/// the request or reqwest's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogoutFailure {
-    /// The request did not reach the server, or no answer came back.
-    Unreachable,
-    /// The server answered with this status.
-    Status(u16),
-}
-
-/// End `session_token`'s session on the server. Never logs; the token goes only into the request's header.
-async fn revoke_desktop_session(
-    client: &reqwest::Client,
-    base_url: &str,
-    session_token: &str,
-) -> Result<(), LogoutFailure> {
-    let response = client
-        .post(format!("{base_url}/api/v1/auth/logout"))
-        .bearer_auth(session_token)
-        .send()
-        .await
-        .map_err(|_| LogoutFailure::Unreachable)?;
-    let status = response.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(LogoutFailure::Status(status.as_u16()))
-    }
-}
-
-/// How long a sign-out waits for the server to end its session (task 1886, as Windows always did): after this the
-/// sign-out goes on without the answer.
-const SIGN_OUT_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// How a sign-out's revoke of its session on the server ended (task 1886). Logged by its closed code only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignOutRevoke {
+enum LogoutOutcome {
     /// The server answered 2xx: the session is ended there too.
     Revoked,
-    /// The server answered with this status (a 401: it had ended the session already).
+    /// The server answered 401: it had already ended the session.
+    AlreadyEnded,
+    /// The server answered with this other status.
     Refused(u16),
-    /// The request did not reach the server (offline, refused, DNS, TLS).
+    /// The request did not reach the server, or no answer came back (offline, refused, DNS, TLS).
     Unreachable,
-    /// No answer within [`SIGN_OUT_REVOKE_TIMEOUT`].
+    /// The request could not be built (the API address is not a URL).
+    Misconfigured,
+    /// No answer within [`SIGN_OUT_REVOKE_TIMEOUT`] (a sign-out's revoke only).
     TimedOut,
-    /// The HTTP client could not be built.
+    /// The HTTP client could not be built (a sign-out's revoke only).
     NoClient,
 }
 
-impl SignOutRevoke {
+impl LogoutOutcome {
     fn code(self) -> &'static str {
         match self {
             Self::Revoked => "revoked",
+            Self::AlreadyEnded => "already_ended",
             Self::Refused(_) => "refused",
             Self::Unreachable => "unreachable",
+            Self::Misconfigured => "misconfigured",
             Self::TimedOut => "timed_out",
             Self::NoClient => "no_client",
         }
     }
 }
 
-/// The token a sign-out ends on the server: the session's in memory, else the one the Keychain holds (a locked computer
-/// keeps only that). Read once, before the sign-out takes the engine slot: from the slot on, nothing in the sign-out
-/// touches the session until its clear (`sign_out_holds_the_engine_slot_until_the_session_is_cleared`). Wiped when the
-/// revoke is done with it.
+/// End `session_token`'s session on the server. Never logs; the token goes only into the request's header.
+async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> LogoutOutcome {
+    let response = match client
+        .post(format!("{base_url}/api/v1/auth/logout"))
+        .bearer_auth(session_token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if error.is_builder() => return LogoutOutcome::Misconfigured,
+        Err(_) => return LogoutOutcome::Unreachable,
+    };
+    match response.status() {
+        status if status.is_success() => LogoutOutcome::Revoked,
+        reqwest::StatusCode::UNAUTHORIZED => LogoutOutcome::AlreadyEnded,
+        status => LogoutOutcome::Refused(status.as_u16()),
+    }
+}
+
+/// How long a sign-out waits for the server to end its sessions, all of them together (task 1886, as Windows always
+/// waited): after this the sign-out goes on without the answers.
+const SIGN_OUT_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The session tokens a sign-out took off this computer (task 1886), each kept once: the one it began with, and every one
+/// its clears removed (a session written while it ran included). Each is ended on the server once the local clear has
+/// run ([`end_dropped_sessions`]). Wiped on drop; never printed (no `Debug`).
+#[derive(Default)]
+struct DroppedTokens(Vec<zeroize::Zeroizing<String>>);
+
+impl DroppedTokens {
+    fn add(&mut self, token: Option<zeroize::Zeroizing<String>>) {
+        if let Some(token) = token
+            && !self.0.iter().any(|kept| **kept == *token)
+        {
+            self.0.push(token);
+        }
+    }
+}
+
+/// The token a sign-out begins with: the session's in memory, else the one the Keychain holds (a locked computer keeps
+/// only that). Read once, before the sign-out takes the engine slot: from the slot on, nothing in the sign-out touches
+/// the session until its clear (`sign_out_holds_the_engine_slot_until_the_session_is_cleared`).
 fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize::Zeroizing<String>> {
     acct.session
         .lock()
@@ -2834,42 +2863,107 @@ fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize::Zeroizing<
         })
 }
 
-/// Task 1886 (P0): a sign-out ends its session on the server too, on every OS. Before, only Windows did, so a Mac's or a
-/// Linux computer's signed-out token stayed valid on the server until it expired (30 days after the sign-in) and the
-/// account's session list still showed the computer as signed in. Best effort and bounded by
-/// [`SIGN_OUT_REVOKE_TIMEOUT`]: the local teardown is the authority, so a revoke the server refuses, that cannot reach
-/// it or that is not answered in time is a warning with its closed code (never the token) and the sign-out goes on.
-/// `token` comes from [`session_token_for_revoke`].
-async fn revoke_session_for_sign_out(token: &str, base_url: &str) -> SignOutRevoke {
-    let revoke = async {
-        let Ok(client) = reqwest::Client::builder()
-            .default_headers(api_client::provenance_headers())
-            .build()
-        else {
-            return SignOutRevoke::NoClient;
-        };
-        match revoke_desktop_session(&client, base_url, token).await {
-            Ok(()) => SignOutRevoke::Revoked,
-            Err(LogoutFailure::Status(status)) => SignOutRevoke::Refused(status),
-            Err(LogoutFailure::Unreachable) => SignOutRevoke::Unreachable,
+/// The session token one Keychain layout holds, if it can say (task 1886: a clear reads what it is about to remove).
+fn stored_session_token<S: keychain::AuthSecretStore>(vault: &AuthVault<S>) -> Option<zeroize::Zeroizing<String>> {
+    vault
+        .session_token()
+        .ok()
+        .flatten()
+        .map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string()))
+}
+
+/// Every session token this computer still holds for `acct`: in memory and in both Keychain layouts. `None` when a
+/// store cannot say (one that holds no secrets, `Unsupported`, or none, `NotFound`, holds none).
+fn session_tokens_held_here(acct: &AccountRuntime) -> Option<Vec<zeroize::Zeroizing<String>>> {
+    let mut held: Vec<zeroize::Zeroizing<String>> = acct
+        .session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|session| zeroize::Zeroizing::new(session.token.clone()))
+        .into_iter()
+        .collect();
+    for vault in [
+        AuthVault::new(platform_keychain_store_for(acct.id.as_str())),
+        AuthVault::new(keychain::legacy_platform_keychain_store()),
+    ] {
+        match vault.session_token() {
+            Ok(token) => held.extend(token.map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string()))),
+            Err(keychain::AuthStoreError::NotFound | keychain::AuthStoreError::Unsupported(_)) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(held)
+}
+
+/// Task 1886 (P0): end these sessions on the server, all at once and within one [`SIGN_OUT_REVOKE_TIMEOUT`]. Best
+/// effort: each outcome is logged by its closed code, never with a token. A 401 means the server had already ended the
+/// session, which is no warning.
+async fn revoke_sessions_for_sign_out(tokens: &[&str], base_url: &str) -> Vec<LogoutOutcome> {
+    let deadline = tokio::time::Instant::now() + SIGN_OUT_REVOKE_TIMEOUT;
+    let outcomes = match reqwest::Client::builder()
+        .default_headers(api_client::provenance_headers())
+        .build()
+    {
+        Err(_) => vec![LogoutOutcome::NoClient; tokens.len()],
+        Ok(client) => {
+            futures_util::future::join_all(tokens.iter().map(|token| {
+                let client = &client;
+                async move {
+                    tokio::time::timeout_at(deadline, revoke_desktop_session(client, base_url, token))
+                        .await
+                        .unwrap_or(LogoutOutcome::TimedOut)
+                }
+            }))
+            .await
         }
     };
-    let outcome = tokio::time::timeout(SIGN_OUT_REVOKE_TIMEOUT, revoke)
-        .await
-        .unwrap_or(SignOutRevoke::TimedOut);
-    match outcome {
-        SignOutRevoke::Revoked => tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session"),
-        SignOutRevoke::Refused(status) => tracing::warn!(
-            outcome = outcome.code(),
-            status,
-            "sign-out: the server did not end the session; signed out on this computer anyway"
-        ),
-        _ => tracing::warn!(
-            outcome = outcome.code(),
-            "sign-out: the server could not be asked to end the session; signed out on this computer anyway"
-        ),
+    for &outcome in &outcomes {
+        match outcome {
+            LogoutOutcome::Revoked => tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session"),
+            LogoutOutcome::AlreadyEnded => {
+                tracing::info!(outcome = outcome.code(), "sign-out: the server had already ended the session")
+            }
+            LogoutOutcome::Refused(status) => tracing::warn!(
+                outcome = outcome.code(),
+                status,
+                "sign-out: the server did not end the session; signed out on this computer anyway"
+            ),
+            _ => tracing::warn!(
+                outcome = outcome.code(),
+                "sign-out: the server could not be asked to end the session; signed out on this computer anyway"
+            ),
+        }
     }
-    outcome
+    outcomes
+}
+
+/// Task 1886 (P0): a sign-out ends on the server every session it took off this computer. Before, only Windows did, and
+/// only for the token it began with, so a Mac's or a Linux computer's signed-out token stayed valid on the server until
+/// it expired (30 days after the sign-in). Runs once the local clear has run (`cleared`: it completed) and the engine
+/// slot is free, so `sync_status`, Lock, Repair and an engine start never wait for the server. After a clear that
+/// completed nothing of the account is left here, so every dropped token is ended. After one that failed, only the
+/// tokens this computer no longer holds are: one it still holds keeps working here, and trying the sign-out again ends
+/// it; when a store cannot say what it holds, none is ended.
+async fn end_dropped_sessions(acct: &AccountRuntime, dropped: DroppedTokens, cleared: bool) {
+    let mut tokens = dropped.0;
+    if !cleared {
+        match session_tokens_held_here(acct) {
+            Some(held) => tokens.retain(|token| !held.iter().any(|kept| **kept == **token)),
+            None => {
+                tracing::warn!(
+                    dropped = tokens.len(),
+                    "sign-out paused: this computer could not say which sessions it still holds; none was ended on the server"
+                );
+                return;
+            }
+        }
+    }
+    if tokens.is_empty() {
+        return;
+    }
+    let tokens: Vec<&str> = tokens.iter().map(|token| token.as_str()).collect();
+    revoke_sessions_for_sign_out(&tokens, &sign_out_api_base()).await;
 }
 
 #[cfg(test)]
@@ -3276,14 +3370,15 @@ async fn clear_session_impl(
     // for it see keys this sign-out is about to clear. `clear_session_holding_slot` makes that order the
     // only one that compiles. Session installs are ordered against a sign-out separately (Task 12).
     //
-    // Task 1886: the token whose session this sign-out ends on the server (after the purge, below), read now, before
-    // the slot is taken and while nothing of the session is torn down: from the slot on, nothing here touches the
-    // session until its clear. An already-signed-out sign-out has no session to end.
-    let revoke_token = if already_signed_out {
-        None
-    } else {
-        session_token_for_revoke(&acct)
-    };
+    // Task 1886: every session token this sign-out takes off this computer, each ended on the server once the local
+    // clear has run and the slot is free (`end_dropped_sessions`, at the end). It begins with the token in memory or the
+    // Keychain, read now, before the slot is taken: from the slot on, nothing here touches the session until its clear.
+    // The clears below add what they remove, a session written while the sign-out runs included. An already-signed-out
+    // sign-out begins with none.
+    let mut dropped = DroppedTokens::default();
+    if !already_signed_out {
+        dropped.add(session_token_for_revoke(&acct));
+    }
     let mut held_engine_slot = if already_signed_out {
         #[cfg(target_os = "windows")]
         tracing::info!("sign-out requested while already signed out; skipping engine stop and Cloud Files teardown");
@@ -3492,16 +3587,6 @@ async fn clear_session_impl(
         sign_out_seam("after_purge").map_err(&kept_with)?;
     }
 
-    // Task 1886 (P0): the session ends on the server too, on every OS (it was Windows only, so a Mac's or a Linux
-    // computer's signed-out token kept working on the server for up to 30 days). Here: after the purge (and on Windows
-    // the Cloud Files unregister), before the session is cleared below, with the token read before the engine slot was
-    // taken. Best effort and bounded: whatever the server answers, or if it does not, the sign-out goes on and the
-    // token is never logged.
-    if let Some(token) = revoke_token.as_deref() {
-        let _ = revoke_session_for_sign_out(token, &sign_out_api_base()).await;
-    }
-    drop(revoke_token);
-
     // (macOS: the Finder removal is the reconciler's, at the start of this function: spec 2026-10-06
     // §5.3 (5). A logged-out Mac has no File Provider domain pointing at a folder the person is no
     // longer signed into, and no second, direct removal runs here.)
@@ -3513,88 +3598,103 @@ async fn clear_session_impl(
 
     // Every path holds the engine slot by now (it took the slot to stop the engine), except the Windows
     // already-signed-out path, which stopped nothing and holds none: it takes the slot here, only to clear under it.
-    let engine_slot = match held_engine_slot.take() {
-        Some(slot) => slot,
-        None => acct.engine.lock().await,
-    };
-    clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;
-    // Windows: only now may a start waiting for the engine slot get it, and it finds no keys. On macOS and Linux the
-    // slot is held through the last turn below (`finish_sign_out_turn`).
-    #[cfg(target_os = "windows")]
-    drop(engine_slot);
-    // Drop the cached account profile so a subsequent `account_profile` IPC
-    // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
-    clear_cached_profile(state);
-    // And the storage summary (task 1887's rule: nothing of the account survives sign-out). The session is gone by
-    // now, so no new fetch can start with its token; one still running answers into nothing (#139 review P2-3).
-    popover_data::clear_storage(&state.popover_storage);
-    // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
-    // partial token can't linger (and is zeroized) past a logout.
-    if let Ok(mut guard) = state.pending_2fa.lock() {
-        *guard = None;
-    }
-    if let Ok(mut guard) = acct.engine_state.lock() {
-        *guard = "stopped".to_string();
-    }
-    // Sign out = clean slate for the auth-health streak too (task 1546
-    // finding 5): the engine that was feeding it just stopped, and a fresh
-    // sign-in must not inherit a stale `auth_expired: true` banner.
-    acct.auth_health.note_result(None);
-    if already_signed_out {
-        // Already signed out: after a startup 401 (R9) the vault key and the email can still be here. The clear is
-        // idempotent, but on a store that cannot answer (e.g. the Linux
-        // fail-closed stub) an error must not turn an already-signed-out
-        // no-op into a failure — log it and go on to the check (macOS/Linux: inside the last turn).
+    // Task 1886: the local clear is one step (`cleared`), so the sessions it took are ended on the server only after
+    // it, with its result known and the engine slot released.
+    let cleared: Result<SignedOut, SignOutFailure> = async {
+        let engine_slot = match held_engine_slot.take() {
+            Some(slot) => slot,
+            None => acct.engine.lock().await,
+        };
+        let in_memory =
+            clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;
+        dropped.add(in_memory);
+        // Windows: only now may a start waiting for the engine slot get it, and it finds no keys. On macOS and Linux the
+        // slot is held through the last turn below (`finish_sign_out_turn`).
+        #[cfg(target_os = "windows")]
+        drop(engine_slot);
+        // Drop the cached account profile so a subsequent `account_profile` IPC
+        // can't cache-hit a stale (logged-out) identity. A fresh login repopulates it.
+        clear_cached_profile(state);
+        // And the storage summary (task 1887's rule: nothing of the account survives sign-out). The session is gone by
+        // now, so no new fetch can start with its token; one still running answers into nothing (#139 review P2-3).
+        popover_data::clear_storage(&state.popover_storage);
+        // Sign out = clean slate: drop any in-flight 2FA challenge so an abandoned
+        // partial token can't linger (and is zeroized) past a logout.
+        if let Ok(mut guard) = state.pending_2fa.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = acct.engine_state.lock() {
+            *guard = "stopped".to_string();
+        }
+        // Sign out = clean slate for the auth-health streak too (task 1546
+        // finding 5): the engine that was feeding it just stopped, and a fresh
+        // sign-in must not inherit a stale `auth_expired: true` banner.
+        acct.auth_health.note_result(None);
+        if already_signed_out {
+            // Already signed out: after a startup 401 (R9) the vault key and the email can still be here. The clear is
+            // idempotent, but on a store that cannot answer (e.g. the Linux
+            // fail-closed stub) an error must not turn an already-signed-out
+            // no-op into a failure — log it and go on to the check (macOS/Linux: inside the last turn).
+            #[cfg(not(target_os = "windows"))]
+            {
+                finish_sign_out_turn(&acct, &engine_slot, true, &mut dropped).map_err(&kept_with)?;
+                // Only now may a start waiting for the engine slot get it, and it finds no keys.
+                drop(engine_slot);
+            }
+            #[cfg(target_os = "windows")]
+            if let Err(error) = clear_keychain_session_into(acct.id.as_str(), &mut dropped) {
+                tracing::warn!(
+                    %error,
+                    "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
+                );
+            }
+            set_auth_present(state, false);
+            set_auth_email(state, None);
+            state.sign_out.snapshots.clear();
+            return Ok(SignedOut {
+                outcome: SignOutOutcome::NotSignedIn,
+                warning: removal_warning,
+                preserved_location: preserved_location.clone(),
+                #[cfg(target_os = "windows")]
+                kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
+                #[cfg(not(target_os = "windows"))]
+                kept_unsent: kept_unsent.clone(),
+            });
+        }
+        // macOS/Linux: the Keychain clear and its check in the sign-out's last turn, which moves the generation on after them.
         #[cfg(not(target_os = "windows"))]
         {
-            finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;
+            finish_sign_out_turn(&acct, &engine_slot, false, &mut dropped).map_err(&kept_with)?;
             // Only now may a start waiting for the engine slot get it, and it finds no keys.
             drop(engine_slot);
         }
         #[cfg(target_os = "windows")]
-        if let Err(error) = clear_keychain_session(acct.id.as_str()) {
-            tracing::warn!(
-                %error,
-                "already-signed-out sign-out: keychain session clear failed (nothing should be left); continuing"
-            );
-        }
+        clear_keychain_session_into(acct.id.as_str(), &mut dropped).map_err(&kept_with)?;
         set_auth_present(state, false);
         set_auth_email(state, None);
+        lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
+        // Everything this sign-out can clear is cleared, so it happened; a removal from Finder it could not confirm is a
+        // warning on that success, not an error (FB-24; lead rulings T8-⚠lock 1 and T7-⚠2 5).
         state.sign_out.snapshots.clear();
-        return Ok(SignedOut {
-            outcome: SignOutOutcome::NotSignedIn,
+        Ok(SignedOut {
+            outcome: SignOutOutcome::Completed,
             warning: removal_warning,
-            preserved_location,
+            preserved_location: preserved_location.clone(),
             #[cfg(target_os = "windows")]
             kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
             #[cfg(not(target_os = "windows"))]
             kept_unsent: kept_unsent.clone(),
-        });
+        })
     }
-    // macOS/Linux: the Keychain clear and its check in the sign-out's last turn, which moves the generation on after them.
-    #[cfg(not(target_os = "windows"))]
-    {
-        finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;
-        // Only now may a start waiting for the engine slot get it, and it finds no keys.
-        drop(engine_slot);
-    }
-    #[cfg(target_os = "windows")]
-    clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;
-    set_auth_present(state, false);
-    set_auth_email(state, None);
-    lifecycle_log::event(lifecycle_log::LifecycleEvent::SignedOut);
-    // Everything this sign-out can clear is cleared, so it happened; a removal from Finder it could not confirm is a
-    // warning on that success, not an error (FB-24; lead rulings T8-⚠lock 1 and T7-⚠2 5).
-    state.sign_out.snapshots.clear();
-    Ok(SignedOut {
-        outcome: SignOutOutcome::Completed,
-        warning: removal_warning,
-        preserved_location,
-        #[cfg(target_os = "windows")]
-        kept_unsent: kept_unsent.clone().or_else(|| windows_kept.clone()),
-        #[cfg(not(target_os = "windows"))]
-        kept_unsent: kept_unsent.clone(),
-    })
+    .await;
+
+    // Task 1886 (P0): the sessions this sign-out took off this computer end on the server too, on every OS (it was
+    // Windows only, and only for the token it began with, so a Mac's or a Linux computer's signed-out token kept
+    // working on the server for up to 30 days). Here: after the local clear, whatever its result (a clear that failed
+    // ends only what this computer no longer holds), with the engine slot released. Best effort and bounded: whatever
+    // the server answers, or if it does not, the sign-out's result stands and no token is logged.
+    end_dropped_sessions(&acct, dropped, cleared.is_ok()).await;
+    cleared
 }
 
 /// Sign-out's engine stop: take the engine slot and stop whatever engine holds it, through the one stop helper
@@ -7218,33 +7318,37 @@ fn engine_start_refusal(acct: &account::AccountRuntime) -> Result<(), String> {
 /// slot: "release the slot, then clear the session" would be a use of a moved guard and does not compile. That
 /// order is what keeps a start that was waiting for the slot from finding keys the clear was about to remove
 /// (every start reads its keys under the slot). A poisoned mutex still guards the master key: it is recovered
-/// and cleared, never skipped (and cleared of its poison, so the next unlock can install a session).
+/// and cleared, never skipped (and cleared of its poison, so the next unlock can install a session). Returns the token
+/// of the session it took (task 1886: a sign-out ends it on the server; Lock, which keeps the session, drops it).
 fn clear_session_holding_slot(
     acct: &account::AccountRuntime,
     _engine_slot: &tokio::sync::MutexGuard<'_, Option<EngineRunner>>,
     by: account::SessionTransition,
-) -> Result<(), String> {
+) -> Result<Option<zeroize::Zeroizing<String>>, String> {
     // Every session transition that began before this point is refused from now on (Task 12, lead ruling 1): one that
     // put its session in memory before it is cleared just below, and one that has not yet written never will. The
     // session-write lock is not held across the clear (`bump_vault_epoch` must never wait under it).
     drop(end_sessions_in_flight(acct, by));
-    match acct.session.lock() {
+    let taken = match acct.session.lock() {
         Ok(mut guard) => {
-            guard.take();
+            let taken = guard.take();
             bump_vault_epoch();
             tracing::info!("runtime session cleared");
+            taken
         }
         #[cfg(target_os = "windows")]
         Err(_) => return Err("Could not clear the runtime session. The vault is not locked; restart Beebeeb.".into()),
         #[cfg(not(target_os = "windows"))]
         Err(poisoned) => {
-            poisoned.into_inner().take();
+            let taken = poisoned.into_inner().take();
             acct.session.clear_poison();
             bump_vault_epoch();
             tracing::warn!("the session mutex was poisoned; the runtime session was cleared anyway");
+            taken
         }
-    }
-    Ok(())
+    };
+    // `Session` wipes itself on drop; its token moves out first, into a value that wipes itself too.
+    Ok(taken.map(|mut session| zeroize::Zeroizing::new(std::mem::take(&mut session.token))))
 }
 
 /// The one way an engine leaves its slot to be stopped (Task 9 fix round 1, item A; lead ruling
@@ -20325,27 +20429,42 @@ mod recovery_phrase_unlock_tests {
 /// against a loopback API, the real cache. No webview and no window exist, and no state DB is
 /// read (a test process has no state directory; that leg is `popover_data::gather_db_view`'s
 /// own test against a real DB).
+/// Test support: a loopback API for tests that drive real HTTP (the popover's storage fetch, the sign-out's revoke).
 #[cfg(all(test, not(target_os = "windows")))]
-mod popover_snapshot_command_tests {
-    use super::*;
+mod loopback_api_for_tests {
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tauri::Manager;
+    use std::sync::{Arc, Mutex};
 
-    /// The command reads `BB_API_BASE` and the user config directory, both process-wide.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// How the API answers each request.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        With { status: &'static str, body: &'static str },
+        /// Reads the request and never answers: the connection stays open until the API is dropped.
+        Never,
+    }
 
-    /// A loopback API that answers every request with `status` and `body`, and records the
-    /// raw requests it received.
-    struct LoopbackApi {
-        base: String,
+    /// A loopback API that records each raw request it reads (before it answers, so a request is recorded by the time
+    /// its client has the answer) and answers it as told. Dropping it stops its thread and closes every connection.
+    pub(super) struct LoopbackApi {
+        pub(super) base: String,
         requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
     }
 
     impl LoopbackApi {
-        fn start(status: &'static str, body: &'static str) -> Self {
+        /// Answers every request with `status` and `body`.
+        pub(super) fn start(status: &'static str, body: &'static str) -> Self {
+            Self::answering(Answer::With { status, body })
+        }
+
+        /// Never answers a request.
+        pub(super) fn never_answering() -> Self {
+            Self::answering(Answer::Never)
+        }
+
+        fn answering(answer: Answer) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
@@ -20353,20 +20472,35 @@ mod popover_snapshot_command_tests {
             let stop = Arc::new(AtomicBool::new(false));
             let (seen, halt) = (requests.clone(), stop.clone());
             let handle = std::thread::spawn(move || {
+                // The connections of `Answer::Never`, open until this thread ends.
+                let mut held = Vec::new();
                 while !halt.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream.set_nonblocking(false).unwrap();
+                            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                            // Up to the end of the headers (or what one read gave, if the peer stops there).
+                            let mut request = Vec::new();
                             let mut buf = [0u8; 8192];
-                            let n = stream.read(&mut buf).unwrap_or(0);
+                            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                match stream.read(&mut buf) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => request.extend_from_slice(&buf[..n]),
+                                }
+                            }
                             seen.lock()
                                 .unwrap()
-                                .push(String::from_utf8_lossy(&buf[..n]).into_owned());
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
+                                .push(String::from_utf8_lossy(&request).into_owned());
+                            match answer {
+                                Answer::With { status, body } => {
+                                    let _ = write!(
+                                        stream,
+                                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                        body.len()
+                                    );
+                                }
+                                Answer::Never => held.push(stream),
+                            }
                         }
                         Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
                     }
@@ -20380,7 +20514,7 @@ mod popover_snapshot_command_tests {
             }
         }
 
-        fn requests(&self) -> Vec<String> {
+        pub(super) fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
         }
     }
@@ -20393,6 +20527,17 @@ mod popover_snapshot_command_tests {
             }
         }
     }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod popover_snapshot_command_tests {
+    use super::loopback_api_for_tests::LoopbackApi;
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+
+    /// The command reads `BB_API_BASE` and the user config directory, both process-wide.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Holds [`super::EPOCH_GATE`] exclusively for as long as it lives, and marks this thread as the holder so the
     /// real `lock_vault` these tests run (on this thread's own runtime) can bump the epoch without waiting for itself.
@@ -22368,34 +22513,64 @@ mod signout_teardown_tests {
         );
     }
 
-    /// Task 1886 (P0): the sign-out ends its session on the server through ONE call that every OS compiles (it was
-    /// Windows only). Pinned as text so it holds on Windows too, where no test can drive a signed-in sign-out: no
-    /// `#[cfg(` gates the token read or the call, each is the only one in the sign-out, the token is read before the
-    /// engine slot is taken (from the slot on nothing touches the session until its clear), and the revoke is sent
-    /// before the session is cleared.
+    /// Task 1886 (P0): the sign-out ends on the server every session it took, through ONE call that every OS compiles
+    /// (it was Windows only). Pinned as text so it holds on Windows too, where no test can drive a signed-in sign-out:
+    /// no `#[cfg(` gates the first token read or the call (looked for past every comment and blank line above them,
+    /// review finding 4); the first token is read before the engine slot is taken (from the slot on nothing touches the
+    /// session until its clear); every clear hands what it removes to the same collector; and the call comes after the
+    /// last local clear step and after every release of the engine slot (review findings 1 to 3).
     #[test]
     fn the_sign_out_ends_its_session_on_the_server_on_every_os() {
         let production = production_source();
         let clear = body_between(&production, "async fn clear_session_impl(", "\n}\n");
+        // The first line above `at` that is code or an attribute: a `#[cfg(` there gates the statement at `at`, however
+        // many comment lines come between.
         let not_gated = |at: usize, what: &str| {
-            let line_before = clear[..at].trim_end().lines().last().unwrap_or_default();
-            assert!(!line_before.contains("#[cfg"), "{what} is not gated to one platform: {line_before}");
+            let above = clear[..at]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap_or_default();
+            assert!(!above.starts_with("#[cfg"), "{what} is gated to one platform: {above}");
         };
-        let read = "    let revoke_token = if already_signed_out {\n        None\n    } else {\n        session_token_for_revoke(&acct)\n    };\n";
-        let read_at = clear.find(read).unwrap_or_else(|| panic!("the token read is in the sign-out:\n{clear}"));
-        not_gated(read_at, "the token read");
-        let call = "    if let Some(token) = revoke_token.as_deref() {\n        let _ = revoke_session_for_sign_out(token, &sign_out_api_base()).await;\n    }\n";
-        let call_at = clear.find(call).unwrap_or_else(|| panic!("the revoke call is in the sign-out:\n{clear}"));
-        not_gated(call_at, "the revoke");
-        assert_eq!(clear.matches("session_token_for_revoke(").count(), 1, "{clear}");
-        assert_eq!(clear.matches("revoke_session_for_sign_out(").count(), 1, "{clear}");
-        assert_eq!(clear.matches("revoke_desktop_session(").count(), 0, "one way to revoke: {clear}");
-        let slot = clear.find("take_slot_and_stop_engine_for_sign_out(").expect("the engine stop");
-        assert!(read_at < slot, "the token is read before the engine slot is taken");
-        let cleared = clear
-            .find("clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut)")
-            .expect("the session clear");
-        assert!(call_at < cleared, "the revoke is sent before the session is cleared");
+        let find = |needle: &str| clear.find(needle).unwrap_or_else(|| panic!("{needle}:\n{clear}"));
+        let collector = find("    let mut dropped = DroppedTokens::default();\n");
+        not_gated(collector, "the collector");
+        let first = find("    if !already_signed_out {\n        dropped.add(session_token_for_revoke(&acct));\n    }\n");
+        not_gated(first, "the first token read");
+        assert!(first < find("take_slot_and_stop_engine_for_sign_out("), "read before the engine slot is taken");
+        let call = find("    end_dropped_sessions(&acct, dropped, cleared.is_ok()).await;\n");
+        not_gated(call, "the call");
+        for (needle, count) in [
+            ("session_token_for_revoke(", 1),
+            ("end_dropped_sessions(", 1),
+            ("revoke_sessions_for_sign_out(", 0),
+            ("revoke_desktop_session(", 0),
+            ("dropped.add(in_memory);", 1),
+            ("finish_sign_out_turn(&acct, &engine_slot, true, &mut dropped)", 1),
+            ("finish_sign_out_turn(&acct, &engine_slot, false, &mut dropped)", 1),
+            ("clear_keychain_session_into(acct.id.as_str(), &mut dropped)", 2),
+            ("clear_keychain_session(", 0),
+        ] {
+            assert_eq!(clear.matches(needle).count(), count, "{needle}:\n{clear}");
+        }
+        assert!(
+            find("let in_memory =\n            clear_session_holding_slot(") < find("dropped.add(in_memory);"),
+            "the memory clear's token is collected"
+        );
+        for last_local_step in [
+            "drop(engine_slot)",
+            "finish_sign_out_turn(",
+            "clear_keychain_session_into(",
+            "set_auth_present(state, false);",
+        ] {
+            let at = clear.rfind(last_local_step).unwrap_or_else(|| panic!("{last_local_step}"));
+            assert!(at < call, "the sessions are ended after {last_local_step}");
+        }
+        let ended = body_between(&production, "async fn end_dropped_sessions(", "\n}\n");
+        assert!(ended.contains("session_tokens_held_here(acct)"), "a failed clear ends only what is gone:\n{ended}");
+        assert!(ended.contains("revoke_sessions_for_sign_out(&tokens, &sign_out_api_base())"), "{ended}");
     }
 
     /// User amendment: the email to prefill into the sign-in form must be
@@ -22510,77 +22685,52 @@ mod signout_teardown_tests {
     }
 }
 
-/// Task 1886 (P0): a sign-out on macOS and Linux ends its session on the server too (`POST /api/v1/auth/logout` with
-/// the session's token), bounded and best effort as on Windows. These drive the REAL `clear_session_impl`, signed in,
-/// against a loopback API the test started (`with_sign_out_api_for_test`). On Linux the test build's credential store is
-/// the fail-closed stub, so a signed-in sign-out there ends in the Keychain clear's error, which comes AFTER the revoke;
-/// so each sign-out is compared with the one whose revoke succeeded: a revoke never changes what the sign-out returns.
+/// Task 1886 (P0): a sign-out on macOS and Linux ends its sessions on the server too (`POST /api/v1/auth/logout` with
+/// each token), bounded and best effort as on Windows. These drive the REAL `clear_session_impl`, signed in, against a
+/// loopback API the test started (`with_sign_out_api_for_test`). On Linux the test build's credential store is the
+/// fail-closed stub, so a signed-in sign-out there ends in the Keychain clear's error; the stub holds nothing, so the
+/// tokens the sign-out took are gone from the computer all the same and are ended. Each sign-out is compared with the
+/// one whose revoke succeeded: a revoke never changes what the sign-out returns.
 #[cfg(all(test, not(target_os = "windows")))]
 mod sign_out_revoke_tests {
+    use super::loopback_api_for_tests::LoopbackApi;
     use super::*;
-    use std::io::{Read as _, Write as _};
     use std::time::{Duration, Instant};
 
-    /// How the loopback API answers.
-    #[derive(Clone, Copy)]
-    enum Answer {
-        Status(&'static str),
-        /// Reads the request and never answers; the connection stays open.
-        Never,
+    /// A fixed address nothing listens on (the test build's closed default), so no parallel test can take it over.
+    const NOTHING_LISTENS: &str = runner::TEST_API_BASE;
+
+    /// One revoke against `base`, by its closed code.
+    async fn revoke_one(token: &str, base: &str) -> &'static str {
+        let outcomes = revoke_sessions_for_sign_out(&[token], base).await;
+        assert_eq!(outcomes.len(), 1);
+        outcomes[0].code()
     }
 
-    /// A loopback API that records every request it reads (before it answers, so a request is recorded by the time
-    /// its client has an answer).
-    struct LogoutApi {
-        base: String,
-        requests: Arc<Mutex<Vec<String>>>,
+    /// The bearer token of a raw request, lowercased (every token here is lowercase).
+    fn bearer_of(request: &str) -> String {
+        request
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("authorization: bearer ")
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
     }
 
-    impl LogoutApi {
-        fn start(answer: Answer) -> Self {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let base = format!("http://{}", listener.local_addr().unwrap());
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let seen = requests.clone();
-            std::thread::spawn(move || {
-                let mut held = Vec::new();
-                for stream in listener.incoming() {
-                    let Ok(mut stream) = stream else { return };
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                    let mut request = Vec::new();
-                    let mut buf = [0u8; 4096];
-                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        match stream.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => request.extend_from_slice(&buf[..n]),
-                        }
-                    }
-                    seen.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
-                    match answer {
-                        Answer::Status(status) => {
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
-                            );
-                        }
-                        Answer::Never => held.push(stream),
-                    }
-                }
-            });
-            Self { base, requests }
+    /// Every request is the logout; the tokens it carried, sorted.
+    fn ended_tokens(api: &LoopbackApi) -> Vec<String> {
+        let requests = api.requests();
+        for request in &requests {
+            assert!(
+                request.to_ascii_lowercase().starts_with("post /api/v1/auth/logout http/1.1\r\n"),
+                "only the logout reaches the API: {request}"
+            );
         }
-
-        fn requests(&self) -> Vec<String> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    /// An address nothing listens on: bound, then released.
-    fn closed_port() -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
-        base
+        let mut tokens: Vec<String> = requests.iter().map(|request| bearer_of(request)).collect();
+        tokens.sort();
+        tokens
     }
 
     /// Signed in on this computer: the auth flag and, with `in_memory`, the session (token and keys) in memory, as after
@@ -22608,31 +22758,45 @@ mod sign_out_revoke_tests {
         acct
     }
 
-    /// The real sign-out of a fresh signed-in account `id` holding `token`, its revoke sent to `api`. It works in the
-    /// scratch state directory every sign-out test shares, so it holds that directory's gate throughout.
-    async fn signed_in_sign_out(
-        id: &str,
-        token: &str,
+    /// The real sign-out of `state`, its revoke sent to `api`, with `seam` (if any) between its steps. It works in the
+    /// scratch state directory every sign-out test shares, so it holds that directory's gate throughout. The 30 s bound
+    /// and the time it reports start once it has the gate, so a wait for another test's purge counts in neither.
+    async fn sign_out(
+        state: &AppState,
         api: &str,
-    ) -> (Result<SignedOut, SignOutFailure>, Arc<AccountRuntime>) {
-        sign_out_of(id, Some(token), api).await
+        seam: Option<SignOutSeam>,
+    ) -> (Result<SignedOut, SignOutFailure>, Duration) {
+        crate::state_paths::init_for_test();
+        with_the_shared_state_dir(async {
+            let started = Instant::now();
+            let sign_out = with_sign_out_api_for_test(
+                api.to_string(),
+                clear_session_impl(state, false, None, UnknownFilesArg::Keep, None),
+            );
+            let run = async {
+                match seam {
+                    Some(seam) => SIGN_OUT_SEAM.scope(seam, sign_out).await,
+                    None => sign_out.await,
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_secs(30), run)
+                .await
+                .expect("the sign-out finished within 30 s of having the shared state directory");
+            (result, started.elapsed())
+        })
+        .await
     }
 
-    /// [`signed_in_sign_out`] with `in_memory` as the session in memory (`None`: none).
+    /// [`sign_out`] of a fresh account `id`, signed in with `in_memory` as the session in memory (`None`: none).
     async fn sign_out_of(
         id: &str,
         in_memory: Option<&str>,
         api: &str,
-    ) -> (Result<SignedOut, SignOutFailure>, Arc<AccountRuntime>) {
-        crate::state_paths::init_for_test();
+    ) -> (Result<SignedOut, SignOutFailure>, Arc<AccountRuntime>, Duration) {
         let state = AppState::default();
         let acct = signed_in(&state, id, in_memory);
-        let result = with_the_shared_state_dir(with_sign_out_api_for_test(
-            api.to_string(),
-            clear_session_impl(&state, false, None, UnknownFilesArg::Keep, None),
-        ))
-        .await;
-        (result, acct)
+        let (result, took) = sign_out(&state, api, None).await;
+        (result, acct, took)
     }
 
     /// Every tracing event `body` emits on this thread, as text (a current-thread runtime polls the sign-out here).
@@ -22665,27 +22829,116 @@ mod sign_out_revoke_tests {
         (out, logs)
     }
 
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
     /// The fix: a signed-in sign-out sends `POST /api/v1/auth/logout` once, with the session's own token, and clears
     /// the session on this computer.
     #[tokio::test]
     async fn a_sign_out_ends_its_session_on_the_server() {
-        let api = LogoutApi::start(Answer::Status("200 OK"));
-        let (result, acct) =
-            signed_in_sign_out("signout-1886-revokes", "tok-1886-revoked-on-sign-out", &api.base).await;
-        let requests = api.requests();
-        assert_eq!(requests.len(), 1, "the sign-out sent one request to the API: {requests:?} ({result:?})");
-        let request = requests[0].to_ascii_lowercase();
-        assert!(
-            request.starts_with("post /api/v1/auth/logout http/1.1\r\n"),
-            "it is the logout: {request}"
-        );
-        assert!(
-            request.contains("\r\nauthorization: bearer tok-1886-revoked-on-sign-out\r\n"),
-            "with the session's own token: {request}"
-        );
+        let api = LoopbackApi::start("200 OK", "{}");
+        let (result, acct, _) =
+            sign_out_of("signout-1886-revokes", Some("tok-1886-revoked-on-sign-out"), &api.base).await;
+        assert_eq!(ended_tokens(&api), ["tok-1886-revoked-on-sign-out"], "{result:?}");
         assert!(acct.session.lock().unwrap().is_none(), "the session is gone from memory");
         #[cfg(target_os = "macos")]
         assert_eq!(result.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
+    }
+
+    /// Review finding 1: a session written while the sign-out runs (a same-account re-sign-in that swaps the token in
+    /// memory; on a Mac also a first sign-in that stores one in the Keychain) is cleared by the sign-out, so it is ended
+    /// on the server too, as is the session the sign-out began with.
+    #[tokio::test]
+    async fn a_session_written_while_the_sign_out_runs_is_ended_on_the_server_too() {
+        let api = LoopbackApi::start("200 OK", "{}");
+        let state = AppState::default();
+        let acct = signed_in(&state, "signout-1886-written-during", Some("tok-1886-a-at-the-start"));
+        let during = acct.clone();
+        let seam: SignOutSeam = Arc::new(move |point| {
+            if point == "after_purge" {
+                let swapped = replace_session_token_in_memory(&SessionWrite::for_test(), &during, "tok-1886-b-in-memory");
+                assert_eq!(swapped, Ok(true), "the premise: a session is in memory to swap");
+                #[cfg(target_os = "macos")]
+                persist_session_token_to_keychain(
+                    &SessionWrite::for_test(),
+                    during.id.as_str(),
+                    "tok-1886-c-in-the-keychain",
+                    None,
+                )
+                .unwrap();
+            }
+            Ok(())
+        });
+        let (result, _) = sign_out(&state, &api.base, Some(seam)).await;
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut expected = vec!["tok-1886-a-at-the-start", "tok-1886-b-in-memory"];
+        #[cfg(target_os = "macos")]
+        expected.push("tok-1886-c-in-the-keychain");
+        expected.sort();
+        assert_eq!(ended_tokens(&api), expected, "every session the sign-out took is ended ({result:?})");
+        assert!(acct.session.lock().unwrap().is_none(), "none is left in memory");
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(result.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
+            assert!(!keychain_session_present(acct.id.as_str()), "none is left in the Keychain");
+        }
+    }
+
+    /// Review findings 2 and 3: by the time the server hears the logout, the sign-out is done on this computer (the
+    /// session is cleared; on a Mac it reports signed out) and the engine slot is free, so `sync_status`, Lock, Repair
+    /// and an engine start do not wait for a slow server.
+    #[tokio::test]
+    async fn the_server_hears_the_logout_only_after_the_local_clear_with_the_engine_slot_free() {
+        let api = LoopbackApi::never_answering();
+        let state = AppState::default();
+        let acct = signed_in(&state, "signout-1886-after-the-clear", Some("tok-1886-after-the-clear"));
+        let watch = async {
+            let deadline = Instant::now() + Duration::from_secs(25);
+            while api.requests().is_empty() {
+                assert!(Instant::now() < deadline, "the logout never reached the server");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            (
+                acct.engine.try_lock().is_ok(),
+                acct.session.lock().unwrap().is_none(),
+                *state.auth_present.lock().unwrap(),
+            )
+        };
+        let ((result, took), (slot_free, session_cleared, auth_present)) =
+            tokio::join!(sign_out(&state, &api.base, None), watch);
+        assert!(slot_free, "the engine slot is free while the logout waits ({result:?})");
+        assert!(session_cleared, "the session is cleared before the logout is sent");
+        assert!(took >= Duration::from_secs(3), "the unanswered logout was given its 3 s: {took:?}");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(!auth_present, "a Mac reports signed out before the logout is sent");
+            assert_eq!(result.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = auth_present;
+    }
+
+    /// Review finding 2, the failure: a Keychain that refuses the removal leaves the token on this Mac, so the sign-out
+    /// pauses and ends no session the Mac still holds. Trying again, with the Keychain working, ends it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_sign_out_whose_keychain_clear_fails_ends_no_session_the_mac_still_holds() {
+        let api = LoopbackApi::start("200 OK", "{}");
+        let id = "signout-1886-clear-fails";
+        persist_session_token_to_keychain(&SessionWrite::for_test(), id, "tok-1886-still-held", None).unwrap();
+        let state = AppState::default();
+        let acct = signed_in(&state, id, Some("tok-1886-still-held"));
+        keychain::test_fail_deletes(Some(id), true);
+        let (paused, _) = sign_out(&state, &api.base, None).await;
+        keychain::test_fail_deletes(Some(id), false);
+        assert!(paused.is_err(), "the sign-out paused: {paused:?}");
+        assert!(keychain_session_present(id), "the premise: the token is still in the Keychain");
+        assert!(api.requests().is_empty(), "no session the Mac still holds is ended: {:?}", api.requests());
+        let (again, _) = sign_out(&state, &api.base, None).await;
+        assert_eq!(again.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
+        assert_eq!(ended_tokens(&api), ["tok-1886-still-held"], "the second sign-out ends it");
+        assert!(acct.session.lock().unwrap().is_none());
     }
 
     /// Best effort and bounded, as on Windows: a revoke the server refuses, one that cannot reach it, and one the server
@@ -22694,32 +22947,24 @@ mod sign_out_revoke_tests {
     /// happened, and no log line holds the token.
     #[test]
     fn a_revoke_that_fails_or_never_answers_changes_nothing_of_the_sign_out_and_logs_no_token() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = current_thread_runtime();
         let id = "signout-1886-best-effort";
-        let ok = LogoutApi::start(Answer::Status("200 OK"));
-        let ((expected, _), baseline_logs) =
-            logs_of(|| runtime.block_on(signed_in_sign_out(id, "tok-1886-baseline", &ok.base)));
+        let ok = LoopbackApi::start("200 OK", "{}");
+        let ((expected, _, _), baseline_logs) =
+            logs_of(|| runtime.block_on(sign_out_of(id, Some("tok-1886-baseline"), &ok.base)));
         assert_eq!(ok.requests().len(), 1, "the premise: the baseline's revoke reached its API");
         assert!(!baseline_logs.contains("tok-1886-baseline"), "{baseline_logs}");
         #[cfg(target_os = "macos")]
         assert_eq!(expected.as_ref().map(|done| done.outcome), Ok(SignOutOutcome::Completed));
 
-        let refused = LogoutApi::start(Answer::Status("500 Internal Server Error"));
-        let silent = LogoutApi::start(Answer::Never);
+        let refused = LoopbackApi::start("500 Internal Server Error", "{}");
+        let silent = LoopbackApi::never_answering();
         for (case, api, token, outcome) in [
             ("refused", refused.base.clone(), "tok-1886-refused", "refused"),
-            ("unreachable", closed_port(), "tok-1886-unreachable", "unreachable"),
+            ("unreachable", NOTHING_LISTENS.to_string(), "tok-1886-unreachable", "unreachable"),
             ("never answers", silent.base.clone(), "tok-1886-never-answers", "timed_out"),
         ] {
-            let started = Instant::now();
-            let ((result, acct), logs) = logs_of(|| {
-                runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(30), signed_in_sign_out(id, token, &api))
-                        .await
-                        .unwrap_or_else(|_| panic!("{case}: the sign-out did not finish within 30 s"))
-                })
-            });
-            let took = started.elapsed();
+            let ((result, acct, took), logs) = logs_of(|| runtime.block_on(sign_out_of(id, Some(token), &api)));
             assert_eq!(result, expected, "{case}: the sign-out's result is the one a revoke that succeeds gives");
             assert!(acct.session.lock().unwrap().is_none(), "{case}: the session is gone from memory");
             assert!(
@@ -22736,47 +22981,71 @@ mod sign_out_revoke_tests {
         assert_eq!(silent.requests().len(), 1, "the unanswered revoke reached its API");
     }
 
-    /// The revoke reads the server's answer into its closed code: 2xx ended the session, any other status (a 401: it
-    /// had ended it already) is `Refused` with that status, and no server is `Unreachable`.
+    /// Review finding 5: a 401 says the server had already ended the session. That is no warning.
+    #[test]
+    fn a_session_the_server_had_already_ended_is_no_warning() {
+        let runtime = current_thread_runtime();
+        let api = LoopbackApi::start("401 Unauthorized", "{}");
+        let ((result, _, _), logs) = logs_of(|| {
+            runtime.block_on(sign_out_of("signout-1886-already-ended", Some("tok-1886-already-ended"), &api.base))
+        });
+        assert_eq!(api.requests().len(), 1, "the logout was sent ({result:?})");
+        assert!(
+            !logs.lines().any(|line| line.contains("WARN") && line.contains("sign-out: the server")),
+            "no warning about the server:\n{logs}"
+        );
+        assert!(
+            logs.lines()
+                .any(|line| line.contains("INFO") && line.contains("outcome") && line.contains("already_ended")),
+            "it says the session had already ended:\n{logs}"
+        );
+        assert!(!logs.contains("tok-1886-already-ended"), "{logs}");
+    }
+
+    /// Review finding 9: a logout request that cannot even be built (the API address is not a URL) says so, instead of
+    /// claiming the server was unreachable.
+    #[test]
+    fn a_logout_that_cannot_be_built_says_so() {
+        let runtime = current_thread_runtime();
+        let ((result, _, _), logs) = logs_of(|| {
+            runtime.block_on(sign_out_of("signout-1886-misconfigured", Some("tok-1886-misconfigured"), "not a url"))
+        });
+        assert!(
+            logs.lines()
+                .any(|line| line.contains("WARN") && line.contains("outcome") && line.contains("misconfigured")),
+            "a warning says the request could not be built ({result:?}):\n{logs}"
+        );
+        assert!(!logs.contains("tok-1886-misconfigured"), "{logs}");
+    }
+
+    /// The revoke reads the server's answer into its closed code: 2xx ended the session, 401 says it had ended
+    /// already, any other status is `refused`, and no server is `unreachable`. Each request carries the token.
     #[tokio::test]
     async fn the_revoke_reads_each_answer_of_the_server() {
         for (status, expected) in [
-            ("200 OK", SignOutRevoke::Revoked),
-            ("204 No Content", SignOutRevoke::Revoked),
-            ("401 Unauthorized", SignOutRevoke::Refused(401)),
-            ("500 Internal Server Error", SignOutRevoke::Refused(500)),
+            ("200 OK", "revoked"),
+            ("204 No Content", "revoked"),
+            ("401 Unauthorized", "already_ended"),
+            ("500 Internal Server Error", "refused"),
         ] {
-            let api = LogoutApi::start(Answer::Status(status));
-            assert_eq!(revoke_session_for_sign_out("tok-1886-answers", &api.base).await, expected, "{status}");
-            let requests = api.requests();
-            assert_eq!(requests.len(), 1, "{status}");
-            assert!(
-                requests[0]
-                    .to_ascii_lowercase()
-                    .contains("\r\nauthorization: bearer tok-1886-answers\r\n"),
-                "{status}: {}",
-                requests[0]
-            );
+            let api = LoopbackApi::start(status, "{}");
+            assert_eq!(revoke_one("tok-1886-answers", &api.base).await, expected, "{status}");
+            assert_eq!(ended_tokens(&api), ["tok-1886-answers"], "{status}");
         }
-        assert_eq!(
-            revoke_session_for_sign_out("tok-1886-unreachable", &closed_port()).await,
-            SignOutRevoke::Unreachable
-        );
+        assert_eq!(revoke_one("tok-1886-unreachable", NOTHING_LISTENS).await, "unreachable");
+        assert_eq!(revoke_one("tok-1886-not-a-url", "not a url").await, "misconfigured");
     }
 
     /// Bounded: a server that never answers is given up after 3 s, not later.
     #[tokio::test]
     async fn the_revoke_gives_up_after_three_seconds() {
-        let api = LogoutApi::start(Answer::Never);
+        let api = LoopbackApi::never_answering();
         let started = Instant::now();
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(20),
-            revoke_session_for_sign_out("tok-1886-bound", &api.base),
-        )
-        .await
-        .expect("the revoke is bounded");
+        let outcome = tokio::time::timeout(Duration::from_secs(20), revoke_one("tok-1886-bound", &api.base))
+            .await
+            .expect("the revoke is bounded");
         let took = started.elapsed();
-        assert_eq!(outcome, SignOutRevoke::TimedOut);
+        assert_eq!(outcome, "timed_out");
         assert!(
             took >= Duration::from_secs(3) && took < Duration::from_secs(6),
             "given up at the 3 s bound: took {took:?}"
@@ -22787,8 +23056,8 @@ mod sign_out_revoke_tests {
     /// Signed in with no token in memory and none in the Keychain: the sign-out has nothing to end and sends nothing.
     #[tokio::test]
     async fn a_sign_out_with_no_token_anywhere_sends_nothing() {
-        let api = LogoutApi::start(Answer::Status("200 OK"));
-        let (result, _acct) = sign_out_of("signout-1886-no-token", None, &api.base).await;
+        let api = LoopbackApi::start("200 OK", "{}");
+        let (result, _acct, _) = sign_out_of("signout-1886-no-token", None, &api.base).await;
         assert!(api.requests().is_empty(), "{:?} ({result:?})", api.requests());
     }
 
@@ -22797,19 +23066,11 @@ mod sign_out_revoke_tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn a_locked_mac_ends_the_session_the_keychain_holds() {
-        let api = LogoutApi::start(Answer::Status("200 OK"));
+        let api = LoopbackApi::start("200 OK", "{}");
         let id = "signout-1886-locked";
         persist_session_token_to_keychain(&SessionWrite::for_test(), id, "tok-1886-in-the-keychain", None).unwrap();
-        let (result, acct) = sign_out_of(id, None, &api.base).await;
-        let requests = api.requests();
-        assert_eq!(requests.len(), 1, "{requests:?} ({result:?})");
-        assert!(
-            requests[0]
-                .to_ascii_lowercase()
-                .contains("\r\nauthorization: bearer tok-1886-in-the-keychain\r\n"),
-            "{}",
-            requests[0]
-        );
+        let (result, acct, _) = sign_out_of(id, None, &api.base).await;
+        assert_eq!(ended_tokens(&api), ["tok-1886-in-the-keychain"], "{result:?}");
         assert_eq!(result.map(|done| done.outcome), Ok(SignOutOutcome::Completed));
         assert!(!keychain_session_present(acct.id.as_str()), "and the Keychain's token is cleared");
     }
@@ -22991,24 +23252,24 @@ mod startup_session_tests {
         let clear = &production[production.find("async fn clear_session_impl(").unwrap()..];
         let clear = &clear[..clear.find("\n}\n").unwrap()];
         let already = &clear[clear
-            .find("if already_signed_out {\n        // Already signed out")
+            .find("if already_signed_out {\n            // Already signed out")
             .expect("the already-signed-out branch")..];
         let already = &already[..already.find("outcome: SignOutOutcome::NotSignedIn,").unwrap()];
         // Task 12 fix round 1, item 2: the Keychain clear and its check run in the sign-out's last turn on macOS/Linux.
         assert!(
-            already.contains("finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;"),
+            already.contains("finish_sign_out_turn(&acct, &engine_slot, true, &mut dropped).map_err(&kept_with)?;"),
             "the already-signed-out branch verifies"
         );
         let tail = &clear[clear.rfind("if already_signed_out {").unwrap()..];
         let tail = &tail[tail.find("outcome: SignOutOutcome::NotSignedIn,").unwrap()..];
         assert!(
-            tail.contains("finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;"),
+            tail.contains("finish_sign_out_turn(&acct, &engine_slot, false, &mut dropped).map_err(&kept_with)?;"),
             "the signed-in branch verifies"
         );
         let last = &production[production.find("fn finish_sign_out_turn(").unwrap()..];
         let last = &last[..last.find("\n}\n").unwrap()];
         let cleared = last
-            .find("clear_keychain_session_holding(&write, acct.id.as_str())")
+            .find("clear_keychain_session_holding(&write, acct.id.as_str(), dropped)")
             .expect("the Keychain clear");
         let checked = last
             .find("ensure_keychain_holds_no_account(acct.id.as_str())")
@@ -24014,8 +24275,8 @@ mod finder_setup_wiring_tests {
         // The refusal for an unconfirmed earlier stop is the stop helper's (fix round 2, item 1).
         assert_eq!(clear.matches("drop(engine_slot)").count(), 3, "{clear}");
         for after_the_last_turn in [
-            "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
-            "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, true, &mut dropped).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, false, &mut dropped).map_err(&kept_with)?;",
         ] {
             let at = clear
                 .find(after_the_last_turn)
@@ -36111,20 +36372,23 @@ mod finder_removal_wiring_tests {
             "purge_local_data_for_sign_out(state_paths::beebeeb_state_dir(), cfg_sync_root.as_deref(), owe_removal, kept.as_ref()).map_err(&kept_with)?;",
             "sign_out_seam(\"after_purge\").map_err(&kept_with)?;",
             "clear_session_holding_slot(&acct, &engine_slot, account::SessionTransition::SignOut).map_err(&kept_with)?;",
-            "finish_sign_out_turn(&acct, &engine_slot, true).map_err(&kept_with)?;",
-            "finish_sign_out_turn(&acct, &engine_slot, false).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, true, &mut dropped).map_err(&kept_with)?;",
+            "finish_sign_out_turn(&acct, &engine_slot, false, &mut dropped).map_err(&kept_with)?;",
             // Task 2191 (review thread on #157): the Windows keychain step too.
-            "clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;",
+            "clear_keychain_session_into(acct.id.as_str(), &mut dropped).map_err(&kept_with)?;",
         ] {
             assert!(squash_ws(&sign_out).contains(&squash_ws(failure)), "{failure}");
         }
         // Task 1887: the keep step and its three test seams (test builds only) carry the folders too.
         assert_eq!(squash_ws(&sign_out).matches(".map_err(&kept_with)?").count(), 11);
-        assert_eq!(
-            sign_out.matches("        preserved_location,\n").count(),
-            2,
-            "both Ok returns carry it"
-        );
+        // Task 1886: both Ok returns are inside the local clear's block, which borrows the folder (`kept_with` does too,
+        // so the field is counted per return).
+        let returns: Vec<&str> = sign_out.split("Ok(SignedOut {").skip(1).collect();
+        assert_eq!(returns.len(), 2, "two Ok returns");
+        for ret in returns {
+            let fields = &ret[..ret.find("})").expect("the literal's end")];
+            assert!(fields.contains("preserved_location: preserved_location.clone(),"), "both Ok returns carry it");
+        }
         // ... and both ways out of a sign-out raise the alert, on success and on failure (I1).
         let command = code_only(&item(&source, "async fn clear_session("));
         assert!(command.contains("surface_sign_out_folders(&app, &result);"));
@@ -38657,7 +38921,7 @@ mod sign_out_keep_tests {
         ));
         let after = &body[body.find("windows_cf::signout::purge(").expect("the purge")..];
         // Task 1886: the logout request is no step that can fail the sign-out any more (it is best effort on every OS,
-        // `revoke_session_for_sign_out`), so its "Could not initialize logout request" failure is gone.
+        // `end_dropped_sessions`), so its "Could not initialize logout request" failure is gone.
         for step in ["Could not unregister Cloud Files", "Could not remove Explorer registration"] {
             assert!(
                 after.contains(&crate::source_pin::squeeze(&format!("failed_after_purge(format!(\"{step}"))),
@@ -38670,7 +38934,9 @@ mod sign_out_keep_tests {
             )),
             "the later failures carry it too"
         );
-        assert!(after.contains(&crate::source_pin::squeeze("clear_keychain_session(acct.id.as_str()).map_err(&kept_with)?;")));
+        assert!(after.contains(&crate::source_pin::squeeze(
+            "clear_keychain_session_into(acct.id.as_str(), &mut dropped).map_err(&kept_with)?;"
+        )));
     }
 
     #[test]
