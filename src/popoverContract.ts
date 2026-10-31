@@ -13,6 +13,8 @@
 
 /** Event Rust emits when the popover is shown; the UI refreshes its snapshot then. */
 export const POPOVER_SHOWN_EVENT = 'popover-shown'
+/** Event Rust emits each time the popover is hidden; the UI stops reading until it is shown again (review P2-2 of #160). */
+export const POPOVER_HIDDEN_EVENT = 'popover-hidden'
 /** Event that points the single `review` window at another file. */
 export const REVIEW_OPEN_EVENT = 'review:open'
 /** The engine's status stream (unchanged name). */
@@ -35,6 +37,11 @@ export const POPOVER_PHASES = [
   'synced',
 ] as const
 export type PopoverPhase = (typeof POPOVER_PHASES)[number]
+
+/** The phases `sync_phase` can carry: Rust computes it with the Finder setup taken as ready, so never a Finder phase
+ * (#139 review P3-13). */
+export const SYNC_PHASES = POPOVER_PHASES.filter((phase) => !phase.startsWith('finder_')) as readonly Exclude<PopoverPhase, `finder_${string}`>[]
+export type SyncPhase = (typeof SYNC_PHASES)[number]
 
 export const FINDER_SETUPS = ['ready', 'missing', 'adding', 'failed', 'user_disabled'] as const
 export type FinderSetup = (typeof FINDER_SETUPS)[number]
@@ -80,7 +87,7 @@ export interface PopoverSnapshot {
   phase: PopoverPhase
   /** `phase` with the Finder setup taken as ready: the sync part of the state alone (task 2179). Rust computes it with
    *  the same reducer, so this side keeps no copy of the precedence. */
-  sync_phase: PopoverPhase
+  sync_phase: SyncPhase
   generated_at: number
   account: { email: string | null; logged_in: boolean; vault_unlocked: boolean; auth_expired: boolean }
   paused: boolean
@@ -137,7 +144,7 @@ function isActivityRow(v: unknown): v is ActivityRow {
 export function parsePopoverSnapshot(raw: unknown): PopoverSnapshot | null {
   if (!isObj(raw)) return null
   const { account, engine, finder, storage, conflicts, activity } = raw
-  if (!oneOf(POPOVER_PHASES, raw.phase) || !oneOf(POPOVER_PHASES, raw.sync_phase) || !isNum(raw.generated_at) || !isBool(raw.paused)) return null
+  if (!oneOf(POPOVER_PHASES, raw.phase) || !oneOf(SYNC_PHASES, raw.sync_phase) || !isNum(raw.generated_at) || !isBool(raw.paused)) return null
   if (!isObj(account) || !isNullOr(account.email, isStr) || !isBool(account.logged_in) || !isBool(account.vault_unlocked) || !isBool(account.auth_expired)) return null
   if (
     !isObj(engine) ||

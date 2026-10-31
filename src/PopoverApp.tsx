@@ -13,11 +13,12 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { BILLING_URL, command, type CommandResult } from './desktopApi'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { BILLING_URL, command, popoverSnapshot, type CommandResult } from './desktopApi'
 import { finderOpenFailedToast, runFinderSetupAction } from './finderSetup'
 import { FINDER_ACTION_FAILED } from './finderSetupCopy'
 import { SnapshotReader } from './mainWindowModel'
-import { parsePopoverSnapshot, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
+import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT, type PopoverPhase } from './popoverContract'
 import { PopoverIcon } from './popoverIcons'
 import { updateOffer } from './macUpdateOffer'
 import {
@@ -40,9 +41,6 @@ export const WEB_APP_URL = 'https://app.beebeeb.io'
 /** The one sentence a first read that failed shows, with Try again. */
 export const READ_FAILED = 'Beebeeb couldn’t check its status.'
 
-/** The one sentence a failed Open in Finder says on a Mac (task 17b: mapped once, by the helper), here without a toast. */
-const OPEN_IN_FINDER_FAILED = ((message) => (typeof message === 'string' ? message : ''))(finderOpenFailedToast().message)
-
 /** The sentence each action's failure shows, in place of the body (one error surface, §6.4). */
 export const ACTION_FAILED: Readonly<Record<PopoverCommand, string>> = {
   open_review: 'Beebeeb couldn’t open its window.',
@@ -53,7 +51,8 @@ export const ACTION_FAILED: Readonly<Record<PopoverCommand, string>> = {
   resume: 'Beebeeb couldn’t resume sync.',
   retry_sync: 'Beebeeb couldn’t start syncing.',
   unlock: 'Beebeeb couldn’t unlock the vault.',
-  open_location: OPEN_IN_FINDER_FAILED,
+  // The one sentence a failed Open in Finder says on a Mac, taken from its helper as task 17b requires, without a toast.
+  open_location: String(finderOpenFailedToast().message),
   finder_try_again: FINDER_ACTION_FAILED.try_again,
   finder_open_system_settings: FINDER_ACTION_FAILED.open_system_settings,
   finder_show_in_finder: FINDER_ACTION_FAILED.show_in_finder,
@@ -114,13 +113,6 @@ export function withFailure(view: PopoverView, failure: ActionFailure): PopoverV
   return { ...view, update: null, attention: null, status: null, body, focus: failure.what }
 }
 
-export async function readPopoverSnapshot(): Promise<CommandResult<PopoverInput>> {
-  const answer = await command<unknown>('popover_snapshot')
-  if (!answer.ok) return answer
-  const snapshot = parsePopoverSnapshot(answer.value)
-  return snapshot ? { ok: true, value: snapshot as PopoverInput } : { ok: false, reason: 'unexpected snapshot', unsupported: false }
-}
-
 export function popoverReadFailure(cause: 'threw' | 'rejected' | 'timed out', error?: unknown): CommandResult<PopoverInput> {
   return { ok: false, reason: error instanceof Error ? error.message : cause, unsupported: false }
 }
@@ -136,6 +128,11 @@ export function popoverKey(event: { key: string; metaKey?: boolean; ctrlKey?: bo
 
 export const GEAR_ID = 'pop-gear'
 export const actionId = (what: PopoverCommand) => `pop-action-${what}`
+/** The footer's own ids: its Add storage sits next to the body's when storage is full (review P3-11 of #160). */
+/** A footer button: the footer's own ids, apart from the body's actions (review P3-11 of #160). */
+type FooterCommand = keyof PopoverView['footer']
+
+export const footerId = (what: FooterCommand) => `pop-footer-${what}`
 
 /** §11: focus starts on the first primary action, else the gear. */
 export function focusIdFor(view: PopoverView | null): string {
@@ -310,8 +307,8 @@ export function PopoverSurface({ screen, readFailed, busy, onRun, onGear }: Surf
 }
 
 function Footer({ footer, busy, onRun }: { footer: PopoverView['footer']; busy: PopoverCommand | null; onRun: (what: PopoverCommand) => void }) {
-  const item = (what: 'open_location' | 'view_online' | 'add_storage', icon: string, label: string) => (
-    <button id={actionId(what)} type="button" className="pop-footer-button" disabled={!footer[what] || busy !== null} onClick={() => onRun(what)}>
+  const item = (what: FooterCommand, icon: string, label: string) => (
+    <button id={footerId(what)} type="button" className="pop-footer-button" disabled={!footer[what] || busy !== null} onClick={() => onRun(what)}>
       <PopoverIcon name={icon} size={18} />
       {label}
     </button>
@@ -334,6 +331,8 @@ export default function PopoverApp() {
   const [busy, setBusy] = useState<PopoverCommand | null>(null)
   const failureRef = useRef<ActionFailure | null>(null)
   const readerRef = useRef<SnapshotReader<CommandResult<PopoverInput>> | null>(null)
+  const answeredAt = useRef(0)
+  const forgetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const setFailureBoth = useCallback((next: ActionFailure | null) => {
     failureRef.current = next
@@ -342,12 +341,14 @@ export default function PopoverApp() {
 
   if (readerRef.current === null) {
     readerRef.current = new SnapshotReader(
-      readPopoverSnapshot,
+      // The one snapshot read, shared with the Beebeeb window (review P3-9 of #160).
+      popoverSnapshot,
       (result) => {
         if (!result.ok) {
           setReadFailed(true)
           return
         }
+        answeredAt.current = Date.now()
         setReadFailed(false)
         setSnapshot(result.value)
         if (failureRef.current && failureRef.current.phase !== result.value.phase) setFailureBoth(null)
@@ -359,15 +360,51 @@ export default function PopoverApp() {
 
   useEffect(() => {
     reader.start(POPOVER_REFRESH_MS)
-    let unlisten: (() => void) | null = null
+    const unlisten: Array<() => void> = []
     let closed = false
-    void listen(POPOVER_SHOWN_EVENT, () => {
-      setFailureBoth(null)
-      void reader.refresh()
-    }).then((stop) => {
-      if (closed) stop()
-      else unlisten = stop
-    })
+    let events = 0
+    const on = (event: string, handler: () => void) =>
+      listen(event, () => {
+        events += 1
+        handler()
+      }).then((stop) => {
+        if (closed) stop()
+        else unlisten.push(stop)
+      })
+    const keep = () => {
+      if (forgetTimer.current !== null) clearTimeout(forgetTimer.current)
+      forgetTimer.current = null
+    }
+    // The window is hidden, never destroyed: reading stops while it is hidden (review P2-2 of #160). It paints before
+    // `popover-shown` reaches it, so once the answer is older than one refresh it is dropped, and the popover is busy
+    // until the next one: it never shows an old state as current (self-review of #202).
+    const hidden = () => {
+      reader.stop()
+      keep()
+      forgetTimer.current = setTimeout(() => {
+        forgetTimer.current = null
+        setSnapshot(null)
+        setReadFailed(false)
+      }, Math.max(0, answeredAt.current + POPOVER_REFRESH_MS - Date.now()))
+    }
+    const listening = Promise.all([
+      on(POPOVER_SHOWN_EVENT, () => {
+        keep()
+        setFailureBoth(null)
+        reader.resume()
+        void reader.refresh()
+      }),
+      on(POPOVER_HIDDEN_EVENT, hidden),
+    ])
+    // A hide before the listeners exist is lost (a click away right after the first click), so once they do the
+    // window is asked; an event that arrives while it answers wins over the answer (self-review of #202).
+    void listening.then(() => {
+      if (closed) return
+      const seen = events
+      return getCurrentWindow().isVisible().then((visible) => {
+        if (!closed && !visible && events === seen) hidden()
+      })
+    }).catch(() => {})
     const onKey = (event: KeyboardEvent) => {
       const key = popoverKey(event)
       if (key === null) return
@@ -379,9 +416,10 @@ export default function PopoverApp() {
     window.addEventListener('keydown', onKey)
     return () => {
       closed = true
-      unlisten?.()
+      for (const stop of unlisten) stop()
       window.removeEventListener('keydown', onKey)
       reader.stop()
+      keep()
     }
   }, [reader, setFailureBoth])
 

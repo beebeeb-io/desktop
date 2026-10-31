@@ -32,8 +32,10 @@ import {
   commandUnavailableLabel,
   openUrl,
   popoverSnapshot,
+  vaultUnlockRoute,
   type CommandResult,
   type Subscription,
+  type VaultUnlockRoute,
 } from './desktopApi'
 import type { PopoverSnapshot } from './popoverContract'
 import { accountSessionRevision, heldSignOutWarning, subscribeAccountSession, subscribeSignOutWarning } from './accountSession'
@@ -117,19 +119,52 @@ function accountLine(account: PopoverSnapshot['account'], plan: Subscription | n
 
 // ── Home (§7.6, first cut: status, Finder row, storage, the kept rows) ────────
 
-function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<void> }) {
+type BusyKey = 'open' | 'resume' | 'unlock'
+/** `running`: the command is under way. `waiting`: it answered, but the window has not yet shown a snapshot read after
+ * it (its own refresh failed, timed out or was superseded), so the card on screen may still be the one from before. */
+type BusyState = 'running' | 'waiting'
+
+function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefresh: () => Promise<boolean> }) {
   const { showToast } = useToast()
   const finder = useFinderSetup()
   const kept = useKeptFolders()
-  const [busy, setBusy] = useState<'open' | 'resume' | 'unlock' | null>(null)
+  // One busy state per button (#139 review P3-5): Open in Finder finishing never re-enables a Resume still under way.
+  const [busy, setBusy] = useState<Partial<Record<BusyKey, BusyState>>>({})
+  const mark = (key: BusyKey, state: BusyState | null) =>
+    setBusy((current) => {
+      const next = { ...current }
+      if (state) next[key] = state
+      else delete next[key]
+      return next
+    })
   // Review P2-3 b: the Keychain holds a token and no vault key, so the unlock has nothing to read. The sentence is the
   // approved Set up this Mac one, and the card offers the recovery phrase, which is what helps.
   const [noKey, setNoKey] = useState(false)
+  // Every snapshot the window applies after an action is from after it (only the current epoch's reads apply), so it
+  // ends the wait of a button whose own refresh did not land (#139 review P2-2).
+  useEffect(() => {
+    setBusy((current) => (Object.values(current).includes('waiting') ? Object.fromEntries(Object.entries(current).filter(([, state]) => state !== 'waiting')) : current))
+  }, [snapshot])
 
   if (!snapshot.account.vault_unlocked) {
     const unlock = async () => {
-      setBusy('unlock')
+      mark('unlock', 'running')
       setNoKey(false)
+      // Task 1747 Part 2: the Keychain is asked at the click, not trusted from when the window opened. A Mac with no key anywhere
+      // goes to Set up this Mac (the Keychain unlock would have nothing to read); a key that appeared since is honoured too.
+      const routed = await vaultUnlockRoute()
+      if (routed.ok && routed.value === 'recovery_phrase') {
+        mark('unlock', null)
+        moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
+        return
+      }
+      // A build without the command cannot tell; any other failure is the unlock failing, in its own words and surface.
+      if (!routed.ok && !routed.unsupported) {
+        mark('unlock', null)
+        showToast({ variant: 'error', title: 'Couldn’t unlock the vault', message: routed.reason })
+        onRefresh()
+        return
+      }
       const result = await command<void>('unlock_vault')
       if (!result.ok) {
         if (!result.unsupported && isNoVaultKey(result.reason)) setNoKey(true)
@@ -141,9 +176,10 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
           })
         }
       }
-      // Busy until the window shows what the unlock did (task 2179): a stale locked card never offers the button again.
-      await onRefresh()
-      setBusy(null)
+      // Busy until the window shows what the unlock did (task 2179; #139 review P2-2): a stale locked card never offers
+      // the button again, also when the refresh after it did not land.
+      const shown = await onRefresh()
+      mark('unlock', shown ? null : 'waiting')
     }
     return (
       <div className="mw-content">
@@ -155,8 +191,8 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
             <div className="mw-row-title">Your vault is locked</div>
             <div className="mw-row-hint">Sync is paused until you unlock it. Files already downloaded to this Mac stay where they are.</div>
           </div>
-          <Btn primary disabled={busy === 'unlock'} onClick={() => void unlock()}>
-            {busy === 'unlock' ? 'Unlocking…' : 'Unlock vault'}
+          <Btn primary disabled={busy.unlock !== undefined} onClick={() => void unlock()}>
+            {busy.unlock !== undefined ? 'Unlocking…' : 'Unlock vault'}
           </Btn>
         </div>
         {noKey ? (
@@ -177,14 +213,14 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   const attention = kept.kept !== null || kept.keptUnsent !== null
 
   const openInFinder = async () => {
-    setBusy('open')
+    mark('open', 'running')
     const result = await command<void>('open_finder_location', { path: null })
-    setBusy(null)
+    mark('open', null)
     if (!result.ok) showToast(finderOpenFailedToast())
   }
 
   const resume = async () => {
-    setBusy('resume')
+    mark('resume', 'running')
     const result = await command<void>('tray_resume_sync')
     if (!result.ok) {
       showToast({
@@ -193,15 +229,15 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
         message: result.unsupported ? commandUnavailableLabel('tray_resume_sync') : result.reason,
       })
     }
-    // Busy until the window shows what the resume did (task 2179).
-    await onRefresh()
-    setBusy(null)
+    // Busy until the window shows what the resume did (task 2179; #139 review P2-2).
+    const shown = await onRefresh()
+    mark('resume', shown ? null : 'waiting')
   }
 
   let statusAction = null
   if (status.action === 'resume') {
     statusAction = (
-      <Btn primary disabled={busy === 'resume'} onClick={() => void resume()}>
+      <Btn primary disabled={busy.resume !== undefined} onClick={() => void resume()}>
         Resume sync
       </Btn>
     )
@@ -212,7 +248,7 @@ function HomePane({ snapshot, onRefresh }: { snapshot: PopoverSnapshot; onRefres
   let finderControl = null
   if (row.kind === 'added') {
     finderControl = (
-      <Btn primary disabled={busy === 'open'} onClick={() => void openInFinder()}>
+      <Btn primary disabled={busy.open !== undefined} onClick={() => void openInFinder()}>
         Open in Finder
       </Btn>
     )
@@ -345,7 +381,10 @@ export default function MacApp() {
   // Home's locked card is not drawn for a moment and then replaced.
   const [setupAsk, setSetupAsk] = useState<'idle' | 'asking' | 'done'>('idle')
   const askingForSetup = account !== null && setupAsk !== 'done' && setupCheckWanted(account, flowNow)
-  const screen = account === null ? 'home' : askingForSetup ? 'settling' : windowScreen(account, flowNow)
+  // Task 1747 Part 2 (plan D4): the Keychain's route, asked with the same one question and for the same window: one that OPENS
+  // signed in and locked. `windowScreen` settles while it is out and, with no key anywhere, shows Set up this Mac by state.
+  const [route, setRoute] = useState<VaultUnlockRoute>('keychain')
+  const screen = account === null ? 'home' : windowScreen(account, flowNow, askingForSetup ? 'unknown' : route)
   const sheetOpen = flowView.kind !== 'idle' || openModals > 0
   // Signed out, only General and About exist (§7.8): a session that ends under another section moves the window to General.
   // Not under a sheet: nothing navigates under one (§8.2), and the Repair sheet lives in Sync. The move comes when it closes.
@@ -442,13 +481,21 @@ export default function MacApp() {
   useEffect(() => {
     if (!askingForSetup || setupAsk !== 'idle') return
     setSetupAsk('asking')
-    void command<unknown>('pending_setup').then((result) => {
-      const resumed = result.ok ? flowForPendingSetup(result.value) : null
+    // Both questions at once: a step Rust remembers wins (it says why the phrase is asked), and the route covers the app having
+    // been quit, which forgets that step. A route that cannot be read is the Keychain unlock, never a window stuck settling.
+    void Promise.all([command<unknown>('pending_setup'), vaultUnlockRoute()]).then(([pending, routed]) => {
+      const resumed = pending.ok ? flowForPendingSetup(pending.value) : null
       // A step set while Rust was answering is the person's: never replaced by a resumed one.
       if (resumed !== null && getSignInFlow().step === null) setSignInFlow(resumed)
+      setRoute(routed.ok ? routed.value : 'keychain')
       setSetupAsk('done')
     })
   }, [askingForSetup, setupAsk])
+  // The route is the Mac as it was when the window opened. Once the keys have arrived (the phrase restored them, or the
+  // sign-in brought them: Finder is next) it is spent, so a later Lock shows Home's locked card, not Set up this Mac again.
+  useEffect(() => {
+    if (unlocked || signInFlow.step === 'finder') setRoute('keychain')
+  }, [unlocked, signInFlow.step])
 
   // The one check above, kept: the store follows what the first render already showed.
   useEffect(() => {
@@ -766,7 +813,12 @@ export default function MacApp() {
     pane = (
       <div className="ms-pane mw-pane" id="mw-pane">
         {view.section === 'general' ? <GeneralTab settings={settings} signedIn={signedIn} /> : null}
-        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} /> : null}
+        {view.section === 'account' ? <AccountTab flow={flow} flowView={flowView} flowOutcomes={flowOutcomes} onSetUpThisMac={() => {
+          // Review P2: the card is drawn in `main`, so the click also leaves Settings — otherwise the Account tab stays up and
+          // the recovery-phrase form the person just asked for never appears.
+          go({ to: 'home' })
+          moveFlow({ ...IDLE_FLOW, step: 'unlock' }, setSignInFlow)
+        }} /> : null}
         {view.section === 'sync' ? <SyncTab settings={settings} /> : null}
         {view.section === 'security' ? <SecurityTab unlocked={unlocked} /> : null}
         {view.section === 'about' ? <AboutTab settings={settings} signedIn={signedIn} /> : null}

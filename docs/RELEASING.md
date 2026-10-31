@@ -38,8 +38,20 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 
 ### Install / Update
 
-Existing desktop installs receive this release through the in-app updater automatically. For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+<!-- Pick the line that matches the channel you pass to the workflow. The release body is
+     written once and reused unchanged on every later promotion, so it must stay true on
+     the first channel. -->
+<!-- stable: --> Existing desktop installs receive this release through the in-app updater automatically.
+<!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
+
+For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
 ```
+
+The release workflow enforces the channel rule: when `channel` is `alpha` or `beta`, notes that
+promise automatic delivery to existing installs fail validation
+(`node scripts/release-channel-checks.mjs notes <version> <channel>`, tested in
+`tests/releaseChannelChecks.test.ts`). desktop-v0.8.3, a security fix, shipped with the
+unconditional stable wording while it was only ever published to `alpha.json`.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
@@ -73,14 +85,63 @@ fingerprint `545D7BA77EDEA7E1`. The replacement private key and passphrase must 
 Guus out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
 or chat. The CI secret change is deliberately not part of this commit.
 
+### State of the task-1240 rotation (checked 2026-10-29): done
+
+- **Release N was 0.3.0** (commit `1fe52ac`/`fc7395d`, 2026-07-25), the first to bake
+  `C6FADFD59D732197`. N+1 was not cut then, so CI kept signing every release from 0.3.0 through
+  **0.8.3** with the old key `545D7BA77EDEA7E1` (0.8.3: 5 of 5 `.sig` files on `545D`). In that
+  time no 0.3.0+ install could apply an update in-app.
+- **Release N+1 was 0.8.4** (#62, 2026-09-25), the first signed with `C6FADFD59D732197`. Every
+  release since is signed with it: 0.8.4 through 0.8.20, 17 releases, every updater `.sig` on the
+  release (5 or 6 each) passes `node scripts/check-updater-signature-key.mjs --sig <files>`. The
+  `latest`, `beta` and `alpha` manifests (all 0.8.20) pass `--manifest`, 5 of 5 each.
+- **Who can update in-app:** every install on 0.3.0 or later. An install older than 0.3.0 trusts
+  only `545D7BA77EDEA7E1`, rejects every release since 0.8.4, and needs one manual reinstall from
+  the GitHub release or beebeeb.io/download.
+- **The published verification key** is the new one: the site's `src/lib/downloads.ts` names
+  `C6FADFD59D732197` (N+1 checklist step 6).
+
+The two checklists below stay for the next rotation.
+
+### Signature-key guard
+
+`scripts/check-updater-signature-key.mjs` decodes the minisign key ID of each updater signature
+and compares it with the key ID of `plugins.updater.pubkey` in `tauri.conf.json`. The release
+workflow runs it twice and fails closed on any mismatch:
+
+- in the build job, on every staged `release-assets/*.sig` (before anything is published), and
+- in `publish-manifest`, on the generated channel manifest (this also covers
+  `publish_existing=true` promotions). That step runs the checker from the release tag, so a tag
+  cut before the guard was merged (0.8.20 and every older tag) has no checker, and the step
+  refuses it.
+
+**Promoting a tag cut before the guard** (for example 0.8.20 to another channel) needs
+`updater_key_transition=true`, and then the manifest step only warns: nothing in the workflow
+checks the key. So check it by hand first, with the checker from `main`, and promote only on OK:
+
+```sh
+gh release download desktop-v<version> -R beebeeb-io/desktop --pattern '*.sig' --dir /tmp/sigs-<version>
+node scripts/check-updater-signature-key.mjs --sig /tmp/sigs-<version>/*.sig
+```
+
+After the promotion, run `--manifest https://releases.beebeeb.io/desktop/<channel>.json` on the
+channel it went to. Tags from 0.8.4 on are signed with the baked key; 0.8.3 and older are not, and
+must never be promoted.
+
+A transition release N is the only legitimate mismatch. For that release, trigger the workflow
+with `updater_key_transition=true`; the guard then reports the mismatch as a warning. The only
+other use is promoting a tag cut before the guard, checked by hand as above. Never set it for
+anything else.
+
 Mechanical checklist for release N:
 
 1. Confirm `src-tauri/tauri.conf.json` contains the new public key fingerprint
    `C6FADFD59D732197`.
 2. Confirm repository/organization secrets still point at the old updater signing key. Do not
    update `TAURI_SIGNING_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` yet.
-3. Run the normal release workflow for release N. Its updater packages must be signed by the old
-   key, and the resulting manifest signatures must be the old-key signatures generated by that run.
+3. Run the normal release workflow for release N with `updater_key_transition=true`. Its updater
+   packages must be signed by the old key, and the resulting manifest signatures must be the
+   old-key signatures generated by that run.
 4. Smoke-test updating an existing install built with the old public key to release N.
 5. Record evidence before planning N+1.
 
@@ -95,8 +156,13 @@ Mechanical checklist for release N+1:
    `C6FADFD59D732197`.
 3. Update CI secrets out of band: `TAURI_SIGNING_PRIVATE_KEY` is the new private key contents, and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is the new passphrase.
-4. Run the normal release workflow for release N+1.
-5. Smoke-test updating an install already on release N to release N+1.
+4. Run the normal release workflow for release N+1 with `updater_key_transition=false` (the
+   default). If the CI secret still holds the old key, the signature-key guard fails the build job
+   before any asset is published. The RELEASE_NOTES.md for N+1 must say that installs older than
+   release N need a manual reinstall from the GitHub release.
+5. Smoke-test updating an install already on release N to release N+1, and confirm
+   `node scripts/check-updater-signature-key.mjs --manifest https://releases.beebeeb.io/desktop/<channel>.json`
+   passes for every channel N+1 was published to.
 6. Update the public verification key on beebeeb.io/download: in the site repo, `src/lib/downloads.ts`
    (`DESKTOP_MINISIGN_KEY_ID` / `DESKTOP_MINISIGN_PUBLIC_KEY`) still names the pre-rotation key
    `545D7BA77EDEA7E1` that signs release N's assets. After N+1 is published, switch it to the new key
@@ -125,7 +191,7 @@ Service coordinates (non-secret):
 | Resource group / account | `beebeeb-signing` / `beebeebsigning` |
 | Endpoint | `https://weu.codesigning.azure.net/` |
 | Certificate profile | `beebeeb-publictrust` (PublicTrust; 3-day certs, auto-rotating) |
-| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:ref:refs/heads/main` |
+| CI identity | app registration `beebeeb-desktop-release`, federated credential `repo:beebeeb-io/desktop:environment:desktop-release` (GitHub environment `desktop-release`, deployment branches `main` and `release/*`) |
 | Role | `Artifact Signing Certificate Profile Signer`, scoped to the account |
 
 How a release build signs (all in `release.yml`, Windows job only):
@@ -159,8 +225,90 @@ How a release build signs (all in `release.yml`, Windows job only):
    gate's `-SelfTest` must first reject an unsigned and a wrong-publisher
    fixture. Any failure blocks the release.
 
-Dispatch `release.yml` **from `main`** — the federated credential's subject is
-`ref:refs/heads/main`, so a run from any other ref cannot authenticate.
+Dispatch `release.yml` from `main` or from a `release/*` branch. No Azure step is
+needed per release. The trust boundary has four parts, and each one is checked:
+
+- **Azure trusts one subject:** `repo:beebeeb-io/desktop:environment:desktop-release`.
+  Only a job that names the GitHub environment `desktop-release` gets that subject in
+  its OIDC token. In `release.yml` that is the `build` job.
+- **The environment deploys only from `main` and `release/*`** (custom deployment
+  branch policies; admins cannot bypass them). A run from any other branch is refused
+  before the job starts, so it never gets a token Azure accepts.
+- **Two repository rulesets protect `release/*`:**
+  - **"release branches (create/delete: admin only)":** only a repository admin can
+    create or delete a `release/*` branch. A bot, an app or a collaborator without the
+    admin role cannot make a branch that is allowed to sign.
+  - **"release branches (PR + checks)", with no bypass for anyone, admins included:**
+    - every update to an existing release branch goes through a pull request (merge
+      method "merge", review threads resolved);
+    - the six CI jobs every release branch runs must pass: Frontend, Rust check
+      (Windows), Rust check (macOS), Rust test (Linux), File Provider Swift (macOS), and
+      the macOS release script check;
+    - force-pushes are refused.
+  - A release-branch merge is a plain `gh pr merge --merge` once those checks are
+    green. `--admin` is neither needed nor used. A direct push, even with an admin
+    token, is refused with "Changes must be made through a pull request".
+  - This was proven on 2026-10-29 with a scratch release branch:
+    - an admin creation succeeded;
+    - a direct admin push was refused;
+    - a merge was refused while a required check was red;
+    - the same PR merged after the re-run turned green;
+    - the scratch branches were then deleted.
+  - Until 2026-10-29 a single ruleset blocked every update, and merges needed the
+    admin bypass. 0.8.19's #184 and #185 were merged that way, before the rule was
+    changed.
+  - **What the rulesets do not cover: a branch's starting commit.**
+    - Creating a release branch is not a pull request. The required checks are not
+      enforced on creation, and CI does not run on pushes to `release/*`.
+    - So an admin who creates (or deletes and recreates) `release/x.y.z` at an
+      unreviewed commit gets a branch that `release.yml` can sign.
+    - `release.yml`'s own test gate still runs on that commit, but nothing reviews it.
+    - The rule: cut a release branch only from a `desktop-v*` tag whose commit is the merge
+      commit of a pull request merged into `main` or a `release/*` branch, and which has a
+      published GitHub release, or from a commit on `main`. Keep the cut commit in the release
+      record.
+    - A published release alone is not enough: anyone with write access, including a session
+      using an admin token, can tag an unreviewed commit and publish a release on it. So the
+      tagged commit must also be reviewed.
+    - A tag ruleset that limits tagging to the release workflow is not possible: GitHub refuses
+      the Actions app as a bypass actor (HTTP 422). That is why the check below tests the tag
+      commit itself instead of protecting the tag.
+    - `release.yml` enforces that rule (task 2281, next bullet): it refuses any other
+      branch point before signing.
+  - Neither ruleset limits who holds an admin token. A tool or session acting with an
+    admin's token can still create, delete or recreate a release branch.
+- **`release.yml` refuses an unreviewed branch point:** `verify-branch-point` runs before
+  `build`, so before any job holds the `desktop-release` environment or an Azure token. For a
+  dispatch from a `release/*` branch it walks the branch's first-parent history from the
+  dispatched commit back to its starting point (the first commit that is not a merge of a pull
+  request into that branch). Every commit on that walk must be a merge of a PR that was merged
+  into this same branch, and the starting point must be the commit of a `desktop-v*` tag with a
+  published GitHub release (`draft == false`) whose commit is itself the merge commit of a pull
+  request merged into `main` or a `release/*` branch, or a commit on `main`; otherwise the run
+  stops before signing and names the offending commit. A tag whose commit is not such a PR merge
+  is printed and then treated like any other unreviewed commit: it only passes if it is on
+  `main`. `desktop-v0.8.19` is the first tag that meets the tag rule: its commit `db648a6` is the
+  merge of #185 into `release/0.8.19`. Older tags whose commit was a direct push (for example
+  0.8.18's `e06c55b`) no longer count, which is intended. A dispatch from `main` skips the
+  job, because `main` is protected by pull requests. The ruleset
+  above cannot gate branch creation, which is why this check exists (task 2281). Branches created
+  before that ruleset hold direct commits of their own (for example `release/0.8.19`), so a fresh
+  dispatch from them is refused; promoting an existing release with `publish_existing=true` does
+  not run the check.
+
+The workflow has no reviewer gate on the environment: a release stays one dispatch.
+`signing-login-check.yml` proves the boundary without building or signing anything. It
+runs only the Azure login through the environment. From `main` it must pass. From any
+other branch it must fail with "not allowed to deploy to desktop-release". Run both
+after any change to the environment, the rulesets or the federated credential.
+
+History: until 0.8.18 the credential named one branch (`ref:refs/heads/main`, then one
+added per release branch, `release/0.8.13` to `release/0.8.18`). A release branch without
+its own credential failed at the Azure login with AADSTS700213 (0.8.18's first run).
+0.8.19 was the first release to sign through the environment (2026-10-29). After that,
+the seven per-branch credentials were deleted with the maintainer's confirmation, and
+only the environment credential remains. The two-way check was run again afterwards:
+from `main` it passed, and from another branch it was refused.
 
 SmartScreen honesty: signing removes the "unknown publisher" warning
 immediately, but SmartScreen *reputation* accrues with download volume and
@@ -295,6 +443,9 @@ update or downgrade is actually installed from that channel.
 6. Promote the same build to another channel by rerunning `.github/workflows/release.yml` with the same `version`, the new `channel`, and `publish_existing=true`.
 7. A `publish_existing=true` run skips release-note validation, skips the test gate, skips the build matrix, skips GitHub release creation, and only rewrites the selected channel manifest to point at the existing `desktop-v<version>` assets.
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
+9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
+10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
+11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
 
 ## Style Notes
 

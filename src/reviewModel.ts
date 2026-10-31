@@ -35,6 +35,10 @@ const KIND_LABELS: Record<ReviewEntryKind, string> = {
   // Review of #142: a change that was parked, paused or given up and will not go on its own, and the plan refusing
   // uploads. Also not in the spec's table (flagged in the PR).
   not_sent: 'Not sent',
+  // Task 2190: an edit held because its base is unknown, and the one row for older files not checked yet. The words
+  // are the Versions page's (`reviewKindLabel.ts`).
+  held_edit: 'Not sent',
+  held_unknown: 'Not sent',
   account_refused: 'Plan',
   // A download or a pin that has not finished (and a kind of change the list has no other word for). Also what a kind this
   // build has never heard of is called.

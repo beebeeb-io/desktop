@@ -56,7 +56,11 @@ import { useDataResidency } from '../useDataResidency'
 import { useFinderSetup } from '../../finderSetup'
 import { FINDER_SETUP_TITLE, finderActionButtonLabel, finderStatusPill } from '../../finderSetupCopy'
 import { setDesktopThemePreference } from '../theme'
+import { syncActivityView, type SyncActivityView } from '../syncActivityModel'
+import { SyncActivityIcon, SyncCheckProgress, SyncPauseButton, useSyncActivitySummary, useSyncPauseToggle } from '../syncActivityUi'
+import { FoundWhilePausedCard } from '../FoundWhilePausedCard'
 import { desktopUpdateCheck } from '../manualUpdateCheck'
+import { pollWhileVisible } from '../visiblePoll'
 
 type ShellIntegrationState = FinderInstallState
 
@@ -75,8 +79,8 @@ interface SyncRow {
 
 const SYNC_ROWS: SyncRow[] = [
   {
-    label: 'Keep files encrypted end-to-end',
-    hint: 'This cannot be disabled. Every byte on disk is ciphertext.',
+    label: 'End-to-end encryption',
+    hint: 'Files are encrypted before upload. This cannot be disabled.',
     locked: true,
   },
   {
@@ -267,17 +271,14 @@ function SyncPanel({
   // failure, in ink3, not as an error. It happens to carry result.reason on the failure branch.
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface
   const [freeUpNote, setFreeUpNote] = useState<string | null>(null)
-  const [lastSyncLabel, setLastSyncLabel] = useState('...')
-
-  useEffect(() => {
-    if (status?.syncing === 0 && status.engine === 'running') {
-      setLastSyncLabel('Just now')
-    } else if (status?.engine === 'running') {
-      setLastSyncLabel('Syncing...')
-    } else {
-      setLastSyncLabel('-')
-    }
-  }, [status?.syncing, status?.engine])
+  const { showToast } = useToast()
+  const platform = usePlatformName()
+  // What sync is doing (0.8.15): the live pause flag, the queue in counts and the startup check, next to `status`.
+  // Before this the card read only `status`, so 2,924 changes on hold looked like "Up to date".
+  const { summary, refresh } = useSyncActivitySummary()
+  const view = syncActivityView(status, summary, { device: thisDeviceNoun(platform), pausedFallback: config.pause_sync })
+  const pause = useSyncPauseToggle(view, refresh, (failure) => showToast({ variant: 'error', ...failure }))
+  const lastSyncLabel = lastCheckLabel(summary?.last_tick_ok_at ?? null, summary === undefined)
 
   const freeUp = async () => {
     setFreeUpBusy(true)
@@ -302,18 +303,15 @@ function SyncPanel({
       <PageHeader
         title="Sync"
         subtitle="Manage what syncs with this PC and how. Files are encrypted on this device before upload."
-        aside={
-          <Chip tone={status?.engine === 'running' && status.syncing === 0 ? 'green' : 'amber'}>
-            {status?.engine === 'running' && status.syncing === 0 ? 'All devices up to date' : 'Syncing'}
-          </Chip>
-        }
+        aside={<Chip tone={view.tone === 'good' ? 'green' : 'neutral'}>{view.label}</Chip>}
       />
 
-      <Card style={{ padding: 20, background: `linear-gradient(135deg, ${T.amberBg}, ${T.paper2})`, borderColor: T.amberDeep, marginBottom: 22 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 20 }}>
+      <Card style={{ padding: 0, marginBottom: 22, overflow: 'hidden' }}>
+        <SyncStateHeader view={view} busy={pause.busy} onToggle={() => void pause.toggle()} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 20, padding: '14px 20px 16px', borderTop: `1px solid ${T.line}`, background: T.paper2 }}>
           {[
-            { k: 'State', v: status?.engine === 'running' ? (status.syncing > 0 ? 'Syncing' : 'Up to date') : 'Paused' },
-            { k: 'On this PC', v: onPc },
+            { k: 'State', v: view.label },
+            { k: `On ${thisDeviceNoun(platform)}`, v: onPc },
             { k: 'In vault', v: synced7d },
             { k: 'Last sync', v: lastSyncLabel },
           ].map(({ k, v }) => (
@@ -327,13 +325,16 @@ function SyncPanel({
         </div>
       </Card>
 
+      {/* Task 2267: changes found while sync was paused wait here for the person's decision (draws nothing otherwise). */}
+      <FoundWhilePausedCard summary={summary} refresh={refresh} />
+
       <Card style={{ padding: 0, overflow: 'hidden' }}>
         {rows.map((row, i) => {
           const isLast = i === rows.length - 1
           let control: ReactNode = null
 
           if (row.locked) {
-            control = windows ? <Chip>Always on</Chip> : <Toggle on={true} onChange={() => undefined} label={row.label} />
+            control = <Chip>Always on</Chip>
           } else if (row.label === 'Sync on metered connections') {
             control = <Toggle on={metered} onChange={(v) => onConfigChange({ metered: v })} label={row.label} />
           } else if (row.label === 'Files on Demand (online-only by default)') {
@@ -368,8 +369,7 @@ function SyncPanel({
       </Card>
 
       {windows && <CapabilityNotice style={{ marginTop: 24 }}>Files download when opened. Use Selective sync to make folders online-only.
-        Automatic metered-network control and overlay preferences are not available yet.
-        Pause syncing from the app menu when needed.</CapabilityNotice>}
+        Automatic metered-network control and overlay preferences are not available yet.</CapabilityNotice>}
       <Card style={{ marginTop: 24, padding: 18, display: 'flex', alignItems: 'center', gap: 14, background: T.paper2 }}>
         <div style={{ width: 32, height: 32, borderRadius: 8, background: T.paper, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <NavIcon name="cloud" size={14} color={T.amberDeep} />
@@ -386,6 +386,42 @@ function SyncPanel({
         </PrimaryBtn>
       </Card>
     </SettingsSectionShell>
+  )
+}
+
+/**
+ * "Last sync" from the engine's last check that reached the server since the app started. Never a guess: no check yet
+ * is "Not yet", and an unread summary is "…".
+ */
+function lastCheckLabel(at: number | null, reading: boolean, now: number = Date.now()): string {
+  if (reading) return '…'
+  if (at == null || at <= 0) return 'Not yet'
+  const sec = Math.max(0, Math.round(now / 1000 - at))
+  if (sec < 45) return 'Just now'
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min} min ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr} hr ago`
+  const day = Math.round(hr / 24)
+  return `${day} day${day === 1 ? '' : 's'} ago`
+}
+
+/** The live state, in words, with Pause / Resume beside it (0.8.15; before it the only way to pause was the menu). */
+function SyncStateHeader({ view, busy, onToggle }: { view: SyncActivityView; busy: boolean; onToggle: () => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '18px 20px' }}>
+      <div style={{ paddingTop: 1 }}>
+        <SyncActivityIcon view={view} size={20} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }} aria-live="polite">
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, lineHeight: 1.35 }}>{view.headline}</div>
+        {view.details.map((line) => (
+          <div key={line} style={{ fontSize: 12, color: T.ink2, marginTop: 4, lineHeight: 1.45 }}>{line}</div>
+        ))}
+        {view.progress && <SyncCheckProgress check={view.progress} />}
+      </div>
+      <SyncPauseButton view={view} busy={busy} onToggle={onToggle} />
+    </div>
   )
 }
 
@@ -471,7 +507,7 @@ function NotificationPreferencesPanel() {
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="cog" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Notification preferences</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Account notifications</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Choose which account events notify you.</div>
         </div>
       </div>
@@ -539,7 +575,7 @@ function DesktopNotificationPreferencesPanel({
       <div style={{ padding: '13px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
         <NavIcon name="external" size={14} color={T.ink2} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Desktop alerts</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>On this device</div>
           <div style={{ fontSize: 11, color: T.ink3 }}>Native notifications fired by this device.</div>
         </div>
       </div>
@@ -723,7 +759,7 @@ export function DataResidencyContent({ loading, loadError, view, onRetry, onSele
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Data residency"
+        title="Storage location"
         subtitle={subtitle}
       />
 
@@ -1536,11 +1572,11 @@ function AppActivityPanel() {
       }
     }
 
-    void load()
-    const id = window.setInterval(() => { void load() }, ACTIVITY_POLL_INTERVAL_MS)
+    // Task 2243: each read opens the state DB; only while the window is on screen.
+    const stop = pollWhileVisible(load, ACTIVITY_POLL_INTERVAL_MS)
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      stop()
     }
   }, [reloadKey])
 
@@ -1663,8 +1699,8 @@ export function AdvancedPanel({
   return (
     <SettingsSectionShell>
       <PageHeader
-        title="Advanced"
-        subtitle="Device-level behavior for this desktop app."
+        title="Appearance & storage"
+        subtitle="Theme and downloaded files on this device."
       />
 
       <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
@@ -1672,7 +1708,7 @@ export function AdvancedPanel({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, marginBottom: 3 }}>Theme</div>
             <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5 }}>
-              Choose the appearance for this app window.
+              {themeOptions.find((option) => option.value === themePreference)?.hint}
             </div>
           </div>
           <div
@@ -1719,28 +1755,6 @@ export function AdvancedPanel({
             })}
           </div>
         </div>
-        {themeOptions.map((option, index) => {
-          const selected = option.value === themePreference
-          return (
-            <div
-              key={option.value}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
-                gap: 12,
-                padding: '11px 18px',
-                alignItems: 'center',
-                borderBottom: index === themeOptions.length - 1 ? 'none' : `1px solid ${T.line}`,
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink }}>{option.label}</div>
-                <div style={{ fontSize: 11, color: T.ink3, marginTop: 2, lineHeight: 1.45 }}>{option.hint}</div>
-              </div>
-              {selected && <Chip tone="green">Selected</Chip>}
-            </div>
-          )
-        })}
       </Card>
 
       {cacheControl ? <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>

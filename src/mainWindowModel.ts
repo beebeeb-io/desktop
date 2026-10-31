@@ -207,17 +207,20 @@ export function lastCheckedLine(lastTickOkAt: number | null, nowSeconds: number)
   return `Last checked ${Math.floor(ago / 3600)} h ago`
 }
 
-function syncState(input: StatusInput, nowSeconds: number): HomeStatus {
+/** Syncing: Rust's reducer decided it (`sync_phase`, which counts a moving file even while the engine says idle); the
+ * engine's count only fills in the detail (#139 review P3-4). */
+function syncingState(input: StatusInput): HomeStatus {
   const left = input.engine.files_remaining
-  if (input.engine.state === 'syncing' || (left !== null && left > 0)) {
-    return {
-      tone: 'busy',
-      title: 'Syncing',
-      detail: left !== null && left > 0 ? `${left} ${plural(left, 'file', 'files')} left` : null,
-      reason: null,
-      action: null,
-    }
+  return {
+    tone: 'busy',
+    title: 'Syncing',
+    detail: left !== null && left > 0 ? `${left} ${plural(left, 'file', 'files')} left` : null,
+    reason: null,
+    action: null,
   }
+}
+
+function upToDateState(input: StatusInput, nowSeconds: number): HomeStatus {
   return { tone: 'ok', title: 'Up to date', detail: lastCheckedLine(input.engine.last_tick_ok_at, nowSeconds), reason: null, action: null }
 }
 
@@ -231,7 +234,7 @@ export function homeStatus(input: StatusInput, nowSeconds: number): HomeStatus {
   const n = input.pending_changes
   switch (input.sync_phase) {
     case 'syncing':
-      return syncState(input, nowSeconds)
+      return syncingState(input)
     case 'paused':
       return {
         tone: 'neutral',
@@ -261,7 +264,7 @@ export function homeStatus(input: StatusInput, nowSeconds: number): HomeStatus {
         action: 'add_storage',
       }
     default:
-      return syncState(input, nowSeconds)
+      return upToDateState(input, nowSeconds)
   }
 }
 
@@ -310,7 +313,15 @@ export interface SnapshotReaderOptions<R> {
   failure: (cause: 'threw' | 'rejected' | 'timed out', error?: unknown) => R
   /** A read still unanswered after this long is given up: its failure is applied and it no longer holds the ticks. */
   watchdogMs: number
+  /** "Try again" joins a read in flight only while it is younger than this; an older one gets a fresh read beside it. */
+  joinMs?: number
+  /** The clock for `joinMs` (tests pass their own). */
+  now?: () => number
 }
+
+/** How long "Try again" joins a read in flight (#139 review P3-7): long enough for a burst of clicks, short enough that a
+ * stuck read is not the only one. */
+export const RETRY_JOIN_MS = 2000
 
 /**
  * Reads the account and sync state without ever throwing a read away because a timer fired.
@@ -319,16 +330,20 @@ export interface SnapshotReaderOptions<R> {
  *   it never piles reads up).
  * - Every outcome that changed the state (a sign-out, an unlock, a resume) calls `refresh`. It moves the epoch and
  *   reads at once, even with a read in flight. A read only applies its result while its epoch is current, so a read
- *   started before the outcome never shows the state from before it, whichever finishes first. `refresh` resolves once
- *   its own result is applied, so a button can stay busy until the window shows what the action did.
- * - `retry` ("Try again") joins the current epoch's read in flight instead of starting another: five clicks, one read.
+ *   started before the outcome never shows the state from before it, whichever finishes first. `refresh` resolves when
+ *   its own read is done, to whether its result was applied (a current read that succeeded): false for a read that
+ *   failed, timed out, was superseded by a newer refresh or finished after `stop`. A button stays busy until the window
+ *   shows what the action did, and a `false` tells it the window has not (#139 review P2-2).
+ * - `retry` ("Try again") joins the current epoch's read in flight while it is younger than `joinMs` (five clicks, one
+ *   read), and otherwise starts a fresh one, so a stuck read is never the only answer to a click.
  * - Only the current epoch's read holds the ticks. One that never answers is given up after `watchdogMs`; one whose
  *   `read()` throws synchronously fails like one that rejected.
- * - `stop` (the window unmounted) applies nothing more and cancels the next tick; `resume` undoes it (StrictMode).
+ * - `stop` (the window unmounted, or the popover hidden) applies nothing more and cancels the next tick; `resume` undoes
+ *   it (StrictMode, the popover shown again).
  */
 export class SnapshotReader<R extends ReadResult> {
   private epoch = 0
-  private current: Promise<void> | null = null
+  private current: { done: Promise<boolean>; startedAt: number } | null = null
   private stopped = true
   private intervalMs: number | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -369,34 +384,46 @@ export class SnapshotReader<R extends ReadResult> {
     void this.begin()
   }
 
-  /** After an outcome: read now; nothing started before wins over it. Resolves when its result is applied. */
-  refresh(): Promise<void> {
-    if (this.stopped) return Promise.resolve()
+  /** After an outcome: read now; nothing started before wins over it. Resolves to whether its result was applied. */
+  refresh(): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(false)
     this.epoch += 1
     return this.begin()
   }
 
-  /** "Try again": the current epoch's read in flight if there is one, else a new read. */
-  retry(): Promise<void> {
-    if (this.stopped) return Promise.resolve()
-    return this.current ?? this.begin()
+  /** "Try again": the current epoch's read in flight while it is young, else a new read. */
+  retry(): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(false)
+    const now = this.options.now ?? Date.now
+    if (this.current !== null && now() - this.current.startedAt < (this.options.joinMs ?? RETRY_JOIN_MS)) return this.current.done
+    return this.begin()
   }
 
-  private begin(): Promise<void> {
+  private begin(): Promise<boolean> {
     const epoch = this.epoch
     let settled = false
-    let resolve: () => void = () => {}
-    const done = new Promise<void>((r) => { resolve = r })
+    let resolve: (applied: boolean) => void = () => {}
+    const done = new Promise<boolean>((r) => { resolve = r })
     const finish = (result: R) => {
       if (settled) return
       settled = true
       clearTimeout(watchdog)
-      if (this.current === done) this.current = null
-      if (!this.stopped && epoch === this.epoch) this.onResult(result)
-      this.schedule()
-      resolve()
+      if (this.current?.done === done) this.current = null
+      let applied = false
+      try {
+        if (!this.stopped && epoch === this.epoch) {
+          this.onResult(result)
+          applied = result.ok
+        }
+      } catch (error) {
+        // A bug in applying a result must not wedge the reader: the next tick still comes, the refresh still resolves.
+        console.error('snapshot reader: applying a result failed', error)
+      } finally {
+        this.schedule()
+        resolve(applied)
+      }
     }
-    this.current = done
+    this.current = { done, startedAt: (this.options.now ?? Date.now)() }
     const watchdog = setTimeout(() => finish(this.options.failure('timed out')), this.options.watchdogMs)
     let pending: Promise<R>
     try {

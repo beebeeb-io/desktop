@@ -173,8 +173,8 @@ function open(name: string, backend: Record<string, (args: any) => unknown>, ext
 }
 
 /** `AccountTab` as the root mounts it: the flow, its view and its outcome count as props (F9). */
-function openAccount(b: Record<string, (args: any) => unknown>, extra: { bindings?: Record<string, unknown> } = {}) {
-  const props: any = { flowView: { kind: 'idle' }, flowOutcomes: 0 }
+function openAccount(b: Record<string, (args: any) => unknown>, extra: { bindings?: Record<string, unknown>; onSetUpThisMac?: () => void } = {}) {
+  const props: any = { flowView: { kind: 'idle' }, flowOutcomes: 0, onSetUpThisMac: extra.onSetUpThisMac ?? (() => {}) }
   let m: Mounted | null = null
   props.flow = new SignOutFlow(signOutFlowApi, (view) => { props.flowView = view }, (outcome) => {
     showSignOutOutcome(outcome, (toast: any) => m!.toasts.push(toast))
@@ -451,7 +451,7 @@ describe('General tab', () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready() } })
     await m.flush()
     const text = visibleText(m)
-    for (const words of ['Open Beebeeb at login', 'Starts in the menu bar. No window opens.', 'Tell me about', 'Conflicts', 'When two versions of a file need a decision.', 'Sync finished', 'Local cache almost full']) {
+    for (const words of ['Open Beebeeb at login', 'Starts in the menu bar. No window opens.', 'On this device', 'Conflict alerts', 'When two versions of a file need a decision.', 'Sync complete', 'Local cache warnings']) {
       expect(text).toContain(words)
     }
     expect(switchOf(m, 'login').props['aria-checked']).toBe(true)
@@ -548,7 +548,7 @@ describe('General tab', () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready({ theme: 'dark' }), signedIn: true } })
     await m.flush()
     const text = visibleText(m)
-    expect(text).toContain('Appearance')
+    expect(text).toContain('Theme')
     expect(text).toContain('Always dark.')
     expect(select(m, 'appearance').props.value).toBe('dark')
     expect(optionsOf(m, 'appearance')).toEqual([{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }])
@@ -584,14 +584,14 @@ describe('General tab', () => {
   test('"From your account" follows "Tell me about" for a signed-in account, and is not there signed out (those preferences live with the account)', async () => {
     const m = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: true } })
     await m.flush()
-    const order = m.elements().filter((el) => el.props['data-prefs-group'] === 'true' || el.props['aria-label'] === 'Tell me about').map((el) => el.props['aria-label'] ?? 'prefs')
-    expect(order).toEqual(['Tell me about', 'prefs'])
+    const order = m.elements().filter((el) => el.props['data-prefs-group'] === 'true' || el.props['aria-label'] === 'On this device').map((el) => el.props['aria-label'] ?? 'prefs')
+    expect(order).toEqual(['On this device', 'prefs'])
 
     const out = open('GeneralTab', { autostart_enabled: () => true }, { props: { settings: ready(), signedIn: false } })
     await out.flush()
     expect(find(out, (el) => el.props['data-prefs-group'] === 'true')).toHaveLength(0)
-    expect(visibleText(out)).toContain('Appearance')
-    expect(visibleText(out)).toContain('Tell me about')
+    expect(visibleText(out)).toContain('Theme')
+    expect(visibleText(out)).toContain('On this device')
   })
 })
 
@@ -742,6 +742,60 @@ describe('Account tab', () => {
     // Locked: the plan and Manage plan need the session, so they are gone, and Unlock is the one action.
     expect(buttons(m)).toEqual(['Unlock', 'Open beebeeb.io', 'Sign out…'])
     expect(button(m, 'Unlock').props.className).toContain('ms-btn--primary')
+  })
+
+  // Task 1747 Part 2 (item 13, plan O4): the Vault row's Unlock follows the same Keychain route as Home's, so it never fails
+  // with the Keychain's own words on a Mac that holds no key.
+  describe('Unlock follows the Keychain route (1747 Part 2)', () => {
+    const lockedSnapshot = () => snapshot({ account: { vault_unlocked: false }, storage: null })
+
+    test('route keychain: unlock_vault runs, the account is read again, and Set up this Mac is not opened', async () => {
+      let setUps = 0
+      const m = openAccount(backend({ vault_unlock_route: () => 'keychain', popover_snapshot: lockedSnapshot }), { onSetUpThisMac: () => { setUps += 1 } })
+      await settle(m)
+      await press(m, 'Unlock')
+      expect(m.calls.filter((c) => c.name === 'vault_unlock_route')).toHaveLength(1)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      expect(setUps).toBe(0)
+      expect(m.calls.filter((c) => c.name === 'popover_snapshot')).toHaveLength(2)
+      expect(m.toasts).toEqual([])
+    })
+
+    test('route recovery_phrase: Set up this Mac opens, unlock_vault is not invoked and nothing is toasted', async () => {
+      let setUps = 0
+      const m = openAccount(backend({ vault_unlock_route: () => 'recovery_phrase', popover_snapshot: lockedSnapshot }), { onSetUpThisMac: () => { setUps += 1 } })
+      await settle(m)
+      await press(m, 'Unlock')
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toEqual([])
+      expect(setUps).toBe(1)
+      expect(m.toasts).toEqual([])
+    })
+
+    test('the route is read at each click', async () => {
+      const answers = ['recovery_phrase', 'keychain']
+      let read = 0
+      let setUps = 0
+      const m = openAccount(backend({ vault_unlock_route: () => answers[read++], popover_snapshot: lockedSnapshot }), { onSetUpThisMac: () => { setUps += 1 } })
+      await settle(m)
+      await press(m, 'Unlock')
+      await press(m, 'Unlock')
+      expect(setUps).toBe(1)
+      expect(m.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      expect(m.calls.filter((c) => c.name === 'vault_unlock_route')).toHaveLength(2)
+    })
+
+    test('a build without the command unlocks as before; a route read that fails for another reason is the unlock failing', async () => {
+      const without = openAccount(backend({ vault_unlock_route: () => { throw new Error('unknown command vault_unlock_route') }, popover_snapshot: lockedSnapshot }))
+      await settle(without)
+      await press(without, 'Unlock')
+      expect(without.calls.filter((c) => c.name === 'unlock_vault')).toHaveLength(1)
+      expect(without.toasts).toEqual([])
+      const failing = openAccount(backend({ vault_unlock_route: () => { throw new Error('the Keychain service did not answer') }, popover_snapshot: lockedSnapshot }))
+      await settle(failing)
+      await press(failing, 'Unlock')
+      expect(failing.calls.filter((c) => c.name === 'unlock_vault')).toEqual([])
+      expect(failing.toasts.map((t: any) => [t.title, t.message])).toEqual([['Couldn’t unlock the vault', 'the Keychain service did not answer']])
+    })
   })
 
   test('a failed lock is ONE toast and the vault still reads unlocked', async () => {

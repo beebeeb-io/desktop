@@ -27,7 +27,10 @@ fn unleased_credential_commands(source: &str) -> Vec<String> {
 #[test]
 fn every_credential_command_has_admission_before_credential_reads() {
     // 33: `account_profile_fresh` (PR #140 delta review) reads the server with the session's token, so it is admitted too.
-    assert_eq!(SOURCE.matches("session_command!(async").count(), 33);
+    // 34: `desktop_recent_files` (task 2243), the tray's recent list, is admitted like `desktop_file_overview`.
+    // 35, 36: task 2190's `parked_conflict_preview` and `resolve_parked_conflict` read the server with the
+    // session's token (the decision also writes the queue), so both are admitted.
+    assert_eq!(SOURCE.matches("session_command!(async").count(), 36);
     assert!(
         unleased_credential_commands(&SOURCE).is_empty(),
         "unleased commands: {:?}",
@@ -238,5 +241,58 @@ fn round7_recovery_guard_rejects_held_transition_and_missing_final_fence() {
         ] {
             assert!(!recovery_verification_is_fenced(&source.replace(code, &mutation)));
         }
+    }
+}
+/// #139 review P1: a task a command spawns as its own outlives the command's lease, so it binds to the session when it
+/// is created. The popover's storage fetch is the one such task: `cached_storage` spawns the future its `fetch`
+/// returns, the snapshot's `fetch` is `session_bound`, and on Windows `session_bound` is `SESSION_COMMANDS.bind`.
+/// A second spawn in popover_data.rs turns the count red: bind it the same way, then raise the count.
+fn detached_fetch_is_bound(source: &str, popover: &str) -> bool {
+    let Some(at) = source.find("fn session_bound<") else {
+        return false;
+    };
+    let helper = &source[at..at + source[at..].find("\n}").unwrap()];
+    let windows = helper.find("#[cfg(target_os = \"windows\")]");
+    let bind = helper.find("let bound = SESSION_COMMANDS.bind(work);");
+    let other = helper.find("#[cfg(not(target_os = \"windows\"))]");
+    matches!((windows, bind, other), (Some(w), Some(b), Some(o)) if w < b && b < o)
+        && body(source, "popover_snapshot").contains("|| session_bound(async move { fetch_storage_usage(")
+        && popover.matches("tokio::spawn(").count() == 1
+}
+#[test]
+fn a_fetch_that_outlives_its_command_is_bound_to_the_session() {
+    let popover = include_str!("../src/popover_data.rs").replace("\r\n", "\n");
+    assert!(detached_fetch_is_bound(&SOURCE, &popover));
+}
+#[test]
+fn the_bound_fetch_guard_rejects_an_unbound_fetch_and_a_new_spawn() {
+    for ending in ["\n", "\r\n"] {
+        let source = SOURCE.replace('\n', ending).replace("\r\n", "\n");
+        let popover = include_str!("../src/popover_data.rs")
+            .replace('\n', ending)
+            .replace("\r\n", "\n");
+        assert!(detached_fetch_is_bound(&source, &popover), "line ending: {ending:?}");
+        for mutation in [
+            source.replace(
+                "|| session_bound(async move { fetch_storage_usage(",
+                "|| (async move { fetch_storage_usage(",
+            ),
+            source.replace(
+                "let bound = SESSION_COMMANDS.bind(work);",
+                "let bound: Result<_, String> = Ok(work);",
+            ),
+            source.replace(
+                "#[cfg(not(target_os = \"windows\"))]\n    {\n        work",
+                "#[cfg(target_os = \"windows\")]\n    {\n        work",
+            ),
+        ] {
+            assert_ne!(mutation, source, "the mutation applies");
+            assert!(
+                !detached_fetch_is_bound(&mutation, &popover),
+                "surviving mutant, line ending: {ending:?}"
+            );
+        }
+        let spawned = popover.replacen("tokio::spawn(", "tokio::spawn(async {});\n    tokio::spawn(", 1);
+        assert!(!detached_fetch_is_bound(&source, &spawned), "a second spawn survived");
     }
 }

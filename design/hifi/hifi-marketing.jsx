@@ -629,7 +629,7 @@ function HiLegalPage() {
             ['Scaleway S.A.', 'Infrastructure (redundancy)', 'Ciphertext blobs', 'France'],
             ['LeaseWeb NL', 'Edge + CDN', 'Encrypted requests only', 'Netherlands'],
             ['Postmark by Wildbit', 'Transactional email', 'Email address', 'Germany (Frankfurt)'],
-            ['Stripe Payments Europe', 'Billing', 'Billing info (never files)', 'Ireland'],
+            ['Mollie B.V.', 'Billing', 'Billing info (never files)', 'Netherlands'],
             ['Plausible Analytics', 'Marketing-site stats', 'Anonymous page-view', 'Germany'],
           ].map((row, i, arr) => (
             <div key={i} style={{

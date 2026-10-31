@@ -5,25 +5,20 @@
  *
  * The Rust `start_browser_login` handoff opens the system browser to the device-code page, waits for the browser to
  * send the session and the vault key back encrypted, installs both, and reports progress as `browser-login` events
- * (`connecting`, `waiting` with the code, `authorized`, `done`, `error`). The command itself resolves when the handoff
- * is over. This controller subscribes BEFORE it invokes (no event is missed), shows every phase, and settles exactly
- * once: whichever of the `done` event and the command's `Ok` comes first.
+ * (`connecting`, `waiting` with the code, `authorized`, `done`, `error`). This controller subscribes BEFORE it invokes (no
+ * event is missed), shows every phase, and settles exactly once, from the command's answer.
  *
- * A different account (macOS and Linux; Windows refuses a second session): Rust sends the event `account_mismatch`
- * with 1887's count and ask snapshot in it, then an `error` event and an `Err` that both carry the raw code
- * `account_mismatch`. Spec C C-S1 asks for one outcome on both sign-in paths and no raw code on a screen. Rust returning
- * a `LoginOutcome` would edit a 1887 pin (`the_switch_count_reaches_the_sign_in_window` holds the event), so the
- * controller does it on this side: the event becomes the same `SignInSettled` the password path yields, and the two raw
- * signals are swallowed. The event and the `Err` travel separately, so either can come first; when the `Err` is first
- * the controller waits `MISMATCH_GRACE_MS` for the event, and if it never comes the switch step opens WITHOUT a
- * snapshot, which is safe: its confirm then asks Rust to sign out with no `keepUnsent`, and Rust's gate refuses while
- * changes wait and the step counts again before anything is signed out.
+ * The answer is the outcome (spec C C-S1, task 1747 Part 1): the same `LoginOutcome` the password path returns, read
+ * with `settledFrom`, the strict parser both paths share. A fresh sign-in delivered the keys, the same account is a
+ * re-sign-in, and a different account (macOS and Linux; Windows refuses a second session) is the switch outcome with
+ * 1887's count and ask snapshot: an outcome, never an error string, so no raw code reaches a screen and nothing waits for a
+ * second signal. The events are progress only, and `done` settles nothing (the answer says what the sign-in became).
  */
 import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { SIGN_IN_OUTCOME_UNREADABLE } from './accountSwitchCopy'
-import { command, commandUnavailableLabel, type CommandResult } from './desktopApi'
-import { unsentFrom, type SignInSettled } from './onboardingSignIn'
+import { command, commandUnavailableLabel, type CommandResult, type DesktopLoginResult } from './desktopApi'
+import { settledFrom, type SignInSettled } from './onboardingSignIn'
 
 export type BrowserPhase = 'idle' | 'connecting' | 'waiting' | 'authorized' | 'error'
 
@@ -40,7 +35,7 @@ export const IDLE_BROWSER_SIGN_IN: BrowserSignInState = { phase: 'idle', userCod
 
 /** The `browser-login` event's payload (`browser_login.rs`). */
 export interface BrowserLoginEvent {
-  phase: 'connecting' | 'waiting' | 'authorized' | 'done' | 'account_mismatch' | 'error'
+  phase: 'connecting' | 'waiting' | 'authorized' | 'done' | 'error'
   user_code?: string
   verification_uri?: string
   expires_in?: number
@@ -48,25 +43,17 @@ export interface BrowserLoginEvent {
   attempt?: string
   email?: string
   message?: string
-  pending_changes?: unknown
-  unsent?: unknown
-  unsent_error?: unknown
 }
 
 export const BROWSER_LOGIN_EVENT = 'browser-login'
-/** How long the `Err("account_mismatch")` waits for the event that carries the count, if it came first. */
-export const MISMATCH_GRACE_MS = 750
-/** The raw code Rust uses for a different account; it never reaches a screen. */
-const MISMATCH_CODE = 'account_mismatch'
 const DEFAULT_ERROR = 'Sign-in failed. Please try again.'
 
 export interface BrowserSignInDeps {
   listen: (event: string, handler: (event: { payload: BrowserLoginEvent }) => void) => Promise<() => void>
   /** A fresh id for one attempt; Rust echoes it in every event of that attempt (review P3-2). */
   newAttemptId: () => string
-  start: (attempt: string) => Promise<CommandResult<void>>
-  setTimer: (fn: () => void, ms: number) => unknown
-  clearTimer: (handle: unknown) => void
+  /** The handoff's answer: the `LoginOutcome` JSON, read with `settledFrom`. */
+  start: (attempt: string) => Promise<CommandResult<DesktopLoginResult>>
 }
 
 let attemptsStarted = 0
@@ -76,9 +63,7 @@ export function browserSignInDeps(): BrowserSignInDeps {
     listen: (event, handler) => listen<BrowserLoginEvent>(event, handler),
     newAttemptId: () => `${Date.now().toString(36)}-${(attemptsStarted += 1).toString(36)}`,
     // Tauri reads the Rust parameter `attempt_id` as `attemptId`.
-    start: (attempt) => command<void>('start_browser_login', { attemptId: attempt }),
-    setTimer: (fn, ms) => setTimeout(fn, ms),
-    clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    start: (attempt) => command<DesktopLoginResult>('start_browser_login', { attemptId: attempt }),
   }
 }
 
@@ -91,7 +76,6 @@ export class BrowserSignIn {
   /** The screen went away; the attempt carries on to its end (`detach`). */
   private detached = false
   private unlisten: (() => void) | null = null
-  private mismatchTimer: unknown = null
   /** The attempt whose events and answer this controller reads: each `start` has its own (review P3-2). */
   private attempt: string | null = null
 
@@ -116,19 +100,16 @@ export class BrowserSignIn {
     }
     this.unlisten = unlisten
     const result = await this.deps.start(attempt)
-    // The done event (or a different account's) can settle the attempt before the command answers. An answer of an
-    // attempt that is not the current one (the person tried again after a failure) is nobody's: it settles nothing.
+    // An `error` event can end the attempt before the command answers. An answer of an attempt that is not the current
+    // one (the person tried again after a failure) is nobody's: it settles nothing.
     if (this.disposed || this.terminal || this.attempt !== attempt) return
     if (result.ok) {
-      this.settle({ kind: 'fresh', vaultUnlocked: true })
-      return
-    }
-    if (result.reason === MISMATCH_CODE) {
-      // The event that carries the count may still be on its way.
-      this.mismatchTimer = this.deps.setTimer(() => {
-        this.mismatchTimer = null
-        this.settleMismatch(null)
-      }, MISMATCH_GRACE_MS)
+      // The same strict reading as the password path. A handoff has no second factor, so `requires_2fa` is a
+      // contradiction here, and anything that is not the contract is an error, never a sign-in.
+      const outcome = settledFrom(result.value)
+      const asked2fa = (result.value as { requires_2fa?: unknown } | null | undefined)?.requires_2fa === true
+      if (outcome.kind === 'unreadable' || asked2fa) this.fail(SIGN_IN_OUTCOME_UNREADABLE)
+      else this.settle(outcome)
       return
     }
     // Any other outcome must leave "Connecting" and show a visible, actionable error: never a spinner with no way out.
@@ -137,10 +118,11 @@ export class BrowserSignIn {
 
   /**
    * The screen that started the attempt went away: a remount, or the person moved on. The attempt is NOT over. Rust
-   * moves the session revision when it installs the session and emits `done` some milliseconds later, and
-   * `AccountSessionBoundary`'s one-second poll can remount the window in between; the person is signed in, so `done`
-   * must still move the flow on (to the Finder screen), or the browser path, the main one, would often skip it. A
-   * detached controller is not told anything any more; it stays listening only until its attempt ends.
+   * moves the session revision when it installs the session and answers some milliseconds later, and
+   * `AccountSessionBoundary`'s one-second poll can remount the window in between; the person is signed in, so the answer
+   * (it stands across a revision change: `ANSWER_STANDS_WHEN_THE_ACCOUNT_CHANGES`) must still move the flow on (to the
+   * Finder screen), or the browser path, the main one, would often skip it. A detached controller is not told anything
+   * any more; it stays listening only until its attempt ends.
    */
   detach(): void {
     this.detached = true
@@ -149,7 +131,6 @@ export class BrowserSignIn {
   /** A hard stop: nothing is reported, nothing settles, nothing is listened to. */
   dispose(): void {
     this.disposed = true
-    this.cancelMismatchTimer()
     this.release()
   }
 
@@ -173,39 +154,12 @@ export class BrowserSignIn {
         this.set({ ...this.state, phase: 'authorized' })
         break
       case 'done':
-        this.settle({ kind: 'fresh', vaultUnlocked: true })
-        break
-      case 'account_mismatch':
-        this.settleMismatch(payload)
+        // Progress only: the answer says what the sign-in became (a re-sign-in is not a fresh sign-in).
         break
       case 'error':
-        // A different account's `error` carries the raw code; the mismatch is the outcome, not this.
-        if (payload.message === MISMATCH_CODE) break
         this.fail(payload.message ? payload.message : DEFAULT_ERROR)
         break
     }
-  }
-
-  /** A different account. `payload` is the event's, or null when only the `Err` came (see the file header). */
-  private settleMismatch(payload: BrowserLoginEvent | null): void {
-    if (this.disposed || this.terminal) return
-    this.cancelMismatchTimer()
-    if (payload === null) {
-      this.settle({ kind: 'account_mismatch', pendingChanges: 0, unsent: null, unsentError: null })
-      return
-    }
-    const pending = payload.pending_changes
-    if (typeof pending !== 'number' || !Number.isSafeInteger(pending) || pending < 0) {
-      // A count that is not a whole number is no switch with an invented count (the password path's rule).
-      this.fail(SIGN_IN_OUTCOME_UNREADABLE)
-      return
-    }
-    this.settle({
-      kind: 'account_mismatch',
-      pendingChanges: pending,
-      unsent: unsentFrom(payload.unsent),
-      unsentError: typeof payload.unsent_error === 'string' ? payload.unsent_error : null,
-    })
   }
 
   private settle(settled: SignInSettled): void {
@@ -222,14 +176,7 @@ export class BrowserSignIn {
   private finish(): void {
     this.terminal = true
     this.running = false
-    this.cancelMismatchTimer()
     this.release()
-  }
-
-  private cancelMismatchTimer(): void {
-    if (this.mismatchTimer === null) return
-    this.deps.clearTimer(this.mismatchTimer)
-    this.mismatchTimer = null
   }
 
   private release(): void {
