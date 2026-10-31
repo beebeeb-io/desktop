@@ -55,7 +55,7 @@ vault folder:
 Implementation: COM DLL loaded by Explorer, talks to the sync service over
 a named pipe to query per-file status.
 
-See `HiWindowsExplorer` in `design/hifi/hifi-desktop.jsx` for the visual
+See `HiWindowsExplorer` in `../../design/hifi/hifi-desktop.jsx` for the visual
 reference.
 
 ## System tray notifications
@@ -66,7 +66,7 @@ A Win11-style tray flyout shows:
 - Progress bars for active transfers
 - Quick actions: Pause, Settings
 
-See `HiWindowsTray` in `design/hifi/hifi-desktop.jsx`.
+See `HiWindowsTray` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## Settings UI (Fluent)
 
@@ -84,7 +84,7 @@ Key settings:
 - Sync overlay icons toggle
 - "Free up space" to convert untouched files to online-only
 
-See `HiWindowsSettings` in `design/hifi/hifi-desktop.jsx`.
+See `HiWindowsSettings` in `../../design/hifi/hifi-desktop.jsx`.
 
 ## Sync engine key behaviors
 
