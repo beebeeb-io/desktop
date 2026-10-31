@@ -502,7 +502,7 @@ pub fn finalize_wholly_local(
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of either identity is refused until the pass returns, so a
     // dehydration that lands between the checks and the data open cannot make the open fetch.
-    let _scope = crate::no_fetch_scope::enter(&[local_id, server_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     // Before the data open, from the attributes alone: that open fetches a file that is not wholly on disk.
     if !fully_on_disk(path) {
         return Ok(Local::NotWhollyLocal);
@@ -1105,7 +1105,7 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S2).
-    let _scope = crate::no_fetch_scope::enter(&[file_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     // Desktop 0.8.15: a read-access open of a placeholder that is not wholly on disk asks for the
     // whole file (the probe in `callbacks.rs`), and this pass offers every in-sync file with no
     // agreed content, a cloud-only one included. Such a file is never promoted, so it is not
@@ -1160,7 +1160,7 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     // Task 2284 A1.2: this process's own fetch of the file is refused until the pass returns (S1).
-    let _scope = crate::no_fetch_scope::enter(&[file_id]);
+    // MUTATION S (task 2284 CI-fix red proof, never merge): the no-fetch scope is removed.
     if placeholder_in_sync(path) != Some(false) || !fully_on_disk(path) {
         return Ok(false);
     }
@@ -1399,6 +1399,10 @@ pub fn platform_view(path: &std::path::Path) -> crate::unknown_check::PlatformVi
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
     if let Err(error) = std::fs::symlink_metadata(path) {
+        // MUTATION E (task 2284 CI-fix red proof, never merge): the pass writes the DACL of a file it cannot read.
+        if error.kind() != std::io::ErrorKind::NotFound {
+            let _ = std::process::Command::new("icacls").arg(path).arg("/grant").arg("*S-1-5-32-545:(R)").output();
+        }
         return crate::unknown_check::view_of_metadata_error(&error);
     }
     let Ok(file) = open_for_state(path) else {
