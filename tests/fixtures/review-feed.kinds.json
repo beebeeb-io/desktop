@@ -1,0 +1,14 @@
+[
+  "account_refused",
+  "auth_failure",
+  "conflict",
+  "delete",
+  "failed_upload",
+  "metadata",
+  "not_sent",
+  "other",
+  "permission_failure",
+  "quota_failure",
+  "restore",
+  "stale_base"
+]

@@ -7,11 +7,11 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { REVIEW_ENTRY_KINDS } from '../src/desktopApi'
 
 const ROOT = join(import.meta.dir, '..')
 const ENGINE = readFileSync(join(ROOT, 'src-tauri', 'src', 'engine_bridge.rs'), 'utf8').replace(/\r\n/g, '\n')
 const PRODUCTION = ENGINE.slice(0, ENGINE.indexOf('\n#[cfg(test)]\nmod tests {'))
-const API = readFileSync(join(ROOT, 'src', 'desktopApi.ts'), 'utf8')
 const LABELS = readFileSync(join(ROOT, 'src', 'reviewKindLabel.ts'), 'utf8')
 
 function rustKinds(): string[] {
@@ -34,7 +34,7 @@ describe('review kinds', () => {
     expect(start).toBeGreaterThanOrEqual(0)
     const label = LABELS.slice(start, LABELS.indexOf('default:', start))
     for (const kind of rustKinds()) {
-      expect(API.includes(`| '${kind}'`), `desktopApi kind ${kind}`).toBe(true)
+      expect((REVIEW_ENTRY_KINDS as readonly string[]).includes(kind), `desktopApi kind ${kind}`).toBe(true)
       // `conflict` is the label's default ("Conflict"); every other kind names its own case.
       if (kind !== 'conflict') expect(label.includes(`case '${kind}':`), `reviewKindLabel ${kind}`).toBe(true)
     }
