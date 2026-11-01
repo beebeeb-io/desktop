@@ -141,6 +141,12 @@ pub unsafe extern "system" fn fetch_data_callback(
         }
     };
 
+    // Task 2284 A1.2: this process's own fetch inside a no-fetch scope is refused before anything is served.
+    // SAFETY: `info` is this live callback's info.
+    if unsafe { refuse_own_scoped_fetch(info, &file_id, required_offset, required_length) } {
+        return;
+    }
+
     // Desktop 0.8.15 (the hydration storm): which program asked for these bytes, by its image's
     // file name and PID (never a path), and how much. The root is connected with
     // `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`, so `ProcessInfo` is filled.
@@ -803,6 +809,27 @@ unsafe fn fail_transfer(
     } {
         tracing::warn!(error = %e, "CfExecute(TRANSFER_DATA) failure-report itself failed");
     }
+}
+
+/// Task 2284 A1.2: refuse this process's own fetch of a file inside a no-fetch scope, so a data open that races a
+/// dehydration fails (os 389) instead of fetching. Another program's fetch, or a callback without process info, is
+/// never refused. `true`: refused, and the transfer was failed.
+///
+/// # Safety
+/// `info` must be the live callback's info, valid for the duration of the callback.
+pub(super) unsafe fn refuse_own_scoped_fetch(info: &CF_CALLBACK_INFO, identity: &str, required_offset: i64, required_length: i64) -> bool {
+    if info.ProcessInfo.is_null() {
+        return false;
+    }
+    // SAFETY: valid for the duration of the callback, like `info` itself.
+    let requester_pid = unsafe { (*info.ProcessInfo).ProcessId };
+    if crate::no_fetch_scope::refuses(identity, requester_pid) {
+        tracing::debug!(file_id = %identity, "own fetch refused inside a no-fetch scope");
+        // SAFETY: the keys come from this live callback.
+        unsafe { fail_transfer(info.ConnectionKey, info.TransferKey, info.RequestKey, required_offset, required_length) };
+        return true;
+    }
+    false
 }
 
 /// Low-level single `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`. A

@@ -150,7 +150,9 @@ fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<
             })
             .map(|local| match local {
                 Local::Finalized(_) => Outcome::Done,
-                Local::NotWhollyLocal => Outcome::Review(ReviewReason::PartlyOnDisk),
+                // Task 2284 F7d: not wholly local any more (dehydrated since the view, or its fetch refused inside the
+                // no-fetch scope): pending; the next tick sees it cloud-only and takes F5.
+                Local::NotWhollyLocal => Outcome::Pending,
                 Local::OtherFile => Outcome::Review(ReviewReason::OtherFile),
             })
         }

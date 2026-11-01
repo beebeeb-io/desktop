@@ -144,6 +144,8 @@ mod os_state_reconcile;
 // everywhere); applied on Windows only (`windows_cf::upload_finalization`).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod upload_finalization_plan;
+// Task 2284: the no-fetch scope a finalization, stamp or promote holds around its data open.
+mod no_fetch_scope;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
