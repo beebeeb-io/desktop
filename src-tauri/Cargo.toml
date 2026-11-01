@@ -328,3 +328,6 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "test"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# spike(2176), branch spike/2176-xpc-swap-proof only, never merged: links the XPC swap-probe client
+# (spikes/2176-xpc-swap-proof/client/) into the app. Off by default; without it the build is unchanged.
+spike-2176 = []

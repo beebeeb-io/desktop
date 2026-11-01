@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "files": {
+        "XPCServices/BeebeebSwapProbe.xpc": "target/spike-2176/BeebeebSwapProbe.xpc"
+      }
+    }
+  }
+}
