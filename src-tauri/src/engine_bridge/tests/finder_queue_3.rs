@@ -1,0 +1,429 @@
+//! `finder_queue_3` engine tests, split out of `engine_bridge.rs`.
+
+use super::*;
+    /// Spec §7.2 (final review): a folder created inside a folder is listed in that folder
+    /// only, with the full relative path.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[test]
+    fn a_nested_folder_create_is_listed_in_its_folder_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&dir.path().join("state.db"));
+        seed_folder_row(&bridge, "r9-folder", "r9-folder");
+        let outcome = bridge
+            .queue_finder_create(FinderWriteTarget {
+                file_id: None,
+                parent_id: Some("r9-folder".into()),
+                filename: "sub".into(),
+                rel_path: None,
+                kind: FinderWriteItemKind::Folder,
+                contents_path: None,
+                content_type: None,
+                base_version_identifier: None,
+            })
+            .unwrap();
+        let FinderWriteOutcome::Queued { file_id: Some(sub), .. } = outcome else {
+            panic!("a queued folder create: {outcome:?}")
+        };
+        assert_eq!(
+            name_parent_status(&bridge, &sub),
+            ("r9-folder/sub".into(), Some("r9-folder".into()), FileStatus::Local)
+        );
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&sub), "not at the top level");
+        assert_eq!(listed_under(&bridge, "r9-folder"), vec![sub]);
+    }
+
+    /// Spec §7.2 (final review): a contents-only save of a nested file never lists it at the
+    /// top level, and keeps its full relative path and parent through its landing. Neither
+    /// its accept nor its landing records a move.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[tokio::test]
+    async fn a_nested_save_is_never_listed_at_the_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [100u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "nested-save");
+        let moves_before = reparented_changes(&bridge, "nested-save");
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "nested-save",
+            "notes.txt",
+            "folder-a",
+            b"edited in place",
+            "1",
+        );
+        assert_eq!(
+            reparented_changes(&bridge, "nested-save"),
+            moves_before,
+            "a save that neither renames nor moves records no move"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "nested-save"),
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+        );
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&"nested-save".to_string()));
+        assert!(listed_under(&bridge, "folder-a").contains(&"nested-save".to_string()));
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, "nested-save"),
+            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Local),
+            "the landing keeps the full relative path"
+        );
+        assert!(
+            !listed_under(&bridge, FP_ROOT).contains(&"nested-save".to_string()),
+            "not at the top level once landed"
+        );
+        assert_eq!(
+            reparented_changes(&bridge, "nested-save"),
+            moves_before,
+            "nor does its landing"
+        );
+        drop(server.finish());
+    }
+
+    /// Spec §7.2 (final review): a save that renames its file while the file's create is
+    /// still queued renames the provisional row. The create's landing keeps that name on the
+    /// server file, and the save, re-keyed to it, lands under it.
+    #[cfg(unix)] // names `crate::ipc_socket`
+    #[tokio::test]
+    async fn a_save_that_renames_a_queued_create_keeps_the_new_name_through_the_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [101u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_folder_row(&bridge, "folder-a", "Docs");
+        // The save's first chunk fails once, so the create lands alone first.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-2".into());
+        let created = fp_create_in(&bridge, dir.path(), "folder-a", "draft.txt", b"draft");
+        let p = created.outcome_file_id();
+        let saved = fp_save_moved(
+            &bridge,
+            dir.path(),
+            &p,
+            "final.txt",
+            "folder-a",
+            b"final",
+            &created.token.clone().unwrap(),
+        );
+        let ipc = crate::ipc_socket::write_outcome_response("modify", &bridge.db, Ok(saved));
+        let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
+            panic!("an item, never None: {ipc:?}")
+        };
+        assert_eq!(
+            (
+                item.identifier.as_str(),
+                item.filename.as_str(),
+                item.parent_identifier.as_str()
+            ),
+            (p.as_str(), "final.txt", "folder-a")
+        );
+        assert_eq!(
+            name_parent_status(&bridge, &p),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Uploading)
+        );
+
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        // SF-0001 (L13): the create landed under the id it chose, so P is the server id.
+        let s = p.clone();
+        assert!(
+            bridge.db.get_file(&p).unwrap().is_some(),
+            "the create lands under the id this device chose"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, &s),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Uploading),
+            "the create's landing kept the save's name"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        assert_eq!(
+            name_parent_status(&bridge, &s),
+            ("Docs/final.txt".into(), Some("folder-a".into()), FileStatus::Local)
+        );
+        assert_eq!(listed_under(&bridge, "folder-a"), vec![s.clone()]);
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&s));
+        let state = server.finish();
+        assert_eq!(state.files_with_content(), vec![s.clone()], "one server file");
+        assert_eq!(state.files[&s].versions.len(), 2);
+        assert_eq!(state.latest_plaintext(&s, master_key), b"final");
+    }
+
+    /// Spec §7.2 (final review): a content save of an item in the trash is refused, as a create
+    /// in the trash is, and the item stays in the trash. Three saves: a real `Trashing` row
+    /// saved under the trash container (as the system holds it) and under its old folder, and
+    /// a live row whose template names the trash container. Each reply is an error, the row
+    /// keeps its status, path and parent, and no upload is queued.
+    #[cfg(unix)] // names `crate::ipc_socket::write_outcome_response`
+    #[tokio::test]
+    async fn a_save_of_an_item_in_the_trash_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let master_key = [102u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_row_in_folder(&bridge, &server, "in-trash");
+        bridge.queue_finder_delete("in-trash", Some("1".into())).unwrap();
+        assert_eq!(
+            bridge.db.get_file("in-trash").unwrap().unwrap().status,
+            FileStatus::Trashing
+        );
+        seed_uploaded_row(&bridge, &server, "live");
+        let logs = capture_logs_async(async {
+            let save = |file_id: &str, parent: &str| {
+                let contents = dir.path().join(format!("save-{}.txt", uuid::Uuid::new_v4()));
+                std::fs::write(&contents, b"edited").unwrap();
+                let mut target = finder_file_target(Some(file_id), "notes.txt", &contents, Some("1".into()));
+                target.parent_id = Some(parent.to_string());
+                crate::ipc_socket::write_outcome_response(
+                    "modify",
+                    &bridge.db,
+                    bridge.queue_file_provider_modify(target),
+                )
+            };
+            for (file_id, parent, status, path, row_parent) in [
+                (
+                    "in-trash",
+                    "NSFileProviderTrashContainerItemIdentifier",
+                    FileStatus::Trashing,
+                    "Docs/notes.txt",
+                    Some("folder-a"),
+                ),
+                (
+                    "in-trash",
+                    "folder-a",
+                    FileStatus::Trashing,
+                    "Docs/notes.txt",
+                    Some("folder-a"),
+                ),
+                (
+                    "live",
+                    "NSFileProviderTrashContainerItemIdentifier",
+                    FileStatus::Local,
+                    "notes.txt",
+                    None,
+                ),
+            ] {
+                let crate::ipc_socket::IpcResponse::Error { message } = save(file_id, parent) else {
+                    panic!("{file_id} under {parent}: refused")
+                };
+                assert_eq!(message, "Beebeeb cannot change items inside the Trash.", "{file_id}");
+                assert_eq!(
+                    name_parent_status(&bridge, file_id),
+                    (path.into(), row_parent.map(str::to_string), status),
+                    "{file_id} under {parent}: unchanged"
+                );
+                assert!(
+                    bridge
+                        .db
+                        .list_operations_for_file(file_id)
+                        .unwrap()
+                        .iter()
+                        .all(|op| op.kind != OperationKind::UploadVersion),
+                    "{file_id} under {parent}: no upload queued"
+                );
+            }
+        })
+        .await;
+        // §11: each refusal is logged with its category, never a name or a path.
+        let refused: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains("Finder write refused"))
+            .collect();
+        assert_eq!(refused.len(), 3, "{logs}");
+        assert!(refused.iter().all(|line| line.contains("in_trash")), "{logs}");
+        assert!(!logs.contains("notes.txt") && !logs.contains("Docs"), "{logs}");
+        drop(server.finish());
+    }
+
+    /// Spec §7.2 (final review): a folder deleted elsewhere while a create in it is queued, by
+    /// each of the three sweeps: a `file_delete` of the folder, its absence from a snapshot, and
+    /// a `file_delete` of a folder this Mac has no row for (the orphan sweep). The sweep keeps the
+    /// create's row and re-homes it at the top level in its transaction: no parent, its name
+    /// alone as the path, a `reparented` change, and the write's parent cleared. The row is
+    /// listed at the root from the sweep on, and the create lands there. A row with no queued
+    /// write is still swept.
+    #[cfg(unix)] // names `crate::ipc_socket::list_file_provider_items`
+    #[tokio::test]
+    async fn a_queued_create_lands_at_the_top_level_after_its_folder_is_deleted_elsewhere() {
+        for (how, folder_row) in [("file_delete", true), ("snapshot", true), ("orphan sweep", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let sync_root = dir.path().join("sync-root");
+            std::fs::create_dir_all(&sync_root).unwrap();
+            let master_key = [109u8; 32];
+            let server = VersionedServerMock::start();
+            let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+            if folder_row {
+                seed_folder_row(&bridge, "r9-folder", "r9-folder");
+            }
+            let created = fp_create_in(&bridge, dir.path(), "r9-folder", "n1.txt", b"queued");
+            let p = created.outcome_file_id();
+            bridge
+                .db
+                .upsert_file_with_contract(
+                    &FileEntry {
+                        file_id: "synced".into(),
+                        path: "r9-folder/synced.txt".into(),
+                        status: FileStatus::CloudOnly,
+                        size_bytes: 3,
+                        modified_at: 1_700_000_000,
+                        content_hash: None,
+                        remote_updated_at: 1_700_000_000,
+                        parent_id: Some("r9-folder".into()),
+                        item_kind: ItemKind::File,
+                    },
+                    |contract| contract.parent_id = Some("r9-folder".into()),
+                )
+                .unwrap();
+            let moves_before = reparented_changes(&bridge, &p);
+            if how == "snapshot" {
+                let seen: HashSet<String> = ["elsewhere".to_string()].into_iter().collect();
+                bridge.db.prune_absent(&seen, now_secs() + 100).unwrap();
+            } else {
+                let delete = crate::api_client::SyncOp {
+                    seq_id: 701,
+                    op_type: "file_delete".into(),
+                    payload: serde_json::json!({ "id": "r9-folder" }),
+                };
+                apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
+            }
+            assert!(
+                bridge.db.get_file("r9-folder").unwrap().is_none(),
+                "{how}: no folder row"
+            );
+            assert!(
+                bridge.db.get_file("synced").unwrap().is_none(),
+                "{how}: a row with no write is swept"
+            );
+            assert!(
+                bridge.db.get_file(&p).unwrap().is_some(),
+                "{how}: the queued create's row is kept"
+            );
+            assert_eq!(
+                name_parent_status(&bridge, &p),
+                ("n1.txt".into(), None, FileStatus::Uploading),
+                "{how}: re-homed at the top level"
+            );
+            assert_eq!(
+                reparented_changes(&bridge, &p),
+                moves_before + 1,
+                "{how}: one move recorded"
+            );
+            assert!(
+                listed_under(&bridge, FP_ROOT).contains(&p),
+                "{how}: listed at the root from the sweep on"
+            );
+            let ops = bridge.db.list_operations_for_file(&p).unwrap();
+            assert_eq!(ops[0].parent_id, None, "{how}: the write's parent is cleared");
+
+            drain_upload_queue(&bridge, &sync_root).await;
+            // SF-0001 (L13): the create landed under the id it chose, so P is the server id.
+            let s = p.clone();
+            assert!(
+                bridge.db.get_file(&p).unwrap().is_some(),
+                "{how}: the create lands under the id this device chose"
+            );
+            assert_eq!(
+                name_parent_status(&bridge, &s),
+                ("n1.txt".into(), None, FileStatus::Local),
+                "{how}: landed at the top level"
+            );
+            assert!(listed_under(&bridge, FP_ROOT).contains(&s), "{how}: listed at the root");
+            let state = server.finish();
+            assert_eq!(state.latest_plaintext(&s, master_key), b"queued");
+            let init = &state.inits[0].0;
+            assert!(
+                init.get("parent_id").is_none_or(serde_json::Value::is_null),
+                "{how}: the create's init names no folder: {init}"
+            );
+        }
+    }
+
+    /// Spec §7.2 (final review): a sweep re-homes only a write whose own folder is gone. A folder
+    /// in the trash and a live folder with the same path; a save queued in the live one; the
+    /// trashed folder purged (`file_delete`). The prefix `Docs/` reaches the save's row, but its
+    /// parent is still there: the row keeps its parent and path, and its PATCH has no
+    /// `parent_id`.
+    #[tokio::test]
+    async fn a_purged_folder_never_re_homes_a_write_in_a_live_folder_with_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let master_key = [112u8; 32];
+        let server = VersionedServerMock::start();
+        let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
+        seed_folder_row(&bridge, "trashed-docs", "Docs");
+        bridge.db.set_status("trashed-docs", FileStatus::Trashing).unwrap();
+        seed_folder_row(&bridge, "live-docs", "Docs");
+        server.seed_file("report", 1);
+        bridge
+            .db
+            .upsert_file_with_contract(
+                &FileEntry {
+                    file_id: "report".into(),
+                    path: "Docs/report.txt".into(),
+                    status: FileStatus::Local,
+                    size_bytes: 10,
+                    modified_at: 1_700_000_000,
+                    content_hash: None,
+                    remote_updated_at: 1_700_000_000,
+                    parent_id: Some("live-docs".into()),
+                    item_kind: ItemKind::File,
+                },
+                |contract| {
+                    contract.parent_id = Some("live-docs".into());
+                    contract.current_version = 1;
+                },
+            )
+            .unwrap();
+        fp_save_moved(
+            &bridge,
+            dir.path(),
+            "report",
+            "report.txt",
+            "live-docs",
+            b"saved in the live folder",
+            "1",
+        );
+        let purge = crate::api_client::SyncOp {
+            seq_id: 704,
+            op_type: "file_delete".into(),
+            payload: serde_json::json!({ "id": "trashed-docs" }),
+        };
+        apply_sync_op(&bridge, &sync_root, &purge, now_secs(), &mut Vec::new()).unwrap();
+        assert!(
+            bridge.db.get_file("trashed-docs").unwrap().is_none(),
+            "the trashed folder is purged"
+        );
+        assert_eq!(
+            name_parent_status(&bridge, "report"),
+            (
+                "Docs/report.txt".into(),
+                Some("live-docs".into()),
+                FileStatus::Uploading
+            ),
+            "its folder is still there: the row is left exactly as it is"
+        );
+
+        drain_upload_queue(&bridge, &sync_root).await;
+        let state = server.finish();
+        assert_eq!(
+            state.latest_plaintext("report", master_key),
+            b"saved in the live folder"
+        );
+        assert_eq!(
+            patched_parents(&state, "report"),
+            vec![None],
+            "the save does not move the server file"
+        );
+    }
+
