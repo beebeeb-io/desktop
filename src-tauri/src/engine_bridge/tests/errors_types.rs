@@ -210,6 +210,14 @@ fn malformed_record_keeps_the_parsers_text() {
     assert_eq!(error.to_string(), json_text);
 }
 
+/// KeyCustody names which wrap opens a folder's children: the owner's custody
+/// envelope, or the invite's own wrap.
+#[test]
+fn key_custody_names_the_unwrap_path() {
+    assert!(KeyCustody::Custody.is_custody());
+    assert!(!KeyCustody::Invite.is_custody());
+}
+
 /// A marker a lower layer wrapped stays findable on the bridge's own error, the
 /// reach downcast_ref had on the boundary's anyhow::Error.
 #[test]

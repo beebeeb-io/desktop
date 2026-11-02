@@ -675,7 +675,7 @@ pub(super) fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(crate) fn remove_pruned_entry(
     path: &Path,
-    is_dir: bool,
+    kind: RemovedKind,
     agreed: Option<&str>,
     local: LocalEntry,
     copy_dir: &Path,
@@ -689,7 +689,7 @@ pub(crate) fn remove_pruned_entry(
         Err(_) => kept,
     };
     let in_use = || PrunedEntry::KeptInPlace(KeptReason::InUse);
-    if is_dir {
+    if kind == RemovedKind::Dir {
         return removed(engine_remove(path, RemovedKind::Dir), PrunedEntry::FolderKept);
     }
     match local {
@@ -906,7 +906,8 @@ pub(super) fn remove_pruned_entries(
         // for a file with agreed content; one of unknown content is read by its size on disk.
         let state = if row.is_dir { LocalEntry::InSync } else { local(&path, agreed.is_some()) };
         let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
-        match remove_pruned_entry(&path, row.is_dir, agreed, state, &copy_dir) {
+        let kind = if row.is_dir { RemovedKind::Dir } else { RemovedKind::File };
+        match remove_pruned_entry(&path, kind, agreed, state, &copy_dir) {
             PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
             PrunedEntry::KeptCopy { copy, copied_hash, original_removed } => {
@@ -1009,7 +1010,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
         // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
-        match remove_pruned_entry(&original, false, agreed, local(&original, agreed.is_some()), &copy_dir) {
+        match remove_pruned_entry(&original, RemovedKind::File, agreed, local(&original, agreed.is_some()), &copy_dir) {
             PrunedEntry::Removed | PrunedEntry::Gone => {
                 remove_office_owner_files(&original);
                 resolve(&copy);

@@ -480,7 +480,7 @@ impl EngineBridge {
             let wrap = encrypted_file_key_from_folder_keys_response(&folder_keys, file_id)
                 .ok_or_else(|| anyhow::anyhow!("folder share is missing the child key"))?;
             self.shared_folder_child_key(&folder_key, &mapping.file_id, file_id, 1, wrap,
-                folder_keys["desktop_has_custody"].as_bool() == Some(true))
+                KeyCustody::from_folder_keys(&folder_keys))
         } else {
             let encrypted_file_key = mapping
                 .encrypted_file_key

@@ -187,8 +187,31 @@ pub(super) fn encrypted_file_key_from_folder_keys_response<'a>(
         .and_then(|entry| entry.get("encrypted_file_key").and_then(|value| value.as_str()))
 }
 
-pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: bool) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
-    if custody {
+/// Which way a folder's child key is unwrapped: under the folder's custody (the owner L6
+/// envelope) or with the invite's own wrap. The kind, not a bare flag, at every call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyCustody {
+    Custody,
+    Invite,
+}
+
+impl KeyCustody {
+    /// The folder-keys record's `desktop_has_custody` says which wrap this device holds.
+    pub(super) fn from_folder_keys(folder_keys: &serde_json::Value) -> Self {
+        if folder_keys["desktop_has_custody"].as_bool() == Some(true) {
+            KeyCustody::Custody
+        } else {
+            KeyCustody::Invite
+        }
+    }
+
+    pub(super) fn is_custody(self) -> bool {
+        matches!(self, KeyCustody::Custody)
+    }
+}
+
+pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: KeyCustody) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+    if custody.is_custody() {
         let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
         Ok(beebeeb_sync::key_resolution::unwrap_child_key(
             &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)

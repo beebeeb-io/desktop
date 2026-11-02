@@ -81,13 +81,13 @@ impl EngineBridge {
         id: &str,
         kind: u8,
         wrap: &str,
-        custody: bool,
+        custody: KeyCustody,
     ) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
-        if custody {
-            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, true);
+        if custody.is_custody() {
+            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, KeyCustody::Custody);
         }
         self.db.read_without_folder_custody(root, || {
-            unwrap_folder_child_for_format(folder, root, id, kind, wrap, false)
+            unwrap_folder_child_for_format(folder, root, id, kind, wrap, KeyCustody::Invite)
         })?.ok_or_else(|| anyhow::anyhow!("This folder's keys are unavailable"))?
     }
 
@@ -100,7 +100,7 @@ impl EngineBridge {
         let name_encrypted = root.file_name_encrypted.as_deref()?;
         let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
         let file_key = self.shared_folder_child_key(folder_key, &root.file_id, &root.file_id, 2,
-            encrypted_file_key, folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok()?;
+            encrypted_file_key, KeyCustody::from_folder_keys(folder_keys_response)).ok()?;
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
 
@@ -156,7 +156,7 @@ impl EngineBridge {
                     .get(&child_id)
                     .and_then(|encrypted| self.shared_folder_child_key(folder_key, &root.file_id, &child_id,
                         if item_kind_from_metadata(&child) == ItemKind::Folder { 2 } else { 1 }, encrypted,
-                        folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok());
+                        KeyCustody::from_folder_keys(folder_keys_response)).ok());
                 let Some(entry) = apply_shared_metadata_file_row(
                     &self.db,
                     &child,
