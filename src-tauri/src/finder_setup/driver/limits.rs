@@ -29,16 +29,47 @@ pub fn op_limit(op: Op) -> Duration {
     }
 }
 
-pub(super) fn op_name(op: Op) -> &'static str {
-    match op {
-        Op::Observe => "Observe",
-        Op::StartEngine => "StartEngine",
-        Op::AddDomain => "AddDomain",
-        Op::ReadDomain => "ReadDomain",
-        Op::WaitStable(_) => "WaitStable",
-        Op::FinishReady => "FinishReady",
-        Op::StopEngine => "StopEngine",
-        Op::RemoveDomain => "RemoveDomain",
+/// The step one operation performs (spec §5.3), named once: the word a timeout sentence uses and the
+/// order a check walks. A check of a present domain walks `Observe`, `StartEngine`, `AddDomain`,
+/// `ReadDomain`, `WaitStable`, `FinishReady`; a removal walks `StopEngine`, `RemoveDomain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FinderSetupStep {
+    Observe,
+    StartEngine,
+    AddDomain,
+    ReadDomain,
+    WaitStable,
+    FinishReady,
+    StopEngine,
+    RemoveDomain,
+}
+
+impl FinderSetupStep {
+    pub(super) fn of(op: Op) -> Self {
+        match op {
+            Op::Observe => Self::Observe,
+            Op::StartEngine => Self::StartEngine,
+            Op::AddDomain => Self::AddDomain,
+            Op::ReadDomain => Self::ReadDomain,
+            Op::WaitStable(_) => Self::WaitStable,
+            Op::FinishReady => Self::FinishReady,
+            Op::StopEngine => Self::StopEngine,
+            Op::RemoveDomain => Self::RemoveDomain,
+        }
+    }
+
+    /// The word the timeout sentence has always used for this step.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "Observe",
+            Self::StartEngine => "StartEngine",
+            Self::AddDomain => "AddDomain",
+            Self::ReadDomain => "ReadDomain",
+            Self::WaitStable => "WaitStable",
+            Self::FinishReady => "FinishReady",
+            Self::StopEngine => "StopEngine",
+            Self::RemoveDomain => "RemoveDomain",
+        }
     }
 }
 
@@ -52,7 +83,58 @@ pub async fn within<T>(op: Op, limit: Duration, call: impl Future<Output = Resul
         Ok(result) => result,
         Err(_) => Err(FpError::app(
             app_code::OP_TIMEOUT,
-            format!("{} did not answer within {limit:?}", op_name(op)),
+            format!("{} did not answer within {limit:?}", FinderSetupStep::of(op).as_str()),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One row per operation: the step and the word the timeout sentence has always used.
+    #[test]
+    fn finder_setup_step_names_every_operation_table_driven() {
+        for (op, step, name) in [
+            (Op::Observe, FinderSetupStep::Observe, "Observe"),
+            (Op::StartEngine, FinderSetupStep::StartEngine, "StartEngine"),
+            (Op::AddDomain, FinderSetupStep::AddDomain, "AddDomain"),
+            (Op::ReadDomain, FinderSetupStep::ReadDomain, "ReadDomain"),
+            (
+                Op::WaitStable(Duration::from_secs(2)),
+                FinderSetupStep::WaitStable,
+                "WaitStable",
+            ),
+            (Op::FinishReady, FinderSetupStep::FinishReady, "FinishReady"),
+            (Op::StopEngine, FinderSetupStep::StopEngine, "StopEngine"),
+            (Op::RemoveDomain, FinderSetupStep::RemoveDomain, "RemoveDomain"),
+        ] {
+            assert_eq!(FinderSetupStep::of(op), step, "{op:?}");
+            assert_eq!(step.as_str(), name, "{op:?}");
+        }
+    }
+
+    /// The order a check of a present domain walks (spec §5.3), pinned as the story the driver tells.
+    #[test]
+    fn the_finder_setup_step_order_is_observe_start_add_read_wait_finish() {
+        let walked = [
+            Op::Observe,
+            Op::StartEngine,
+            Op::AddDomain,
+            Op::ReadDomain,
+            Op::WaitStable(Duration::from_secs(10)),
+            Op::FinishReady,
+        ];
+        assert_eq!(
+            walked.map(FinderSetupStep::of),
+            [
+                FinderSetupStep::Observe,
+                FinderSetupStep::StartEngine,
+                FinderSetupStep::AddDomain,
+                FinderSetupStep::ReadDomain,
+                FinderSetupStep::WaitStable,
+                FinderSetupStep::FinishReady,
+            ]
+        );
     }
 }

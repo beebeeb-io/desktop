@@ -38,13 +38,43 @@ pub struct FinderSetupHandle {
 /// reconciler at all.
 pub const NOT_RUNNING: &str = "Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.";
 
+/// Why a handle call did not reach the reconciler, or the reconciler did not answer: the one place
+/// these sentences are built. The public calls still hand `lib.rs` a `String`, which is what a Tauri
+/// command result carries, but the reason itself is named (spec §3.4: typed errors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleError {
+    /// No reconciler is running: it was never started, or it stopped on a panic (see `start`).
+    NotRunning,
+    /// The reconciler stopped between the event going out and its answer coming back.
+    Stopped,
+    /// The lock was sent, but not acknowledged within the limit.
+    LockTimeout(Duration),
+}
+
+impl HandleError {
+    pub fn sentence(self) -> String {
+        match self {
+            Self::NotRunning => NOT_RUNNING.to_string(),
+            Self::Stopped => "the Finder reconciler stopped".to_string(),
+            Self::LockTimeout(timeout) => format!(
+                "the Finder reconciler did not acknowledge the lock within {}s",
+                timeout.as_secs()
+            ),
+        }
+    }
+}
+
 impl FinderSetupHandle {
     /// `Err` when the reconciler is not running (it stopped on a panic, see `start`): a caller
     /// that offers a person "Try again" can say so instead of doing nothing.
     pub fn trigger(&self, trigger: Trigger) -> Result<(), String> {
+        self.send_trigger(trigger).map_err(HandleError::sentence)
+    }
+
+    fn send_trigger(&self, trigger: Trigger) -> Result<(), HandleError> {
         self.tx
             .send(Event::Trigger(trigger))
-            .map_err(|_| NOT_RUNNING.to_string())
+            .map_err(|_| HandleError::NotRunning)
     }
 
     /// Nothing to tell a person when it fails: the app being active is not their request.
@@ -80,15 +110,18 @@ impl FinderSetupHandle {
     }
 
     pub async fn lock(&self, timeout: Duration) -> Result<(), String> {
+        self.lock_session(timeout).await.map_err(HandleError::sentence)
+    }
+
+    async fn lock_session(&self, timeout: Duration) -> Result<(), HandleError> {
         let (ack, done) = oneshot::channel();
-        self.tx.send(Event::Lock { ack }).map_err(|_| NOT_RUNNING.to_string())?;
+        self.tx
+            .send(Event::Lock { ack })
+            .map_err(|_| HandleError::NotRunning)?;
         match tokio::time::timeout(timeout, done).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err("the Finder reconciler stopped".to_string()),
-            Err(_) => Err(format!(
-                "the Finder reconciler did not acknowledge the lock within {}s",
-                timeout.as_secs()
-            )),
+            Ok(Err(_)) => Err(HandleError::Stopped),
+            Err(_) => Err(HandleError::LockTimeout(timeout)),
         }
     }
 
@@ -127,5 +160,25 @@ impl FinderSetupHandle {
     #[cfg(test)]
     pub fn set_held_for_test(&self, held: bool) {
         self.held.store(held, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One row per reason: each sentence is the text the calls returned before the type.
+    #[test]
+    fn handle_error_sentences_are_pinned_table_driven() {
+        for (error, sentence) in [
+            (HandleError::NotRunning, NOT_RUNNING),
+            (HandleError::Stopped, "the Finder reconciler stopped"),
+            (
+                HandleError::LockTimeout(Duration::from_secs(5)),
+                "the Finder reconciler did not acknowledge the lock within 5s",
+            ),
+        ] {
+            assert_eq!(error.sentence(), sentence, "{error:?}");
+        }
     }
 }
