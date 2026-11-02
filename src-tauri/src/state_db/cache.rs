@@ -23,7 +23,8 @@ impl StateDb {
         }
         Ok(limit)
     }
-    pub fn set_recursive_pin(&self, root_file_id: &str, pinned: bool, now: i64) -> Result<Vec<String>> {
+    pub fn set_recursive_pin(&self, root_file_id: &str, pinned: impl Into<Pinned>, now: i64) -> Result<Vec<String>> {
+        let pinned: Pinned = pinned.into();
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
 
@@ -60,7 +61,11 @@ impl StateDb {
             rows.collect::<Result<Vec<_>>>()?
         };
 
-        let state = if pinned { PinState::Pinned } else { PinState::Unpinned };
+        let state = if pinned.as_bool() {
+            PinState::Pinned
+        } else {
+            PinState::Unpinned
+        };
         let state_str = state.as_str();
         tx.execute(
             "UPDATE files
@@ -174,9 +179,10 @@ impl StateDb {
             |row| row.get(0),
         )
     }
-    pub fn cache_bytes_by_effective_pin(&self, pinned: bool) -> Result<i64> {
+    pub fn cache_bytes_by_effective_pin(&self, pinned: impl Into<Pinned>) -> Result<i64> {
+        let pinned: Pinned = pinned.into();
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let predicate = if pinned {
+        let predicate = if pinned.as_bool() {
             "pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned')"
         } else {
             "NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))"

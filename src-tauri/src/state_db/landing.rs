@@ -348,10 +348,10 @@ impl StateDb {
     /// and the removal of the op and its resume row with its payload marked for release.
     /// `rekey` re-encrypts a queued op's metadata for the server id. `Ok(None)`: the op moved
     /// since the claim, and nothing was written.
-    pub fn apply_landing(
+    pub fn apply_landing<E: RekeyFailure>(
         &self,
         input: &LandingInput<'_>,
-        rekey: &dyn Fn(&PendingOperation, &str) -> anyhow::Result<Option<String>>,
+        rekey: &dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E>,
     ) -> Result<Option<LandingOutcome>> {
         #[cfg(test)]
         if let Some(error) = injected_landing_failure() {
@@ -359,7 +359,9 @@ impl StateDb {
         }
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (local, server) = (input.local_file_id, input.server_file_id);
+        let local = LocalFileId::new(input.local_file_id);
+        let server = ServerFileId::new(input.server_file_id);
+        let produced_version_id = VersionId::new(input.produced_object_version_id);
         if let Some(claim_id) = input.claim_id {
             let claimed: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
@@ -398,16 +400,16 @@ impl StateDb {
                    WHERE file_id IN (?1, ?2) AND op_id != ?3
                      AND kind IN ('rename_file', 'move_file')
                      AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
-                params![local, server, input.op_id],
+                params![local.as_str(), server.as_str(), input.op_id],
                 |r| r.get(0),
             )?;
         // The row and contract. The row's status, size and mtime are settled below, after
         // the chain step, because that step can park a later write (spec §9.1–§9.2).
-        let existing_row = get_file_conn(&tx, local)?;
+        let existing_row = get_file_conn(&tx, local.as_str())?;
         let keep_place = renamed_since && existing_row.is_some();
         let mut entry = existing_row.unwrap_or_else(|| FileEntry {
-            file_id: server.to_string(),
-            path: input.target_path.unwrap_or(server).to_string(),
+            file_id: server.as_str().to_string(),
+            path: input.target_path.unwrap_or(server.as_str()).to_string(),
             status: FileStatus::Local,
             size_bytes: input.size_bytes,
             modified_at: input.now,
@@ -416,7 +418,7 @@ impl StateDb {
             parent_id: input.parent_id.map(str::to_string),
             item_kind: ItemKind::File,
         });
-        entry.file_id = server.to_string();
+        entry.file_id = server.as_str().to_string();
         let kept_path = keep_place.then(|| entry.path.clone());
         if let Some(target_path) = input.target_path.filter(|_| !later_save && !keep_place) {
             // §7.2 (final review): a Finder landing, the id swap included, writes the full
@@ -430,8 +432,9 @@ impl StateDb {
         }
         entry.remote_updated_at = input.now;
         upsert_file_conn(&tx, &entry)?;
-        let mut contract = get_file_contract_state_conn(&tx, local)?.unwrap_or_else(|| default_contract(server));
-        contract.file_id = server.to_string();
+        let mut contract =
+            get_file_contract_state_conn(&tx, local.as_str())?.unwrap_or_else(|| default_contract(server.as_str()));
+        contract.file_id = server.as_str().to_string();
         contract.item_kind = ItemKind::File;
         // The metadata's content type, else the server's `mime_type`, as before. A File Provider
         // write that has neither (its only `complete` answer was `already_completed`) keeps the
@@ -450,33 +453,33 @@ impl StateDb {
         // content: the previous hash would pair the new version with the old bytes (a revert to them
         // would read as agreed). For a sync-folder upload the content is mixed at that version below.
         contract.local_hash = input.completed_payload_hash.map(str::to_string);
-        contract.current_object_version_id = Some(input.produced_object_version_id.to_string());
+        contract.current_object_version_id = Some(produced_version_id.as_str().to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;
         // Task 1640 (review F1): what it sent is the whole file, so nothing fetched is left on disk.
         if input.completed_payload_hash.is_some() {
             tx.execute(
                 "UPDATE files SET fetched_min_version = 0, fetched_hash = NULL WHERE file_id = ?1",
-                params![server],
+                params![server.as_str()],
             )?;
         } else if input.write_id.is_none() {
             // Review-151d P3-6: not hashed: never agreed; a change is sent on the version that landed.
             tx.execute(
                 "UPDATE files SET fetched_min_version = ?2, fetched_hash = NULL WHERE file_id = ?1",
-                params![server, input.produced_version],
+                params![server.as_str(), input.produced_version],
             )?;
         }
         // A landing: the row's version is the one the server answered, not a snapshot fill (§6.1).
         tx.execute(
             "UPDATE files SET version_filled = 0 WHERE file_id = ?1",
-            params![server],
+            params![server.as_str()],
         )?;
 
         let mut outcome = LandingOutcome {
             parked_successors: Vec::new(),
             resolved_successors: 0,
         };
-        if local != server {
+        if local.as_str() != server.as_str() {
             // §5.4 row 14: S takes P's held columns; the alias; P's queued ops move to S.
             tx.execute(
                 "UPDATE files SET
@@ -485,29 +488,29 @@ impl StateDb {
                     held_version = (SELECT held_version FROM files WHERE file_id = ?1),
                     held_object_version_id = (SELECT held_object_version_id FROM files WHERE file_id = ?1)
                  WHERE file_id = ?2",
-                params![local, server],
+                params![local.as_str(), server.as_str()],
             )?;
             if input.write_id.is_some() {
                 // Write-keyed (§7.1): a Windows create leaves no alias.
                 tx.execute(
                     "INSERT INTO id_aliases (provisional_id, server_id, created_at) VALUES (?1, ?2, ?3)
                      ON CONFLICT(provisional_id) DO UPDATE SET server_id = excluded.server_id",
-                    params![local, server, input.now],
+                    params![local.as_str(), server.as_str(), input.now],
                 )?;
             }
             let successors = {
                 let mut stmt = tx.prepare(&format!(
                     "SELECT {PENDING_OPERATION_COLUMNS} FROM operation_queue WHERE file_id = ?1 AND op_id != ?2 ORDER BY rowid"
                 ))?;
-                let rows = stmt.query_map(params![local, input.op_id], pending_operation_from_row)?;
+                let rows = stmt.query_map(params![local.as_str(), input.op_id], pending_operation_from_row)?;
                 rows.collect::<Result<Vec<_>>>()?
             };
             for op in successors {
-                match rekey(&op, server) {
+                match rekey(&op, server.as_str()) {
                     Ok(metadata_json) => {
                         tx.execute(
                             "UPDATE operation_queue SET file_id = ?2, metadata_json = ?3, updated_at = ?4 WHERE op_id = ?1",
-                            params![op.op_id, server, metadata_json, input.now],
+                            params![op.op_id, server.as_str(), metadata_json, input.now],
                         )?;
                     }
                     // §8.6 rule 3: a Finder landing's chain step never fails the landing.
@@ -516,16 +519,16 @@ impl StateDb {
                             "UPDATE operation_queue SET file_id = ?2, attempts = max_attempts, last_error = 'rekey_failed',
                                                         last_error_class = 'rekey_failed', updated_at = ?3
                              WHERE op_id = ?1",
-                            params![op.op_id, server, input.now],
+                            params![op.op_id, server.as_str(), input.now],
                         )?;
                         outcome.parked_successors.push((op.op_id, ParkReason::RekeyFailed));
                     }
                     // Windows and watcher landings propagate the rekey error as before: the
                     // transaction rolls back and the op is retried.
-                    Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(error.into())),
+                    Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(error.into_boxed())),
                 }
             }
-            delete_file_conn(&tx, local)?;
+            delete_file_conn(&tx, local.as_str())?;
         }
         // §9.1–§9.2: read after the rekey loop, which can park a successor.
         // `later_unparked`: other Finder uploads of the file that have not parked;
@@ -534,14 +537,14 @@ impl StateDb {
             "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
                             AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
                             AND attempts < max_attempts)",
-            params![server, input.op_id],
+            params![server.as_str(), input.op_id],
             |r| r.get(0),
         )?;
         let later_parked: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND op_id != ?2
                             AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')
                             AND attempts >= max_attempts)",
-            params![server, input.op_id],
+            params![server.as_str(), input.op_id],
             |r| r.get(0),
         )?;
         if !later_unparked && !later_parked {
@@ -554,7 +557,7 @@ impl StateDb {
                                   size_bytes = ?3, modified_at = ?4
                  WHERE file_id = ?1",
                 params![
-                    server,
+                    server.as_str(),
                     FileStatus::Local.as_str(),
                     input.size_bytes,
                     input.now,
@@ -571,13 +574,13 @@ impl StateDb {
             // §8.6.2: only WHERE held_write_id = W; a later save's token stays held.
             tx.execute(
                 "UPDATE files SET held_version = ?3, held_object_version_id = ?4 WHERE file_id = ?1 AND held_write_id = ?2",
-                params![server, write_id, input.produced_version, input.produced_object_version_id],
+                params![server.as_str(), write_id, input.produced_version, produced_version_id.as_str()],
             )?;
             // §8.1: the chain step, by write id, with the version the server produced.
             outcome.resolved_successors = tx.execute(
                 "UPDATE operation_queue SET base_version = ?2, base_object_version_id = ?3, after_write_id = NULL
                  WHERE after_write_id = ?1",
-                params![write_id, input.produced_version, input.produced_object_version_id],
+                params![write_id, input.produced_version, produced_version_id.as_str()],
             )?;
         } else {
             // Windows and watcher uploads keep round 3's equal-base rule (spec §6.3.1). For a
@@ -590,12 +593,12 @@ impl StateDb {
                    AND kind IN ('upload_version', 'upload_file')
                    AND ((?5 IS NOT NULL AND base_version = ?5) OR (?5 IS NULL AND base_version IS NULL AND ?6))",
                 params![
-                    server,
+                    server.as_str(),
                     input.op_id,
                     input.produced_version,
-                    input.produced_object_version_id,
+                    produced_version_id.as_str(),
                     input.landed_base,
-                    local != server
+                    local.as_str() != server.as_str()
                 ],
             )?;
         }
@@ -613,7 +616,7 @@ impl StateDb {
             return Ok(None); // dropping `tx` rolls back
         }
         if settle_after_removal {
-            settle_status_after_park_conn(&tx, server)?;
+            settle_status_after_park_conn(&tx, server.as_str())?;
         }
         tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![input.op_id])?;
         if let Some(path) = input.completed_payload {

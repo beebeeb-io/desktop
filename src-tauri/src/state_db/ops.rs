@@ -445,7 +445,7 @@ impl StateDb {
         let claim_id = uuid::Uuid::new_v4().simple().to_string();
         tx.execute(
             "UPDATE operation_queue SET claim_id = ?2, claimed_at = ?3 WHERE op_id = ?1",
-            params![op_id, claim_id, now],
+            params![op_id, ClaimId::new(&claim_id).as_str(), now],
         )?;
         tx.commit()?;
         Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp {

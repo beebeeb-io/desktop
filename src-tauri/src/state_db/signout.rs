@@ -101,11 +101,17 @@ impl StateDb {
         Ok(())
     }
     /// Upload payload ownership outlives operation/resume rows and unlink errors.
-    pub fn track_staged_payload(&self, path: &str, source: Option<&str>, completed: bool) -> Result<()> {
+    pub fn track_staged_payload(
+        &self,
+        path: &str,
+        source: Option<&str>,
+        completed: impl Into<PayloadCompleted>,
+    ) -> Result<()> {
+        let completed: PayloadCompleted = completed.into();
         self.0.lock().unwrap().execute(
             "INSERT INTO staged_payloads(path,source_path,completed) VALUES (?1,?2,?3)
              ON CONFLICT(path) DO UPDATE SET completed = MAX(completed, excluded.completed)",
-            params![path, source, completed],
+            params![path, source, completed.as_bool()],
         )?;
         Ok(())
     }
@@ -617,7 +623,8 @@ impl StateDb {
     /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
     /// `false` also clears a debt that was already recorded, because the caller only passes it once a removal
     /// was confirmed or none is needed.
-    pub fn clear_account_data(&self, owe_finder_removal: bool) -> Result<()> {
+    pub fn clear_account_data(&self, owe_finder_removal: impl Into<SignOutMarker>) -> Result<()> {
+        let owe_finder_removal: SignOutMarker = owe_finder_removal.into();
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
@@ -627,7 +634,7 @@ impl StateDb {
             "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'",
             [],
         )?;
-        let mark = if owe_finder_removal {
+        let mark = if owe_finder_removal.as_bool() {
             FINDER_REMOVAL_OWED_KEY
         } else {
             FINDER_DOMAIN_GONE_KEY
@@ -671,9 +678,10 @@ impl StateDb {
     }
     /// Record (or release) the debt on its own: a sign-out whose removal was not confirmed owes it after the
     /// rows were cleared; a confirmed removal releases it.
-    pub fn set_finder_removal_owed(&self, owed: bool) -> Result<()> {
+    pub fn set_finder_removal_owed(&self, owed: impl Into<FinderRemovalOwed>) -> Result<()> {
+        let owed: FinderRemovalOwed = owed.into();
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        if owed {
+        if owed.as_bool() {
             conn.execute(
                 "INSERT INTO sync_state (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![FINDER_REMOVAL_OWED_KEY],

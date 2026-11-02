@@ -631,6 +631,16 @@ pub(crate) use sql::{page_cache_limit_kib, tree_holds_a_file, is_file_provider_t
 mod conn;
 use conn::*;
 
+mod error;
+use error::*;
+pub use error::StateDbError;
+
+mod flags;
+use flags::*;
+
+mod ids;
+use ids::*;
+
 mod reconcile;
 use reconcile::*;
 pub use reconcile::{RECONCILE_UNITS_PER_TX};
