@@ -21,10 +21,13 @@
 //!
 //! ## Layout
 //!
-//! `client` owns the `ApiClient` value and its request methods; `types` the wire
-//! DTOs; `headers` the writer-provenance headers and 429 retry policy; `tests/`
-//! the unit tests, split by area. This file re-exports the surface `api_client.rs`
-//! had before the split.
+//! `client` owns the `ApiClient` value and the request core (construction, the
+//! URLs, the bounded 429 retry, the status mapping); `auth`, `files`, `shares`,
+//! `search` and `upload` add the request methods their domain names; `error`
+//! the typed failure; `ids` the typed ids; `types` the wire DTOs; `headers` the
+//! writer-provenance headers and 429 retry policy; `tests/` the unit tests,
+//! split by area. This file re-exports the surface `api_client.rs` had before
+//! the split.
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,13 @@ mod headers;
 use headers::*;
 pub(crate) use headers::{provenance_headers};
 
+mod error;
+pub use error::{DesktopApiError, Listing};
+pub(crate) use error::{ApiResult, ErrorChain};
+
+mod ids;
+pub use ids::{FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, VersionId};
+
 mod types;
 use types::*;
 pub use types::{ListFilesScope, SyncSnapshot, SyncOp, SyncOps, DesktopUploadInitRequest, DesktopUploadInitResponse, STALE_BASE_MESSAGE, IN_PROGRESS_MESSAGE, InitConflictClass, classify_init_conflict, InitConflict, UploadRefusalCode, UploadRefused, UploadChunkResponse, ParentChange, SearchShardRef, MAX_SEARCH_SHARD_BLOB_BYTES, RegisteredDevice, CreatedSession, HeartbeatBody};
@@ -45,6 +55,11 @@ pub(crate) use types::{UpgradeRequired, upgrade_required, custody_unavailable};
 
 mod client;
 pub use client::{ApiClient};
+mod auth;
+mod files;
+mod search;
+mod shares;
+mod upload;
 
 
 
@@ -97,8 +112,8 @@ pub use client::{ApiClient};
 
 #[cfg(test)]
 mod region_set_fixture {
+    use super::{ApiResult, DesktopApiError};
     use crate::account_dto::SetPreferredRegionResponse;
-    use anyhow::Context;
     use serde_json::Value;
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -162,11 +177,13 @@ mod region_set_fixture {
         }
     }
 
+    /// Answer a `set_preferred_region` call from a fixture, or `None` when the
+    /// client is not pointed at one (every real build).
     pub(super) fn try_handle(
         base_url: &str,
         token: &str,
         body: &Value,
-    ) -> anyhow::Result<Option<SetPreferredRegionResponse>> {
+    ) -> ApiResult<Option<SetPreferredRegionResponse>> {
         let Some(id) = base_url.strip_prefix("fixture://") else {
             return Ok(None);
         };
@@ -175,7 +192,7 @@ mod region_set_fixture {
             .unwrap()
             .get(id)
             .cloned()
-            .with_context(|| format!("region fixture {id} missing"))?;
+            .unwrap_or_else(|| panic!("region fixture {id} missing"));
         let mut fixture = fixture.lock().unwrap();
         fixture.requests.push(RegionRequest {
             method: "PUT".to_string(),
@@ -187,13 +204,24 @@ mod region_set_fixture {
         let response = fixture
             .responses
             .pop_front()
-            .context("region fixture has no response left")?;
+            .expect("region fixture has no response left");
         if !response.status_line.starts_with('2') {
             let snippet: String = response.body.to_string().chars().take(300).collect();
-            anyhow::bail!("HTTP {}: {}", response.status_line, snippet);
+            let code = response
+                .status_line
+                .split_whitespace()
+                .next()
+                .and_then(|code| code.parse::<u16>().ok())
+                .expect("the fixture's status line starts with a status code");
+            return Err(DesktopApiError::HttpStatus {
+                status: reqwest::StatusCode::from_u16(code).expect("a known status code"),
+                snippet,
+            });
         }
 
-        Ok(Some(serde_json::from_value(response.body)?))
+        Ok(Some(
+            serde_json::from_value(response.body).expect("a SetPreferredRegionResponse body"),
+        ))
     }
 
     fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<RegionFixture>>>> {
@@ -245,6 +273,8 @@ mod tests {
         ApiClient::new(base, "tok".into(), [0u8; 32])
     }
 
+    mod errors;
+    mod ids;
     mod link;
     mod urls;
     mod region;

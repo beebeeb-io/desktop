@@ -12,7 +12,7 @@ use beebeeb_core::direct_transfer as dt;
 use reqwest::Client;
 use urlencoding::encode;
 
-use super::ApiClient;
+use super::{ApiClient, FileId};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -331,7 +331,7 @@ impl ApiClient {
     ) -> Result<Vec<u8>, PinnedFailure> {
         let resp = self
             .client
-            .get(self.chunk_url(file_id, index))
+            .get(self.chunk_url(FileId::new(file_id), index))
             .query(&[("object_version_id", version)])
             .header("Authorization", format!("Bearer {}", self.token))
             .send()

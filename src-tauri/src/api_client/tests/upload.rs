@@ -2,13 +2,23 @@
 
 use super::*;
 
+/// The typed refusal inside an upload error, wherever in the chain it sits: the
+/// same place a caller's `downcast_ref` used to reach.
+fn refusal(error: &DesktopApiError) -> &UploadRefused {
+    error
+        .causes()
+        .into_iter()
+        .find_map(|cause| cause.downcast_ref::<UploadRefused>())
+        .expect("typed")
+}
+
     /// Spec §8.4: a refused upload request keeps the server's code by type, matched exactly, and
     /// its text is the status error's alone: the body (its code, its numbers, its message) never
     /// reaches the error's text, which is what a log line or the queue's `last_error` could show.
     #[tokio::test]
     async fn an_upload_refusal_keeps_the_servers_code_and_never_its_body() {
         use std::io::{Read, Write};
-        async fn refused(status: &'static str, body: &'static str) -> anyhow::Error {
+        async fn refused(status: &'static str, body: &'static str) -> DesktopApiError {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
@@ -31,9 +41,9 @@ use super::*;
             r#"{"error":"quota_exceeded","limit_bytes":5368709120,"used_bytes":5368709120,"is_trial_cap":false}"#,
         )
         .await;
-        let refusal = quota.downcast_ref::<UploadRefused>().expect("typed");
-        assert_eq!(refusal.code, Some(UploadRefusalCode::QuotaExceeded));
-        assert_eq!(refusal.status(), Some(413));
+        let typed = refusal(&quota);
+        assert_eq!(typed.code, Some(UploadRefusalCode::QuotaExceeded));
+        assert_eq!(typed.status(), Some(413));
         let text = quota.to_string();
         assert!(text.contains("413 Payload Too Large"), "{text}");
         assert!(
@@ -42,7 +52,8 @@ use super::*;
         );
         assert!(
             quota
-                .chain()
+                .causes()
+                .into_iter()
                 .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some()),
             "the status error stays in the chain"
         );
@@ -55,7 +66,7 @@ use super::*;
         ] {
             let error = refused("413 Payload Too Large", body).await;
             assert_eq!(
-                error.downcast_ref::<UploadRefused>().expect("typed").code,
+                refusal(&error).code,
                 None,
                 "{body}"
             );
