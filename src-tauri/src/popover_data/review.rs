@@ -33,6 +33,7 @@ pub struct ReviewOpen {
 impl ReviewOpen {
     /// `None` when the event cannot point anywhere (no file id), so a malformed
     /// request never blanks the window.
+    #[cfg(test)]
     pub fn new(file_id: &str, file_name: &str, is_text: bool, mode: ReviewMode) -> Option<Self> {
         if file_id.trim().is_empty() {
             return None;

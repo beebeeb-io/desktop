@@ -6,8 +6,6 @@
 //! the popover and the main window both use these names and numbers, and none of
 //! them may drift into a second literal elsewhere.
 
-use super::*;
-
 /// Event Rust emits when the popover is shown; the UI refreshes its snapshot then.
 /// Emitted by the window code (`macos_popover.rs`). The constant lives here so the
 /// contract has one home.

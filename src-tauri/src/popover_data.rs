@@ -100,20 +100,27 @@ mod tests;
 
 mod constants;
 use constants::*;
-pub use constants::{POPOVER_SHOWN_EVENT, POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT};
+pub use constants::{POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT};
+// Emitted by the macOS popover window code (`macos_popover.rs`).
+#[cfg(target_os = "macos")]
+pub use constants::POPOVER_SHOWN_EVENT;
 
 mod runtime;
-use runtime::*;
 pub use runtime::{PopoverRuntime};
 
 mod storage;
-use storage::*;
-pub use storage::{StorageUsage, StorageCache, clear_storage, StorageDto, cached_storage, cached_storage_with, fetch_storage_usage, storage_is_full};
+pub use storage::{StorageUsage, StorageCache, clear_storage, StorageDto, cached_storage, fetch_storage_usage, storage_is_full};
+// The seam a snapshot test fetches through (`cached_storage` is the caller's form).
+#[cfg(test)]
+pub use storage::cached_storage_with;
 
 mod snapshot;
-use snapshot::*;
-pub use snapshot::{finder_reason_line, AccountDto, EngineDto, ReasonDto, FinderDto, ConflictFile, ConflictsDto, ActivityState, ActivityRow, PopoverSnapshotDto, SnapshotInputs, build_activity_rows, DbView, gather_db_view, assemble};
+pub use snapshot::{PopoverSnapshotDto, SnapshotInputs, DbView, gather_db_view, assemble};
+// The row/conflict shapes and builders are exercised from this module's tests.
+#[cfg(test)]
+pub use snapshot::{ActivityState, ConflictFile, build_activity_rows, finder_reason_line};
 
 mod review;
-use review::*;
-pub use review::{REVIEW_OPEN_EVENT, ReviewMode, ReviewOpen, emit_review_open};
+// The retarget payload is built and checked from this module's tests; the emitting window is slice 6's.
+#[cfg(test)]
+pub use review::{REVIEW_OPEN_EVENT, ReviewMode, ReviewOpen};
