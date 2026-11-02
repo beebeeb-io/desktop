@@ -134,3 +134,12 @@ fn land_error_boundary_keeps_the_queue_moved_signal() {
     assert!(error.downcast_ref::<QueueStateMoved>().is_some());
     assert_eq!(error.to_string(), "queue state moved");
 }
+
+/// Only the video mime family takes the ffmpeg frame path; everything else,
+/// including a payload with no mime, decodes as an image.
+#[test]
+fn media_kind_reads_the_video_mime_family() {
+    assert_eq!(MediaKind::from_mime(Some("video/mp4")), MediaKind::Video);
+    assert_eq!(MediaKind::from_mime(Some("image/png")), MediaKind::Image);
+    assert_eq!(MediaKind::from_mime(None), MediaKind::Image);
+}

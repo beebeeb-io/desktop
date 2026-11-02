@@ -52,7 +52,24 @@ pub(super) struct ThumbnailSource {
     pub(super) rgba: Zeroizing<Vec<u8>>,
     pub(super) width: u32,
     pub(super) height: u32,
-    pub(super) is_video: bool,
+    pub(super) kind: MediaKind,
+}
+
+/// Which decoder produced a thumbnail source, and so whether the source can
+/// carry a blurhash: a video frame cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MediaKind {
+    Image,
+    Video,
+}
+
+impl MediaKind {
+    pub(super) fn from_mime(mime_type: Option<&str>) -> Self {
+        match mime_type {
+            Some(mime) if mime.starts_with("video/") => MediaKind::Video,
+            _ => MediaKind::Image,
+        }
+    }
 }
 
 /// Why a thumbnail, its blurhash or a thumbnail-carried base64 value could not be
@@ -134,7 +151,7 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type:
     }
 
     let source = decode_thumbnail_source(payload_path, mime_type)?;
-    let blurhash = if source.is_video {
+    let blurhash = if source.kind == MediaKind::Video {
         None
     } else {
         blurhash_for_source(&source).ok().flatten()
@@ -187,9 +204,9 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type:
 }
 
 pub(super) fn decode_thumbnail_source(payload_path: &Path, mime_type: Option<&str>) -> Result<ThumbnailSource, MediaError> {
-    match mime_type {
-        Some(mime) if mime.starts_with("video/") => decode_video_thumbnail_source(payload_path),
-        _ => decode_image_thumbnail_source(payload_path),
+    match MediaKind::from_mime(mime_type) {
+        MediaKind::Video => decode_video_thumbnail_source(payload_path),
+        MediaKind::Image => decode_image_thumbnail_source(payload_path),
     }
 }
 
@@ -198,7 +215,7 @@ pub(super) fn decode_image_thumbnail_source(payload_path: &Path) -> Result<Thumb
         .with_guessed_format()?
         .decode()
         .map_err(MediaError::DecodeImage)?;
-    dynamic_image_to_thumbnail_source(image, false)
+    dynamic_image_to_thumbnail_source(image, MediaKind::Image)
 }
 
 pub(super) fn decode_video_thumbnail_source(payload_path: &Path) -> Result<ThumbnailSource, MediaError> {
@@ -242,10 +259,10 @@ pub(super) fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) ->
     let frame_png = Zeroizing::new(output.stdout);
     let image =
         image::load_from_memory(&frame_png).map_err(MediaError::DecodeFrame)?;
-    dynamic_image_to_thumbnail_source(image, true)
+    dynamic_image_to_thumbnail_source(image, MediaKind::Video)
 }
 
-pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_video: bool) -> Result<ThumbnailSource, MediaError> {
+pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, kind: MediaKind) -> Result<ThumbnailSource, MediaError> {
     let rgba = image.into_rgba8();
     let width = rgba.width();
     let height = rgba.height();
@@ -256,7 +273,7 @@ pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_v
         rgba: Zeroizing::new(rgba.into_raw()),
         width,
         height,
-        is_video,
+        kind,
     })
 }
 
