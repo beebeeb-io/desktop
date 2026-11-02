@@ -20,7 +20,7 @@ impl EngineBridge {
     pub(super) async fn shared_folder_material(
         &self,
         root: &SharedRootMapping,
-    ) -> anyhow::Result<(Zeroizing<[u8; 32]>, serde_json::Value)> {
+    ) -> Result<(Zeroizing<[u8; 32]>, serde_json::Value), EngineError> {
         let sender_public_key = root
             .sender_public_key
             .as_deref()
@@ -41,8 +41,8 @@ impl EngineBridge {
         scope.check()?;
         let custody = match response {
             Ok(row) => {
-                anyhow::ensure!(row["folder_id"].as_str() == Some(&root.file_id)
-                    && row["key_version"].as_u64().is_some_and(|v| v > 0), "invalid folder custody record");
+                if !(row["folder_id"].as_str() == Some(&root.file_id)
+                    && row["key_version"].as_u64().is_some_and(|v| v > 0)) { return Err(anyhow::anyhow!("invalid folder custody record").into()) };
                 // The server returns the caller's copy: L6 for owners, the
                 // existing authenticated invite envelope for members. A member
                 // cannot open another account's owner/L6 envelope.
@@ -51,22 +51,22 @@ impl EngineBridge {
                         .ok_or_else(|| anyhow::anyhow!("missing member custody key"))?;
                     unwrap_folder_share_key(self.api.master_key(), sender_public_key, &root.file_id, wrapped)?
                 } else {
-                    anyhow::ensure!(row["role"] == "owner", "invalid custody role");
+                    if !(row["role"] == "owner") { return Err(anyhow::anyhow!("invalid custody role").into()) };
                     let wrap = crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"])?
                         .ok_or_else(|| anyhow::anyhow!("missing owner custody key"))?;
                     let key = beebeeb_sync::key_resolution::unwrap_folder_custody(
                         &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), &root.file_id, &wrap)?;
                     Zeroizing::new(*key.as_bytes())
                 };
-                anyhow::ensure!(*custody_key == *folder_key, "custody and invite keys differ");
+                if !(*custody_key == *folder_key) { return Err(anyhow::anyhow!("custody and invite keys differ").into()) };
                 scope.remember_custody(&root.file_id)?;
                 true
             }
             Err(error) if crate::owner_keys::custody_absent(&error) => {
-                anyhow::ensure!(!self.db.has_seen_folder_custody(&root.file_id)?, "This folder's keys are unavailable");
+                if !(!self.db.has_seen_folder_custody(&root.file_id)?) { return Err(anyhow::anyhow!("This folder's keys are unavailable").into()) };
                 false
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let mut folder_keys_response = self.api.get_folder_keys(&root.invite_id).await?;
         scope.check()?;
@@ -81,13 +81,13 @@ impl EngineBridge {
         id: &str,
         kind: u8,
         wrap: &str,
-        custody: bool,
-    ) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
-        if custody {
-            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, true);
+        custody: KeyCustody,
+    ) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+        if custody.is_custody() {
+            return unwrap_folder_child_for_format(folder, root, id, kind, wrap, KeyCustody::Custody);
         }
         self.db.read_without_folder_custody(root, || {
-            unwrap_folder_child_for_format(folder, root, id, kind, wrap, false)
+            unwrap_folder_child_for_format(folder, root, id, kind, wrap, KeyCustody::Invite)
         })?.ok_or_else(|| anyhow::anyhow!("This folder's keys are unavailable"))?
     }
 
@@ -100,7 +100,7 @@ impl EngineBridge {
         let name_encrypted = root.file_name_encrypted.as_deref()?;
         let encrypted_file_key = encrypted_file_key_from_folder_keys_response(folder_keys_response, &root.file_id)?;
         let file_key = self.shared_folder_child_key(folder_key, &root.file_id, &root.file_id, 2,
-            encrypted_file_key, folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok()?;
+            encrypted_file_key, KeyCustody::from_folder_keys(folder_keys_response)).ok()?;
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
 
@@ -136,7 +136,7 @@ impl EngineBridge {
         folder_key: &[u8; 32],
         folder_keys_response: &serde_json::Value,
         now: i64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), EngineError> {
         let key_map = folder_keys_map(folder_keys_response);
         let root_path = format!("Shared with me/{root_display_name}");
         let mut queue: VecDeque<(Option<String>, String, String)> =
@@ -156,7 +156,7 @@ impl EngineBridge {
                     .get(&child_id)
                     .and_then(|encrypted| self.shared_folder_child_key(folder_key, &root.file_id, &child_id,
                         if item_kind_from_metadata(&child) == ItemKind::Folder { 2 } else { 1 }, encrypted,
-                        folder_keys_response["desktop_has_custody"].as_bool() == Some(true)).ok());
+                        KeyCustody::from_folder_keys(folder_keys_response)).ok());
                 let Some(entry) = apply_shared_metadata_file_row(
                     &self.db,
                     &child,

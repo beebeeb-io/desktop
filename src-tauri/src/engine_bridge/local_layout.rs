@@ -6,7 +6,7 @@ impl EngineBridge {
     /// Task 1640 (review N1b): the row's version (`None` when unknown), the version a legacy
     /// download records. Accepted for legacy files only: it can say less than the bytes are
     /// (a later change then parks as stale), never more.
-    pub(super) fn legacy_download_version(&self, file_id: &str) -> anyhow::Result<Option<i64>> {
+    pub(super) fn legacy_download_version(&self, file_id: &str) -> Result<Option<i64>, EngineError> {
         Ok(self
             .db
             .get_file_contract_state(file_id)?
@@ -16,7 +16,7 @@ impl EngineBridge {
 
     /// Task 1640: whether `dest` is `file_id`'s own place in the sync folder, under one of
     /// `allowed_roots`, rather than a staging copy (a Finder fetch, a Linux FUSE temp file).
-    pub(super) fn dest_is_files_sync_folder_place(&self, file_id: &str, dest: &Path, allowed_roots: &[&Path]) -> anyhow::Result<bool> {
+    pub(super) fn dest_is_files_sync_folder_place(&self, file_id: &str, dest: &Path, allowed_roots: &[&Path]) -> Result<bool, EngineError> {
         let Some(entry) = self.db.get_file(file_id)? else {
             return Ok(false);
         };
@@ -182,13 +182,14 @@ impl EngineBridge {
         pinned: bool,
     ) -> anyhow::Result<PinUpdateOutcome> {
         let now = now_secs();
+        let toggle = PinToggle::from_flag(pinned);
         let changed_item_ids = self.db.set_recursive_pin(file_id, pinned, now)?;
         // Mutated only on the non-Windows hydrate-enqueue path below; on Windows
         // the OS (CfSetPinState) drives hydration, so this stays 0.
         #[cfg_attr(target_os = "windows", allow(unused_mut))]
         let mut hydrate_operations = 0usize;
 
-        self.enqueue_pin_tree_operation(file_id, pinned, now)?;
+        self.enqueue_pin_tree_operation(file_id, toggle, now)?;
 
         #[cfg(target_os = "windows")]
         {
@@ -202,11 +203,11 @@ impl EngineBridge {
             if let Some(top) = self.db.get_file(file_id)? {
                 if let Some(path) = Self::placeholder_path_under(sync_root, &top.path) {
                     let recurse = top.is_dir();
-                    if let Err(e) = crate::windows_cf::placeholders::set_pin_state(&path, pinned, recurse) {
+                    if let Err(e) = crate::windows_cf::placeholders::set_pin_state(&path, toggle.is_pin(), recurse) {
                         // Zero-knowledge: never log the path. A pin-state failure
                         // must not abort the DB+server pin that already succeeded;
                         // surface it as a log line and continue.
-                        tracing::warn!(file_id = %file_id, pinned, recurse, error = %e, "CfSetPinState failed for pin toggle");
+                        tracing::warn!(file_id = %file_id, pinned = toggle.is_pin(), recurse, error = %e, "CfSetPinState failed for pin toggle");
                     }
                 }
 
@@ -219,7 +220,7 @@ impl EngineBridge {
                 // cloud-only file, or every cloud-only file under it if a folder)
                 // and CfHydratePlaceholder each. We only ever hydrate on pin, not
                 // unpin (unpinning just makes files reclaim-eligible again).
-                if pinned {
+                if toggle.is_pin() {
                     match self.db.cloud_only_file_descendants(file_id) {
                         Ok(entries) if !entries.is_empty() => {
                             // Resolve placeholder paths the SAME way the pin does,
@@ -260,7 +261,7 @@ impl EngineBridge {
         }
 
         #[cfg(not(target_os = "windows"))]
-        if pinned {
+        if toggle.is_pin() {
             for changed_id in &changed_item_ids {
                 let Some(entry) = self.db.get_file(changed_id)? else {
                     continue;
@@ -331,6 +332,7 @@ impl EngineBridge {
 
     pub fn enforce_local_cache_limit(&self, max_local_cache_bytes: Option<i64>) -> anyhow::Result<CacheCleanupOutcome> {
         self.enforce_local_cache_limit_after_guard(max_local_cache_bytes, &crate::unknown_check::STARTUP_GUARD)
+            .map_err(land_error_to_anyhow)
     }
 
     /// Desktop 0.8.15: [`Self::enforce_local_cache_limit`], which evicts nothing until `guard`'s
@@ -339,7 +341,7 @@ impl EngineBridge {
         &self,
         max_local_cache_bytes: Option<i64>,
         guard: &crate::unknown_check::StartupGuard,
-    ) -> anyhow::Result<CacheCleanupOutcome> {
+    ) -> Result<CacheCleanupOutcome, EngineError> {
         if !guard.allows_freeing() {
             return Ok(CacheCleanupOutcome {
                 evicted_file_ids: Vec::new(),
@@ -362,6 +364,7 @@ impl EngineBridge {
             max_unpinned_cache_bytes,
             ..CachePolicy::default()
         })
+            .map_err(EngineError::from)
     }
 
     pub fn local_cache_usage_bytes(&self) -> anyhow::Result<i64> {

@@ -40,12 +40,12 @@ impl EngineBridge {
     }
 
     /// Mark or clear `file_id`'s landed write as waiting for its new thumbnails (spec §5.6).
-    pub(super) fn set_thumbnails_pending(&self, file_id: &str, pending: bool) {
+    pub(super) fn set_thumbnails_pending(&self, file_id: &str, wait: ThumbnailWait) {
         let mut set = self
             .thumbnails_pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending {
+        if wait.is_waiting() {
             set.insert(file_id.to_string());
         } else {
             set.remove(file_id);
@@ -227,7 +227,7 @@ impl EngineBridge {
     /// master key in memory ([`name_opens`]). Ops with no name, or with a shared context, are not checked and follow
     /// the verdict; with none checked, nothing contradicts this key and the verdict is that they open. The key never
     /// leaves memory, and nothing is logged.
-    fn auth_ops_open_under_this_key(&self) -> anyhow::Result<bool> {
+    fn auth_ops_open_under_this_key(&self) -> Result<bool, EngineError> {
         let master_key = self.api.master_key();
         for op in self.db.operations_paused_for_auth()? {
             let Some(file_id) = op.file_id.as_deref() else {
@@ -343,7 +343,8 @@ impl EngineBridge {
             let op = claimed.op.clone();
             let result = self
                 .execute_operation(&claimed, sync_root, now, &mut outcome.post_complete_errors)
-                .await;
+                .await
+                .map_err(land_error_to_anyhow);
             self.seam("outcome:before_tx");
             // §8.6 rule 6: an upload whose completion is recorded never parks, is never paused
             // and is never abandoned: whatever failed, its retry repeats the landing (rule 4).
@@ -437,8 +438,16 @@ impl EngineBridge {
                     outcome.account_refused |= finder_write && is_curable_refusal(&error);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
-                    let transient = finder_write && finder_write_failure_is_transient(class, &error);
-                    match failed_attempt_rule(class, finder_write, completed, transient) {
+                    let stage = if completed {
+                        AttemptState::Completed
+                    } else if !finder_write {
+                        AttemptState::Upload
+                    } else if finder_write_failure_is_transient(class, &error) {
+                        AttemptState::FinderWriteTransient
+                    } else {
+                        AttemptState::FinderWriteFinal
+                    };
+                    match failed_attempt_rule(class, stage) {
                         FailedAttemptRule::Pause(reason) => {
                             if !self.db.record_pause_claimed(
                                 &op.op_id,
@@ -526,7 +535,7 @@ impl EngineBridge {
         sync_root: &Path,
         now: i64,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<OpDone> {
+    ) -> Result<OpDone, EngineError> {
         let op = &claimed.op;
         match op.kind {
             OperationKind::PinTree => Ok(OpDone::Remove { release: None }),
@@ -540,7 +549,7 @@ impl EngineBridge {
                 } else if let Some(entry) = self.db.get_file(file_id)? {
                     local_file_path_under_sync_root(sync_root, &entry.path)?
                 } else {
-                    return Err(anyhow::anyhow!("hydrate operation target missing from state"));
+                    return Err(anyhow::anyhow!("hydrate operation target missing from state").into());
                 };
                 self.hydrate_file(file_id, &dest, &[sync_root]).await?;
                 Ok(OpDone::Remove { release: None })

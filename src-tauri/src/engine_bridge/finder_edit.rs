@@ -77,6 +77,7 @@ impl EngineBridge {
                     .and_then(|contract| contract.current_object_version_id.clone()),
                 None,
             )
+                .map_err(land_error_to_anyhow)
         }
     }
 
@@ -87,7 +88,7 @@ impl EngineBridge {
         file_id: &str,
         target: &FinderWriteTarget,
         item_contract: Option<&crate::state_db::FileContractState>,
-    ) -> anyhow::Result<(OperationKind, serde_json::Value)> {
+    ) -> Result<(OperationKind, serde_json::Value), EngineError> {
         let name_encrypted = owned_metadata_for_name(
             &self.db, self.api.master_key(),
             file_id,
@@ -107,7 +108,7 @@ impl EngineBridge {
             OperationKind::RenameFile
         };
         let mut payload = serde_json::json!({
-            "operation": "metadata_update",
+            "operation": Op::MetadataUpdate.as_str(),
             "name_encrypted": name_encrypted,
             "base_version_identifier": target.base_version_identifier,
         });
@@ -142,7 +143,7 @@ impl EngineBridge {
         // rename is not sent, and a file at the vacated path waits.
         op.next_retry_at = now_secs() + RENAME_SETTLE_SECS;
         match self.db.enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())? {
-            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed).into()),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
                 op_id: op.op_id,
                 file_id: Some(file_id),
@@ -158,10 +159,10 @@ impl EngineBridge {
     fn start_finder_modify(
         &self,
         target: &FinderWriteTarget,
-    ) -> anyhow::Result<Option<(String, Option<FileContractState>)>> {
+    ) -> Result<Option<(String, Option<FileContractState>)>, EngineError> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
-            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
         }
         if is_ignored_finder_name(&target.filename) {
             return Ok(None);
@@ -185,7 +186,7 @@ impl EngineBridge {
         contents: Option<&std::fs::File>,
         file_id: &str,
         item_contract: Option<&FileContractState>,
-    ) -> anyhow::Result<PreparedFinderModify> {
+    ) -> Result<PreparedFinderModify, EngineError> {
         let staged = stage_finder_contents(
             &self.db,
             self.finder_staging_root()?,
@@ -206,7 +207,7 @@ impl EngineBridge {
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
         let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &target.filename, mime)?;
         let mut payload = serde_json::json!({
-            "operation": "upload_version",
+            "operation": Op::UploadVersion.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": target.content_type,
             "size_bytes": size_bytes,
@@ -245,7 +246,7 @@ impl EngineBridge {
         {
             let (file_id, presented) = self.resolve_provisional(&requested_id, "modify")?;
             if self.db.get_file(&file_id)?.is_none() {
-                return Err(anyhow::Error::new(UnknownItem { requested_id }));
+                return Err(anyhow::Error::new(UnknownItem { requested_id }).into());
             }
             target.file_id = Some(file_id);
             present_as = presented;
@@ -297,15 +298,15 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::UnknownItem => {
                 return Err(anyhow::Error::new(UnknownItem {
                     requested_id: present_as.unwrap_or(file_id),
-                }));
+                }).into());
             }
-            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
-            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone).into()),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
             // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
-            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash)),
+            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash).into()),
             // A modify retires no parked write (task 2190's "Keep both" is a create).
             crate::state_db::AcceptOutcome::ParkedMoved | crate::state_db::AcceptOutcome::QueuedRetiring { .. } => {
-                anyhow::bail!("a modify retires no parked write")
+                return Err(anyhow::anyhow!("a modify retires no parked write").into())
             }
         };
         prepared.staged.retain();
@@ -335,7 +336,7 @@ impl EngineBridge {
     ) -> anyhow::Result<FinderWriteOutcome> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
-            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
         }
         // §7.2 (m-6): a provisional id whose create landed reaches the server file only when
         // the delete's base is that file's held token, the token the create's reply named.
@@ -373,7 +374,7 @@ impl EngineBridge {
             contract => contract,
         };
         let mut payload = serde_json::json!({
-            "operation": "trash",
+            "operation": Op::Trash.as_str(),
             "base_version_identifier": base_version_identifier,
         });
         apply_shared_context(&mut payload, item_contract.as_ref());

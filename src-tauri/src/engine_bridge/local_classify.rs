@@ -243,7 +243,7 @@ impl EngineBridge {
     /// only such row, or the one whose agreed content the bytes are. With no such row it is the
     /// path's first, as before. With several and bytes that are none of them, no row is guessed.
     /// Choosing among several reads the bytes once, and only when they are wholly on this PC.
-    fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> anyhow::Result<RowAtPath> {
+    fn row_judging_bytes_at(&self, rel: &str, path: &Path) -> Result<RowAtPath, EngineError> {
         let mut rows = self.db.file_rows_at_path(rel)?;
         if rows.len() < 2 {
             return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));

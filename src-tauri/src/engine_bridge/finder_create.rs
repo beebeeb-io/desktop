@@ -58,7 +58,7 @@ impl EngineBridge {
                     item_kind: ItemKind::Folder,
                 };
                 let mut payload = serde_json::json!({
-                    "operation": "create_folder",
+                    "operation": Op::CreateFolder.as_str(),
                     "name_encrypted": metadata,
                 });
                 apply_shared_context(&mut payload, parent_contract.as_ref());
@@ -79,6 +79,7 @@ impl EngineBridge {
                         parent_id: target.parent_id.as_deref(),
                     }),
                 )
+                    .map_err(land_error_to_anyhow)
             }
             FinderWriteItemKind::File => {
                 let PreparedFinderCreate {
@@ -119,7 +120,7 @@ impl EngineBridge {
 
     /// What every Finder create checks first, and the ids it gets. `None`: the name is
     /// one Finder writes for itself, which is ignored.
-    fn start_finder_create(&self, target: &FinderWriteTarget) -> anyhow::Result<Option<FinderCreateStart>> {
+    fn start_finder_create(&self, target: &FinderWriteTarget) -> Result<Option<FinderCreateStart>, EngineError> {
         // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
         // enqueue once this engine has been asked to stop. Both the Windows
         // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
@@ -128,7 +129,7 @@ impl EngineBridge {
         // check covers "the watcher" on every platform without needing a
         // separate flag check duplicated in each caller.
         if self.is_stopping() {
-            anyhow::bail!("engine is stopping; refusing to enqueue a new local write");
+            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
         }
         if is_ignored_finder_name(&target.filename) {
             return Ok(None);
@@ -164,7 +165,7 @@ impl EngineBridge {
         target: &FinderWriteTarget,
         contents: Option<&std::fs::File>,
         start: FinderCreateStart,
-    ) -> anyhow::Result<PreparedFinderCreate> {
+    ) -> Result<PreparedFinderCreate, EngineError> {
         let FinderCreateStart {
             parent_contract,
             file_id,
@@ -204,7 +205,7 @@ impl EngineBridge {
             item_kind: ItemKind::File,
         };
         let mut payload = serde_json::json!({
-            "operation": "create_file",
+            "operation": Op::CreateFile.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": target.content_type,
             "uploaded_by": "authenticated_desktop_user",
@@ -250,7 +251,7 @@ impl EngineBridge {
         target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
         retire: Option<crate::state_db::RetireParked<'_>>,
-    ) -> anyhow::Result<Option<(FpWrite, Option<String>)>> {
+    ) -> Result<Option<(FpWrite, Option<String>)>, EngineError> {
         let Some(start) = self.start_finder_create(&target)? else {
             return Ok(Some((FpWrite::plain(ignored_finder_item(&target.filename)), None)));
         };
@@ -285,10 +286,10 @@ impl EngineBridge {
                 (token, None)
             }
             crate::state_db::AcceptOutcome::ParkedMoved => return Ok(None),
-            crate::state_db::AcceptOutcome::UnknownItem => anyhow::bail!("a create always inserts its row"),
-            crate::state_db::AcceptOutcome::InTrash => anyhow::bail!("a create is never refused as in the trash"),
-            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
-            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::AcceptOutcome::UnknownItem => return Err(anyhow::anyhow!("a create always inserts its row").into()),
+            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::anyhow!("a create is never refused as in the trash").into()),
+            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone).into()),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
         };
         prepared.staged.retain();
         Ok(Some((
@@ -391,7 +392,7 @@ impl EngineBridge {
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<HydrateSource> {
         if !hydrate_dest_is_allowed(dest, allowed_roots) {
-            anyhow::bail!("hydrate destination is not within an allowed root");
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
         }
         let (file_id, _) = self.resolve_provisional(id, "hydrate")?;
         // A copy that is gone at the open is decided once more. If the landing unlinked it, the
@@ -435,7 +436,7 @@ impl EngineBridge {
             }
         }
         if copy_missing {
-            return Err(anyhow::Error::new(QueuedCopyMissing));
+            return Err(anyhow::Error::new(QueuedCopyMissing).into());
         }
         self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
@@ -460,7 +461,7 @@ impl EngineBridge {
         self.seam("thumbnail:between_reads");
         let marked = self.thumbnails_pending(&file_id);
         if queued || marked {
-            return Err(anyhow::Error::new(ThumbnailNotYet));
+            return Err(anyhow::Error::new(ThumbnailNotYet).into());
         }
         self.fetch_thumbnail_to_memory(&file_id, variant).await
     }

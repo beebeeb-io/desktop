@@ -14,7 +14,7 @@ impl EngineBridge {
         claim: Option<&ClaimedOp>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<OpDone> {
+    ) -> Result<OpDone, EngineError> {
         let local_file_id = op
             .file_id
             .as_deref()
@@ -79,7 +79,7 @@ impl EngineBridge {
         claim: Option<&ClaimedOp>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<OpDone> {
+    ) -> Result<OpDone, EngineError> {
         // §8.6 rules 4 and 6: a recorded completion lands without the network, before anything
         // else is checked, because it never parks, not even on a missing payload. Write-keyed:
         // a completion is recorded only for a File Provider write, so only one can be found
@@ -97,19 +97,21 @@ impl EngineBridge {
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .and_then(|metadata| metadata["content_type"].as_str().map(str::to_string));
             return self
-                .land(
+                .land(LandRequest {
                     local_file_id,
                     op,
                     claim,
-                    &previous.server_file_id,
-                    version,
-                    &object,
-                    previous.payload_size as u64,
+                    server_file_id: &previous.server_file_id,
+                    produced: ProducedObject {
+                        version_id: version,
+                        object_name: object,
+                    },
+                    size_bytes: previous.payload_size as u64,
                     content_type,
-                    previous.completed_mime_type.clone(),
+                    mime_type: previous.completed_mime_type.clone(),
                     post_complete_errors,
                     sync_root,
-                )
+                })
                 .await;
         }
         let payload_path = op
@@ -122,20 +124,20 @@ impl EngineBridge {
             // The staged copy lives in the app's own container and cannot come back
             // (spec §8.4). Only a File Provider write parks on it.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && claim.and_then(|c| c.write.as_ref()).is_some() => {
-                return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)));
+                return Err(anyhow::Error::new(ParkNow(ParkReason::PayloadMissing)).into());
             }
             // An op without a write id keeps today's retry and today's text
             // (`test_process_due_operations_records_retry_for_upload_worker_handoff`), without
             // the path: `classify_operation_error` matches bare substrings such as `403`, so a
             // path would pause the op instead.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(anyhow::anyhow!("staged upload payload is missing"));
+                return Err(anyhow::anyhow!("staged upload payload is missing").into());
             }
             // Every other read error (permission, I/O, not a regular file) retries as
             // today (spec §8.4), with a fixed text. Neither the path nor the I/O error
             // reaches `classify_operation_error`: it matches bare substrings such as
             // `403` and `permission`, and would pause the op instead.
-            _ => return Err(anyhow::anyhow!("staged upload payload could not be read")),
+            _ => return Err(anyhow::anyhow!("staged upload payload could not be read").into()),
         }
 
         let metadata = operation_metadata(op)?;
@@ -209,11 +211,14 @@ impl EngineBridge {
         let session = match session {
             Some(session) => session,
             None => {
-                guard_init_base(
-                    op.base_version,
-                    is_create,
-                    claim.and_then(|claim| claim.write.as_ref()).is_some(),
-                )?;
+                let init_kind = if is_create {
+                    InitKind::Create
+                } else if claim.and_then(|claim| claim.write.as_ref()).is_some() {
+                    InitKind::FinderReplace
+                } else {
+                    InitKind::Replace
+                };
+                guard_init_base(op.base_version, init_kind)?;
                 // SF-0001 (L13): this device chooses the item id. A create proposes
                 // its own id when that id is canonical; otherwise (a local-only id)
                 // it mints a fresh one for this init. A replace keeps the row's id.
@@ -232,7 +237,7 @@ impl EngineBridge {
                 );
                 let upload = self.api.init_upload(&init_request).await?;
                 if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
-                    return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+                    return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
                 }
                 // Before anything is persisted or sealed: an init that answers with
                 // another id is not this device's item. Exact equality — a re-spelled
@@ -240,7 +245,7 @@ impl EngineBridge {
                 if upload.file_id != proposed_id {
                     return Err(anyhow::anyhow!(
                         "server_changed_item_id: the upload init answered with an id this device did not choose"
-                    ));
+                    ).into());
                 }
                 let session = UploadResume {
                     op_id: op.op_id.clone(),
@@ -268,7 +273,7 @@ impl EngineBridge {
                     Some(claim) => {
                         if !self.db.put_upload_resume_claimed(&session, &claim.claim_id)? {
                             log_queue_state_moved(&op.op_id, "resume");
-                            return Err(anyhow::Error::new(QueueStateMoved));
+                            return Err(anyhow::Error::new(QueueStateMoved).into());
                         }
                     }
                     // Keep Mine runs inline, outside the queue: no claim guards it.
@@ -326,26 +331,32 @@ impl EngineBridge {
                     )?
                 {
                     log_queue_state_moved(&op.op_id, "completion");
-                    return Err(anyhow::Error::new(QueueStateMoved));
+                    return Err(anyhow::Error::new(QueueStateMoved).into());
                 }
                 let size = completed["size_bytes"].as_u64().unwrap_or(plaintext_size);
                 ensure_session_item_id(&session, local_file_id)?;
-                self.land(
+                self.land(LandRequest {
                     local_file_id,
                     op,
                     claim,
-                    &session.server_file_id,
-                    produced_version,
-                    &produced_object,
-                    size,
+                    server_file_id: &session.server_file_id,
+                    produced: ProducedObject {
+                        version_id: produced_version,
+                        object_name: produced_object,
+                    },
+                    size_bytes: size,
                     content_type,
                     mime_type,
                     post_complete_errors,
                     sync_root,
-                )
+                })
                 .await
             }
             Err(error) => {
+                // The session checks and `SessionAbandoned` speak `anyhow`, as the API client
+                // does; `land_error_to_anyhow` hands them the error itself, so a marker it
+                // carries stays findable.
+                let error = land_error_to_anyhow(error);
                 if upload_session_is_gone(&error) {
                     let status = error_http_status(&error);
                     // The status and a category only: the error's text carries the request URL
@@ -364,32 +375,31 @@ impl EngineBridge {
                     // session opened in this attempt, and a 400 at a resumed one, is counted, so a
                     // server that refuses every new session still parks the write.
                     if resumed && matches!(status, Some(404 | 410)) {
-                        return Err(anyhow::Error::new(SessionAbandoned(error)));
+                        return Err(anyhow::Error::new(SessionAbandoned(error)).into());
                     }
                 }
-                Err(error)
+                Err(error.into())
             }
         }
     }
 
     /// The landing (spec §8.6.2): one transaction (`StateDb::apply_landing`), then the work
     /// that follows its commit. Keep Mine passes `claim: None`: the landing removes nothing
-    /// it does not own, and the caller unlinks the released copy.
-    #[allow(clippy::too_many_arguments)]
-    async fn land(
-        &self,
-        local_file_id: &str,
-        op: &PendingOperation,
-        claim: Option<&ClaimedOp>,
-        server_file_id: &str,
-        produced_version: i64,
-        produced_object: &str,
-        size: u64,
-        content_type: Option<String>,
-        mime_type: Option<String>,
-        post_complete_errors: &mut Vec<String>,
-        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
-    ) -> anyhow::Result<OpDone> {
+    /// it does not own, and the caller unlinks the released copy. The error type is the
+    /// bridge's own; `land_error_to_anyhow` hands it back at the call sites.
+    async fn land(&self, request: LandRequest<'_>) -> Result<OpDone, EngineError> {
+        let LandRequest {
+            local_file_id,
+            op,
+            claim,
+            server_file_id,
+            produced,
+            size_bytes,
+            content_type,
+            mime_type,
+            post_complete_errors,
+            sync_root,
+        } = request;
         self.seam("landing:after_complete");
         let payload_path = op.payload_path.clone();
         // macOS only: `release` says only what the caller unlinks after the commit (S6).
@@ -403,7 +413,9 @@ impl EngineBridge {
         // written in the landing's own transaction (the journal then owns the retry).
         #[cfg(target_os = "windows")]
         let finalization = match payload_path.as_deref() {
-            Some(path) => self.defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))?,
+            Some(path) => self
+                .defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))
+                .map_err(EngineError::from)?,
             None => None,
         };
         #[cfg(not(target_os = "windows"))]
@@ -414,7 +426,7 @@ impl EngineBridge {
         // the token: `finder_thumbnail` refuses meanwhile. Keyed on a minted write (macOS).
         let marks_thumbnails = claim.and_then(|c| c.write.as_ref()).is_some() && payload_path.is_some();
         if marks_thumbnails {
-            self.set_thumbnails_pending(server_file_id, true);
+            self.set_thumbnails_pending(server_file_id, ThumbnailWait::Waiting);
         }
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
@@ -433,7 +445,7 @@ impl EngineBridge {
             _ => None,
         };
         let master_key = self.api.master_key();
-        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id)?;
+        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id).map_err(EngineError::from)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -444,9 +456,9 @@ impl EngineBridge {
                 target_path: op.target_path.as_deref(),
                 parent_id: op.parent_id.as_deref(),
                 landed_base: op.base_version,
-                produced_version,
-                produced_object_version_id: produced_object,
-                size_bytes: i64::try_from(size).unwrap_or(i64::MAX),
+                produced_version: produced.version_id,
+                produced_object_version_id: produced.object_name.as_str(),
+                size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
                 content_type: content_type.as_deref(),
                 mime_type: mime_type.as_deref(),
                 // Always the op's payload path, whatever `release` is.
@@ -456,21 +468,21 @@ impl EngineBridge {
                 now: now_secs(),
             },
             &|queued, server_id| metadata_rekeyed_with_material(master_key, queued, server_id,
-                (server_id == server_file_id).then_some((&landing_material.0, landing_material.1))),
+                (server_id == server_file_id).then_some((&landing_material.0, landing_material.1))).map_err(land_error_to_anyhow),
         );
         // Nothing landed: the op is still queued, and the refusal is the queue's again.
         let landed = match landed {
             Ok(Some(landed)) => landed,
             Ok(None) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, false);
+                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                 }
                 log_queue_state_moved(&op.op_id, "landing");
-                return Err(anyhow::Error::new(QueueStateMoved));
+                return Err(QueueStateMoved.into());
             }
             Err(e) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, false);
+                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                 }
                 return Err(e.into());
             }
@@ -478,18 +490,20 @@ impl EngineBridge {
         for (successor, reason) in &landed.parked_successors {
             log_parked(successor, Some(server_file_id), *reason);
         }
-        self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id, size);
+        self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id, size_bytes);
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.0;
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)
+                .map_err(EngineError::from)?
+                .0;
             match self
                 .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
                 .await
             {
                 Ok(()) => {
                     if marks_thumbnails {
-                        self.set_thumbnails_pending(server_file_id, false);
+                        self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                     }
                 }
                 // The refusal stays: the server still holds the previous version's thumbnail.
@@ -497,7 +511,7 @@ impl EngineBridge {
                     // A category only: the error's text can carry the request URL (spec §11).
                     tracing::warn!(
                         file_id = %server_file_id,
-                        reason = error_category(e.as_ref()),
+                        reason = error_category(&e),
                         "upload-time thumbnail generation/upload skipped"
                     );
                     post_complete_errors.push(format!("{}: {e}", op.op_id));
@@ -525,7 +539,7 @@ impl EngineBridge {
         content_type: Option<String>,
         payload_path: &Path,
         session: &UploadResume,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, EngineError> {
         // SF-0001 (L13): never seal a name or send a chunk under an id this device
         // did not choose, even when the session was read back from disk.
         ensure_session_item_id(session, local_file_id)?;
@@ -559,11 +573,10 @@ impl EngineBridge {
         let chunk_size = session.chunk_size_bytes as usize;
         let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
-            return Err(anyhow::anyhow!("upload init returned invalid chunk plan"));
+            return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
         }
         let first_chunk = session.acked_chunks.max(0) as u64;
-        anyhow::ensure!(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
-            "a v2 upload must restart in a fresh session");
+        if !(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2) { return Err(anyhow::anyhow!("a v2 upload must restart in a fresh session").into()) };
         let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
             file_key, &server_file_id, session.payload_size as u64, chunk_size as u64, file)?
             .with_recorded_pin(pin)?;
@@ -622,7 +635,7 @@ impl EngineBridge {
         if completed.is_ok() {
             progress.finish();
         }
-        completed
+        completed.map_err(EngineError::from)
     }
 
     /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
@@ -639,7 +652,7 @@ impl EngineBridge {
         thumbnail_content_type: Option<String>,
         file_key: &beebeeb_core::kdf::FileKey,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), EngineError> {
         let server_file_id = server_file_id.to_string();
         let thumbnails = self
             .upload_thumbnails_for_plaintext_media(
@@ -679,7 +692,7 @@ impl EngineBridge {
     /// days if this fails). A REPLACE targets the user's existing file and its
     /// session is only dropped locally. The resume row is always dropped so the
     /// next attempt starts a fresh session.
-    async fn abandon_upload_session(&self, session: &UploadResume) -> anyhow::Result<()> {
+    async fn abandon_upload_session(&self, session: &UploadResume) -> Result<(), EngineError> {
         if session.is_create {
             match self.api.abandon_upload(&session.server_file_id).await {
                 Ok(()) => tracing::info!(
@@ -723,7 +736,7 @@ impl EngineBridge {
         payload_path: &Path,
         mime_type: Option<&str>,
         file_key: &beebeeb_core::kdf::FileKey,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), EngineError> {
         let pin = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.1;
         let uploads = prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, pin)?;
         for upload in uploads {
@@ -750,7 +763,7 @@ impl EngineBridge {
         server_file_id: &str,
         sync_root: &Path,
         payload_path: &Path,
-    ) -> anyhow::Result<Option<crate::state_db::UploadFinalization>> {
+    ) -> Result<Option<crate::state_db::UploadFinalization>, EngineError> {
         let is_create = op
             .metadata_json
             .as_deref()

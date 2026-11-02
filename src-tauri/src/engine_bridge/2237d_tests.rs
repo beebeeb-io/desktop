@@ -340,7 +340,7 @@ fn sf2237d_t5_thumbnail_preview_and_versions() {
         &*runtime().block_on(b.fetch_thumbnail_to_memory(ID, "small")).unwrap(),
         b"thumbnail"
     );
-    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, true));
+    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, ContentKind::Text));
     assert_eq!(preview.text.as_deref(), Some("guest bytes!"));
     {
         let mut w = s.state.lock().unwrap();
@@ -584,7 +584,7 @@ fn sf2237d_l7b_custody_never_uses_legacy_reader() {
     let folder = FileKey::from_bytes([23; 32]);
     let wrap = beebeeb_sync::key_resolution::wrap_child_key(&folder, ROOT, ID, 1, &random_key()).unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(wrap);
-    let got = unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &encoded, true);
+    let got = unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &encoded, KeyCustody::Custody);
     assert_eq!(
         LEGACY_CHILD_READS.with(|n| n.get()),
         0,
@@ -593,10 +593,10 @@ fn sf2237d_l7b_custody_never_uses_legacy_reader() {
     assert_eq!(got.unwrap().as_bytes(), random_key().as_bytes());
     let legacy = base64::engine::general_purpose::STANDARD
         .encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, random_key().as_bytes()).unwrap());
-    assert!(unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, true).is_err());
+    assert!(unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, KeyCustody::Custody).is_err());
     assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()), 0);
     assert_eq!(
-        unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, false)
+        unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, KeyCustody::Invite)
             .unwrap()
             .as_bytes(),
         random_key().as_bytes()

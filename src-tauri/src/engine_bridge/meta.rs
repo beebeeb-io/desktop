@@ -65,7 +65,7 @@ pub(super) struct SharedRootMapping {
 }
 
 pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
-    -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+    -> Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat), EngineError> {
     if let Some(record) = db.get_owned_key_record(id)? {
         let (key, metadata) = crate::owner_keys::record_key(&beebeeb_core::kdf::MasterKey::from_bytes(*master), &record)?;
         return Ok((key, metadata.chunk_format));
@@ -73,7 +73,7 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
     Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))
 }
 
-pub(super) fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> anyhow::Result<String> {
+pub(super) fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> Result<String, EngineError> {
     let (key, pin) = owned_key_and_pin(db, master, id)?;
     Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
 }
@@ -83,10 +83,10 @@ pub(super) fn encrypted_metadata_for_name(
     file_id: &str,
     filename: &str,
     mime_type: Option<&str>,
-) -> anyhow::Result<String> {
+) -> Result<String, EngineError> {
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*master_key_bytes);
     beebeeb_core::encrypt::encrypt_name(&master_key, file_id, filename, mime_type)
-        .map_err(|e| anyhow::anyhow!("encrypt Finder metadata: {e}"))
+        .map_err(|e| EngineError::from(anyhow::anyhow!("encrypt Finder metadata: {e}")))
 }
 
 /// Task 2190: a held edit's reasons (`held_edits.reason`).
@@ -126,7 +126,7 @@ pub(crate) fn promote_fetched_content(
     local: LocalEntry,
     wholly_on_disk: bool,
     hash_under_handle: &mut dyn FnMut() -> std::io::Result<String>,
-) -> anyhow::Result<bool> {
+) -> Result<bool, EngineError> {
     if local != LocalEntry::InSync || !wholly_on_disk {
         return Ok(false);
     }
@@ -182,7 +182,7 @@ pub(super) fn sign_pow(value: f64, exp: f64) -> f64 {
 /// for `file_id`. The plaintext name is the op's display name; the MIME hint
 /// is the op's content type, else the one guessed from the name, as the
 /// Finder write path does.
-pub(super) fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &PendingOperation, file_id: &str, material: Option<(&beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)>) -> anyhow::Result<Option<String>> {
+pub(super) fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &PendingOperation, file_id: &str, material: Option<(&beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)>) -> Result<Option<String>, EngineError> {
     let Some(raw) = op.metadata_json.as_deref() else {
         return Ok(None);
     };
@@ -191,10 +191,10 @@ pub(super) fn metadata_rekeyed_with_material(master_key: &[u8; 32], op: &Pending
         return Ok(Some(raw.to_string()));
     }
     let Some(name) = metadata_display_name(&metadata, op) else {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "queued operation {} has an encrypted name but no display name",
             op.op_id
-        );
+        ).into());
     };
     let mime = metadata["content_type"]
         .as_str()
@@ -230,7 +230,7 @@ pub(super) fn plan_hydration_chunk_range(
     chunk_size_bytes: u64,
     required_offset: u64,
     required_length: u64,
-) -> anyhow::Result<Option<HydrationChunkRangePlan>> {
+) -> Result<Option<HydrationChunkRangePlan>, EngineError> {
     if !chunk_layout_matches_metadata(size_bytes, chunk_count, chunk_size_bytes) {
         return Ok(None);
     }
@@ -394,7 +394,7 @@ pub(super) fn record_hydration_cache_state(
     file_id: &str,
     dest_path: &Path,
     macos_hydrate_dir: &Path,
-) -> anyhow::Result<()> {
+) -> Result<(), EngineError> {
     if is_macos_finder_handoff_staging_path(dest_path, macos_hydrate_dir) {
         return Ok(());
     }

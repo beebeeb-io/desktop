@@ -345,11 +345,12 @@ pub(super) fn stage_finder_contents(
     root: PathBuf,
     source: &Path,
     opened: Option<&std::fs::File>,
-) -> anyhow::Result<crate::staged_payload::StagedPayload> {
-    match opened {
+) -> Result<crate::staged_payload::StagedPayload, EngineError> {
+    let staged = match opened {
         Some(file) => crate::staged_payload::StagedPayload::copy_from_file(db.clone(), file, source, root),
         None => crate::staged_payload::StagedPayload::copy(db.clone(), source, root),
-    }
+    };
+    staged.map_err(EngineError::from)
 }
 
 /// The folders a Finder write's plaintext copy can be staged in, from the bases this process
@@ -492,15 +493,15 @@ pub(super) fn decidable_or_logged(db: &StateDb, op_id: &str) -> bool {
     })
 }
 
-pub(super) fn decidable_check(db: &StateDb, op_id: &str) -> anyhow::Result<bool> {
+pub(super) fn decidable_check(db: &StateDb, op_id: &str) -> Result<bool, EngineError> {
     #[cfg(test)]
     if FAIL_DECIDABLE_READ.with(|fail| fail.borrow().as_deref() == Some(op_id)) {
-        anyhow::bail!("the decision check failed (test)");
+        return Err(anyhow::anyhow!("the decision check failed (test)").into());
     }
     Ok(db.is_decidable_parked(op_id)?)
 }
 
-pub(super) fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
+pub(super) fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> Result<VersionConflictEntry, EngineError> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
     let file_name = op
         .target_path
@@ -674,7 +675,7 @@ pub(super) fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(crate) fn remove_pruned_entry(
     path: &Path,
-    is_dir: bool,
+    kind: RemovedKind,
     agreed: Option<&str>,
     local: LocalEntry,
     copy_dir: &Path,
@@ -688,11 +689,11 @@ pub(crate) fn remove_pruned_entry(
         Err(_) => kept,
     };
     let in_use = || PrunedEntry::KeptInPlace(KeptReason::InUse);
-    if is_dir {
-        return removed(engine_remove(path, true), PrunedEntry::FolderKept);
+    if kind == RemovedKind::Dir {
+        return removed(engine_remove(path, RemovedKind::Dir), PrunedEntry::FolderKept);
     }
     match local {
-        LocalEntry::InSync | LocalEntry::NothingLocal => removed(engine_remove(path, false), in_use()),
+        LocalEntry::InSync | LocalEntry::NothingLocal => removed(engine_remove(path, RemovedKind::File), in_use()),
         LocalEntry::PartlyLocal => PrunedEntry::KeptInPlace(KeptReason::PartlyLocal),
         LocalEntry::Unreadable => in_use(),
         LocalEntry::WhollyLocal => {
@@ -700,15 +701,16 @@ pub(crate) fn remove_pruned_entry(
                 return in_use();
             };
             if agreed == Some(hash.as_str()) {
-                return removed(engine_remove(path, false), in_use());
+                return removed(engine_remove(path, RemovedKind::File), in_use());
             }
             match copy_as_this_pc(path, copy_dir) {
                 Ok((copy, copied_hash)) => {
-                    let original_removed = match engine_remove(path, false) {
-                        Ok(()) => true,
-                        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    let removal = match engine_remove(path, RemovedKind::File) {
+                        Ok(()) => OriginalRemoval::Removed,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OriginalRemoval::Removed,
+                        Err(_) => OriginalRemoval::InPlace,
                     };
-                    PrunedEntry::KeptCopy { copy, copied_hash, original_removed }
+                    PrunedEntry::KeptCopy { copy, copied_hash, removal }
                 }
                 Err(_) => PrunedEntry::KeptInPlace(KeptReason::CopyFailed),
             }
@@ -826,7 +828,7 @@ pub(super) fn record_kept_copy(
     original: &Path,
     copy: Option<&Path>,
     copied_hash: &str,
-    original_removed: bool,
+    removal: OriginalRemoval,
     reason: KeptReason,
     existing: Option<i64>,
 ) {
@@ -838,7 +840,7 @@ pub(super) fn record_kept_copy(
         original_path: &original_path,
         copy_path: &copy_path,
         copied_hash,
-        original_removed,
+        original_removed: removal.is_removed(),
         reason,
         kept_at: now,
     };
@@ -905,17 +907,18 @@ pub(super) fn remove_pruned_entries(
         // for a file with agreed content; one of unknown content is read by its size on disk.
         let state = if row.is_dir { LocalEntry::InSync } else { local(&path, agreed.is_some()) };
         let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
-        match remove_pruned_entry(&path, row.is_dir, agreed, state, &copy_dir) {
+        let kind = if row.is_dir { RemovedKind::Dir } else { RemovedKind::File };
+        match remove_pruned_entry(&path, kind, agreed, state, &copy_dir) {
             PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
-            PrunedEntry::KeptCopy { copy, copied_hash, original_removed } => {
-                if original_removed {
+            PrunedEntry::KeptCopy { copy, copied_hash, removal } => {
+                if removal.is_removed() {
                     remove_office_owner_files(&path);
                 }
                 // Zero-knowledge: never log the path, only the file_id.
                 tracing::warn!(
                     file_id = %row.file_id,
-                    original_removed,
+                    original_removed = removal.is_removed(),
                     "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy"
                 );
                 record_kept_copy(
@@ -925,7 +928,7 @@ pub(super) fn remove_pruned_entries(
                     &path,
                     Some(&copy),
                     &copied_hash,
-                    original_removed,
+                    removal,
                     KeptReason::Copy,
                     None,
                 );
@@ -938,7 +941,7 @@ pub(super) fn remove_pruned_entries(
                 );
                 // Condition 5: ONE entry per file (a second remote op skips it, above); the retry
                 // resolves it once it can be removed, copied or is gone.
-                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), false, reason, None);
+                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), OriginalRemoval::InPlace, reason, None);
             }
             PrunedEntry::FolderKept => {
                 tracing::warn!(file_id = %row.file_id, "remote-deletion reconcile: kept a folder that still holds something");
@@ -1008,13 +1011,13 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
         // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
-        match remove_pruned_entry(&original, false, agreed, local(&original, agreed.is_some()), &copy_dir) {
+        match remove_pruned_entry(&original, RemovedKind::File, agreed, local(&original, agreed.is_some()), &copy_dir) {
             PrunedEntry::Removed | PrunedEntry::Gone => {
                 remove_office_owner_files(&original);
                 resolve(&copy);
             }
-            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, original_removed } => {
-                if original_removed {
+            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, removal } => {
+                if removal.is_removed() {
                     remove_office_owner_files(&original);
                 }
                 // Changed since (or wholly on disk now, with changes): a new change, in the same entry.
@@ -1025,7 +1028,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                     &original,
                     Some(&new_copy),
                     &copied_hash,
-                    original_removed,
+                    removal,
                     KeptReason::Copy,
                     Some(copy.id),
                 );
@@ -1042,7 +1045,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                         &original,
                         None,
                         &copy.copied_hash,
-                        false,
+                        OriginalRemoval::InPlace,
                         reason,
                         Some(copy.id),
                     );
@@ -1077,7 +1080,7 @@ pub(super) fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
         if std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some()) {
             continue;
         }
-        match engine_remove(&path, true) {
+        match engine_remove(&path, RemovedKind::Dir) {
             Ok(()) => {
                 let _ = db.forget_removed_folder(&rel);
             }

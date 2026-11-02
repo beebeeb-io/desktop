@@ -2,6 +2,238 @@
 
 use super::*;
 
+/// The engine bridge's own error type. Every failure the bridge raises is one of
+/// these variants; dependencies that still speak `anyhow` (the API client) or
+/// return `rusqlite::Result` are wrapped here and converted at this module's
+/// edge. The Tauri command boundary converts one back to `anyhow::Error`, so
+/// `lib.rs` keeps its signature. `Display` delegates to the wrapped error, so
+/// the text a person or the File Provider extension reads is unchanged.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum EngineError {
+    UnknownItem(UnknownItem),
+    QueuedCopyMissing(QueuedCopyMissing),
+    UnsentLocalChange(UnsentLocalChange),
+    ThumbnailNotYet(ThumbnailNotYet),
+    StagedCopyGone(StagedCopyGone),
+    AcceptsClosed(AcceptsClosed),
+    ItemInTrash(ItemInTrash),
+    QueueStateMoved(QueueStateMoved),
+    ParkNow(ParkNow),
+    Database(rusqlite::Error),
+    Io(std::io::Error),
+    /// A thumbnail, its blurhash or a thumbnail-carried value could not be built.
+    Media(MediaError),
+    /// A Finder write found no staging root it may use.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows", test)), allow(dead_code))]
+    Staging(FinderStagingUnavailable),
+    /// A pinned version's manifest did not describe a version this download can use.
+    Manifest(crate::download_pin::BadManifest),
+    /// core's own error: a chunk frame, a key or a metadata record it would not open.
+    Core(beebeeb_core::CoreError),
+    /// A stored JSON or base64 record did not parse. Its text never names a path or a name.
+    Malformed(MalformedRecord),
+    Api(anyhow::Error),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::UnknownItem(error) => error.fmt(f),
+            EngineError::QueuedCopyMissing(error) => error.fmt(f),
+            EngineError::UnsentLocalChange(error) => error.fmt(f),
+            EngineError::ThumbnailNotYet(error) => error.fmt(f),
+            EngineError::StagedCopyGone(error) => error.fmt(f),
+            EngineError::AcceptsClosed(error) => error.fmt(f),
+            EngineError::ItemInTrash(error) => error.fmt(f),
+            EngineError::QueueStateMoved(error) => error.fmt(f),
+            EngineError::ParkNow(error) => error.fmt(f),
+            EngineError::Database(error) => error.fmt(f),
+            EngineError::Io(error) => error.fmt(f),
+            EngineError::Media(error) => error.fmt(f),
+            EngineError::Staging(error) => error.fmt(f),
+            EngineError::Manifest(error) => error.fmt(f),
+            EngineError::Core(error) => error.fmt(f),
+            EngineError::Malformed(error) => error.fmt(f),
+            EngineError::Api(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EngineError::UnknownItem(error) => Some(error),
+            EngineError::QueuedCopyMissing(error) => Some(error),
+            EngineError::UnsentLocalChange(error) => Some(error),
+            EngineError::ThumbnailNotYet(error) => Some(error),
+            EngineError::StagedCopyGone(error) => Some(error),
+            EngineError::AcceptsClosed(error) => Some(error),
+            EngineError::ItemInTrash(error) => Some(error),
+            EngineError::QueueStateMoved(error) => Some(error),
+            EngineError::ParkNow(error) => Some(error),
+            EngineError::Database(error) => Some(error),
+            EngineError::Io(error) => Some(error),
+            EngineError::Media(error) => Some(error),
+            EngineError::Staging(error) => Some(error),
+            EngineError::Manifest(error) => Some(error),
+            EngineError::Core(error) => Some(error),
+            EngineError::Malformed(error) => Some(error),
+            EngineError::Api(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<UnknownItem> for EngineError {
+    fn from(error: UnknownItem) -> Self {
+        EngineError::UnknownItem(error)
+    }
+}
+
+impl From<QueuedCopyMissing> for EngineError {
+    fn from(error: QueuedCopyMissing) -> Self {
+        EngineError::QueuedCopyMissing(error)
+    }
+}
+
+impl From<UnsentLocalChange> for EngineError {
+    fn from(error: UnsentLocalChange) -> Self {
+        EngineError::UnsentLocalChange(error)
+    }
+}
+
+impl From<ThumbnailNotYet> for EngineError {
+    fn from(error: ThumbnailNotYet) -> Self {
+        EngineError::ThumbnailNotYet(error)
+    }
+}
+
+impl From<StagedCopyGone> for EngineError {
+    fn from(error: StagedCopyGone) -> Self {
+        EngineError::StagedCopyGone(error)
+    }
+}
+
+impl From<AcceptsClosed> for EngineError {
+    fn from(error: AcceptsClosed) -> Self {
+        EngineError::AcceptsClosed(error)
+    }
+}
+
+impl From<ItemInTrash> for EngineError {
+    fn from(error: ItemInTrash) -> Self {
+        EngineError::ItemInTrash(error)
+    }
+}
+
+impl From<QueueStateMoved> for EngineError {
+    fn from(error: QueueStateMoved) -> Self {
+        EngineError::QueueStateMoved(error)
+    }
+}
+
+impl From<ParkNow> for EngineError {
+    fn from(error: ParkNow) -> Self {
+        EngineError::ParkNow(error)
+    }
+}
+
+impl From<rusqlite::Error> for EngineError {
+    fn from(error: rusqlite::Error) -> Self {
+        EngineError::Database(error)
+    }
+}
+
+impl From<std::io::Error> for EngineError {
+    fn from(error: std::io::Error) -> Self {
+        EngineError::Io(error)
+    }
+}
+
+impl From<MediaError> for EngineError {
+    fn from(error: MediaError) -> Self {
+        EngineError::Media(error)
+    }
+}
+
+impl From<FinderStagingUnavailable> for EngineError {
+    fn from(error: FinderStagingUnavailable) -> Self {
+        EngineError::Staging(error)
+    }
+}
+
+impl From<crate::download_pin::BadManifest> for EngineError {
+    fn from(error: crate::download_pin::BadManifest) -> Self {
+        EngineError::Manifest(error)
+    }
+}
+
+impl From<beebeeb_core::CoreError> for EngineError {
+    fn from(error: beebeeb_core::CoreError) -> Self {
+        EngineError::Core(error)
+    }
+}
+
+impl From<serde_json::Error> for EngineError {
+    fn from(error: serde_json::Error) -> Self {
+        EngineError::Malformed(MalformedRecord::Json(error))
+    }
+}
+
+impl From<base64::DecodeError> for EngineError {
+    fn from(error: base64::DecodeError) -> Self {
+        EngineError::Malformed(MalformedRecord::Base64(error))
+    }
+}
+
+/// A stored JSON or base64 record that did not parse. `Display` delegates, so the
+/// text a person or the File Provider extension reads is unchanged.
+#[derive(Debug)]
+pub(crate) enum MalformedRecord {
+    Json(serde_json::Error),
+    Base64(base64::DecodeError),
+}
+
+impl std::fmt::Display for MalformedRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MalformedRecord::Json(error) => error.fmt(f),
+            MalformedRecord::Base64(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MalformedRecord {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MalformedRecord::Json(error) => Some(error),
+            MalformedRecord::Base64(error) => Some(error),
+        }
+    }
+}
+
+impl From<anyhow::Error> for EngineError {
+    fn from(error: anyhow::Error) -> Self {
+        EngineError::Api(error)
+    }
+}
+
+impl EngineError {
+    /// Whether `E` sits in this error's source chain. The same reach the boundary's
+    /// `anyhow::Error::downcast_ref` had before the split: a marker a lower layer wrapped
+    /// stays findable through `Api` and through `source`.
+    pub(super) fn is_caused_by<E: std::error::Error + 'static>(&self) -> bool {
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = current {
+            if error.is::<E>() {
+                return true;
+            }
+            current = error.source();
+        }
+        false
+    }
+}
+
 /// A Finder write for an id this Mac never knew and no alias resolves (spec §7.3). The
 /// reply is an error the extension reports as `cannotSynchronize`, so the edit stays on
 /// disk; never "no such item", which would make the system delete it. It carries the id
@@ -301,6 +533,17 @@ impl std::fmt::Display for ItemInTrash {
 
 impl std::error::Error for ItemInTrash {}
 
+/// What the failed attempt had already done when it failed: a completion it
+/// recorded, a plain upload, or a File Provider write whose refusal either looks
+/// transient (the network, a 5xx, a lock) or does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttemptState {
+    Completed,
+    Upload,
+    FinderWriteTransient,
+    FinderWriteFinal,
+}
+
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,10 +589,10 @@ pub(super) fn next_attempt_count(attempts: i64, max_attempts: i64, count: Attemp
 
 /// The rule for a failed attempt of class `class`.
 ///
-/// - A recorded completion (`completed`, §8.6 rule 6) only ever retries, and never uses up its
-///   attempts.
-/// - A File Provider write (`finder_write`: an upload with a write id) never stops uploading for
-///   a reason that waiting or the person can cure (§8.4): a `transient` failure
+/// - A recorded completion (`AttemptState::Completed`, §8.6 rule 6) only ever retries, and never
+///   uses up its attempts.
+/// - A File Provider write (a stage with a write id) never stops uploading for
+///   a reason that waiting or the person can cure (§8.4): a transient failure
 ///   ([`finder_write_failure_is_transient`]: the network, a 5xx, 408/425/429, a lock, a quota
 ///   refusal) retries on the normal backoff without using up the attempts, so the save lands once
 ///   the network, the lock or the space comes back; any other `Retryable` failure uses them up and
@@ -357,31 +600,24 @@ pub(super) fn next_attempt_count(attempts: i64, max_attempts: i64, count: Attemp
 ///   which presents it read-only; `auth` pauses it until the next sign-in.
 /// - Every other upload keeps the rules it had: `Retryable` uses up its attempts, every other
 ///   class pauses it.
-pub(super) fn failed_attempt_rule(
-    class: OperationFailureClass,
-    finder_write: bool,
-    completed: bool,
-    transient: bool,
-) -> FailedAttemptRule {
-    if completed {
-        return FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap);
-    }
-    if !finder_write {
-        return match class.pause_reason() {
+pub(super) fn failed_attempt_rule(class: OperationFailureClass, stage: AttemptState) -> FailedAttemptRule {
+    match stage {
+        AttemptState::Completed => FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap),
+        AttemptState::Upload => match class.pause_reason() {
             Some(reason) => FailedAttemptRule::Pause(reason),
             None => FailedAttemptRule::Retry(AttemptCount::UsesUp),
-        };
-    }
-    match class {
-        OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
-        OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
-        OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
-            FailedAttemptRule::Retry(if transient {
-                AttemptCount::UpToTheBackoffCap
-            } else {
-                AttemptCount::UsesUp
-            })
-        }
+        },
+        AttemptState::FinderWriteTransient | AttemptState::FinderWriteFinal => match class {
+            OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
+            OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
+            OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
+                FailedAttemptRule::Retry(if stage == AttemptState::FinderWriteTransient {
+                    AttemptCount::UpToTheBackoffCap
+                } else {
+                    AttemptCount::UsesUp
+                })
+            }
+        },
     }
 }
 
@@ -473,4 +709,32 @@ pub(super) fn backoff_cap_attempts() -> i64 {
 pub fn retry_delay_seconds(attempts: i64) -> i64 {
     let exponent = attempts.clamp(1, 6) as u32;
     30_i64.saturating_mul(2_i64.saturating_pow(exponent - 1))
+}
+
+/// The bridge's own error type crossing the Tauri command boundary: one
+/// `anyhow::Error`, so `lib.rs` keeps its signature. The wrapped error goes out as
+/// itself, not boxed in [`EngineError`], so a marker the IPC layer finds by downcast
+/// (`StagedCopyGone`, `UnknownItem`, `QueuedCopyMissing`, …) is where it was before
+/// the split, and `land`'s queue-moved signal still reaches the lifecycle. `Display`
+/// is unchanged either way.
+pub(crate) fn land_error_to_anyhow(error: EngineError) -> anyhow::Error {
+    match error {
+        EngineError::UnknownItem(error) => anyhow::Error::new(error),
+        EngineError::QueuedCopyMissing(error) => anyhow::Error::new(error),
+        EngineError::UnsentLocalChange(error) => anyhow::Error::new(error),
+        EngineError::ThumbnailNotYet(error) => anyhow::Error::new(error),
+        EngineError::StagedCopyGone(error) => anyhow::Error::new(error),
+        EngineError::AcceptsClosed(error) => anyhow::Error::new(error),
+        EngineError::ItemInTrash(error) => anyhow::Error::new(error),
+        EngineError::QueueStateMoved(error) => anyhow::Error::new(error),
+        EngineError::ParkNow(error) => anyhow::Error::new(error),
+        EngineError::Database(error) => anyhow::Error::new(error),
+        EngineError::Io(error) => anyhow::Error::new(error),
+        EngineError::Media(error) => anyhow::Error::new(error),
+        EngineError::Staging(error) => anyhow::Error::new(error),
+        EngineError::Manifest(error) => anyhow::Error::new(error),
+        EngineError::Core(error) => anyhow::Error::new(error),
+        EngineError::Malformed(error) => anyhow::Error::new(error),
+        EngineError::Api(error) => error,
+    }
 }

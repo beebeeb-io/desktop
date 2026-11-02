@@ -178,6 +178,68 @@ pub struct TransferLoopOutcome {
     pub account_refused: bool,
 }
 
+/// The two states a pin toggle can ask for. The Tauri command still takes a
+/// flag; naming it here keeps `true` from having to stand for "pin".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PinToggle {
+    Pin,
+    Unpin,
+}
+
+impl PinToggle {
+    pub(super) fn from_flag(pinned: bool) -> Self {
+        if pinned {
+            PinToggle::Pin
+        } else {
+            PinToggle::Unpin
+        }
+    }
+
+    pub(super) fn is_pin(self) -> bool {
+        matches!(self, PinToggle::Pin)
+    }
+}
+
+/// Which upload init this is. A create sends no base; a File Provider write
+/// that replaces a file is never sent without one; a plain replace keeps
+/// today's base. The guard reads the kind, so `true, true` cannot mean two
+/// different things at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitKind {
+    Create,
+    FinderReplace,
+    Replace,
+}
+
+/// Whether a kept copy's original left the disk in this pass, or stayed because
+/// it was in use (a later tick removes it). The name keeps a bare `true` from
+/// standing for "removed" at the prune and at the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OriginalRemoval {
+    Removed,
+    InPlace,
+}
+
+impl OriginalRemoval {
+    pub(super) fn is_removed(self) -> bool {
+        matches!(self, OriginalRemoval::Removed)
+    }
+}
+
+/// Whether a landed write still waits for its new thumbnails (spec §5.6).
+/// Naming the two states keeps `false` from having to stand for "settled".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ThumbnailWait {
+    Waiting,
+    Settled,
+}
+
+impl ThumbnailWait {
+    pub(super) fn is_waiting(self) -> bool {
+        matches!(self, ThumbnailWait::Waiting)
+    }
+}
+
 /// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
 /// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
 pub(super) struct DueOperations {
@@ -202,7 +264,7 @@ impl DueOperations {
         self.folder_landed = true;
     }
 
-    pub(super) fn next(&mut self, db: &StateDb, now: i64) -> anyhow::Result<Option<PendingOperation>> {
+    pub(super) fn next(&mut self, db: &StateDb, now: i64) -> Result<Option<PendingOperation>, EngineError> {
         while self.queue.is_empty() && self.folder_landed && self.listings < DUE_LISTINGS_PER_PASS {
             self.folder_landed = false;
             self.listings += 1;
@@ -454,6 +516,61 @@ pub(crate) enum OpDone {
     Removed { release: Option<String> },
 }
 
+/// The `"operation"` tag a queued op's `metadata_json` carries. The stored JSON is a
+/// format the queue already holds, so each variant spells the exact string the rows
+/// carry; the enum only keeps that set from drifting apart across call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Op {
+    CreateFolder,
+    CreateFile,
+    MetadataUpdate,
+    UploadVersion,
+    Trash,
+    RestoreVersion,
+    PinTree,
+    HydrateFile,
+}
+
+impl Op {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Op::CreateFolder => "create_folder",
+            Op::CreateFile => "create_file",
+            Op::MetadataUpdate => "metadata_update",
+            Op::UploadVersion => "upload_version",
+            Op::Trash => "trash",
+            Op::RestoreVersion => "restore_version",
+            Op::PinTree => "pin_tree",
+            Op::HydrateFile => "hydrate_file",
+        }
+    }
+}
+
+/// The object version the server answered with when its `complete` succeeded: the
+/// version number the row lands on, and the object id its content now has. Two
+/// strings the server answered with, nothing else; the landing reads both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProducedObject {
+    pub(crate) version_id: i64,
+    pub(crate) object_name: String,
+}
+
+/// Everything one landing needs: the op and its claim, the server row the upload
+/// produced, and the completion's own size and types. Borrows the caller's op and
+/// error list; nothing is cloned but the object the server answered with.
+pub(crate) struct LandRequest<'a> {
+    pub(crate) local_file_id: &'a str,
+    pub(crate) op: &'a PendingOperation,
+    pub(crate) claim: Option<&'a ClaimedOp>,
+    pub(crate) server_file_id: &'a str,
+    pub(crate) produced: ProducedObject,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_type: Option<String>,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) post_complete_errors: &'a mut Vec<String>,
+    pub(crate) sync_root: &'a Path,
+}
+
 /// One line per retried landing of an upload the server completed (spec §8.6 rule 6):
 /// ids and the attempt only (spec §11).
 pub(super) fn log_completed_landing_retried(op_id: &str, file_id: Option<&str>, attempt: i64) {
@@ -511,7 +628,7 @@ pub(super) fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
 }
 
 pub(super) fn recorded_content_format(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
-    -> anyhow::Result<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, EngineError> {
     let name = meta["name_encrypted"].as_str().ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
     Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
 }
@@ -706,8 +823,8 @@ pub(crate) enum PrunedEntry {
     Gone,
     /// The file held bytes the server does not have: they were copied to `copy` (whose SHA-256
     /// is `copied_hash`), where the copy can upload, then the original was removed, or not
-    /// (`original_removed`: it was in use; a later tick removes it).
-    KeptCopy { copy: PathBuf, copied_hash: String, original_removed: bool },
+    /// (`removal`: it was in use; a later tick removes it).
+    KeptCopy { copy: PathBuf, copied_hash: String, removal: OriginalRemoval },
     /// A file left as it is, and why (review F5): partly on disk (reading it would fetch the
     /// rest), in use (it could not be removed or read), or holding changes whose copy failed.
     KeptInPlace(KeptReason),
@@ -718,10 +835,20 @@ pub(crate) enum PrunedEntry {
 /// Task 1640 (review-151d P3-1): the engine's own remove of a sync-folder entry. It is registered
 /// with the watcher right before it happens, so its delete notification queues no trash, and the
 /// registration is dropped again when it did not happen (a later delete by the person counts).
+/// What the path being removed is, so the remove picks the matching syscall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovedKind {
+    File,
+    Dir,
+}
+
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(super) fn engine_remove(path: &Path, is_dir: bool) -> std::io::Result<()> {
+pub(super) fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
     crate::watcher::suppress_engine_delete(path);
-    let removed = if is_dir { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+    let removed = match kind {
+        RemovedKind::Dir => std::fs::remove_dir(path),
+        RemovedKind::File => std::fs::remove_file(path),
+    };
     if removed.is_err() {
         crate::watcher::cancel_engine_delete_suppression(path);
     }

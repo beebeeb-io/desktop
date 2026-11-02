@@ -396,7 +396,7 @@ use super::*;
             let server = Server::start(versions, vec![(1, 1, true)]);
             server.state.lock().unwrap().null_manifest_on_commit = true;
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
-            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, ContentKind::Text));
             assert_eq!(side.text, None);
             assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.contains("cannot be downloaded yet")), "{side:?}");
             no_unpinned_chunk_request(&server);
@@ -420,7 +420,7 @@ use super::*;
             let server = Server::start(versions(true), vec![(1, 1, true)]);
             let bridge = test_bridge_with_api(&dir.path().join("restart.db"), server.base.clone(), KEY);
             let (side, version) =
-                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, ContentKind::Text));
             assert_eq!(side.text, Some(text("B")), "the new version's bytes, whole");
             assert_eq!(version, Some(2), "and its version, from the fresh metadata");
             assert_eq!(
@@ -432,7 +432,7 @@ use super::*;
             let server = Server::start(versions(false), vec![]);
             let bridge = test_bridge_with_api(&dir.path().join("plain.db"), server.base.clone(), KEY);
             let (side, version) =
-                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+                tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, ContentKind::Text));
             assert_eq!((side.text, version), (Some(text("A")), Some(1)));
         }
 
@@ -468,7 +468,7 @@ use super::*;
             let server = Server::start(vec![big], vec![]);
             server.state.lock().unwrap().size_bytes_override = Some(100);
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base.clone(), KEY);
-            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, true));
+            let (side, _) = tokio::runtime::Runtime::new().unwrap().block_on(bridge.remote_content_preview(TEST_FILE_ID, ContentKind::Text));
             assert_eq!(side.size_bytes, Some(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1));
             assert!(side.unavailable_reason.as_deref().is_some_and(|r| r.starts_with("File is too large to preview")), "{side:?}");
             assert_eq!(server.seen().iter().filter(|r| r.contains("/chunks/")).count(), 0, "nothing downloaded");

@@ -52,7 +52,7 @@ impl EngineBridge {
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
         if entry.is_dir() {
-            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}"));
+            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}").into());
         }
 
         let shared_contract = self.ensure_item_allows_shared_write(file_id, "keep mine")?;
@@ -73,7 +73,7 @@ impl EngineBridge {
         let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
 
         let mut metadata = serde_json::json!({
-            "operation": "upload_version",
+            "operation": Op::UploadVersion.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": content_type,
             "size_bytes": staged_size,
@@ -112,7 +112,7 @@ impl EngineBridge {
             Err(e) => {
                 // One-shot op (never queued): nothing will resume its session.
                 self.abandon_upload_after_give_up(&op).await;
-                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}").into());
             }
         };
         // macOS: the upload leaves its staged copy for the caller to release. This op
@@ -248,13 +248,13 @@ impl EngineBridge {
             .db
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
-        let is_text = is_text_file(&entry.path);
+        let kind = ContentKind::from_flag(is_text_file(&entry.path));
 
-        let local = self.local_content_preview(sync_root, &entry.path, is_text);
-        let (remote, _) = self.remote_content_preview(file_id, is_text).await;
+        let local = self.local_content_preview(sync_root, &entry.path, kind);
+        let (remote, _) = self.remote_content_preview(file_id, kind).await;
 
         Ok(ConflictContentPreview {
-            is_text,
+            is_text: kind.is_text(),
             local,
             remote,
             version: None,
@@ -274,10 +274,10 @@ impl EngineBridge {
             .db
             .get_file(&file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
-        let is_text = is_text_file(&entry.path);
+        let kind = ContentKind::from_flag(is_text_file(&entry.path));
         let payload = PathBuf::from(op.payload_path.ok_or_else(|| anyhow::anyhow!("the write has no staged copy"))?);
         let local = match (payload.parent(), payload.file_name().and_then(|name| name.to_str())) {
-            (Some(dir), Some(name)) => self.local_content_preview(dir, name, is_text),
+            (Some(dir), Some(name)) => self.local_content_preview(dir, name, kind),
             _ => ConflictContentSide {
                 size_bytes: None,
                 text: None,
@@ -291,9 +291,9 @@ impl EngineBridge {
         // gets the mirror as it was BEFORE the fetch, which is never newer than the bytes: at worst
         // the decision is `Moved`, or the write is sent on an older base and the server refuses it.
         let before = self.db.get_file_contract_state(&file_id)?.map(|contract| contract.current_version);
-        let (remote, shown) = self.remote_content_preview(&file_id, is_text).await;
+        let (remote, shown) = self.remote_content_preview(&file_id, kind).await;
         let version = shown.or(before);
-        Ok(ConflictContentPreview { is_text, local, remote, version })
+        Ok(ConflictContentPreview { is_text: kind.is_text(), local, remote, version })
     }
 
     /// Task 2190 (plan §3.2): the person's decision on a parked conflict, against `shown_version`,
@@ -394,7 +394,7 @@ impl EngineBridge {
                     FinderWriteOutcome::Queued { file_id: Some(new_id), .. } => {
                         (ParkedResolution::KeptBoth { file_id: new_id, name }, released)
                     }
-                    other => anyhow::bail!("the copy could not be queued as a new file: {other:?}"),
+                    other => return Err(anyhow::anyhow!("the copy could not be queued as a new file: {other:?}").into()),
                 }
             }
             ParkedChoice::Local => unreachable!("handled above"),
@@ -415,7 +415,7 @@ impl EngineBridge {
     /// result to "too large," never load an oversized buffer. Conflict
     /// windows open automatically, so a multi-gigabyte local file must never
     /// be pulled fully into memory just to report its size.
-    fn local_content_preview(&self, sync_root: &Path, entry_path: &str, is_text: bool) -> ConflictContentSide {
+    fn local_content_preview(&self, sync_root: &Path, entry_path: &str, kind: ContentKind) -> ConflictContentSide {
         let local_path = match local_file_path_under_sync_root(sync_root, entry_path) {
             Ok(p) => p,
             Err(e) => {
@@ -438,7 +438,7 @@ impl EngineBridge {
             }
         };
 
-        if !is_text {
+        if kind == ContentKind::Binary {
             // Binary preview only ever shows size — the bytes are never read.
             return ConflictContentSide {
                 size_bytes: Some(size_bytes),
@@ -472,7 +472,7 @@ impl EngineBridge {
             .take(CONFLICT_PREVIEW_TEXT_MAX_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
         {
-            Ok(_) => content_side_from_bytes(bytes, is_text),
+            Ok(_) => content_side_from_bytes(bytes, kind),
             Err(e) => ConflictContentSide {
                 size_bytes: Some(size_bytes),
                 text: None,
@@ -495,7 +495,7 @@ impl EngineBridge {
     ///
     /// Also returns the server version the side shows: the `download_version.version_number` of the
     /// metadata the attempt ran on (task 2190, review-169 F1), `None` when no metadata named one.
-    pub(super) async fn remote_content_preview(&self, file_id: &str, is_text: bool) -> (ConflictContentSide, Option<i64>) {
+    pub(super) async fn remote_content_preview(&self, file_id: &str, kind: ContentKind) -> (ConflictContentSide, Option<i64>) {
         let unavailable = |reason: String| ConflictContentSide {
             size_bytes: None,
             text: None,
@@ -512,7 +512,7 @@ impl EngineBridge {
         // `do_hydrate` does, and the size is checked again on the new version.
         self.with_one_restart(file_id, meta, |meta| async move {
             let version = meta["download_version"]["version_number"].as_i64();
-            self.preview_attempt(file_id, is_text, &meta).await.map(|side| (side, version))
+            self.preview_attempt(file_id, kind, &meta).await.map(|side| (side, version))
         })
         .await
         .unwrap_or_else(|e| (unavailable(format!("Couldn't download the other device's version: {e}")), None))
@@ -520,7 +520,7 @@ impl EngineBridge {
 
     /// One pass of [`Self::remote_content_preview`] on `meta`. `Err` only for what the restart handles (the version
     /// went away) or what ends it; every other failure is the side's own "unavailable" line.
-    async fn preview_attempt(&self, file_id: &str, is_text: bool, meta: &serde_json::Value) -> anyhow::Result<ConflictContentSide> {
+    async fn preview_attempt(&self, file_id: &str, kind: ContentKind, meta: &serde_json::Value) -> Result<ConflictContentSide, EngineError> {
         // Task 1643: the size of the version that would be downloaded. While a replace runs, the top-level
         // `size_bytes` can be another version's.
         let size_bytes = match crate::download_pin::PinnedVersion::from_metadata(meta)? {
@@ -528,7 +528,7 @@ impl EngineBridge {
             None => meta.get("size_bytes").and_then(|v| v.as_u64()),
         };
 
-        if !is_text {
+        if kind == ContentKind::Binary {
             // Binary preview only ever shows size — never download the bytes.
             return Ok(ConflictContentSide {
                 size_bytes,
@@ -558,11 +558,11 @@ impl EngineBridge {
                 // plaintext in memory. `content_side_from_bytes` consumes
                 // the Vec by value (no further copy), and the now-empty
                 // `bytes` is zeroized below for defense in depth.
-                let side = content_side_from_bytes(std::mem::take(&mut *bytes), is_text);
+                let side = content_side_from_bytes(std::mem::take(&mut *bytes), kind);
                 bytes.zeroize();
                 Ok(side)
             }
-            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => Err(e),
+            Err(e) if e.is_caused_by::<crate::download_pin::VersionGone>() => Err(e),
             Err(e) => Ok(ConflictContentSide {
                 size_bytes,
                 text: None,

@@ -22,7 +22,7 @@ impl EngineBridge {
             target_path: None,
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "restore_version",
+                    "operation": Op::RestoreVersion.as_str(),
                     "version_id": version_id,
                 })
                 .to_string(),
@@ -54,7 +54,7 @@ impl EngineBridge {
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
         folder: Option<crate::state_db::FinderFolderRow<'_>>,
-    ) -> anyhow::Result<FinderWriteOutcome> {
+    ) -> Result<FinderWriteOutcome, EngineError> {
         let op = self.finder_operation(
             kind.clone(),
             file_id.clone(),
@@ -69,7 +69,7 @@ impl EngineBridge {
         // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
         // folder's row is written in it too.
         match self.db.enqueue_finder_change(&op, folder)? {
-            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed).into()),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
                 op_id,
                 file_id,
@@ -92,7 +92,7 @@ impl EngineBridge {
         payload_path: Option<String>,
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
-    ) -> anyhow::Result<PendingOperation> {
+    ) -> Result<PendingOperation, EngineError> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         // Task 0811: tag known-folder backup ops with their origin key (derived
@@ -127,7 +127,12 @@ impl EngineBridge {
         Ok(op)
     }
 
-    pub(super) fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
+    pub(super) fn enqueue_pin_tree_operation(
+        &self,
+        file_id: &str,
+        toggle: PinToggle,
+        now: i64,
+    ) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::PinTree,
@@ -136,8 +141,8 @@ impl EngineBridge {
             target_path: None,
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "pin_tree",
-                    "pinned": pinned,
+                    "operation": Op::PinTree.as_str(),
+                    "pinned": toggle.is_pin(),
                 })
                 .to_string(),
             ),
@@ -156,7 +161,7 @@ impl EngineBridge {
         Ok(())
     }
 
-    pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> anyhow::Result<()> {
+    pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::HydrateFile,
@@ -165,7 +170,7 @@ impl EngineBridge {
             target_path: Some(entry.path.clone()),
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "hydrate_file",
+                    "operation": Op::HydrateFile.as_str(),
                     "reason": "recursive_pin",
                 })
                 .to_string(),
