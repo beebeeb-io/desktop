@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+//! Freedesktop thumbnails for Linux: encode a synced file's preview into the user's thumbnail
+//! cache and delete it on removal. Must not cache outside the two standard sizes.
+
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;

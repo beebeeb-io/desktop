@@ -1,3 +1,6 @@
+//! The Rust side of the macOS File Provider bridge: decode `BeebeebFpErrorC` from the Objective-C
+//! shim into `FpError` and name the domain and item calls. Must not decide what Finder sees.
+
 use std::ffi::{CStr, c_void};
 use std::os::raw::c_char;
 use std::time::Duration;

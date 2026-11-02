@@ -1,3 +1,6 @@
+// The compact shell's Sync Folder page: choose or change the folder and run the Finder/Explorer
+// install and repair actions, each with its own failure line.
+
 import { useEffect, useState } from 'react'
 import {
   command,

@@ -1,3 +1,5 @@
+// The Windows main app window: its own sidebar and views, sharing the banners, search and version
+// overlays with the compact shell. Capability gating stays in `capabilities.tsx`.
 
 import { useRegionLabel } from './windows/useRegion'
 import { useEffect, useRef, useState } from 'react'

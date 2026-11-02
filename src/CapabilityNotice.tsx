@@ -1,3 +1,6 @@
+// The shared card both desktop shells use to explain a capability this host lacks, with an optional
+// action. The copy and the decision live with the caller; this only draws the box.
+
 import type { CSSProperties, ReactNode } from 'react'
 import { Card, NavIcon, T } from './windows/ui'
 

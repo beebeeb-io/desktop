@@ -1,3 +1,6 @@
+// The compact shell's navigation model: which page a `?window` value means and the sidebar labels
+// per platform. Must not own page state or call a command.
+
 import type { DesktopPlatform } from './desktopApi'
 
 export type CompactPage =

@@ -1,3 +1,6 @@
+// The compact shell's Shared page: the roots other people shared with this account, with their
+// permission and a reveal in Finder. Read-only; nothing here changes a share.
+
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, type SharedRoot } from '../desktopApi'
 import { finderShowFileFailedToast } from '../finderSetup'

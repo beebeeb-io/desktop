@@ -1,3 +1,6 @@
+// The compact shell's Selective Sync page: the remote tree with a per-folder sync toggle.
+// A load failure stays inline (`notice`), a toggle failure is a toast, never the other way round.
+
 import { useEffect, useMemo, useState } from 'react'
 import { command, commandUnavailableLabel, type VaultItem } from '../desktopApi'
 import { useToast } from '../windows/ui'

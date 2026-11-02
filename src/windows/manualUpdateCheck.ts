@@ -1,3 +1,6 @@
+// One manual update-check store per webview, surviving Settings navigation, so a check started on
+// one visit is still there on the next. Must not poll; only `check` and `retry` move it.
+
 import { checkForDesktopUpdatesNow, commandUnavailableLabel, type CommandResult, type ManualUpdateCheckResult } from '../desktopApi'
 import { stateFromManualUpdateResult, type ManualUpdateCheckState } from './updateCheckViewModel'
 

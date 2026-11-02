@@ -1,3 +1,6 @@
+// Turns a manual update check into the standard toast (checking, up to date, downgrade, error),
+// retry included. An available update stays UpdateBanner's job, never a second surface.
+
 import { useEffect, useSyncExternalStore } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { command } from './desktopApi'

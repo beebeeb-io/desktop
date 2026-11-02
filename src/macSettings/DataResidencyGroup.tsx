@@ -1,3 +1,6 @@
+// Account > Where your files are stored on macOS: the country rows the API returns and the
+// "only store in <country>" switch. Keeps no country list of its own; the server's list wins.
+
 import { Btn, Note, SettingRow, SettingsGroup, ToggleRow } from '../macSettingsParts'
 import { residencySummary } from '../windows/dataResidencySettingsModel'
 import { useDataResidency } from '../windows/useDataResidency'
