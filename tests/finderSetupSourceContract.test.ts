@@ -85,7 +85,7 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
       ['signInModel.ts', null],
       ['browserSignIn.ts', null],
       ['MacApp.tsx', null],
-      ['windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel'],
+      ['windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel'],
       ['pages/Status.tsx', 'macFinderSetupState'],
     ]
     for (const [file, fn] of units) {
@@ -119,12 +119,12 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
   })
 
   test('the main-window Settings panel dispatches macOS to MacFinderIntegrationPanel', () => {
-    expect(functionText('windows/views/SettingsView.tsx', 'ShellOrFinderPanel')).toMatch(/name === 'macos' \? <MacFinderIntegrationPanel/)
-    expect(functionText('windows/views/SettingsView.tsx', 'shellIntegrationCommandsFor')).not.toContain('finder_')
+    expect(functionText('windows/views/SettingsView/integrationPanels.tsx', 'ShellOrFinderPanel')).toMatch(/name === 'macos' \? <MacFinderIntegrationPanel/)
+    expect(functionText('windows/views/SettingsView/integrationPanels.tsx', 'shellIntegrationCommandsFor')).not.toContain('finder_')
   })
 
   test('the Windows/Linux Explorer panel carries no macOS install path any more', () => {
-    const panel = functionText('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel')
+    const panel = functionText('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel')
     expect(FORBIDDEN_ON_MACOS.filter((command) => panel.includes(command))).toEqual([])
     expect(panel).not.toMatch(/finderInstall|open_login_items_and_extensions_settings/)
     expect(panel).not.toMatch(/['"]Install['"]|Installing/)
@@ -146,7 +146,7 @@ describe('the mixed pages take the reconciler from useFinderSetup and never run 
   }
 
   test('MacFinderIntegrationPanel takes the load, the subscription and the failed-action toast from the hook', () => {
-    const body = functionText('windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel')
+    const body = functionText('windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel')
     expect(body).toMatch(/useFinderSetup\(\)/)
     expect([...own, 'showToast'].filter((name) => body.includes(name))).toEqual([])
   })
@@ -164,7 +164,7 @@ describe('a failed Open in Finder on a Mac is mapped once (task 17b)', () => {
   test('every macOS call site takes the toast from finderOpenFailedToast and never writes the sentence itself', () => {
     for (const [file, fn] of [
       ['pages/SyncFolder.tsx', 'SyncFolder'],
-      ['WindowsApp.tsx', 'SyncFolderCard'],
+      ['WindowsApp/filesView.tsx', 'SyncFolderCard'],
       ['MacApp.tsx', 'HomePane'],
     ] as const) {
       const body = functionText(file, fn)
@@ -228,7 +228,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       // The popover uses the same mapped Finder sentences without a toast.
       'PopoverApp.tsx | open_finder_location': 1,
       'PopoverApp.tsx | wrapper:runFinderSetupAction': 4,
-      'WindowsApp.tsx | open_finder_location': 1,
+      'WindowsApp/filesView.tsx | open_finder_location': 1,
       [TRAY]: 1,
       'finderSetup.ts | finder_setup_*': 4,
       'finderSetup.ts | open_login_items_and_extensions_settings': 1,
@@ -244,7 +244,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'pages/SyncFolder.tsx | open_finder_location': 1,
       [OPEN_SETTINGS]: 1,
       'pages/SyncFolder.tsx | reset_macos_integration': 1,
-      'windows/views/SettingsView.tsx | finder.run': 1,
+      'windows/views/SettingsView/integrationPanels.tsx | finder.run': 1,
     })
   })
 
@@ -257,7 +257,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'MacApp.tsx': { open_finder_location: 1 },
       'MacSettings.tsx': { reset_macos_integration: 1 },
       'PopoverApp.tsx': { open_finder_location: 1 },
-      'WindowsApp.tsx': { open_finder_location: 2 },
+      'WindowsApp/filesView.tsx': { open_finder_location: 2 },
       'WindowsTray.tsx': { open_finder_location: 1 },
       'finderSetup.ts': { 'finder_setup_*': 7, open_login_items_and_extensions_settings: 2 },
       'pages/Shared.tsx': { open_in_finder: 2 },
@@ -310,7 +310,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     )
     expect(seen).toEqual({
       'DesktopQuickSearch.tsx | open_in_finder': { reason: 1 },
-      'WindowsApp.tsx | open_finder_location': { reason: 1 },
+      'WindowsApp/filesView.tsx | open_finder_location': { reason: 1 },
       'pages/Shared.tsx | open_in_finder': { reason: 1 },
       'pages/SyncFolder.tsx | open_finder_location': { reason: 1 },
       // reason 1: the Reset's error text off a Mac. (1882 r4's repair-removed check, the second read, is gone: rebase

@@ -37,12 +37,12 @@ const cases: [string, UserRegionResponse | null | undefined, string][] = [
 // copy assertions independent of unrelated IPC/loading state in the full page;
 // brandResidencyCopy separately guards every hook binding and hardcoded claim.
 const surfaces: [string, number][] = [
-  ['Onboarding.tsx', 1], ['WindowsFirstRun.tsx', 1], ['WindowsApp.tsx', 3],
+  ['Onboarding.tsx', 1], ['WindowsFirstRun.tsx', 1], ['WindowsApp.tsx', 1], ['WindowsApp/shell.tsx', 1], ['WindowsApp/storageWidget.tsx', 1],
   ['pages/Account.tsx', 1], ['windows/KnownFolderOnboarding.tsx', 1],
   ['windows/views/AccountView.tsx', 1], ['windows/views/ActivityView.tsx', 1],
   ['windows/views/InsightsView.tsx', 1], ['windows/views/SelectiveSyncView.tsx', 1],
   // Two: the Windows/Linux Explorer panel and the macOS Finder panel (Task 17), both from useRegionLabel.
-  ['windows/views/SettingsView.tsx', 2],
+  ['windows/views/SettingsView/integrationPanels.tsx', 2],
 ]
 
 function copyFragments(file: string): string[] {

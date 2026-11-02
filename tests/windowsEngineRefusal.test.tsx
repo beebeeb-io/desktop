@@ -21,7 +21,7 @@ const SENTENCE = rustStr('account_binding.rs', 'OTHER_ACCOUNT_ON_WINDOWS')
 const status = (engine_refusal: unknown) => ({ logged_in: true, engine: 'stopped', sync_root: 'C:\\Beebeeb', syncing: 0, cloud_only: 0, conflicts: 0, engine_refusal })
 
 function openHome(syncStatus: unknown) {
-  const m = mount('WindowsApp.tsx', 'HomeView', {
+  const m = mount('WindowsApp/homeView.tsx', 'HomeView', {
     backend: {},
     props: { status: syncStatus, usage: null, storage: null },
     bindings: {

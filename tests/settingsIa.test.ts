@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { settingLabel } from '../src/windows/settingsNavigation'
 const read = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
-const settings = read('windows/views/SettingsView.tsx')
+const settingsPanels = readdirSync(new URL('../src/windows/views/SettingsView/', import.meta.url))
+const settings = [
+  read('windows/views/SettingsView.tsx'),
+  ...settingsPanels.map((panel) => read(`windows/views/SettingsView/${panel}`)),
+].join('\n')
 const mac = read('MacSettings.tsx')
 
 describe('settings describe the choice and its scope', () => {

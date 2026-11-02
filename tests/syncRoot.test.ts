@@ -123,7 +123,7 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
 
 describe('runtime sync root (1646)', () => {
   test('Files renders the backend status root, updates it, and does not ask for a suggestion', async () => {
-    const h = harness('WindowsApp.tsx', 'SyncFolderCard')
+    const h = harness('WindowsApp/filesView.tsx', 'SyncFolderCard')
     try {
       await h.refresh()
       expect(h.content()).toContain(customRoot)
@@ -139,7 +139,7 @@ describe('runtime sync root (1646)', () => {
   })
 
   test('Mac Files keeps the named Finder location actionable with its intentionally null status root', async () => {
-    const h = harness('WindowsApp.tsx', 'SyncFolderCard', { usePlatformName: () => 'macos' })
+    const h = harness('WindowsApp/filesView.tsx', 'SyncFolderCard', { usePlatformName: () => 'macos' })
     try {
       await h.refresh({ ...initialStatus, sync_root: null })
       expect(h.content()).toContain('Beebeeb in Finder')
@@ -155,7 +155,7 @@ describe('runtime sync root (1646)', () => {
   // domain and a code, so a failed "Open in Finder" says one sentence and never `result.reason`.
   // Off a Mac the card keeps its own title and the error text, and never evaluates the macOS helper.
   test('Mac Files: a failed Open in Finder is one toast with the one sentence, and the bridge code is rendered nowhere', async () => {
-    const h = harness('WindowsApp.tsx', 'SyncFolderCard', { usePlatformName: () => 'macos' })
+    const h = harness('WindowsApp/filesView.tsx', 'SyncFolderCard', { usePlatformName: () => 'macos' })
     try {
       h.failCommand('open_finder_location', 'io.beebeeb.bridge 3')
       await h.refresh({ ...initialStatus, sync_root: null })
@@ -169,7 +169,7 @@ describe('runtime sync root (1646)', () => {
   })
 
   for (const [file, name, label] of [
-    ['WindowsApp.tsx', 'SyncFolderCard', 'Open in Explorer'],
+    ['WindowsApp/filesView.tsx', 'SyncFolderCard', 'Open in Explorer'],
     ['WindowsTray.tsx', 'WindowsTray', 'Open folder'],
     ['pages/SyncFolder.tsx', 'SyncFolder', 'Open in Finder'],
   ] as const) {
@@ -189,7 +189,7 @@ describe('runtime sync root (1646)', () => {
   }
 
   test('Files passes the current backend root when opening', async () => {
-    const h = harness('WindowsApp.tsx', 'SyncFolderCard')
+    const h = harness('WindowsApp/filesView.tsx', 'SyncFolderCard')
     try {
       await h.refresh()
       const button = h.elements().find(e => e.type === 'button')
@@ -200,7 +200,7 @@ describe('runtime sync root (1646)', () => {
   })
 
   for (const [file, name, label] of [
-    ['WindowsApp.tsx', 'SyncFolderCard', 'Open in Explorer'],
+    ['WindowsApp/filesView.tsx', 'SyncFolderCard', 'Open in Explorer'],
     ['WindowsTray.tsx', 'WindowsTray', 'Open folder'],
     ['pages/SyncFolder.tsx', 'SyncFolder', 'Open in Finder'],
   ]) {
@@ -254,7 +254,7 @@ describe('runtime sync root (1646)', () => {
 
   for (const missing of ['unconfigured', 'unavailable'] as const) {
     test(`Files reports ${missing} and cannot open an invented root`, async () => {
-      const h = harness('WindowsApp.tsx', 'SyncFolderCard')
+      const h = harness('WindowsApp/filesView.tsx', 'SyncFolderCard')
       try {
         await h.refresh(missing === 'unconfigured' ? { ...initialStatus, sync_root: null } : null)
         expect(h.content()).toContain(missing === 'unconfigured' ? 'Not configured on this PC yet' : 'Sync folder unavailable')
@@ -267,7 +267,7 @@ describe('runtime sync root (1646)', () => {
 
   for (const result of [null, { ok: true, value: { total_files: 0, total_bytes: 0 } }, { ok: true, value: { total_files: 2, total_bytes: 10, recent: [] } }, { ok: false, reason: 'fixture error', unsupported: false }, { ok: false, reason: 'missing command', unsupported: true }]) {
     test(`Files has one status-backed folder card with overview ${JSON.stringify(result)}`, async () => {
-      const h = harness('WindowsApp.tsx', 'FilesView', { desktopFileOverview: () => result ? Promise.resolve(result) : new Promise(() => {}) })
+      const h = harness('WindowsApp/filesView.tsx', 'FilesView', { desktopFileOverview: () => result ? Promise.resolve(result) : new Promise(() => {}) })
       try {
         await h.flush()
         const cards = h.elements().filter(e => e.type === 'sync-folder')
@@ -278,7 +278,7 @@ describe('runtime sync root (1646)', () => {
   }
 
   test('Settings displays status root even when the installation probe has a different path', async () => {
-    const h = harness('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel')
+    const h = harness('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel')
     try {
       await h.refresh()
       expect(h.content()).toContain(customRoot)
