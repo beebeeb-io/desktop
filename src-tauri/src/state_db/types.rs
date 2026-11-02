@@ -1021,46 +1021,6 @@ pub struct HeldGroup {
     pub newest_at: i64,
 }
 
-/// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProofRow {
-    pub file_id: String,
-    pub parent_id: Option<String>,
-    /// Its path under the sync root ('/'-separated). 128 of the 2,979 nested rows made on the maintainer's PC have no
-    /// parent link, so a walk up falls back to the row at the path's folder.
-    pub path: String,
-    /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
-    pub my_files: bool,
-    /// Judged against the server's tree: not made on this PC. A row made here has `current_version` and
-    /// `remote_updated_at` both at 0 and a queued create names it (lead review of round 2, P2-1).
-    pub server_named: bool,
-}
-
-/// Task 2267 (fix round 2): one queued operation, by what it acts on.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProofOp {
-    pub op_id: String,
-    pub file_id: Option<String>,
-    pub parent_id: Option<String>,
-    /// `operation_queue.kind`, as stored.
-    pub kind: String,
-}
-
-/// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeldChange {
-    pub op_id: String,
-    /// `operation_queue.kind`, as stored.
-    pub kind: String,
-    /// It creates its item (`CREATE_OP_SQL`).
-    pub creates: bool,
-    /// Its own row or its folder is in a folder shared with this account (`namespace != 'my_files'`).
-    pub shared: bool,
-}
-
 /// One `files` row as the Selective sync tree reads it (0.8.15). A row the server never confirmed (a folder this PC
 /// created whose `create_folder` never landed) has `current_version` 0 and `remote_updated_at` 0; a server row has one
 /// of them set.

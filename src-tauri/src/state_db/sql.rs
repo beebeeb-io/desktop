@@ -539,18 +539,6 @@ pub(crate) fn tree_holds_a_file(dir: &Path) -> bool {
     false
 }
 
-/// T61, P9: the next `n` landings on this thread fail with a database error.
-#[cfg(test)]
-pub(crate) fn fail_next_landings_for_test(n: u32) {
-    FAIL_LANDINGS.with(|left| left.set((n, false)));
-}
-
-/// m-11's pause filter: the next `n` landings on this thread fail as SQLite's "database is
-/// locked", which `classify_operation_error` reads as `Locked`, a pause.
-#[cfg(test)]
-pub(crate) fn fail_next_landings_as_locked_for_test(n: u32) {
-    FAIL_LANDINGS.with(|left| left.set((n, true)));
-}
 
 /// One injected landing failure, if this thread has one left.
 #[cfg(test)]
