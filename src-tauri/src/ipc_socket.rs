@@ -788,6 +788,7 @@ pub use protocol::{IpcRequest, IpcResponse, FileProviderItemPayload, FileProvide
 pub(crate) use protocol::{FP_TRASH_APPLE, CAP_WRITE};
 
 mod payloads;
+#[cfg(test)]
 use payloads::*;
 pub(crate) use payloads::{file_entry_payload_for_db};
 
@@ -796,20 +797,33 @@ use thumbnails::*;
 pub(crate) use thumbnails::{thumbnail_variant, persist_thumbnail_plaintext};
 
 mod macos_paths;
+// Only the macOS paths use these.
+#[cfg(target_os = "macos")]
 use macos_paths::*;
 
 mod macos_staging;
 use macos_staging::*;
-pub(crate) use macos_staging::{StagingDirRefusal, StagingDir, WriteContentsPolicy, ContentsRefusal, open_staged_contents, OpenedContents, StagedContents};
+pub(crate) use macos_staging::{StagingDirRefusal, StagingDir, WriteContentsPolicy, StagedContents};
+// The staging admission is exercised by the upload-staging tests.
+#[cfg(test)]
+pub(crate) use macos_staging::{ContentsRefusal, open_staged_contents};
+// Handed to the macOS write path when a staged read is opened.
+#[cfg(target_os = "macos")]
+pub(crate) use macos_staging::OpenedContents;
 
 mod server;
+#[cfg(test)]
 use server::*;
-pub use server::{serve_ipc, serve_ipc_at};
-pub(crate) use server::{serve_ipc_at_with_ready};
+pub use server::serve_ipc;
+#[cfg(test)]
+pub use server::serve_ipc_at;
+#[cfg(test)]
+pub(crate) use server::serve_ipc_at_with_ready;
 
 mod hydrate;
 use hydrate::*;
-pub(crate) use hydrate::{hydrate_failure_reply};
+#[cfg(test)]
+pub(crate) use hydrate::hydrate_failure_reply;
 
 mod write_path;
 use write_path::*;

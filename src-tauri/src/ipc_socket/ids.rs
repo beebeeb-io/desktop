@@ -41,6 +41,8 @@ impl ContainerId {
         &self.0
     }
 
+    /// The wire text back out; read by this module's tests.
+    #[cfg(test)]
     pub(crate) fn into_string(self) -> String {
         self.0
     }
@@ -79,6 +81,8 @@ impl RequestId {
         &self.0
     }
 
+    /// The wire text back out; read by this module's tests.
+    #[cfg(test)]
     pub(crate) fn into_string(self) -> String {
         self.0
     }
