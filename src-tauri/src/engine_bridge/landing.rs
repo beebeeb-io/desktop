@@ -705,11 +705,12 @@ pub(crate) fn remove_pruned_entry(
             }
             match copy_as_this_pc(path, copy_dir) {
                 Ok((copy, copied_hash)) => {
-                    let original_removed = match engine_remove(path, RemovedKind::File) {
-                        Ok(()) => true,
-                        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    let removal = match engine_remove(path, RemovedKind::File) {
+                        Ok(()) => OriginalRemoval::Removed,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OriginalRemoval::Removed,
+                        Err(_) => OriginalRemoval::InPlace,
                     };
-                    PrunedEntry::KeptCopy { copy, copied_hash, original_removed }
+                    PrunedEntry::KeptCopy { copy, copied_hash, removal }
                 }
                 Err(_) => PrunedEntry::KeptInPlace(KeptReason::CopyFailed),
             }
@@ -827,7 +828,7 @@ pub(super) fn record_kept_copy(
     original: &Path,
     copy: Option<&Path>,
     copied_hash: &str,
-    original_removed: bool,
+    removal: OriginalRemoval,
     reason: KeptReason,
     existing: Option<i64>,
 ) {
@@ -839,7 +840,7 @@ pub(super) fn record_kept_copy(
         original_path: &original_path,
         copy_path: &copy_path,
         copied_hash,
-        original_removed,
+        original_removed: removal.is_removed(),
         reason,
         kept_at: now,
     };
@@ -910,14 +911,14 @@ pub(super) fn remove_pruned_entries(
         match remove_pruned_entry(&path, kind, agreed, state, &copy_dir) {
             PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
-            PrunedEntry::KeptCopy { copy, copied_hash, original_removed } => {
-                if original_removed {
+            PrunedEntry::KeptCopy { copy, copied_hash, removal } => {
+                if removal.is_removed() {
                     remove_office_owner_files(&path);
                 }
                 // Zero-knowledge: never log the path, only the file_id.
                 tracing::warn!(
                     file_id = %row.file_id,
-                    original_removed,
+                    original_removed = removal.is_removed(),
                     "remote-deletion reconcile: the file held changes that were not sent; they are kept as a copy"
                 );
                 record_kept_copy(
@@ -927,7 +928,7 @@ pub(super) fn remove_pruned_entries(
                     &path,
                     Some(&copy),
                     &copied_hash,
-                    original_removed,
+                    removal,
                     KeptReason::Copy,
                     None,
                 );
@@ -940,7 +941,7 @@ pub(super) fn remove_pruned_entries(
                 );
                 // Condition 5: ONE entry per file (a second remote op skips it, above); the retry
                 // resolves it once it can be removed, copied or is gone.
-                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), false, reason, None);
+                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), OriginalRemoval::InPlace, reason, None);
             }
             PrunedEntry::FolderKept => {
                 tracing::warn!(file_id = %row.file_id, "remote-deletion reconcile: kept a folder that still holds something");
@@ -1015,8 +1016,8 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                 remove_office_owner_files(&original);
                 resolve(&copy);
             }
-            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, original_removed } => {
-                if original_removed {
+            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, removal } => {
+                if removal.is_removed() {
                     remove_office_owner_files(&original);
                 }
                 // Changed since (or wholly on disk now, with changes): a new change, in the same entry.
@@ -1027,7 +1028,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                     &original,
                     Some(&new_copy),
                     &copied_hash,
-                    original_removed,
+                    removal,
                     KeptReason::Copy,
                     Some(copy.id),
                 );
@@ -1044,7 +1045,7 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
                         &original,
                         None,
                         &copy.copied_hash,
-                        false,
+                        OriginalRemoval::InPlace,
                         reason,
                         Some(copy.id),
                     );

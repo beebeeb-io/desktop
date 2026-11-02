@@ -218,6 +218,14 @@ fn key_custody_names_the_unwrap_path() {
     assert!(!KeyCustody::Invite.is_custody());
 }
 
+/// OriginalRemoval names what happened to a kept copy's original: it left the
+/// disk, or it stayed because it was in use.
+#[test]
+fn original_removal_names_the_prunes_outcome() {
+    assert!(OriginalRemoval::Removed.is_removed());
+    assert!(!OriginalRemoval::InPlace.is_removed());
+}
+
 /// The init guard answers by the kind: only a File Provider replace needs a
 /// base, and a missing one parks the write as base_unknown.
 #[test]

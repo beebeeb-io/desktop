@@ -211,6 +211,21 @@ pub(super) enum InitKind {
     Replace,
 }
 
+/// Whether a kept copy's original left the disk in this pass, or stayed because
+/// it was in use (a later tick removes it). The name keeps a bare `true` from
+/// standing for "removed" at the prune and at the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OriginalRemoval {
+    Removed,
+    InPlace,
+}
+
+impl OriginalRemoval {
+    pub(super) fn is_removed(self) -> bool {
+        matches!(self, OriginalRemoval::Removed)
+    }
+}
+
 /// Whether a landed write still waits for its new thumbnails (spec §5.6).
 /// Naming the two states keeps `false` from having to stand for "settled".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -808,8 +823,8 @@ pub(crate) enum PrunedEntry {
     Gone,
     /// The file held bytes the server does not have: they were copied to `copy` (whose SHA-256
     /// is `copied_hash`), where the copy can upload, then the original was removed, or not
-    /// (`original_removed`: it was in use; a later tick removes it).
-    KeptCopy { copy: PathBuf, copied_hash: String, original_removed: bool },
+    /// (`removal`: it was in use; a later tick removes it).
+    KeptCopy { copy: PathBuf, copied_hash: String, removal: OriginalRemoval },
     /// A file left as it is, and why (review F5): partly on disk (reading it would fetch the
     /// rest), in use (it could not be removed or read), or holding changes whose copy failed.
     KeptInPlace(KeptReason),
