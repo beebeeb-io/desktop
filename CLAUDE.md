@@ -52,15 +52,32 @@ docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)   linux/,
 - **Config writes go through `try_update_at_then`** (`DesktopConfig` has no `save()`); settings writes are merge-only: send only what changed.
 - **Local data belongs to one account (R10):** every engine start goes through `spawn_bound_engine`; another account's data resets first (Windows refuses instead).
 - **Sign-out:** `clear_session_impl` ends every server session it removes; it keeps waiting Finder saves (task 1887) and refuses with `unsent_changes:` until the person was asked.
-- **macOS File Provider:** log only through `ExtensionLog` (never `NSLog`; never a path, file name or error text); every domain removal passes
-  `NSFileProviderDomainRemovalModePreserveDirtyUserData` (never plain `removeDomain:`); a Finder blocker is provisioning (app group on both profiles), never masked as a UI timeout.
 - **A Mac never installs an update in place** (App Sandbox, task 2176): "Download update" only; no "Restart to update" on a Mac. Nothing a Mac compiles starts `/usr/bin/open`.
 - **No developer word in person-facing Mac copy** (`tests/macCopyGuard.test.ts`); every window opener calls `show_main_window(app, MainNav)`; closing `main` destroys it and the app keeps running.
 - **Direct S3 / downloads:** storage links go through the separate storage client only (no default headers, redirects; https); a storage failure is a status number, never reqwest's text (it holds the signed URL);
   a download pins `download_version` (`?object_version_id=`), never invent a pin; `BB_TRANSPORT=api` forces the API.
 - **Conflicts never silently drop a version** (default `KeepBoth`, loser renamed `file (Device, HH:MM).ext`); resumable uploads persist in `upload_resume`.
-- **A storage location is a COUNTRY, never a city** (`tests/noCityInCopy.test.ts` fails on a city name or a `city` read); the desktop keeps no region list.
 - Identifier `io.beebeeb.app` stays (the `.app` warning is known). Brand: amber rounded square with a lowercase `b`; app name "Beebeeb".
+
+## Never break
+
+The rules whose breakage costs data, a key, a credential or a user. One line each; the detail is in `docs/agent-notes.md`.
+
+- macOS builds locally, not in CI (Developer ID key never exported — task 1608). macOS release = `scripts/release-macos-local.sh <VERSION> <CHANNEL>`.
+- The updater private key `~/.tauri/beebeeb-desktop.key` is mode 0600, **never commit**; generated without a password, so rotate before public release.
+- File Provider logs only through `ExtensionLog`, never `NSLog` (on macOS 26 it reaches the unified log as `<private>`); never a path, file name or error text.
+- Finder blocker is provisioning: fix signing/provisioning — never mask as a UI timeout or a fake local folder root.
+- Every domain removal passes `NSFileProviderDomainRemovalModePreserveDirtyUserData`; never add plain `removeDomain:`/`remove(domain)`/`removeAllDomains`.
+- Settings writes (`set_desktop_config`) are merge-only — send only what changed, never the whole object read on open.
+- Sign-out keep step (1887): copy every waiting save with `clonefile` (never overwriting) and records it durably BEFORE the purge.
+- Finder setup: sign-out removes + holds; a revoked session keeps; Lock cancels, never removes. Surfaces read `finder_setup_state` + `finder-setup-changed`.
+- "Open in Finder": the gate is never held across the open; a Mac never asks the File Provider about a shared-with-me row (ruling 1701: webapp-only).
+- Sign-out server-revoke reports a status word, never the token or reqwest's text, and never changes the sign-out's result (task 1886).
+- R10: changes the engine cannot tie to an own account are held, never sent or deleted until the person decides in Settings › Sync.
+- `vault_unlock_route` fails closed when the Keychain cannot be read (nothing is written over a key that may be there); never part of the 1 Hz `sync_status`.
+- A null `download_version` (legacy) keeps the unpinned download; never invent a pin. Not covered: Windows Cloud Files PARTIAL hydration (task 2180).
+- Finder writes (`write_id`): record the completion first; the op is never abandoned/parked — it retries only local landing (one transaction).
+- A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `tests/noCityInCopy.test.ts` fails on a city name).
 
 ## How we work
 
