@@ -468,6 +468,7 @@ impl StateDb {
         next_retry_at: i64,
         last_error: Option<&str>,
     ) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = tx.execute(
@@ -475,7 +476,7 @@ impl StateDb {
              SET attempts = ?3, next_retry_at = ?4, last_error = ?5, last_error_class = NULL,
                  paused_reason = NULL, updated_at = ?4, claim_id = NULL, claimed_at = NULL
              WHERE op_id = ?1 AND claim_id = ?2",
-            params![op_id, claim_id, attempts, next_retry_at, last_error],
+            params![op_id, claim.as_str(), attempts, next_retry_at, last_error],
         )?;
         if n == 1 {
             // Write-keyed: an upload without a write id keeps its own rollback.
@@ -505,6 +506,7 @@ impl StateDb {
         last_error: Option<&str>,
         now: i64,
     ) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
             "UPDATE operation_queue
@@ -513,7 +515,7 @@ impl StateDb {
              WHERE op_id = ?1 AND claim_id = ?2",
             params![
                 op_id,
-                claim_id,
+                claim.as_str(),
                 reason.as_str(),
                 last_error.map(redact_diagnostic_error),
                 now
@@ -525,6 +527,7 @@ impl StateDb {
     /// `false`: nothing was written, because the op moved since the claim (S2) or its
     /// completion is recorded (§8.6 rule 6: the runner retries such an op instead).
     pub fn park_claimed(&self, op_id: &str, claim_id: &str, reason: ParkReason, now: i64) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let file_id: Option<String> = tx
@@ -541,7 +544,7 @@ impl StateDb {
                  claim_id = NULL, claimed_at = NULL
              WHERE op_id = ?1 AND claim_id = ?2
                AND NOT EXISTS (SELECT 1 FROM upload_resume WHERE op_id = ?1 AND completed_version IS NOT NULL)",
-            params![op_id, claim_id, reason.as_str(), now],
+            params![op_id, claim.as_str(), reason.as_str(), now],
         )?;
         if n == 1
             && let Some(file_id) = file_id.as_deref()
@@ -555,6 +558,7 @@ impl StateDb {
     /// payload journalled in the same transaction. `false`: the op moved since the
     /// claim and nothing was written.
     pub fn put_upload_resume_claimed(&self, resume: &UploadResume, claim_id: &str) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = tx.execute(
@@ -593,7 +597,7 @@ impl StateDb {
                 resume.metadata_applied,
                 resume.is_create,
                 resume.self_minted,
-                claim_id,
+                claim.as_str(),
             ],
         )?;
         if n == 1 {
@@ -611,11 +615,12 @@ impl StateDb {
     /// after this commits (S6). `false`: the op moved since the claim and nothing was
     /// written.
     pub fn finish_claimed(&self, op_id: &str, claim_id: &str, release_payload: Option<&str>) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let n = tx.execute(
             "DELETE FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2",
-            params![op_id, claim_id],
+            params![op_id, claim.as_str()],
         )?;
         if n == 1 {
             tx.execute("DELETE FROM upload_resume WHERE op_id = ?1", params![op_id])?;

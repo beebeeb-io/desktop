@@ -664,6 +664,9 @@ pub struct ItemPresentation {
     pub unparked_finder_upload: bool,
     /// A Finder upload of this file has parked (attempts used up, spec §9.1).
     pub parked_finder_upload: bool,
+    /// Only the tests read it (production never did, and macOS warned on the unread field):
+    /// the flag exists in a test build alone.
+    #[cfg(test)]
     pub version_filled: bool,
 }
 
