@@ -211,11 +211,14 @@ impl EngineBridge {
         let session = match session {
             Some(session) => session,
             None => {
-                guard_init_base(
-                    op.base_version,
-                    is_create,
-                    claim.and_then(|claim| claim.write.as_ref()).is_some(),
-                )?;
+                let init_kind = if is_create {
+                    InitKind::Create
+                } else if claim.and_then(|claim| claim.write.as_ref()).is_some() {
+                    InitKind::FinderReplace
+                } else {
+                    InitKind::Replace
+                };
+                guard_init_base(op.base_version, init_kind)?;
                 // SF-0001 (L13): this device chooses the item id. A create proposes
                 // its own id when that id is canonical; otherwise (a local-only id)
                 // it mints a fresh one for this init. A replace keeps the row's id.
@@ -423,7 +426,7 @@ impl EngineBridge {
         // the token: `finder_thumbnail` refuses meanwhile. Keyed on a minted write (macOS).
         let marks_thumbnails = claim.and_then(|c| c.write.as_ref()).is_some() && payload_path.is_some();
         if marks_thumbnails {
-            self.set_thumbnails_pending(server_file_id, true);
+            self.set_thumbnails_pending(server_file_id, ThumbnailWait::Waiting);
         }
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
@@ -472,14 +475,14 @@ impl EngineBridge {
             Ok(Some(landed)) => landed,
             Ok(None) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, false);
+                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                 }
                 log_queue_state_moved(&op.op_id, "landing");
                 return Err(QueueStateMoved.into());
             }
             Err(e) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, false);
+                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                 }
                 return Err(e.into());
             }
@@ -500,7 +503,7 @@ impl EngineBridge {
             {
                 Ok(()) => {
                     if marks_thumbnails {
-                        self.set_thumbnails_pending(server_file_id, false);
+                        self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
                     }
                 }
                 // The refusal stays: the server still holds the previous version's thumbnail.

@@ -52,13 +52,13 @@ pub(crate) fn sync_folder_content(
 }
 
 /// The `init` guard (spec §6.3.1), checked where the request is built: a File Provider
-/// write (`has_write_id`) that replaces a file is never sent without a base. A missing
+/// write that replaces a file (`InitKind::FinderReplace`) is never sent without a base. A missing
 /// base, or one that does not fit the server's `i32` (which
 /// [`upload_init_request_for_operation`] would drop as "no base"), parks it as
 /// `base_unknown`. A create sends no base, and uploads without a write id (Windows, the
 /// watcher) keep today's bases.
-pub(super) fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_write_id: bool) -> Result<(), EngineError> {
-    if !has_write_id || is_new_file {
+pub(super) fn guard_init_base(base_version: Option<i64>, kind: InitKind) -> Result<(), EngineError> {
+    if !matches!(kind, InitKind::FinderReplace) {
         return Ok(());
     }
     match base_version.map(i32::try_from) {

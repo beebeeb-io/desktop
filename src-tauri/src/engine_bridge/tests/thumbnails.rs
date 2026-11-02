@@ -56,7 +56,7 @@ use super::*;
         let landing = Arc::clone(&bridge);
         // The landing's order: the mark first, then the commit that takes the op off the queue.
         bridge.seams.arm("thumbnail:between_reads", move || {
-            landing.set_thumbnails_pending(photo, true);
+            landing.set_thumbnails_pending(photo, ThumbnailWait::Waiting);
             landing.db.remove_operation(&op_id).unwrap();
         });
         let error = bridge

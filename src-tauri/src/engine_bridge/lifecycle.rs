@@ -40,12 +40,12 @@ impl EngineBridge {
     }
 
     /// Mark or clear `file_id`'s landed write as waiting for its new thumbnails (spec §5.6).
-    pub(super) fn set_thumbnails_pending(&self, file_id: &str, pending: bool) {
+    pub(super) fn set_thumbnails_pending(&self, file_id: &str, wait: ThumbnailWait) {
         let mut set = self
             .thumbnails_pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending {
+        if wait.is_waiting() {
             set.insert(file_id.to_string());
         } else {
             set.remove(file_id);

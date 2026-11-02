@@ -218,6 +218,24 @@ fn key_custody_names_the_unwrap_path() {
     assert!(!KeyCustody::Invite.is_custody());
 }
 
+/// The init guard answers by the kind: only a File Provider replace needs a
+/// base, and a missing one parks the write as base_unknown.
+#[test]
+fn the_init_guard_reads_the_kind() {
+    assert!(guard_init_base(None, InitKind::Create).is_ok());
+    assert!(guard_init_base(None, InitKind::Replace).is_ok());
+    assert!(guard_init_base(Some(3), InitKind::FinderReplace).is_ok());
+    let error = guard_init_base(None, InitKind::FinderReplace).unwrap_err();
+    assert!(error.is_caused_by::<ParkNow>());
+}
+
+/// ThumbnailWait names the two states of a landed write's thumbnail work.
+#[test]
+fn thumbnail_wait_names_the_two_states() {
+    assert!(ThumbnailWait::Waiting.is_waiting());
+    assert!(!ThumbnailWait::Settled.is_waiting());
+}
+
 /// A marker a lower layer wrapped stays findable on the bridge's own error, the
 /// reach downcast_ref had on the boundary's anyhow::Error.
 #[test]

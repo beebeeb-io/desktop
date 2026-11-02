@@ -200,6 +200,31 @@ impl PinToggle {
     }
 }
 
+/// Which upload init this is. A create sends no base; a File Provider write
+/// that replaces a file is never sent without one; a plain replace keeps
+/// today's base. The guard reads the kind, so `true, true` cannot mean two
+/// different things at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitKind {
+    Create,
+    FinderReplace,
+    Replace,
+}
+
+/// Whether a landed write still waits for its new thumbnails (spec §5.6).
+/// Naming the two states keeps `false` from having to stand for "settled".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ThumbnailWait {
+    Waiting,
+    Settled,
+}
+
+impl ThumbnailWait {
+    pub(super) fn is_waiting(self) -> bool {
+        matches!(self, ThumbnailWait::Waiting)
+    }
+}
+
 /// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
 /// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
 pub(super) struct DueOperations {
