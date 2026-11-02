@@ -165,6 +165,7 @@ impl TransferGuard {
 
     /// Raise the total when the real size turns out to differ from the hint (a
     /// download's size hint is the server's plaintext size and can be off).
+    #[cfg(test)]
     pub fn set_total(&self, total: u64) {
         if let Ok(mut inner) = self.board.inner.lock()
             && let Some(t) = inner.active.get_mut(&self.file_id)

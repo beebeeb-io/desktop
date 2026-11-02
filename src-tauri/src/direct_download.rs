@@ -694,7 +694,6 @@ pub(crate) mod test_support {
 mod tests;
 
 mod transport;
-use transport::*;
 pub(crate) use transport::{Transport, FileTransport, Storage};
 
 mod protocol;
@@ -702,5 +701,6 @@ use protocol::*;
 pub(crate) use protocol::{Request, Progress, Outcome, DirectError};
 
 mod download;
-use download::*;
-pub(crate) use download::{paced_until_ms, download};
+pub(crate) use download::download;
+#[cfg(test)]
+pub(crate) use download::paced_until_ms;
