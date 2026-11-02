@@ -42,6 +42,9 @@ impl std::ops::Deref for AccountId {
 /// The three secret leaves a store holds per account. Each has ONE wire name;
 /// the platform stores only ever see `leaf()`, so a typo cannot mint a fourth
 /// item.
+/// macOS and Windows stores (and the in-memory test store) are the only users:
+/// the Linux build has no credential vault to name items in.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeychainAccount {
     SessionToken,
@@ -55,6 +58,7 @@ pub enum KeychainAccount {
     AccountEmail,
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 impl KeychainAccount {
     #[cfg(test)]
     pub const ALL: [Self; 3] = [Self::SessionToken, Self::WrappedMasterKey, Self::AccountEmail];
@@ -78,6 +82,9 @@ impl KeychainAccount {
 /// `Some(id)` → `"<id>/<leaf>"` (segmented, Phase 1); `None` → bare `leaf`
 /// (legacy, pre-Phase-1 layout). Shared by every concrete store so the
 /// composition rule lives in exactly one place.
+/// The per-account credential leaf name, used by the platform stores and the
+/// tests that model them; the Linux build has no vault to name items in.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn account_path(prefix: Option<&AccountId>, account: KeychainAccount) -> String {
     match prefix {
         Some(id) => format!("{id}/{}", account.leaf()),

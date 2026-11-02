@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+/// The service every platform store (and the test store) names its items with; the Linux stub has no item to name.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
 const MASTER_KEY_BYTES: usize = 32;
 
@@ -23,6 +25,8 @@ const MASTER_KEY_BYTES: usize = 32;
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
+    /// Tests only: production secrets are built with `new_master_key` (the vault key) and never from raw bytes.
+    #[cfg(test)]
     pub fn new(bytes: impl Into<Vec<u8>>) -> AuthResult<Self> {
         let bytes = bytes.into();
         if bytes.is_empty() {
@@ -363,72 +367,6 @@ impl AuthSecretStore for WindowsCredentialStore {
 
     fn delete_account_email(&self) -> AuthResult<()> {
         windows_credentials::delete(&self.account_path(KeychainAccount::AccountEmail))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub struct WindowsCredentialStore {
-    // Type-parity with the Windows store (see MacOsKeychainStore stub note).
-    #[allow(dead_code)]
-    account_prefix: Option<AccountId>,
-}
-
-#[cfg(not(target_os = "windows"))]
-impl WindowsCredentialStore {
-    pub fn new() -> Self {
-        Self { account_prefix: None }
-    }
-
-    pub fn with_account(account_id: impl Into<AccountId>) -> Self {
-        Self {
-            account_prefix: Some(account_id.into()),
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-impl Default for WindowsCredentialStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-impl AuthSecretStore for WindowsCredentialStore {
-    fn save_session_token(&self, _token: &SessionToken) -> AuthResult<()> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
-    }
-
-    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
-    }
-
-    fn delete_session_token(&self) -> AuthResult<()> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
-    }
-
-    fn save_wrapped_master_key(&self, _wrapped: SecretBytes) -> AuthResult<()> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
-    }
-
-    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
-    }
-
-    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        Err(AuthStoreError::Unsupported(
-            "Windows Credential Manager is unavailable on this platform",
-        ))
     }
 }
 
@@ -999,6 +937,9 @@ pub use accounts::{platform_keychain_store_for, legacy_platform_keychain_store};
 
 #[path = "../src/keychain/legacy.rs"]
 mod legacy;
-pub use legacy::{migrate_legacy_keychain_to_account, migrate_legacy_keychain_between};
+pub use legacy::migrate_legacy_keychain_to_account;
+/// Tests only: the migration's own tests drive the two-store variant directly; production runs the account variant.
+#[cfg(test)]
+pub use legacy::migrate_legacy_keychain_between;
 
 

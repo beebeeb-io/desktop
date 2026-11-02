@@ -86,6 +86,8 @@ impl<S: AuthSecretStore> AuthVault<S> {
         }
     }
 
+    /// Tests only: no production caller reads the state back; it asserts the transitions.
+    #[cfg(test)]
     pub fn lock_state(&self) -> VaultLockState {
         self.state
     }
@@ -170,6 +172,11 @@ impl<S: AuthSecretStore> AuthVault<S> {
             .ok_or(AuthStoreError::InvalidSecret("vault is locked"))
     }
 
+    /// Tests only: no production caller asks (the engine reads the master key
+    /// itself), and only the auth facade's contract test (`tests/keychain.rs`,
+    /// which includes this file whole) drives it.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn can_hydrate_or_upload(&self) -> bool {
         self.master_key().is_ok()
     }

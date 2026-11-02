@@ -4,8 +4,6 @@
 //! probes, zeroization and the source-text tests. The in-memory stores live with the
 //! area that uses them, so no shared harness crosses module lines.
 
-use super::*;
-
 #[cfg(test)]
 mod tests {
     //! Decision-boundary tests for the startup auto-unlock.
@@ -17,7 +15,7 @@ mod tests {
     //! here against an in-memory store so it runs on any platform (the real
     //! OS credential vaults are platform-gated and can't run in CI).
 
-    use super::*;
+    use crate::keychain::*;
     use std::sync::Mutex;
 
     /// In-memory `AuthSecretStore` standing in for the OS credential vault.
