@@ -7,6 +7,27 @@ pub(super) enum HydrateOutcome {
     ClientGone,
 }
 
+/// Whether the client asked for `HydrateProgress` frames before the final reply
+/// (task 1670 issue 3). An enum rather than a `bool`, so every call site says
+/// what the flag means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProgressReporting {
+    /// Old extensions read exactly one reply; a progress frame would be
+    /// mistaken for it.
+    Off,
+    On,
+}
+
+impl ProgressReporting {
+    pub(super) fn from_wire(progress: bool) -> Self {
+        if progress { Self::On } else { Self::Off }
+    }
+
+    pub(super) fn wanted(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// Serve one `HydrateFile` request: validate, hydrate, and (when the client
 /// opted in) stream `HydrateProgress` frames while the download + decrypt run.
 ///
@@ -18,16 +39,16 @@ pub(super) async fn hydrate_over_ipc(
     frames: &mut FrameReader<tokio::net::unix::OwnedReadHalf>,
     write_half: &mut tokio::net::unix::OwnedWriteHalf,
     bridge: &crate::engine_bridge::EngineBridge,
-    file_id: &str,
+    file_id: &ItemId,
     dest_path: &str,
-    want_progress: bool,
+    progress: ProgressReporting,
 ) -> HydrateOutcome {
     // Task 1670 round 2: `file_id` here is the raw File Provider
     // item identifier straight off the wire — reject it before it
     // is trusted for anything else in this arm. See
     // `macos_validate_hydrate_item_identifier`'s doc comment.
     #[cfg(target_os = "macos")]
-    let identifier_check = macos_validate_hydrate_item_identifier(file_id);
+    let identifier_check = macos_validate_hydrate_item_identifier(file_id.as_str());
     #[cfg(not(target_os = "macos"))]
     let identifier_check: Result<(), &'static str> = Ok(());
 
@@ -94,18 +115,18 @@ pub(super) async fn hydrate_over_ipc(
     let report = move |done: u64, total: u64| {
         let _ = tx.send((done, total));
     };
-    let progress_cb: Option<&(dyn Fn(u64, u64) + Send + Sync)> = if want_progress { Some(&report) } else { None };
+    let progress_cb: Option<&(dyn Fn(u64, u64) + Send + Sync)> = if progress.wanted() { Some(&report) } else { None };
     // macOS: through the alias, and from the queue while the held write is queued (spec §7.4).
     // Other unix builds hydrate from the server as before.
     #[cfg(target_os = "macos")]
     let hydrate = async {
         bridge
-            .serve_hydrate(file_id, dest, &allowed_roots, progress_cb)
+            .serve_hydrate(file_id.as_str(), dest, &allowed_roots, progress_cb)
             .await
             .map(|_| ())
     };
     #[cfg(not(target_os = "macos"))]
-    let hydrate = bridge.hydrate_file_with_progress(file_id, dest, &allowed_roots, progress_cb);
+    let hydrate = bridge.hydrate_file_with_progress(file_id.as_str(), dest, &allowed_roots, progress_cb);
     tokio::pin!(hydrate);
 
     let result = loop {
@@ -146,7 +167,7 @@ pub(super) async fn hydrate_over_ipc(
                     .await
                     .is_err()
                 {
-                    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
+                    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id.as_str());
                     tracing::info!(
                         file_id,
                         id_kind,
@@ -157,12 +178,12 @@ pub(super) async fn hydrate_over_ipc(
             }
             match outcome {
                 Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
-                Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id, e)),
+                Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id.as_str(), e)),
             }
         }
         None => {
             // `hydrate` is dropped when this function returns.
-            let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
+            let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id.as_str());
             tracing::info!(
                 file_id,
                 id_kind,
@@ -226,4 +247,17 @@ pub(super) fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
         return "database";
     }
     "other"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_reporting_round_trips_the_wire_flag() {
+        assert_eq!(ProgressReporting::from_wire(false), ProgressReporting::Off);
+        assert_eq!(ProgressReporting::from_wire(true), ProgressReporting::On);
+        assert!(!ProgressReporting::Off.wanted());
+        assert!(ProgressReporting::On.wanted());
+    }
 }

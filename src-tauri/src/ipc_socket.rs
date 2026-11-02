@@ -507,28 +507,41 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 
 
 
-/// The reply to a Finder write. A queued write answers with its item, read back from the
-/// row, presented under `present_as` when the write came under a provisional id (spec §7.2).
+/// The reply to a Finder write, for the engine's own `anyhow` result: the
+/// boundary the engine's tests call. The error is classified once into
+/// [`IpcError`], and the typed core answers.
 pub(crate) fn write_outcome_response(
     op: &'static str,
     db: &crate::state_db::StateDb,
     result: anyhow::Result<crate::engine_bridge::FpWrite>,
 ) -> IpcResponse {
-    match result.map(|write| (write.outcome, write.present_as)) {
-        Ok((crate::engine_bridge::FinderWriteOutcome::Ignored { message }, _)) => IpcResponse::WriteQueued {
+    write_outcome_response_classified(op, db, result.map_err(|error| IpcError::from_engine(op, error)))
+}
+
+/// The reply to a Finder write whose error is already classified. A queued
+/// write answers with its item, read back from the row, presented under
+/// `present_as` when the write came under a provisional id (spec §7.2).
+fn write_outcome_response_classified(
+    op: &'static str,
+    db: &crate::state_db::StateDb,
+    result: Result<crate::engine_bridge::FpWrite, IpcError>,
+) -> IpcResponse {
+    let (outcome, present_as) = match result {
+        Ok(write) => (write.outcome, write.present_as),
+        Err(error) => return refused_write_reply(op, error),
+    };
+    match outcome {
+        crate::engine_bridge::FinderWriteOutcome::Ignored { message } => IpcResponse::WriteQueued {
             item: None,
             ignored: true,
             message,
         },
-        Ok((
-            crate::engine_bridge::FinderWriteOutcome::Queued {
-                file_id,
-                ignored,
-                message,
-                ..
-            },
-            present_as,
-        )) => {
+        crate::engine_bridge::FinderWriteOutcome::Queued {
+            file_id,
+            ignored,
+            message,
+            ..
+        } => {
             let item = file_id
                 .as_deref()
                 .and_then(|id| db.get_file(id).ok().flatten())
@@ -560,52 +573,24 @@ pub(crate) fn write_outcome_response(
             }
             IpcResponse::WriteQueued { item, ignored, message }
         }
-        // Spec §8.4: the staging folder cannot take the copy now. Nothing was staged or
-        // queued; the extension reports a transient error, so the system retries the write.
-        // The text is the typed error's fixed reason, never a path.
-        Err(e) if e.is::<crate::engine_bridge::FinderStagingUnavailable>() => {
-            log_refused_write(op, write_refusal_category(&e));
-            IpcResponse::WriteRetryLater { message: e.to_string() }
-        }
-        // Spec §8.7 S6: an engine-start sweep removed the staged copy before the accept
-        // committed. Nothing was queued; the system hands the write over again.
-        Err(e) if e.is::<crate::engine_bridge::StagedCopyGone>() => {
-            log_refused_write(op, write_refusal_category(&e));
-            IpcResponse::WriteRetryLater { message: e.to_string() }
-        }
-        // Spec 2026-10-10 §15 question 3: a sign-out closed accepts after its engine stop. Nothing was queued; the
-        // extension reports a transient error, so the system keeps the change and hands it over again.
-        Err(e) if e.is::<crate::engine_bridge::AcceptsClosed>() => {
-            log_refused_write(op, write_refusal_category(&e));
-            IpcResponse::WriteRetryLater { message: e.to_string() }
-        }
-        // The disk or the state database is full. A create or modify that failed queued nothing
-        // (the accept's transaction is its last step that can fail), so the system retries it, as
-        // for an unavailable staging folder, and it is accepted once there is room. An `Error`
-        // would reach macOS as `cannotSynchronize`, which it does not retry until the item
-        // changes again. A fixed text, never the error's.
-        Err(e)
-            if matches!(op, "create" | "modify")
-                && matches!(
-                    crate::engine_bridge::error_category(e.as_ref()),
-                    "disk_full" | "database_full"
-                ) =>
-        {
-            log_refused_write(op, write_refusal_category(&e));
-            IpcResponse::WriteRetryLater {
-                message: "the disk or Beebeeb's local database is full".into(),
-            }
-        }
-        Err(e) => {
-            // The extension turns this reply into a definitive Finder error,
-            // so it must leave a trace in the daemon log (it used to leave
-            // none). The category only: the error text can name the file.
-            match e.downcast_ref::<crate::engine_bridge::UnknownItem>() {
-                Some(unknown) => log_refused_unknown_item(op, &unknown.requested_id),
-                None => log_refused_write(op, write_refusal_category(&e)),
-            }
-            IpcResponse::Error { message: e.to_string() }
-        }
+    }
+}
+
+/// The reply to a refused write. The category (or the unknown id) goes to the
+/// log first; then a transient error when the system must hand the write over
+/// again (spec §8.4, §8.7 S6, 2026-10-10 §15 question 3, a full disk), and a
+/// definitive Finder error otherwise — the extension turns that into
+/// `cannotSynchronize`, so it must leave a trace.
+fn refused_write_reply(op: &'static str, error: IpcError) -> IpcResponse {
+    match error.unknown_item_id() {
+        Some(requested_id) => log_refused_unknown_item(op, requested_id),
+        None => log_refused_write(op, error.category()),
+    }
+    let message = error.message();
+    if error.is_retry_later() {
+        IpcResponse::WriteRetryLater { message }
+    } else {
+        IpcResponse::Error { message }
     }
 }
 
@@ -787,6 +772,15 @@ mod tests {
     mod upload_staging;
     mod presentation_write;
 }
+
+mod error;
+use error::*;
+
+mod ids;
+use ids::*;
+
+mod requests;
+use requests::*;
 
 mod protocol;
 use protocol::*;

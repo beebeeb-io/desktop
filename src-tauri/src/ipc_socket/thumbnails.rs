@@ -97,12 +97,17 @@ pub(crate) fn persist_thumbnail_plaintext(
     dest: &std::path::Path,
     allowed_roots: &[std::path::PathBuf],
     plaintext: &[u8],
-) -> anyhow::Result<u64> {
+) -> Result<u64, IpcError> {
     if thumbnail_destination_error(dest, allowed_roots).is_some() {
-        anyhow::bail!("thumbnail destination {} is not under an allowed root", dest.display());
+        return Err(IpcError::DestinationNotAllowed {
+            dest: dest.to_path_buf(),
+        });
     }
     let root_paths: Vec<&std::path::Path> = allowed_roots.iter().map(|p| p.as_path()).collect();
     crate::engine_bridge::write_hydrated_plaintext(dest, &root_paths, plaintext)
         .map(|_| plaintext.len() as u64)
-        .map_err(|e| anyhow::anyhow!("could not stage thumbnail at {}: {e}", dest.display()))
+        .map_err(|source| IpcError::Stage {
+            dest: dest.to_path_buf(),
+            source: anyhow::Error::new(source),
+        })
 }
