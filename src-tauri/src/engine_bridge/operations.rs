@@ -132,7 +132,7 @@ impl EngineBridge {
         file_id: &str,
         toggle: PinToggle,
         now: i64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::PinTree,
@@ -161,7 +161,7 @@ impl EngineBridge {
         Ok(())
     }
 
-    pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> anyhow::Result<()> {
+    pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::HydrateFile,
