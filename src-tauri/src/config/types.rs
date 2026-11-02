@@ -338,6 +338,30 @@ impl ReleaseChannel {
     }
 }
 
+/// Sync mode picked in the Windows first-run wizard. `desktop.toml` stores its
+/// own string, so an unknown value there is an error, never a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMode {
+    Everything,
+    Smart,
+    Custom,
+    OnlineOnly,
+}
+
+impl ConfigMode {
+    /// The only way in from the stored string: the four values
+    /// `WindowsFirstRun.tsx` sends, and nothing else.
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        match raw {
+            "everything" => Ok(Self::Everything),
+            "smart" => Ok(Self::Smart),
+            "custom" => Ok(Self::Custom),
+            "online_only" => Ok(Self::OnlineOnly),
+            other => Err(ConfigError::UnknownSyncMode(other.to_string())),
+        }
+    }
+}
+
 impl Default for DesktopConfig {
     /// Mirror the `#[serde(default = ...)]` annotations so a fresh
     /// in-memory config produces the same notification-on defaults

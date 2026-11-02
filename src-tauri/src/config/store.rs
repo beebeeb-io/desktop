@@ -9,21 +9,40 @@
 
 use super::*;
 
+/// Which OS a load is for, named so both branches run on any test host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigHost {
+    MacOs,
+    Other,
+}
+
+impl ConfigHost {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
 impl DesktopConfig {
     /// Resolve the absolute path to `desktop.toml` for the current user,
     /// creating the parent directory if missing. Errors propagate as
     /// strings so they can flow through Tauri commands.
     pub fn path() -> Result<PathBuf, String> {
-        let base = Self::config_base_dir()?;
+        let base = Self::config_base_dir().map_err(String::from)?;
         let dir = base.join(APP_CONFIG_DIR);
-        fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+        fs::create_dir_all(&dir)
+            .map_err(ConfigError::CreateConfigDirectory)
+            .map_err(String::from)?;
         Ok(dir.join(CONFIG_FILENAME))
     }
 
     /// The directory that holds the `beebeeb` config folder: the user's config dir.
     #[cfg(not(test))]
-    pub(super) fn config_base_dir() -> Result<PathBuf, String> {
-        dirs::config_dir().ok_or_else(|| "could not determine user config directory".to_string())
+    pub(super) fn config_base_dir() -> Result<PathBuf, ConfigError> {
+        dirs::config_dir().ok_or(ConfigError::ConfigDirectoryUnknown)
     }
 
     /// Unit tests never see the person's real config. In a test build this is a per-process
@@ -32,11 +51,11 @@ impl DesktopConfig {
     /// writes the sandbox, not `~/Library/Application Support/beebeeb/desktop.toml`. The guard
     /// test `unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one` pins this.
     #[cfg(test)]
-    pub(super) fn config_base_dir() -> Result<PathBuf, String> {
+    pub(super) fn config_base_dir() -> Result<PathBuf, ConfigError> {
         if let Ok(dir) = CONFIG_DIR_OVERRIDE.try_with(PathBuf::clone) {
             return Ok(dir);
         }
-        crate::test_sandbox::dir("config")
+        crate::test_sandbox::dir("config").map_err(ConfigError::Sandbox)
     }
 
     /// Load the on-disk config. A missing file is normal on first
@@ -44,17 +63,23 @@ impl DesktopConfig {
     /// error. A corrupt or unparseable file IS an error — surfacing
     /// it loud avoids silently overwriting a user's settings on save.
     pub fn load() -> Result<Self, String> {
-        Self::load_from(&Self::path()?)
+        Self::load_from(&Self::path()?).map_err(String::from)
     }
 
     /// [`Self::load`] from `path`. A seam so a test can run the real load against its own file.
-    pub(crate) fn load_from(path: &Path) -> Result<Self, String> {
+    pub(crate) fn load_from(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             return Ok(Self::default());
         }
         // toml 0.8 removed from_slice; read as UTF-8 string and parse.
-        let s = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let mut cfg: Self = toml::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let s = fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut cfg: Self = toml::from_str(&s).map_err(|source| ConfigError::ParseFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a
         // relative path would otherwise let the engine sync against
@@ -65,7 +90,10 @@ impl DesktopConfig {
             tracing::warn!("ignoring non-absolute sync_root in desktop.toml: {}", p.display());
             cfg.sync_root = None;
         }
-        cfg.scrub_legacy_finder_error(cfg!(target_os = "macos"));
+        if let Some(raw) = cfg.sync_mode.as_deref() {
+            ConfigMode::parse(raw)?;
+        }
+        cfg.scrub_legacy_finder_error(ConfigHost::current());
         Ok(cfg)
     }
 
@@ -74,10 +102,10 @@ impl DesktopConfig {
     /// writes the `finder_install_*` keys (it reads Finder's state from the OS, spec §9), so
     /// nothing there needs the text and the next update drops it from disk. The other old
     /// keys carry no path: they still load and are kept. Windows and Linux keep reading and
-    /// writing the error unchanged. `on_macos` is a parameter so tests exercise both branches
-    /// on any host; `load_from` passes `cfg!(target_os = "macos")`.
-    pub(super) fn scrub_legacy_finder_error(&mut self, on_macos: bool) {
-        if on_macos {
+    /// writing the error unchanged. The host is a parameter so tests exercise both branches
+    /// on any host; `load_from` passes the build's own target.
+    pub(super) fn scrub_legacy_finder_error(&mut self, host: ConfigHost) {
+        if host == ConfigHost::MacOs {
             self.finder_install_last_error = None;
         }
     }
@@ -99,13 +127,13 @@ impl DesktopConfig {
     /// Task 1889: the read, the mint and the write are one [`Self::update_at`], so two callers at once
     /// cannot mint two ids, and the mint cannot replace a setting another writer saved meanwhile.
     pub fn ensure_account_id() -> Result<String, String> {
-        Self::ensure_account_id_at(&Self::path()?)
+        Self::ensure_account_id_at(&Self::path()?).map_err(String::from)
     }
 
     /// [`Self::ensure_account_id`] against an explicit file, so a test can run the real read, mint
     /// and write in a temp dir instead of the person's `desktop.toml`.
-    pub(crate) fn ensure_account_id_at(path: &Path) -> Result<String, String> {
-        Self::update_at(path, |cfg| match &cfg.account_id {
+    pub(crate) fn ensure_account_id_at(path: &Path) -> Result<String, ConfigError> {
+        Self::try_update_at(path, |cfg| match &cfg.account_id {
             Some(id) => (false, id.clone()),
             None => {
                 let id = uuid::Uuid::new_v4().to_string();
@@ -113,6 +141,7 @@ impl DesktopConfig {
                 (true, id)
             }
         })
+        .map_err(UpdateError::into_error)
     }
 
     /// Load the config, let `change` modify it, and save it if `change` says so, all under the
@@ -131,7 +160,7 @@ impl DesktopConfig {
     /// For a short, synchronous change: the lock is held while `change` runs, and it is not
     /// re-entrant, so `change` calls no other update.
     pub(crate) fn update_at<R>(path: &Path, change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
-        Self::try_update_at(path, change).map_err(UpdateError::into_message)
+        Self::try_update_at(path, change).map_err(|error| error.into_error().to_string())
     }
 
     /// [`Self::update_at`] that says whether the read or the write failed, for a caller whose log
@@ -150,7 +179,7 @@ impl DesktopConfig {
         change: impl FnOnce(&mut Self) -> (bool, R),
         saved: impl FnOnce(&Self),
     ) -> Result<R, String> {
-        Self::try_update_at_then(path, change, saved, None).map_err(UpdateError::into_message)
+        Self::try_update_at_then(path, change, saved, None).map_err(|error| error.into_error().to_string())
     }
 
     /// Spec 2026-10-10 §7.3 (task 1887): `update_at`, whose write survives a power loss once it returns: the temp file
@@ -164,7 +193,7 @@ impl DesktopConfig {
         change: impl FnOnce(&mut Self) -> (bool, R),
         fs_steps: &dyn ConfigFs,
     ) -> Result<R, String> {
-        Self::try_update_at_then(path, change, |_| {}, Some(fs_steps)).map_err(UpdateError::into_message)
+        Self::try_update_at_then(path, change, |_| {}, Some(fs_steps)).map_err(|error| error.into_error().to_string())
     }
 
     /// The one place the file is written: the lock is taken before the read and held through the write and `saved`.
@@ -194,44 +223,59 @@ impl DesktopConfig {
     }
 
     /// The write itself. The caller holds the config-write lock.
-    pub(super) fn save_to(&self, path: &Path) -> Result<(), String> {
-        let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+    pub(super) fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        let toml_str = toml::to_string_pretty(self).map_err(ConfigError::Serialize)?;
 
         // Atomic write: temp + rename. Avoids leaving a half-written
         // file if the process is killed mid-save.
         let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, toml_str.as_bytes()).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        fs::write(&tmp, toml_str.as_bytes()).map_err(|source| ConfigError::WriteFile {
+            path: tmp.clone(),
+            source,
+        })?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+            fs::set_permissions(&tmp, perms).map_err(|source| ConfigError::SetPermissions {
+                path: tmp.clone(),
+                source,
+            })?;
         }
 
-        fs::rename(&tmp, path).map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        fs::rename(&tmp, path).map_err(|source| ConfigError::Rename {
+            from: tmp,
+            to: path.to_path_buf(),
+            source,
+        })?;
         Ok(())
     }
 
     /// The durable write. The caller holds the config-write lock.
-    pub(super) fn save_to_durable(&self, path: &Path, fs_steps: &dyn ConfigFs) -> Result<(), String> {
-        let toml_str = toml::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+    pub(super) fn save_to_durable(&self, path: &Path, fs_steps: &dyn ConfigFs) -> Result<(), ConfigError> {
+        let toml_str = toml::to_string_pretty(self).map_err(ConfigError::Serialize)?;
         let tmp = path.with_extension("toml.tmp");
         fs_steps
             .write(&tmp, toml_str.as_bytes())
-            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        fs_steps
-            .sync_file(&tmp)
-            .map_err(|e| format!("flush {}: {e}", tmp.display()))?;
-        fs_steps
-            .rename(&tmp, path)
-            .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
-        let dir = path
-            .parent()
-            .ok_or_else(|| "the config file has no directory".to_string())?;
-        fs_steps
-            .sync_dir(dir)
-            .map_err(|e| format!("flush {}: {e}", dir.display()))
+            .map_err(|source| ConfigError::WriteFile {
+                path: tmp.clone(),
+                source,
+            })?;
+        fs_steps.sync_file(&tmp).map_err(|source| ConfigError::Flush {
+            path: tmp.clone(),
+            source,
+        })?;
+        fs_steps.rename(&tmp, path).map_err(|source| ConfigError::Rename {
+            from: tmp,
+            to: path.to_path_buf(),
+            source,
+        })?;
+        let dir = path.parent().ok_or(ConfigError::MissingParentDirectory)?;
+        fs_steps.sync_dir(dir).map_err(|source| ConfigError::Flush {
+            path: dir.to_path_buf(),
+            source,
+        })
     }
 }
 

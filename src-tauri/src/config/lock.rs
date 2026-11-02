@@ -33,17 +33,17 @@ pub(super) fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
 /// changed config could not be written. Nothing was written in the first case. A durable save's
 /// `Write` can also come after its rename, when the directory flush failed: the change is then in
 /// the file, but not flushed ([`DesktopConfig::update_at_durable_with`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum UpdateError {
-    Read(String),
-    Write(String),
+    Read(ConfigError),
+    Write(ConfigError),
 }
 
 impl UpdateError {
-    /// The message, as [`DesktopConfig::update_at`] returns it.
-    pub(crate) fn into_message(self) -> String {
+    /// The failure, as [`DesktopConfig::update_at`] hands it back.
+    pub(crate) fn into_error(self) -> ConfigError {
         match self {
-            Self::Read(message) | Self::Write(message) => message,
+            Self::Read(error) | Self::Write(error) => error,
         }
     }
 }
@@ -98,7 +98,10 @@ impl HeldConfig {
     /// Records queued by [`Self::queue_for_next_write`] are applied first, in the same write; they make a write that
     /// says "nothing changed" a write when they changed something.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub(crate) fn update_held<R>(&mut self, change: impl FnOnce(&mut DesktopConfig) -> (bool, R)) -> Result<R, String> {
+    pub(crate) fn update_held<R>(
+        &mut self,
+        change: impl FnOnce(&mut DesktopConfig) -> (bool, R),
+    ) -> Result<R, String> {
         self.update_held_at(&DesktopConfig::path()?, change)
     }
 

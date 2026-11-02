@@ -8,6 +8,20 @@
 
 use super::*;
 
+/// One known folder's state in the backup set. The command's boolean means
+/// these two states; `From<bool>` keeps the frozen `lib.rs` call site working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownFolderBackup {
+    Enabled,
+    Disabled,
+}
+
+impl From<bool> for KnownFolderBackup {
+    fn from(enabled: bool) -> Self {
+        if enabled { Self::Enabled } else { Self::Disabled }
+    }
+}
+
 /// Settings-only DTO for the `get_desktop_config` / `set_desktop_config`
 /// IPC commands. Does NOT include `sync_root` — the WebView never
 /// edits the sync root through these commands (the `pick_sync_root`
@@ -154,12 +168,13 @@ impl DesktopConfig {
     /// enabling an already-enabled key (or disabling an absent one) is a
     /// no-op. Keeps the list de-duplicated. Does NOT persist — the caller
     /// (the `set_known_folder_backup` IPC) saves.
-    pub fn set_known_folder(&mut self, key: &str, enabled: bool) {
-        let present = self.known_folder_enabled(key);
-        if enabled && !present {
-            self.known_folder_backup.push(key.to_string());
-        } else if !enabled && present {
-            self.known_folder_backup.retain(|k| k != key);
+    pub fn set_known_folder(&mut self, key: &str, backup: impl Into<KnownFolderBackup>) {
+        match backup.into() {
+            KnownFolderBackup::Enabled if !self.known_folder_enabled(key) => {
+                self.known_folder_backup.push(key.to_string());
+            }
+            KnownFolderBackup::Disabled => self.known_folder_backup.retain(|k| k != key),
+            KnownFolderBackup::Enabled => {}
         }
     }
 }

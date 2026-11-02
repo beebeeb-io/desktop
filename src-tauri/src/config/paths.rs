@@ -49,13 +49,16 @@ pub fn default_sync_root_suggestion() -> PathBuf {
 /// Ensure `path` exists as a directory, creating it (and any missing
 /// parents) if necessary. Returns an error if `path` exists but is
 /// a file.
-pub fn ensure_directory(path: &Path) -> Result<(), String> {
+pub fn ensure_directory(path: &Path) -> Result<(), ConfigError> {
     if path.exists() {
         if !path.is_dir() {
-            return Err(format!("{} exists but is not a directory", path.display()));
+            return Err(ConfigError::NotADirectory(path.to_path_buf()));
         }
         return Ok(());
     }
-    fs::create_dir_all(path).map_err(|e| format!("create directory {}: {e}", path.display()))?;
+    fs::create_dir_all(path).map_err(|source| ConfigError::CreateDirectory {
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(())
 }
