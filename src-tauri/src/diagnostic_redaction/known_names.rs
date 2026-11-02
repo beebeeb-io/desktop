@@ -38,10 +38,6 @@ impl KnownNames {
         self.names.dedup();
         self
     }
-
-    pub fn len(&self) -> usize {
-        self.names.len()
-    }
 }
 
 /// Replace every occurrence of a known name (ASCII case-insensitive, at word

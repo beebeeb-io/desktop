@@ -77,9 +77,8 @@ pub(super) fn redact(error: &str, names: &KnownNames, mode: Mode) -> RedactedErr
                 continue;
             }
             CredentialShape::LabelledValue {
-                key,
-                delim,
                 value: LabelledValueKind::Label,
+                ..
             } => {
                 // `authorization=Bearer <tok>`: the label run continues.
                 out.push(part.replace(NAME_MARK, ""));
