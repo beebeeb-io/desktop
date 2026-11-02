@@ -18,7 +18,7 @@ Every Finder-location removal on `main` used the remove-all form, with no remova
 | --- | --- |
 | `beebeeb_fp_remove` (sign-out, Repair, the Add-to-Finder rollback) | `src-tauri/macos/FileProviderBridge.m:82` |
 | `beebeeb_fp_remove_domain_by_id` (the app-start sweep of other domains) | `src-tauri/macos/FileProviderBridge.m:380` |
-| `BeebeebFileProviderCtl remove` (developer helper) | `BeebeebFileProviderTools/DomainControlTool.swift:73` (`NSFileProviderManager.remove(domain)`, the same call in Swift) |
+| `BeebeebFileProviderCtl remove` (developer helper) | `BeebeebFileProviderTools/DomainControlTool.swift` (`NSFileProviderManager.remove(domain)`, the same call in Swift) |
 
 In 0.8.11 every file created in the Finder location fails to upload (task 1873: the extension's
 `createItem` ends in `-2005`, so the file stays on this Mac only). A sign-out, a Repair or the

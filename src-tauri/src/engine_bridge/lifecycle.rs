@@ -14,7 +14,7 @@ impl EngineBridge {
     }
 
     /// Like [`Self::new`], but shares an externally-owned stop flag —
-    /// [`crate::runner::run`] passes the SAME `Arc<AtomicBool>` its
+    /// [`crate::runner`]'s `run` passes the SAME `Arc<AtomicBool>` its
     /// `EngineRunner` flips on `abort()`, so this bridge (and every clone of
     /// it handed to the IPC socket server / Windows upload watcher) observes
     /// the stop request the instant it's set, not just at the next tick
@@ -85,7 +85,7 @@ impl EngineBridge {
         self
     }
 
-    /// Share the account's resume and pass requests (spec D11; review P2). [`crate::runner::run`] passes the same
+    /// Share the account's resume and pass requests (spec D11; review P2). [`crate::runner`]'s `run` passes the same
     /// ticket it serves in [`Self::reconcile_then_resume`].
     pub fn with_resume(mut self, resume: crate::runner::ResumeTicket) -> Self {
         self.resume = resume;

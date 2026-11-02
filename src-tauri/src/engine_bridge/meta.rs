@@ -383,7 +383,7 @@ pub(crate) fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path])
 /// a durable cache footprint the system, not us, now owns.
 ///
 /// `macos_hydrate_dir` is a parameter — production passes the REAL
-/// `crate::ipc_socket::macos_hydrate_cache_dir()` (see the call site in
+/// `crate::ipc_socket`'s `macos_hydrate_cache_dir()` (see the call site in
 /// [`Self::hydrate_file`]); tests pass a throwaway tempdir, so this whole
 /// decision is exercised end to end without ever touching the real,
 /// singleton App-Group directory a live Beebeeb.app/Finder extension share

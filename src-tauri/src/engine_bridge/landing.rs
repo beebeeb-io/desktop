@@ -118,7 +118,7 @@ pub struct VersionConflictEntry {
 /// leading dot (`.env`) is not an extension.
 ///
 /// Review-169 F3: the whole name fits the file-name limit, as a kept file's does
-/// ([`crate::sign_out::kept_names::with_suffix`], 255 bytes): the stem is cut at a character boundary,
+/// ([`crate::sign_out::kept_names`]'s `with_suffix`, 255 bytes): the stem is cut at a character boundary,
 /// never the suffix, the counter or the extension. The device is cut first, to
 /// [`KEEP_BOTH_DEVICE_MAX_BYTES`], so the suffix always leaves the stem room.
 pub(crate) fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::collections::HashSet<String>) -> String {
@@ -317,7 +317,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
 /// `true` when `dest_path` is a macOS Finder `fetchContents` HANDOFF staging
 /// file — i.e. it lives inside `hydrate_dir`, never a durable local cache
 /// copy. `hydrate_dir` is a parameter (never
-/// `crate::ipc_socket::macos_hydrate_cache_dir()` read inline) so this is
+/// `crate::ipc_socket`'s `macos_hydrate_cache_dir()` read inline) so this is
 /// unit-testable with a throwaway directory, never the real, singleton
 /// App-Group container a live Beebeeb.app/Finder extension share on this
 /// same machine (`macos_hydrate_cache_dir`'s own doc comment covers why that

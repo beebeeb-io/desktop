@@ -125,7 +125,7 @@ pub fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
 
 /// The GATED half of "Open in Finder" (task 1885, fix round 1 I1): resolves the Beebeeb domain's root to the
 /// security-scoped URL macOS returns for it, as a retained handle. `Ok(None)` is "macOS reports no location" (the
-/// domain is not added). The open itself is [`crate::macos_workspace::open_scoped`], which runs after the gate is
+/// domain is not added). The open itself is [`crate::macos_workspace`]'s `open_scoped`, which runs after the gate is
 /// released: `NSWorkspace` is not a File Provider call and can stall for seconds. There is no path string anywhere in
 /// the chain: a path carries no sandbox extension.
 pub fn resolve_location() -> Result<Option<ScopedUrl>, FpError> {

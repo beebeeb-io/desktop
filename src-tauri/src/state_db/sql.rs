@@ -712,7 +712,7 @@ pub(super) fn count_queue_groups(conn: &Connection, column: &str) -> Result<BTre
 
 /// Credential-token stripping for error text persisted in the state DB. The
 /// privacy boundary for names and paths is the export pass
-/// ([`crate::diagnostic_redaction::redact_for_export`]), not this.
+/// ([`crate::diagnostic_redaction::export`]'s `redact_for_export`), not this.
 pub(super) fn redact_diagnostic_error(error: &str) -> String {
     redact_secrets_only(error)
 }

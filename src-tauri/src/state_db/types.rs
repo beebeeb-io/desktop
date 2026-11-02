@@ -287,8 +287,8 @@ pub struct FileEntry {
     pub content_hash: Option<String>,
     /// Server's `updated_at` snapshot at the time we last considered
     /// this file fully synced (status transitioned to `Local`). Used
-    /// by [`crate::engine_bridge::sync_tick`] as the "base version"
-    /// in [`crate::conflict::is_conflict`]: a remote `updated_at` past
+    /// by [`crate::engine_bridge::syncflow`]'s `sync_tick` as the "base version"
+    /// in [`crate::conflict`]'s `is_conflict`: a remote `updated_at` past
     /// this value means a sibling device has touched the file since
     /// our last sync.
     ///
@@ -304,7 +304,7 @@ pub struct FileEntry {
     /// (and `item_kind`) is owned by [`StateDb::set_file_contract_state`]
     /// via [`FileContractState`], which every metadata sweep calls right
     /// after `upsert_file`. Exposing it here lets
-    /// [`crate::windows_cf::populate_placeholders`] order parents-before-
+    /// [`crate::windows_cf`]'s `populate_placeholders` order parents-before-
     /// children and place nested placeholders without an N+1 contract fetch.
     pub parent_id: Option<String>,
     /// Whether this row is a folder or a file. **Read-only on `FileEntry`**
