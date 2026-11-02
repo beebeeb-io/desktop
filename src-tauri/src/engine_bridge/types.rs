@@ -33,25 +33,22 @@ impl WireCounters {
 }
 
 /// Events that drive a file through its sync lifecycle.
+#[cfg(test)]
 pub enum FileEvent {
     DownloadStart,
     DownloadComplete,
-    DownloadFail,
     UploadStart,
-    UploadComplete,
-    UploadFail,
-    ConflictDetected,
-    ConflictResolved,
-    Evict,
 }
 
 /// In-memory state tracker for a single file. The persisted state is
 /// in [`StateDb`]; this struct exists so callers can validate the
 /// _next_ state before writing it.
+#[cfg(test)]
 pub struct FileSM {
     pub(super) state: FileStatus,
 }
 
+#[cfg(test)]
 impl FileSM {
     pub fn new(state: FileStatus) -> Self {
         Self { state }
@@ -70,13 +67,7 @@ impl FileSM {
         self.state = match (&self.state, event) {
             (CloudOnly, DownloadStart) => Downloading,
             (Downloading, DownloadComplete) => Local,
-            (Downloading, DownloadFail) => Error,
             (Local, UploadStart) => Uploading,
-            (Uploading, UploadComplete) => Local,
-            (Uploading, UploadFail) => Error,
-            (Local, ConflictDetected) => Conflict,
-            (Conflict, ConflictResolved) => Local,
-            (Local, Evict) => CloudOnly,
             _ => return Err("invalid state transition"),
         };
         Ok(())
@@ -215,7 +206,7 @@ pub(super) enum InitKind {
 /// it was in use (a later tick removes it). The name keeps a bare `true` from
 /// standing for "removed" at the prune and at the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OriginalRemoval {
+pub(crate) enum OriginalRemoval {
     Removed,
     InPlace,
 }
@@ -838,7 +829,7 @@ pub(crate) enum PrunedEntry {
 /// registration is dropped again when it did not happen (a later delete by the person counts).
 /// What the path being removed is, so the remove picks the matching syscall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RemovedKind {
+pub(crate) enum RemovedKind {
     File,
     Dir,
 }

@@ -100,6 +100,7 @@ impl EngineBridge {
         self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
@@ -256,10 +257,6 @@ impl EngineBridge {
             }
         }
         Ok(true)
-    }
-
-    pub fn queue_diagnostics(&self, now: i64) -> anyhow::Result<QueueDiagnostics> {
-        Ok(self.db.queue_diagnostics(now)?)
     }
 
     pub async fn process_due_operations(&self, sync_root: &Path, now: i64) -> anyhow::Result<TransferLoopOutcome> {

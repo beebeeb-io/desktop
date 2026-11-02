@@ -76,7 +76,7 @@ impl MediaKind {
 /// built. Each variant spells the step's text exactly as the `anyhow!` it replaces
 /// did, so a log line that carried the failure reads the same.
 #[derive(Debug)]
-pub(super) enum MediaError {
+pub(crate) enum MediaError {
     EncryptThumbnail { variant: &'static str, detail: String },
     /// Opening or reading the file the image comes from.
     Io(std::io::Error),

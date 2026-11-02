@@ -37,7 +37,7 @@ use crate::conflict::is_text_file;
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, KeptReason, LocalActivityEventInput,
     LocalActivityKind, LocalFileId, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, ServerFileId, StateDb, TookOver,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, ServerFileId, StateDb, TookOver,
     UploadResume, VersionId,
 };
 
@@ -230,7 +230,7 @@ mod conflicts;
 
 
 
-/// Files [`cached_sha256_file_hex`] read on this thread (tests count them).
+// Files `cached_sha256_file_hex` read on this thread (tests count them).
 #[cfg(test)]
 thread_local! {
     static HASH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -493,7 +493,9 @@ use ipc::{IpcHydrationMock};
 use metadata_2::{patched_parents};
 use refusals_2::{reqwest_status_error, transient};
 use refusals_3::{PLANTED, assert_clean_line};
-use reg_1640::{regression_1640_chunk, regression_1640_edited_file_in_a_folder, regression_1640_edited_file_in_a_folder_in, regression_1640_synced_file, regression_1640_web_saves};
+use reg_1640::{regression_1640_edited_file_in_a_folder, regression_1640_edited_file_in_a_folder_in, regression_1640_synced_file};
+#[cfg(target_os = "windows")]
+use reg_1640::{regression_1640_chunk, regression_1640_web_saves};
 use reg_1640_2::{regression_1640_new_placeholder, regression_1640_uploads_queued_for};
 use scan::{regression_2229_set_modified, task_2190_files_holding, task_2190_fu1_tick_after, task_2190_server_chunk, task_2190_web_saves};
 use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
@@ -507,6 +509,7 @@ use uploads_7::{land_one_save, remote_update};
 use uploads_8::{assert_kept_uploading, failing_passes};
 use versions::{drain_upload_queue, finder_file_target, held_content_version, run_competing, versioned_server_answer};
 use versions_2::{FP_ROOT, fp_create_in, fp_save_moved, listed_under, name_parent_status, reparented_changes, seed_folder_row, seed_row_in_folder};
+#[cfg(target_os = "macos")]
 use versions_3::*;
 }
 
@@ -627,7 +630,9 @@ impl Seams {
 
 mod types;
 use types::*;
-pub use types::{WireCounters, FileEvent, FileSM, FpWrite, CachePolicy, PinUpdateOutcome, CacheCleanupOutcome, TransferLoopOutcome, ConflictContentSide, ParkedChoice, ParkedResolution, ConflictContentPreview, FetchedVersion, FetchedBytes, FetchTicket, name_opens, ConflictDetected, SyncTickOutcome};
+pub use types::{WireCounters, FpWrite, CachePolicy, PinUpdateOutcome, CacheCleanupOutcome, TransferLoopOutcome, ConflictContentSide, ParkedChoice, ParkedResolution, ConflictContentPreview, FetchedVersion, FetchTicket, name_opens, ConflictDetected, SyncTickOutcome};
+#[cfg(windows)]
+pub use types::FetchedBytes;
 pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_SETTLE_SECS, OpDone, LocalEntry, PrunedEntry};
 
 mod errors;
@@ -649,7 +654,9 @@ pub(crate) use fs::{path_is_engine_internal, relative_db_path, LocalPathVerdict,
 mod meta;
 use meta::*;
 pub use meta::{HydrateSource, SharedRootRefreshOutcome};
-pub(crate) use meta::{wire_id_fields, promote_fetched_content, HydrateProgressFn, hydrate_final_status, hydrate_dest_is_allowed, write_hydrated_plaintext, write_hydrated_from_reader, item_content_version, item_version_identifier};
+pub(crate) use meta::{wire_id_fields, HydrateProgressFn, hydrate_final_status, hydrate_dest_is_allowed, write_hydrated_plaintext, write_hydrated_from_reader, item_content_version, item_version_identifier};
+#[cfg(windows)]
+pub(crate) use meta::promote_fetched_content;
 
 mod meta_2;
 use meta_2::*;
@@ -658,9 +665,13 @@ pub(crate) use meta_2::{parse_base_version_number, decrypt_shared_name_with_key}
 mod landing;
 use landing::*;
 pub use landing::{FinderWriteItemKind, FinderWriteTarget, FinderWriteOutcome, VersionConflictEntry, is_ignored_finder_name, version_conflict_feed_from_db};
-pub(crate) use landing::{keep_both_name, FinderStagingBases, finder_staging_candidates, remove_pruned_entry, copy_as_this_pc, retry_kept_originals};
+pub(crate) use landing::{keep_both_name, FinderStagingBases, finder_staging_candidates};
+#[cfg(windows)]
+pub(crate) use landing::retry_kept_originals;
 
 mod syncflow;
 use syncflow::*;
-pub use syncflow::{sync_tick, sync_tick_outcome};
+pub use syncflow::sync_tick_outcome;
+#[cfg(test)]
+pub use syncflow::sync_tick;
 pub(crate) use syncflow::{sync_folder_content, init_conflict_class, local_file_path_under_sync_root};

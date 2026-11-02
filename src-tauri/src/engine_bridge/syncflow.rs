@@ -175,6 +175,7 @@ pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: a
     Err(error.into())
 }
 
+#[cfg(test)]
 pub async fn sync_tick(
     bridge: &EngineBridge,
     // See `sync_tick_outcome` for the `sync_root` contract.
