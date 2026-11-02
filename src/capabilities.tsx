@@ -1,3 +1,6 @@
+// What this host can do (delivered by `desktop_capabilities.rs`) and the gate that hides a route it
+// cannot serve. Must not guess a capability: an unresolved host shows the honest unknown state.
+
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { command, openUrl } from './desktopApi'
 import { CapabilityNotice } from './CapabilityNotice'

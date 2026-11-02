@@ -22,7 +22,7 @@ impl EngineBridge {
     ///    convert). Hydration fills a placeholder's data stream WITHOUT clearing
     ///    its reparse-point attribute, so a hydration-write still trips this guard
     ///    and never re-uploads. Checked via
-    ///    [`crate::windows_cf::placeholders::is_cloud_placeholder`].
+    ///    [`crate::windows_cf::placeholders`]'s `is_cloud_placeholder`.
     /// 3. **Already a known server file** (authoritative) — look the path up in
     ///    the state DB. A row means the file already lives on the server
     ///    (cloud-only / downloading / local / uploading), so a write to it is a

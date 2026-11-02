@@ -1,3 +1,6 @@
+// Task 2191: before a Windows sign-out removes files that still hold bytes on this PC, the person
+// chooses keep copies (the default) or delete. A dialog only; the sign-out is the backend's job.
+
 import { Modal, PrimaryBtn, T } from './ui'
 import { unknownFilesSignOutCopy } from '../signOutUnknownFilesCopy'
 

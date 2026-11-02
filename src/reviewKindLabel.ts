@@ -1,3 +1,6 @@
+// The words a Versions row uses for a conflict kind, taken from the macOS spec's copy table so no
+// engine identifier reaches a person's screen. An unknown kind reads as a plain conflict.
+
 import type { VersionConflictEntry } from './desktopApi'
 
 /**

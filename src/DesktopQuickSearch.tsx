@@ -1,3 +1,6 @@
+// The quick-search overlay: debounced `desktop_search` queries, arrow/Enter selection and a reveal
+// in Finder. Must not rank results itself; the Rust index does, and this shows what it returns.
+
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   command,

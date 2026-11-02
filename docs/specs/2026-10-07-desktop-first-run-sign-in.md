@@ -18,7 +18,7 @@
 
 Guus, 2026-10-06 (spec A §1): "… it should just show to me to login and thats it."
 
-- **Launch keys on the sync folder, not the session.** `startup_surface` opens onboarding only when no `sync_root` is set (`src-tauri/src/surfaces/policy.rs:49-55`, called at `src-tauri/src/lib.rs:9003-9036`). Sign-out never clears `sync_root`: the only `None` assignments are the default (`src-tauri/src/config.rs:312`) and the rejection of a relative path (`:503`). A Mac that was set up once and is now signed out opens the compact window on its "Drive status" page (`src/pages/Status.tsx:160,172`; landing page `src/App.tsx:27`). That page says "Signed out" (`src/App.tsx:163`) and offers no way to sign in.
+- **Launch keys on the sync folder, not the session.** `startup_surface` opens onboarding only when no `sync_root` is set (`src-tauri/src/surfaces/policy.rs:44-50`, called at `src-tauri/src/lib.rs:8994-9027`). Sign-out never clears `sync_root`: the only `None` assignments are the default (`src-tauri/src/config/types.rs`, the `Default` impl) and the rejection of a relative path (`:503`). A Mac that was set up once and is now signed out opens the compact window on its "Drive status" page (`src/pages/Status.tsx:160,172`; landing page `src/App.tsx:27`). That page says "Signed out" (`src/App.tsx:163`) and offers no way to sign in.
 - **macOS sign-in is email and password only** (`src/Onboarding.tsx:183`). The browser handoff exists, but only Windows offers it (`src/WindowsFirstRun.tsx:300-715`).
 - **Neither platform has a "Create account" entry**, and neither reads the server's onboarding document.
 
@@ -165,7 +165,7 @@ stateDiagram-v2
 
 - **C-D1 Endpoint.** `GET {BB_API_BASE}/api/v1/onboarding`. While signed out the request is anonymous (stage `pre_account`); while signed in it carries the session's Bearer (stage `account`). The server answers a bad Bearer with a 401 and never falls back to anonymous (server `beebeeb-api/src/routes/onboarding.rs:8-14`).
 - **C-D2 Headers.**
-  - Today's provenance headers stay: `X-Beebeeb-Client: desktop` and `X-Beebeeb-Client-Version` (`src-tauri/src/api_client.rs:45-66`).
+  - Today's provenance headers stay: `X-Beebeeb-Client: desktop` and `X-Beebeeb-Client-Version` (`src-tauri/src/api_client/headers.rs:9-30`).
   - This request also sends `X-Beebeeb-Onboarding-Schema: 1` and `X-Beebeeb-Client-OS: macos`, `windows` or `linux`. The server parses all three (server `onboarding/context.rs:20-22`, `:113-121`).
   - Without the OS header, the server resolves the desktop to purchase surface `none` and omits `purchase.checkout.poll_seconds` (server `onboarding/mod.rs:271-299`).
   - A test pins both headers.
@@ -209,7 +209,7 @@ stateDiagram-v2
 | Unknown required step | the C-R5 button | the `fallback.url` of the first required step in document order that has one, else the document's | web billing |
 
 One module owns these built-in addresses. It replaces every hard-coded web-billing URL:
-- `src/desktopApi.ts:160`, used at `src/MacSettings.tsx:352`, `src/pages/Account.tsx:263` and `src/pages/VersionCenter.tsx:251`
+- `src/desktopApi.ts:159`, used at `src/MacSettings.tsx:352`, `src/pages/Account.tsx:263` and `src/pages/VersionCenter.tsx:251`
 - `src/windows/views/AccountView.tsx:34`, used at `:516`
 - `src/WindowsApp.tsx:1764`
 
@@ -432,7 +432,7 @@ The removed steps (§11) are not replaced by other steps. While spec A's reconci
 | 401 | Reported to spec A's `AuthHealth::note_result`. Its auth-expired state makes C-R2, and so does, after a relaunch, a missing token beside a recorded owner (§4.1). The last document is kept. |
 | 429 | Keep the last document. The next fetch waits for `Retry-After`, or `ttl_seconds` when that header is absent or unreadable, capped at 300 s. It ends Checking as "document unavailable". |
 | Any HTTP status that is not a usable document (5xx, a 400 for the schema header at server `routes/onboarding.rs:55`, other 4xx), an unreadable body, or an unknown `schema` | "Document unavailable": proceed as today (or from the cache), keeping the built-in links and the sign-in buttons, plus one lifecycle-log line. Never offline. |
-| Network-level failure: DNS, connect, TLS, timeout, or the exchange breaking before any HTTP status | Offline (C-R7), shown only after 2 failures at least 10 s apart (C-D4), so it does not flicker. It clears on the next success. ~~While offline, the app re-probes every 30 s and on wake.~~ `link_health::classify_reqwest` minus its HTTP-status arm (`src-tauri/src/link_health.rs:131-136`) is the classifier. ~~A wake is detected when the wall clock moves more than 60 s across one 30 s probe tick; no new OS observer is added.~~<br>**Amended 2026-10-07 (§17.4):** While offline, the app re-probes every 30 s. A wake while offline is covered by the next 30 s re-probe, so there is no separate wake branch and no new OS observer. |
+| Network-level failure: DNS, connect, TLS, timeout, or the exchange breaking before any HTTP status | Offline (C-R7), shown only after 2 failures at least 10 s apart (C-D4), so it does not flicker. It clears on the next success. ~~While offline, the app re-probes every 30 s and on wake.~~ `link_health::classify_reqwest` minus its HTTP-status arm (`src-tauri/src/link_health.rs:129-134`) is the classifier. ~~A wake is detected when the wall clock moves more than 60 s across one 30 s probe tick; no new OS observer is added.~~<br>**Amended 2026-10-07 (§17.4):** While offline, the app re-probes every 30 s. A wake while offline is covered by the next 30 s re-probe, so there is no separate wake branch and no new OS observer. |
 | Unknown `account.state` | Decided from `capabilities` (§7.5); `blocking` still applies (C-R15). |
 | Unknown required step | Within C-R5: the button opens the server's link (§5.1, last row). Outside `needs_plan`: C-R15. |
 | Browser won't open | Show the address as selectable text + "Copy link". |
@@ -455,7 +455,7 @@ Rules for these events:
   - Spec A §10 handed the Finder step's deletion to this spec.
   - `FinderInstallStep` (`:476`) stays for Linux and for an unknown platform.
   - Offline folders stay in Settings, Sync (`src/MacSettings.tsx:564`).
-- **The "Drive status" page** (`src/pages/Status.tsx`; nav entry `src/compactNavigation.ts:29`; landing default `src/App.tsx:27`). Until spec B, the compact window lands on spec A's Finder location view (C-W3). Windows and Linux are unchanged.
+- **The "Drive status" page** (`src/pages/Status.tsx`; nav entry `src/compactNavigation.ts:31`; landing default `src/App.tsx:27`). Until spec B, the compact window lands on spec A's Finder location view (C-W3). Windows and Linux are unchanged.
 - **The hard-coded web-billing URLs** (§5.1).
 
 ## 12. Design before code
@@ -583,7 +583,7 @@ Each task file keeps its original line struck through. These are the replacement
   - `cargo test` counts
 - There are no launch rungs on Windows: C3's launch policy is macOS-only in this spec (§6).
 - The first-run walk-through on a **clean physical Windows machine** stays a named open rung. A VM or CI run never answers it.
-- Struck: the native signup, phrase-window and ticket-expiry rungs. Acceptance item C6 is struck too, because 1734 already fixed it (`7728a27`; `src/browserLoginCopy.ts:13` now says "session and key").
+- Struck: the native signup, phrase-window and ticket-expiry rungs. Acceptance item C6 is struck too, because 1734 already fixed it (`7728a27`; `src/browserLoginCopy.ts:1` now says "session and key").
 
 ## 16. Open rungs
 

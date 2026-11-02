@@ -1,3 +1,6 @@
+//! The local search index and its server sync: build it from `state.db`, rank results for a
+//! query, and push/pull the encrypted shards. Must not touch the UI or decide Finder revealability.
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;

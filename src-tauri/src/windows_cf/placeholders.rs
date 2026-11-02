@@ -899,7 +899,7 @@ pub fn is_cloud_placeholder(path: &std::path::Path) -> bool {
 /// This is the thin Windows-only reader feeding the per-tick reconcile pass
 /// ([`super::reconcile_placeholder_state`]): the returned `u32` carries the
 /// Cloud Files placeholder bits (`RECALL_ON_DATA_ACCESS`, `PINNED`, `UNPINNED`)
-/// that [`crate::state_db::decode_os_state`] turns into a status/pin delta. The
+/// that [`crate::state_db::sql`]'s `decode_os_state` turns into a status/pin delta. The
 /// decode itself is platform-agnostic and unit-tested on Linux; this fn just
 /// fetches the mask the same way [`is_cloud_placeholder`] does.
 ///
@@ -1098,7 +1098,7 @@ pub fn placeholder_local_entry_trusting(path: &std::path::Path, trust_in_sync: b
 /// under ONE exclusive handle: the platform's state is read through it (in sync, no modified
 /// data), the file must be wholly on disk, and its bytes are hashed through it, so no write lands
 /// between the check and the hash. The decision and the re-read of the row are
-/// [`crate::engine_bridge::promote_fetched_content`]. `Ok(false)`: not promoted (also when the
+/// [`crate::engine_bridge::meta`]'s `promote_fetched_content`. `Ok(false)`: not promoted (also when the
 /// file is open elsewhere: the next pass tries again).
 pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, path: &std::path::Path) -> anyhow::Result<bool> {
     use crate::engine_bridge::LocalEntry;

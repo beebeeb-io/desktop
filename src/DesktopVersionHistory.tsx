@@ -1,3 +1,6 @@
+// The version-history overlay: find a file, list its versions, restore one after confirmation.
+// Must not invent a version id; `restoreVersionId` reads it from the row the server returned.
+
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   commandUnavailableLabel,

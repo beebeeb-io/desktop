@@ -1,3 +1,6 @@
+// The compact shell's Versions page: conflicts and file versions with restore, kept in step by
+// `refreshSignal`. Never restores without the person confirming the version first.
+
 import { useEffect, useMemo, useState } from 'react'
 import {
   BILLING_URL,

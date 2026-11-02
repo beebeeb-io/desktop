@@ -1,3 +1,6 @@
+// The compact shell's Status page: sync state, storage, conflicts and the Finder install pill,
+// plus the links that move to the page which can fix each one.
+
 import { useEffect, useMemo, useState } from 'react'
 import {
   command,

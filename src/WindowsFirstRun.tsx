@@ -44,7 +44,6 @@ import {
   type DesktopPlatform,
   type FinderInstallState,
   type SyncStatus,
-  type VaultItem,
 } from './desktopApi'
 import { useToast } from './windows/ui'
 import {

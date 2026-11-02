@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+//! The Linux FUSE mount: `BeebeebFS` answers the kernel's file and directory calls from
+//! `state.db` and the engine bridge. Unmounted prototype; must not decide sync policy.
+
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;

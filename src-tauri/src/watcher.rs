@@ -55,10 +55,10 @@
 //!
 //! ## Lifecycle
 //!
-//! [`spawn`] is called from [`crate::runner::run`] right after the engine
+//! [`spawn`] is called from [`crate::runner`]'s `run` right after the engine
 //! bridge is built (and, on Windows, after the Cloud Files root is connected),
 //! and returns a [`WatcherHandle`]. It registers an [`mpsc`] sender into the
-//! [`crate::windows_cf`] callback layer (via [`crate::windows_cf::set_notify_sender`])
+//! [`crate::windows_cf`] callback layer (via [`crate::windows_cf`]'s `set_notify_sender`)
 //! and spawns TWO background tasks: the debounce loop (CF NOTIFY dispatch) and
 //! the enumeration scan loop (the CREATE trigger). Dropping the handle (on engine
 //! shutdown / logout) signals BOTH tasks to exit; the callbacks then find no live
@@ -101,7 +101,7 @@
 //! ## Platform note
 //!
 //! This module is compiled on every platform (so the `mpsc` plumbing is
-//! type-checked cross-platform), but [`crate::runner::run`] only *spawns* it on
+//! type-checked cross-platform), but [`crate::runner`]'s `run` only *spawns* it on
 //! Windows — macOS (File Provider) and Linux (FUSE) already drive uploads
 //! through `ipc_socket`. The `allow(dead_code)` below suppresses the
 //! never-called warnings on those non-Windows builds.

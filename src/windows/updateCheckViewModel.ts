@@ -1,3 +1,6 @@
+// The manual update-check view model: each state to its tone, title and detail, so the toast and
+// the Settings row say the same thing. Pure; the store and the command live elsewhere.
+
 import type { ManualUpdateCheckResult, ReleaseChannel } from '../desktopApi'
 
 export type ManualUpdateCheckState =

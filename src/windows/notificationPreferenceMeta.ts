@@ -1,3 +1,6 @@
+// The notification rows both shells render: each key with its label and hint, split between the
+// account's preferences and this device's. Must not read or write config; it is a table.
+
 import type {
   DesktopConfig,
   NotificationPreferenceValues,

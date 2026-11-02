@@ -1,3 +1,6 @@
+// The Advanced settings model: theme preference, cache limit and their normalisation, so a bad
+// stored value falls back instead of reaching the UI. No React and no command calls here.
+
 export type ThemePreference = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
 

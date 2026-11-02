@@ -121,7 +121,7 @@ pub(super) async fn scan_loop(
 
 /// Depth-first recursive walk of `dir`, invoking `on_file` for every regular
 /// FILE entry. Skips engine-internal paths (`.beebeeb/`, the lock file) via the
-/// shared [`crate::engine_bridge::path_is_engine_internal`] guard, never follows
+/// shared [`crate::engine_bridge::fs`]'s `path_is_engine_internal` guard, never follows
 /// symlinks, and is bounded by [`MAX_SCAN_DEPTH`].
 ///
 /// Errors (an unreadable directory, a racing delete) are logged at trace and

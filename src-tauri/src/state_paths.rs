@@ -1,3 +1,6 @@
+//! Where `state.db`, the lock and the device identity live, and the one-way move out of the legacy
+//! `.beebeeb` dir. Must not create the database or decide sync behaviour.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

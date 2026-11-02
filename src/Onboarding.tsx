@@ -1,3 +1,6 @@
+// The first-run window (Linux; a Mac signs in inside the Beebeeb window): sign in, choose a sync
+// folder, then the Finder/Explorer step. Holds the flow only; every action is a backend command.
+
 import { useRegionLabel } from './windows/useRegion'
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'

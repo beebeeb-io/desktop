@@ -190,7 +190,7 @@ impl StateDb {
     /// a `None` means "leave that column untouched".
     ///
     /// Drives the Windows per-tick reconcile pass
-    /// ([`crate::windows_cf::reconcile_placeholder_state`]): a NATIVE pin /
+    /// ([`crate::windows_cf`]'s `reconcile_placeholder_state`): a NATIVE pin /
     /// free-up the user did in Explorer (not through the in-app pin path) shows
     /// up here as a delta and is written back so the app's view matches reality.
     /// Callers pass DELTAS ONLY — the reconcile pass compares each desired value
