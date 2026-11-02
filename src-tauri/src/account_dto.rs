@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 mod profile;
 use profile::*;
-pub use profile::{AccountProfile, Subscription, BillingUsage};
+pub use profile::{AccountAccess, AccountProfile, Subscription, BillingUsage};
 
 mod region;
 use region::*;

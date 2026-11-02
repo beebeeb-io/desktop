@@ -13,6 +13,20 @@ use super::*;
 // is_impersonation, admin_user_id) are captured so the Account page can
 // surface 2FA / freeze state without a second round-trip.
 
+/// Who a profile describes. The wire spells impersonation as two optional
+/// fields (`is_impersonation`, `admin_user_id`); they only mean one thing
+/// together, so a caller matches this union once instead of checking two flags
+/// in the right order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountAccess {
+    /// The signed-in account itself.
+    Own,
+    /// An admin acting as another account. `admin_user_id` names the target; it
+    /// is `None` only from a server that said "impersonation" without naming the
+    /// account, and a caller then shows no target rather than the admin's own.
+    Impersonated { admin_user_id: Option<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AccountProfile {
     pub user_id: String,
@@ -34,6 +48,18 @@ pub struct AccountProfile {
     /// Set only inside an admin impersonation session.
     #[serde(default)]
     pub admin_user_id: Option<String>,
+}
+
+impl AccountProfile {
+    /// The one value the two impersonation optionals mean.
+    pub fn access(&self) -> AccountAccess {
+        match self.is_impersonation {
+            Some(true) => AccountAccess::Impersonated {
+                admin_user_id: self.admin_user_id.clone(),
+            },
+            _ => AccountAccess::Own,
+        }
+    }
 }
 
 // ── 2. Billing — GET /api/v1/billing/subscription + /usage ────────────────────
