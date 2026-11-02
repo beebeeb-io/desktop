@@ -9,8 +9,8 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListFilesScope<'a> {
-    pub parent_id: Option<&'a str>,
-    pub shared_folder_id: Option<&'a str>,
+    pub parent_id: Option<FolderId<'a>>,
+    pub shared_folder_id: Option<SharedFolderId<'a>>,
     pub trashed: Option<bool>,
     pub cursor: Option<&'a str>,
 }
@@ -207,9 +207,9 @@ impl std::error::Error for UploadRefused {
     }
 }
 
-/// `resp` when it is a 2xx; else an [`UploadRefused`] with the server's code read from the body's
+/// `resp` when it is a 2xx; else the [`UploadRefused`] with the server's code read from the body's
 /// `error` field.
-pub(super) async fn upload_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+pub(super) async fn upload_response(resp: reqwest::Response) -> ApiResult<reqwest::Response> {
     let status_error = resp.error_for_status_ref().err();
     let Some(status_error) = status_error else {
         return Ok(resp);
@@ -219,7 +219,7 @@ pub(super) async fn upload_response(resp: reqwest::Response) -> anyhow::Result<r
         .get("error")
         .and_then(|value| value.as_str())
         .and_then(UploadRefusalCode::from_code);
-    Err(anyhow::Error::new(UploadRefused { code, status_error }))
+    Err(DesktopApiError::UploadRefused(UploadRefused { code, status_error }))
 }
 
 impl std::fmt::Display for InitConflict {
@@ -385,9 +385,14 @@ impl std::fmt::Display for UpgradeRequired {
 
 impl std::error::Error for UpgradeRequired {}
 
-/// Whether `error` is the typed L11 refusal (`409 upgrade_required`).
-pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<UpgradeRequired>().is_some()
+/// Whether `error` is the typed L11 refusal (`409 upgrade_required`), on either
+/// error shape a caller can hold: the typed [`DesktopApiError`] or an
+/// `anyhow::Error` that wraps it.
+pub(crate) fn upgrade_required<E: ErrorChain>(error: &E) -> bool {
+    error
+        .causes()
+        .iter()
+        .any(|cause| cause.downcast_ref::<UpgradeRequired>().is_some())
 }
 
 /// Whether a custody write was refused because this deployment has no custody:
@@ -396,12 +401,16 @@ pub(crate) fn upgrade_required(error: &anyhow::Error) -> bool {
 /// `feature_gate::require_shared_folders_enabled`). That is a state, not a
 /// failed write to retry. The 501 counts only when it names that gate: any
 /// other 501 is a server failure the caller must see (task 2276 P3-D).
-pub(crate) fn custody_unavailable(error: &anyhow::Error) -> bool {
+pub(crate) fn custody_unavailable<E: ErrorChain + std::fmt::Display>(error: &E) -> bool {
     let text = error.to_string();
-    let missing_route =
-        matches!(crate::engine_bridge::error_http_status(error), Some(405)) || text.starts_with("HTTP 405 ");
-    let feature_gate = (matches!(crate::engine_bridge::error_http_status(error), Some(501))
-        || text.starts_with("HTTP 501 "))
-        && text.contains("shared_folders_v1");
+    let status = error
+        .causes()
+        .iter()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .and_then(reqwest::Error::status)
+        .map(|status| status.as_u16());
+    let missing_route = status == Some(405) || text.starts_with("HTTP 405 ");
+    let feature_gate =
+        (status == Some(501) || text.starts_with("HTTP 501 ")) && text.contains("shared_folders_v1");
     missing_route || feature_gate
 }
