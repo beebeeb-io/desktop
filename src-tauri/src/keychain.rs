@@ -812,119 +812,8 @@ mod windows_credentials {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    //! Decision-boundary tests for the startup auto-unlock.
-    //!
-    //! On launch, `lib::restore_session_on_startup` resumes a fully UNLOCKED
-    //! session iff the credential store holds both the session token and a
-    //! valid 32-byte master key; otherwise it leaves onboarding to prompt for
-    //! the recovery phrase. The exact gate is `AuthVault::unlock()`, exercised
-    //! here against an in-memory store so it runs on any platform (the real
-    //! OS credential vaults are platform-gated and can't run in CI).
-
-    use super::*;
-    use std::sync::Mutex;
-
-    /// In-memory `AuthSecretStore` standing in for the OS credential vault.
-    #[derive(Default)]
-    struct MemoryStore {
-        token: Mutex<Option<Vec<u8>>>,
-        key: Mutex<Option<Vec<u8>>>,
-        email: Mutex<Option<String>>,
-    }
-
-    impl AuthSecretStore for MemoryStore {
-        fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
-            *self.token.lock().unwrap() = Some(token.expose_for_request().as_bytes().to_vec());
-            Ok(())
-        }
-        fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-            self.token
-                .lock()
-                .unwrap()
-                .clone()
-                .map(|bytes| SessionToken::new(String::from_utf8(bytes).unwrap()))
-                .transpose()
-        }
-        fn delete_session_token(&self) -> AuthResult<()> {
-            *self.token.lock().unwrap() = None;
-            Ok(())
-        }
-        fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
-            *self.key.lock().unwrap() = Some(wrapped.expose_for_crypto().to_vec());
-            Ok(())
-        }
-        fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-            self.key.lock().unwrap().clone().map(SecretBytes::new).transpose()
-        }
-        fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-            *self.key.lock().unwrap() = None;
-            Ok(())
-        }
-        fn save_account_email(&self, email: &str) -> AuthResult<()> {
-            *self.email.lock().unwrap() = Some(email.to_string());
-            Ok(())
-        }
-        fn load_account_email(&self) -> AuthResult<Option<String>> {
-            Ok(self.email.lock().unwrap().clone())
-        }
-        fn delete_account_email(&self) -> AuthResult<()> {
-            *self.email.lock().unwrap() = None;
-            Ok(())
-        }
-    }
-
-    /// The real macOS Keychain answers "is it there?" from the item's attributes (`find_item`), never by reading the
-    /// secret, and a free that fails after a read wipes what it copied before it reports the error.
-    #[test]
-    fn the_real_macos_store_answers_presence_without_reading_the_secret() {
-        let source = include_str!("keychain.rs").replace("\r\n", "\n");
-        let store = &source[source
-            .find("impl AuthSecretStore for MacOsKeychainStore {")
-            .expect("the real store")..];
-        let store = &store[..store.find("\n}\n").unwrap()];
-        for presence in [
-            "fn holds_session_token(",
-            "fn holds_wrapped_master_key(",
-            "fn holds_account_email(",
-        ] {
-            let body = &store[store
-                .find(presence)
-                .unwrap_or_else(|| panic!("the real store answers {presence}"))..];
-            let body = &body[..body.find("\n    }").unwrap_or(body.len())];
-            assert!(
-                body.contains("macos_keychain::exists("),
-                "{presence} asks the item's attributes:\n{body}"
-            );
-            assert!(
-                !body.contains("::load("),
-                "{presence} must not read the secret:\n{body}"
-            );
-        }
-        // The FFI module is the last thing in the file, after this test, so the LAST match is the real one.
-        let macos = &source[source.rfind("mod macos_keychain {").expect("the macOS FFI module")..];
-        let ffi = &macos[macos
-            .find("pub fn exists(account: &str)")
-            .expect("the attribute-only query")..];
-        let exists = &ffi[..ffi.find("\n    }\n").unwrap()];
-        assert!(
-            exists.contains("find_item(") && !exists.contains("password_data"),
-            "{exists}"
-        );
-        let load = &macos[macos.find("pub fn load(account: &str)").unwrap()..];
-        let load = &load[..load.find("\n    }\n").unwrap()];
-        assert!(
-            load.contains("zeroize::Zeroize::zeroize(&mut bytes)"),
-            "a failed free wipes the copy before the error is returned:\n{load}"
-        );
-    }
-
-    mod unlock;
-    mod migration;
-    mod secrets;
-    mod presence;
-}
+#[path = "../src/keychain/tests.rs"]
+mod tests;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_keychain {
@@ -1100,18 +989,25 @@ mod macos_keychain {
     }
 }
 
+#[path = "../src/keychain/errors.rs"]
 mod errors;
 pub use errors::{AuthStoreError, AuthResult, VaultLockState};
 
+#[path = "../src/keychain/session.rs"]
 mod session;
 pub use session::{SessionToken};
 
+#[path = "../src/keychain/vault.rs"]
 mod vault;
 pub use vault::{AuthSecretStore, holds_session_token, holds_account_email, holds_vault_key, AuthVault};
 
+#[path = "../src/keychain/accounts.rs"]
 mod accounts;
 use accounts::*;
 pub use accounts::{platform_keychain_store_for, legacy_platform_keychain_store};
 
+#[path = "../src/keychain/legacy.rs"]
 mod legacy;
 pub use legacy::{migrate_legacy_keychain_to_account, migrate_legacy_keychain_between};
+
+
