@@ -454,6 +454,31 @@ pub(crate) enum OpDone {
     Removed { release: Option<String> },
 }
 
+/// The object version the server answered with when its `complete` succeeded: the
+/// version number the row lands on, and the object id its content now has. Two
+/// strings the server answered with, nothing else; the landing reads both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProducedObject {
+    pub(crate) version_id: i64,
+    pub(crate) object_name: String,
+}
+
+/// Everything one landing needs: the op and its claim, the server row the upload
+/// produced, and the completion's own size and types. Borrows the caller's op and
+/// error list; nothing is cloned but the object the server answered with.
+pub(crate) struct LandRequest<'a> {
+    pub(crate) local_file_id: &'a str,
+    pub(crate) op: &'a PendingOperation,
+    pub(crate) claim: Option<&'a ClaimedOp>,
+    pub(crate) server_file_id: &'a str,
+    pub(crate) produced: ProducedObject,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_type: Option<String>,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) post_complete_errors: &'a mut Vec<String>,
+    pub(crate) sync_root: &'a Path,
+}
+
 /// One line per retried landing of an upload the server completed (spec §8.6 rule 6):
 /// ids and the attempt only (spec §11).
 pub(super) fn log_completed_landing_retried(op_id: &str, file_id: Option<&str>, attempt: i64) {

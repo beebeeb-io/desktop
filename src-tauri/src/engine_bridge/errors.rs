@@ -607,3 +607,15 @@ pub fn retry_delay_seconds(attempts: i64) -> i64 {
     let exponent = attempts.clamp(1, 6) as u32;
     30_i64.saturating_mul(2_i64.saturating_pow(exponent - 1))
 }
+
+/// The bridge's own error type crossing the Tauri command boundary: one
+/// `anyhow::Error`, so `lib.rs` keeps its signature. The `Display` text and the
+/// inner error's reachability are unchanged; `EngineError`'s `source` keeps the
+/// chain intact for classification. `land`'s queue-moved signal is unwrapped so
+/// the lifecycle still finds it by downcast, as it did before the split.
+pub(crate) fn land_error_to_anyhow(error: EngineError) -> anyhow::Error {
+    match error {
+        EngineError::QueueStateMoved(moved) => anyhow::Error::new(moved),
+        other => anyhow::Error::new(other),
+    }
+}

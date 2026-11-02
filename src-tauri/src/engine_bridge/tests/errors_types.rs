@@ -17,3 +17,77 @@ fn engine_error_keeps_the_refusals_text() {
     let converted: anyhow::Error = error.into();
     assert_eq!(converted.to_string(), "this item is not known to Beebeeb");
 }
+
+/// `ProducedObject` keeps the version the server answered with and the object id
+/// its content now has, and nothing else.
+#[test]
+fn produced_object_keeps_the_servers_version_and_object() {
+    let produced = ProducedObject {
+        version_id: 7,
+        object_name: "object-123".to_string(),
+    };
+    assert_eq!(produced.version_id, 7);
+    assert_eq!(produced.object_name, "object-123");
+}
+
+/// `LandRequest` carries the eleven landing arguments as one request: the op,
+/// its claim (none for Keep Mine's inline run), the server row and the
+/// completion's own numbers. The queue-moved signal still crosses the
+/// `anyhow` boundary as its own type, so the lifecycle finds it by downcast.
+#[test]
+fn land_request_bundles_the_landing_inputs() {
+    let op = PendingOperation {
+        op_id: "op-1".to_string(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some("file-1".to_string()),
+        parent_id: None,
+        target_path: None,
+        metadata_json: None,
+        payload_path: None,
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut post_complete_errors = vec!["thumbnail: skipped".to_string()];
+    let request = LandRequest {
+        local_file_id: "file-1",
+        op: &op,
+        claim: None,
+        server_file_id: "server-file-1",
+        produced: ProducedObject {
+            version_id: 7,
+            object_name: "object-123".to_string(),
+        },
+        size_bytes: 1024,
+        content_type: Some("text/plain".to_string()),
+        mime_type: None,
+        post_complete_errors: &mut post_complete_errors,
+        sync_root: Path::new("/sync"),
+    };
+    assert_eq!(request.local_file_id, "file-1");
+    assert_eq!(request.op.op_id, "op-1");
+    assert!(request.claim.is_none());
+    assert_eq!(request.server_file_id, "server-file-1");
+    assert_eq!(request.produced.version_id, 7);
+    assert_eq!(request.produced.object_name, "object-123");
+    assert_eq!(request.size_bytes, 1024);
+    assert_eq!(request.content_type.as_deref(), Some("text/plain"));
+    assert!(request.mime_type.is_none());
+    assert_eq!(request.post_complete_errors.len(), 1);
+    assert_eq!(request.sync_root, Path::new("/sync"));
+}
+
+/// The boundary conversion keeps `QueueStateMoved` as its own type: the
+/// lifecycle's "the op moved on" arms find it by downcast exactly as before.
+#[test]
+fn land_error_boundary_keeps_the_queue_moved_signal() {
+    let error = land_error_to_anyhow(EngineError::QueueStateMoved(QueueStateMoved));
+    assert!(error.downcast_ref::<QueueStateMoved>().is_some());
+    assert_eq!(error.to_string(), "queue state moved");
+}
