@@ -10,7 +10,7 @@ use super::*;
 pub struct ApiClient {
     // Dropped AFTER Drop has zeroized credentials, unlike Weak<ApiClient>'s
     // strong count (which reaches zero before its destructor runs).
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(target_os = "windows")]
     pub(super) credential_lifetime: std::sync::Arc<()>,
     pub(super) base_url: String,
     pub(super) token: String,
@@ -47,7 +47,7 @@ impl Drop for ApiClient {
 impl zeroize::ZeroizeOnDrop for ApiClient {}
 
 impl ApiClient {
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(target_os = "windows")]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
         std::sync::Arc::downgrade(&self.credential_lifetime)
     }
@@ -59,7 +59,7 @@ impl ApiClient {
     /// download.
     pub fn new(base_url: String, token: String, master_key: [u8; 32]) -> Self {
         Self {
-            #[cfg(any(target_os = "windows", test))]
+            #[cfg(target_os = "windows")]
             credential_lifetime: std::sync::Arc::new(()),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
@@ -78,7 +78,7 @@ impl ApiClient {
     /// This client with `timeout` for each request in place of the app's
     /// [`crate::link_health::API_REQUEST_TIMEOUT_SECS`]: for a listing that may move a whole tree on a slow link and
     /// that nobody waits on (task 2267's ownership proof, self-review F5).
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(target_os = "windows")]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.client = Client::builder()
             .timeout(timeout)
@@ -177,6 +177,8 @@ impl ApiClient {
         self.url(&format!("/api/v1/files/{}/versions", encode(file_id.as_str())))
     }
 
+    /// Tests only: the download path is bound to a pinned version (`download_pin`), so no production caller builds this URL.
+    #[cfg(test)]
     pub fn version_download_url(&self, file_id: FileId<'_>, version_id: VersionId<'_>) -> String {
         self.url(&format!(
             "/api/v1/files/{}/versions/{}/download",
@@ -193,6 +195,8 @@ impl ApiClient {
         ))
     }
 
+    /// Tests only: no desktop caller lists folder members; the URL contract is still pinned.
+    #[cfg(test)]
     pub fn folder_members_url(&self, folder_id: FolderId<'_>) -> String {
         self.url(&format!("/api/v1/shares/invites/folder-members/{}", encode(folder_id.as_str())))
     }

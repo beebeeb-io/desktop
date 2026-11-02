@@ -150,17 +150,6 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn download_version(&self, file_id: &str, version_id: &str) -> anyhow::Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(self.version_download_url(FileId::new(file_id), VersionId::new(version_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
-    }
-
     pub async fn restore_version(&self, file_id: &str, version_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client

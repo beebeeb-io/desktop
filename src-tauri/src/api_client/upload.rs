@@ -31,22 +31,6 @@ impl ApiClient {
         Ok(())
     }
 
-    /// `PUT /api/v1/files/:id/chunks/:idx` — uploads encrypted chunk
-    /// bytes. The body is `application/octet-stream`; the encryption
-    /// envelope is whatever the caller wrote (matches the CLI's
-    /// `EncryptedBlob` JSON layout for parity).
-    pub async fn upload_chunk(&self, file_id: &str, chunk_idx: u32, data: &[u8]) -> anyhow::Result<()> {
-        self.client
-            .put(&self.chunk_url(FileId::new(file_id), chunk_idx))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(data.to_vec())
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-
     pub async fn init_upload(&self, body: &DesktopUploadInitRequest) -> anyhow::Result<DesktopUploadInitResponse> {
         let resp = self
             .client
