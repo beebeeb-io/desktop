@@ -268,9 +268,6 @@ pub enum WorkingSetSignalOutcome {
     /// The system accepted the signal (or the domain is not registered —
     /// nothing to signal is not a failure; sync continues regardless).
     Delivered,
-    /// The signal itself failed (timeout, NSFileProviderManager error). Logged
-    /// by the caller; never blocks the sync tick that produced it.
-    Failed,
 }
 
 /// Task 1698 part 3 (closes 1696, audit G8): the ONE domain we own. The

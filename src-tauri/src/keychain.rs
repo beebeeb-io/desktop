@@ -25,8 +25,9 @@ const MASTER_KEY_BYTES: usize = 32;
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
-    /// Tests only: production secrets are built with `new_master_key` (the vault key) and never from raw bytes.
-    #[cfg(test)]
+    /// The load path of the macOS and Windows stores, and of tests: stored bytes become a secret only once proven
+    /// non-empty. A vault key is built with `new_master_key` instead, never from raw bytes.
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     pub fn new(bytes: impl Into<Vec<u8>>) -> AuthResult<Self> {
         let bytes = bytes.into();
         if bytes.is_empty() {

@@ -807,9 +807,6 @@ pub(crate) use macos_staging::{StagingDirRefusal, StagingDir, WriteContentsPolic
 // The staging admission is exercised by the upload-staging tests.
 #[cfg(test)]
 pub(crate) use macos_staging::{ContentsRefusal, open_staged_contents};
-// Handed to the macOS write path when a staged read is opened.
-#[cfg(target_os = "macos")]
-pub(crate) use macos_staging::OpenedContents;
 
 mod server;
 #[cfg(test)]

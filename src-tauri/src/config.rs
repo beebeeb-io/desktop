@@ -44,7 +44,10 @@ pub use settings::DesktopSettings;
 #[cfg(test)]
 pub(crate) use settings::KnownFolderBackup;
 pub(crate) use store::ConfigFs;
+/// Tests build hosts; outside tests only the macOS sign-out and keep paths build the real file-system steps.
 #[cfg(test)]
-pub(crate) use store::{ConfigHost, RealConfigFs};
+pub(crate) use store::ConfigHost;
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) use store::RealConfigFs;
 pub(crate) use types::ConfigMode;
 pub use types::{DesktopConfig, DesktopTheme, LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel};
