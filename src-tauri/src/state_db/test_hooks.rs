@@ -9,7 +9,7 @@ impl StateDb {
     pub(crate) fn hold_lock_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0.lock().expect("state_db mutex poisoned")
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn set_created_at_for_test(&self, op_id: &str, created_at: i64) {
         let conn = self.0.lock().unwrap();
         conn.execute(
@@ -88,16 +88,6 @@ impl StateDb {
         )
         .optional()
         .unwrap()
-    }
-    /// T27: an op whose name cannot be re-encrypted (no display name, no path).
-    #[cfg(test)]
-    pub(crate) fn set_target_path_for_test(&self, op_id: &str, target_path: Option<&str>) {
-        let conn = self.0.lock().unwrap();
-        conn.execute(
-            "UPDATE operation_queue SET target_path = ?2 WHERE op_id = ?1",
-            params![op_id, target_path],
-        )
-        .unwrap();
     }
     /// T26: an op that used up its attempts (parked, with its bytes).
     #[cfg(test)]

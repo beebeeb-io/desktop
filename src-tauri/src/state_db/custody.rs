@@ -77,6 +77,7 @@ impl StateDb {
         let mut stmt=conn.prepare("SELECT substr(key,27) FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'")?;
         stmt.query_map([],|r|r.get(0))?.collect()
     }
+    #[cfg(test)]
     pub fn clear_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
         let conn=self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM sync_state WHERE key=?1", [format!("shared_folder_index_dirty:{folder_id}")])?;
@@ -150,6 +151,7 @@ impl StateDb {
         let record: Option<String> = conn.query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r|r.get(0)).optional()?;
         record.map(|s| serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))).transpose()
     }
+    #[cfg(test)]
     pub fn put_owned_key_record(&self, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Self::put_owned_key_record_conn(&conn, row)
@@ -166,6 +168,7 @@ impl StateDb {
         conn.execute("INSERT INTO owned_key_records (file_id, record) VALUES (?1, ?2) ON CONFLICT(file_id) DO UPDATE SET record = excluded.record", params![row.file_id, record])?;
         Ok(())
     }
+    #[cfg(test)]
     pub fn delete_owned_key_record(&self, id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;

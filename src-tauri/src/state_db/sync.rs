@@ -205,6 +205,7 @@ impl StateDb {
     /// Returns the number of rows touched (a row updated for both status and pin
     /// counts the affected-row total across both statements). Empty input is a
     /// fast `Ok(0)` with no transaction opened.
+    #[cfg(any(target_os = "windows", test))]
     pub fn reconcile_os_state(
         &self,
         deltas: &[(String, Option<FileStatus>, Option<PinState>)],
@@ -378,7 +379,7 @@ impl StateDb {
     }
     /// A content op, a landing or a restore touched the row: its version no longer came
     /// from a snapshot fill (spec §6.1, `version_filled`).
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg(target_os = "macos")]
     pub fn clear_version_filled(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -396,6 +397,7 @@ impl StateDb {
     /// unchanged when the caller is already up to date — and `None` (no rows)
     /// never happens for the default domain: a fresh, empty log reports an
     /// empty anchor. `next_anchor` moves only when changes were delivered.
+    #[cfg(test)]
     pub fn list_file_changes(&self, since_anchor: Option<&[u8]>) -> Result<Option<(Vec<FileChange>, Option<Vec<u8>>)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let since: i64 = match since_anchor {
@@ -510,6 +512,7 @@ impl StateDb {
     /// runs on a delay so a slow replica can still page through recent
     /// history). NEVER touches `fp_sync_anchor`: the replica's cursor position
     /// must survive even after the changes it points past are gone.
+    #[cfg(any(target_os = "macos", test))]
     pub fn sweep_file_changes(&self, before_epoch: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM fp_changes WHERE recorded_at < ?1", params![before_epoch])
@@ -542,6 +545,7 @@ impl StateDb {
         tx.commit()?;
         Ok(())
     }
+    #[cfg(target_os = "macos")]
     pub fn materialized_containers(&self) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare("SELECT container_id FROM fp_materialized ORDER BY container_id ASC")?;
@@ -604,7 +608,7 @@ impl StateDb {
         Ok(first.map(|(_, counts)| counts).unwrap_or_default())
     }
     /// Spec D14: the plan's counts, from one read transaction; writes nothing.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg(test)]
     pub fn reconcile_dry_run(
         &self,
         opts: &crate::held_queue::Options,

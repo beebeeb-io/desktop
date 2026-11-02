@@ -103,6 +103,7 @@ impl StateDb {
         )
     }
     /// Task 2191: every file of unknown content (the start-up guard walks them all).
+    #[cfg(any(target_os = "windows", test))]
     pub fn list_guarded(&self) -> Result<Vec<GuardedRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(&format!(
@@ -389,6 +390,7 @@ impl StateDb {
     /// Task 1640 (review F1): the placeholder's bytes may have changed in part without a fetch (a
     /// resize, a download cut off by a stop): its agreed content joins the candidate, which is then
     /// mixed: never agreed, a change sent on its version. Its version is kept (never reset).
+    #[cfg(any(target_os = "windows", test))]
     pub fn poison_local_content(&self, file_id: &str) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -418,6 +420,7 @@ impl StateDb {
     /// Task 1640 (review P2-5): the `Local` files the stamp pass may mark in sync: a recorded
     /// agreed content and no sync-folder upload queued. Everything else is never marked, so it is
     /// filtered here, before the pass's per-tick cap.
+    #[cfg(windows)]
     pub fn list_stamp_candidates(&self) -> Result<Vec<(String, String)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -449,6 +452,7 @@ impl StateDb {
     /// absent). A negative size is clamped to 0: a caller should never
     /// pass a negative length, but clamping keeps a pathological value
     /// from corrupting the column.
+    #[cfg(any(target_os = "windows", test))]
     pub fn set_size_bytes(&self, file_id: &str, size_bytes: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let updated = conn.execute(
@@ -628,6 +632,7 @@ impl StateDb {
     /// informational elsewhere); the NEW parent is read from the current
     /// `files` row when it exists (for `Deleted` it was captured by the caller
     /// BEFORE `delete_file` — see `delete_file_for_fp`).
+    #[cfg(test)]
     pub fn record_file_change(&self, file_id: &str, kind: FpChangeKind, old_parent_id: Option<String>) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         record_file_change_conn(&conn, file_id, kind, old_parent_id)
