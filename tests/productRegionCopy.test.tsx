@@ -42,7 +42,7 @@ const surfaces: [string, number][] = [
   ['windows/views/AccountView.tsx', 1], ['windows/views/ActivityView.tsx', 1],
   ['windows/views/InsightsView.tsx', 1], ['windows/views/SelectiveSyncView.tsx', 1],
   // Two: the Windows/Linux Explorer panel and the macOS Finder panel (Task 17), both from useRegionLabel.
-  ['windows/views/SettingsView.tsx', 2],
+  ['windows/views/SettingsView/integrationPanels.tsx', 2],
 ]
 
 function copyFragments(file: string): string[] {

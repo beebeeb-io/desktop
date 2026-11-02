@@ -1,5 +1,5 @@
 /**
- * `ShellOrFinderPanel` (src/windows/views/SettingsView.tsx) is the one place the main window's
+ * `ShellOrFinderPanel` (src/windows/views/SettingsView/integrationPanels.tsx) is the one place the main window's
  * integration panel is chosen: macOS reads the reconciler (`MacFinderIntegrationPanel`), every other
  * host keeps the Explorer/shell panel and must still receive the live sync status (task 1646).
  *
@@ -17,7 +17,7 @@ afterEach(() => { while (mounted.length) mounted.pop()!.close() })
 const status = { logged_in: true, engine: 'running', sync_root: 'D:\\Private files\\Sync', syncing: 0, cloud_only: 0, conflicts: 0 }
 
 function open(platform: { name: string | null; resolved: boolean }, props: { status: unknown } = { status }) {
-  const m = mount('windows/views/SettingsView.tsx', 'ShellOrFinderPanel', {
+  const m = mount('windows/views/SettingsView/integrationPanels.tsx', 'ShellOrFinderPanel', {
     backend: {},
     props,
     bindings: {

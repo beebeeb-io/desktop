@@ -191,7 +191,7 @@ describe('the surfaces a hidden window keeps loaded poll through it (task 2243)'
     ['WindowsFirstRun.tsx', 'ReadyStep'],
     ['WindowsFirstRun.tsx', 'WindowsFirstRunView'],
     ['windows/views/SelectiveSyncView.tsx', 'SelectiveSyncView'],
-    ['windows/views/SettingsView.tsx', 'AppActivityPanel'],
+    ['windows/views/SettingsView/appActivityPanel.tsx', 'AppActivityPanel'],
     ['windows/views/BandwidthView.tsx', 'TrafficChartPanel'],
     ['windows/views/BandwidthView.tsx', 'BandwidthView'],
   ]

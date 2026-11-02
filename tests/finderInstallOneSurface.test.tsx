@@ -506,7 +506,7 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
     const installName = windows ? 'install_windows_shell_integration' : 'install_finder_location'
     const stateName = windows ? 'windows_shell_integration_state' : 'finder_location_state'
     let persisted: any = persistedBefore ? failed(persistedBefore) : missing
-    const m = mount('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel', {
+    const m = mount('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel', {
       backend: {
         [stateName]: () => persisted,
         [installName]: () => {
@@ -543,7 +543,7 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
 
     async function openMacPanel(view: unknown, over: Record<string, any> = {}) {
       const bus = finderBus()
-      const m = mount('windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel', {
+      const m = mount('windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel', {
         expand: true,
         backend: {
           finder_setup_state: () => { if (view instanceof Error) throw view; return view },

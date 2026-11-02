@@ -31,6 +31,11 @@ describe('settingsConstants', () => {
     const files = [
       'macSecurityModel.ts', 'macSettingsModel.ts', 'MacSettings.tsx', 'MacSecurity.tsx',
       'windows/views/SecurityView.tsx', 'windows/views/AccountView.tsx', 'windows/views/SettingsView.tsx',
+      'windows/views/SettingsView/primitives.tsx', 'windows/views/SettingsView/syncPanel.tsx',
+      'windows/views/SettingsView/notificationsPanel.tsx', 'windows/views/SettingsView/dataResidencyPanel.tsx',
+      'windows/views/SettingsView/launchPanel.tsx', 'windows/views/SettingsView/integrationPanels.tsx',
+      'windows/views/SettingsView/updatesPanel.tsx', 'windows/views/SettingsView/appActivityPanel.tsx',
+      'windows/views/SettingsView/advancedPanel.tsx', 'windows/views/SettingsView/settingsNav.tsx',
     ]
     for (const file of files) {
       const text = src(file)

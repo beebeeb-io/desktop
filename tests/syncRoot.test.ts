@@ -278,7 +278,7 @@ describe('runtime sync root (1646)', () => {
   }
 
   test('Settings displays status root even when the installation probe has a different path', async () => {
-    const h = harness('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel')
+    const h = harness('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel')
     try {
       await h.refresh()
       expect(h.content()).toContain(customRoot)

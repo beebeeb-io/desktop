@@ -85,7 +85,7 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
       ['signInModel.ts', null],
       ['browserSignIn.ts', null],
       ['MacApp.tsx', null],
-      ['windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel'],
+      ['windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel'],
       ['pages/Status.tsx', 'macFinderSetupState'],
     ]
     for (const [file, fn] of units) {
@@ -119,12 +119,12 @@ describe('no macOS code path calls the install-era Finder commands (R5)', () => 
   })
 
   test('the main-window Settings panel dispatches macOS to MacFinderIntegrationPanel', () => {
-    expect(functionText('windows/views/SettingsView.tsx', 'ShellOrFinderPanel')).toMatch(/name === 'macos' \? <MacFinderIntegrationPanel/)
-    expect(functionText('windows/views/SettingsView.tsx', 'shellIntegrationCommandsFor')).not.toContain('finder_')
+    expect(functionText('windows/views/SettingsView/integrationPanels.tsx', 'ShellOrFinderPanel')).toMatch(/name === 'macos' \? <MacFinderIntegrationPanel/)
+    expect(functionText('windows/views/SettingsView/integrationPanels.tsx', 'shellIntegrationCommandsFor')).not.toContain('finder_')
   })
 
   test('the Windows/Linux Explorer panel carries no macOS install path any more', () => {
-    const panel = functionText('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel')
+    const panel = functionText('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel')
     expect(FORBIDDEN_ON_MACOS.filter((command) => panel.includes(command))).toEqual([])
     expect(panel).not.toMatch(/finderInstall|open_login_items_and_extensions_settings/)
     expect(panel).not.toMatch(/['"]Install['"]|Installing/)
@@ -146,7 +146,7 @@ describe('the mixed pages take the reconciler from useFinderSetup and never run 
   }
 
   test('MacFinderIntegrationPanel takes the load, the subscription and the failed-action toast from the hook', () => {
-    const body = functionText('windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel')
+    const body = functionText('windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel')
     expect(body).toMatch(/useFinderSetup\(\)/)
     expect([...own, 'showToast'].filter((name) => body.includes(name))).toEqual([])
   })
@@ -244,7 +244,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'pages/SyncFolder.tsx | open_finder_location': 1,
       [OPEN_SETTINGS]: 1,
       'pages/SyncFolder.tsx | reset_macos_integration': 1,
-      'windows/views/SettingsView.tsx | finder.run': 1,
+      'windows/views/SettingsView/integrationPanels.tsx | finder.run': 1,
     })
   })
 
