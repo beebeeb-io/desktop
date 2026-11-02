@@ -198,9 +198,12 @@ describe('the surfaces a hidden window keeps loaded poll through it (task 2243)'
   test('no Windows surface keeps a bare setInterval', () => {
     const windowsSources = ['WindowsTray.tsx', 'WindowsApp.tsx', 'WindowsFirstRun.tsx']
     const views = new URL('../src/windows/', import.meta.url)
+    // The Windows app's own modules live beside it in src/WindowsApp/, outside the src/windows scan.
+    const appModules = new URL('../src/WindowsApp/', import.meta.url)
     const files = [
       ...windowsSources.map((f) => new URL(`../src/${f}`, import.meta.url)),
       ...new Bun.Glob('**/*.tsx').scanSync(views.pathname).map((f) => new URL(f, views)),
+      ...new Bun.Glob('*.tsx').scanSync(appModules.pathname).map((f) => new URL(f, appModules)),
     ]
     const offenders = files.filter((url) => readFileSync(url, 'utf8').includes('setInterval(')).map((url) => url.pathname)
     expect(offenders).toEqual([])

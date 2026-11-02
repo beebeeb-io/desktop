@@ -115,7 +115,7 @@ const summaryHook = {
 }
 
 function openHome(summary: unknown, { status = signedIn, pauseSync = false }: { status?: SyncStatus; pauseSync?: boolean } = {}) {
-  const m = mount('WindowsApp.tsx', 'HomeView', {
+  const m = mount('WindowsApp/homeView.tsx', 'HomeView', {
     backend: {
       sync_activity_summary: () => summary,
       desktop_config: () => ({ upload_kbps_limit: 0, download_kbps_limit: 0, pause_sync: pauseSync, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true }),
