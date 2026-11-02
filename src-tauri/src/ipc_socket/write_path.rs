@@ -41,6 +41,30 @@ pub(super) fn write_refusal_category(error: &anyhow::Error) -> &'static str {
     }
 }
 
+/// Whether a remembered write reply may resolve through a provisional id's
+/// alias (spec 2026-10-09 §7.2). A create's repeat never does (§12): its item
+/// is the real row or the repeat runs again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ThroughAlias {
+    Direct,
+    ThroughProvisionalId,
+}
+
+impl ThroughAlias {
+    /// The fingerprint's first field is the operation (`create|…`/`modify|…`).
+    pub(super) fn for_fingerprint(fingerprint: &str) -> Self {
+        if fingerprint.starts_with("modify|") {
+            Self::ThroughProvisionalId
+        } else {
+            Self::Direct
+        }
+    }
+
+    pub(super) fn resolves_alias(self) -> bool {
+        matches!(self, Self::ThroughProvisionalId)
+    }
+}
+
 pub(super) fn parse_write_kind(kind: &str) -> crate::engine_bridge::FinderWriteItemKind {
     if kind.eq_ignore_ascii_case("folder") || kind.eq_ignore_ascii_case("namespace") {
         crate::engine_bridge::FinderWriteItemKind::Folder
@@ -68,9 +92,9 @@ pub(super) fn parse_write_kind_name(kind: &crate::engine_bridge::FinderWriteItem
 /// new operation; a delete through this socket also forgets the stored reply). Only queued results are remembered; an error is
 /// handed to whoever was already waiting but a later retry runs again.
 /// Drop every remembered write reply that describes `file_id`.
-pub(super) fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_id: &str) {
+pub(super) fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcResponse>>, file_id: &ItemId) {
     dedup.forget_where(
-        |cached| matches!(cached, IpcResponse::WriteQueued { item: Some(item), .. } if item.identifier == file_id),
+        |cached| matches!(cached, IpcResponse::WriteQueued { item: Some(item), .. } if item.identifier == file_id.as_str()),
     );
 }
 
@@ -90,7 +114,7 @@ pub(super) fn forget_dedup_for_item(dedup: &std::sync::Arc<WriteDedup<IpcRespons
 pub(super) fn refresh_cached_write(
     db: &crate::state_db::StateDb,
     cached: IpcResponse,
-    through_alias: bool,
+    through_alias: ThroughAlias,
 ) -> Option<IpcResponse> {
     let IpcResponse::WriteQueued {
         item: Some(item),
@@ -102,7 +126,7 @@ pub(super) fn refresh_cached_write(
     };
     let (entry, presented) = match db.get_file(&item.identifier) {
         Ok(Some(entry)) => (entry, false),
-        Ok(None) if through_alias => {
+        Ok(None) if through_alias.resolves_alias() => {
             match db
                 .resolve_alias(&item.identifier)
                 .ok()
@@ -150,13 +174,14 @@ pub(super) fn refresh_cached_write(
 pub(super) async fn dedup_write(
     dedup: &std::sync::Arc<WriteDedup<IpcResponse>>,
     db: &std::sync::Arc<crate::state_db::StateDb>,
-    request_id: Option<String>,
+    request_id: Option<RequestId>,
     fingerprint: String,
     work: impl FnOnce() -> IpcResponse + Send + 'static,
 ) -> IpcResponse {
-    let Some(key) = request_id else {
+    let Some(request_id) = request_id else {
         return work();
     };
+    let key = request_id.as_str();
     if key.is_empty() || key.len() > MAX_KEY_BYTES || key.chars().any(|c| c.is_control()) {
         log_refused_write("write", "invalid_request_id");
         return IpcResponse::Error {
@@ -164,10 +189,10 @@ pub(super) async fn dedup_write(
         };
     }
     let validate_db = db.clone();
-    let through_alias = fingerprint.starts_with("modify|");
+    let through_alias = ThroughAlias::for_fingerprint(&fingerprint);
     dedup
         .run(
-            &key,
+            key,
             &fingerprint,
             std::time::Instant::now,
             move |cached: IpcResponse| refresh_cached_write(&validate_db, cached, through_alias),
@@ -180,13 +205,13 @@ pub(super) async fn dedup_write(
         .await
 }
 
-pub(super) fn normalize_parent_id(parent_id: Option<String>) -> Option<String> {
+pub(super) fn normalize_parent_id(parent_id: Option<ParentId>) -> Option<ParentId> {
     parent_id.and_then(|value| {
-        let trimmed = value.trim();
+        let trimmed = value.as_str().trim();
         if is_file_provider_root(trimmed) || trimmed.starts_with("namespace:") {
             None
         } else {
-            Some(trimmed.to_string())
+            Some(ParentId::new(trimmed))
         }
     })
 }
@@ -208,5 +233,21 @@ pub(crate) fn file_status_response(db: &crate::state_db::StateDb, file_id: &str)
     }
     IpcResponse::Error {
         message: "not found".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn through_alias_is_the_fingerprint_operation() {
+        assert_eq!(
+            ThroughAlias::for_fingerprint("modify|file-1|notes.txt|file"),
+            ThroughAlias::ThroughProvisionalId
+        );
+        assert_eq!(ThroughAlias::for_fingerprint("create||notes.txt|file"), ThroughAlias::Direct);
+        assert!(!ThroughAlias::Direct.resolves_alias());
+        assert!(ThroughAlias::ThroughProvisionalId.resolves_alias());
     }
 }
