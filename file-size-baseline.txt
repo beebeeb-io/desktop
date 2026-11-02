@@ -1,0 +1,38 @@
+# file-size-baseline.txt: source files over the size limit when the ratchet started, `<lines> <path>`.
+# Limits: 1,200 lines per source file, 1,500 under tests/. Written by scripts/check-file-sizes.sh --init-baseline
+# (workspace) from 77ca403d7e49 on 2026-11-02. Entries only go down: `check-file-sizes.sh . --update-baseline`
+# lowers or drops them. Never add a path or raise a count here; split the file instead (token plan Phase 4).
+1236 BeebeebFileProvider/FileProviderExtension.swift
+1990 BeebeebFileProviderTests/main.swift
+1641 src-tauri/src/account_dto.rs
+2427 src-tauri/src/api_client.rs
+1808 src-tauri/src/config.rs
+1377 src-tauri/src/diagnostic_redaction.rs
+1634 src-tauri/src/direct_download.rs
+33174 src-tauri/src/engine_bridge.rs
+1318 src-tauri/src/engine_status.rs
+1781 src-tauri/src/finder_removal.rs
+1956 src-tauri/src/finder_setup/core.rs
+2323 src-tauri/src/finder_setup/driver.rs
+1773 src-tauri/src/finder_setup/macos_ports.rs
+1408 src-tauri/src/found_while_paused.rs
+1586 src-tauri/src/held_queue.rs
+6052 src-tauri/src/ipc_socket.rs
+1910 src-tauri/src/ipc_socket_framing_tests.rs
+2330 src-tauri/src/keychain.rs
+41359 src-tauri/src/lib.rs
+1835 src-tauri/src/own_data_proof.rs
+1776 src-tauri/src/owner_keys/tests.rs
+1758 src-tauri/src/popover_data.rs
+3915 src-tauri/src/runner.rs
+17015 src-tauri/src/state_db.rs
+1358 src-tauri/src/watcher.rs
+1243 src-tauri/src/windows_cf/callbacks.rs
+1734 src-tauri/src/windows_cf/mod.rs
+1550 src-tauri/src/windows_cf/placeholders.rs
+1217 src/MacSettings.tsx
+1935 src/WindowsApp.tsx
+1587 src/desktopApi.ts
+2030 src/windows/views/SettingsView.tsx
+1978 tests/macSettingsTabs.test.tsx
+1524 tests/macSignIn.test.tsx
