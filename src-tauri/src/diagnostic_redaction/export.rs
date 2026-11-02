@@ -47,7 +47,11 @@ pub(super) fn redact(error: &str, names: &KnownNames, mode: Mode) -> RedactedErr
                     continue;
                 }
                 // `Cookie: session=<tok>`: the pair's own value is the secret.
-                CredentialShape::LabelledValue { key, delim, value_is_label } if !value_is_label => {
+                CredentialShape::LabelledValue {
+                    key,
+                    delim,
+                    value: LabelledValueKind::Secret,
+                } => {
                     out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
                     redactions += 1;
                     armed = false;
@@ -72,15 +76,23 @@ pub(super) fn redact(error: &str, names: &KnownNames, mode: Mode) -> RedactedErr
                 armed = true;
                 continue;
             }
-            CredentialShape::LabelledValue { key, delim, value_is_label } => {
-                if value_is_label {
-                    // `authorization=Bearer <tok>`: the label run continues.
-                    out.push(part.replace(NAME_MARK, ""));
-                    armed = true;
-                } else {
-                    out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
-                    redactions += 1;
-                }
+            CredentialShape::LabelledValue {
+                key,
+                delim,
+                value: LabelledValueKind::Label,
+            } => {
+                // `authorization=Bearer <tok>`: the label run continues.
+                out.push(part.replace(NAME_MARK, ""));
+                armed = true;
+                continue;
+            }
+            CredentialShape::LabelledValue {
+                key,
+                delim,
+                value: LabelledValueKind::Secret,
+            } => {
+                out.push(format!("{}{delim}[redacted]", key.replace(NAME_MARK, "")));
+                redactions += 1;
                 continue;
             }
             CredentialShape::Punctuation | CredentialShape::Other => {}

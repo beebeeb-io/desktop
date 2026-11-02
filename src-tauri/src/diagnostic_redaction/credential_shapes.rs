@@ -21,6 +21,16 @@ pub(super) const CREDENTIAL_LABELS: &[&str] = &[
     "set-cookie",
 ];
 
+/// What sits right of a credential label in one `key=value` part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LabelledValueKind {
+    /// The value is itself a credential label (`authorization=Bearer`), so the
+    /// real secret is the NEXT part.
+    Label,
+    /// The value is the secret.
+    Secret,
+}
+
 pub(super) enum CredentialShape<'a> {
     /// A bare label: `Bearer`, `Authorization:`, `"token":`, `Bearer,`.
     Label,
@@ -30,9 +40,9 @@ pub(super) enum CredentialShape<'a> {
     LabelledValue {
         key: &'a str,
         delim: char,
-        /// The value is itself a label (`authorization=Bearer`), so the real
-        /// secret is the NEXT part.
-        value_is_label: bool,
+        /// What sits right of the label — a label run continues or the secret
+        /// is here.
+        value: LabelledValueKind,
     },
     Other,
 }
@@ -69,7 +79,11 @@ pub(super) fn credential_shape(part: &str) -> CredentialShape<'_> {
             return CredentialShape::LabelledValue {
                 key,
                 delim,
-                value_is_label: is_credential_label(value),
+                value: if is_credential_label(value) {
+                    LabelledValueKind::Label
+                } else {
+                    LabelledValueKind::Secret
+                },
             };
         }
     }
