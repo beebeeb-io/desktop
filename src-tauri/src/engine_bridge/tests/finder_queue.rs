@@ -33,7 +33,7 @@ use super::*;
             found
         }
         assert_eq!(
-            unfenced(include_str!("engine_bridge.rs")),
+            unfenced(include_str!("../../engine_bridge.rs")),
             [
                 "queue_restore_version",
                 "enqueue_pin_tree_operation",
@@ -42,7 +42,7 @@ use super::*;
             "only a version restore, a pin and a hydrate queue without the fence"
         );
         assert_eq!(
-            unfenced(include_str!("ipc_socket.rs")),
+            unfenced(include_str!("../../ipc_socket.rs")),
             Vec::<&str>::new(),
             "the IPC never queues without the fence"
         );

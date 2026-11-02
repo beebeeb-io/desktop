@@ -361,13 +361,13 @@ use super::*;
     /// writes its row and contract through `enqueue_finder_change`, with its op.
     #[test]
     fn ingestion_writers_use_the_single_transaction_api() {
-        let source = include_str!("engine_bridge.rs");
+        let source = include_str!("../../engine_bridge.rs");
         let production = source.split("\nmod tests {").next().unwrap();
         assert!(
             !production.contains(".set_file_contract_state("),
             "production code writes a contract in a second call"
         );
-        let state_db = include_str!("state_db.rs");
+        let state_db = include_str!("../../state_db.rs");
         let at = state_db
             .find("    pub fn set_file_contract_state(")
             .expect("the test-only writer");

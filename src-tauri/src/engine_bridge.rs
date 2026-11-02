@@ -5612,8 +5612,49 @@ use uploads_7::{land_one_save, remote_update};
 use uploads_8::{assert_kept_uploading, failing_passes};
 use versions::{drain_upload_queue, finder_file_target, held_content_version, run_competing, versioned_server_answer};
 use versions_2::{FP_ROOT, fp_create_in, fp_save_moved, listed_under, name_parent_status, reparented_changes, seed_folder_row, seed_row_in_folder};
-use versions_3::{node, seed_version_zero_row};
+use versions_3::*;
 }
+
+/// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
+/// 410) and abandoned it: the next attempt starts a fresh upload, so for a File Provider write the
+/// failure is transient, never a counted one (spec §8.4). A 400 at any session, and a 404 or 410 at a
+/// session opened in the same attempt, abandon the session too, but stay counted. It shows, and has
+/// as its source, the failure it wraps, so every reading of the error's text and status stays as it
+/// was.
+#[derive(Debug)]
+struct SessionAbandoned(anyhow::Error);
+
+impl std::fmt::Display for SessionAbandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SessionAbandoned {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let inner: &(dyn std::error::Error + 'static) = self.0.as_ref();
+        Some(inner)
+    }
+}
+
+/// A Finder write could not be staged: the staging folder cannot be created or written to, and
+/// on macOS nothing falls back to a folder the system may purge (spec §8.4). The reply is
+/// `WriteRetryLater`, which the extension reports as a transient error, so the system keeps the
+/// change and retries. Path-free on purpose: the text reaches the extension and the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct FinderStagingUnavailable(Option<std::io::ErrorKind>);
+
+impl std::fmt::Display for FinderStagingUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(kind) => write!(f, "the staging folder is unavailable: {kind}"),
+            None => f.write_str("the staging folder is unavailable: no data directory"),
+        }
+    }
+}
+
+impl std::error::Error for FinderStagingUnavailable {}
 
 mod types;
 use types::*;
@@ -5623,7 +5664,7 @@ pub(crate) use types::{Seams, NON_UUID, log_alias_resolved, SyncFolderContent, R
 mod errors;
 use errors::*;
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
-pub(crate) use errors::{UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow, FinderStagingUnavailable};
+pub(crate) use errors::{UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
 
 mod content;
 use content::*;

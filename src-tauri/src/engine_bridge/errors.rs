@@ -301,28 +301,6 @@ impl std::fmt::Display for ItemInTrash {
 
 impl std::error::Error for ItemInTrash {}
 
-/// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
-/// 410) and abandoned it: the next attempt starts a fresh upload, so for a File Provider write the
-/// failure is transient, never a counted one (spec §8.4). A 400 at any session, and a 404 or 410 at a
-/// session opened in the same attempt, abandon the session too, but stay counted. It shows, and has
-/// as its source, the failure it wraps, so every reading of the error's text and status stays as it
-/// was.
-#[derive(Debug)]
-pub(super) struct SessionAbandoned(anyhow::Error);
-
-impl std::fmt::Display for SessionAbandoned {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl std::error::Error for SessionAbandoned {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        let inner: &(dyn std::error::Error + 'static) = self.0.as_ref();
-        Some(inner)
-    }
-}
-
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,25 +422,6 @@ impl std::fmt::Display for ParkNow {
 }
 
 impl std::error::Error for ParkNow {}
-
-/// A Finder write could not be staged: the staging folder cannot be created or written to, and
-/// on macOS nothing falls back to a folder the system may purge (spec §8.4). The reply is
-/// `WriteRetryLater`, which the extension reports as a transient error, so the system keeps the
-/// change and retries. Path-free on purpose: the text reaches the extension and the person.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(crate) struct FinderStagingUnavailable(Option<std::io::ErrorKind>);
-
-impl std::fmt::Display for FinderStagingUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            Some(kind) => write!(f, "the staging folder is unavailable: {kind}"),
-            None => f.write_str("the staging folder is unavailable: no data directory"),
-        }
-    }
-}
-
-impl std::error::Error for FinderStagingUnavailable {}
 
 pub fn classify_operation_error(error: &str) -> OperationFailureClass {
     // Classify on the failure MESSAGE only, never on the request URL. reqwest's
