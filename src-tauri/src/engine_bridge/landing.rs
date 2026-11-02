@@ -689,10 +689,10 @@ pub(crate) fn remove_pruned_entry(
     };
     let in_use = || PrunedEntry::KeptInPlace(KeptReason::InUse);
     if is_dir {
-        return removed(engine_remove(path, true), PrunedEntry::FolderKept);
+        return removed(engine_remove(path, RemovedKind::Dir), PrunedEntry::FolderKept);
     }
     match local {
-        LocalEntry::InSync | LocalEntry::NothingLocal => removed(engine_remove(path, false), in_use()),
+        LocalEntry::InSync | LocalEntry::NothingLocal => removed(engine_remove(path, RemovedKind::File), in_use()),
         LocalEntry::PartlyLocal => PrunedEntry::KeptInPlace(KeptReason::PartlyLocal),
         LocalEntry::Unreadable => in_use(),
         LocalEntry::WhollyLocal => {
@@ -700,11 +700,11 @@ pub(crate) fn remove_pruned_entry(
                 return in_use();
             };
             if agreed == Some(hash.as_str()) {
-                return removed(engine_remove(path, false), in_use());
+                return removed(engine_remove(path, RemovedKind::File), in_use());
             }
             match copy_as_this_pc(path, copy_dir) {
                 Ok((copy, copied_hash)) => {
-                    let original_removed = match engine_remove(path, false) {
+                    let original_removed = match engine_remove(path, RemovedKind::File) {
                         Ok(()) => true,
                         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
                     };
@@ -1077,7 +1077,7 @@ pub(super) fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
         if std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some()) {
             continue;
         }
-        match engine_remove(&path, true) {
+        match engine_remove(&path, RemovedKind::Dir) {
             Ok(()) => {
                 let _ = db.forget_removed_folder(&rel);
             }

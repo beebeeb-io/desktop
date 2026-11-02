@@ -143,3 +143,26 @@ fn media_kind_reads_the_video_mime_family() {
     assert_eq!(MediaKind::from_mime(Some("image/png")), MediaKind::Image);
     assert_eq!(MediaKind::from_mime(None), MediaKind::Image);
 }
+
+/// The kind, not the path, picks the syscall: a directory needs Dir and a file
+/// needs File, so a caller that names the wrong one is refused the same way.
+#[test]
+fn engine_remove_takes_the_kind_it_was_told() {
+    let root = std::env::temp_dir().join(format!("bb-removed-kind-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("file.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let dir = root.join("dir");
+    std::fs::create_dir(&dir).unwrap();
+
+    assert!(engine_remove(&file, RemovedKind::Dir).is_err());
+    assert!(file.exists());
+    engine_remove(&file, RemovedKind::File).unwrap();
+    assert!(!file.exists());
+
+    assert!(engine_remove(&dir, RemovedKind::File).is_err());
+    assert!(dir.exists());
+    engine_remove(&dir, RemovedKind::Dir).unwrap();
+    assert!(!dir.exists());
+    let _ = std::fs::remove_dir(&root);
+}

@@ -773,10 +773,20 @@ pub(crate) enum PrunedEntry {
 /// Task 1640 (review-151d P3-1): the engine's own remove of a sync-folder entry. It is registered
 /// with the watcher right before it happens, so its delete notification queues no trash, and the
 /// registration is dropped again when it did not happen (a later delete by the person counts).
+/// What the path being removed is, so the remove picks the matching syscall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovedKind {
+    File,
+    Dir,
+}
+
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(super) fn engine_remove(path: &Path, is_dir: bool) -> std::io::Result<()> {
+pub(super) fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
     crate::watcher::suppress_engine_delete(path);
-    let removed = if is_dir { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+    let removed = match kind {
+        RemovedKind::Dir => std::fs::remove_dir(path),
+        RemovedKind::File => std::fs::remove_file(path),
+    };
     if removed.is_err() {
         crate::watcher::cancel_engine_delete_suppression(path);
     }
