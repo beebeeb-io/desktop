@@ -18,16 +18,16 @@ fn engine_error_keeps_the_refusals_text() {
     assert_eq!(converted.to_string(), "this item is not known to Beebeeb");
 }
 
-/// `ProducedObject` keeps the version the server answered with and the object id
-/// its content now has, and nothing else.
+/// `ProducedObject` keeps the version number the server answered with and the
+/// object version id its content now has, and nothing else.
 #[test]
 fn produced_object_keeps_the_servers_version_and_object() {
     let produced = ProducedObject {
-        version_id: 7,
-        object_name: "object-123".to_string(),
+        version_number: 7,
+        object_version_id: VersionId::new("object-123"),
     };
-    assert_eq!(produced.version_id, 7);
-    assert_eq!(produced.object_name, "object-123");
+    assert_eq!(produced.version_number, 7);
+    assert_eq!(produced.object_version_id.as_str(), "object-123");
 }
 
 /// `LandRequest` carries the eleven landing arguments as one request: the op,
@@ -56,13 +56,13 @@ fn land_request_bundles_the_landing_inputs() {
     };
     let mut post_complete_errors = vec!["thumbnail: skipped".to_string()];
     let request = LandRequest {
-        local_file_id: "file-1",
+        local_file_id: LocalFileId::new("file-1"),
         op: &op,
         claim: None,
-        server_file_id: "server-file-1",
+        server_file_id: ServerFileId::new("server-file-1"),
         produced: ProducedObject {
-            version_id: 7,
-            object_name: "object-123".to_string(),
+            version_number: 7,
+            object_version_id: VersionId::new("object-123"),
         },
         size_bytes: 1024,
         content_type: Some("text/plain".to_string()),
@@ -70,12 +70,12 @@ fn land_request_bundles_the_landing_inputs() {
         post_complete_errors: &mut post_complete_errors,
         sync_root: Path::new("/sync"),
     };
-    assert_eq!(request.local_file_id, "file-1");
+    assert_eq!(request.local_file_id.as_str(), "file-1");
     assert_eq!(request.op.op_id, "op-1");
     assert!(request.claim.is_none());
-    assert_eq!(request.server_file_id, "server-file-1");
-    assert_eq!(request.produced.version_id, 7);
-    assert_eq!(request.produced.object_name, "object-123");
+    assert_eq!(request.server_file_id.as_str(), "server-file-1");
+    assert_eq!(request.produced.version_number, 7);
+    assert_eq!(request.produced.object_version_id.as_str(), "object-123");
     assert_eq!(request.size_bytes, 1024);
     assert_eq!(request.content_type.as_deref(), Some("text/plain"));
     assert!(request.mime_type.is_none());

@@ -33,7 +33,7 @@ impl EngineBridge {
 
         struct Rollback<'a> {
             db: &'a StateDb,
-            id: &'a str,
+            id: LocalFileId<'a>,
             previous: Option<FileStatus>,
             finder_write: bool,
         }
@@ -48,7 +48,7 @@ impl EngineBridge {
                 // undo that if cancellation happens during thumbnail work.
                 if self
                     .db
-                    .get_file(self.id)
+                    .get_file(self.id.as_str())
                     .ok()
                     .flatten()
                     .is_some_and(|r| r.status == FileStatus::Uploading)
@@ -58,10 +58,13 @@ impl EngineBridge {
                     } else {
                         FileStatus::Error
                     };
-                    let _ = self.db.set_status(self.id, status);
+                    let _ = self.db.set_status(self.id.as_str(), status);
                 }
             }
         }
+        // The row's key from here on is a local file id, not a bare string: the
+        // upload and its rollback both address the same `files` row by it.
+        let local_file_id = LocalFileId::new(local_file_id);
         let _rollback = Rollback {
             db: &self.db,
             id: local_file_id,
@@ -74,7 +77,7 @@ impl EngineBridge {
 
     async fn do_upload_version(
         &self,
-        local_file_id: &str,
+        local_file_id: LocalFileId<'_>,
         op: &PendingOperation,
         claim: Option<&ClaimedOp>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
@@ -101,10 +104,10 @@ impl EngineBridge {
                     local_file_id,
                     op,
                     claim,
-                    server_file_id: &previous.server_file_id,
+                    server_file_id: ServerFileId::new(&previous.server_file_id),
                     produced: ProducedObject {
-                        version_id: version,
-                        object_name: object,
+                        version_number: version,
+                        object_version_id: VersionId::new(&object),
                     },
                     size_bytes: previous.payload_size as u64,
                     content_type,
@@ -222,10 +225,10 @@ impl EngineBridge {
                 // SF-0001 (L13): this device chooses the item id. A create proposes
                 // its own id when that id is canonical; otherwise (a local-only id)
                 // it mints a fresh one for this init. A replace keeps the row's id.
-                let proposed_id = if is_create && !is_canonical_item_id(local_file_id) {
+                let proposed_id = if is_create && !is_canonical_item_id(local_file_id.as_str()) {
                     uuid::Uuid::new_v4().to_string()
                 } else {
-                    local_file_id.to_string()
+                    local_file_id.as_str().to_string()
                 };
                 let init_request = upload_init_request_for_operation(
                     &proposed_id,
@@ -310,7 +313,7 @@ impl EngineBridge {
                         Some(base) => base.saturating_add(1),
                         None => self
                             .db
-                            .get_file_contract_state(local_file_id)?
+                            .get_file_contract_state(local_file_id.as_str())?
                             .map_or(0, |contract| contract.current_version)
                             .saturating_add(1),
                     },
@@ -339,10 +342,10 @@ impl EngineBridge {
                     local_file_id,
                     op,
                     claim,
-                    server_file_id: &session.server_file_id,
+                    server_file_id: ServerFileId::new(&session.server_file_id),
                     produced: ProducedObject {
-                        version_id: produced_version,
-                        object_name: produced_object,
+                        version_number: produced_version,
+                        object_version_id: VersionId::new(&produced_object),
                     },
                     size_bytes: size,
                     content_type,
@@ -426,7 +429,7 @@ impl EngineBridge {
         // the token: `finder_thumbnail` refuses meanwhile. Keyed on a minted write (macOS).
         let marks_thumbnails = claim.and_then(|c| c.write.as_ref()).is_some() && payload_path.is_some();
         if marks_thumbnails {
-            self.set_thumbnails_pending(server_file_id, ThumbnailWait::Waiting);
+            self.set_thumbnails_pending(server_file_id.as_str(), ThumbnailWait::Waiting);
         }
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
@@ -445,19 +448,19 @@ impl EngineBridge {
             _ => None,
         };
         let master_key = self.api.master_key();
-        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id).map_err(EngineError::from)?;
+        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
                 claim_id: claim.map(|c| c.claim_id.as_str()),
                 write_id: claim.and_then(|c| c.write.as_ref()).map(|w| w.write_id.as_str()),
-                local_file_id,
-                server_file_id,
+                local_file_id: local_file_id.as_str(),
+                server_file_id: server_file_id.as_str(),
                 target_path: op.target_path.as_deref(),
                 parent_id: op.parent_id.as_deref(),
                 landed_base: op.base_version,
-                produced_version: produced.version_id,
-                produced_object_version_id: produced.object_name.as_str(),
+                produced_version: produced.version_number,
+                produced_object_version_id: produced.object_version_id.as_str(),
                 size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
                 content_type: content_type.as_deref(),
                 mime_type: mime_type.as_deref(),
@@ -468,33 +471,33 @@ impl EngineBridge {
                 now: now_secs(),
             },
             &|queued, server_id| metadata_rekeyed_with_material(master_key, queued, server_id,
-                (server_id == server_file_id).then_some((&landing_material.0, landing_material.1))).map_err(land_error_to_anyhow),
+                (server_id == server_file_id.as_str()).then_some((&landing_material.0, landing_material.1))).map_err(land_error_to_anyhow),
         );
         // Nothing landed: the op is still queued, and the refusal is the queue's again.
         let landed = match landed {
             Ok(Some(landed)) => landed,
             Ok(None) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
+                    self.set_thumbnails_pending(server_file_id.as_str(), ThumbnailWait::Settled);
                 }
                 log_queue_state_moved(&op.op_id, "landing");
                 return Err(QueueStateMoved.into());
             }
             Err(e) => {
                 if marks_thumbnails {
-                    self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
+                    self.set_thumbnails_pending(server_file_id.as_str(), ThumbnailWait::Settled);
                 }
                 return Err(e.into());
             }
         };
         for (successor, reason) in &landed.parked_successors {
-            log_parked(successor, Some(server_file_id), *reason);
+            log_parked(successor, Some(server_file_id.as_str()), *reason);
         }
-        self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id, size_bytes);
+        self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id.as_str(), size_bytes);
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())
                 .map_err(EngineError::from)?
                 .0;
             match self
@@ -503,7 +506,7 @@ impl EngineBridge {
             {
                 Ok(()) => {
                     if marks_thumbnails {
-                        self.set_thumbnails_pending(server_file_id, ThumbnailWait::Settled);
+                        self.set_thumbnails_pending(server_file_id.as_str(), ThumbnailWait::Settled);
                     }
                 }
                 // The refusal stays: the server still holds the previous version's thumbnail.
@@ -532,7 +535,7 @@ impl EngineBridge {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn upload_session_body(
         &self,
-        local_file_id: &str,
+        local_file_id: LocalFileId<'_>,
         op: &PendingOperation,
         metadata: &serde_json::Value,
         name_encrypted: &str,
@@ -545,7 +548,7 @@ impl EngineBridge {
         ensure_session_item_id(session, local_file_id)?;
         let server_file_id = session.server_file_id.clone();
         if !session.metadata_applied {
-            let effective_name_encrypted = if server_file_id != local_file_id {
+            let effective_name_encrypted = if server_file_id != local_file_id.as_str() {
                 owned_metadata_for_name(
                     &self.db, self.api.master_key(),
                     &server_file_id,
@@ -586,7 +589,7 @@ impl EngineBridge {
         let payload_total = u64::try_from(session.payload_size).unwrap_or(0);
         let progress = self
             .transfers
-            .begin(local_file_id, crate::transfer_progress::Direction::Up, payload_total);
+            .begin(local_file_id.as_str(), crate::transfer_progress::Direction::Up, payload_total);
         progress.update(crate::transfer_progress::uploaded_bytes(
             first_chunk,
             chunk_size as u64,
@@ -647,16 +650,15 @@ impl EngineBridge {
     async fn finish_completed_upload(
         &self,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] op: &PendingOperation,
-        server_file_id: &str,
+        server_file_id: ServerFileId<'_>,
         payload_path: &Path,
         thumbnail_content_type: Option<String>,
         file_key: &beebeeb_core::kdf::FileKey,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     ) -> Result<(), EngineError> {
-        let server_file_id = server_file_id.to_string();
         let thumbnails = self
             .upload_thumbnails_for_plaintext_media(
-                &server_file_id,
+                server_file_id,
                 payload_path,
                 thumbnail_content_type.as_deref(),
                 file_key,
@@ -732,17 +734,17 @@ impl EngineBridge {
 
     async fn upload_thumbnails_for_plaintext_media(
         &self,
-        server_file_id: &str,
+        server_file_id: ServerFileId<'_>,
         payload_path: &Path,
         mime_type: Option<&str>,
         file_key: &beebeeb_core::kdf::FileKey,
     ) -> Result<(), EngineError> {
-        let pin = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?.1;
+        let pin = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())?.1;
         let uploads = prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, pin)?;
         for upload in uploads {
             self.api
                 .upload_thumbnail(
-                    server_file_id,
+                    server_file_id.as_str(),
                     upload.variant.label(),
                     &upload.encrypted,
                     upload.blurhash.as_deref(),
@@ -760,7 +762,7 @@ impl EngineBridge {
     fn defer_local_upload_finalization(
         &self,
         op: &PendingOperation,
-        server_file_id: &str,
+        server_file_id: ServerFileId<'_>,
         sync_root: &Path,
         payload_path: &Path,
     ) -> Result<Option<crate::state_db::UploadFinalization>, EngineError> {
@@ -788,8 +790,8 @@ impl EngineBridge {
         }
         Ok(Some(crate::state_db::UploadFinalization {
             op_id: op.op_id.clone(),
-            local_file_id: op.file_id.as_deref().unwrap_or(server_file_id).to_string(),
-            server_file_id: server_file_id.to_string(),
+            local_file_id: op.file_id.as_deref().unwrap_or(server_file_id.as_str()).to_string(),
+            server_file_id: server_file_id.as_str().to_string(),
             target_path: target_path.to_string(),
             payload_path: payload_path.to_string_lossy().into_owned(),
             stamped: false,

@@ -398,7 +398,7 @@ fn sf2237d_t5_rename_and_replacement_keep_key() {
     b.db.put_upload_resume(&session).unwrap();
     runtime()
         .block_on(b.upload_session_body(
-            ID,
+            LocalFileId::new(ID),
             &op,
             &json!({}),
             &name,

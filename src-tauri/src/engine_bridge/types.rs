@@ -547,23 +547,24 @@ impl Op {
 }
 
 /// The object version the server answered with when its `complete` succeeded: the
-/// version number the row lands on, and the object id its content now has. Two
-/// strings the server answered with, nothing else; the landing reads both.
+/// version number the row lands on, and the object version id its content now has.
+/// Two values the server answered with, nothing else; the landing reads both. The
+/// number is not an id: it counts a file's versions, `VersionId` names one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProducedObject {
-    pub(crate) version_id: i64,
-    pub(crate) object_name: String,
+pub(crate) struct ProducedObject<'a> {
+    pub(crate) version_number: i64,
+    pub(crate) object_version_id: VersionId<'a>,
 }
 
 /// Everything one landing needs: the op and its claim, the server row the upload
-/// produced, and the completion's own size and types. Borrows the caller's op and
-/// error list; nothing is cloned but the object the server answered with.
+/// produced, and the completion's own size and types. Borrows the caller's ids,
+/// op and error list; nothing is cloned but the object the server answered with.
 pub(crate) struct LandRequest<'a> {
-    pub(crate) local_file_id: &'a str,
+    pub(crate) local_file_id: LocalFileId<'a>,
     pub(crate) op: &'a PendingOperation,
     pub(crate) claim: Option<&'a ClaimedOp>,
-    pub(crate) server_file_id: &'a str,
-    pub(crate) produced: ProducedObject,
+    pub(crate) server_file_id: ServerFileId<'a>,
+    pub(crate) produced: ProducedObject<'a>,
     pub(crate) size_bytes: u64,
     pub(crate) content_type: Option<String>,
     pub(crate) mime_type: Option<String>,

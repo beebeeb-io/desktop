@@ -73,11 +73,11 @@ pub(super) fn guard_init_base(base_version: Option<i64>, kind: InitKind) -> Resu
 /// op is updating. Anything else means the server handed back a different item
 /// than the client chose, so the op must abort.
 ///
-pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: &str) -> Result<(), EngineError> {
+pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: LocalFileId<'_>) -> Result<(), EngineError> {
     let ours = if session.is_create {
         session.self_minted
     } else {
-        session.server_file_id == local_file_id
+        session.server_file_id == local_file_id.as_str()
     };
     if ours {
         return Ok(());

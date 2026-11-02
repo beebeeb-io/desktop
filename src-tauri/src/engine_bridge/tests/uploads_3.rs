@@ -676,7 +676,7 @@ use super::*;
         op
     }
 
-    fn l13_resume(is_create: bool, self_minted: bool, server_file_id: &str) -> UploadResume {
+    pub(super) fn l13_resume(is_create: bool, self_minted: bool, server_file_id: &str) -> UploadResume {
         UploadResume {
             op_id: "op-l13".into(),
             payload_path: "/tmp/l13.bin".into(),
@@ -973,16 +973,17 @@ use super::*;
     fn l13_session_item_id_must_be_ours() {
         // SF-0001 (L13): a create needs self_minted; a replace needs the row's id.
         let local_id = "5e6f7a8b-9c0d-4e1f-2a3b-4c5d6e7f8091";
-        let err = ensure_session_item_id(&l13_resume(true, false, "server-chosen"), local_id)
+        let local = LocalFileId::new(local_id);
+        let err = ensure_session_item_id(&l13_resume(true, false, "server-chosen"), local)
             .unwrap_err()
             .to_string();
         assert!(err.contains("server_changed_item_id"), "got {err:?}");
-        assert!(ensure_session_item_id(&l13_resume(true, true, "whatever-the-server-says"), local_id).is_ok());
-        let err = ensure_session_item_id(&l13_resume(false, true, "another-row"), local_id)
+        assert!(ensure_session_item_id(&l13_resume(true, true, "whatever-the-server-says"), local).is_ok());
+        let err = ensure_session_item_id(&l13_resume(false, true, "another-row"), local)
             .unwrap_err()
             .to_string();
         assert!(err.contains("server_changed_item_id"), "got {err:?}");
-        assert!(ensure_session_item_id(&l13_resume(false, true, local_id), local_id).is_ok());
+        assert!(ensure_session_item_id(&l13_resume(false, true, local_id), local).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
