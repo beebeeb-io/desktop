@@ -146,3 +146,19 @@ use super::*;
         let s = redact_secrets_only("write /a/b/c failed Bearer zzz");
         assert_eq!(s, "write /a/b/c failed Bearer [redacted]");
     }
+
+    /// The right side of a `key=value` part is one of two kinds, and that kind
+    /// alone decides whether this part is the secret or the label run goes on.
+    #[test]
+    fn labelled_value_kind_tells_a_label_from_a_secret() {
+        fn kind(part: &str) -> LabelledValueKind {
+            match credential_shape(part) {
+                CredentialShape::LabelledValue { value, .. } => value,
+                _ => panic!("{part} is not a labelled value"),
+            }
+        }
+        assert_eq!(kind("authorization=Bearer"), LabelledValueKind::Label);
+        assert_eq!(kind("token:session_token"), LabelledValueKind::Label);
+        assert_eq!(kind("session_token=abc123"), LabelledValueKind::Secret);
+        assert_eq!(kind("cookie=sess-0"), LabelledValueKind::Secret);
+    }

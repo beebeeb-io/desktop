@@ -124,3 +124,43 @@ use super::*;
             "the subscription payload may carry no provider-configuration flag: {out}"
         );
     }
+
+    /// The two impersonation optionals are one value: every wire combination
+    /// lands in exactly one variant, and the match has no wildcard so a new
+    /// variant must be decided here.
+    #[test]
+    fn account_access_unions_the_impersonation_fields() {
+        fn profile(is_impersonation: &str, admin_user_id: &str) -> AccountProfile {
+            let json = format!(
+                r#"{{"user_id":"u","email":"e@example.com","email_verified":true,
+                    "created_at":"2026-01-02T03:04:05Z",
+                    "is_impersonation":{is_impersonation},"admin_user_id":{admin_user_id}}}"#
+            );
+            serde_json::from_str(&json).unwrap()
+        }
+
+        let cases = [
+            ("false", "null"),
+            ("true", "\"admin-1\""),
+            ("null", "\"admin-1\""),
+            ("true", "null"),
+        ];
+        for (flag, admin) in cases {
+            let p = profile(flag, admin);
+            match p.access() {
+                AccountAccess::Own => assert_ne!(flag, "true", "flag {flag} / admin {admin}"),
+                AccountAccess::Impersonated { admin_user_id } => {
+                    assert_eq!(flag, "true");
+                    assert_eq!(admin_user_id, p.admin_user_id);
+                }
+            }
+        }
+        assert_eq!(profile("false", "null").access(), AccountAccess::Own);
+        assert_eq!(profile("null", "null").access(), AccountAccess::Own);
+        assert_eq!(
+            profile("true", "\"admin-1\"").access(),
+            AccountAccess::Impersonated {
+                admin_user_id: Some("admin-1".to_string())
+            }
+        );
+    }
