@@ -629,12 +629,13 @@ async fn run(
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
-                if sync_paused.load(Ordering::Relaxed) {
+                let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
+                if mode.is_paused() {
                     emit_payload(&app, tracker.paused().to_json());
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
-                    refresh_status_ui_snapshot(&db, true, false);
+                    refresh_status_ui_snapshot(&db, mode, false);
                     continue;
                 }
 
@@ -791,7 +792,7 @@ async fn run(
                         // conflicts ⇒ Error, else In-Sync. Not paused, no engine
                         // error on a successful tick.
                         #[cfg(target_os = "windows")]
-                        refresh_status_ui_snapshot(&db, false, false);
+                        refresh_status_ui_snapshot(&db, RunMode::Running, false);
 
                         match crate::desktop_search::local_index_signature(&db) {
                             Ok(signature) if last_search_index_signature != Some(signature) => {
@@ -846,7 +847,7 @@ async fn run(
                         // Windows breadcrumb flyout: surface the tick failure as
                         // an Error state in the flyout too.
                         #[cfg(target_os = "windows")]
-                        refresh_status_ui_snapshot(&db, false, true);
+                        refresh_status_ui_snapshot(&db, RunMode::Running, true);
                     }
                 }
             }
@@ -857,7 +858,7 @@ async fn run(
                 let now = std::time::Instant::now();
                 if !phase_step_due(
                     send_phase.is_armed(),
-                    sync_paused.load(Ordering::Relaxed),
+                    RunMode::of_flag(sync_paused.load(Ordering::Relaxed)),
                     last_phase_run,
                     now,
                 ) {
@@ -1085,6 +1086,7 @@ pub(crate) use lifecycle::{phase_step_due, Wake, with_startup_guard};
 
 mod tick_loop;
 use tick_loop::*;
+pub(crate) use tick_loop::RunMode;
 
 mod working_set_signal;
 use working_set_signal::*;

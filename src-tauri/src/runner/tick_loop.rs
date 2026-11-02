@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// Whether the runner is doing sync work or the person paused it (spec §3.4: a named mode instead of
+/// a bare `paused` boolean). The shared flag stays an `AtomicBool` because `lib.rs`'s `AppState`
+/// flips it; this is its meaning at every place the loop branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunMode {
+    Running,
+    Paused,
+}
+
+impl RunMode {
+    pub(crate) fn of_flag(paused: bool) -> Self {
+        if paused { Self::Paused } else { Self::Running }
+    }
+
+    pub(crate) fn is_paused(self) -> bool {
+        self == Self::Paused
+    }
+}
+
 /// How often the runner pulls the file list from the server and
 /// refreshes the state DB. The previous 5s cadence re-walked the WHOLE
 /// remote tree (`GET /api/v1/files`) every tick, which by itself could
@@ -178,10 +197,10 @@ pub(super) fn unresolved_sync_issue_count(db: &StateDb) -> u32 {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn refresh_status_ui_snapshot(db: &StateDb, paused: bool, engine_error: bool) {
+pub(super) fn refresh_status_ui_snapshot(db: &StateDb, mode: RunMode, engine_error: bool) {
     let syncing = sync_in_flight_count(db);
     let conflicts = file_status_count(db, FileStatus::Conflict);
-    crate::windows_cf::status_ui::set_engine_state(paused, syncing, conflicts, engine_error);
+    crate::windows_cf::status_ui::set_engine_state(mode.is_paused(), syncing, conflicts, engine_error);
 }
 
 /// Run one known-folder backup mirror pass (task 0797, Windows). Reads the
@@ -378,3 +397,17 @@ pub(super) async fn sweep_auto_resolutions(app: &AppHandle, bridge: &Arc<EngineB
 // per-file emit calls from engine_bridge.rs.
 #[allow(dead_code)]
 pub(super) fn _unused_path(_p: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The old `paused` branches, one row per boolean: the mode says the same thing.
+    #[test]
+    fn run_mode_maps_the_pause_flag_table_driven() {
+        for (paused, mode) in [(false, RunMode::Running), (true, RunMode::Paused)] {
+            assert_eq!(RunMode::of_flag(paused), mode, "paused = {paused}");
+            assert_eq!(mode.is_paused(), paused, "paused = {paused}");
+        }
+    }
+}

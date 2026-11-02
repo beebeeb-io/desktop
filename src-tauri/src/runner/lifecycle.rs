@@ -65,11 +65,11 @@ impl SendPhaseLink {
 /// `Instant`.)
 pub(crate) fn phase_step_due(
     armed: bool,
-    paused: bool,
+    mode: RunMode,
     last_run: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> bool {
-    armed && !paused && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+    armed && !mode.is_paused() && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
 }
 
 /// What woke the runner's loop (spec 2026-10-10 §6.2).

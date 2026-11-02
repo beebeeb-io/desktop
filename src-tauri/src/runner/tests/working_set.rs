@@ -277,7 +277,7 @@ use super::*;
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
         let call = at("signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);");
         assert!(
-            at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, false, true)"),
+            at("\"sync tick failed\"") < call && call < at("refresh_status_ui_snapshot(&db, RunMode::Running, true)"),
             "in the failed tick's arm"
         );
     }
@@ -294,14 +294,14 @@ use super::*;
         let mut runs = 0;
         for tenth in 0..=600u64 {
             let now = start + std::time::Duration::from_millis(tenth * 100);
-            if phase_step_due(true, false, last, now) {
+            if phase_step_due(true, RunMode::Running, last, now) {
                 runs += 1;
                 last = Some(now);
             }
         }
         assert!((60..=61).contains(&runs), "{runs} runs in 60 s");
-        assert!(!phase_step_due(true, true, None, start), "not while paused");
-        assert!(!phase_step_due(false, false, None, start), "never once disarmed");
+        assert!(!phase_step_due(true, RunMode::Paused, None, start), "not while paused");
+        assert!(!phase_step_due(false, RunMode::Running, None, start), "never once disarmed");
         let source = include_str!("../../runner.rs").replace("\r\n", "\n");
         let arm = &source[source.find("Wake::Phase => {").expect("the phase's arm")..];
         let arm = &arm[..arm.find("\n            }\n").unwrap()];
@@ -350,7 +350,7 @@ use super::*;
         // §6.2: the arm skips its step while sync is paused, as the tick does: it reads the runner's own pause flag.
         assert!(
             squeeze(arm).contains(&squeeze(
-                "phase_step_due(send_phase.is_armed(), sync_paused.load(Ordering::Relaxed), last_phase_run, now)"
+                "phase_step_due(send_phase.is_armed(), RunMode::of_flag(sync_paused.load(Ordering::Relaxed)), last_phase_run, now)"
             )),
             "the arm reads the pause flag the tick reads:\n{arm}"
         );
