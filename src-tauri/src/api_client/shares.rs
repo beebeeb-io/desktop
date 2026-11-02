@@ -129,17 +129,6 @@ impl ApiClient {
         Ok(out)
     }
 
-    pub async fn folder_members(&self, folder_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.folder_members_url(FolderId::new(folder_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
-    }
-
     pub async fn get_folder_keys(&self, invite_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client

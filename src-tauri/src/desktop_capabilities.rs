@@ -43,6 +43,9 @@ pub enum InstallFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateFormat {
+    /// The frontend's `update_format` union names it (`src/capabilities.tsx`) and the tests read that name; no Rust
+    /// path produces it, because a Mac downloads an update and never installs one in place (task 2176, ruling 5).
+    #[allow(dead_code)]
     AppBundle,
     /// A sandboxed Mac: the App Sandbox denies replacing the running bundle, so an update is downloaded, never installed
     /// in place (task 2176; two-surface spec §0 ruling 5).

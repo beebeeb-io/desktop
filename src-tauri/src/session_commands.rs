@@ -49,6 +49,8 @@ impl SessionCommands {
             .map(|_| ())
             .ok_or_else(|| "Session changed while starting sync".into())
     }
+    /// Windows only: the Windows startup restore asks it before it takes the transition lock.
+    #[cfg(target_os = "windows")]
     pub fn startup_restore_allowed(&self) -> bool {
         self.next.load(Ordering::SeqCst) == 1 && !self.pending.load(Ordering::SeqCst)
     }

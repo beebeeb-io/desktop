@@ -40,32 +40,31 @@
 use serde::{Deserialize, Serialize};
 
 mod profile;
-use profile::*;
-pub use profile::{AccountAccess, AccountProfile, Subscription, BillingUsage};
+pub use profile::{AccountProfile, Subscription, BillingUsage};
+/// Tests only: the profile tests pin the impersonation enum's variants.
+#[cfg(test)]
+pub use profile::AccountAccess;
 
 mod region;
-use region::*;
-pub use region::{RegionInfo, StorageChoice, UserRegionResponse, SetPreferredRegionResponse};
+pub use region::{UserRegionResponse, SetPreferredRegionResponse};
 
 mod activity;
-use activity::*;
-pub use activity::{AccountActivityEvent, AccountActivitySummary, AccountActivity, SecurityFactor, SecurityScore};
+pub use activity::{AccountActivity, SecurityScore};
 
 mod sessions;
-use sessions::*;
-pub use sessions::{AccountSession, AccountSessionList, RevokeAllResult, ClientDevice, ClientDeviceList, ClientSyncSession, ClientSyncSessionList};
+pub use sessions::{AccountSessionList, RevokeAllResult, ClientDeviceList, ClientSyncSessionList};
 
 mod notifications;
-use notifications::*;
-pub use notifications::{ActivityFeedEvent, ActivityFeed, Notification, NotificationList, NotificationPreferenceValues, NotificationPreferences, NotificationPreferencesUpdate};
+pub use notifications::{ActivityFeedEvent, ActivityFeed, NotificationList, NotificationPreferences, NotificationPreferencesUpdate};
 
 mod storage;
-use storage::*;
-pub use storage::{StorageCategory, StorageCategoryTotal, LargestFile, StorageBreakdown, BreakdownInput, compute_storage_breakdown};
+pub use storage::{StorageBreakdown, BreakdownInput, compute_storage_breakdown};
+/// Tests only: the storage tests classify extensions against the category enum.
+#[cfg(test)]
+pub use storage::StorageCategory;
 
 mod overview;
-use overview::*;
-pub use overview::{StatusBucket, RecentFile, FileOverview, FileOverviewInput, FileOverviewActivityInput, DesktopTrashItem, ConfirmActionResult, compute_file_overview};
+pub use overview::{RecentFile, FileOverview, FileOverviewInput, FileOverviewActivityInput, DesktopTrashItem, ConfirmActionResult, compute_file_overview};
 
 #[cfg(test)]
 mod tests {

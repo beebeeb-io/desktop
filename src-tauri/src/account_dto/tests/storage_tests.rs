@@ -4,6 +4,7 @@
 //! largest-file selection.
 
 use super::*;
+use crate::account_dto::storage::extension_of;
 
     #[test]
     fn storage_category_classifies_by_extension() {

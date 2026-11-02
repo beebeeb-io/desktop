@@ -50,7 +50,10 @@ pub use ids::{FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, Versi
 
 mod types;
 use types::*;
-pub use types::{ListFilesScope, SyncSnapshot, SyncOp, SyncOps, DesktopUploadInitRequest, DesktopUploadInitResponse, STALE_BASE_MESSAGE, IN_PROGRESS_MESSAGE, InitConflictClass, classify_init_conflict, InitConflict, UploadRefusalCode, UploadRefused, UploadChunkResponse, ParentChange, SearchShardRef, MAX_SEARCH_SHARD_BLOB_BYTES, RegisteredDevice, CreatedSession, HeartbeatBody};
+pub use types::{ListFilesScope, SyncSnapshot, SyncOp, SyncOps, DesktopUploadInitRequest, DesktopUploadInitResponse, InitConflictClass, classify_init_conflict, InitConflict, UploadRefusalCode, UploadRefused, UploadChunkResponse, ParentChange, SearchShardRef, MAX_SEARCH_SHARD_BLOB_BYTES, RegisteredDevice, CreatedSession, HeartbeatBody};
+/// Tests only: the engine's tests provoke and pin the server's two 409 init messages by name.
+#[cfg(test)]
+pub use types::{IN_PROGRESS_MESSAGE, STALE_BASE_MESSAGE};
 pub(crate) use types::{UpgradeRequired, upgrade_required, custody_unavailable};
 
 mod client;

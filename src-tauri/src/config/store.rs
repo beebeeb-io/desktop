@@ -8,6 +8,8 @@
 //! Tests: `crate::config::tests`.
 
 use super::*;
+use super::lock::config_write_guard;
+use super::paths::{APP_CONFIG_DIR, CONFIG_FILENAME};
 
 /// Which OS a load is for, named so both branches run on any test host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

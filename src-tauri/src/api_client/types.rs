@@ -59,6 +59,9 @@ pub struct SyncOp {
 }
 
 /// `GET /api/v1/sync/ops?since={n}` response.
+// The wire shape stays whole: every field the server sends keeps its name, and
+// the client reads only what it acts on (`since` is an echo it does not need).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SyncOps {
     #[serde(default)]
@@ -89,6 +92,9 @@ pub struct DesktopUploadInitRequest {
     pub base_version_number: Option<i32>,
 }
 
+// The wire shape stays whole: tenant, pool, format version and region describe
+// where the server put the object; the upload client needs none of them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct DesktopUploadInitResponse {
     pub file_id: String,
@@ -230,6 +236,9 @@ impl std::fmt::Display for InitConflict {
 
 impl std::error::Error for InitConflict {}
 
+// The wire shape stays whole: index, size and skipped are the server's echo of
+// a chunk it accepted; the caller only needs the success.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadChunkResponse {
     pub index: u32,
@@ -309,6 +318,9 @@ pub const MAX_SEARCH_SHARD_BLOB_BYTES: usize = 160 * 1024;
 // `client_sync_sessions` GETs above) is what the BandwidthView polls. Server
 // contract: `repos/server/.../routes/clients.rs` under `/api/v1/clients`.
 
+// The wire shape stays whole: hostname, platform and bb_version are captured so
+// a caller could surface the device row; nothing reads them today.
+#[allow(dead_code)]
 pub struct RegisteredDevice {
     pub id: String,
     #[serde(default)]

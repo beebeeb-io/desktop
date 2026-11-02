@@ -37,21 +37,14 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use error::*;
-use lock::*;
-use paths::*;
-use settings::*;
-use store::*;
-use types::*;
-
 pub(crate) use error::ConfigError;
 pub(crate) use lock::{HeldConfig, UpdateError};
 pub use paths::{default_sync_root_suggestion, ensure_directory};
 pub use settings::DesktopSettings;
+#[cfg(test)]
 pub(crate) use settings::KnownFolderBackup;
-pub(crate) use store::{ConfigFs, ConfigHost, RealConfigFs};
+pub(crate) use store::ConfigFs;
+#[cfg(test)]
+pub(crate) use store::{ConfigHost, RealConfigFs};
 pub(crate) use types::ConfigMode;
-pub use types::{
-    DEFAULT_LOCAL_CACHE_LIMIT_BYTES, DesktopConfig, DesktopTheme, LOCAL_CACHE_LIMIT_100_GB_BYTES, LOCAL_CACHE_LIMIT_GB,
-    ReleaseChannel,
-};
+pub use types::{DesktopConfig, DesktopTheme, LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel};
