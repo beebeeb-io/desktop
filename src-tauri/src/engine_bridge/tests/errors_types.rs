@@ -183,3 +183,9 @@ fn content_kind_keeps_a_binary_side_to_its_size() {
     assert_eq!(ContentKind::from_flag(true), ContentKind::Text);
     assert!(!ContentKind::from_flag(false).is_text());
 }
+
+#[test]
+fn pin_toggle_reads_the_command_flag() {
+    assert!(PinToggle::from_flag(true).is_pin());
+    assert!(!PinToggle::from_flag(false).is_pin());
+}

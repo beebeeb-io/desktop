@@ -127,7 +127,12 @@ impl EngineBridge {
         Ok(op)
     }
 
-    pub(super) fn enqueue_pin_tree_operation(&self, file_id: &str, pinned: bool, now: i64) -> anyhow::Result<()> {
+    pub(super) fn enqueue_pin_tree_operation(
+        &self,
+        file_id: &str,
+        toggle: PinToggle,
+        now: i64,
+    ) -> anyhow::Result<()> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),
             kind: OperationKind::PinTree,
@@ -137,7 +142,7 @@ impl EngineBridge {
             metadata_json: Some(
                 serde_json::json!({
                     "operation": Op::PinTree.as_str(),
-                    "pinned": pinned,
+                    "pinned": toggle.is_pin(),
                 })
                 .to_string(),
             ),

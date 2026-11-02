@@ -178,6 +178,28 @@ pub struct TransferLoopOutcome {
     pub account_refused: bool,
 }
 
+/// The two states a pin toggle can ask for. The Tauri command still takes a
+/// flag; naming it here keeps `true` from having to stand for "pin".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PinToggle {
+    Pin,
+    Unpin,
+}
+
+impl PinToggle {
+    pub(super) fn from_flag(pinned: bool) -> Self {
+        if pinned {
+            PinToggle::Pin
+        } else {
+            PinToggle::Unpin
+        }
+    }
+
+    pub(super) fn is_pin(self) -> bool {
+        matches!(self, PinToggle::Pin)
+    }
+}
+
 /// The due work of one pass, in due order. It lists again only after a folder create of the pass landed (D7), at most
 /// `DUE_LISTINGS_PER_PASS` times in all, and an op listed earlier in the pass is not run again in it.
 pub(super) struct DueOperations {
