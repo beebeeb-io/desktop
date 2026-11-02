@@ -26,6 +26,8 @@ version AND the workflow run green AND the manifest resolving: three counts, not
 
 ## Module map
 
+Module map: `MAP.md` (generated; `make map REPO=desktop`) — start here for "where does X live"; do not hand-edit.
+
 ```
 src/main.tsx, MacApp.tsx, PopoverApp.tsx   frontend roots: Windows/Linux windows, the Mac `main` window, the menu-bar popover
 src/*Model.ts, *Copy.ts, signInFlowStore.ts   pure view models and copy (macCopyGuard scans every person-facing string)
