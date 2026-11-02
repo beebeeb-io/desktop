@@ -2,15 +2,86 @@
 
 use super::*;
 
-/// Compose the per-account credential leaf from an optional prefix.
+/// One account's id (the runner's `account.id`), used only as a path segment of
+/// the credential item names. It carries no secret: the leaves do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountId(String);
+
+impl AccountId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl From<&str> for AccountId {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<String> for AccountId {
+    fn from(id: String) -> Self {
+        Self::new(id)
+    }
+}
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for AccountId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The three secret leaves a store holds per account. Each has ONE wire name;
+/// the platform stores only ever see `leaf()`, so a typo cannot mint a fourth
+/// item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeychainAccount {
+    SessionToken,
+    WrappedMasterKey,
+    /// Account email (PII) persisted alongside the session so the Account page
+    /// can show it after an auto-unlock on relaunch — the credential store is
+    /// the only place it survives, since neither the token nor the wrapped key
+    /// carries it. Stored in the SAME protected vault as the secrets (NOT a
+    /// plaintext config file): account metadata, not key material, so it is a
+    /// plain UTF-8 string rather than `SecretBytes`.
+    AccountEmail,
+}
+
+impl KeychainAccount {
+    #[cfg(test)]
+    pub const ALL: [Self; 3] = [Self::SessionToken, Self::WrappedMasterKey, Self::AccountEmail];
+
+    pub const fn leaf(self) -> &'static str {
+        match self {
+            Self::SessionToken => "session-token",
+            Self::WrappedMasterKey => "wrapped-master-key",
+            Self::AccountEmail => "account-email",
+        }
+    }
+
+    #[cfg(test)]
+    pub fn from_leaf(leaf: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|account| account.leaf() == leaf)
+    }
+}
+
+/// Compose the per-account credential leaf.
 ///
 /// `Some(id)` → `"<id>/<leaf>"` (segmented, Phase 1); `None` → bare `leaf`
 /// (legacy, pre-Phase-1 layout). Shared by every concrete store so the
 /// composition rule lives in exactly one place.
-pub(super) fn account_path(prefix: Option<&str>, leaf: &str) -> String {
+pub(super) fn account_path(prefix: Option<&AccountId>, account: KeychainAccount) -> String {
     match prefix {
-        Some(id) => format!("{id}/{leaf}"),
-        None => leaf.to_string(),
+        Some(id) => format!("{id}/{}", account.leaf()),
+        None => account.leaf().to_string(),
     }
 }
 
@@ -42,4 +113,47 @@ pub fn platform_keychain_store_for(account_id: &str) -> PlatformKeychainStore {
 /// `platform_keychain_store_for` exclusively.
 pub fn legacy_platform_keychain_store() -> PlatformKeychainStore {
     PlatformKeychainStore::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three secret leaves are the wire names the platform stores use; a
+    /// fourth name cannot appear and a leaf round-trips to exactly one account.
+    #[test]
+    fn keychain_account_names_every_service_leaf_once() {
+        let mut leaves = Vec::new();
+        for account in KeychainAccount::ALL {
+            // Exhaustive on purpose: a new variant must decide its wire name here.
+            let leaf = match account {
+                KeychainAccount::SessionToken => "session-token",
+                KeychainAccount::WrappedMasterKey => "wrapped-master-key",
+                KeychainAccount::AccountEmail => "account-email",
+            };
+            assert_eq!(account.leaf(), leaf);
+            assert_eq!(KeychainAccount::from_leaf(leaf), Some(account));
+            leaves.push(leaf);
+        }
+        assert_eq!(leaves, ["session-token", "wrapped-master-key", "account-email"]);
+        assert_eq!(KeychainAccount::from_leaf("master-key"), None);
+    }
+
+    /// The account id segments the leaf (`<id>/<leaf>`); without one the leaf
+    /// keeps the legacy flat name, so an upgrade reads the entries it wrote.
+    #[test]
+    fn account_id_segments_every_leaf_and_legacy_stays_flat() {
+        let id = AccountId::new("acct-uuid-0001");
+        assert_eq!(
+            account_path(Some(&id), KeychainAccount::SessionToken),
+            "acct-uuid-0001/session-token"
+        );
+        assert_eq!(
+            account_path(Some(&id), KeychainAccount::AccountEmail),
+            "acct-uuid-0001/account-email"
+        );
+        for account in KeychainAccount::ALL {
+            assert_eq!(account_path(None, account), account.leaf());
+        }
+    }
 }

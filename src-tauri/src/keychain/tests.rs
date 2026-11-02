@@ -183,7 +183,7 @@ mod tests {
     /// keys in the same namespace.
     struct KeyedMemoryStore {
         vault: SharedVault,
-        prefix: Option<String>,
+        prefix: Option<AccountId>,
     }
 
     impl KeyedMemoryStore {
@@ -193,18 +193,18 @@ mod tests {
         fn with_account(vault: SharedVault, id: &str) -> Self {
             Self {
                 vault,
-                prefix: Some(id.to_string()),
+                prefix: Some(AccountId::from(id)),
             }
         }
-        fn key(&self, leaf: &str) -> String {
-            account_path(self.prefix.as_deref(), leaf)
+        fn key(&self, account: KeychainAccount) -> String {
+            account_path(self.prefix.as_ref(), account)
         }
     }
 
     impl AuthSecretStore for KeyedMemoryStore {
         fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
             self.vault.lock().unwrap().insert(
-                self.key(SESSION_TOKEN_ACCOUNT),
+                self.key(KeychainAccount::SessionToken),
                 token.expose_for_request().as_bytes().to_vec(),
             );
             Ok(())
@@ -213,18 +213,18 @@ mod tests {
             self.vault
                 .lock()
                 .unwrap()
-                .get(&self.key(SESSION_TOKEN_ACCOUNT))
+                .get(&self.key(KeychainAccount::SessionToken))
                 .cloned()
                 .map(|bytes| SessionToken::new(String::from_utf8(bytes).unwrap()))
                 .transpose()
         }
         fn delete_session_token(&self) -> AuthResult<()> {
-            self.vault.lock().unwrap().remove(&self.key(SESSION_TOKEN_ACCOUNT));
+            self.vault.lock().unwrap().remove(&self.key(KeychainAccount::SessionToken));
             Ok(())
         }
         fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
             self.vault.lock().unwrap().insert(
-                self.key(WRAPPED_MASTER_KEY_ACCOUNT),
+                self.key(KeychainAccount::WrappedMasterKey),
                 wrapped.expose_for_crypto().to_vec(),
             );
             Ok(())
@@ -233,20 +233,20 @@ mod tests {
             self.vault
                 .lock()
                 .unwrap()
-                .get(&self.key(WRAPPED_MASTER_KEY_ACCOUNT))
+                .get(&self.key(KeychainAccount::WrappedMasterKey))
                 .cloned()
                 .map(SecretBytes::new)
                 .transpose()
         }
         fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-            self.vault.lock().unwrap().remove(&self.key(WRAPPED_MASTER_KEY_ACCOUNT));
+            self.vault.lock().unwrap().remove(&self.key(KeychainAccount::WrappedMasterKey));
             Ok(())
         }
         fn save_account_email(&self, email: &str) -> AuthResult<()> {
             self.vault
                 .lock()
                 .unwrap()
-                .insert(self.key(ACCOUNT_EMAIL_ACCOUNT), email.as_bytes().to_vec());
+                .insert(self.key(KeychainAccount::AccountEmail), email.as_bytes().to_vec());
             Ok(())
         }
         fn load_account_email(&self) -> AuthResult<Option<String>> {
@@ -254,11 +254,11 @@ mod tests {
                 .vault
                 .lock()
                 .unwrap()
-                .get(&self.key(ACCOUNT_EMAIL_ACCOUNT))
+                .get(&self.key(KeychainAccount::AccountEmail))
                 .map(|bytes| String::from_utf8(bytes.clone()).unwrap()))
         }
         fn delete_account_email(&self) -> AuthResult<()> {
-            self.vault.lock().unwrap().remove(&self.key(ACCOUNT_EMAIL_ACCOUNT));
+            self.vault.lock().unwrap().remove(&self.key(KeychainAccount::AccountEmail));
             Ok(())
         }
     }
@@ -316,9 +316,9 @@ mod tests {
 
     fn legacy_present(vault: &SharedVault) -> bool {
         let m = vault.lock().unwrap();
-        m.contains_key(SESSION_TOKEN_ACCOUNT)
-            || m.contains_key(WRAPPED_MASTER_KEY_ACCOUNT)
-            || m.contains_key(ACCOUNT_EMAIL_ACCOUNT)
+        KeychainAccount::ALL
+            .into_iter()
+            .any(|account| m.contains_key(account.leaf()))
     }
 
     /// Happy path: a full legacy trio migrates into the segmented layout, the
