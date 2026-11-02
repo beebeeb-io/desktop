@@ -27,7 +27,10 @@ use results::*;
 use types::*;
 
 pub use decide::{next_op, step};
-pub use types::{Trigger, Wanted, SessionFacts, wanted, DomainState, Observation, Op, OpResult, Input, Transition, Effect, Next, CoreState};
+pub use types::{Trigger, Wanted, wanted, DomainState, Observation, Op, OpResult, Input, Transition, Effect, Next, CoreState};
+// Built by the macOS ports and read by this module's own tests.
+#[cfg(any(test, target_os = "macos"))]
+pub use types::SessionFacts;
 
 #[cfg(test)]
 mod tests {

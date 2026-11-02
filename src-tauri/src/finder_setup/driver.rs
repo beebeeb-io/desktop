@@ -32,19 +32,30 @@ mod limits;
 mod ports;
 mod state;
 
-use check::*;
+// Feeds the test module's `use super::*` (the "Copy details" text builders).
+#[cfg(test)]
 use details::*;
-use handle::*;
-use limits::*;
-use ports::*;
-use state::*;
 
-pub use check::{spawn, start};
+// The re-exports below are the surface; nothing else in this file uses the children directly.
 pub use details::copy_details;
-pub use handle::{Event, FinderSetupHandle, NOT_RUNNING, RemoveAnswer};
+pub use handle::{Event, FinderSetupHandle, RemoveAnswer};
+pub use ports::{Clock, Ports};
+pub use state::FinderSetupView;
+// Started and asked about only by the macOS reconciler wiring (`lib.rs`).
+#[cfg(target_os = "macos")]
+pub use check::spawn;
+#[cfg(target_os = "macos")]
+pub use handle::NOT_RUNNING;
+#[cfg(target_os = "macos")]
+pub use state::FINDER_SETUP_CHANGED_EVENT;
+// `op_limit`/`within` time the macOS ports and are read by the driver's tests.
+#[cfg(any(test, target_os = "macos"))]
 pub use limits::{op_limit, within};
-pub use ports::{Clock, Ports, SystemClock};
-pub use state::{FINDER_SETUP_CHANGED_EVENT, FinderSetupView};
+#[cfg(target_os = "macos")]
+pub use ports::SystemClock;
+// `start` builds the task in the driver's own tests.
+#[cfg(test)]
+pub use check::start;
 
 #[cfg(test)]
 mod tests {

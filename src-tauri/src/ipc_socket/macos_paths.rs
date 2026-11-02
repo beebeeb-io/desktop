@@ -1,5 +1,6 @@
 //! `macos_paths` items split out of `ipc_socket.rs`.
 
+#[cfg(target_os = "macos")]
 use super::*;
 
 /// Resolve the daemon's IPC socket path inside the macOS shared App Group
