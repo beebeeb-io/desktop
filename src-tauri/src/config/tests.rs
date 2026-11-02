@@ -6,10 +6,10 @@
 //! Tests only: no production item lives in this file.
 
     use super::{
-        DesktopConfig, DesktopSettings, DesktopTheme, HeldConfig, ReleaseChannel, UpdateError,
-        default_sync_root_suggestion,
+        ConfigError, ConfigHost, ConfigMode, DesktopConfig, DesktopSettings, DesktopTheme, HeldConfig,
+        KnownFolderBackup, ReleaseChannel, UpdateError, default_sync_root_suggestion,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     // ── Task 0800 — multi-account Phase 1: persisted account id ────────────
 
@@ -554,7 +554,7 @@
         assert!(!path.exists(), "nothing was written");
         // `update_at` says the same thing as a string.
         let as_string = DesktopConfig::update_at(&path, |_| (true, ()));
-        assert_eq!(as_string, Err(write.expect_err("failed").into_message()));
+        assert_eq!(as_string, Err(write.expect_err("failed").into_error().to_string()));
     }
 
     // ── Task 1889 fix round 1 (M5) — a settings write carries only the fields that changed ──────────────
@@ -709,8 +709,8 @@ at = 1791291909
         let mut elsewhere = on_macos.clone();
         let mut on_macos = on_macos;
 
-        on_macos.scrub_legacy_finder_error(true);
-        elsewhere.scrub_legacy_finder_error(false);
+        on_macos.scrub_legacy_finder_error(ConfigHost::MacOs);
+        elsewhere.scrub_legacy_finder_error(ConfigHost::Other);
 
         assert_eq!(on_macos.finder_install_last_error, None);
         assert_eq!(elsewhere.finder_install_last_error.as_deref(), Some(PATH_ERROR));
@@ -803,4 +803,185 @@ at = 1791291909
             sandboxed.starts_with(&exe_dir),
             "{sandboxed:?} is not inside the test binary's directory {exe_dir:?}"
         );
+    }
+
+    // ── D-P2-6 — typed error, sync mode and the two boolean flags ──────────
+
+    /// The message of every variant is the line main produced: lib.rs logs it,
+    /// and a command's String error is that same line.
+    #[test]
+    fn config_error_display_keeps_the_legacy_message_of_every_variant() {
+        let io = |text: &str| std::io::Error::new(std::io::ErrorKind::Other, text);
+        let path = Path::new("/tmp/desktop.toml");
+
+        let read = io("boom");
+        let expected = format!("read /tmp/desktop.toml: {read}");
+        let error = ConfigError::ReadFile {
+            path: path.to_path_buf(),
+            source: read,
+        };
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(String::from(error), expected, "a command sees the same line");
+
+        let create_dir = io("boom");
+        assert_eq!(
+            ConfigError::CreateConfigDirectory(create_dir).to_string(),
+            "create config dir: boom"
+        );
+        assert_eq!(
+            ConfigError::ConfigDirectoryUnknown.to_string(),
+            "could not determine user config directory"
+        );
+
+        let written = io("boom");
+        let expected = format!("write /tmp/desktop.toml: {written}");
+        assert_eq!(
+            ConfigError::WriteFile {
+                path: path.to_path_buf(),
+                source: written,
+            }
+            .to_string(),
+            expected
+        );
+
+        let chmod = io("boom");
+        let expected = format!("chmod /tmp/desktop.toml: {chmod}");
+        assert_eq!(
+            ConfigError::SetPermissions {
+                path: path.to_path_buf(),
+                source: chmod,
+            }
+            .to_string(),
+            expected
+        );
+
+        let rename = io("boom");
+        let expected = format!("rename /tmp/a.toml → /tmp/b.toml: {rename}");
+        assert_eq!(
+            ConfigError::Rename {
+                from: PathBuf::from("/tmp/a.toml"),
+                to: PathBuf::from("/tmp/b.toml"),
+                source: rename,
+            }
+            .to_string(),
+            expected
+        );
+
+        let flush = io("boom");
+        let expected = format!("flush /tmp/desktop.toml: {flush}");
+        assert_eq!(
+            ConfigError::Flush {
+                path: path.to_path_buf(),
+                source: flush,
+            }
+            .to_string(),
+            expected
+        );
+
+        assert_eq!(
+            ConfigError::MissingParentDirectory.to_string(),
+            "the config file has no directory"
+        );
+        assert_eq!(
+            ConfigError::NotADirectory(PathBuf::from("/tmp/x")).to_string(),
+            "/tmp/x exists but is not a directory"
+        );
+
+        let make = io("boom");
+        let expected = format!("create directory /tmp/x: {make}");
+        assert_eq!(
+            ConfigError::CreateDirectory {
+                path: PathBuf::from("/tmp/x"),
+                source: make,
+            }
+            .to_string(),
+            expected
+        );
+
+        let parse = toml::from_str::<DesktopConfig>("= this is not toml").expect_err("invalid toml");
+        let expected = format!("parse /tmp/desktop.toml: {parse}");
+        assert_eq!(
+            ConfigError::ParseFile {
+                path: path.to_path_buf(),
+                source: parse,
+            }
+            .to_string(),
+            expected
+        );
+
+        // A value TOML cannot serialize stands in for the write path's serializer failure.
+        let unrepresentable = std::collections::BTreeMap::from([(vec![1_u8], 2_u8)]);
+        let serialize =
+            toml::to_string_pretty(&unrepresentable).expect_err("a sequence key is not TOML");
+        assert!(
+            ConfigError::Serialize(serialize)
+                .to_string()
+                .starts_with("serialize: "),
+            "the serializer failure keeps its prefix"
+        );
+    }
+
+    /// The four stored mode strings parse to the enum, and any other value is
+    /// an error — never a silent default.
+    #[test]
+    fn config_mode_parses_the_four_stored_modes_and_refuses_an_unknown_one() {
+        for (raw, mode) in [
+            ("everything", ConfigMode::Everything),
+            ("smart", ConfigMode::Smart),
+            ("custom", ConfigMode::Custom),
+            ("online_only", ConfigMode::OnlineOnly),
+        ] {
+            assert_eq!(ConfigMode::parse(raw).expect("a known mode"), mode);
+        }
+        assert!(matches!(
+            ConfigMode::parse("turbo"),
+            Err(ConfigError::UnknownSyncMode(value)) if value == "turbo"
+        ));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("desktop.toml");
+        std::fs::write(&path, "sync_mode = \"turbo\"\n").expect("write");
+        assert!(
+            matches!(
+                DesktopConfig::load_from(&path),
+                Err(ConfigError::UnknownSyncMode(value)) if value == "turbo"
+            ),
+            "an unknown mode in the file is an error, not a default"
+        );
+    }
+
+    /// The known-folder setter reads as a sentence; the frozen lib.rs command
+    /// still sends its boolean, which means the same two states.
+    #[test]
+    fn known_folder_backup_names_the_two_states_and_reads_a_command_boolean() {
+        assert_eq!(KnownFolderBackup::from(true), KnownFolderBackup::Enabled);
+        assert_eq!(KnownFolderBackup::from(false), KnownFolderBackup::Disabled);
+
+        let mut cfg = DesktopConfig::default();
+        cfg.set_known_folder("documents", KnownFolderBackup::Enabled);
+        assert!(cfg.known_folder_enabled("documents"));
+        cfg.set_known_folder("documents", KnownFolderBackup::Disabled);
+        assert!(!cfg.known_folder_enabled("documents"));
+        cfg.set_known_folder("pictures", true);
+        assert!(cfg.known_folder_enabled("pictures"));
+    }
+
+    /// The scrub is the macOS-only migration; naming the host makes the branch
+    /// explicit and still runs both sides on any build host.
+    #[test]
+    fn config_host_says_whether_the_legacy_finder_error_is_scrubbed() {
+        let secret = Some("/Users/someone/Library/secret".to_string());
+        let mut on_macos = DesktopConfig {
+            finder_install_last_error: secret.clone(),
+            ..DesktopConfig::default()
+        };
+        on_macos.scrub_legacy_finder_error(ConfigHost::MacOs);
+        assert_eq!(on_macos.finder_install_last_error, None);
+
+        let mut elsewhere = DesktopConfig {
+            finder_install_last_error: secret.clone(),
+            ..DesktopConfig::default()
+        };
+        elsewhere.scrub_legacy_finder_error(ConfigHost::Other);
+        assert_eq!(elsewhere.finder_install_last_error, secret);
     }
