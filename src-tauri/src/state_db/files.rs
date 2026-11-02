@@ -112,9 +112,10 @@ impl StateDb {
         rows.collect()
     }
     /// Task 2191: a "not in sync" mark of `file_id` is still to be made (`true`) or done.
-    pub fn set_mark_pending(&self, file_id: &str, pending: bool) -> Result<()> {
+    pub fn set_mark_pending(&self, file_id: &str, pending: impl Into<MarkPending>) -> Result<()> {
+        let pending: MarkPending = pending.into();
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        if pending {
+        if pending.as_bool() {
             conn.execute(
                 "INSERT INTO unknown_checks(file_id, mark_pending, updated_at)
                  VALUES (?1, 1, CAST(strftime('%s', 'now') AS INTEGER))
@@ -185,13 +186,14 @@ impl StateDb {
     }
     /// Task 2191 (D12): record a placeholder at `path` whose identity is `file_id`, a file of
     /// unknown content now at another path; `mark_pending` until its "not in sync" mark is made.
-    pub fn put_unknown_orphan(&self, path: &str, file_id: &str, mark_pending: bool) -> Result<()> {
+    pub fn put_unknown_orphan(&self, path: &str, file_id: &str, mark_pending: impl Into<MarkPending>) -> Result<()> {
+        let mark_pending: MarkPending = mark_pending.into();
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
             "INSERT INTO unknown_orphans(path, file_id, mark_pending, updated_at)
              VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER))
              ON CONFLICT(path) DO UPDATE SET file_id = ?2, mark_pending = ?3, updated_at = excluded.updated_at",
-            params![path, file_id, mark_pending],
+            params![path, file_id, mark_pending.as_bool()],
         )?;
         Ok(())
     }

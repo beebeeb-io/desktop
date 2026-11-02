@@ -243,8 +243,9 @@ impl StateDb {
         file_id: &str,
         node_version: i64,
         node_size: i64,
-        node_is_uploading: bool,
+        node_is_uploading: impl Into<SnapshotNodeState>,
     ) -> Result<SnapshotVersion> {
+        let node_is_uploading: SnapshotNodeState = node_is_uploading.into();
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(String, i64)> = tx
@@ -266,7 +267,7 @@ impl StateDb {
         if !fill && !raise {
             return Ok(SnapshotVersion::Unchanged);
         }
-        if node_is_uploading {
+        if node_is_uploading.as_bool() {
             // The clear at the end of this tick then matches no row: the request stays.
             Self::request_resnapshot_conn(&tx)?;
             tx.commit()?;

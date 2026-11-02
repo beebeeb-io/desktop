@@ -303,7 +303,9 @@ use super::*;
     fn a_landing_rekeys_a_mixed_pair_but_never_rebases_across_it() {
         let dir = tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
-        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+        let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+            Ok(op.metadata_json.clone())
+        };
         let landing = |op_id: &'static str, claim_id: &'static str, write_id: Option<&'static str>| LandingInput {
             op_id,
             claim_id: Some(claim_id),
@@ -489,7 +491,9 @@ use super::*;
             finalization: Some(&finalization),
             now: 20,
         };
-        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+        let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+            Ok(op.metadata_json.clone())
+        };
         db.apply_landing(&input, &rekey).unwrap().expect("the claim holds");
         let landed = db.get_file("server").unwrap().unwrap();
         assert_eq!(landed.path, "docs/b.txt", "the row stays where the file is");
@@ -575,7 +579,9 @@ use super::*;
             finalization: Some(&finalization),
             now: 20,
         };
-        let rekey = |op: &PendingOperation, _: &str| -> anyhow::Result<Option<String>> { Ok(op.metadata_json.clone()) };
+        let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+            Ok(op.metadata_json.clone())
+        };
 
         assert!(db.apply_landing(&input, &rekey).is_err(), "the journal write fails");
         assert!(
