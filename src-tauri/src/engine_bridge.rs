@@ -5656,10 +5656,84 @@ impl std::fmt::Display for FinderStagingUnavailable {
 
 impl std::error::Error for FinderStagingUnavailable {}
 
+/// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
+/// covering the requested range, plus enough context for the caller to splice
+/// out the exact `[required_offset, required_offset + required_length)` span.
+#[cfg(any(target_os = "windows", test))]
+pub struct HydratedRange {
+    /// Decrypted plaintext for chunks `[first_chunk, last_chunk]` — i.e. the
+    /// smallest chunk-aligned span that covers the requested byte range. This
+    /// is NOT necessarily aligned to the requested range itself; the caller
+    /// must slice `data[required_offset - range_start_bytes ..]`.
+    pub data: Zeroizing<Vec<u8>>,
+    /// Absolute byte offset (into the full file) of `data[0]` — i.e.
+    /// `first_chunk * chunk_size_bytes`.
+    pub range_start_bytes: u64,
+    /// `true` when `data` happens to cover the ENTIRE file (the covering-chunk
+    /// range was `[0, chunk_count)`). Only then is a range hydration equivalent
+    /// to a whole-file hydration for status-bookkeeping / resolve-or-error
+    /// purposes.
+    pub covers_whole_file: bool,
+}
+
+/// Test-only hooks at named points where the concurrency tests force an
+/// interleaving (spec §13, "Concurrency tests"). Each hook fires once.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Seams {
+    hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
+    /// Staging bases this bridge uses instead of the process's (`stage_under`, macOS tests).
+    staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
+    /// The download transport this bridge uses (task 2173). Unset: `Auto`, so a test never reads
+    /// the developer's `BB_TRANSPORT` or `desktop.toml`.
+    transport: std::sync::Mutex<Option<crate::direct_download::Transport>>,
+    /// Every direct storage fetch fails with this status, without a request (task 2173).
+    storage_fail: std::sync::Mutex<Option<u16>>,
+}
+
+#[cfg(test)]
+type SeamHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+impl Seams {
+    pub(crate) fn arm(&self, name: &'static str, hook: impl FnOnce() + Send + 'static) {
+        self.hooks.lock().unwrap().insert(name, Box::new(hook));
+    }
+
+    fn fire(&self, name: &'static str) {
+        // Taken out first: the hook runs without the map's lock held.
+        let hook = self.hooks.lock().unwrap().remove(name);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// From now on this bridge stages Finder writes under `bases`, not the test sandbox.
+    /// macOS only: its one caller is the macOS staging-folder test.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stage_under(&self, bases: FinderStagingBases) {
+        *self.staging_bases.lock().unwrap() = Some(bases);
+    }
+
+    fn staging_bases(&self) -> Option<FinderStagingBases> {
+        self.staging_bases.lock().unwrap().clone()
+    }
+
+    /// From now on this bridge downloads with `transport` (task 2173).
+    pub(crate) fn use_transport(&self, transport: crate::direct_download::Transport) {
+        *self.transport.lock().unwrap() = Some(transport);
+    }
+
+    /// From now on every direct storage fetch of this bridge fails with `status` (task 2173).
+    pub(crate) fn fail_storage(&self, status: u16) {
+        *self.storage_fail.lock().unwrap() = Some(status);
+    }
+}
+
 mod types;
 use types::*;
 pub use types::{WireCounters, FileEvent, FileSM, FpWrite, CachePolicy, PinUpdateOutcome, CacheCleanupOutcome, TransferLoopOutcome, ConflictContentSide, ParkedChoice, ParkedResolution, ConflictContentPreview, FetchedVersion, FetchedBytes, FetchTicket, name_opens, ConflictDetected, SyncTickOutcome};
-pub(crate) use types::{Seams, NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_SETTLE_SECS, OpDone, LocalEntry, PrunedEntry};
+pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_SETTLE_SECS, OpDone, LocalEntry, PrunedEntry};
 
 mod errors;
 use errors::*;
@@ -5679,7 +5753,7 @@ pub(crate) use fs::{path_is_engine_internal, relative_db_path, LocalPathVerdict,
 
 mod meta;
 use meta::*;
-pub use meta::{HydrateSource, SharedRootRefreshOutcome, HydratedRange};
+pub use meta::{HydrateSource, SharedRootRefreshOutcome};
 pub(crate) use meta::{wire_id_fields, promote_fetched_content, HydrateProgressFn, hydrate_final_status, hydrate_dest_is_allowed, write_hydrated_plaintext, write_hydrated_from_reader, item_content_version, item_version_identifier};
 
 mod meta_2;

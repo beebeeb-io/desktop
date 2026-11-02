@@ -83,60 +83,6 @@ impl FileSM {
     }
 }
 
-/// Test-only hooks at named points where the concurrency tests force an
-/// interleaving (spec §13, "Concurrency tests"). Each hook fires once.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct Seams {
-    pub(super) hooks: std::sync::Mutex<HashMap<&'static str, SeamHook>>,
-    /// Staging bases this bridge uses instead of the process's (`stage_under`, macOS tests).
-    pub(super) staging_bases: std::sync::Mutex<Option<FinderStagingBases>>,
-    /// The download transport this bridge uses (task 2173). Unset: `Auto`, so a test never reads
-    /// the developer's `BB_TRANSPORT` or `desktop.toml`.
-    pub(super) transport: std::sync::Mutex<Option<crate::direct_download::Transport>>,
-    /// Every direct storage fetch fails with this status, without a request (task 2173).
-    pub(super) storage_fail: std::sync::Mutex<Option<u16>>,
-}
-
-#[cfg(test)]
-pub(super) type SeamHook = Box<dyn FnOnce() + Send>;
-
-#[cfg(test)]
-impl Seams {
-    pub(crate) fn arm(&self, name: &'static str, hook: impl FnOnce() + Send + 'static) {
-        self.hooks.lock().unwrap().insert(name, Box::new(hook));
-    }
-
-    pub(super) fn fire(&self, name: &'static str) {
-        // Taken out first: the hook runs without the map's lock held.
-        let hook = self.hooks.lock().unwrap().remove(name);
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    /// From now on this bridge stages Finder writes under `bases`, not the test sandbox.
-    /// macOS only: its one caller is the macOS staging-folder test.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn stage_under(&self, bases: FinderStagingBases) {
-        *self.staging_bases.lock().unwrap() = Some(bases);
-    }
-
-    pub(super) fn staging_bases(&self) -> Option<FinderStagingBases> {
-        self.staging_bases.lock().unwrap().clone()
-    }
-
-    /// From now on this bridge downloads with `transport` (task 2173).
-    pub(crate) fn use_transport(&self, transport: crate::direct_download::Transport) {
-        *self.transport.lock().unwrap() = Some(transport);
-    }
-
-    /// From now on every direct storage fetch of this bridge fails with `status` (task 2173).
-    pub(crate) fn fail_storage(&self, status: u16) {
-        *self.storage_fail.lock().unwrap() = Some(status);
-    }
-}
-
 /// A File Provider write's outcome, with the token its reply names (spec §5) and, for a
 /// write under a provisional id whose create has landed, the identifier the reply is
 /// presented under: the system's own id for the item until it applies the swap (spec §7.2).

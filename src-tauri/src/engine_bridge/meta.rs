@@ -214,26 +214,6 @@ pub(super) fn metadata_display_name(metadata: &serde_json::Value, op: &PendingOp
         .or_else(|| op.target_path.as_deref().map(display_name_for_path))
 }
 
-/// The result of [`EngineBridge::hydrate_file_range`]: the decrypted plaintext
-/// covering the requested range, plus enough context for the caller to splice
-/// out the exact `[required_offset, required_offset + required_length)` span.
-#[cfg(any(target_os = "windows", test))]
-pub struct HydratedRange {
-    /// Decrypted plaintext for chunks `[first_chunk, last_chunk]` — i.e. the
-    /// smallest chunk-aligned span that covers the requested byte range. This
-    /// is NOT necessarily aligned to the requested range itself; the caller
-    /// must slice `data[required_offset - range_start_bytes ..]`.
-    pub data: Zeroizing<Vec<u8>>,
-    /// Absolute byte offset (into the full file) of `data[0]` — i.e.
-    /// `first_chunk * chunk_size_bytes`.
-    pub range_start_bytes: u64,
-    /// `true` when `data` happens to cover the ENTIRE file (the covering-chunk
-    /// range was `[0, chunk_count)`). Only then is a range hydration equivalent
-    /// to a whole-file hydration for status-bookkeeping / resolve-or-error
-    /// purposes.
-    pub covers_whole_file: bool,
-}
-
 #[cfg(any(target_os = "windows", test))]
 pub(super) struct HydrationChunkRangePlan {
     pub(super) first_chunk: u32,
