@@ -1088,5 +1088,4 @@ use tick_loop::*;
 
 mod working_set_signal;
 use working_set_signal::*;
-pub use working_set_signal::{working_set_signal_needed};
 pub(crate) use working_set_signal::{owe_working_set_signal};
