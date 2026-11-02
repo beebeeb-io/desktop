@@ -29,85 +29,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 #[path = "reconcile_measure_tests.rs"]
 mod reconcile_measure_tests;
-
-
-
-
-
-
 
 #[cfg(test)]
 thread_local! {
@@ -116,75 +40,6 @@ thread_local! {
     /// runs on the test's own thread.
     static FAIL_LANDINGS: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
 #[cfg(any(target_os = "windows", test))]
@@ -249,280 +104,9 @@ pub(crate) fn fail_next_landings_as_locked_for_test(n: u32) {
 /// seconds and OS-extension callbacks are infrequent.
 pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
 
-impl StateDb {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-}
-mod ops;
-mod activity;
-mod cache;
-mod signout;
-mod test_hooks;
-mod removals;
-mod sync;
-mod landing;
-mod schema;
-mod custody;
-mod files;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests {
     mod open_and_cache;
-
-
 
     /// Task 2240: file rows in a fresh state.db, enough to fill several times SQLite's default page cache (about 300
     /// bytes each). The scan's lookups find them as `dir/<i>.txt`.
@@ -607,16 +191,6 @@ mod tests {
         );
     }
 
-
-
-
-
-
-
-
-
-
-
     mod signout_and_activity;
 
     fn finalization(op: &str) -> UploadFinalization {
@@ -630,14 +204,6 @@ mod tests {
             review: None,
         }
     }
-
-
-
-
-
-
-
-
 
     use super::*;
 
@@ -656,12 +222,7 @@ mod tests {
         }
     }
 
-
-
     use tempfile::tempdir;
-
-
-
 
     // ── transfer activity + backlog (task 1683 slice 2) ──────────────────────
 
@@ -697,40 +258,7 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
     mod files_and_purge;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     fn seed_contract_row(
         db: &StateDb,
@@ -780,17 +308,6 @@ mod tests {
 
     mod prune_and_finder;
 
-
-
-
-
-
-
-
-
-
-
-
     fn queued(op_id: &str, kind: OperationKind, file_id: &str, payload: Option<&str>) -> PendingOperation {
         PendingOperation {
             op_id: op_id.into(),
@@ -812,24 +329,7 @@ mod tests {
         }
     }
 
-
-
-
-
-
-
     mod landing_and_snapshots;
-
-
-
-
-
-
-
-
-
-
-
 
     // ── orphan-subtree + delete_file_subtree coverage (task 0806) ──────────────
 
@@ -875,11 +375,6 @@ mod tests {
         }
     }
 
-
-
-
-
-
     /// A row the server holds at `version`, under `object`.
     fn seed_restorable_row(db: &StateDb, file_id: &str, version: i64, object: &str) {
         db.upsert_file(&FileEntry {
@@ -905,27 +400,15 @@ mod tests {
         (contract.current_version, contract.current_object_version_id)
     }
 
-
-
-
-
-
-
-
-
-
     // ── bandwidth_samples (task 0810 — P3) ───────────────────────────────────
 
     mod change_log_and_account;
-
-
 
     // ── Mbps <-> kbps conversion (task 0810 — E) ─────────────────────────────
     //
     // The desktop UI exposes bandwidth caps as Mbps; config.rs stores them as
     // kbps.  These tests encode the conversion contract so a future refactor
     // can't silently break it.
-
 
     // ── task 0828 regression: orphaned children of an absent folder ───────────
     //
@@ -939,10 +422,6 @@ mod tests {
     //
     // `delete_orphaned_children_of_absent_folder` must sweep and remove ALL
     // descendant rows even when the folder row itself is absent.
-
-
-
-
 
     // ------------------------------------------------------------------
     // Task 1697: per-domain change log + monotonic anchor (state_db).
@@ -1009,12 +488,6 @@ mod tests {
         .unwrap();
     }
 
-
-
-
-
-
-
     // ------------------------------------------------------------------
     // Task 1697 review fix (T2): `record_file_change` stamped
     // `recorded_at = 0`, so the macOS signal path's 7-day sweep
@@ -1036,30 +509,11 @@ mod tests {
             .unwrap()
     }
 
-
-
-
     // ── R10 (spec 2026-10-06 §5.6): local data is bound to the account that created it ──
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
 
     mod startup_and_accepts;
-
-
 
     /// A row the server holds at version 1.
     fn seed_v1_row(db: &StateDb, file_id: &str) {
@@ -1111,15 +565,6 @@ mod tests {
             .unwrap_or(0)
     }
 
-
-
-
-
-
-
-
-
-
     fn accept_late_save(db: &StateDb, payload_path: &str) -> AcceptOutcome {
         db.accept_finder_write(
             &FinderAccept {
@@ -1154,17 +599,6 @@ mod tests {
         (dir, db)
     }
 
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /// Tasks 1888 + 2226 (spec §4 D1-D4, D8, D14; I1-I4, §5): the reconcile pass against a real database.
@@ -1172,6 +606,18 @@ mod tests {
 mod reconcile_tests {
     mod pass;
 }
+
+mod activity;
+mod cache;
+mod custody;
+mod files;
+mod landing;
+mod ops;
+mod removals;
+mod schema;
+mod signout;
+mod sync;
+mod test_hooks;
 
 mod types;
 use types::*;
