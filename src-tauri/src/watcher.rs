@@ -117,8 +117,8 @@ use tokio::sync::mpsc;
 use crate::engine_bridge::{EngineBridge, FinderWriteOutcome, LocalPathVerdict};
 
 mod driver;
-use driver::*;
-pub use driver::{spawn, NotifyEvent, WatcherHandle};
+#[cfg(target_os = "windows")]
+pub use driver::{spawn, NotifyEvent};
 
 mod scan;
 use scan::*;
