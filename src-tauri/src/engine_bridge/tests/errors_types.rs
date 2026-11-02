@@ -1,7 +1,7 @@
-//! One unit test per new type of D-P2-2: `EngineError`, `LandRequest`,
-//! `ProducedObject` and `Op`. Each proves the type's contract without a
+//! One unit test per new type of D-P2-2: `EngineError`, `Op`, `LandRequest`
+//! and `ProducedObject`. Each proves the type's contract without a
 //! database or network: the Display text a refusal keeps, the boundary
-//! conversion, and the newtype's parse/round-trip.
+//! conversion, and the enum's stored strings.
 
 use super::*;
 
@@ -81,6 +81,30 @@ fn land_request_bundles_the_landing_inputs() {
     assert!(request.mime_type.is_none());
     assert_eq!(request.post_complete_errors.len(), 1);
     assert_eq!(request.sync_root, Path::new("/sync"));
+}
+
+/// `Op` names the `"operation"` tag a queued op's metadata carries. Every
+/// variant spells the stored string the rows already hold, so the JSON stays
+/// byte-identical, and the payload built from it keeps its exact shape.
+#[test]
+fn op_spells_the_stored_operation_tags() {
+    let expected = [
+        (Op::CreateFolder, "create_folder"),
+        (Op::CreateFile, "create_file"),
+        (Op::MetadataUpdate, "metadata_update"),
+        (Op::UploadVersion, "upload_version"),
+        (Op::Trash, "trash"),
+        (Op::RestoreVersion, "restore_version"),
+        (Op::PinTree, "pin_tree"),
+        (Op::HydrateFile, "hydrate_file"),
+    ];
+    for (op, stored) in expected {
+        assert_eq!(op.as_str(), stored);
+        assert_eq!(
+            serde_json::json!({ "operation": op.as_str() }).to_string(),
+            serde_json::json!({ "operation": stored }).to_string()
+        );
+    }
 }
 
 /// The boundary conversion keeps `QueueStateMoved` as its own type: the

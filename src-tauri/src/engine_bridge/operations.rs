@@ -22,7 +22,7 @@ impl EngineBridge {
             target_path: None,
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "restore_version",
+                    "operation": Op::RestoreVersion.as_str(),
                     "version_id": version_id,
                 })
                 .to_string(),
@@ -136,7 +136,7 @@ impl EngineBridge {
             target_path: None,
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "pin_tree",
+                    "operation": Op::PinTree.as_str(),
                     "pinned": pinned,
                 })
                 .to_string(),
@@ -165,7 +165,7 @@ impl EngineBridge {
             target_path: Some(entry.path.clone()),
             metadata_json: Some(
                 serde_json::json!({
-                    "operation": "hydrate_file",
+                    "operation": Op::HydrateFile.as_str(),
                     "reason": "recursive_pin",
                 })
                 .to_string(),

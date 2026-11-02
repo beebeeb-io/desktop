@@ -73,7 +73,7 @@ impl EngineBridge {
         let staged_size = std::fs::metadata(&staged_path).map(|m| m.len()).unwrap_or(0);
 
         let mut metadata = serde_json::json!({
-            "operation": "upload_version",
+            "operation": Op::UploadVersion.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": content_type,
             "size_bytes": staged_size,

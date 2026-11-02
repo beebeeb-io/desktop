@@ -454,6 +454,36 @@ pub(crate) enum OpDone {
     Removed { release: Option<String> },
 }
 
+/// The `"operation"` tag a queued op's `metadata_json` carries. The stored JSON is a
+/// format the queue already holds, so each variant spells the exact string the rows
+/// carry; the enum only keeps that set from drifting apart across call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Op {
+    CreateFolder,
+    CreateFile,
+    MetadataUpdate,
+    UploadVersion,
+    Trash,
+    RestoreVersion,
+    PinTree,
+    HydrateFile,
+}
+
+impl Op {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Op::CreateFolder => "create_folder",
+            Op::CreateFile => "create_file",
+            Op::MetadataUpdate => "metadata_update",
+            Op::UploadVersion => "upload_version",
+            Op::Trash => "trash",
+            Op::RestoreVersion => "restore_version",
+            Op::PinTree => "pin_tree",
+            Op::HydrateFile => "hydrate_file",
+        }
+    }
+}
+
 /// The object version the server answered with when its `complete` succeeded: the
 /// version number the row lands on, and the object id its content now has. Two
 /// strings the server answered with, nothing else; the landing reads both.

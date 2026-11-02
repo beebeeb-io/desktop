@@ -107,7 +107,7 @@ impl EngineBridge {
             OperationKind::RenameFile
         };
         let mut payload = serde_json::json!({
-            "operation": "metadata_update",
+            "operation": Op::MetadataUpdate.as_str(),
             "name_encrypted": name_encrypted,
             "base_version_identifier": target.base_version_identifier,
         });
@@ -206,7 +206,7 @@ impl EngineBridge {
             .or_else(|| beebeeb_core::media::guess_mime_type(&target.filename));
         let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &target.filename, mime)?;
         let mut payload = serde_json::json!({
-            "operation": "upload_version",
+            "operation": Op::UploadVersion.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": target.content_type,
             "size_bytes": size_bytes,
@@ -373,7 +373,7 @@ impl EngineBridge {
             contract => contract,
         };
         let mut payload = serde_json::json!({
-            "operation": "trash",
+            "operation": Op::Trash.as_str(),
             "base_version_identifier": base_version_identifier,
         });
         apply_shared_context(&mut payload, item_contract.as_ref());

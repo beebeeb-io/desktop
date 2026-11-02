@@ -58,7 +58,7 @@ impl EngineBridge {
                     item_kind: ItemKind::Folder,
                 };
                 let mut payload = serde_json::json!({
-                    "operation": "create_folder",
+                    "operation": Op::CreateFolder.as_str(),
                     "name_encrypted": metadata,
                 });
                 apply_shared_context(&mut payload, parent_contract.as_ref());
@@ -204,7 +204,7 @@ impl EngineBridge {
             item_kind: ItemKind::File,
         };
         let mut payload = serde_json::json!({
-            "operation": "create_file",
+            "operation": Op::CreateFile.as_str(),
             "name_encrypted": name_encrypted,
             "content_type": target.content_type,
             "uploaded_by": "authenticated_desktop_user",
