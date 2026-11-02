@@ -2,6 +2,139 @@
 
 use super::*;
 
+/// The engine bridge's own error type. Every failure the bridge raises is one of
+/// these variants; dependencies that still speak `anyhow` (the API client) or
+/// return `rusqlite::Result` are wrapped here and converted at this module's
+/// edge. The Tauri command boundary converts one back to `anyhow::Error`, so
+/// `lib.rs` keeps its signature. `Display` delegates to the wrapped error, so
+/// the text a person or the File Provider extension reads is unchanged.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum EngineError {
+    UnknownItem(UnknownItem),
+    QueuedCopyMissing(QueuedCopyMissing),
+    UnsentLocalChange(UnsentLocalChange),
+    ThumbnailNotYet(ThumbnailNotYet),
+    StagedCopyGone(StagedCopyGone),
+    AcceptsClosed(AcceptsClosed),
+    ItemInTrash(ItemInTrash),
+    QueueStateMoved(QueueStateMoved),
+    ParkNow(ParkNow),
+    Database(rusqlite::Error),
+    Io(std::io::Error),
+    Api(anyhow::Error),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::UnknownItem(error) => error.fmt(f),
+            EngineError::QueuedCopyMissing(error) => error.fmt(f),
+            EngineError::UnsentLocalChange(error) => error.fmt(f),
+            EngineError::ThumbnailNotYet(error) => error.fmt(f),
+            EngineError::StagedCopyGone(error) => error.fmt(f),
+            EngineError::AcceptsClosed(error) => error.fmt(f),
+            EngineError::ItemInTrash(error) => error.fmt(f),
+            EngineError::QueueStateMoved(error) => error.fmt(f),
+            EngineError::ParkNow(error) => error.fmt(f),
+            EngineError::Database(error) => error.fmt(f),
+            EngineError::Io(error) => error.fmt(f),
+            EngineError::Api(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EngineError::UnknownItem(error) => Some(error),
+            EngineError::QueuedCopyMissing(error) => Some(error),
+            EngineError::UnsentLocalChange(error) => Some(error),
+            EngineError::ThumbnailNotYet(error) => Some(error),
+            EngineError::StagedCopyGone(error) => Some(error),
+            EngineError::AcceptsClosed(error) => Some(error),
+            EngineError::ItemInTrash(error) => Some(error),
+            EngineError::QueueStateMoved(error) => Some(error),
+            EngineError::ParkNow(error) => Some(error),
+            EngineError::Database(error) => Some(error),
+            EngineError::Io(error) => Some(error),
+            EngineError::Api(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<UnknownItem> for EngineError {
+    fn from(error: UnknownItem) -> Self {
+        EngineError::UnknownItem(error)
+    }
+}
+
+impl From<QueuedCopyMissing> for EngineError {
+    fn from(error: QueuedCopyMissing) -> Self {
+        EngineError::QueuedCopyMissing(error)
+    }
+}
+
+impl From<UnsentLocalChange> for EngineError {
+    fn from(error: UnsentLocalChange) -> Self {
+        EngineError::UnsentLocalChange(error)
+    }
+}
+
+impl From<ThumbnailNotYet> for EngineError {
+    fn from(error: ThumbnailNotYet) -> Self {
+        EngineError::ThumbnailNotYet(error)
+    }
+}
+
+impl From<StagedCopyGone> for EngineError {
+    fn from(error: StagedCopyGone) -> Self {
+        EngineError::StagedCopyGone(error)
+    }
+}
+
+impl From<AcceptsClosed> for EngineError {
+    fn from(error: AcceptsClosed) -> Self {
+        EngineError::AcceptsClosed(error)
+    }
+}
+
+impl From<ItemInTrash> for EngineError {
+    fn from(error: ItemInTrash) -> Self {
+        EngineError::ItemInTrash(error)
+    }
+}
+
+impl From<QueueStateMoved> for EngineError {
+    fn from(error: QueueStateMoved) -> Self {
+        EngineError::QueueStateMoved(error)
+    }
+}
+
+impl From<ParkNow> for EngineError {
+    fn from(error: ParkNow) -> Self {
+        EngineError::ParkNow(error)
+    }
+}
+
+impl From<rusqlite::Error> for EngineError {
+    fn from(error: rusqlite::Error) -> Self {
+        EngineError::Database(error)
+    }
+}
+
+impl From<std::io::Error> for EngineError {
+    fn from(error: std::io::Error) -> Self {
+        EngineError::Io(error)
+    }
+}
+
+impl From<anyhow::Error> for EngineError {
+    fn from(error: anyhow::Error) -> Self {
+        EngineError::Api(error)
+    }
+}
+
 /// A Finder write for an id this Mac never knew and no alias resolves (spec §7.3). The
 /// reply is an error the extension reports as `cannotSynchronize`, so the edit stays on
 /// disk; never "no such item", which would make the system delete it. It carries the id

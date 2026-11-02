@@ -483,6 +483,7 @@ mod reg_1640_2;
 mod scan;
 mod review_2190;
 mod review_2190_2;
+mod errors_types;
 
 use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
 use finder_queue_2::{capture_logs_async, fp_create};
@@ -631,7 +632,7 @@ pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_S
 mod errors;
 use errors::*;
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
-pub(crate) use errors::{UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
+pub(crate) use errors::{EngineError, UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
 
 mod content;
 use content::*;
