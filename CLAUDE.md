@@ -27,6 +27,7 @@ version AND the workflow run green AND the manifest resolving: three counts, not
 ## Module map
 
 Module map: `MAP.md` (generated; `make map REPO=desktop`) — start here for "where does X live"; do not hand-edit.
+Task recipes: `docs/agents/recipes.md` — the four changes asked for most, each naming a real file and item (`bun scripts/outline/recipes.ts desktop` from the workspace root).
 
 ```
 src/main.tsx, MacApp.tsx, PopoverApp.tsx   frontend roots: Windows/Linux windows, the Mac `main` window, the menu-bar popover
