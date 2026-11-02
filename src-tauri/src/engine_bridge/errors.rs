@@ -22,6 +22,8 @@ pub(crate) enum EngineError {
     ParkNow(ParkNow),
     Database(rusqlite::Error),
     Io(std::io::Error),
+    /// A thumbnail, its blurhash or a thumbnail-carried value could not be built.
+    Media(MediaError),
     Api(anyhow::Error),
 }
 
@@ -39,6 +41,7 @@ impl std::fmt::Display for EngineError {
             EngineError::ParkNow(error) => error.fmt(f),
             EngineError::Database(error) => error.fmt(f),
             EngineError::Io(error) => error.fmt(f),
+            EngineError::Media(error) => error.fmt(f),
             EngineError::Api(error) => error.fmt(f),
         }
     }
@@ -58,6 +61,7 @@ impl std::error::Error for EngineError {
             EngineError::ParkNow(error) => Some(error),
             EngineError::Database(error) => Some(error),
             EngineError::Io(error) => Some(error),
+            EngineError::Media(error) => Some(error),
             EngineError::Api(error) => Some(error.as_ref()),
         }
     }
@@ -126,6 +130,12 @@ impl From<rusqlite::Error> for EngineError {
 impl From<std::io::Error> for EngineError {
     fn from(error: std::io::Error) -> Self {
         EngineError::Io(error)
+    }
+}
+
+impl From<MediaError> for EngineError {
+    fn from(error: MediaError) -> Self {
+        EngineError::Media(error)
     }
 }
 

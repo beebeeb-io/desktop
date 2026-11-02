@@ -55,6 +55,62 @@ pub(super) struct ThumbnailSource {
     pub(super) is_video: bool,
 }
 
+/// Why a thumbnail, its blurhash or a thumbnail-carried base64 value could not be
+/// built. Each variant spells the step's text exactly as the `anyhow!` it replaces
+/// did, so a log line that carried the failure reads the same.
+#[derive(Debug)]
+pub(super) enum MediaError {
+    EncryptThumbnail { variant: &'static str, detail: String },
+    /// Opening or reading the file the image comes from.
+    Io(std::io::Error),
+    DecodeImage(image::ImageError),
+    NoVideoFrame,
+    SpawnFfmpeg(std::io::Error),
+    FfmpegFailed(String),
+    DecodeFrame(image::ImageError),
+    ZeroDimensions,
+    ResizeBlurhash(String),
+    Base64 { label: String, detail: String },
+}
+
+impl std::fmt::Display for MediaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaError::EncryptThumbnail { variant, detail } => {
+                write!(f, "encrypt thumbnail {variant}: {detail}")
+            }
+            MediaError::Io(error) => error.fmt(f),
+            MediaError::DecodeImage(error) => write!(f, "decode image for thumbnail: {error}"),
+            MediaError::NoVideoFrame => f.write_str("video thumbnail extraction failed"),
+            MediaError::SpawnFfmpeg(error) => write!(f, "spawn ffmpeg for video thumbnail: {error}"),
+            MediaError::FfmpegFailed(snippet) => write!(f, "ffmpeg video thumbnail failed: {snippet}"),
+            MediaError::DecodeFrame(error) => write!(f, "decode ffmpeg thumbnail frame: {error}"),
+            MediaError::ZeroDimensions => f.write_str("thumbnail source has zero dimensions"),
+            MediaError::ResizeBlurhash(detail) => write!(f, "resize blurhash source: {detail}"),
+            MediaError::Base64 { label, detail } => {
+                write!(f, "{label} is not valid standard base64: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MediaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MediaError::Io(error) | MediaError::SpawnFfmpeg(error) => Some(error),
+            MediaError::DecodeImage(error) | MediaError::DecodeFrame(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for MediaError {
+    fn from(error: std::io::Error) -> Self {
+        MediaError::Io(error)
+    }
+}
+
+
 #[derive(Debug)]
 pub(super) struct PreparedThumbnailUpload {
     pub(super) variant: ThumbnailUploadVariant,
@@ -67,12 +123,12 @@ pub(super) fn prepare_thumbnail_uploads_for_plaintext_media(
     payload_path: &Path,
     mime_type: Option<&str>,
     file_key: &beebeeb_core::kdf::FileKey,
-) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
+) -> Result<Vec<PreparedThumbnailUpload>, MediaError> {
     prepare_thumbnail_uploads_with_pin(payload_path, mime_type, file_key, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded)
 }
 
 pub(super) fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type: Option<&str>, file_key: &beebeeb_core::kdf::FileKey,
-    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<Vec<PreparedThumbnailUpload>> {
+    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> Result<Vec<PreparedThumbnailUpload>, MediaError> {
     if !beebeeb_core::media::is_media(mime_type) {
         return Ok(Vec::new());
     }
@@ -102,7 +158,10 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type:
         let plaintext = Zeroizing::new(output.data);
         let encrypted = Zeroizing::new(
             beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &plaintext, pin)
-                .map_err(|e| anyhow::anyhow!("encrypt thumbnail {}: {e}", variant.label()))?,
+                .map_err(|e| MediaError::EncryptThumbnail {
+                    variant: variant.label(),
+                    detail: e.to_string(),
+                })?,
         );
         if encrypted.len() > variant.encrypted_max_bytes() {
             tracing::warn!(
@@ -127,33 +186,33 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(payload_path: &Path, mime_type:
     Ok(uploads)
 }
 
-pub(super) fn decode_thumbnail_source(payload_path: &Path, mime_type: Option<&str>) -> anyhow::Result<ThumbnailSource> {
+pub(super) fn decode_thumbnail_source(payload_path: &Path, mime_type: Option<&str>) -> Result<ThumbnailSource, MediaError> {
     match mime_type {
         Some(mime) if mime.starts_with("video/") => decode_video_thumbnail_source(payload_path),
         _ => decode_image_thumbnail_source(payload_path),
     }
 }
 
-pub(super) fn decode_image_thumbnail_source(payload_path: &Path) -> anyhow::Result<ThumbnailSource> {
+pub(super) fn decode_image_thumbnail_source(payload_path: &Path) -> Result<ThumbnailSource, MediaError> {
     let image = image::ImageReader::open(payload_path)?
         .with_guessed_format()?
         .decode()
-        .map_err(|e| anyhow::anyhow!("decode image for thumbnail: {e}"))?;
+        .map_err(MediaError::DecodeImage)?;
     dynamic_image_to_thumbnail_source(image, false)
 }
 
-pub(super) fn decode_video_thumbnail_source(payload_path: &Path) -> anyhow::Result<ThumbnailSource> {
-    let mut last_error: Option<anyhow::Error> = None;
+pub(super) fn decode_video_thumbnail_source(payload_path: &Path) -> Result<ThumbnailSource, MediaError> {
+    let mut last_error: Option<MediaError> = None;
     for seek in ["1", "0"] {
         match decode_video_frame_with_ffmpeg(payload_path, seek) {
             Ok(source) => return Ok(source),
             Err(e) => last_error = Some(e),
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("video thumbnail extraction failed")))
+    Err(last_error.unwrap_or(MediaError::NoVideoFrame))
 }
 
-pub(super) fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) -> anyhow::Result<ThumbnailSource> {
+pub(super) fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) -> Result<ThumbnailSource, MediaError> {
     let ffmpeg = std::env::var_os("BEEBEEB_FFMPEG_PATH").unwrap_or_else(|| "ffmpeg".into());
     let output = Command::new(ffmpeg)
         .arg("-nostdin")
@@ -172,26 +231,26 @@ pub(super) fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) ->
         .arg("png")
         .arg("-")
         .output()
-        .map_err(|e| anyhow::anyhow!("spawn ffmpeg for video thumbnail: {e}"))?;
+        .map_err(MediaError::SpawnFfmpeg)?;
 
     if !output.status.success() || output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let snippet: String = stderr.chars().take(240).collect();
-        anyhow::bail!("ffmpeg video thumbnail failed: {snippet}");
+        return Err(MediaError::FfmpegFailed(snippet));
     }
 
     let frame_png = Zeroizing::new(output.stdout);
     let image =
-        image::load_from_memory(&frame_png).map_err(|e| anyhow::anyhow!("decode ffmpeg thumbnail frame: {e}"))?;
+        image::load_from_memory(&frame_png).map_err(MediaError::DecodeFrame)?;
     dynamic_image_to_thumbnail_source(image, true)
 }
 
-pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_video: bool) -> anyhow::Result<ThumbnailSource> {
+pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_video: bool) -> Result<ThumbnailSource, MediaError> {
     let rgba = image.into_rgba8();
     let width = rgba.width();
     let height = rgba.height();
     if width == 0 || height == 0 {
-        anyhow::bail!("thumbnail source has zero dimensions");
+        return Err(MediaError::ZeroDimensions);
     }
     Ok(ThumbnailSource {
         rgba: Zeroizing::new(rgba.into_raw()),
@@ -201,14 +260,14 @@ pub(super) fn dynamic_image_to_thumbnail_source(image: image::DynamicImage, is_v
     })
 }
 
-pub(super) fn blurhash_for_source(source: &ThumbnailSource) -> anyhow::Result<Option<String>> {
+pub(super) fn blurhash_for_source(source: &ThumbnailSource) -> Result<Option<String>, MediaError> {
     let (small_rgba, width, height) = beebeeb_core::thumbnail::resize_for_thumbnail(
         &source.rgba,
         source.width,
         source.height,
         BLURHASH_SOURCE_MAX_DIMENSION,
     )
-    .map_err(|e| anyhow::anyhow!("resize blurhash source: {e}"))?;
+    .map_err(|e| MediaError::ResizeBlurhash(e.to_string()))?;
     let small_rgba = Zeroizing::new(small_rgba);
     Ok(encode_blurhash_rgba(
         &small_rgba,
@@ -351,8 +410,11 @@ pub(super) fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 
-pub(super) fn decode_standard_b64(label: &str, value: &str) -> anyhow::Result<Vec<u8>> {
+pub(super) fn decode_standard_b64(label: &str, value: &str) -> Result<Vec<u8>, MediaError> {
     base64::engine::general_purpose::STANDARD
         .decode(value)
-        .map_err(|e| anyhow::anyhow!("{label} is not valid standard base64: {e}"))
+        .map_err(|e| MediaError::Base64 {
+            label: label.to_string(),
+            detail: e.to_string(),
+        })
 }

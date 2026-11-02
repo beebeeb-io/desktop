@@ -107,6 +107,25 @@ fn op_spells_the_stored_operation_tags() {
     }
 }
 
+/// `MediaError` keeps each step's text and reaches `EngineError` as its own cause.
+#[test]
+fn media_error_keeps_its_step_text_in_engine_error() {
+    let error = EngineError::Media(MediaError::ZeroDimensions);
+    assert_eq!(error.to_string(), "thumbnail source has zero dimensions");
+    assert_eq!(
+        EngineError::Media(MediaError::FfmpegFailed("boom".to_string())).to_string(),
+        "ffmpeg video thumbnail failed: boom"
+    );
+    assert_eq!(
+        EngineError::Media(MediaError::Base64 {
+            label: "sender_public_key".to_string(),
+            detail: "bad".to_string(),
+        })
+        .to_string(),
+        "sender_public_key is not valid standard base64: bad"
+    );
+}
+
 /// The boundary conversion keeps `QueueStateMoved` as its own type: the
 /// lifecycle's "the op moved on" arms find it by downcast exactly as before.
 #[test]
