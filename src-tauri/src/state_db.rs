@@ -640,6 +640,7 @@ use flags::*;
 
 mod ids;
 use ids::*;
+pub(crate) use ids::{LocalFileId, ServerFileId, VersionId};
 
 mod reconcile;
 use reconcile::*;

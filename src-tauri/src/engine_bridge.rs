@@ -36,9 +36,9 @@ use crate::api_client::{ApiClient, DesktopUploadInitRequest};
 use crate::conflict::is_text_file;
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, KeptReason, LocalActivityEventInput,
-    LocalActivityKind, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, StateDb, TookOver,
-    UploadResume,
+    LocalActivityKind, LocalFileId, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, QueueDiagnostics, ServerFileId, StateDb, TookOver,
+    UploadResume, VersionId,
 };
 
 pub struct EngineBridge {
@@ -484,6 +484,7 @@ mod scan;
 mod review_2190;
 mod review_2190_2;
 mod errors_types;
+mod typed_ids;
 
 use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
 use finder_queue_2::{capture_logs_async, fp_create};
