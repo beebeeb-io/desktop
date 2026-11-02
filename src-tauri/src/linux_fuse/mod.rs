@@ -1,4 +1,8 @@
 #![cfg(target_os = "linux")]
+// Unmounted prototype (CLAUDE.md): nothing mounts `BeebeebFS` yet, so on its one platform
+// every item in this module reads as unused. Delete this allow when the mount is wired into
+// the runner; until then it must still compile and stay policy-free.
+#![allow(dead_code)]
 
 //! The Linux FUSE mount: `BeebeebFS` answers the kernel's file and directory calls from
 //! `state.db` and the engine bridge. Unmounted prototype; must not decide sync policy.
