@@ -1,6 +1,7 @@
 //! The persisted flags (removal owed, domain gone), the config's one-update rule, and the
 //! kept folder that a late removal saves and alerts.
 use super::*;
+use super::gate::until;
 
     /// F3: the macOS port releases the persisted "removal owed" flag when the core says a removal is confirmed, and
     /// the facts the core observes carry the same flag the engine start reads.

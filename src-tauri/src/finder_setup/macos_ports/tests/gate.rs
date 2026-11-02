@@ -125,7 +125,7 @@ use super::*;
         );
     }
 
-    async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    pub(super) async fn until(what: &str, mut done: impl FnMut() -> bool) {
         for _ in 0..1000 {
             if done() {
                 return;
