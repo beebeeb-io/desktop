@@ -108,6 +108,7 @@ fn dropbox_roots(info_json: &str) -> Vec<PathBuf> {
 
 /// The folders OneDrive and Dropbox sync on this PC: OneDrive's from its environment variables, Dropbox's from its
 /// `info.json` in the roaming and the local application data. Whatever cannot be read is left out.
+#[cfg(target_os = "windows")]
 pub fn cloud_synced_roots() -> Vec<(PathBuf, &'static str)> {
     let mut roots: Vec<(PathBuf, &'static str)> = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
         .into_iter()
@@ -596,11 +597,6 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         std::fs::rename(from, to)
     }
-}
-
-/// Today's local date, as the dated folder is named.
-pub fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 #[cfg(test)]
