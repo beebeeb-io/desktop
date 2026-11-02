@@ -64,7 +64,7 @@ impl RekeyFailure for StateDbError {
 
 impl RekeyFailure for anyhow::Error {
     fn into_boxed(self) -> Box<dyn std::error::Error + Send + Sync> {
-        anyhow::Error::into_boxed(self)
+        Box::<dyn std::error::Error + Send + Sync>::from(self)
     }
 }
 

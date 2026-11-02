@@ -1,7 +1,5 @@
 //! `types` items split out of `held_queue.rs`.
 
-use super::*;
-
 /// A `files` row, as the pass reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {

@@ -1,7 +1,5 @@
 //! `types` items split out of `own_data_proof.rs`.
 
-use super::*;
-
 /// How many of the server-named rows must prove to be this account's own (all of them when fewer were checked).
 pub const REQUIRED_PROOFS: usize = 2;
 

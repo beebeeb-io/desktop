@@ -418,6 +418,7 @@ impl EngineBridge {
     /// need the bytes on disk (`hydrate_file`) or in memory (`hydrate_file_to_memory`)
     /// handle that themselves so the disk-write decision stays at the call site,
     /// not buried inside the crypto loop.
+    #[cfg(test)]
     pub async fn encrypt_owned_name(&self, file_id: &str, name: &str, pin: beebeeb_core::chunk_stream::ExpectedChunkFormat) -> anyhow::Result<String> {
         let key = self.resolved_owned_key(file_id).await?;
         Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, None, pin)?)
@@ -490,6 +491,7 @@ impl EngineBridge {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn do_hydrate(
         &self,
         file_id: &str,

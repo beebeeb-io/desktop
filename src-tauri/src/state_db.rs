@@ -431,20 +431,6 @@ mod tests {
 
     use super::FpChangeKind;
 
-    fn change_entry() -> FileEntry {
-        FileEntry {
-            file_id: "ch-1".into(),
-            path: "/docs/report.txt".into(),
-            status: FileStatus::Local,
-            size_bytes: 10,
-            modified_at: 100,
-            content_hash: None,
-            remote_updated_at: 100,
-            parent_id: None,
-            item_kind: ItemKind::File,
-        }
-    }
-
     fn seed_child(db: &StateDb, file_id: &str, path: &str, kind: ItemKind) {
         seed_child_under(db, file_id, path, kind, None);
     }

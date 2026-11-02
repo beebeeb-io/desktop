@@ -367,17 +367,13 @@ mod tests {
 }
 
 mod types;
-use types::*;
 pub use types::{REQUIRED_PROOFS, Listing, Probe, Tally, Verdict, Outcome};
 
 mod probe;
-use probe::*;
 pub use probe::{eligible, probe, verdict, listing_from_status, listing_of};
 
 mod judge;
-use judge::*;
 pub use judge::{Judgement, judge};
 
 mod adopt;
-use adopt::*;
 pub use adopt::{prove_and_adopt};

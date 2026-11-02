@@ -308,17 +308,6 @@ impl EngineBridge {
         Some(candidate)
     }
 
-    pub fn record_smart_cache_open(
-        &self,
-        file_id: &str,
-        cache_path: &Path,
-        cache_bytes: i64,
-    ) -> anyhow::Result<CacheCleanupOutcome> {
-        self.db
-            .mark_cached(file_id, &cache_path.to_string_lossy(), cache_bytes, now_secs())?;
-        self.enforce_configured_cache_limit()
-    }
-
     pub fn enforce_smart_cache(&self, policy: CachePolicy) -> anyhow::Result<CacheCleanupOutcome> {
         let evicted = self
             .db

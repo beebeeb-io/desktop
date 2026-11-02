@@ -146,7 +146,7 @@ impl StateDb {
     }
     /// Task 2270 (spec F8, self-review of #195): a row in review that meets a transient error leaves review, so the
     /// next tick tries it again and the tray stops counting it.
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(target_os = "windows")]
     pub fn clear_upload_finalization_review(&self, op_id: &str) -> Result<()> {
         self.0.lock().unwrap().execute(
             "UPDATE upload_finalizations SET review=NULL, review_at=NULL WHERE op_id=?1",

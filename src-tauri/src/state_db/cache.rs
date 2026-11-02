@@ -106,6 +106,7 @@ impl StateDb {
     /// `substr(path, 1, length(R) + 1) = R || '/'` (strict descendants) — a
     /// metacharacter-safe prefix equality (NOT `LIKE`). An unknown root id
     /// returns []. The row mapper mirrors [`Self::list_files`].
+    #[cfg(windows)]
     pub fn cloud_only_file_descendants(&self, root_file_id: &str) -> Result<Vec<FileEntry>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let root_path: Option<String> = conn
@@ -164,20 +165,6 @@ impl StateDb {
             params![file_id, cache_path, cache_bytes.max(0), opened_at],
         )?;
         Ok(())
-    }
-    pub fn unpinned_cache_bytes(&self) -> Result<i64> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row(
-            "
-            SELECT COALESCE(SUM(cache_bytes), 0)
-            FROM files
-            WHERE cache_bytes > 0
-              AND cache_path IS NOT NULL
-              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
-            ",
-            [],
-            |row| row.get(0),
-        )
     }
     pub fn cache_bytes_by_effective_pin(&self, pinned: impl Into<Pinned>) -> Result<i64> {
         let pinned: Pinned = pinned.into();
@@ -284,6 +271,7 @@ impl StateDb {
     /// it can never be the dehydration target. The caller reconstructs the real
     /// on-disk placeholder path from `path` joined onto the sync root (exactly
     /// as `windows_cf::populate_placeholders` does) and dehydrates THAT.
+    #[cfg(windows)]
     pub fn unpinned_local_files_for_dehydration(&self) -> Result<Vec<(String, String, i64)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(

@@ -18,6 +18,7 @@ use super::*;
 /// `None` parents — root-child items under the single root — always signal.
 /// A `namespace:` id can no longer occur (`normalize_parent_id` strips it
 /// from writes) and no longer signals.
+#[cfg(any(target_os = "macos", test))]
 pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], materialized: &[String]) -> bool {
     if materialized.is_empty() {
         return !changed_parent_ids.is_empty();
@@ -139,6 +140,7 @@ pub(super) struct OwedWorkingSetSignal {
 pub(super) static COMMAND_OWED_SIGNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Task 2190: owe `ids` to the next tick's working-set signal.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn owe_working_set_signal(ids: &[String]) {
     let mut owed = COMMAND_OWED_SIGNAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for id in ids {

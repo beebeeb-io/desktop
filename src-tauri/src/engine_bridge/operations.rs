@@ -3,6 +3,7 @@
 use super::*;
 
 impl EngineBridge {
+    #[cfg(test)]
     pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
         version_conflict_feed_from_db(self.db.as_ref())
     }

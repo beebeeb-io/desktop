@@ -3,6 +3,14 @@
 use super::*;
 
 impl EngineBridge {
+    #[cfg(test)]
+    pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
+        match self.classify_local_path_verdict(sync_root, path) {
+            LocalPathVerdict::Write(target) => Some(target),
+            LocalPathVerdict::Settled | LocalPathVerdict::Skip => None,
+        }
+    }
+
     /// Single, parent-aware classifier shared by every local-write trigger
     /// (the retired `notify` watcher *and* the Windows Cloud Files NOTIFY
     /// callbacks). Given an absolute on-disk `path` under `sync_root`, it
@@ -39,19 +47,11 @@ impl EngineBridge {
     /// tick can reconcile, which is strictly safer than attaching it to the
     /// wrong parent.
     ///
-    /// Returns `None` when `path` is not a regular file, is filtered out, or the
+    /// Returns [`LocalPathVerdict::Skip`] when `path` is not a regular file, is filtered out, or the
     /// DB lookup fails (fail-closed: a lookup error skips the upload rather than
     /// risk a spurious one). Cross-platform so it type-checks everywhere; only
-    /// the Windows triggers call it.
-    pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
-        match self.classify_local_path_verdict(sync_root, path) {
-            LocalPathVerdict::Write(target) => Some(target),
-            LocalPathVerdict::Settled | LocalPathVerdict::Skip => None,
-        }
-    }
-
-    /// Task 2229: [`Self::classify_local_path`], telling a tracked file that needs nothing while its row
-    /// and its bytes stay as they are ([`LocalPathVerdict::Settled`]) from one to ask about again.
+    /// the Windows triggers call it. Task 2229: also tells a tracked file that needs nothing while
+    /// its row and its bytes stay as they are ([`LocalPathVerdict::Settled`]).
     pub(crate) fn classify_local_path_verdict(&self, sync_root: &Path, path: &Path) -> LocalPathVerdict {
         // The file may have been deleted/renamed during a debounce window — if
         // it is no longer a regular file there is nothing to upload.

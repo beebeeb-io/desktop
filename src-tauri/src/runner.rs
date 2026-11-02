@@ -1077,7 +1077,9 @@ mod tests {
 mod telemetry;
 use telemetry::*;
 pub use telemetry::{AuthHealth};
-pub(crate) use telemetry::{hostname_or_unknown, device_name};
+pub(crate) use telemetry::{device_name};
+#[cfg(target_os = "macos")]
+pub(crate) use telemetry::hostname_or_unknown;
 
 mod lifecycle;
 use lifecycle::*;
@@ -1090,4 +1092,5 @@ pub(crate) use tick_loop::RunMode;
 
 mod working_set_signal;
 use working_set_signal::*;
+#[cfg(any(target_os = "macos", test))]
 pub(crate) use working_set_signal::{owe_working_set_signal};

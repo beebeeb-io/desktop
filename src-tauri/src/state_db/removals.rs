@@ -64,7 +64,7 @@ impl StateDb {
         };
 
         let mut marked: Vec<PrunedRow> = Vec::new();
-        let mut mark = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
+        let mark = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
             // Flip only when it changes anything: a no-op flip must not mint
             // a duplicate change row (same contract as `set_status`).
             let status: String = tx
@@ -159,7 +159,7 @@ impl StateDb {
         };
 
         let mut flipped: Vec<PrunedRow> = Vec::new();
-        let mut flip = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
+        let flip = |tx: &rusqlite::Connection, row: &PrunedRow| -> Result<bool> {
             // Flip only Trashing rows: the restore must not touch live rows
             // that happen to sit in the subtree (e.g. a child the local
             // flow never parked), and a no-op must not mint a change row.
