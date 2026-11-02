@@ -229,6 +229,33 @@ fn the_init_guard_reads_the_kind() {
     assert!(error.is_caused_by::<ParkNow>());
 }
 
+/// The failed-attempt rule answers by the stage: a recorded completion never
+/// uses up its last attempt, a File Provider refusal that looks transient backs
+/// off to the cap, and a permission refusal parks at once.
+#[test]
+fn the_failed_attempt_rule_reads_the_stage() {
+    assert_eq!(
+        failed_attempt_rule(OperationFailureClass::Retryable, AttemptState::Completed),
+        FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap)
+    );
+    assert_eq!(
+        failed_attempt_rule(OperationFailureClass::Auth, AttemptState::Upload),
+        FailedAttemptRule::Pause(OperationPauseReason::Auth)
+    );
+    assert_eq!(
+        failed_attempt_rule(OperationFailureClass::Permission, AttemptState::FinderWriteFinal),
+        FailedAttemptRule::Park(ParkReason::PermissionDenied)
+    );
+    assert_eq!(
+        failed_attempt_rule(OperationFailureClass::Retryable, AttemptState::FinderWriteTransient),
+        FailedAttemptRule::Retry(AttemptCount::UpToTheBackoffCap)
+    );
+    assert_eq!(
+        failed_attempt_rule(OperationFailureClass::Retryable, AttemptState::FinderWriteFinal),
+        FailedAttemptRule::Retry(AttemptCount::UsesUp)
+    );
+}
+
 /// ThumbnailWait names the two states of a landed write's thumbnail work.
 #[test]
 fn thumbnail_wait_names_the_two_states() {

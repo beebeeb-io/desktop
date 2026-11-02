@@ -438,8 +438,16 @@ impl EngineBridge {
                     outcome.account_refused |= finder_write && is_curable_refusal(&error);
                     // m-11: a recorded completion is never paused (a busy database reads as
                     // `Locked`), because a paused op is not listed again.
-                    let transient = finder_write && finder_write_failure_is_transient(class, &error);
-                    match failed_attempt_rule(class, finder_write, completed, transient) {
+                    let stage = if completed {
+                        AttemptState::Completed
+                    } else if !finder_write {
+                        AttemptState::Upload
+                    } else if finder_write_failure_is_transient(class, &error) {
+                        AttemptState::FinderWriteTransient
+                    } else {
+                        AttemptState::FinderWriteFinal
+                    };
+                    match failed_attempt_rule(class, stage) {
                         FailedAttemptRule::Pause(reason) => {
                             if !self.db.record_pause_claimed(
                                 &op.op_id,

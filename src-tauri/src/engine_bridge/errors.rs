@@ -533,6 +533,17 @@ impl std::fmt::Display for ItemInTrash {
 
 impl std::error::Error for ItemInTrash {}
 
+/// What the failed attempt had already done when it failed: a completion it
+/// recorded, a plain upload, or a File Provider write whose refusal either looks
+/// transient (the network, a 5xx, a lock) or does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttemptState {
+    Completed,
+    Upload,
+    FinderWriteTransient,
+    FinderWriteFinal,
+}
+
 /// What the runner does with a failed attempt that neither parked at once nor found its op
 /// gone ([`failed_attempt_rule`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,10 +589,10 @@ pub(super) fn next_attempt_count(attempts: i64, max_attempts: i64, count: Attemp
 
 /// The rule for a failed attempt of class `class`.
 ///
-/// - A recorded completion (`completed`, §8.6 rule 6) only ever retries, and never uses up its
-///   attempts.
-/// - A File Provider write (`finder_write`: an upload with a write id) never stops uploading for
-///   a reason that waiting or the person can cure (§8.4): a `transient` failure
+/// - A recorded completion (`AttemptState::Completed`, §8.6 rule 6) only ever retries, and never
+///   uses up its attempts.
+/// - A File Provider write (a stage with a write id) never stops uploading for
+///   a reason that waiting or the person can cure (§8.4): a transient failure
 ///   ([`finder_write_failure_is_transient`]: the network, a 5xx, 408/425/429, a lock, a quota
 ///   refusal) retries on the normal backoff without using up the attempts, so the save lands once
 ///   the network, the lock or the space comes back; any other `Retryable` failure uses them up and
@@ -589,31 +600,24 @@ pub(super) fn next_attempt_count(attempts: i64, max_attempts: i64, count: Attemp
 ///   which presents it read-only; `auth` pauses it until the next sign-in.
 /// - Every other upload keeps the rules it had: `Retryable` uses up its attempts, every other
 ///   class pauses it.
-pub(super) fn failed_attempt_rule(
-    class: OperationFailureClass,
-    finder_write: bool,
-    completed: bool,
-    transient: bool,
-) -> FailedAttemptRule {
-    if completed {
-        return FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap);
-    }
-    if !finder_write {
-        return match class.pause_reason() {
+pub(super) fn failed_attempt_rule(class: OperationFailureClass, stage: AttemptState) -> FailedAttemptRule {
+    match stage {
+        AttemptState::Completed => FailedAttemptRule::Retry(AttemptCount::ShortOfTheCap),
+        AttemptState::Upload => match class.pause_reason() {
             Some(reason) => FailedAttemptRule::Pause(reason),
             None => FailedAttemptRule::Retry(AttemptCount::UsesUp),
-        };
-    }
-    match class {
-        OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
-        OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
-        OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
-            FailedAttemptRule::Retry(if transient {
-                AttemptCount::UpToTheBackoffCap
-            } else {
-                AttemptCount::UsesUp
-            })
-        }
+        },
+        AttemptState::FinderWriteTransient | AttemptState::FinderWriteFinal => match class {
+            OperationFailureClass::Auth => FailedAttemptRule::Pause(OperationPauseReason::Auth),
+            OperationFailureClass::Permission => FailedAttemptRule::Park(ParkReason::PermissionDenied),
+            OperationFailureClass::Retryable | OperationFailureClass::Locked | OperationFailureClass::Quota => {
+                FailedAttemptRule::Retry(if stage == AttemptState::FinderWriteTransient {
+                    AttemptCount::UpToTheBackoffCap
+                } else {
+                    AttemptCount::UsesUp
+                })
+            }
+        },
     }
 }
 
