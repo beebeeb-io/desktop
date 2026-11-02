@@ -20,7 +20,6 @@
 //! state that stays on `AppState` is process-global (`auth_present`) or
 //! login-in-flight with no account yet (`pending_2fa`).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -28,7 +27,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::AppState;
 use crate::Session;
 use crate::account_dto::AccountProfile;
-use crate::config::DesktopConfig;
 use crate::runner::{AuthHealth, EngineRunner};
 
 /// Stable identity for one account in the runtime registry.
@@ -51,50 +49,6 @@ impl AccountId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// Per-account **runtime projection** of the loaded [`DesktopConfig`].
-///
-/// This is NOT a new serde shape on disk — `desktop.toml` keeps its current
-/// single-document layout (decision 0800 risk #2). `AccountConfig` is built
-/// from the one loaded `DesktopConfig` and carries only the per-account fields
-/// (decision 0800's device-global vs per-account split). In Phase 0 it is
-/// minimal/barely-consumed — Group D handlers still read `DesktopConfig`
-/// directly; this type exists to establish the model that Phase 1 routes
-/// through.
-#[derive(Debug, Clone)]
-pub struct AccountConfig {
-    pub id: AccountId,
-    pub sync_root: Option<PathBuf>,
-    pub excluded_folder_ids: Option<Vec<String>>,
-    pub known_folder_backup: Vec<String>,
-    pub files_on_demand: Option<bool>,
-    pub sync_mode: Option<String>,
-    pub finder_install_status: Option<String>,
-    pub finder_install_last_error: Option<String>,
-    pub finder_install_last_attempt_at: Option<i64>,
-    pub finder_install_reason_category: Option<String>,
-}
-
-impl AccountConfig {
-    /// Project the per-account fields out of the single loaded `DesktopConfig`.
-    ///
-    /// Clones the relevant fields — `DesktopConfig` is the source of truth on
-    /// disk; this is a read-only snapshot for the runtime account.
-    pub fn from_desktop_config(id: AccountId, cfg: &DesktopConfig) -> Self {
-        Self {
-            id,
-            sync_root: cfg.sync_root.clone(),
-            excluded_folder_ids: cfg.excluded_folder_ids.clone(),
-            known_folder_backup: cfg.known_folder_backup.clone(),
-            files_on_demand: cfg.files_on_demand,
-            sync_mode: cfg.sync_mode.clone(),
-            finder_install_status: cfg.finder_install_status.clone(),
-            finder_install_last_error: cfg.finder_install_last_error.clone(),
-            finder_install_last_attempt_at: cfg.finder_install_last_attempt_at,
-            finder_install_reason_category: cfg.finder_install_reason_category.clone(),
-        }
     }
 }
 
