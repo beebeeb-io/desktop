@@ -3,14 +3,14 @@
 use super::*;
 
 impl EngineBridge {
-    pub(super) fn ensure_shared_parent_allows_write(&self, parent_id: Option<&str>) -> anyhow::Result<Option<FileContractState>> {
+    pub(super) fn ensure_shared_parent_allows_write(&self, parent_id: Option<&str>) -> Result<Option<FileContractState>, EngineError> {
         let Some(parent_id) = parent_id else {
             return Ok(None);
         };
         if parent_id == "namespace:shared_with_me" {
             return Err(anyhow::anyhow!(
                 "Shared with me is read-only at the namespace root; open an editable shared folder first"
-            ));
+            ).into());
         }
         let Some(contract) = self.db.get_file_contract_state(parent_id)? else {
             return Ok(None);
@@ -18,7 +18,7 @@ impl EngineBridge {
         if contract.is_shared() && !contract.can_write() {
             return Err(anyhow::anyhow!(
                 "read-only shared folder cannot accept new Finder items"
-            ));
+            ).into());
         }
         Ok(Some(contract).filter(|contract| contract.is_shared()))
     }
@@ -27,14 +27,14 @@ impl EngineBridge {
         &self,
         file_id: &str,
         operation: &str,
-    ) -> anyhow::Result<Option<FileContractState>> {
+    ) -> Result<Option<FileContractState>, EngineError> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return Ok(None);
         };
         if contract.is_shared() && !contract.can_write() {
             return Err(anyhow::anyhow!(
                 "read-only shared item cannot be changed from Finder during {operation}"
-            ));
+            ).into());
         }
         Ok(Some(contract).filter(|contract| contract.is_shared()))
     }
@@ -97,7 +97,7 @@ impl EngineBridge {
         // decrypt-oracle + arbitrary-write primitive (e.g. writing decrypted
         // vault plaintext over ~/.ssh/authorized_keys).
         if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
-            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
         }
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // Task 1640: a hydrate into the file's own place in the sync folder (on Windows, only
@@ -123,7 +123,7 @@ impl EngineBridge {
                 && place_holds_bytes(dest_path);
             if unknown_with_bytes || matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
                 tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
-                return Err(anyhow::Error::new(UnsentLocalChange));
+                return Err(anyhow::Error::new(UnsentLocalChange).into());
             }
         }
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
@@ -182,7 +182,7 @@ impl EngineBridge {
                     // Route it through the same status flip as every other
                     // failure in this function.
                     set_failed();
-                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
+                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()).into());
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
                 // guard at the top of this fn is a check-then-use, and there is
@@ -207,7 +207,7 @@ impl EngineBridge {
                 buf.zeroize();
                 if let Err(e) = write_result {
                     set_failed();
-                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
+                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()).into());
                 }
                 // Task 1640: the bytes just written (one atomic rename: the whole file) are the
                 // content this device agrees with the server on, at the version the download
@@ -262,9 +262,9 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e).await;
+                let e = self.owned_open_failure(file_id, e.into()).await;
                 set_failed(); // only writes over Downloading; the recoverable item already left it.
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -272,7 +272,7 @@ impl EngineBridge {
     /// Record where a hydrate wrote `file_id`'s plaintext, for the cache accounting and the
     /// sign-out sweep. Both hydrate paths, the server's and the queue's, call it. On macOS a
     /// Finder hand-off into the hydrate cache is not a cached copy ([`record_hydration_cache_state`]).
-    pub(super) fn record_hydrated_destination(&self, file_id: &str, dest_path: &Path) -> anyhow::Result<()> {
+    pub(super) fn record_hydrated_destination(&self, file_id: &str, dest_path: &Path) -> Result<(), EngineError> {
         #[cfg(target_os = "macos")]
         record_hydration_cache_state(
             &self.db,
@@ -289,7 +289,7 @@ impl EngineBridge {
         Ok(())
     }
 
-    pub(super) fn ensure_shared_hydrate_path_safe(&self, file_id: &str) -> anyhow::Result<()> {
+    pub(super) fn ensure_shared_hydrate_path_safe(&self, file_id: &str) -> Result<(), EngineError> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return Ok(());
         };
@@ -364,9 +364,9 @@ impl EngineBridge {
                 Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e).await;
+                let e = self.owned_open_failure(file_id, e.into()).await;
                 let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -445,15 +445,15 @@ impl EngineBridge {
         error
     }
 
-    pub(super) async fn file_key_for_download(&self, file_id: &str) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+    pub(super) async fn file_key_for_download(&self, file_id: &str) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
-            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes())).map_err(EngineError::from);
         };
         if contract.namespace != Namespace::SharedWithMe {
-            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()));
+            return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes())).map_err(EngineError::from);
         }
         if !contract.can_read() {
-            anyhow::bail!("shared item is not readable");
+            return Err(anyhow::anyhow!("shared item is not readable").into());
         }
 
         let share_id = contract
@@ -494,7 +494,7 @@ impl EngineBridge {
         &self,
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
-    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
         self.do_hydrate_versioned(file_id, progress).await.map(|(plaintext, _)| plaintext)
     }
 
@@ -505,7 +505,7 @@ impl EngineBridge {
         &self,
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
-    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, Option<i64>)> {
+    ) -> Result<(Zeroizing<Vec<u8>>, Option<i64>), EngineError> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
@@ -529,18 +529,18 @@ impl EngineBridge {
     /// and versions are never mixed. The restart keeps the binding: when the first attempt was pinned and the fresh
     /// metadata names no version (`download_version: null`), it is [`crate::download_pin::PinLost`], never an unpinned
     /// download. The one copy of this rule (whole-file hydrate, range read, conflict preview).
-    pub(super) async fn with_one_restart<T, F, Fut>(&self, file_id: &str, meta: serde_json::Value, attempt: F) -> anyhow::Result<T>
+    pub(super) async fn with_one_restart<T, F, Fut>(&self, file_id: &str, meta: serde_json::Value, attempt: F) -> Result<T, EngineError>
     where
         F: Fn(serde_json::Value) -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<T>>,
+        Fut: std::future::Future<Output = Result<T, EngineError>>,
     {
         let first_was_pinned = crate::download_pin::PinnedVersion::from_metadata(&meta)?.is_some();
         match attempt(meta).await {
-            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => {
+            Err(e) if e.is_caused_by::<crate::download_pin::VersionGone>() => {
                 tracing::debug!("download: the file changed while it was downloading; restarting once");
                 let fresh = self.api.get_file(file_id).await?;
                 if first_was_pinned && crate::download_pin::PinnedVersion::from_metadata(&fresh)?.is_none() {
-                    return Err(anyhow::Error::new(crate::download_pin::PinLost));
+                    return Err(anyhow::Error::new(crate::download_pin::PinLost).into());
                 }
                 attempt(fresh).await
             }
@@ -564,7 +564,7 @@ impl EngineBridge {
         file_id: &str,
         meta: &serde_json::Value,
         progress: Option<&HydrateProgressFn>,
-    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
         self.hydrate_whole_file(file_id, meta, progress)
             .await
             .map(|(plaintext, _)| plaintext)
@@ -585,7 +585,7 @@ impl EngineBridge {
         file_id: &str,
         meta: &serde_json::Value,
         progress: Option<&HydrateProgressFn>,
-    ) -> anyhow::Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport)> {
+    ) -> Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport), EngineError> {
         let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
         let chunk_count = match &pin {
             Some(pin) => pin.chunk_count,
@@ -635,9 +635,12 @@ impl EngineBridge {
             &report,
         )
         .await
-        .map_err(|e| match e {
-            crate::direct_download::DirectError::VersionChanged => anyhow::Error::new(crate::download_pin::VersionGone),
-            other => anyhow::Error::new(other),
+        .map_err(|e| {
+            let error = match e {
+                crate::direct_download::DirectError::VersionChanged => anyhow::Error::new(crate::download_pin::VersionGone),
+                other => anyhow::Error::new(other),
+            };
+            EngineError::from(error)
         })?;
         let (plaintext, transport) = match direct {
             crate::direct_download::Outcome::Done { plaintext, transport } => (plaintext, transport),
@@ -661,11 +664,11 @@ impl EngineBridge {
         if let Some(pin) = &pin
             && plaintext.len() as u64 != pin.plaintext_size_bytes
         {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "the download is {} bytes, the pinned version's manifest says {}",
                 plaintext.len(),
                 pin.plaintext_size_bytes
-            );
+            ).into());
         }
         tracing::debug!(transport = transport.as_str(), "download finished");
         Ok((plaintext, transport))
@@ -710,7 +713,7 @@ impl EngineBridge {
     /// wire size must be the manifest's; a 409 comes back as [`crate::download_pin::VersionGone`].
     /// Without one (a legacy file) the requests are today's unpinned ones.
     async fn download_content_frame(&self, file_id: &str, i: u32,
-        pin: Option<&crate::download_pin::PinnedVersion>) -> anyhow::Result<Vec<u8>> {
+        pin: Option<&crate::download_pin::PinnedVersion>) -> Result<Vec<u8>, EngineError> {
         Ok(match pin {
                 // Task 1643: the pinned route (shared with the direct path's fallback): exactly the manifest's
                 // length, a transient failure tried again, a 409 = the version is gone, no URL in an error.
@@ -723,10 +726,10 @@ impl EngineBridge {
                         .await
                         .map_err(|e| match e {
                             crate::api_client::ChunkApiError::Restart => {
-                                anyhow::Error::new(crate::download_pin::VersionGone)
+                                anyhow::Error::new(crate::download_pin::VersionGone).into()
                             }
                             crate::api_client::ChunkApiError::Terminal(status) => {
-                                anyhow::Error::new(crate::direct_download::DirectError::Refused(status))
+                                anyhow::Error::new(crate::direct_download::DirectError::Refused(status)).into()
                             }
                             crate::api_client::ChunkApiError::Failed(message) => anyhow::anyhow!(message),
                         })?
@@ -748,7 +751,7 @@ impl EngineBridge {
         pin: Option<&crate::download_pin::PinnedVersion>,
         expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
         chunk_count: u32,
-    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
         let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
         // Task 1670 issue 3: tell the caller (the macOS IPC handler, which
         // forwards it to Finder's progress bar) how far along we are. `total`
@@ -859,7 +862,7 @@ impl EngineBridge {
                 self.range_attempt(file_id, required_offset, required_length, &meta).await
             })
             .await;
-        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, e).await) };
+        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, e.into()).await.into()) };
         if read.is_err() {
             // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
             // Downloading, and the placeholder never in sync.
@@ -876,7 +879,7 @@ impl EngineBridge {
         required_offset: u64,
         required_length: u64,
         meta: &serde_json::Value,
-    ) -> anyhow::Result<Option<HydratedRange>> {
+    ) -> Result<Option<HydratedRange>, EngineError> {
         let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
         let (chunk_count, size_bytes, chunk_size_bytes) = match &pin {
             Some(pin) => (
@@ -949,10 +952,10 @@ impl EngineBridge {
             .and_then(|data| {
                 // Task 1643: exactly the pinned version's plaintext for those chunks.
                 match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
-                    Some(want) if want != Some(data.len() as u64) => anyhow::bail!(
+                    Some(want) if want != Some(data.len() as u64) => return Err(anyhow::anyhow!(
                         "the range read is {} bytes, the pinned version's manifest says {want:?}",
                         data.len()
-                    ),
+                    ).into()),
                     _ => Ok(data),
                 }
             });

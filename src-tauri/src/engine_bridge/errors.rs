@@ -24,6 +24,15 @@ pub(crate) enum EngineError {
     Io(std::io::Error),
     /// A thumbnail, its blurhash or a thumbnail-carried value could not be built.
     Media(MediaError),
+    /// A Finder write found no staging root it may use.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows", test)), allow(dead_code))]
+    Staging(FinderStagingUnavailable),
+    /// A pinned version's manifest did not describe a version this download can use.
+    Manifest(crate::download_pin::BadManifest),
+    /// core's own error: a chunk frame, a key or a metadata record it would not open.
+    Core(beebeeb_core::CoreError),
+    /// A stored JSON or base64 record did not parse. Its text never names a path or a name.
+    Malformed(MalformedRecord),
     Api(anyhow::Error),
 }
 
@@ -42,6 +51,10 @@ impl std::fmt::Display for EngineError {
             EngineError::Database(error) => error.fmt(f),
             EngineError::Io(error) => error.fmt(f),
             EngineError::Media(error) => error.fmt(f),
+            EngineError::Staging(error) => error.fmt(f),
+            EngineError::Manifest(error) => error.fmt(f),
+            EngineError::Core(error) => error.fmt(f),
+            EngineError::Malformed(error) => error.fmt(f),
             EngineError::Api(error) => error.fmt(f),
         }
     }
@@ -62,6 +75,10 @@ impl std::error::Error for EngineError {
             EngineError::Database(error) => Some(error),
             EngineError::Io(error) => Some(error),
             EngineError::Media(error) => Some(error),
+            EngineError::Staging(error) => Some(error),
+            EngineError::Manifest(error) => Some(error),
+            EngineError::Core(error) => Some(error),
+            EngineError::Malformed(error) => Some(error),
             EngineError::Api(error) => Some(error.as_ref()),
         }
     }
@@ -139,9 +156,81 @@ impl From<MediaError> for EngineError {
     }
 }
 
+impl From<FinderStagingUnavailable> for EngineError {
+    fn from(error: FinderStagingUnavailable) -> Self {
+        EngineError::Staging(error)
+    }
+}
+
+impl From<crate::download_pin::BadManifest> for EngineError {
+    fn from(error: crate::download_pin::BadManifest) -> Self {
+        EngineError::Manifest(error)
+    }
+}
+
+impl From<beebeeb_core::CoreError> for EngineError {
+    fn from(error: beebeeb_core::CoreError) -> Self {
+        EngineError::Core(error)
+    }
+}
+
+impl From<serde_json::Error> for EngineError {
+    fn from(error: serde_json::Error) -> Self {
+        EngineError::Malformed(MalformedRecord::Json(error))
+    }
+}
+
+impl From<base64::DecodeError> for EngineError {
+    fn from(error: base64::DecodeError) -> Self {
+        EngineError::Malformed(MalformedRecord::Base64(error))
+    }
+}
+
+/// A stored JSON or base64 record that did not parse. `Display` delegates, so the
+/// text a person or the File Provider extension reads is unchanged.
+#[derive(Debug)]
+pub(crate) enum MalformedRecord {
+    Json(serde_json::Error),
+    Base64(base64::DecodeError),
+}
+
+impl std::fmt::Display for MalformedRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MalformedRecord::Json(error) => error.fmt(f),
+            MalformedRecord::Base64(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MalformedRecord {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MalformedRecord::Json(error) => Some(error),
+            MalformedRecord::Base64(error) => Some(error),
+        }
+    }
+}
+
 impl From<anyhow::Error> for EngineError {
     fn from(error: anyhow::Error) -> Self {
         EngineError::Api(error)
+    }
+}
+
+impl EngineError {
+    /// Whether `E` sits in this error's source chain. The same reach the boundary's
+    /// `anyhow::Error::downcast_ref` had before the split: a marker a lower layer wrapped
+    /// stays findable through `Api` and through `source`.
+    pub(super) fn is_caused_by<E: std::error::Error + 'static>(&self) -> bool {
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = current {
+            if error.is::<E>() {
+                return true;
+            }
+            current = error.source();
+        }
+        false
     }
 }
 
@@ -619,13 +708,29 @@ pub fn retry_delay_seconds(attempts: i64) -> i64 {
 }
 
 /// The bridge's own error type crossing the Tauri command boundary: one
-/// `anyhow::Error`, so `lib.rs` keeps its signature. The `Display` text and the
-/// inner error's reachability are unchanged; `EngineError`'s `source` keeps the
-/// chain intact for classification. `land`'s queue-moved signal is unwrapped so
-/// the lifecycle still finds it by downcast, as it did before the split.
+/// `anyhow::Error`, so `lib.rs` keeps its signature. The wrapped error goes out as
+/// itself, not boxed in [`EngineError`], so a marker the IPC layer finds by downcast
+/// (`StagedCopyGone`, `UnknownItem`, `QueuedCopyMissing`, …) is where it was before
+/// the split, and `land`'s queue-moved signal still reaches the lifecycle. `Display`
+/// is unchanged either way.
 pub(crate) fn land_error_to_anyhow(error: EngineError) -> anyhow::Error {
     match error {
-        EngineError::QueueStateMoved(moved) => anyhow::Error::new(moved),
-        other => anyhow::Error::new(other),
+        EngineError::UnknownItem(error) => anyhow::Error::new(error),
+        EngineError::QueuedCopyMissing(error) => anyhow::Error::new(error),
+        EngineError::UnsentLocalChange(error) => anyhow::Error::new(error),
+        EngineError::ThumbnailNotYet(error) => anyhow::Error::new(error),
+        EngineError::StagedCopyGone(error) => anyhow::Error::new(error),
+        EngineError::AcceptsClosed(error) => anyhow::Error::new(error),
+        EngineError::ItemInTrash(error) => anyhow::Error::new(error),
+        EngineError::QueueStateMoved(error) => anyhow::Error::new(error),
+        EngineError::ParkNow(error) => anyhow::Error::new(error),
+        EngineError::Database(error) => anyhow::Error::new(error),
+        EngineError::Io(error) => anyhow::Error::new(error),
+        EngineError::Media(error) => anyhow::Error::new(error),
+        EngineError::Staging(error) => anyhow::Error::new(error),
+        EngineError::Manifest(error) => anyhow::Error::new(error),
+        EngineError::Core(error) => anyhow::Error::new(error),
+        EngineError::Malformed(error) => anyhow::Error::new(error),
+        EngineError::Api(error) => error,
     }
 }

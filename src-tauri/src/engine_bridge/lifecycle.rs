@@ -227,7 +227,7 @@ impl EngineBridge {
     /// master key in memory ([`name_opens`]). Ops with no name, or with a shared context, are not checked and follow
     /// the verdict; with none checked, nothing contradicts this key and the verdict is that they open. The key never
     /// leaves memory, and nothing is logged.
-    fn auth_ops_open_under_this_key(&self) -> anyhow::Result<bool> {
+    fn auth_ops_open_under_this_key(&self) -> Result<bool, EngineError> {
         let master_key = self.api.master_key();
         for op in self.db.operations_paused_for_auth()? {
             let Some(file_id) = op.file_id.as_deref() else {
@@ -343,7 +343,8 @@ impl EngineBridge {
             let op = claimed.op.clone();
             let result = self
                 .execute_operation(&claimed, sync_root, now, &mut outcome.post_complete_errors)
-                .await;
+                .await
+                .map_err(land_error_to_anyhow);
             self.seam("outcome:before_tx");
             // §8.6 rule 6: an upload whose completion is recorded never parks, is never paused
             // and is never abandoned: whatever failed, its retry repeats the landing (rule 4).
@@ -526,7 +527,7 @@ impl EngineBridge {
         sync_root: &Path,
         now: i64,
         post_complete_errors: &mut Vec<String>,
-    ) -> anyhow::Result<OpDone> {
+    ) -> Result<OpDone, EngineError> {
         let op = &claimed.op;
         match op.kind {
             OperationKind::PinTree => Ok(OpDone::Remove { release: None }),
@@ -540,7 +541,7 @@ impl EngineBridge {
                 } else if let Some(entry) = self.db.get_file(file_id)? {
                     local_file_path_under_sync_root(sync_root, &entry.path)?
                 } else {
-                    return Err(anyhow::anyhow!("hydrate operation target missing from state"));
+                    return Err(anyhow::anyhow!("hydrate operation target missing from state").into());
                 };
                 self.hydrate_file(file_id, &dest, &[sync_root]).await?;
                 Ok(OpDone::Remove { release: None })

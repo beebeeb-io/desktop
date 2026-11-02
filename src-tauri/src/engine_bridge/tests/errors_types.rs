@@ -189,3 +189,32 @@ fn pin_toggle_reads_the_command_flag() {
     assert!(PinToggle::from_flag(true).is_pin());
     assert!(!PinToggle::from_flag(false).is_pin());
 }
+
+/// MalformedRecord is a stored record that did not parse: its text is the
+/// parser's, unchanged, and it stays the error's cause, so the chain a
+/// classification walks reads as it did before the split.
+#[test]
+fn malformed_record_keeps_the_parsers_text() {
+    let base64_error = base64::engine::general_purpose::STANDARD.decode("!!").unwrap_err();
+    let base64_text = base64_error.to_string();
+    let error: EngineError = base64_error.into();
+    assert_eq!(error.to_string(), base64_text);
+    assert_eq!(
+        std::error::Error::source(&error).map(ToString::to_string),
+        Some(base64_text)
+    );
+
+    let json_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    let json_text = json_error.to_string();
+    let error: EngineError = json_error.into();
+    assert_eq!(error.to_string(), json_text);
+}
+
+/// A marker a lower layer wrapped stays findable on the bridge's own error, the
+/// reach downcast_ref had on the boundary's anyhow::Error.
+#[test]
+fn an_engine_error_finds_a_marker_wrapped_in_anyhow() {
+    let error: EngineError = anyhow::Error::new(crate::download_pin::VersionGone).into();
+    assert!(error.is_caused_by::<crate::download_pin::VersionGone>());
+    assert!(!error.is_caused_by::<crate::download_pin::PinLost>());
+}

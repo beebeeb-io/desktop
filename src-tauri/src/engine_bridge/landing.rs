@@ -345,11 +345,12 @@ pub(super) fn stage_finder_contents(
     root: PathBuf,
     source: &Path,
     opened: Option<&std::fs::File>,
-) -> anyhow::Result<crate::staged_payload::StagedPayload> {
-    match opened {
+) -> Result<crate::staged_payload::StagedPayload, EngineError> {
+    let staged = match opened {
         Some(file) => crate::staged_payload::StagedPayload::copy_from_file(db.clone(), file, source, root),
         None => crate::staged_payload::StagedPayload::copy(db.clone(), source, root),
-    }
+    };
+    staged.map_err(EngineError::from)
 }
 
 /// The folders a Finder write's plaintext copy can be staged in, from the bases this process
@@ -492,15 +493,15 @@ pub(super) fn decidable_or_logged(db: &StateDb, op_id: &str) -> bool {
     })
 }
 
-pub(super) fn decidable_check(db: &StateDb, op_id: &str) -> anyhow::Result<bool> {
+pub(super) fn decidable_check(db: &StateDb, op_id: &str) -> Result<bool, EngineError> {
     #[cfg(test)]
     if FAIL_DECIDABLE_READ.with(|fail| fail.borrow().as_deref() == Some(op_id)) {
-        anyhow::bail!("the decision check failed (test)");
+        return Err(anyhow::anyhow!("the decision check failed (test)").into());
     }
     Ok(db.is_decidable_parked(op_id)?)
 }
 
-pub(super) fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> anyhow::Result<VersionConflictEntry> {
+pub(super) fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> Result<VersionConflictEntry, EngineError> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
     let file_name = op
         .target_path

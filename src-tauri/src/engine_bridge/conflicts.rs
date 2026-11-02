@@ -52,7 +52,7 @@ impl EngineBridge {
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
         if entry.is_dir() {
-            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}"));
+            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}").into());
         }
 
         let shared_contract = self.ensure_item_allows_shared_write(file_id, "keep mine")?;
@@ -112,7 +112,7 @@ impl EngineBridge {
             Err(e) => {
                 // One-shot op (never queued): nothing will resume its session.
                 self.abandon_upload_after_give_up(&op).await;
-                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
+                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}").into());
             }
         };
         // macOS: the upload leaves its staged copy for the caller to release. This op
@@ -394,7 +394,7 @@ impl EngineBridge {
                     FinderWriteOutcome::Queued { file_id: Some(new_id), .. } => {
                         (ParkedResolution::KeptBoth { file_id: new_id, name }, released)
                     }
-                    other => anyhow::bail!("the copy could not be queued as a new file: {other:?}"),
+                    other => return Err(anyhow::anyhow!("the copy could not be queued as a new file: {other:?}").into()),
                 }
             }
             ParkedChoice::Local => unreachable!("handled above"),
@@ -520,7 +520,7 @@ impl EngineBridge {
 
     /// One pass of [`Self::remote_content_preview`] on `meta`. `Err` only for what the restart handles (the version
     /// went away) or what ends it; every other failure is the side's own "unavailable" line.
-    async fn preview_attempt(&self, file_id: &str, kind: ContentKind, meta: &serde_json::Value) -> anyhow::Result<ConflictContentSide> {
+    async fn preview_attempt(&self, file_id: &str, kind: ContentKind, meta: &serde_json::Value) -> Result<ConflictContentSide, EngineError> {
         // Task 1643: the size of the version that would be downloaded. While a replace runs, the top-level
         // `size_bytes` can be another version's.
         let size_bytes = match crate::download_pin::PinnedVersion::from_metadata(meta)? {
@@ -562,7 +562,7 @@ impl EngineBridge {
                 bytes.zeroize();
                 Ok(side)
             }
-            Err(e) if e.downcast_ref::<crate::download_pin::VersionGone>().is_some() => Err(e),
+            Err(e) if e.is_caused_by::<crate::download_pin::VersionGone>() => Err(e),
             Err(e) => Ok(ConflictContentSide {
                 size_bytes,
                 text: None,

@@ -17,7 +17,7 @@ pub(crate) fn sync_folder_content(
     file_id: &str,
     path: &Path,
     os_in_sync: Option<bool>,
-) -> anyhow::Result<SyncFolderContent> {
+) -> Result<SyncFolderContent, EngineError> {
     if db.sync_folder_upload_queued(file_id)? {
         return Ok(SyncFolderContent::Queued);
     }
@@ -57,13 +57,13 @@ pub(crate) fn sync_folder_content(
 /// [`upload_init_request_for_operation`] would drop as "no base"), parks it as
 /// `base_unknown`. A create sends no base, and uploads without a write id (Windows, the
 /// watcher) keep today's bases.
-pub(super) fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_write_id: bool) -> anyhow::Result<()> {
+pub(super) fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_write_id: bool) -> Result<(), EngineError> {
     if !has_write_id || is_new_file {
         return Ok(());
     }
     match base_version.map(i32::try_from) {
         Some(Ok(_)) => Ok(()),
-        _ => Err(anyhow::Error::new(ParkNow(ParkReason::BaseUnknown))),
+        _ => Err(anyhow::Error::new(ParkNow(ParkReason::BaseUnknown)).into()),
     }
 }
 
@@ -73,7 +73,7 @@ pub(super) fn guard_init_base(base_version: Option<i64>, is_new_file: bool, has_
 /// op is updating. Anything else means the server handed back a different item
 /// than the client chose, so the op must abort.
 ///
-pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: &str) -> anyhow::Result<()> {
+pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: &str) -> Result<(), EngineError> {
     let ours = if session.is_create {
         session.self_minted
     } else {
@@ -84,7 +84,7 @@ pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, lo
     }
     Err(anyhow::anyhow!(
         "server_changed_item_id: the upload init answered with an id this device did not choose"
-    ))
+    ).into())
 }
 
 /// The server no longer accepts writes to this upload session: 404 (session
@@ -128,13 +128,13 @@ pub(super) fn upload_parent_change<'a>(
     }
 }
 
-pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> Result<PathBuf, EngineError> {
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
-pub(super) fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> anyhow::Result<()> {
+pub(super) fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> Result<(), EngineError> {
     db.record_local_activity(LocalActivityEventInput {
         event_type: LocalActivityKind::MovedToTrash,
         file_id: Some(file_id.to_string()),
@@ -157,7 +157,7 @@ pub(super) const FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS: u32 = 3;
 /// endpoint that times out on a large tree) stopped every upload on the Mac. A successful
 /// snapshot resets the count. Elsewhere the request was taken before the snapshot, so a failure
 /// ends only this tick.
-pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: anyhow::Error) -> anyhow::Result<i64> {
+pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: anyhow::Error) -> Result<i64, EngineError> {
     #[cfg(target_os = "macos")]
     {
         let failures = bridge.failed_snapshots.fetch_add(1, Ordering::SeqCst).saturating_add(1);
@@ -172,7 +172,7 @@ pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: a
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (bridge, cursor);
-    Err(error)
+    Err(error.into())
 }
 
 pub async fn sync_tick(
@@ -291,7 +291,7 @@ pub async fn sync_tick_outcome(
                         reached_server: true,
                     });
                 }
-                Err(e) => after_failed_snapshot(bridge, c, e)?,
+                Err(e) => after_failed_snapshot(bridge, c, e.into())?,
             }
         }
         Some(c) => c,
@@ -379,7 +379,7 @@ pub async fn sync_tick_outcome(
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
-pub(super) async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->anyhow::Result<Option<crate::api_client::SyncOp>> {
+pub(super) async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->Result<Option<crate::api_client::SyncOp>, EngineError> {
     if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
     let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
     let known_foreign=bridge.db().get_owned_key_record(id)?.is_some_and(|r|r.foreign_added || r.owner_wrap.is_some());
@@ -401,7 +401,7 @@ pub(super) async fn bootstrap_from_snapshot(
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<Vec<String>> {
+) -> Result<Vec<String>, EngineError> {
     // `now_secs` is captured at tick start, BEFORE this request — so it is the
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
@@ -444,7 +444,7 @@ pub(super) fn apply_snapshot(
     now_secs: i64,
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<Vec<String>> {
+) -> Result<Vec<String>, EngineError> {
     // Task 1697 review fix (T3): every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
     let mut applied: Vec<String> = Vec::new();
@@ -598,7 +598,7 @@ pub(super) fn apply_sync_op(
     op: &crate::api_client::SyncOp,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<Vec<String>> {
+) -> Result<Vec<String>, EngineError> {
     // Task 1697 review fix (T3): the ids of items this op actually changed on
     // the local mirror — what the runner's working-set signal must carry.
     let mut applied: Vec<String> = Vec::new();
@@ -817,7 +817,7 @@ pub(super) fn rebase_folder_descendants(
     folder_id: &str,
     now: i64,
     applied: &mut Vec<String>,
-) -> anyhow::Result<()> {
+) -> Result<(), EngineError> {
     let rows = bridge.db().list_files()?;
     let mut parents = vec![folder_id.to_string()];
     let mut visited = std::collections::HashSet::new();

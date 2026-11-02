@@ -416,7 +416,7 @@ thread_local! { static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std:
 
 #[cfg(test)]
 mod tests {
-    fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> Result<Vec<u8>, EngineError> {
         let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
             beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), "legacy", beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
         let data = reader.push_frame(&content_frame(bytes)?)?.data;

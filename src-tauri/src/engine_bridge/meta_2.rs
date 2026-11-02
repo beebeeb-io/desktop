@@ -23,7 +23,7 @@ pub(crate) fn parse_base_version_number(version_identifier: Option<&str>) -> Opt
     })
 }
 
-pub(super) fn operation_metadata(op: &PendingOperation) -> anyhow::Result<serde_json::Value> {
+pub(super) fn operation_metadata(op: &PendingOperation) -> Result<serde_json::Value, EngineError> {
     Ok(op
         .metadata_json
         .as_deref()
@@ -111,10 +111,10 @@ pub(super) fn shared_invite_allows_write(invite: &serde_json::Value) -> bool {
         })
 }
 
-pub(super) fn decode_x25519_public_key(label: &str, value: &str) -> anyhow::Result<[u8; 32]> {
+pub(super) fn decode_x25519_public_key(label: &str, value: &str) -> Result<[u8; 32], EngineError> {
     let bytes = decode_standard_b64(label, value)?;
     if bytes.len() != 32 {
-        anyhow::bail!("{label} must be 32 bytes, got {}", bytes.len());
+        return Err(anyhow::anyhow!("{label} must be 32 bytes, got {}", bytes.len()).into());
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -125,7 +125,7 @@ pub(super) fn derive_recipient_share_key(
     recipient_master_key: &[u8; 32],
     sender_public_key_b64: &str,
     file_id: &str,
-) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(*recipient_master_key);
     let recipient_private = beebeeb_core::opaque::derive_x25519_private(&master_key);
     let sender_public = decode_x25519_public_key("sender_public_key", sender_public_key_b64)?;
@@ -137,7 +137,7 @@ pub(super) fn derive_recipient_share_key(
     ))
 }
 
-pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let raw = decode_standard_b64(label, encrypted_key_b64)?;
     let frame_key = beebeeb_core::kdf::FileKey::from_bytes(*wrap_key);
     let plaintext = Zeroizing::new(
@@ -146,7 +146,7 @@ pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, lab
     );
     if plaintext.len() != 32 {
         let len = plaintext.len();
-        anyhow::bail!("{label} decrypted key must be 32 bytes, got {len}");
+        return Err(anyhow::anyhow!("{label} decrypted key must be 32 bytes, got {len}").into());
     }
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&plaintext);
@@ -158,7 +158,7 @@ pub(super) fn unwrap_direct_shared_file_key(
     sender_public_key_b64: &str,
     file_id: &str,
     encrypted_file_key_b64: &str,
-) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     let share_key = derive_recipient_share_key(recipient_master_key, sender_public_key_b64, file_id)?;
     let file_key = unwrap_key_frame(&share_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
@@ -169,7 +169,7 @@ pub(super) fn unwrap_folder_share_key(
     sender_public_key_b64: &str,
     folder_id: &str,
     encrypted_folder_key_b64: &str,
-) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let share_key = derive_recipient_share_key(recipient_master_key, sender_public_key_b64, folder_id)?;
     unwrap_key_frame(&share_key, encrypted_folder_key_b64, "encrypted_folder_key")
 }
@@ -187,7 +187,7 @@ pub(super) fn encrypted_file_key_from_folder_keys_response<'a>(
         .and_then(|entry| entry.get("encrypted_file_key").and_then(|value| value.as_str()))
 }
 
-pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: bool) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: bool) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     if custody {
         let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
         Ok(beebeeb_sync::key_resolution::unwrap_child_key(
@@ -198,7 +198,7 @@ pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &
 pub(super) fn unwrap_child_file_key(
     folder_key: &[u8; 32],
     encrypted_file_key_b64: &str,
-) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     #[cfg(test)]
     LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
@@ -213,7 +213,7 @@ pub(super) fn unwrap_folder_share_file_key(
     encrypted_folder_key_b64: &str,
     file_id: &str,
     folder_keys_response: &serde_json::Value,
-) -> anyhow::Result<beebeeb_core::kdf::FileKey> {
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     let folder_key = unwrap_folder_share_key(
         recipient_master_key,
         sender_public_key_b64,
@@ -297,7 +297,7 @@ pub(super) fn apply_shared_metadata_file_row(
     parent_id: Option<String>,
     parent_rel_path: &str,
     file_key: Option<&beebeeb_core::kdf::FileKey>,
-) -> anyhow::Result<Option<FileEntry>> {
+) -> Result<Option<FileEntry>, EngineError> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
         return Ok(None);
@@ -383,7 +383,7 @@ pub(super) fn apply_metadata_file_row(
     // get a full `<parent>/<leaf>` path that round-trips with the upload
     // watcher's `relative_db_path` (also '/'-joined, no leading slash).
     parent_rel_path: &str,
-) -> anyhow::Result<Option<FileEntry>> {
+) -> Result<Option<FileEntry>, EngineError> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
         return Ok(None);
@@ -553,7 +553,7 @@ pub(super) fn process_metadata_row(
     // Task 2190 (plan §7.1 E1): the detector reports no `ConflictDetected`; a concurrent edit is
     // the parked op. Kept so the tick's conflict plumbing stays as it is.
     _conflicts: &mut Vec<ConflictDetected>,
-) -> anyhow::Result<Option<(String, ItemKind)>> {
+) -> Result<Option<(String, ItemKind)>, EngineError> {
     let file_id = f["id"].as_str().unwrap_or_default();
     if file_id.is_empty() {
         return Ok(None);
@@ -595,7 +595,7 @@ pub(super) fn process_metadata_row(
 
     // Helper to refresh metadata + return the resolved path/kind. The single
     // place that writes the row's nested path and folder/file classification.
-    let apply = |bridge: &EngineBridge| -> anyhow::Result<Option<(String, ItemKind)>> {
+    let apply = |bridge: &EngineBridge| -> Result<Option<(String, ItemKind)>, EngineError> {
         let entry = apply_metadata_file_row(
             bridge.db(),
             f,

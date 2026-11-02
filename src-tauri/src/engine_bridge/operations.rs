@@ -54,7 +54,7 @@ impl EngineBridge {
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
         folder: Option<crate::state_db::FinderFolderRow<'_>>,
-    ) -> anyhow::Result<FinderWriteOutcome> {
+    ) -> Result<FinderWriteOutcome, EngineError> {
         let op = self.finder_operation(
             kind.clone(),
             file_id.clone(),
@@ -69,7 +69,7 @@ impl EngineBridge {
         // Spec 2026-10-10 §5.2 step 6: the sign-out's fence is read in the transaction that queues the op, and a
         // folder's row is written in it too.
         match self.db.enqueue_finder_change(&op, folder)? {
-            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed).into()),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
                 op_id,
                 file_id,
@@ -92,7 +92,7 @@ impl EngineBridge {
         payload_path: Option<String>,
         base_version: Option<i64>,
         base_object_version_id: Option<String>,
-    ) -> anyhow::Result<PendingOperation> {
+    ) -> Result<PendingOperation, EngineError> {
         let op_id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         // Task 0811: tag known-folder backup ops with their origin key (derived

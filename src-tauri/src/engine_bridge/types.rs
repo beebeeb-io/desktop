@@ -224,7 +224,7 @@ impl DueOperations {
         self.folder_landed = true;
     }
 
-    pub(super) fn next(&mut self, db: &StateDb, now: i64) -> anyhow::Result<Option<PendingOperation>> {
+    pub(super) fn next(&mut self, db: &StateDb, now: i64) -> Result<Option<PendingOperation>, EngineError> {
         while self.queue.is_empty() && self.folder_landed && self.listings < DUE_LISTINGS_PER_PASS {
             self.folder_landed = false;
             self.listings += 1;
@@ -588,7 +588,7 @@ pub(super) fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
 }
 
 pub(super) fn recorded_content_format(key: &beebeeb_core::kdf::FileKey, meta: &serde_json::Value)
-    -> anyhow::Result<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, EngineError> {
     let name = meta["name_encrypted"].as_str().ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
     Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
 }
