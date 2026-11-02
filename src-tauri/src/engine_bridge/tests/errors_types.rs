@@ -166,3 +166,20 @@ fn engine_remove_takes_the_kind_it_was_told() {
     assert!(!dir.exists());
     let _ = std::fs::remove_dir(&root);
 }
+
+/// A binary side is sized and never shown; a text side shows its bytes. The
+/// kind the window reads back is the same one the classifier was given.
+#[test]
+fn content_kind_keeps_a_binary_side_to_its_size() {
+    let text = content_side_from_bytes(b"hello".to_vec(), ContentKind::Text);
+    assert_eq!(text.text.as_deref(), Some("hello"));
+    assert_eq!(text.size_bytes, Some(5));
+
+    let binary = content_side_from_bytes(b"hello".to_vec(), ContentKind::Binary);
+    assert_eq!(binary.text, None);
+    assert_eq!(binary.unavailable_reason, None);
+    assert_eq!(binary.size_bytes, Some(5));
+
+    assert_eq!(ContentKind::from_flag(true), ContentKind::Text);
+    assert!(!ContentKind::from_flag(false).is_text());
+}

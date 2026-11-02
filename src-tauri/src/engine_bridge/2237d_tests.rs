@@ -340,7 +340,7 @@ fn sf2237d_t5_thumbnail_preview_and_versions() {
         &*runtime().block_on(b.fetch_thumbnail_to_memory(ID, "small")).unwrap(),
         b"thumbnail"
     );
-    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, true));
+    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, ContentKind::Text));
     assert_eq!(preview.text.as_deref(), Some("guest bytes!"));
     {
         let mut w = s.state.lock().unwrap();

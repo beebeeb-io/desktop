@@ -2,13 +2,35 @@
 
 use super::*;
 
+/// Whether a conflict side is text the window may show or bytes it may only size.
+/// The one place a filename's "is text" fact is turned into a type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ContentKind {
+    Text,
+    Binary,
+}
+
+impl ContentKind {
+    pub(super) fn from_flag(is_text: bool) -> Self {
+        if is_text {
+            ContentKind::Text
+        } else {
+            ContentKind::Binary
+        }
+    }
+
+    pub(super) fn is_text(self) -> bool {
+        self == ContentKind::Text
+    }
+}
+
 /// Pure classifier: turns real file bytes into what the conflict window can
 /// safely show. Never fabricates content — a non-text file, an oversized
 /// file, or invalid UTF-8 all report `text: None` plus an honest
 /// `unavailable_reason`, never a placeholder string.
-pub(super) fn content_side_from_bytes(bytes: Vec<u8>, is_text: bool) -> ConflictContentSide {
+pub(super) fn content_side_from_bytes(bytes: Vec<u8>, kind: ContentKind) -> ConflictContentSide {
     let size_bytes = Some(bytes.len() as u64);
-    if !is_text {
+    if kind == ContentKind::Binary {
         return ConflictContentSide {
             size_bytes,
             text: None,

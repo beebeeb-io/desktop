@@ -69,20 +69,20 @@ use super::*;
         // regardless of actual file content. `content_side_from_bytes` is
         // the pure classifier `EngineBridge::conflict_content_preview` uses
         // to turn real bytes into what the window can safely show.
-        let small_text = content_side_from_bytes(b"hello world".to_vec(), true);
+        let small_text = content_side_from_bytes(b"hello world".to_vec(), ContentKind::Text);
         assert_eq!(small_text.text.as_deref(), Some("hello world"));
         assert_eq!(small_text.size_bytes, Some(11));
         assert!(small_text.unavailable_reason.is_none());
 
         // Binary side never carries text, even for tiny content — only size.
-        let binary = content_side_from_bytes(b"hello world".to_vec(), false);
+        let binary = content_side_from_bytes(b"hello world".to_vec(), ContentKind::Binary);
         assert!(binary.text.is_none());
         assert_eq!(binary.size_bytes, Some(11));
         assert!(binary.unavailable_reason.is_none());
 
         // Invalid UTF-8 for a file the caller marked as text: honest
         // "isn't valid UTF-8" reason, never fabricated text.
-        let invalid_utf8 = content_side_from_bytes(vec![0xFF, 0xFE, 0xFD], true);
+        let invalid_utf8 = content_side_from_bytes(vec![0xFF, 0xFE, 0xFD], ContentKind::Text);
         assert!(invalid_utf8.text.is_none());
         assert_eq!(invalid_utf8.size_bytes, Some(3));
         assert!(invalid_utf8.unavailable_reason.unwrap().contains("UTF-8"));
@@ -92,7 +92,7 @@ use super::*;
         // over it, size is still reported honestly but text is withheld
         // rather than silently truncated (which would corrupt the diff).
         let oversized = vec![b'a'; CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1];
-        let too_big = content_side_from_bytes(oversized, true);
+        let too_big = content_side_from_bytes(oversized, ContentKind::Text);
         assert!(too_big.text.is_none());
         assert_eq!(too_big.size_bytes, Some((CONFLICT_PREVIEW_TEXT_MAX_BYTES + 1) as u64));
         assert!(too_big.unavailable_reason.unwrap().contains("too large"));

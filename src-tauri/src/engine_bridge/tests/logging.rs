@@ -724,7 +724,7 @@ use super::*;
                 k.grants.push_back(GrantScript::Replace);
             }
             let bridge = bridge_for(dir.path(), &pair);
-            let (side, _) = bridge.remote_content_preview(TEST_FILE_ID, true).await;
+            let (side, _) = bridge.remote_content_preview(TEST_FILE_ID, ContentKind::Text).await;
             assert_eq!(side.unavailable_reason, None);
             assert_eq!(side.text.as_deref(), Some(String::from_utf8(b.plain.clone()).unwrap().as_str()));
         }
