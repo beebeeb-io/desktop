@@ -225,7 +225,7 @@ mod activity;
 mod moves;
 mod requests;
 
-pub(crate) use requests::{RequestKeys, request_upload_fields};
+pub(crate) use requests::{RequestKeys, rename_material, request_row_fact, request_upload_fields};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
@@ -756,11 +756,16 @@ impl crate::engine_bridge::EngineBridge {
             let mut candidate = (!malformed && class.is_some())
                 .then(|| record_key(&master, &record, row_kind(&row)).ok())
                 .flatten();
-            // T3.2 (L12/L13): a 2236 request row's name key is derived first, else `C`.
-            // Never adopted, wrapped at share time or published; content is read-only.
-            let is_request = request_upload_fields(&row).is_some();
-            record.request_row = is_request;
-            self.set_request_row(id, is_request);
+            // T3.2/P1-1: the name key is derived first, else `C`; only a row carrying
+            // the 2236 envelope may set or clear the durable fact (a sync row keeps it).
+            let is_request = match request_row_fact(&row) {
+                Some(is_request) => {
+                    record.request_row = is_request;
+                    self.set_request_row(id, is_request);
+                    is_request
+                }
+                None => record.request_row,
+            };
             if is_request && candidate.is_none() {
                 if requests.is_none() {
                     requests = Some(RequestKeys::load(&self.api()).await);

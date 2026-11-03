@@ -1,11 +1,14 @@
-//! Task 2275 T3.2 (L12/L13): the desktop's reader for 2236 request rows.
+//! Task 2275 T3.2 (L12/L13): the desktop's request-row envelope fields and the
+//! owner's request private keys.
 //!
-//! Owns: the request envelope fields, the owner's request private keys, and the
-//! row's keys — content under the sealed request key `C`, name under the derived
-//! string convention first, with the named R5 legacy reader behind the class and
-//! encrypted-name gates.
+//! Owns: decoding the 2236 envelope fields and loading the owner's wrapped
+//! request private keys. The row's keys are core's: [`resolve_request_row`]
+//! runs the class and encrypted-name checks and opens the bound seal, then the
+//! shipped empty-id seal (§15). Desktop keeps no reader of its own.
 //! Must not: decide a row's class (core does) or touch any other row kind.
 //! Tests: `owner_keys::tests::request`.
+//!
+//! [`resolve_request_row`]: beebeeb_core::owned_keys::resolve_request_row
 
 use base64::{
     Engine as _,
@@ -13,12 +16,8 @@ use base64::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use zeroize::Zeroizing;
 
-use beebeeb_core::{
-    item_id::ItemClass,
-    kdf::{FileKey, MasterKey},
-};
+use beebeeb_core::kdf::MasterKey;
 use crate::api_client::ApiClient;
 
 /// A 2236 request upload row's envelope fields (L12). The row is an owner-class
@@ -59,14 +58,10 @@ pub(crate) fn request_upload_fields(row: &Value) -> Option<RequestUploadFields> 
     })
 }
 
-/// The owner's upload requests, loaded once per resolution. Mirrors the CLI's
-/// `RequestKeyResolver`: core's bound reader first (2236), then the named R5
-/// legacy reader behind the class and name gates.
+/// The owner's upload requests, loaded once per pass.
 #[derive(Default)]
 pub(crate) struct RequestKeys {
     wrapped: HashMap<String, (Vec<u8>, Vec<u8>)>,
-    /// The unwrapped X25519 private halves, wiped on drop and never copied out.
-    privs: HashMap<String, Zeroizing<[u8; 32]>>,
 }
 
 impl RequestKeys {
@@ -92,79 +87,57 @@ impl RequestKeys {
         keys
     }
 
-    /// The request's X25519 private key, lent from the zeroizing cache. The
-    /// pre-2236 wrap binds no request id, so the context is empty — the same
-    /// shape the CLI reads.
-    fn private(&mut self, master: &MasterKey, request_id: &str) -> Option<&[u8; 32]> {
-        if !self.privs.contains_key(request_id) {
-            let key = {
-                let (wrapped, nonce) = self.wrapped.get(request_id)?;
-                beebeeb_core::file_request::unwrap_request_private(master, b"", wrapped, nonce).ok()?
-            };
-            self.privs.insert(request_id.to_string(), key);
-        }
-        self.privs.get(request_id).map(|key| &**key)
-    }
-
-    /// A request row's keys (L12): content key `C`; name key from the derived
-    /// convention (string only) first, else `C`. Read-only either way, and the
-    /// row is never adopted.
+    /// A request row's keys through core (§15): the class and encrypted-name
+    /// checks, the row-bound seal, then the shipped empty-id seal. Content is
+    /// `C`; the rename target is the string-derived key and the recorded pin,
+    /// never `C`, and `None` for an upper-repair (read-only) name.
     pub(crate) fn row_keys(&mut self, master: &MasterKey, row: &Value) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
-        use beebeeb_core::kdf::OwnerKeyConvention;
-        use beebeeb_core::owned_keys::{KeyOrigin, RequestRowKeys};
         let fields = request_upload_fields(row)?;
         let id = row.get("id")?.as_str()?;
         let encrypted = row.get("name_encrypted")?.as_str()?;
         let (wrapped, nonce) = self.wrapped.get(&fields.request_id)?;
-        // Core binds the row id and the request id (2236). It wins when it opens.
-        if let Ok(keys) = beebeeb_core::owned_keys::resolve_request_row(
+        // Every request created so far wraps its private key under the empty
+        // context: the server mints the request id AFTER the wrap.
+        beebeeb_core::owned_keys::resolve_request_row(
             master,
             id,
-            fields.request_id.as_bytes(),
+            b"",
             wrapped,
             nonce,
             &fields.e_pub,
             &fields.wrapped_content_key,
             encrypted,
-        ) {
-            return Some(keys);
-        }
-        // Gate the legacy reader exactly as core would: an owner-class id with an
-        // encrypted name. A plaintext name authenticates nothing.
-        if beebeeb_core::item_id::item_class(id).ok()? != ItemClass::Owner || !encrypted.starts_with('{') {
-            return None;
-        }
-        let private = self.private(master, &fields.request_id)?;
-        let content = beebeeb_core::file_request::open_request_upload(
-            private,
-            &fields.e_pub,
-            b"",
-            &fields.wrapped_content_key,
         )
-        .ok()?;
-        let content_key = FileKey::from_bytes(*content);
-        // R5 binds no ids, so its three fields can be grafted onto a binary or
-        // upper-repair owner row. Only the string convention is the request shape.
-        let derived = match beebeeb_core::kdf::owner_file_key_for_name(master, id, encrypted) {
-            Ok((key, OwnerKeyConvention::String)) => beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, encrypted)
-                .ok()
-                .map(|name| (key, KeyOrigin::Derived, name)),
-            Ok(_) => return None,
-            Err(_) => None,
-        };
-        let (name_key, name_origin, name) = match derived {
-            Some(found) => found,
-            None => (
-                FileKey::from_bytes(*content_key.as_bytes()),
-                KeyOrigin::RequestContent,
-                beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key, encrypted).ok()?,
-            ),
-        };
-        Some(RequestRowKeys {
-            content_key,
-            name_key,
-            name_origin,
-            name,
-        })
+        .ok()
     }
+}
+
+/// The durable request-row fact a row may set or clear (P1-1): only a row that
+/// carries the 2236 envelope decides; a synthesized sync row returns `None`.
+pub(crate) fn request_row_fact(row: &Value) -> Option<bool> {
+    let carries = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
+        .iter()
+        .all(|field| row.get(field).is_some());
+    carries.then(|| request_upload_fields(row).is_some())
+}
+
+/// The key and pin a rename of a request row must seal under (§15): core's
+/// `RenameTarget` — the string-convention key derived from the row id and the
+/// pin the current name records. Never `C`; an upper-repair name is read-only.
+pub(crate) fn rename_material(
+    master: &MasterKey,
+    id: &str,
+    name_encrypted: &str,
+) -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+    use beebeeb_core::kdf::OwnerKeyConvention;
+    let (name_key, convention) = beebeeb_core::kdf::owner_file_key_for_name(master, id, name_encrypted)?;
+    anyhow::ensure!(
+        convention != OwnerKeyConvention::UpperRepair,
+        "a request row with an upper-repair name is read-only"
+    );
+    let metadata = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&name_key, name_encrypted)?;
+    Ok((
+        beebeeb_core::kdf::derive_file_key(master, id.as_bytes()),
+        metadata.chunk_format,
+    ))
 }
