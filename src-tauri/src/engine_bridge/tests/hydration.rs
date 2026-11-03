@@ -265,8 +265,8 @@ use super::*;
 
         let outcome = bridge
             .queue_finder_modify(FinderWriteTarget {
-                file_id: Some("file-1".into()),
-                parent_id: Some("folder-1".into()),
+                file_id: Some("40000000-0000-4000-8000-0000000000f6".into()),
+                parent_id: Some("40000000-0000-4000-8000-0000000000f7".into()),
                 filename: "renamed.txt".into(),
                 rel_path: None,
                 kind: FinderWriteItemKind::File,
