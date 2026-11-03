@@ -85,9 +85,12 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
         )?;
         return Ok((key, metadata.chunk_format));
     }
-    // P2-8: a foreign id has no derived key. Its read twin refuses it already;
-    // deriving here would seal the write under a key the attacker can pick.
-    if beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Foreign) {
+    // P2-8/P2-2: a foreign id has no derived key, and neither has text that is
+    // not a canonical id at all. Its read twin refuses both; deriving here would
+    // seal the write under a key made from attacker-chosen text.
+    if beebeeb_core::item_id::item_class(id).is_err()
+        || beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Foreign)
+    {
         return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
     }
     Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))

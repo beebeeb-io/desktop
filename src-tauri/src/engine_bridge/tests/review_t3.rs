@@ -207,6 +207,26 @@ async fn review_p1_1_a_remote_rename_of_a_request_row_keeps_the_fact() {
 }
 
 #[test]
+fn review_p2_2_a_non_canonical_id_has_no_derived_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    for id in [
+        "not-a-uuid",
+        "40000000-0000-4000-8000-0000000000zz",
+        "40000000-0000-4000-8000-0000000000D3",
+    ] {
+        let err = match owned_key_and_pin(&db, &[7u8; 32], id) {
+            Ok(_) => panic!("a non-canonical id must have no write key: {id}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("item key is unavailable"),
+            "a non-canonical id gets no derived write key: {id}: {err}"
+        );
+    }
+}
+
+#[test]
 fn review_p2_8_an_unknown_foreign_item_has_no_derived_key() {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
