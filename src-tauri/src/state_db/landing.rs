@@ -325,7 +325,7 @@ impl StateDb {
     }
     /// §8.6.1: the completion the server confirmed, recorded before any local bookkeeping, only
     /// while the claimed op exists (S4). `false`: the op moved since the claim and nothing was
-    /// written.
+    /// written. The claim and the object version arrive from outside: a blank one is refused.
     pub fn record_completion_claimed(
         &self,
         op_id: &str,
@@ -334,12 +334,15 @@ impl StateDb {
         object_version_id: &str,
         mime_type: Option<&str>,
     ) -> Result<bool> {
+        let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
+        let object_version =
+            VersionId::parse(object_version_id).map_err(StateDbError::into_sql)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
             "UPDATE upload_resume
              SET completed_version = ?3, completed_object_version_id = ?4, completed_mime_type = ?5
              WHERE op_id = ?1 AND EXISTS (SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
-            params![op_id, claim_id, version, object_version_id, mime_type],
+            params![op_id, claim.as_str(), version, object_version.as_str(), mime_type],
         )?;
         Ok(n == 1)
     }
@@ -353,19 +356,27 @@ impl StateDb {
         input: &LandingInput<'_>,
         rekey: &dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E>,
     ) -> Result<Option<LandingOutcome>> {
+        // The landing's ids come from outside (the server's completion, the queue's claim,
+        // the runner's op): a blank one is refused before it reaches SQL.
+        let local = LocalFileId::parse(input.local_file_id).map_err(StateDbError::into_sql)?;
+        let server = ServerFileId::parse(input.server_file_id).map_err(StateDbError::into_sql)?;
+        let produced_version_id =
+            VersionId::parse(input.produced_object_version_id).map_err(StateDbError::into_sql)?;
+        let claim = input
+            .claim_id
+            .map(ClaimId::parse)
+            .transpose()
+            .map_err(StateDbError::into_sql)?;
         #[cfg(test)]
         if let Some(error) = injected_landing_failure() {
             return Err(error);
         }
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let local = LocalFileId::new(input.local_file_id);
-        let server = ServerFileId::new(input.server_file_id);
-        let produced_version_id = VersionId::new(input.produced_object_version_id);
-        if let Some(claim_id) = input.claim_id {
+        if let Some(claim) = claim {
             let claimed: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2)",
-                params![input.op_id, claim_id],
+                params![input.op_id, claim.as_str()],
                 |r| r.get(0),
             )?;
             if !claimed {
@@ -605,14 +616,14 @@ impl StateDb {
         // The op and its resume row. The payload is marked completed on every platform
         // (Windows keeps it until finalization, and its sign-out reads the flag); the caller
         // unlinks the released copy after the commit (S6).
-        let removed = match input.claim_id {
-            Some(claim_id) => tx.execute(
+        let removed = match claim {
+            Some(claim) => tx.execute(
                 "DELETE FROM operation_queue WHERE op_id = ?1 AND claim_id = ?2",
-                params![input.op_id, claim_id],
+                params![input.op_id, claim.as_str()],
             )?,
             None => tx.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![input.op_id])?,
         };
-        if input.claim_id.is_some() && removed != 1 {
+        if claim.is_some() && removed != 1 {
             return Ok(None); // dropping `tx` rolls back
         }
         if settle_after_removal {

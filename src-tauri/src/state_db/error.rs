@@ -41,11 +41,15 @@ impl From<rusqlite::Error> for StateDbError {
     }
 }
 
-/// Kept while the engine bridge's rekey callback still yields `anyhow::Result`: its
-/// lane (D-P2-2) maps that to `EngineError`, and this conversion goes with it.
-impl From<anyhow::Error> for StateDbError {
-    fn from(error: anyhow::Error) -> Self {
-        Self::Callback(error.into_boxed())
+impl StateDbError {
+    /// The error a public method reports. Its callers read `rusqlite::Result`, so a value
+    /// that never becomes a SQL parameter (a blank id) reports as rusqlite's conversion
+    /// failure, and the sentence still names the kind.
+    pub fn into_sql(self) -> rusqlite::Error {
+        match self {
+            Self::Sql(error) => error,
+            other => rusqlite::Error::ToSqlConversionFailure(Box::new(other)),
+        }
     }
 }
 
@@ -59,6 +63,15 @@ pub trait RekeyFailure {
 impl RekeyFailure for StateDbError {
     fn into_boxed(self) -> Box<dyn std::error::Error + Send + Sync> {
         Box::new(self)
+    }
+}
+
+/// The boundary conversion: `engine_bridge/upload.rs`'s rekey callback still yields
+/// `anyhow::Error` (lane D-P2-2 maps it to `EngineError`, and both this and the
+/// `RekeyFailure` impl below go then). Nothing inside `state_db` yields it.
+impl From<anyhow::Error> for StateDbError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Callback(error.into_boxed())
     }
 }
 

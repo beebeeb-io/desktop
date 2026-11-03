@@ -1137,3 +1137,171 @@ use super::*;
             "the version-0 row still asks for a snapshot"
         );
     }
+
+    // ── the ids from outside: every seam's `parse` refuses a blank one ──────
+
+    fn blank_landing<'a>(
+        local_file_id: &'a str,
+        server_file_id: &'a str,
+        produced_object_version_id: &'a str,
+        claim_id: Option<&'a str>,
+    ) -> LandingInput<'a> {
+        LandingInput {
+            op_id: "op",
+            claim_id,
+            write_id: None,
+            local_file_id,
+            server_file_id,
+            target_path: None,
+            parent_id: None,
+            landed_base: None,
+            produced_version: 0,
+            produced_object_version_id,
+            size_bytes: 1,
+            content_type: None,
+            mime_type: None,
+            completed_payload: None,
+            completed_payload_hash: None,
+            finalization: None,
+            now: 1,
+        }
+    }
+
+    /// The landing's refusal sentence for a blank id: its `parse` refuses before a transaction
+    /// opens, so nothing was written.
+    fn landing_refusal(local: &str, server: &str, object: &str, claim: Option<&str>) -> String {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let rekey =
+            |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+                Ok(op.metadata_json.clone())
+            };
+        db.apply_landing(&blank_landing(local, server, object, claim), &rekey)
+            .unwrap_err()
+            .to_string()
+    }
+
+    fn blank_id_db() -> (tempfile::TempDir, StateDb) {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn a_landing_refuses_a_blank_local_file_id() {
+        assert_eq!(
+            landing_refusal(" ", "server", "object-1", Some("claim")),
+            "a local file id is empty"
+        );
+    }
+
+    #[test]
+    fn a_landing_refuses_a_blank_server_file_id() {
+        assert_eq!(
+            landing_refusal("local", "", "object-1", Some("claim")),
+            "a server file id is empty"
+        );
+    }
+
+    #[test]
+    fn a_landing_refuses_a_blank_produced_object_version_id() {
+        assert_eq!(
+            landing_refusal("local", "server", " ", Some("claim")),
+            "a version id is empty"
+        );
+    }
+
+    #[test]
+    fn a_landing_refuses_a_blank_claim_id() {
+        assert_eq!(
+            landing_refusal("local", "server", "object-1", Some("")),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_recorded_completion_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.record_completion_claimed("op", " ", 1, "object-1", None)
+                .unwrap_err()
+                .to_string(),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_recorded_completion_refuses_a_blank_object_version_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.record_completion_claimed("op", "claim", 1, "", None)
+                .unwrap_err()
+                .to_string(),
+            "a version id is empty"
+        );
+    }
+
+    #[test]
+    fn an_attempt_report_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.record_attempt_claimed("op", "", 1, 2, None).unwrap_err().to_string(),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_pause_report_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.record_pause_claimed("op", " ", OperationPauseReason::Auth, None, 3)
+                .unwrap_err()
+                .to_string(),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_park_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.park_claimed("op", "", ParkReason::BaseUnknown, 3).unwrap_err().to_string(),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_resume_write_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        let resume = UploadResume {
+            op_id: "op".into(),
+            payload_path: "/staged/op".into(),
+            payload_size: 3,
+            payload_mtime_ns: 1,
+            upload_session_id: "session-op".into(),
+            server_file_id: "server".into(),
+            object_version_id: "object-1".into(),
+            chunk_size_bytes: 3,
+            chunk_count: 1,
+            acked_chunks: 0,
+            metadata_applied: false,
+            is_create: false,
+            self_minted: false,
+            completed_version: None,
+            completed_object_version_id: None,
+            completed_mime_type: None,
+        };
+        assert_eq!(
+            db.put_upload_resume_claimed(&resume, "").unwrap_err().to_string(),
+            "a claim id is empty"
+        );
+    }
+
+    #[test]
+    fn a_finish_refuses_a_blank_claim_id() {
+        let (_dir, db) = blank_id_db();
+        assert_eq!(
+            db.finish_claimed("op", "", None).unwrap_err().to_string(),
+            "a claim id is empty"
+        );
+    }

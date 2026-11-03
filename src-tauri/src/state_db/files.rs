@@ -573,7 +573,7 @@ impl StateDb {
         let Some(contract) = get_file_contract_state_conn(&tx, file_id)? else {
             return Ok(None);
         };
-        let (held, version_filled) = held_write_conn(&tx, file_id)?;
+        let (held, _version_filled) = held_write_conn(&tx, file_id)?;
         let held_write_queued = match &held {
             Some(held) => tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE write_id = ?1)",
@@ -601,7 +601,8 @@ impl StateDb {
             held_write_queued,
             unparked_finder_upload,
             parked_finder_upload,
-            version_filled,
+            #[cfg(test)]
+            version_filled: _version_filled,
         }))
     }
     /// Task 2190 (plan §3.3, D4): the leaf names of the rows in `parent_id`'s folder (the root when
