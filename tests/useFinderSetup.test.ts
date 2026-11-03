@@ -23,7 +23,7 @@ import {
   finderSetupLoadPresentation,
 } from '../src/finderSetupCopy'
 import { mount, type Handler, type Mounted } from './fixtures/componentHarness'
-import { rustStr } from './fixtures/rustConstants'
+import { rustStr, rustStrIn } from './fixtures/rustConstants'
 
 const view = (over: Partial<FinderSetupView> = {}): FinderSetupView => ({
   setup: 'adding',
@@ -463,7 +463,7 @@ describe('lead ruling 7b: actions and the failed-action toast', () => {
  */
 describe('a failed Try again says Rust\'s sentence (row 15)', () => {
   const HELD = rustStr('lib.rs', 'FINDER_SETUP_HELD')
-  const NOT_RUNNING = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+  const NOT_RUNNING = rustStrIn('finder_setup/driver', 'NOT_RUNNING')
   const failing = (reason: unknown) => ({ finder_setup_state: () => failedTimeout, finder_setup_retry: () => { throw reason } })
 
   for (const [name, sentence] of [['held', HELD], ['not running', NOT_RUNNING]] as const) {
