@@ -225,7 +225,7 @@ mod activity;
 mod moves;
 mod requests;
 
-#[allow(unused_imports)] pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, rename_material, request_envelope, request_upload_fields};
+#[allow(unused_imports)] pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope, request_upload_fields};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
@@ -758,7 +758,7 @@ impl crate::engine_bridge::EngineBridge {
                 .resolve_envelope(&master, &row, &mut requests, &mut record, id)
                 .await;
             let Ok(outcome) = outcome else {
-                record.blocked_fingerprint = Some(record.fingerprint());
+                block_malformed_row(&scope, old.as_ref(), &mut record)?;
                 prepared.push(PreparedOwnedRow { row, record, readable: false });
                 continue;
             };

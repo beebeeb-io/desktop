@@ -158,6 +158,21 @@ impl crate::engine_bridge::EngineBridge {
     }
 }
 
+/// Review 5 P1-1: a malformed envelope's block must reach the DB even when the
+/// row was never seen — only the stored flag refuses every write seam. The
+/// served name is untrusted, so a previously stored name stays.
+pub(crate) fn block_malformed_row(
+    scope: &crate::owner_keys::AccountScope<'_>,
+    old: Option<&crate::owner_keys::OwnedKeyRecord>,
+    record: &mut crate::owner_keys::OwnedKeyRecord,
+) -> anyhow::Result<()> {
+    if let Some(old) = old {
+        record.name_encrypted.clone_from(&old.name_encrypted);
+    }
+    record.blocked_fingerprint = Some(record.fingerprint());
+    scope.put(record)
+}
+
 /// The 2236 envelope a row carries (P1-1): `Ok(None)` when it carries none —
 /// a synthesized sync row never decides the durable fact. A row that carries
 /// all three fields must carry a well-formed envelope: a malformed one is an

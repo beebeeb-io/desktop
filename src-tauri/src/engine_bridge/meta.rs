@@ -73,6 +73,11 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
         if record.request_row {
             return Err(EngineError::from(anyhow::anyhow!("a request row has no content key")));
         }
+        // Review 5 P1-1: a persisted block blocks this seam too, whatever
+        // `record_key` decides internally.
+        if record.blocked_fingerprint.is_some() {
+            return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
+        }
         let (key, metadata) = crate::owner_keys::record_key(
             &beebeeb_core::kdf::MasterKey::from_bytes(*master),
             &record,
@@ -102,7 +107,13 @@ pub(super) fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str,
 /// `C` — while every other row takes its own key. The only rename entry point;
 /// a content write never comes here.
 pub(super) fn owned_metadata_for_rename(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> Result<String, EngineError> {
-    let (key, pin) = match db.get_owned_key_record(id)? {
+    let record = db.get_owned_key_record(id)?;
+    // Review 5 P1-1: a blocked row has no write seam, rename included — not
+    // even the request row's derived rename key.
+    if record.as_ref().is_some_and(|record| record.blocked_fingerprint.is_some()) {
+        return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
+    }
+    let (key, pin) = match record {
         Some(record) if record.request_row => crate::owner_keys::rename_material(
             &beebeeb_core::kdf::MasterKey::from_bytes(*master),
             id,

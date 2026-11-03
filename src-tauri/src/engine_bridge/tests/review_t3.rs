@@ -370,6 +370,88 @@ async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write()
     assert!(bridge.is_request_row(REQUEST), "the in-memory set keeps it too");
 }
 
+/// P1-1: a row this build has never stored that carries a malformed envelope
+/// must still get its block into the DB. It was reported unreadable but written
+/// nowhere, so `get_owned_key_record` stayed `None` and every write seam took
+/// `owned_key_and_pin`'s no-record branch and derived the string key.
+///
+/// Mutants: dropping the `scope.put` keeps the record `None`; dropping the
+/// `blocked_fingerprint` assignment stores it unblocked. Either turns this red.
+#[tokio::test]
+async fn review_p1_1_a_never_seen_malformed_row_is_blocked_and_has_no_write_key() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e8";
+    let master = MasterKey::from_bytes([7; 32]);
+    let (envelope, requests) = request_envelope_fixture(REQUEST_ID, [0x49u8; 32]);
+    let (base, _server) = json_server(move |path| (path == "/api/v1/file-requests").then(|| requests.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    // (file id, the served field value that makes the carried envelope malformed)
+    let malformed = [(
+        "40000000-0000-4000-8000-0000000000e8",
+        serde_json::json!("%%%not-base64%%%"),
+    )];
+    for (row_id, _) in malformed.iter() {
+        assert!(
+            bridge.db().get_owned_key_record(row_id).unwrap().is_none(),
+            "the row is never seen: {row_id}"
+        );
+    }
+    let mut rows = Vec::new();
+    for (row_id, wrapped) in malformed.iter() {
+        let name = beebeeb_core::encrypt::encrypt_name_for(
+            &derive_file_key(&master, row_id.as_bytes()),
+            "report.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let mut row = serde_json::json!({
+            "id": row_id,
+            "name_encrypted": name,
+            "parent_id": FOLDER,
+            "is_folder": false,
+            "version_number": 1,
+            "size_bytes": 4,
+            "updated_at": 1,
+        });
+        row.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
+        row["wrapped_content_key"] = wrapped.clone();
+        rows.push(row);
+    }
+    let prepared = bridge.prepare_owned_rows(&rows).await.expect("one malformed row never aborts the pass");
+    assert_eq!(prepared.len(), rows.len());
+    assert!(prepared.iter().all(|prepared| !prepared.readable), "every malformed row is unreadable");
+    for (row_id, _) in malformed.iter() {
+        let record = bridge
+            .db()
+            .get_owned_key_record(row_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the block is persisted: {row_id}"));
+        assert!(record.blocked_fingerprint.is_some(), "the malformed row's block reaches the DB: {row_id}");
+        let seams = [
+            ("content key", owned_key_and_pin(&bridge.db(), &[7u8; 32], row_id).map(|_| ())),
+            (
+                "name",
+                crate::engine_bridge::meta::owned_metadata_for_name(&bridge.db(), &[7u8; 32], row_id, "edited.txt", None)
+                    .map(|_| ()),
+            ),
+            (
+                "rename",
+                crate::engine_bridge::meta::owned_metadata_for_rename(&bridge.db(), &[7u8; 32], row_id, "edited.txt", None)
+                    .map(|_| ()),
+            ),
+        ];
+        for (seam, result) in seams {
+            let error = match result {
+                Ok(()) => panic!("a blocked row has no write key ({seam}): {row_id}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("item key is unavailable"), "{seam}: {error}");
+        }
+    }
+}
+
 /// P1-1: three well-formed envelope fields on a normal OWNER row come from the
 /// server, so only core's `resolve_request_row` success may make it a request
 /// row — here the seal does not open, so it stays blocked, never an owner row
