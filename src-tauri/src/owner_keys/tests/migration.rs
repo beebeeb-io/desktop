@@ -40,7 +40,7 @@ fn sf2237d_t3_migration_preserves_contracts() {
         (after.local_base_version, after.local_hash),
         (before.local_base_version, before.local_hash)
     );
-    let reopened_records = usize::from(db.get_owned_key_record("item").unwrap().is_some());
+    let reopened_records = usize::from(db.get_owned_key_record(RECORD_ID).unwrap().is_some());
     assert_eq!(reopened_records, 1);
 }
 
@@ -51,7 +51,7 @@ fn sf2237d_t3_opaque_roundtrip_and_purge() {
     let db = StateDb::open(&path).unwrap();
     let row = record();
     db.put_owned_key_record(&row).unwrap();
-    assert_eq!(db.get_owned_key_record("item").unwrap(), Some(row.clone()));
+    assert_eq!(db.get_owned_key_record(RECORD_ID).unwrap(), Some(row.clone()));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(owned_key_records)")
@@ -76,17 +76,17 @@ fn sf2237d_t3_opaque_roundtrip_and_purge() {
     changed.name_encrypted.push('x');
     assert_ne!(row.fingerprint(), changed.fingerprint());
     db.clear_account_data(false).unwrap();
-    assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    assert_eq!(db.get_owned_key_record(RECORD_ID).unwrap(), None);
     assert!(!db.has_account_data().unwrap());
     db.put_owned_key_record(&row).unwrap();
-    db.delete_owned_key_record("item").unwrap();
-    assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    db.delete_owned_key_record(RECORD_ID).unwrap();
+    assert_eq!(db.get_owned_key_record(RECORD_ID).unwrap(), None);
     db.put_owned_key_record(&row).unwrap();
     let api = ApiClient::new("http://127.0.0.1:9".into(), "fixture".into(), [7; 32]);
     let stop = AtomicBool::new(false);
     let before_purge = AccountScope::new(&db, &api, &stop);
     db.purge_all_local_state().unwrap();
-    assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    assert_eq!(db.get_owned_key_record(RECORD_ID).unwrap(), None);
     assert!(before_purge.put(&row).is_err());
 }
 
@@ -142,11 +142,11 @@ fn sf2237d_t3_write_once_false_and_timeout() {
     let obs = observed.clone();
     let target = db.clone();
     let fixture = Fixture::new(move |req| {
-        assert!(req.path.ends_with("/item/owner-key"));
+        assert!(req.path.ends_with(&format!("/{RECORD_ID}/owner-key")));
         assert!(req.body["owner_wrapped_file_key"].is_string());
         obs.lock()
             .unwrap()
-            .push(target.get_owned_key_record("item").unwrap().is_some());
+            .push(target.get_owned_key_record(RECORD_ID).unwrap().is_some());
         if obs.lock().unwrap().len() == 1 {
             Some(json!({"adopted":false}))
         } else {
@@ -165,7 +165,7 @@ fn sf2237d_t3_write_once_false_and_timeout() {
         "persist before POST, including ambiguous failure"
     );
     assert_eq!(
-        db.get_owned_key_record("item").unwrap().unwrap().pending_owner_wrap,
+        db.get_owned_key_record(RECORD_ID).unwrap().unwrap().pending_owner_wrap,
         row.pending_owner_wrap
     );
 }
@@ -187,6 +187,6 @@ fn sf2237d_t3_account_switch_cancels() {
     let scope = AccountScope::new(&db, &api, &stop);
     stop.store(true, Ordering::Release);
     assert!(scope.put(&record()).is_err());
-    assert_eq!(db.get_owned_key_record("item").unwrap(), None);
+    assert_eq!(db.get_owned_key_record(RECORD_ID).unwrap(), None);
 }
 

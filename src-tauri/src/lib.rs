@@ -12486,7 +12486,7 @@ fn dehydrate_excluded_subtrees_windows(
 /// synced the folder), falling back to a stable id-derived label
 /// (`"Folder 7f3a1c…"`) when the path is empty. When we fall back to the
 /// top-level API path (empty DB), names are decrypted via
-/// [`try_decrypt_name`] as before.
+/// [`owner_keys::display_name`] as before.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct VaultItem {
     id: String,
@@ -12908,27 +12908,14 @@ fn subtree_file_ids(rows: &[(String, Option<String>, bool)], root_folder_ids: &[
 /// an entry encrypted under a different key, should still appear in
 /// the list (with a fallback name) rather than abort the whole call.
 ///
-/// Routes through the consolidated `beebeeb_core::encrypt::decrypt_name`, the
-/// single decrypt path all clients share (web/cli/desktop). Unlike the previous
-/// local helper — which handled only native `EncryptedBlob` blobs derived from
-/// the BINARY UUID — `decrypt_name` covers the full format/key matrix: native
-/// blobs AND web base64 `{nonce,ciphertext}` envelopes, derived from EITHER the
-/// string-UUID (the web app's `TextEncoder.encode(fileId)`) or the binary UUID.
-/// A bare plaintext name passes straight through. We deliberately swallow the
+/// Routes through core's resolver (`beebeeb_core::owned_keys::resolve_owned_key`),
+/// the single decision path all clients share. The served id class decides
+/// (task 2275, L12): an owner id's key is derived and must authenticate the
+/// name, and any served attribution or envelope is ignored; a foreign id opens
+/// only through its L8 envelope. Unlike the previous `decrypt_name` call this
+/// covers the string, binary and read-only uppercase-repair conventions and
+/// never treats a foreign row as an owner row. We deliberately swallow the
 /// error to `None` so the SelectiveSync row falls back to a stable id label.
-fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
-    let name = file_meta["name_encrypted"].as_str()?;
-    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
-    let owner = owner_keys::normalize_wrap(&file_meta["owner_wrapped_file_key"]).ok()?;
-    let foreign = !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null();
-    if owner.is_some() || foreign {
-        let resolved = beebeeb_sync::key_resolution::resolve_owned_key(&mk, id, owner.as_deref(), None, foreign).ok()?;
-        return beebeeb_core::encrypt::decrypt_file_metadata_with_key(&resolved.key, name).ok()
-            .map(|m| m.name).filter(|name| reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\'));
-    }
-    beebeeb_core::encrypt::decrypt_name(&mk, id, name).ok()
-}
-
 /// Build the nested SelectiveSync folder tree.
 ///
 /// Wave-2 change (task 0090 backing): the tree is built from the LOCAL
@@ -13013,7 +13000,7 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             // server-provided plaintext `path` if present (some legacy
             // entries surface plaintext here), then to a stable, short
             // id-based label so the user can still tell folders apart.
-            let display = try_decrypt_name(f, id, &master_key)
+            let display = owner_keys::display_name(f, id, &master_key)
                 .or_else(|| {
                     if !f["acted_via_share_id"].is_null() || !f["uploaded_by"].is_null() || !f["owner_wrapped_file_key"].is_null() { return None; }
                     let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -13417,7 +13404,7 @@ fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
 
 fn trash_item_from_meta(file_meta: &serde_json::Value, master_key: &[u8; 32]) -> Option<account_dto::DesktopTrashItem> {
     let id = file_meta.get("id").and_then(|v| v.as_str())?.to_string();
-    let name = try_decrypt_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
+    let name = owner_keys::display_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
     let updated_at = file_meta
         .get("updated_at")
         .and_then(|v| {

@@ -1,7 +1,7 @@
 // Sparse event bodies follow server folder_public.rs at server main 7dd40237.
 const A: &str = "40000000-0000-4000-8000-000000000004";
 const B: &str = "50000000-0000-4000-8000-000000000005";
-const MEMBER: &str = "60000000-0000-4000-8000-000000000006";
+const MEMBER: &str = "60000000-0000-8000-8000-000000000006";
 struct Convergence {
     dir: tempfile::TempDir,
     root: PathBuf,

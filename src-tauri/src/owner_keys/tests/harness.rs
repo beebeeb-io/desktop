@@ -116,12 +116,15 @@ pub(super) fn run<T>(future: impl std::future::Future<Output = T>) -> T {
         .unwrap()
         .block_on(future)
 }
+/// A canonical foreign (version 8) id for the stored-record fixtures.
+pub(super) const RECORD_ID: &str = "30000000-0000-8000-8000-000000000001";
+
 pub(super) fn record() -> OwnedKeyRecord {
     let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
     let key = beebeeb_core::kdf::FileKey::from_bytes([0x9d; 32]);
-    let envelope = beebeeb_sync::key_resolution::wrap_owner_file_key(&master, "item", &key).unwrap();
+    let envelope = beebeeb_sync::key_resolution::wrap_owner_file_key(&master, RECORD_ID, &key).unwrap();
     OwnedKeyRecord {
-        file_id: "item".into(),
+        file_id: RECORD_ID.into(),
         name_encrypted: "opaque-name".into(),
         pending_owner_wrap: Some(envelope),
         foreign_added: true,

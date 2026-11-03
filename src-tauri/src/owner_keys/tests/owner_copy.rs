@@ -14,7 +14,8 @@ fn sf2237d_l8_old_owner_wrap_is_rejected_without_fallback() {
         kdf::{FileKey, MasterKey},
     };
     let master = MasterKey::from_bytes([7; 32]);
-    let id = "old-owner-format";
+    // Canonical version-8 id: the class is Foreign (L12).
+    let id = "20000000-0000-8000-8000-000000000001";
     let key = FileKey::from_bytes([91; 32]);
     // The removed format was an empty-AAD frame under derive_file_key(master,id).
     // Build the historical wire bytes through core, never a compatibility reader.
@@ -23,21 +24,34 @@ fn sf2237d_l8_old_owner_wrap_is_rejected_without_fallback() {
     let encrypted =
         beebeeb_core::encrypt::encrypt_name_for(&key, "legacy.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
     for pending in [false, true] {
-        for foreign in [false, true] {
-            let record = OwnedKeyRecord {
-                file_id: id.into(),
-                name_encrypted: encrypted.clone(),
-                foreign_added: foreign,
-                owner_wrap: (!pending).then(|| old.clone()),
-                pending_owner_wrap: pending.then(|| old.clone()),
-                ..Default::default()
-            };
-            assert!(
-                record_key(&master, &record).is_err(),
-                "old owner envelopes must never open or select derived-key fallback"
-            );
-        }
+        let record = OwnedKeyRecord {
+            file_id: id.into(),
+            name_encrypted: encrypted.clone(),
+            foreign_added: true,
+            owner_wrap: (!pending).then(|| old.clone()),
+            pending_owner_wrap: pending.then(|| old.clone()),
+            ..Default::default()
+        };
+        assert!(
+            record_key(&master, &record, beebeeb_core::owned_keys::ItemKind::File).is_err(),
+            "old owner envelopes must never open or select derived-key fallback"
+        );
     }
+    // A1: for an owner id the served and persisted envelopes are ignored
+    // entirely; only the derived key may authenticate the name.
+    let owner = "11111111-1111-4111-8111-111111111111";
+    let owner_record = OwnedKeyRecord {
+        file_id: owner.into(),
+        name_encrypted: encrypted,
+        foreign_added: true,
+        owner_wrap: Some(old.clone()),
+        pending_owner_wrap: Some(old),
+        ..Default::default()
+    };
+    assert!(
+        record_key(&master, &owner_record, beebeeb_core::owned_keys::ItemKind::File).is_err(),
+        "A1: an owner id never opens a served or persisted envelope"
+    );
 }
 
 #[test]

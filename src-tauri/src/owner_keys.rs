@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use beebeeb_core::{
     encrypt::NameMetadata,
+    item_id::ItemClass,
     kdf::{FileKey, MasterKey},
+    owned_keys::ItemKind,
 };
 use beebeeb_sync::key_resolution::{self as keys, FolderWrap};
 use std::collections::{HashMap, HashSet};
@@ -127,12 +129,18 @@ pub(crate) fn custody_write_format(has_custody: bool) -> Option<&'static str> {
     has_custody.then_some("l7")
 }
 
-fn foreign(row: &Value) -> bool {
-    !row["acted_via_share_id"].is_null() || !row["uploaded_by"].is_null()
-}
-
 fn folder(row: &Value) -> bool {
     row["is_folder"].as_bool() == Some(true) || row["kind"] == "folder"
+}
+
+/// The served id decides the class (task 2275, L12). Attribution fields and
+/// served envelopes never override it.
+fn class_of(id: &str) -> anyhow::Result<ItemClass> {
+    beebeeb_core::item_id::item_class(id).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+fn row_kind(row: &Value) -> ItemKind {
+    if folder(row) { ItemKind::Folder } else { ItemKind::File }
 }
 
 fn authenticate(key: &FileKey, encrypted: &str) -> anyhow::Result<NameMetadata> {
@@ -149,27 +157,64 @@ fn authenticate(key: &FileKey, encrypted: &str) -> anyhow::Result<NameMetadata> 
     Ok(metadata)
 }
 
-pub fn record_key(master: &MasterKey, record: &OwnedKeyRecord) -> anyhow::Result<(FileKey, NameMetadata)> {
+pub fn record_key(
+    master: &MasterKey,
+    record: &OwnedKeyRecord,
+    kind: ItemKind,
+) -> anyhow::Result<(FileKey, NameMetadata)> {
     if record.blocked_fingerprint.as_ref() == Some(&record.fingerprint()) {
         anyhow::bail!("item key is unavailable");
     }
-    for wrap in [record.owner_wrap.as_deref(), record.pending_owner_wrap.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        if let Ok(key) = keys::unwrap_owner_file_key(master, &record.file_id, wrap)
-            && let Ok(metadata) = authenticate(&key, &record.name_encrypted)
-        {
-            return Ok((key, metadata));
+    match class_of(&record.file_id)? {
+        // The class decides (L12): no served or persisted envelope is opened
+        // for an owner id, and its key must authenticate the served name (A1).
+        ItemClass::Owner => {
+            let resolved =
+                keys::resolve_owned_key(master, &record.file_id, kind, None, None, &record.name_encrypted, None)?;
+            let metadata = authenticate(&resolved.key, &record.name_encrypted)?;
+            Ok((resolved.key, metadata))
+        }
+        ItemClass::Foreign => {
+            for wrap in [record.owner_wrap.as_deref(), record.pending_owner_wrap.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(key) = keys::unwrap_owner_file_key(master, &record.file_id, wrap)
+                    && let Ok(metadata) = authenticate(&key, &record.name_encrypted)
+                {
+                    return Ok((key, metadata));
+                }
+            }
+            anyhow::bail!("item key is unavailable")
         }
     }
-    anyhow::ensure!(
-        !record.foreign_added && record.owner_wrap.is_none() && record.pending_owner_wrap.is_none(),
-        "item key is unavailable"
-    );
-    let resolved = keys::resolve_owned_key(master, &record.file_id, None, None, false)?;
-    let metadata = authenticate(&resolved.key, &record.name_encrypted)?;
-    Ok((resolved.key, metadata))
+}
+
+/// The Finder/Explorer display name for a listed item (L12). The class decides
+/// which reader runs; a plaintext owner name is display text, never a key
+/// selector. `None` means the name is unavailable and must not be shown.
+pub fn display_name(file_meta: &Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
+    let name = file_meta["name_encrypted"].as_str()?;
+    let mk = MasterKey::from_bytes(*master_key);
+    let kind = row_kind(file_meta);
+    let class = beebeeb_core::item_id::item_class(id).ok()?;
+    if class == ItemClass::Owner && !name.starts_with('{') {
+        return Some(name.to_string()).filter(|name| safe_display_name(name));
+    }
+    let owner = match class {
+        ItemClass::Owner => None,
+        ItemClass::Foreign => normalize_wrap(&file_meta["owner_wrapped_file_key"]).ok()?,
+    };
+    let resolved = keys::resolve_owned_key(&mk, id, kind, owner.as_deref(), None, name, None).ok()?;
+    let display = match resolved.name {
+        keys::ResolvedName::Encrypted(metadata) => metadata.name,
+        keys::ResolvedName::Plaintext(text) => text,
+    };
+    Some(display).filter(|name| safe_display_name(name))
+}
+
+fn safe_display_name(name: &str) -> bool {
+    crate::reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\')
 }
 
 /// A failed row remains visible and deletable; this label is never ciphertext
@@ -189,10 +234,9 @@ pub fn stored_name(db: &StateDb, id: &str, master: &[u8; 32]) -> anyhow::Result<
     if record.blocked_fingerprint.is_some() {
         return Ok(Some(blocked_name(id)));
     }
-    if record.foreign_added || record.owner_wrap.is_some() || record.pending_owner_wrap.is_some() {
-        return Ok(Some(record_key(&MasterKey::from_bytes(*master), &record)?.1.name));
-    }
-    Ok(None)
+    Ok(record_key(&MasterKey::from_bytes(*master), &record, ItemKind::File)
+        .ok()
+        .map(|(_, metadata)| metadata.name))
 }
 
 impl Batch {
@@ -271,7 +315,14 @@ impl Batch {
         id: &str,
     ) -> anyhow::Result<Option<Custody>> {
         if self.invites.is_none() {
-            let body = scope.api.sent_folder_invites().await?;
+            let body = match scope.api.sent_folder_invites().await {
+                Ok(body) => body,
+                // A server without the invites endpoint simply has none: a
+                // folder with no custody and no invite is unavailable, never
+                // a failed tick (L12: foreign items never abort the batch).
+                Err(error) if custody_absent(&error) => Value::Null,
+                Err(error) => return Err(error),
+            };
             scope.check()?;
             self.invites = Some(body["invites"].as_array().cloned().unwrap_or_default());
         }
@@ -606,12 +657,23 @@ impl crate::engine_bridge::EngineBridge {
                 file_id: id.to_string(),
                 ..Default::default()
             });
-            let known_foreign = record.foreign_added || foreign(input) || !input["owner_wrapped_file_key"].is_null();
+            // L12: only the id class says whether a row is foreign. Served
+            // attribution and envelopes never do.
+            let class = class_of(id).ok();
+            let is_foreign = class == Some(ItemClass::Foreign);
+            let known_foreign = is_foreign;
             let text = input["name_encrypted"].as_str();
             let derived_readable =
                 text.is_some_and(|text| beebeeb_core::encrypt::decrypt_name_metadata(&master, id, text).is_ok());
             let sparse = text.is_none() && input["name"].is_null() && input["path"].is_null();
-            if sparse || (!derived_readable && !known_foreign && text.is_some()) {
+            // An owner row never needs the canonical listing for its key. A
+            // foreign row does when the event carries no envelope and none is
+            // persisted yet: the L8 frame lives on the item detail.
+            let needs_envelope = is_foreign
+                && text.is_some_and(|text| text.starts_with('{'))
+                && record.owner_wrap.is_none()
+                && input.get("owner_wrapped_file_key").is_none();
+            if sparse || needs_envelope || (!derived_readable && !known_foreign && text.is_some()) {
                 let canonical = scope.api.get_file(id).await;
                 scope.check()?;
                 row = match canonical {
@@ -624,34 +686,40 @@ impl crate::engine_bridge::EngineBridge {
                 anyhow::ensure!(row["id"].as_str() == Some(id), "canonical item id mismatch");
                 batch.rows.insert(id.to_string(), row.clone());
             }
-            record.foreign_added |= foreign(&row) || !row["owner_wrapped_file_key"].is_null();
+            record.foreign_added = is_foreign;
             if let Some(text) = row["name_encrypted"].as_str() {
                 record.name_encrypted = text.to_string();
             }
-            let malformed = match normalize_wrap(&row["owner_wrapped_file_key"]) {
-                Ok(Some(wrap)) => {
-                    record.owner_wrap = Some(wrap);
-                    false
-                }
-                Ok(None) => false,
-                Err(_) => true,
-            };
+            let mut malformed = false;
+            if is_foreign {
+                malformed = match normalize_wrap(&row["owner_wrapped_file_key"]) {
+                    Ok(Some(wrap)) => {
+                        record.owner_wrap = Some(wrap);
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(_) => true,
+                };
+            } else {
+                // A1b: an owner id's key is derived. A persisted pre-L12
+                // record's envelope is cleared here and never POSTed.
+                record.owner_wrap = None;
+                record.pending_owner_wrap = None;
+            }
             record.member_added |= !row["uploaded_by"].is_null();
             record.origin_label_encrypted = row["origin_label_encrypted"]
                 .as_str()
                 .map(str::to_string)
                 .or(record.origin_label_encrypted);
             record.blocked_fingerprint = None;
-            let mut candidate = if malformed {
+            let mut candidate = if malformed || class.is_none() {
                 None
             } else {
-                record_key(&master, &record).ok()
+                record_key(&master, &record, row_kind(&row)).ok()
             };
-            let ordinary_legacy = !record.foreign_added
-                && record.owner_wrap.is_none()
-                && record.pending_owner_wrap.is_none()
-                && (derived_readable || (text.is_none() && !sparse));
-            if candidate.is_none() && !ordinary_legacy && !malformed {
+            let ordinary_legacy =
+                !is_foreign && class.is_some() && (derived_readable || (text.is_none() && !sparse));
+            if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {
                         record.shared_root_id = Some(root.clone());
@@ -672,11 +740,17 @@ impl crate::engine_bridge::EngineBridge {
                                 folder_key: &custody.key,
                                 wrapped_key,
                             });
-                            if let Ok(resolved) =
-                                keys::resolve_owned_key(&master, id, record.owner_wrap.as_deref(), wrap, true)
+                            if let Ok(resolved) = keys::resolve_owned_key(
+                                &master,
+                                id,
+                                row_kind(&row),
+                                record.owner_wrap.as_deref(),
+                                wrap,
+                                &record.name_encrypted,
+                                None,
+                            )
                                 && let Ok(metadata) = authenticate(&resolved.key, &record.name_encrypted)
                             {
-                                record.foreign_added = true;
                                 candidate = Some((resolved.key, metadata));
                             }
                         }
@@ -743,9 +817,15 @@ impl crate::engine_bridge::EngineBridge {
         scope.check()?;
         let master = MasterKey::from_bytes(*self.api().master_key());
         if let Some(record) = self.db().get_owned_key_record(id)? {
-            return Ok(Arc::new(record_key(&master, &record)?.0));
+            return Ok(Arc::new(record_key(&master, &record, ItemKind::File)?.0));
         }
-        Ok(Arc::new(keys::resolve_owned_key(&master, id, None, None, false)?.key))
+        match class_of(id)? {
+            // No prepared record: an owner id's key is derived from it (the
+            // string convention), exactly as before. A foreign id has no
+            // envelope here, so it is unavailable.
+            ItemClass::Owner => Ok(Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()))),
+            ItemClass::Foreign => anyhow::bail!("item key is unavailable"),
+        }
     }
 
     pub async fn retry_owner_adoptions(&self) -> anyhow::Result<usize> {
@@ -754,10 +834,18 @@ impl crate::engine_bridge::EngineBridge {
         let mut confirmed = 0;
         for mut record in self.db().list_owned_key_records()? {
             scope.check()?;
+            // A1b: an owner id never adopts. A persisted pre-L12 envelope is
+            // cleared and never POSTed.
+            if !matches!(class_of(&record.file_id), Ok(ItemClass::Foreign)) {
+                if record.pending_owner_wrap.take().is_some() {
+                    scope.put(&record)?;
+                }
+                continue;
+            }
             if record.pending_owner_wrap.is_none() || record.blocked_fingerprint.is_some() {
                 continue;
             }
-            if let Ok((key, _)) = record_key(&master, &record) {
+            if let Ok((key, _)) = record_key(&master, &record, ItemKind::File) {
                 if adopt(&scope, &mut record, &key, true).await.unwrap_or(false) {
                     confirmed += 1;
                 }

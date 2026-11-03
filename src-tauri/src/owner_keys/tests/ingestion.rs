@@ -8,8 +8,8 @@ use beebeeb_core::{
 use beebeeb_sync::key_resolution::{wrap_child_key, wrap_folder_custody, wrap_owner_file_key};
 use std::collections::BTreeMap;
 const ROOT: &str = "10000000-0000-4000-8000-000000000001";
-const FOLDER: &str = "20000000-0000-4000-8000-000000000002";
-const GUEST: &str = "30000000-0000-4000-8000-000000000003";
+const FOLDER: &str = "20000000-0000-8000-8000-000000000002";
+const GUEST: &str = "30000000-0000-8000-8000-000000000003";
 const SECOND: &str = "40000000-0000-4000-8000-000000000004";
 fn master() -> MasterKey {
     MasterKey::from_bytes([7; 32])

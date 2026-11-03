@@ -16,7 +16,7 @@ fn sf2279_index_repair_waits_for_custody_and_resumes_when_it_appears() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000030";
-    let item = "20000000-0000-4000-8000-000000000030";
+    let item = "20000000-0000-8000-8000-000000000030";
     let folder = FileKey::from_bytes([55; 32]);
     let child = FileKey::from_bytes([66; 32]);
     let child_wrap =
@@ -55,6 +55,8 @@ fn sf2279_index_repair_waits_for_custody_and_resumes_when_it_appears() {
                 200,
                 json!({"keys":[{"file_id":item,"encrypted_file_key":child_wrap}],"next_cursor":null}),
             )
+        } else if req.path == format!("/api/v1/files/{item}") {
+            (200, served_row.clone())
         } else if req.path.starts_with("/api/v1/files?") {
             (200, json!({"files":[served_row.clone()],"next_cursor":null}))
         } else if req.path == format!("/api/v1/shared-folders/{root}/search-index/shards") {
@@ -151,7 +153,7 @@ fn sf2279_a_seen_custody_404_blocks_only_its_row() {
     use beebeeb_core::kdf::MasterKey;
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000032";
-    let item = "20000000-0000-4000-8000-000000000032";
+    let item = "20000000-0000-8000-8000-000000000032";
     let owned = "40000000-0000-4000-8000-000000000032";
     let owned_key = beebeeb_core::kdf::derive_file_key(&master, owned.as_bytes());
     let owned_name = beebeeb_core::encrypt::encrypt_name_for(
@@ -259,7 +261,7 @@ fn sf2279_a_custody_write_during_the_pass_is_not_stranded() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000034";
-    let item = "20000000-0000-4000-8000-000000000034";
+    let item = "20000000-0000-8000-8000-000000000034";
     let folder = FileKey::from_bytes([55; 32]);
     let child = FileKey::from_bytes([66; 32]);
     let child_wrap =
@@ -305,6 +307,8 @@ fn sf2279_a_custody_write_during_the_pass_is_not_stranded() {
                 200,
                 json!({"keys":[{"file_id":item,"encrypted_file_key":child_wrap}],"next_cursor":null}),
             )
+        } else if req.path == format!("/api/v1/files/{item}") {
+            (200, row.clone())
         } else if req.path.starts_with("/api/v1/files?") {
             (200, json!({"files":[row.clone()],"next_cursor":null}))
         } else if req.path == format!("/api/v1/shared-folders/{root}/search-index/shards") {
@@ -355,7 +359,7 @@ fn sf2279_prepare_owned_rows_revives_a_deferred_root() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000035";
-    let item = "20000000-0000-4000-8000-000000000035";
+    let item = "20000000-0000-8000-8000-000000000035";
     let folder = FileKey::from_bytes([55; 32]);
     let child = FileKey::from_bytes([66; 32]);
     let child_wrap =
@@ -394,6 +398,8 @@ fn sf2279_prepare_owned_rows_revives_a_deferred_root() {
                 200,
                 json!({"keys":[{"file_id":item,"encrypted_file_key":child_wrap}],"next_cursor":null}),
             )
+        } else if req.path == format!("/api/v1/files/{item}") {
+            (200, served_row.clone())
         } else if req.path.starts_with("/api/v1/files?") {
             (200, json!({"files":[served_row.clone()],"next_cursor":null}))
         } else if req.path == format!("/api/v1/shared-folders/{root}/search-index/shards") {

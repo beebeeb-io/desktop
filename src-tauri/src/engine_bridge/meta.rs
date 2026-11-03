@@ -67,7 +67,11 @@ pub(super) struct SharedRootMapping {
 pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
     -> Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat), EngineError> {
     if let Some(record) = db.get_owned_key_record(id)? {
-        let (key, metadata) = crate::owner_keys::record_key(&beebeeb_core::kdf::MasterKey::from_bytes(*master), &record)?;
+        let (key, metadata) = crate::owner_keys::record_key(
+            &beebeeb_core::kdf::MasterKey::from_bytes(*master),
+            &record,
+            beebeeb_core::owned_keys::ItemKind::File,
+        )?;
         return Ok((key, metadata.chunk_format));
     }
     Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))

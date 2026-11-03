@@ -12,7 +12,7 @@ fn sf2276_invite_rows_failures_that_are_not_gone_abort_the_proof_search() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000018";
-    let item = "20000000-0000-4000-8000-000000000018";
+    let item = "20000000-0000-8000-8000-000000000018";
     let folder = FileKey::from_bytes([0x8d; 32]);
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
     let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
@@ -63,7 +63,7 @@ fn sf2276_a_404_from_a_gone_invite_still_tries_the_next_one() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000019";
-    let item = "20000000-0000-4000-8000-000000000019";
+    let item = "20000000-0000-8000-8000-000000000019";
     let folder = FileKey::from_bytes([0x8d; 32]);
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
     let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
@@ -109,7 +109,7 @@ fn sf2276_a_no_custody_repair_stops_retrying_the_index() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000020";
-    let item = "20000000-0000-4000-8000-000000000020";
+    let item = "20000000-0000-8000-8000-000000000020";
     let folder = FileKey::from_bytes([0x8d; 32]);
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
     let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
@@ -159,7 +159,7 @@ fn sf2276_a_404_from_the_custody_put_does_not_abort_the_snapshot() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000021";
-    let item = "20000000-0000-4000-8000-000000000021";
+    let item = "20000000-0000-8000-8000-000000000021";
     let folder = FileKey::from_bytes([55; 32]);
     let invites = json!({"invites":[{
         "id":"inv-21","file_id":root,"is_folder_share":true,"status":"approved",
@@ -186,7 +186,7 @@ fn sf2276_a_404_from_the_custody_put_does_not_abort_the_snapshot() {
     );
     let rows = vec![
         foreign_child(item, root),
-        foreign_child("20000000-0000-4000-8000-000000000221", root),
+        foreign_child("20000000-0000-8000-8000-000000000221", root),
     ];
     let prepared = run(bridge.prepare_owned_rows(&rows))
         .unwrap_or_else(|error| panic!("a 404 from the custody PUT must not abort the snapshot: {error}; {seen:?}"));
@@ -218,7 +218,7 @@ fn sf2276_a_501_that_does_not_name_the_feature_stays_an_error() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000022";
-    let item = "20000000-0000-4000-8000-000000000022";
+    let item = "20000000-0000-8000-8000-000000000022";
     let folder = FileKey::from_bytes([55; 32]);
     let invites = json!({"invites":[{
         "id":"inv-22","file_id":root,"is_folder_share":true,"status":"approved",

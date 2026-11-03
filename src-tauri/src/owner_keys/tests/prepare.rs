@@ -13,7 +13,7 @@ fn sf2265_prepare_blocks_foreign_row_under_forged_folder() {
     use beebeeb_core::kdf::MasterKey;
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000011";
-    let item = "20000000-0000-4000-8000-000000000011";
+    let item = "20000000-0000-8000-8000-000000000011";
     let invites = json!({"invites":[{
         "id":"inv-11","file_id":root,"is_folder_share":true,"status":"approved",
         "created_at":"2026-10-28T00:00:00Z",
@@ -48,7 +48,7 @@ fn sf2265_prepare_never_pins_l8_under_a_legacy_proven_key() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000012";
-    let item = "20000000-0000-4000-8000-000000000012";
+    let item = "20000000-0000-8000-8000-000000000012";
     let folder = FileKey::from_bytes([0x8d; 32]);
     // A real key is not valid UTF-8 (L9 rule 1); the child wrap is the proof.
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
@@ -113,7 +113,7 @@ fn sf2265_prepare_swallows_a_501_from_the_custody_put() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000013";
-    let item = "20000000-0000-4000-8000-000000000013";
+    let item = "20000000-0000-8000-8000-000000000013";
     let folder = FileKey::from_bytes([55; 32]);
     let invites = json!({"invites":[{
         "id":"inv-13","file_id":root,"is_folder_share":true,"status":"approved",
@@ -160,7 +160,7 @@ fn sf2265_prepare_rereads_the_winner_after_key_version_conflict() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000014";
-    let item = "20000000-0000-4000-8000-000000000014";
+    let item = "20000000-0000-8000-8000-000000000014";
     let folder = FileKey::from_bytes([55; 32]);
     let winner_key = FileKey::from_bytes([0x44; 32]);
     let invites = json!({"invites":[{
@@ -238,7 +238,7 @@ fn sf2265_prepare_asks_custody_once_per_folder_not_once_per_row() {
         Arc::new(fixture.api()),
     );
     let rows: Vec<Value> = (0..3)
-        .map(|n| foreign_child(&format!("20000000-0000-4000-8000-00000000002{n}"), root))
+        .map(|n| foreign_child(&format!("20000000-0000-8000-8000-00000000002{n}"), root))
         .collect();
     let prepared = run(bridge.prepare_owned_rows(&rows)).unwrap();
     assert_eq!(prepared.len(), 3);
@@ -261,7 +261,7 @@ fn sf2265_one_invites_missing_rows_does_not_abort_the_proof_search() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000016";
-    let item = "20000000-0000-4000-8000-000000000016";
+    let item = "20000000-0000-8000-8000-000000000016";
     let folder = FileKey::from_bytes([0x8d; 32]);
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
     let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, child.as_bytes()).unwrap());
@@ -312,7 +312,7 @@ fn sf2265_purpose_bound_invites_are_tried_before_newer_legacy_ones() {
     use beebeeb_core::kdf::{FileKey, MasterKey};
     let master = MasterKey::from_bytes([7; 32]);
     let root = "10000000-0000-4000-8000-000000000017";
-    let item = "20000000-0000-4000-8000-000000000017";
+    let item = "20000000-0000-8000-8000-000000000017";
     let purpose_key = FileKey::from_bytes([0x51; 32]);
     let legacy_key = FileKey::from_bytes([0x8d; 32]);
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
@@ -364,3 +364,106 @@ fn sf2265_purpose_bound_invites_are_tried_before_newer_legacy_ones() {
     assert_eq!(count(&seen, "/folder-keys"), 0, "no legacy read at all: {seen:?}");
 }
 
+#[test]
+fn a1b_persisted_owner_record_is_cleared_and_never_posted() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let owner = "11111111-1111-4111-8111-111111111111";
+    let key = FileKey::from_bytes([0x31; 32]);
+    // Pre-L12 code wrapped whatever id it was given; the bytes persist today.
+    let envelope = beebeeb_sync::key_resolution::wrap_owner_file_key(
+        &master,
+        "30000000-0000-8000-8000-000000000009",
+        &key,
+    )
+    .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        Some((404, serde_json::to_vec(&json!({})).unwrap()))
+    });
+    let db = Arc::new(StateDb::open(":memory:").unwrap());
+    db.put_owned_key_record(&OwnedKeyRecord {
+        file_id: owner.into(),
+        name_encrypted: "opaque-name".into(),
+        pending_owner_wrap: Some(envelope.clone()),
+        foreign_added: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    // A1b: a persisted pre-L12 owner record never adopts.
+    assert_eq!(run(bridge.retry_owner_adoptions()).unwrap(), 0);
+    assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+    assert!(db.get_owned_key_record(owner).unwrap().unwrap().pending_owner_wrap.is_none());
+
+    // The prepare pass clears a served envelope too, and never mints one.
+    let derived = beebeeb_core::kdf::derive_file_key(&master, owner.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "notes.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":owner,"name_encrypted":name,"parent_id":null,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(&envelope)});
+    let prepared = run(bridge.prepare_owned_rows(&[row])).unwrap();
+    assert_eq!(prepared.len(), 1);
+    assert!(prepared[0].readable);
+    assert!(!prepared[0].record.foreign_added, "the id class, not attribution");
+    assert!(prepared[0].record.owner_wrap.is_none());
+    assert!(prepared[0].record.pending_owner_wrap.is_none());
+    assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+}
+
+#[test]
+fn a1_owner_class_ignores_a_member_wrap_and_never_posts() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let owner = "22222222-2222-4222-8222-222222222222";
+    let member = FileKey::from_bytes([0x52; 32]);
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &member,
+        "member.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    // A member's envelope, replayed against an owner id.
+    let member_wrap = beebeeb_sync::key_resolution::wrap_owner_file_key(
+        &master,
+        "30000000-0000-8000-8000-00000000000a",
+        &member,
+    )
+    .unwrap();
+    // A1: the owner id with a member's wrap and a name sealed under it.
+    let served = json!({"id":owner,"name_encrypted":name,"parent_id":null,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":"member",
+        "owner_wrapped_file_key":STANDARD.encode(&member_wrap)});
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let reply = served.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        Some((200, serde_json::to_vec(&reply).unwrap()))
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let prepared = run(bridge.prepare_owned_rows(&[served])).expect("A1 must not abort the snapshot");
+    assert_eq!(prepared.len(), 1);
+    assert!(!prepared[0].readable, "a member key never authenticates an owner id");
+    assert!(prepared[0].record.blocked_fingerprint.is_some());
+    assert!(prepared[0].record.owner_wrap.is_none());
+    assert!(prepared[0].record.pending_owner_wrap.is_none());
+    assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+    assert_eq!(count(&seen, "/shared-folders"), 0, "an owner row asks no custody: {seen:?}");
+    assert!(run(bridge.resolved_owned_key(owner)).is_err());
+}

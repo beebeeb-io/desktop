@@ -104,7 +104,12 @@ impl EngineBridge {
                         queue.push_back(id.clone());
                     }
                     let master = MasterKey::from_bytes(*self.api().master_key());
-                    let name = owner_keys::record_key(&master, &item.record)
+                    let kind = if item.row["is_folder"] == true {
+                        beebeeb_core::owned_keys::ItemKind::Folder
+                    } else {
+                        beebeeb_core::owned_keys::ItemKind::File
+                    };
+                    let name = owner_keys::record_key(&master, &item.record, kind)
                         .map(|(_, m)| m.name)
                         .or_else(|_| {
                             beebeeb_core::encrypt::decrypt_name(&master, &id, &item.record.name_encrypted)

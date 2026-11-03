@@ -383,7 +383,9 @@ pub async fn sync_tick_outcome(
 pub(super) async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->Result<Option<crate::api_client::SyncOp>, EngineError> {
     if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
     let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
-    let known_foreign=bridge.db().get_owned_key_record(id)?.is_some_and(|r|r.foreign_added || r.owner_wrap.is_some());
+    // L12: the id class decides. A foreign row needs the canonical listing so
+    // `prepare_owned_rows` can see its envelope; an owner row never does.
+    let known_foreign = beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false);
     let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
     if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
     let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
