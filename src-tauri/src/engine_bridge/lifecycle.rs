@@ -587,6 +587,12 @@ impl EngineBridge {
                     .file_id
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("metadata operation missing file_id"))?;
+                // A19: a move out of a shared folder adopts every foreign item
+                // it takes with it (folders included) before the server hears
+                // of the move; otherwise the move is refused with the reason.
+                if op.kind == OperationKind::MoveFile {
+                    self.adopt_foreign_subtree(file_id, op.parent_id.as_deref()).await?;
+                }
                 let metadata = operation_metadata(op)?;
                 let name = metadata["name_encrypted"].as_str();
                 // Spec §7.2 (final review): a rename leaves the parent alone; a move names its

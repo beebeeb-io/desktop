@@ -25,6 +25,7 @@ mod invites;
 mod migration;
 mod owner_copy;
 mod prepare;
+mod move_adopt;
 mod request;
 
 use harness::*;

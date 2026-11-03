@@ -1074,6 +1074,82 @@ impl<'a> AccountScope<'a> {
 }
 
 impl crate::engine_bridge::EngineBridge {
+    /// The nearest ancestor (the id itself included) whose custody this device
+    /// holds: the shared folder a move is judged against.
+    fn shared_folder_root_of(&self, folder_id: Option<&str>) -> Option<String> {
+        let mut current = folder_id.map(str::to_string);
+        for _ in 0..256 {
+            let folder = current?;
+            if self.db().has_seen_folder_custody(&folder).unwrap_or(false) {
+                return Some(folder);
+            }
+            current = self.db().get_file(&folder).ok().flatten().and_then(|entry| entry.parent_id);
+        }
+        None
+    }
+
+    /// `id` and every descendant in the local mirror, bounded.
+    fn subtree_ids(&self, id: &str) -> Vec<String> {
+        let entries = self.db().list_files().unwrap_or_default();
+        let mut ids = vec![id.to_string()];
+        let mut cursor = 0;
+        while cursor < ids.len() && ids.len() <= 20_000 {
+            let parent = ids[cursor].clone();
+            cursor += 1;
+            for entry in &entries {
+                if entry.parent_id.as_deref() == Some(parent.as_str()) && !ids.contains(&entry.file_id) {
+                    ids.push(entry.file_id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// A19: an owner move that takes an item (or a subtree) out of the shared
+    /// folder whose custody key opens its foreign descendants must adopt every
+    /// foreign item involved first, confirmed by read-back. A move that stays
+    /// in the same shared root, or touches no foreign item, needs nothing.
+    /// Anything else is refused with the reason.
+    pub(crate) async fn adopt_foreign_subtree(&self, item_id: &str, new_parent: Option<&str>) -> anyhow::Result<()> {
+        let scope = self.owner_key_scope();
+        scope.check()?;
+        let from_root = self
+            .db()
+            .get_file(item_id)?
+            .and_then(|entry| entry.parent_id)
+            .and_then(|parent| self.shared_folder_root_of(Some(&parent)));
+        let Some(from_root) = from_root else { return Ok(()) };
+        if self.shared_folder_root_of(new_parent).as_deref() == Some(from_root.as_str()) {
+            return Ok(());
+        }
+        let foreign: Vec<String> = self
+            .subtree_ids(item_id)
+            .into_iter()
+            .filter(|id| beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false))
+            .collect();
+        if foreign.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Vec::with_capacity(foreign.len());
+        for id in &foreign {
+            let row = self.api().get_file(id).await?;
+            scope.check()?;
+            rows.push(row);
+        }
+        let prepared = self.prepare_owned_rows(&rows).await?;
+        for item in &prepared {
+            anyhow::ensure!(
+                item.readable
+                    && item.record.owner_wrap.is_some()
+                    && item.record.pending_owner_wrap.is_none()
+                    && item.record.blocked_fingerprint.is_none(),
+                "move needs adoption: {}",
+                item.record.file_id
+            );
+        }
+        Ok(())
+    }
+
     /// Whether `folder_id` lies inside a shared folder whose custody this device
     /// holds (the folder itself included). A bounded walk of the DB ancestry.
     pub(crate) fn inside_shared_folder(&self, folder_id: &str) -> bool {
