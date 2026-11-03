@@ -262,7 +262,7 @@ impl EngineBridge {
                 Ok(())
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e.into()).await;
+                let e = self.owned_open_failure(file_id, land_error_to_anyhow(e)).await;
                 set_failed(); // only writes over Downloading; the recoverable item already left it.
                 Err(e.into())
             }
@@ -364,7 +364,7 @@ impl EngineBridge {
                 Ok(FetchedBytes { bytes: buf, version: fetched, ticket })
             }
             Err(e) => {
-                let e = self.owned_open_failure(file_id, e.into()).await;
+                let e = self.owned_open_failure(file_id, land_error_to_anyhow(e)).await;
                 let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
                 Err(e.into())
             }
@@ -864,7 +864,7 @@ impl EngineBridge {
                 self.range_attempt(file_id, required_offset, required_length, &meta).await
             })
             .await;
-        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, e.into()).await.into()) };
+        let read = match read { Ok(value) => Ok(value), Err(e) => Err(self.owned_open_failure(file_id, land_error_to_anyhow(e)).await.into()) };
         if read.is_err() {
             // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
             // Downloading, and the placeholder never in sync.

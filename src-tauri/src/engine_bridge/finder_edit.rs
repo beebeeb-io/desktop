@@ -59,7 +59,8 @@ impl EngineBridge {
                     .as_ref()
                     .and_then(|contract| contract.current_object_version_id.clone()),
                 None,
-            )?;
+            )
+            .map_err(land_error_to_anyhow)?;
             staged.retain();
             Ok(outcome)
         } else {
@@ -390,7 +391,8 @@ impl EngineBridge {
                 .as_ref()
                 .and_then(|contract| contract.current_object_version_id.clone()),
             None,
-        )?;
+        )
+        .map_err(land_error_to_anyhow)?;
         // Task 1698: park the row `Trashing` AFTER a successful enqueue, so
         // the change feed immediately presents the item under the trash
         // container (ruling step 2) while the server trash converges. A

@@ -111,7 +111,8 @@ impl EngineBridge {
                     None,
                     None,
                     None,
-                )?;
+                )
+                .map_err(land_error_to_anyhow)?;
                 staged.retain();
                 Ok(outcome)
             }
@@ -235,7 +236,8 @@ impl EngineBridge {
         if target.kind == FinderWriteItemKind::Folder {
             return self.queue_finder_create_from(target, contents).map(FpWrite::plain);
         }
-        self.queue_file_provider_create_retiring(target, contents, None)?
+        self.queue_file_provider_create_retiring(target, contents, None)
+            .map_err(land_error_to_anyhow)?
             .map(|(write, _)| write)
             .ok_or_else(|| anyhow::anyhow!("a create that retires no parked write is never refused as moved"))
     }
