@@ -40,7 +40,8 @@ const response = (preferred: string | null, choices = captured.choices, strict =
 })
 
 function open(backend: Record<string, (args: any) => unknown>) {
-  const m = mount('MacSettings.tsx', 'DataResidencyGroup', {
+  // The group moved out of MacSettings.tsx in the split (5c2c9cc); the harness reads the file that declares it.
+  const m = mount('macSettings/DataResidencyGroup.tsx', 'DataResidencyGroup', {
     backend: backend as any,
     expand: true,
     hookModules: [hook],
