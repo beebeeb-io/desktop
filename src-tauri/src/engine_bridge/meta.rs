@@ -74,7 +74,7 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
             let (key, pin) = crate::owner_keys::rename_material(
                 &beebeeb_core::kdf::MasterKey::from_bytes(*master),
                 id,
-                &record.name_encrypted,
+                &record,
             )?;
             return Ok((key, pin));
         }
@@ -99,6 +99,22 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
 
 pub(super) fn owned_metadata_for_name(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> Result<String, EngineError> {
     let (key, pin) = owned_key_and_pin(db, master, id)?;
+    Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
+}
+
+/// The name a rename of `id` seals (P2-2, P3-5): a request row takes the
+/// string-derived key and the pin of the name core read — never the content key
+/// `C` — while every other row takes its own key. The only rename entry point;
+/// a content write never comes here.
+pub(super) fn owned_metadata_for_rename(db: &StateDb, master: &[u8; 32], id: &str, name: &str, mime: Option<&str>) -> Result<String, EngineError> {
+    let (key, pin) = match db.get_owned_key_record(id)? {
+        Some(record) if record.request_row => crate::owner_keys::rename_material(
+            &beebeeb_core::kdf::MasterKey::from_bytes(*master),
+            id,
+            &record,
+        )?,
+        _ => owned_key_and_pin(db, master, id)?,
+    };
     Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
 }
 

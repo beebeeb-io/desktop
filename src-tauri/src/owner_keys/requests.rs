@@ -14,6 +14,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -131,23 +132,73 @@ pub(crate) fn request_envelope(row: &Value) -> anyhow::Result<Option<RequestUplo
         .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope"))
 }
 
-/// The key and pin a rename of a request row must seal under (§15): core's
-/// `RenameTarget` — the string-convention key derived from the row id and the
-/// pin the current name records. Never `C`; an upper-repair name is read-only.
+/// The key and pin a rename of a request row must seal under (§15, P2-2): the
+/// string-derived key from the row id and the pin core read from its current
+/// name — whatever key authenticated that name, `C` included. Never `C` itself;
+/// an upper-repair name is read-only.
 pub(crate) fn rename_material(
     master: &MasterKey,
     id: &str,
-    name_encrypted: &str,
+    record: &crate::owner_keys::OwnedKeyRecord,
 ) -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
-    use beebeeb_core::kdf::OwnerKeyConvention;
-    let (name_key, convention) = beebeeb_core::kdf::owner_file_key_for_name(master, id, name_encrypted)?;
+    use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+
+    let name = record
+        .request_name
+        .ok_or_else(|| anyhow::anyhow!("a request row's name is not resolved on this device"))?;
     anyhow::ensure!(
-        convention != OwnerKeyConvention::UpperRepair,
+        name.key != RequestNameKey::UpperRepair,
         "a request row with an upper-repair name is read-only"
     );
-    let metadata = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&name_key, name_encrypted)?;
     Ok((
         beebeeb_core::kdf::derive_file_key(master, id.as_bytes()),
-        metadata.chunk_format,
+        ExpectedChunkFormat::from_u8(name.pin)?,
     ))
+}
+
+/// Where core found a request row's name (P2-2): a derived owner convention,
+/// the content key `C` the uploader sealed it under, or an upper-repair name
+/// (READ-ONLY: no rename, no new version; an edit is saved as a new item).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequestNameKey {
+    /// Derived under the canonical string id.
+    Derived,
+    /// Derived under the legacy 16-byte binary UUID.
+    DerivedBinary,
+    /// The 2236 request-upload content key `C`.
+    Content,
+    /// Derived under the uppercase id. READ-ONLY.
+    UpperRepair,
+}
+
+/// Core's resolution of a request row's name: what authenticated it and the
+/// chunk-format code its envelope records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestName {
+    pub key: RequestNameKey,
+    /// [`beebeeb_core::chunk_stream::ExpectedChunkFormat`]'s stable code.
+    pub pin: u8,
+}
+
+impl From<beebeeb_core::owned_keys::KeyOrigin> for RequestNameKey {
+    fn from(origin: beebeeb_core::owned_keys::KeyOrigin) -> Self {
+        use beebeeb_core::owned_keys::KeyOrigin;
+        match origin {
+            KeyOrigin::Derived => Self::Derived,
+            KeyOrigin::DerivedBinary => Self::DerivedBinary,
+            KeyOrigin::DerivedUpperRepair => Self::UpperRepair,
+            // The name authenticated under the content key `C`; a name read
+            // through an L8/L7 envelope is not a request row's name at all.
+            KeyOrigin::RequestContent | KeyOrigin::OwnerWrap | KeyOrigin::FolderWrap => Self::Content,
+        }
+    }
+}
+
+/// Core's resolution of a request row's name, in the shape the durable
+/// record keeps (P2-2).
+pub(crate) fn request_name(keys: &beebeeb_core::owned_keys::RequestRowKeys) -> RequestName {
+    RequestName {
+        key: RequestNameKey::from(keys.name_origin),
+        pin: keys.name.chunk_format.as_u8(),
+    }
 }

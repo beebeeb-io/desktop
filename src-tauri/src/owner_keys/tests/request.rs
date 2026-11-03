@@ -7,6 +7,7 @@
 //! Tests: `a9c_`.
 
 use super::*;
+use super::requests::{RequestName, RequestNameKey};
 use beebeeb_core::chunk_stream::ExpectedChunkFormat;
 
 const OWNER: &str = "40000000-0000-4000-8000-00000000000b";
@@ -106,6 +107,7 @@ fn request_world(
     content: [u8; 32],
     name_key: &beebeeb_core::kdf::FileKey,
     plaintext: &[u8],
+    pin: ExpectedChunkFormat,
 ) -> (Fixture, Arc<Mutex<Vec<String>>>, Value) {
     use beebeeb_core::opaque::derive_x25519_public;
 
@@ -114,7 +116,7 @@ fn request_world(
     let r_pub = derive_x25519_public(&r_priv);
     let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", &content).unwrap();
     let (wrapped_private, wrap_nonce) = beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
-    let name = beebeeb_core::encrypt::encrypt_name_for(name_key, "report.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
+    let name = beebeeb_core::encrypt::encrypt_name_for(name_key, "report.txt", None, pin).unwrap();
     let row = json!({
         "id": OWNER,
         "name_encrypted": name,
@@ -164,7 +166,7 @@ fn request_world(
 #[test]
 fn review_p2_2_request_keys_load_once_per_bridge() {
     let derived = beebeeb_core::kdf::derive_file_key(&MasterKey::from_bytes([7; 32]), OWNER.as_bytes());
-    let (fixture, seen, row) = request_world([0x77; 32], &derived, b"hello");
+    let (fixture, seen, row) = request_world([0x77; 32], &derived, b"hello", ExpectedChunkFormat::Unrecorded);
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
@@ -188,7 +190,7 @@ fn review_p2_3_a_request_row_hydrates_whole_and_by_range() {
     let master = MasterKey::from_bytes([7; 32]);
     let derived = beebeeb_core::kdf::derive_file_key(&master, OWNER.as_bytes());
     let plaintext = b"hello range".to_vec();
-    let (fixture, seen, row) = request_world([0x77; 32], &derived, &plaintext);
+    let (fixture, seen, row) = request_world([0x77; 32], &derived, &plaintext, ExpectedChunkFormat::Unrecorded);
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
     let entry = FileEntry {
@@ -223,4 +225,74 @@ fn review_p2_3_a_request_row_hydrates_whole_and_by_range() {
     assert_eq!(&range.data[start..start + 5], b"range", "the range reads under C with the name key");
     assert!(range.covers_whole_file);
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+}
+
+/// P2-2 (L13/§15): the first rename of a request row, whose name the uploader
+/// sealed under `C`. The rename seals under the string-derived key with the pin
+/// core read from that `C`-sealed name, and the new name never opens under `C`.
+#[test]
+fn review_p2_2_a_c_sealed_request_row_renames_under_the_string_key() {
+    use crate::engine_bridge::{FinderWriteItemKind, FinderWriteTarget};
+    use beebeeb_core::kdf::derive_file_key;
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let content = [0x77u8; 32];
+    let c_key = beebeeb_core::kdf::FileKey::from_bytes(content);
+    let (fixture, _seen, row) = request_world(content, &c_key, b"hello", ExpectedChunkFormat::V2);
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    db.upsert_file(&crate::state_db::FileEntry {
+        file_id: OWNER.into(),
+        path: "report.txt".into(),
+        status: crate::state_db::FileStatus::CloudOnly,
+        size_bytes: 5,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 0,
+        parent_id: None,
+        item_kind: crate::state_db::ItemKind::File,
+    })
+    .unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+
+    // The real ingest: core opens the `C`-sealed name and the pin it records is
+    // kept on the durable record.
+    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    assert!(prepared[0].readable, "core opens the name under C");
+    assert_eq!(
+        prepared[0].record.request_name,
+        Some(RequestName {
+            key: RequestNameKey::Content,
+            pin: ExpectedChunkFormat::V2.as_u8(),
+        }),
+        "core's resolution of the name is durable"
+    );
+
+    bridge
+        .queue_finder_modify(FinderWriteTarget {
+            file_id: Some(OWNER.into()),
+            parent_id: None,
+            filename: "renamed.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        })
+        .unwrap();
+
+    let op = bridge.db().list_operations_for_file(OWNER).unwrap().remove(0);
+    let payload: Value = serde_json::from_str(op.metadata_json.as_deref().unwrap()).unwrap();
+    let name_encrypted = payload["name_encrypted"].as_str().unwrap();
+    let renamed = beebeeb_core::encrypt::decrypt_name_metadata_with_key(
+        &derive_file_key(&master, OWNER.as_bytes()),
+        name_encrypted,
+    )
+    .expect("the rename seals under the string-derived key");
+    assert_eq!(renamed.name, "renamed.txt");
+    assert_eq!(renamed.chunk_format, ExpectedChunkFormat::V2, "the pin core read is kept");
+    assert!(
+        beebeeb_core::encrypt::decrypt_name_metadata_with_key(&c_key, name_encrypted).is_err(),
+        "the new name does not open under C"
+    );
 }

@@ -90,7 +90,7 @@ impl EngineBridge {
         target: &FinderWriteTarget,
         item_contract: Option<&crate::state_db::FileContractState>,
     ) -> Result<(OperationKind, serde_json::Value), EngineError> {
-        let name_encrypted = owned_metadata_for_name(
+        let name_encrypted = owned_metadata_for_rename(
             &self.db, self.api.master_key(),
             file_id,
             &target.filename,

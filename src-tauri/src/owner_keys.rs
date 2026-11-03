@@ -766,6 +766,7 @@ impl crate::engine_bridge::EngineBridge {
                     requests = Some(RequestKeys::load(&self.api()).await);
                 }
                 if let Some(found) = requests.as_mut().and_then(|keys| keys.row_keys(&master, &row)) {
+                    record.request_name = Some(requests::request_name(&found));
                     if candidate.is_none() {
                         candidate = Some((found.name_key, found.name));
                     }
@@ -1019,6 +1020,9 @@ pub struct OwnedKeyRecord {
     /// a download in a later process still takes the request content key.
     #[serde(default)]
     pub request_row: bool,
+    /// Core's resolution of a request row's name (P2-2), for a later rename.
+    #[serde(default)]
+    pub request_name: Option<requests::RequestName>,
     pub blocked_fingerprint: Option<String>,
 }
 
@@ -1186,7 +1190,6 @@ pub const ADDED_BY_SOMEONE_ELSE: &str = "Added by someone else";
 /// write into a shared folder stays owner-only. The exact copy both clients
 /// owe the person (A14b).
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
-
 
 /// Recoverable item copy. Only an authenticated, decrypted label may be passed here.
 pub fn cannot_open_message(label: Option<&str>, member_added: bool) -> String {
