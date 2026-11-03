@@ -506,6 +506,64 @@ async fn review_p2_2_an_unresolvable_envelope_row_never_becomes_an_owner_row() {
     assert!(bridge.is_request_row(ROW));
 }
 
+/// P3-1: the durable request fact is sticky against a well-formed envelope the
+/// pass cannot resolve. Prepare the valid row (fact true), then the same row
+/// with its request key withheld: the record and `is_request_row` still say
+/// true. Mutant: clearing the fact when `row_keys` returns None turns it red.
+#[tokio::test]
+async fn review_p3_1_an_unresolvable_envelope_never_clears_the_fact() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e7";
+    const ROW: &str = "4f000000-0000-4000-8000-0000000000e7";
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, ROW.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let (envelope, requests) = request_envelope_fixture(REQUEST_ID, [0x47u8; 32]);
+    let loaded = std::sync::Arc::new(AtomicBool::new(true));
+    let flag = loaded.clone();
+    let (base, _server) = json_server(move |path| {
+        (path == "/api/v1/file-requests").then(|| {
+            if flag.load(Ordering::SeqCst) {
+                requests.clone()
+            } else {
+                serde_json::json!({"file_requests": []})
+            }
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    let mut row = json!({
+        "id": ROW,
+        "name_encrypted": name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+    });
+    row.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
+
+    let prepared = bridge.prepare_owned_rows(&[row.clone()]).await.expect("the valid row prepares");
+    assert!(prepared[0].readable);
+    let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is recorded");
+    assert!(record.request_row, "core resolved the request row");
+
+    // The request key is withheld on the next pass: unresolved, but the fact stays.
+    loaded.store(false, Ordering::SeqCst);
+    let prepared = bridge.prepare_owned_rows(&[row]).await.expect("an unresolved row never aborts the pass");
+    assert!(!prepared[0].readable, "the unresolved row is blocked");
+    let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is still recorded");
+    assert!(record.request_row, "an unresolvable envelope never clears the sticky fact");
+    assert!(bridge.is_request_row(ROW), "the in-memory view keeps it too");
+}
+
 /// P2-1: a non-canonical id the SERVER planted as a roster row still gets no
 /// derived write key — holding a row under that text proves nothing, and the
 /// derived key would be one nobody can open.
