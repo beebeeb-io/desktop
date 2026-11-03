@@ -67,6 +67,9 @@ pub struct EngineBridge {
     /// landing takes the op off the queue before they are uploaded, and until they are, the
     /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
     thumbnails_pending: std::sync::Mutex<HashSet<String>>,
+    /// Ids whose listing carries a 2236 request envelope (L12). In memory only:
+    /// the next pass re-learns them, and nothing here is ever persisted.
+    request_rows: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Re-snapshots that failed in a row (spec §6.3.2, macOS): from
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

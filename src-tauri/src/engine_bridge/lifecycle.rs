@@ -27,12 +27,34 @@ impl EngineBridge {
             transfers: crate::transfer_progress::TransferBoard::new(),
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
+            request_rows: std::sync::Mutex::new(HashSet::new()),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
             #[cfg(test)]
             seams: Seams::default(),
         }
+    }
+
+    /// L12: remember (or forget) that `id` is a request row, so a download takes
+    /// the sealed request key instead of a derived one.
+    pub(crate) fn set_request_row(&self, id: &str, request: bool) {
+        let mut rows = self
+            .request_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if request {
+            rows.insert(id.to_string());
+        } else {
+            rows.remove(id);
+        }
+    }
+
+    pub(crate) fn is_request_row(&self, id: &str) -> bool {
+        self.request_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(id)
     }
 
     pub(crate) fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {

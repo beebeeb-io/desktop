@@ -1,7 +1,10 @@
 //! Opaque owner-key state and account-scoped transport. Crypto belongs to core.
 
 use crate::{api_client::ApiClient, state_db::StateDb};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -216,6 +219,10 @@ pub fn display_name(file_meta: &Value, id: &str, master_key: &[u8; 32]) -> Optio
 fn safe_display_name(name: &str) -> bool {
     crate::reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\')
 }
+
+mod requests;
+
+pub(crate) use requests::{RequestKeys, request_upload_fields};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
@@ -640,6 +647,8 @@ impl crate::engine_bridge::EngineBridge {
         let scope = self.owner_key_scope();
         let master = MasterKey::from_bytes(*self.api().master_key());
         let mut batch = Batch::default();
+        // Loaded once per pass, and only when a request row actually needs it.
+        let mut requests: Option<RequestKeys> = None;
         for row in rows {
             if let Some(id) = row["id"].as_str() {
                 batch.rows.insert(id.to_string(), row.clone());
@@ -717,6 +726,20 @@ impl crate::engine_bridge::EngineBridge {
             } else {
                 record_key(&master, &record, row_kind(&row)).ok()
             };
+            // T3.2 (L12/L13): a 2236 request row is owner-class with a request
+            // envelope. Its content key is the sealed request key `C`; its name
+            // key is the derived string convention first, else `C`. It is never
+            // adopted, wrapped at share time or published, and it is read-only.
+            let is_request = request_upload_fields(&row).is_some();
+            self.set_request_row(id, is_request);
+            if is_request && candidate.is_none() {
+                if requests.is_none() {
+                    requests = Some(RequestKeys::load(&self.api()).await);
+                }
+                if let Some(found) = requests.as_mut().and_then(|keys| keys.row_keys(&master, &row)) {
+                    candidate = Some((found.name_key, found.name));
+                }
+            }
             let ordinary_legacy =
                 !is_foreign && class.is_some() && (derived_readable || (text.is_none() && !sparse));
             if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
@@ -826,6 +849,16 @@ impl crate::engine_bridge::EngineBridge {
             ItemClass::Owner => Ok(Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes()))),
             ItemClass::Foreign => anyhow::bail!("item key is unavailable"),
         }
+    }
+
+    /// T3.2: a request row's content key. The row is read-only; the key is the
+    /// sealed request key `C` from the owner's request, never a derived one.
+    pub(crate) async fn request_content_key(&self, row: &Value) -> anyhow::Result<FileKey> {
+        let master = MasterKey::from_bytes(*self.api().master_key());
+        let mut keys = RequestKeys::load(&self.api()).await;
+        keys.row_keys(&master, row)
+            .map(|found| found.content_key)
+            .ok_or_else(|| anyhow::anyhow!("request keys are unavailable"))
     }
 
     pub async fn retry_owner_adoptions(&self) -> anyhow::Result<usize> {
@@ -1026,6 +1059,11 @@ impl<'a> AccountScope<'a> {
 
 #[cfg(test)]
 mod tests;
+
+
+/// The visible mark every client owes an F item (L12): the class, never a
+/// server field, says someone else added it.
+pub const ADDED_BY_SOMEONE_ELSE: &str = "Added by someone else";
 
 /// Recoverable item copy. Only an authenticated, decrypted label may be passed here.
 pub fn cannot_open_message(label: Option<&str>, member_added: bool) -> String {

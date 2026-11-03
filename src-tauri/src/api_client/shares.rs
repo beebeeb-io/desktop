@@ -8,6 +8,13 @@
 use super::*;
 
 impl ApiClient {
+    /// `GET /api/v1/file-requests` — the owner's upload requests, with their
+    /// master-wrapped request private keys. Read-only: nothing here is ever
+    /// sealed, adopted or published (task 2275, L12).
+    pub async fn list_file_requests(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(self.get_typed("/api/v1/file-requests").await?)
+    }
+
     pub async fn sent_folder_invites(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.get_typed("/api/v1/shares/invites/sent").await?)
     }

@@ -441,12 +441,19 @@ impl EngineBridge {
                     beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok().map(|metadata| metadata.name)
                 } else { None }
             } else { None };
-            return anyhow::anyhow!(crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added));
+            let message = crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added);
+            return anyhow::anyhow!("{} — {message}", crate::owner_keys::ADDED_BY_SOMEONE_ELSE);
         }
         error
     }
 
     pub(super) async fn file_key_for_download(&self, file_id: &str) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+        // T3.2: a request row's content is sealed under the request key `C`, not
+        // a derived key. Read-only: the row is never re-sealed or adopted.
+        if self.is_request_row(file_id) {
+            let row = self.api.get_file(file_id).await?;
+            return self.request_content_key(&row).await.map_err(EngineError::from);
+        }
         let Some(contract) = self.db.get_file_contract_state(file_id)? else {
             return self.resolved_owned_key(file_id).await.map(|key| beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes())).map_err(EngineError::from);
         };
