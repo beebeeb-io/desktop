@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+mod class_matrix;
 mod custody;
 mod harness;
 mod index_repair;

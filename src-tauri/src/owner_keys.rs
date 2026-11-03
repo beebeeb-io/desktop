@@ -136,8 +136,7 @@ fn folder(row: &Value) -> bool {
     row["is_folder"].as_bool() == Some(true) || row["kind"] == "folder"
 }
 
-/// The served id decides the class (task 2275, L12). Attribution fields and
-/// served envelopes never override it.
+/// The served id decides the class (2275 L12); attribution and envelopes never do.
 fn class_of(id: &str) -> anyhow::Result<ItemClass> {
     beebeeb_core::item_id::item_class(id).map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -562,6 +561,15 @@ async fn adopt(
     key: &FileKey,
     read_first: bool,
 ) -> anyhow::Result<bool> {
+    // A24: a served second wrap never replaces the authenticated winner.
+    if let Some(frame) = record.owner_wrap.as_deref()
+        && keys::unwrap_owner_file_key(&MasterKey::from_bytes(*scope.api.master_key()), &record.file_id, frame)
+            .is_ok_and(|winner| winner.as_bytes() != key.as_bytes())
+    {
+        record.blocked_fingerprint = Some(record.fingerprint());
+        scope.put(record)?;
+        anyhow::bail!("immutable owner envelope conflicts with authenticated item key");
+    }
     if read_first {
         let canonical = scope.api.get_file(&record.file_id).await?;
         scope.check()?;
@@ -711,22 +719,17 @@ impl crate::engine_bridge::EngineBridge {
                     Err(_) => true,
                 };
             } else {
-                // A1b: an owner id's key is derived. A persisted pre-L12
-                // record's envelope is cleared here and never POSTed.
+                // A1b: an owner id's key is derived; a persisted pre-L12 envelope is cleared, never POSTed.
                 record.owner_wrap = None;
                 record.pending_owner_wrap = None;
             }
             record.member_added |= !row["uploaded_by"].is_null();
             record.blocked_fingerprint = None;
-            let mut candidate = if malformed || class.is_none() {
-                None
-            } else {
-                record_key(&master, &record, row_kind(&row)).ok()
-            };
-            // T3.2 (L12/L13): a 2236 request row is owner-class with a request
-            // envelope. Its content key is the sealed request key `C`; its name
-            // key is the derived string convention first, else `C`. It is never
-            // adopted, wrapped at share time or published, and it is read-only.
+            let mut candidate = (!malformed && class.is_some())
+                .then(|| record_key(&master, &record, row_kind(&row)).ok())
+                .flatten();
+            // T3.2 (L12/L13): a 2236 request row's name key is derived first, else `C`.
+            // Never adopted, wrapped at share time or published; content is read-only.
             let is_request = request_upload_fields(&row).is_some();
             self.set_request_row(id, is_request);
             if is_request && candidate.is_none() {
@@ -818,8 +821,8 @@ impl crate::engine_bridge::EngineBridge {
             if let Some((key, _)) = candidate.as_ref()
                 && record.pending_owner_wrap.is_some()
             {
-                // Adoption availability never blocks authenticated local reads.
-                if let Err(_error) = adopt(&scope, &mut record, key, false).await {
+                // A24: read the winner first; a second wrap is blocked, never re-posted.
+                if let Err(_error) = adopt(&scope, &mut record, key, true).await {
                     scope.check()?;
                     if record.blocked_fingerprint.is_some() {
                         readable = false;
@@ -1177,7 +1180,6 @@ impl crate::engine_bridge::EngineBridge {
 
 #[cfg(test)]
 mod tests;
-
 
 /// The visible mark every client owes an F item (L12): the class, never a
 /// server field, says someone else added it.
