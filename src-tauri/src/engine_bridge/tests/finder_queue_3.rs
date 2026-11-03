@@ -467,3 +467,83 @@ fn a14b_owner_write_into_a_shared_folder_stays_owner_only() {
         );
     }
 }
+
+/// P2-5 / L15: the owner-only notice belongs to a create. A rename or move of
+/// an existing item (even inside a shared folder) says only "queued".
+#[test]
+fn review_p2_5_only_a_create_shows_the_owner_only_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let root = "40000000-0000-4000-8000-0000000000a4";
+    let item = "40000000-0000-4000-8000-0000000000a5";
+    seed_folder_row(&bridge, root, "shared");
+    seed_bridge_row(&bridge, item, "shared/item.txt", Some(root), FileStatus::Local, 0);
+    bridge.db().remember_folder_custody_at_revision(root, 0).unwrap();
+
+    let target = |file_id: Option<&str>, name: &str, kind| FinderWriteTarget {
+        file_id: file_id.map(str::to_string),
+        parent_id: Some(root.into()),
+        filename: name.into(),
+        rel_path: None,
+        kind,
+        contents_path: None,
+        content_type: None,
+        base_version_identifier: None,
+    };
+    let FinderWriteOutcome::Queued { message, .. } = bridge
+        .queue_local_rename(target(Some(item), "renamed.txt", FinderWriteItemKind::File), "shared/renamed.txt")
+        .unwrap()
+    else {
+        panic!("a queued rename")
+    };
+    assert_eq!(
+        message, "queued for encrypted sync",
+        "a rename of an existing item is not a create and never claims the notice"
+    );
+
+    // A move of an existing item out of the shared folder: same rule.
+    let private = "40000000-0000-4000-8000-0000000000a6";
+    let moved = "40000000-0000-4000-8000-0000000000a7";
+    seed_folder_row(&bridge, private, "private");
+    seed_bridge_row(&bridge, moved, "shared/other.txt", Some(root), FileStatus::Local, 0);
+    let mut move_target = target(Some(moved), "other.txt", FinderWriteItemKind::File);
+    move_target.parent_id = Some(private.into());
+    let FinderWriteOutcome::Queued { message, .. } = bridge
+        .queue_local_rename(move_target, "private/other.txt")
+        .unwrap()
+    else {
+        panic!("a queued move")
+    };
+    assert_eq!(
+        message, "queued for encrypted sync",
+        "a move of an existing item never claims the notice"
+    );
+
+    // A new version of an existing item: the version path, not a create.
+    let versioned = "40000000-0000-4000-8000-0000000000a8";
+    seed_bridge_row(&bridge, versioned, "shared/versioned.txt", Some(root), FileStatus::Local, 0);
+    let payload_path = dir.path().join("version.txt");
+    std::fs::write(&payload_path, b"new bytes").unwrap();
+    let mut version_target = target(Some(versioned), "versioned.txt", FinderWriteItemKind::File);
+    version_target.contents_path = Some(payload_path.to_string_lossy().into_owned());
+    let written = bridge.queue_file_provider_modify_from(version_target, None).unwrap();
+    match written.outcome {
+        FinderWriteOutcome::Queued { message, .. } => assert_eq!(
+            message, "queued for encrypted sync",
+            "a new version of an existing item never claims the notice"
+        ),
+        _ => panic!("a queued version"),
+    }
+
+    let FinderWriteOutcome::Queued { message, .. } = bridge
+        .queue_finder_create(target(None, "fresh", FinderWriteItemKind::Folder))
+        .unwrap()
+    else {
+        panic!("a queued create")
+    };
+    assert_eq!(
+        message,
+        crate::owner_keys::OWNER_ONLY_NOTICE,
+        "a self-minted create in a shared folder still says it stays owner-only"
+    );
+}
