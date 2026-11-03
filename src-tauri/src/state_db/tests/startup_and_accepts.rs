@@ -692,7 +692,7 @@ use super::*;
     /// never before it: a read taken before the write lock can see accepts open, wait behind the close, and then queue.
     #[test]
     fn the_fence_is_read_first_inside_the_transaction_that_queues() {
-        let source: Vec<&str> = include_str!("../../state_db.rs").lines().collect();
+        let source: Vec<&str> = include_str!("../../state_db/landing.rs").lines().collect();
         for definition in ["pub fn accept_finder_write(", "pub fn enqueue_finder_change("] {
             let start = source
                 .iter()

@@ -166,7 +166,7 @@ mod tests {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                &format!("state_db::tests::{name}"),
+                &format!("state_db::tests::open_and_cache::{name}"),
                 "--test-threads=1",
                 "--nocapture",
             ])
