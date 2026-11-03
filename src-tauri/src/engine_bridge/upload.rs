@@ -707,15 +707,20 @@ impl EngineBridge {
     /// derived convention first, else `C` (§15). Falls back to the stored
     /// record's name when the canonical row cannot be read.
     async fn request_row_display_name(&self, request_id: &str) -> String {
+        // The common path: the stored record's name opens under the derived
+        // convention, so no network call is made.
+        if let Some(name) = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
+            .ok()
+            .flatten()
+        {
+            return name;
+        }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
         {
             return keys.name.name;
         }
-        crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "edited file".to_string())
+        "edited file".to_string()
     }
 
     /// L13/P1-1: a content edit of a 2236 request row is saved as a NEW owner
