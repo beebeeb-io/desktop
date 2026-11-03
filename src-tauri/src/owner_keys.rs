@@ -756,12 +756,13 @@ impl crate::engine_bridge::EngineBridge {
             let mut candidate = (!malformed && class.is_some())
                 .then(|| record_key(&master, &record, row_kind(&row)).ok())
                 .flatten();
-            // T3.2/P1-1: only the 2236 envelope may decide the durable fact, and
-            // only core's `resolve_request_row` may say a carrying row IS a
-            // request row — the server can plant three well-formed fields on an
-            // owner row. A malformed envelope is an error (the row is unreadable,
-            // nothing is written). The fact is sticky: server data never clears it.
-            if crate::owner_keys::request_envelope(&row)?.is_some() {
+            // Review 4 P2-1: a malformed envelope makes only this row unreadable.
+            let Ok(envelope) = crate::owner_keys::request_envelope(&row) else {
+                record.blocked_fingerprint = Some(record.fingerprint());
+                prepared.push(PreparedOwnedRow { row, record, readable: false });
+                continue;
+            };
+            if envelope.is_some() {
                 if requests.is_none() {
                     requests = Some(RequestKeys::load(&self.api()).await);
                 }
@@ -776,8 +777,7 @@ impl crate::engine_bridge::EngineBridge {
                     }
                 }
             }
-            let ordinary_legacy =
-                !is_foreign && class.is_some() && (derived_readable || (text.is_none() && !sparse));
+            let ordinary_legacy = !is_foreign && class.is_some() && (derived_readable || (text.is_none() && !sparse));
             if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {

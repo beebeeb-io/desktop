@@ -256,6 +256,10 @@ fn request_envelope_fixture(request_id: &str, content: [u8; 32]) -> (serde_json:
 /// P1-1: a row that carries the 2236 envelope with one malformed field is
 /// unreadable, and never clears the durable fact or overwrites the record.
 ///
+/// Review 4 P2-1: it also no longer aborts the whole pass — an uploader could
+/// otherwise stall the owner's every prepare by adding one such row. The other
+/// rows in the same snapshot still prepare.
+///
 /// Review 4 P3-4: mutant-proven — treating a malformed envelope as absent
 /// (`request_envelope(&row).ok().flatten()`) turns this red.
 #[tokio::test]
@@ -311,11 +315,55 @@ async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write()
         beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
     )
     .unwrap());
-    let err = match bridge.prepare_owned_rows(&[malformed]).await {
-        Ok(_) => panic!("a carrying-but-malformed envelope is an error"),
+    // Review 4 P2-1: the same pass also carries a healthy owner row. One
+    // malformed envelope must not abort the snapshot for it.
+    const OTHER: &str = "40000000-0000-4000-8000-0000000000e5";
+    let other_name = beebeeb_core::encrypt::encrypt_name_for(
+        &derive_file_key(&master, OTHER.as_bytes()),
+        "other.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let other = serde_json::json!({
+        "id": OTHER,
+        "name_encrypted": other_name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+    });
+    let prepared = bridge
+        .prepare_owned_rows(&[malformed.clone(), other])
+        .await
+        .expect("one malformed envelope must not abort the pass");
+    assert_eq!(prepared.len(), 2, "every row in the pass is reported");
+    let unreadable = prepared
+        .iter()
+        .find(|prepared| prepared.row["id"].as_str() == Some(REQUEST))
+        .expect("the malformed row is reported, not dropped");
+    assert!(!unreadable.readable, "the malformed row is unreadable");
+    let other = prepared
+        .iter()
+        .find(|prepared| prepared.row["id"].as_str() == Some(OTHER))
+        .expect("the other row is reported");
+    assert!(other.readable, "the other rows in the same pass still prepare");
+    // A write through the ordinary owned-key seam refuses it.
+    let err = match crate::engine_bridge::meta::owned_metadata_for_name(
+        &bridge.db(),
+        &[7u8; 32],
+        REQUEST,
+        "changed.txt",
+        None,
+    ) {
+        Ok(_) => panic!("an unreadable request row refuses a write"),
         Err(err) => err,
     };
-    assert!(err.to_string().contains("malformed"), "the row is unreadable: {err}");
+    assert!(
+        err.to_string().contains("request row has no content key"),
+        "the row refuses a write: {err}"
+    );
     let record = bridge.db().get_owned_key_record(REQUEST).unwrap().expect("the row is still recorded");
     assert!(record.request_row, "the durable fact is never cleared by server data");
     assert_eq!(record.name_encrypted, name, "the unreadable row writes nothing");
