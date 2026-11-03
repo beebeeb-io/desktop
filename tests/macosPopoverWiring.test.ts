@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT } from '../src/popoverContract'
+import { rustModuleSource } from './fixtures/rustConstants'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const read = (path: string) => existsSync(`${root}/${path}`) ? readFileSync(`${root}/${path}`, 'utf8') : ''
@@ -59,7 +60,8 @@ describe('the shipping macOS popover boundary', () => {
     expect(body).toContain('.hide()')
     expect(body).toMatch(/emit\((crate::popover_data::)?POPOVER_HIDDEN_EVENT, /)
     expect(src).toMatch(/emit\((crate::popover_data::)?POPOVER_SHOWN_EVENT, /)
-    const data = read('src-tauri/src/popover_data.rs')
+    // The split moved the event names to popover_data/constants.rs; read the whole module.
+    const data = rustModuleSource('popover_data')
     expect(data).toContain(`pub const POPOVER_SHOWN_EVENT: &str = "${POPOVER_SHOWN_EVENT}";`)
     expect(data).toContain(`pub const POPOVER_HIDDEN_EVENT: &str = "${POPOVER_HIDDEN_EVENT}";`)
   })
