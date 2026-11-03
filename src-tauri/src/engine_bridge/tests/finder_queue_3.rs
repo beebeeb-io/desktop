@@ -430,10 +430,13 @@ use super::*;
 /// A14b / L15 (option A): an owner write into a shared folder is never
 /// published. Its queue reply carries the exact owner-only copy, and no
 /// pending key envelope is written for the new item.
-#[test]
-fn a14b_owner_write_into_a_shared_folder_stays_owner_only() {
+#[tokio::test]
+async fn a14b_owner_write_into_a_shared_folder_stays_owner_only() {
     let dir = tempfile::tempdir().unwrap();
-    let bridge = test_bridge(&dir.path().join("state.db"));
+    let server = VersionedServerMock::start();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [7u8; 32]);
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
     seed_folder_row(&bridge, "40000000-0000-4000-8000-0000000000a1", "r14-plain");
     seed_folder_row(&bridge, "40000000-0000-4000-8000-0000000000a2", "r14-shared");
     bridge.db().remember_folder_custody_at_revision("40000000-0000-4000-8000-0000000000a2", 0).unwrap();
@@ -465,6 +468,24 @@ fn a14b_owner_write_into_a_shared_folder_stays_owner_only() {
             record.and_then(|record| record.pending_owner_wrap).is_none(),
             "an owner write is never wrapped for a share: {id}"
         );
+    }
+    // A14b: run the queue against a watching mock. The creates reach the
+    // server, and neither the plain nor the shared folder posts a key.
+    // The mock has no create route, so the op may retry; the request itself is
+    // the evidence that the write ran and published nothing.
+    bridge.process_due_operations(&sync_root, i64::MAX / 2).await.unwrap();
+    let state = server.finish();
+    assert!(
+        state.requests.iter().any(|(method, path)| method == "POST" && path == "/api/v1/files/folder"),
+        "the creates reached the server: {:?}",
+        state.requests
+    );
+    for (method, path) in &state.requests {
+        assert!(
+            !(matches!(method.as_str(), "POST" | "PUT") && path.starts_with("/api/v1/shared-folders/")),
+            "an owner write publishes no key: {method} {path}"
+        );
+        assert!(!path.contains("/owner-key"), "an owner write adopts nothing: {method} {path}");
     }
 }
 

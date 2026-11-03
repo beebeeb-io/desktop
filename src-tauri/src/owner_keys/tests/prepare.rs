@@ -418,6 +418,15 @@ fn a1b_persisted_owner_record_is_cleared_and_never_posted() {
     assert!(prepared[0].record.owner_wrap.is_none());
     assert!(prepared[0].record.pending_owner_wrap.is_none());
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+
+    // A1b: beyond the record fields, the persisted row resolves to the derived
+    // key and lists its real name — a class-blind record would not.
+    db.put_owned_key_record(&prepared[0].record).unwrap();
+    assert_eq!(run(bridge.resolved_owned_key(owner)).unwrap().as_bytes(), derived.as_bytes());
+    assert_eq!(
+        crate::owner_keys::stored_name(&db, owner, &master.to_bytes()).unwrap().as_deref(),
+        Some("notes.txt")
+    );
 }
 
 #[test]
@@ -441,16 +450,40 @@ fn a1_owner_class_ignores_a_member_wrap_and_never_posts() {
     )
     .unwrap();
     // A1: the owner id with a member's wrap and a name sealed under it.
-    let served = json!({"id":owner,"name_encrypted":name,"parent_id":null,"is_folder":false,
+    let root = "10000000-0000-4000-8000-0000000000a2";
+    let folder = FileKey::from_bytes([57; 32]);
+    let served = json!({"id":owner,"name_encrypted":name,"parent_id":root,"is_folder":false,
         "version_number":1,"size_bytes":4,"updated_at":1,
         "acted_via_share_id":"fixture-share","uploaded_by":"member",
         "owner_wrapped_file_key":STANDARD.encode(&member_wrap)});
+    // A real custody root with an L7 wrap of the member key for the owner id.
+    let custody = json!({
+        "folder_id":root,"role":"owner","key_version":1,
+        "owner_wrapped_folder_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_folder_custody(&master, root, &folder).unwrap()
+        )
+    });
+    let inventory = json!({"keys":[{
+        "file_id":owner,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_child_key(&folder, root, owner, 1, &member).unwrap()
+        )
+    }],"next_cursor":null});
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let log = seen.clone();
     let reply = served.clone();
     let fixture = Fixture::wire(move |req| {
         log.lock().unwrap().push(format!("{} {}", req.method, req.path));
-        Some((200, serde_json::to_vec(&reply).unwrap()))
+        let body = if req.path == "/api/v1/shares/invites/sent" {
+            json!({"invites":[]})
+        } else if req.path == format!("/api/v1/shared-folders/{root}") {
+            custody.clone()
+        } else if req.path.starts_with(&format!("/api/v1/shared-folders/{root}/keys")) {
+            inventory.clone()
+        } else {
+            reply.clone()
+        };
+        Some((200, serde_json::to_vec(&body).unwrap()))
     });
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(

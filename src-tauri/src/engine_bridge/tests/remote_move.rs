@@ -16,6 +16,30 @@ async fn a15_remote_move_into_a_shared_folder_publishes_nothing() {
     let root = "40000000-0000-4000-8000-0000000000f2";
     seed_folder_row(&bridge, item, "Notes");
     seed_folder_row(&bridge, root, "Shared");
+    // A15: "Shared" is a real shared folder, and the moved owner item already
+    // carries a persisted owner envelope — the old `owner_wrap.is_some()`
+    // heuristic would read that as a foreign row and refetch it.
+    bridge.db().remember_folder_custody_at_revision(root, 0).unwrap();
+    assert!(bridge.db().has_seen_folder_custody(root).unwrap());
+    let other = beebeeb_core::kdf::FileKey::from_bytes([0x42; 32]);
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &other,
+        "Notes",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&crate::owner_keys::OwnedKeyRecord {
+            file_id: item.into(),
+            name_encrypted: name,
+            // Core refuses to mint an L8 wrap for an owner id; the old heuristic
+            // only read `is_some`, so any persisted bytes reproduce it.
+            owner_wrap: Some(vec![0x11; 60]),
+            ..Default::default()
+        })
+        .unwrap();
     let op = crate::api_client::SyncOp {
         seq_id: 7,
         op_type: "file_move".into(),

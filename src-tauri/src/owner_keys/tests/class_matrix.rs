@@ -85,22 +85,30 @@ fn world(
 #[test]
 fn a2_owner_row_with_a_member_wrap_but_the_real_name_is_derived_and_not_adopted() {
     let owner = "22222222-2222-4222-8222-22222222222a";
+    let root = "10000000-0000-4000-8000-0000000000a1";
+    let folder = FileKey::from_bytes([56; 32]);
     let member = FileKey::from_bytes([0x52; 32]);
     let derived = beebeeb_core::kdf::derive_file_key(&master(), owner.as_bytes());
     let member_wrap =
         beebeeb_sync::key_resolution::wrap_owner_file_key(&master(), "20000000-0000-8000-8000-00000000002a", &member)
             .unwrap();
-    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-    let log = seen.clone();
-    let fixture = Fixture::wire(move |req| {
-        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
-        Some((404, serde_json::to_vec(&json!({})).unwrap()))
-    });
-    let bridge = bridge_for(&fixture);
-    let row = json!({"id":owner,"name_encrypted":name_under(&derived,"real.txt"),"parent_id":null,
+    let row = json!({"id":owner,"name_encrypted":name_under(&derived,"real.txt"),"parent_id":root,
         "is_folder":false,"version_number":1,"size_bytes":4,"updated_at":1,
         "acted_via_share_id":"fixture-share","uploaded_by":"member",
         "owner_wrapped_file_key":STANDARD.encode(&member_wrap)});
+    // A real custody root whose inventory holds an L7 wrap of the member key for
+    // this owner id: a resolver that applies the L7 reader to an owner id would
+    // open it, so the test must fail if that reader is ever reached.
+    let inventory = json!({"keys":[{
+        "file_id":owner,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_child_key(&folder, root, owner, 1, &member).unwrap()
+        )
+    }],"next_cursor":null});
+    // An owner id cannot carry an L8 winner (core refuses to mint one), and the
+    // served row's envelope is the member's; this is never handed back.
+    let (fixture, seen) = world(root, &row, &folder, inventory, member_wrap.clone());
+    let bridge = bridge_for(&fixture);
     let prepared = run(bridge.prepare_owned_rows(&[row])).expect("A2 must not abort the snapshot");
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].readable, "the real name opens under the derived key");
@@ -108,6 +116,7 @@ fn a2_owner_row_with_a_member_wrap_but_the_real_name_is_derived_and_not_adopted(
     assert!(prepared[0].record.owner_wrap.is_none());
     assert!(prepared[0].record.pending_owner_wrap.is_none(), "no adoption was prepared");
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+    assert_eq!(count(&seen, "/shared-folders"), 0, "the owner path never walks custody: {seen:?}");
 }
 
 #[test]
@@ -128,7 +137,9 @@ fn a3_l8_envelope_served_on_an_owner_id_is_ignored() {
         log.lock().unwrap().push(format!("{} {}", req.method, req.path));
         Some((404, serde_json::to_vec(&json!({})).unwrap()))
     });
-    let bridge = bridge_for(&fixture);
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
     let row = json!({"id":owner,"name_encrypted":name_under(&derived,"enveloped.txt"),"parent_id":null,
         "is_folder":false,"version_number":1,"size_bytes":4,"updated_at":1,
         "acted_via_share_id":null,"uploaded_by":null,
@@ -141,6 +152,14 @@ fn a3_l8_envelope_served_on_an_owner_id_is_ignored() {
     assert!(prepared[0].record.pending_owner_wrap.is_none());
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
     assert_eq!(count(&seen, "/shared-folders"), 0, "no custody walk for an owner id: {seen:?}");
+    // A3: beyond the record fields, the persisted row still resolves to the
+    // derived key and lists its real name.
+    db.put_owned_key_record(&prepared[0].record).unwrap();
+    assert_eq!(run(bridge.resolved_owned_key(owner)).unwrap().as_bytes(), derived.as_bytes());
+    assert_eq!(
+        crate::owner_keys::stored_name(&db, owner, &master().to_bytes()).unwrap().as_deref(),
+        Some("enveloped.txt")
+    );
 }
 
 #[test]

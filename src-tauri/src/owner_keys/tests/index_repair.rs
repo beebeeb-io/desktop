@@ -648,3 +648,115 @@ fn review_p3_6_a_wrap_under_another_root_does_not_change_the_skip_reason() {
     );
     assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
 }
+
+/// A11 (owner name): the wrap of another key served under an owner item's id is
+/// skipped exactly as a foreign one is — the name class changes nothing.
+#[test]
+fn a11_owner_item_wrap_of_another_key_is_skipped() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000048";
+    let item = "40000000-0000-4000-8000-000000000048";
+    let folder = FileKey::from_bytes([55; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let other = FileKey::from_bytes([0xa1; 32]);
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "owner-named.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":item,"name_encrypted":name,"parent_id":root,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1});
+    let inventory = vec![json!({
+        "file_id":item,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, item, 1, &other).unwrap()),
+    })];
+    let (fixture, seen) = l14_world(root, &folder, vec![row], inventory);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert_eq!(report.skip_reasons.get("wrap_key_mismatch"), Some(&1), "{seen:?}");
+    assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
+}
+
+/// A10 (positive control): an owner item wrapped correctly for this root IS
+/// indexed — the L14 gates do not exclude the ordinary case.
+#[test]
+fn a10_a_correctly_wrapped_owner_item_is_indexed() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000049";
+    let item = "40000000-0000-4000-8000-000000000049";
+    let folder = FileKey::from_bytes([55; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "indexed.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":item,"name_encrypted":name,"parent_id":root,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1});
+    let inventory = vec![json!({
+        "file_id":item,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, item, 1, &derived).unwrap()),
+    })];
+    let (fixture, seen) = l14_world(root, &folder, vec![row], inventory);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert!(report.written >= 1, "the correctly wrapped item is indexed: {:?} {seen:?}", report.skip_reasons);
+    assert!(report.skip_reasons.is_empty(), "{:?}", report.skip_reasons);
+}
+
+/// A12 (positive control): a proven folder is descended into, and its correctly
+/// wrapped child is indexed too.
+#[test]
+fn a12_a_correctly_wrapped_child_of_a_proven_folder_is_indexed() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-00000000004a";
+    let nested = "20000000-0000-8000-8000-00000000004a";
+    let child = "20000000-0000-8000-8000-00000000004b";
+    let folder = FileKey::from_bytes([55; 32]);
+    let nested_key = FileKey::from_bytes([66; 32]);
+    let child_key = FileKey::from_bytes([77; 32]);
+    let nested_name = beebeeb_core::encrypt::encrypt_name_for(
+        &nested_key,
+        "Nested",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let nested_row = json!({"id":nested,"name_encrypted":nested_name,"parent_id":root,"is_folder":true,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&master, nested, &nested_key).unwrap())});
+    let child_name = beebeeb_core::encrypt::encrypt_name_for(
+        &child_key,
+        "inner.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let child_row = json!({"id":child,"name_encrypted":child_name,"parent_id":nested,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&master, child, &child_key).unwrap())});
+    let inventory = vec![
+        json!({"file_id":nested,"encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, nested, 2, &nested_key).unwrap())}),
+        json!({"file_id":child,"encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, child, 1, &child_key).unwrap())}),
+    ];
+    let (fixture, seen) = l14_world(root, &folder, vec![nested_row, child_row], inventory);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert!(report.written >= 1, "folder and child are indexed: {:?} {seen:?}", report.skip_reasons);
+    assert_eq!(count(&seen, &format!("parent_id={nested}")), 1, "the proven folder is walked: {seen:?}");
+}
