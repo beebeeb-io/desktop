@@ -929,7 +929,10 @@ pub use session::{SessionToken};
 
 #[path = "../src/keychain/vault.rs"]
 mod vault;
-pub use vault::{AuthSecretStore, holds_session_token, holds_account_email, holds_vault_key, AuthVault};
+pub use vault::{AuthSecretStore, AuthVault};
+/// The non-Windows trace and "what is left of this account" paths ask these, and so do the keychain tests.
+#[cfg(any(test, not(target_os = "windows")))]
+pub use vault::{holds_session_token, holds_account_email, holds_vault_key};
 
 #[path = "../src/keychain/accounts.rs"]
 mod accounts;

@@ -370,7 +370,10 @@ mod types;
 pub use types::{REQUIRED_PROOFS, Listing, Probe, Tally, Verdict, Outcome};
 
 mod probe;
-pub use probe::{eligible, probe, verdict, listing_from_status, listing_of};
+pub use probe::{eligible, probe, verdict, listing_of};
+/// The status-to-listing mapping is pinned by the tests; production code reads it through `probe`.
+#[cfg(test)]
+pub use probe::listing_from_status;
 
 mod judge;
 pub use judge::{Judgement, judge};
