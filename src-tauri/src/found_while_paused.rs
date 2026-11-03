@@ -599,5 +599,12 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Today's local date, as the dated folder is named. Only the Windows "Keep on this PC only" command
+/// (`lib.rs`, `found_while_paused_keep`) builds a dated folder.
+#[cfg(target_os = "windows")]
+pub fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
 #[cfg(test)]
 mod tests;
