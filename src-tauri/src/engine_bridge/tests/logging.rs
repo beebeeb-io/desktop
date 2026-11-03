@@ -58,17 +58,17 @@ use super::*;
             .unwrap()
             .fail_first_chunk_once
             .insert("session-1".into());
-        seed_uploaded_row(&bridge, &server, "revoked");
+        seed_uploaded_row(&bridge, &server, "43c0df67-e887-5a79-9f9a-772247f56239");
         fp_save(
             &bridge,
             dir.path(),
-            "revoked",
+            "43c0df67-e887-5a79-9f9a-772247f56239",
             PLANTED,
             b"save under a share that goes away",
             "1",
         );
-        let w = bridge.db.list_operations_for_file("revoked").unwrap().remove(0);
-        let mut contract = bridge.db.get_file_contract_state("revoked").unwrap().unwrap();
+        let w = bridge.db.list_operations_for_file("43c0df67-e887-5a79-9f9a-772247f56239").unwrap().remove(0);
+        let mut contract = bridge.db.get_file_contract_state("43c0df67-e887-5a79-9f9a-772247f56239").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("revoked-root".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
@@ -101,8 +101,8 @@ use super::*;
     async fn log_completed_landing_retried() {
         let master_key = [110u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "recorded");
-        fp_save(&bridge, dir.path(), "recorded", PLANTED, b"edit", "1");
+        seed_uploaded_row(&bridge, &server, "35bf2b92-6739-57f1-900c-3ae371776e8c");
+        fp_save(&bridge, dir.path(), "35bf2b92-6739-57f1-900c-3ae371776e8c", PLANTED, b"edit", "1");
         crate::state_db::fail_next_landings_for_test(1);
         let now = now_secs();
         let logs = capture_logs_async(async {
@@ -121,7 +121,7 @@ use super::*;
         );
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("recorded").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("35bf2b92-6739-57f1-900c-3ae371776e8c").unwrap().is_empty(),
             "landed on the retry"
         );
         drop(server.finish());
@@ -394,14 +394,14 @@ use super::*;
     async fn a_missing_staged_copy_is_retried_whatever_its_path_contains() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
+        seed_bridge_row(&bridge, "891ade83-2178-5932-91bd-4bea46844faa", "Draft.txt", None, FileStatus::Uploading, 0);
         let missing = dir.path().join("staged-403").join("payload");
         bridge
             .db
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("file-1".into()),
+                file_id: Some("891ade83-2178-5932-91bd-4bea46844faa".into()),
                 parent_id: None,
                 target_path: Some("Draft.txt".into()),
                 metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
@@ -439,7 +439,7 @@ use super::*;
         let op = PendingOperation {
             op_id: "op-refused".into(),
             kind: OperationKind::UploadVersion,
-            file_id: Some("file-refused".into()),
+            file_id: Some("1e3b2937-3d35-5237-81d0-eec70353a103".into()),
             parent_id: None,
             target_path: Some(PLANTED.into()),
             metadata_json: None,

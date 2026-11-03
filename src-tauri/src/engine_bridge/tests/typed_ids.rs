@@ -12,7 +12,7 @@ fn land_request_carries_the_landing_ids_as_ids() {
     let op = PendingOperation {
         op_id: "op-typed".to_string(),
         kind: OperationKind::UploadVersion,
-        file_id: Some("local-typed".to_string()),
+        file_id: Some("452ec2e0-399f-5d73-a904-3595c5c65c32".to_string()),
         parent_id: None,
         target_path: None,
         metadata_json: None,
@@ -29,7 +29,7 @@ fn land_request_carries_the_landing_ids_as_ids() {
     };
     let mut post_complete_errors = Vec::new();
     let request = LandRequest {
-        local_file_id: LocalFileId::new("local-typed"),
+        local_file_id: LocalFileId::new("452ec2e0-399f-5d73-a904-3595c5c65c32"),
         op: &op,
         claim: None,
         server_file_id: ServerFileId::new("server-typed"),
@@ -44,7 +44,7 @@ fn land_request_carries_the_landing_ids_as_ids() {
         sync_root: Path::new("/sync"),
     };
 
-    assert_eq!(request.local_file_id.as_str(), "local-typed");
+    assert_eq!(request.local_file_id.as_str(), "452ec2e0-399f-5d73-a904-3595c5c65c32");
     assert_eq!(request.server_file_id.as_str(), "server-typed");
     assert_eq!(request.produced.object_version_id.as_str(), "object-typed");
     assert_eq!(request.produced.version_number, 7);

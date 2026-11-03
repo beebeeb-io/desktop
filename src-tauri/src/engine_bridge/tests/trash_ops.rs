@@ -16,7 +16,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "server-file-2".into(),
+                file_id: "d6b89687-3ec2-52ca-8ee7-4f5e8e9a22f8".into(),
                 path: "doomed2.txt".into(),
                 status: FileStatus::Trashing,
                 size_bytes: 5,
@@ -32,7 +32,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-trash-2".into(),
                 kind: OperationKind::TrashFile,
-                file_id: Some("server-file-2".into()),
+                file_id: Some("d6b89687-3ec2-52ca-8ee7-4f5e8e9a22f8".into()),
                 parent_id: None,
                 target_path: None,
                 metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
@@ -54,7 +54,7 @@ use super::*;
         assert_eq!(outcome.retried_op_ids, vec!["op-trash-2".to_string()]);
         // Row preserved (still Trashing) so a future retry can complete and the
         // file is recoverable from the server in the meantime.
-        let row = bridge.db.get_file("server-file-2").unwrap().unwrap();
+        let row = bridge.db.get_file("d6b89687-3ec2-52ca-8ee7-4f5e8e9a22f8").unwrap().unwrap();
         assert_eq!(row.status, FileStatus::Trashing);
 
         let _ = server.finish();
@@ -113,20 +113,20 @@ use super::*;
     fn test_recursive_pin_queues_hydration_for_cloud_only_descendants() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "folder-a", "/Projects", None, FileStatus::CloudOnly, 0);
+        seed_bridge_row(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "/Projects", None, FileStatus::CloudOnly, 0);
         seed_bridge_row(
             &bridge,
-            "file-a",
+            "cbdd4504-f0e0-59ee-b8e8-41468119fa68",
             "/Projects/report.txt",
-            Some("folder-a"),
+            Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
             FileStatus::CloudOnly,
             128,
         );
         seed_bridge_row(
             &bridge,
-            "file-local",
+            "db107ee2-e80f-548e-9f13-94782d3a04a4",
             "/Projects/local.txt",
-            Some("folder-a"),
+            Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
             FileStatus::Local,
             256,
         );
@@ -134,7 +134,7 @@ use super::*;
         // `sync_root` is only used on Windows (to resolve placeholder paths for
         // CfSetPinState). On the non-Windows test host the hydrate-enqueue path
         // runs and `sync_root` is unused, so any path is fine here.
-        let queued = bridge.set_recursive_pin(dir.path(), "folder-a", true).unwrap();
+        let queued = bridge.set_recursive_pin(dir.path(), "14d2a297-b916-52d6-959d-7cc821b7a978", true).unwrap();
         assert_eq!(queued.changed_item_ids.len(), 3);
         // hydrate_operations is the non-Windows materialise path; on Windows the
         // OS (CfSetPinState) hydrates pinned files, so this count is 0 there.
@@ -144,7 +144,7 @@ use super::*;
         let due = bridge.db.list_due_operations(now_secs()).unwrap();
         assert!(due.iter().any(|op| {
             op.kind == OperationKind::PinTree
-                && op.file_id.as_deref() == Some("folder-a")
+                && op.file_id.as_deref() == Some("14d2a297-b916-52d6-959d-7cc821b7a978")
                 && op.metadata_json.as_deref().unwrap_or("").contains("\"pinned\":true")
         }));
         // On Windows the pin path calls CfSetPinState; the OS drives hydration
@@ -154,11 +154,11 @@ use super::*;
         {
             assert!(
                 due.iter()
-                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-a") })
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("cbdd4504-f0e0-59ee-b8e8-41468119fa68") })
             );
             assert!(
                 !due.iter()
-                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("file-local") })
+                    .any(|op| { op.kind == OperationKind::HydrateFile && op.file_id.as_deref() == Some("db107ee2-e80f-548e-9f13-94782d3a04a4") })
             );
         }
     }
@@ -167,11 +167,11 @@ use super::*;
     fn test_smart_cache_cleanup_never_evicts_effectively_pinned_files() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
-        seed_bridge_row(&bridge, "unpinned", "/Unpinned.txt", None, FileStatus::Local, 600);
-        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
-        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
-        bridge.db.mark_cached("unpinned", "/cache/unpinned", 600, 20).unwrap();
+        seed_bridge_row(&bridge, "006d694c-0e8f-5261-b04c-baf0ab999820", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "deffd454-79ea-5661-aa89-ff6ed6e61936", "/Unpinned.txt", None, FileStatus::Local, 600);
+        bridge.db.set_recursive_pin("006d694c-0e8f-5261-b04c-baf0ab999820", true, 1).unwrap();
+        bridge.db.mark_cached("006d694c-0e8f-5261-b04c-baf0ab999820", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("deffd454-79ea-5661-aa89-ff6ed6e61936", "/cache/unpinned", 600, 20).unwrap();
 
         let evicted = bridge
             .enforce_smart_cache(CachePolicy {
@@ -180,30 +180,30 @@ use super::*;
             })
             .unwrap();
 
-        assert_eq!(evicted.evicted_file_ids, vec!["unpinned".to_string()]);
-        assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(evicted.evicted_file_ids, vec!["deffd454-79ea-5661-aa89-ff6ed6e61936".to_string()]);
+        assert_eq!(bridge.db.get_file("006d694c-0e8f-5261-b04c-baf0ab999820").unwrap().unwrap().status, FileStatus::Local);
     }
 
     #[test]
     fn test_local_cache_limit_counts_pinned_bytes_against_total_cap() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
-        seed_bridge_row(&bridge, "old", "/Old.txt", None, FileStatus::Local, 400);
-        seed_bridge_row(&bridge, "new", "/New.txt", None, FileStatus::Local, 300);
+        seed_bridge_row(&bridge, "006d694c-0e8f-5261-b04c-baf0ab999820", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "1616b1d2-6fb7-52a7-a715-c3d4d70e207d", "/Old.txt", None, FileStatus::Local, 400);
+        seed_bridge_row(&bridge, "17c07913-2906-59bd-be57-749303cdf8f3", "/New.txt", None, FileStatus::Local, 300);
 
-        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
-        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
-        bridge.db.mark_cached("old", "/cache/old", 400, 20).unwrap();
-        bridge.db.mark_cached("new", "/cache/new", 300, 30).unwrap();
+        bridge.db.set_recursive_pin("006d694c-0e8f-5261-b04c-baf0ab999820", true, 1).unwrap();
+        bridge.db.mark_cached("006d694c-0e8f-5261-b04c-baf0ab999820", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("1616b1d2-6fb7-52a7-a715-c3d4d70e207d", "/cache/old", 400, 20).unwrap();
+        bridge.db.mark_cached("17c07913-2906-59bd-be57-749303cdf8f3", "/cache/new", 300, 30).unwrap();
 
         let evicted = bridge.enforce_local_cache_limit(Some(1_000)).unwrap();
 
-        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()]);
-        assert_eq!(bridge.db.get_file("pinned").unwrap().unwrap().status, FileStatus::Local);
-        assert_eq!(bridge.db.get_file("new").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(evicted.evicted_file_ids, vec!["1616b1d2-6fb7-52a7-a715-c3d4d70e207d".to_string()]);
+        assert_eq!(bridge.db.get_file("006d694c-0e8f-5261-b04c-baf0ab999820").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(bridge.db.get_file("17c07913-2906-59bd-be57-749303cdf8f3").unwrap().unwrap().status, FileStatus::Local);
         assert_eq!(
-            bridge.db.get_file("old").unwrap().unwrap().status,
+            bridge.db.get_file("1616b1d2-6fb7-52a7-a715-c3d4d70e207d").unwrap().unwrap().status,
             FileStatus::CloudOnly
         );
     }
@@ -215,18 +215,18 @@ use super::*;
     fn desktop_0815_cache_eviction_waits_for_the_start_up_pass() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "old", "/Old.txt", None, FileStatus::Local, 400);
-        seed_bridge_row(&bridge, "new", "/New.txt", None, FileStatus::Local, 300);
-        bridge.db.mark_cached("old", "/cache/old", 400, 20).unwrap();
-        bridge.db.mark_cached("new", "/cache/new", 300, 30).unwrap();
+        seed_bridge_row(&bridge, "1616b1d2-6fb7-52a7-a715-c3d4d70e207d", "/Old.txt", None, FileStatus::Local, 400);
+        seed_bridge_row(&bridge, "17c07913-2906-59bd-be57-749303cdf8f3", "/New.txt", None, FileStatus::Local, 300);
+        bridge.db.mark_cached("1616b1d2-6fb7-52a7-a715-c3d4d70e207d", "/cache/old", 400, 20).unwrap();
+        bridge.db.mark_cached("17c07913-2906-59bd-be57-749303cdf8f3", "/cache/new", 300, 30).unwrap();
         let guard = crate::unknown_check::StartupGuard::new();
         let pass = guard.begin();
         let held = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
         assert!(held.evicted_file_ids.is_empty(), "nothing is evicted while the pass is owed");
-        assert_eq!(bridge.db.get_file("old").unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(bridge.db.get_file("1616b1d2-6fb7-52a7-a715-c3d4d70e207d").unwrap().unwrap().status, FileStatus::Local);
         guard.finish(pass);
         let evicted = bridge.enforce_local_cache_limit_after_guard(Some(500), &guard).unwrap();
-        assert_eq!(evicted.evicted_file_ids, vec!["old".to_string()], "evicted once the pass walked every row");
+        assert_eq!(evicted.evicted_file_ids, vec!["1616b1d2-6fb7-52a7-a715-c3d4d70e207d".to_string()], "evicted once the pass walked every row");
         // The checkout may carry CRLF line endings (the Windows gate clones with core.autocrlf=true).
         let source = include_str!("../../engine_bridge/local_layout.rs").replace("\r\n", "\n");
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
@@ -244,12 +244,12 @@ use super::*;
     fn test_local_cache_usage_bytes_sums_pinned_and_unpinned_cache() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "pinned", "/Pinned.txt", None, FileStatus::Local, 700);
-        seed_bridge_row(&bridge, "unpinned", "/Unpinned.txt", None, FileStatus::Local, 600);
+        seed_bridge_row(&bridge, "006d694c-0e8f-5261-b04c-baf0ab999820", "/Pinned.txt", None, FileStatus::Local, 700);
+        seed_bridge_row(&bridge, "deffd454-79ea-5661-aa89-ff6ed6e61936", "/Unpinned.txt", None, FileStatus::Local, 600);
 
-        bridge.db.set_recursive_pin("pinned", true, 1).unwrap();
-        bridge.db.mark_cached("pinned", "/cache/pinned", 700, 10).unwrap();
-        bridge.db.mark_cached("unpinned", "/cache/unpinned", 600, 20).unwrap();
+        bridge.db.set_recursive_pin("006d694c-0e8f-5261-b04c-baf0ab999820", true, 1).unwrap();
+        bridge.db.mark_cached("006d694c-0e8f-5261-b04c-baf0ab999820", "/cache/pinned", 700, 10).unwrap();
+        bridge.db.mark_cached("deffd454-79ea-5661-aa89-ff6ed6e61936", "/cache/unpinned", 600, 20).unwrap();
 
         assert_eq!(bridge.local_cache_usage_bytes().unwrap(), 1_300);
     }

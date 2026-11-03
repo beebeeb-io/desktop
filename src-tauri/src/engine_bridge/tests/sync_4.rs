@@ -10,14 +10,14 @@ use super::*;
         let master_key = [78u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_version_zero_row(&bridge, &server, "never-listed", FileStatus::Local);
-        seed_uploaded_row(&bridge, &server, "listed");
+        seed_version_zero_row(&bridge, &server, "d6781532-6323-5217-b51a-bbd120c6b7a6", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1");
         bridge.db.set_sync_cursor(0).unwrap();
-        fp_save(&bridge, dir.path(), "never-listed", "notes.txt", b"edit", "0");
-        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        fp_save(&bridge, dir.path(), "d6781532-6323-5217-b51a-bbd120c6b7a6", "notes.txt", b"edit", "0");
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1", "notes.txt", 1, false)] });
         let op_id = bridge
             .db
-            .list_operations_for_file("never-listed")
+            .list_operations_for_file("d6781532-6323-5217-b51a-bbd120c6b7a6")
             .unwrap()
             .remove(0)
             .op_id;
@@ -59,11 +59,11 @@ use super::*;
         let master_key = [128u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_version_zero_row(&bridge, &server, "never-listed-signal", FileStatus::Local);
-        seed_uploaded_row(&bridge, &server, "listed");
+        seed_version_zero_row(&bridge, &server, "20571f96-2b78-5f39-ae82-e8e3c79a61f2", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1");
         bridge.db.set_sync_cursor(0).unwrap();
-        fp_save(&bridge, dir.path(), "never-listed-signal", "notes.txt", b"edit", "0");
-        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        fp_save(&bridge, dir.path(), "20571f96-2b78-5f39-ae82-e8e3c79a61f2", "notes.txt", b"edit", "0");
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1", "notes.txt", 1, false)] });
         for success in 1..=10 {
             server
                 .state
@@ -72,7 +72,7 @@ use super::*;
                 .snapshots
                 .push_back(("200 OK".into(), listed.clone()));
             let tick = sync_tick_outcome(&bridge, &sync_root).await.unwrap();
-            let carried = tick.applied_item_ids.contains(&"never-listed-signal".to_string());
+            let carried = tick.applied_item_ids.contains(&"20571f96-2b78-5f39-ae82-e8e3c79a61f2".to_string());
             if success < 10 {
                 assert!(
                     !carried,
@@ -82,12 +82,12 @@ use super::*;
             } else {
                 let op = bridge
                     .db
-                    .list_operations_for_file("never-listed-signal")
+                    .list_operations_for_file("20571f96-2b78-5f39-ae82-e8e3c79a61f2")
                     .unwrap()
                     .remove(0);
                 assert_eq!(op.attempts, op.max_attempts, "precondition: parked after the 10th");
                 assert_eq!(
-                    bridge.db.get_file("never-listed-signal").unwrap().unwrap().status,
+                    bridge.db.get_file("20571f96-2b78-5f39-ae82-e8e3c79a61f2").unwrap().unwrap().status,
                     FileStatus::Error
                 );
                 assert!(carried, "the park is carried: {:?}", tick.applied_item_ids);
@@ -109,12 +109,12 @@ use super::*;
         let master_key = [79u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_version_zero_row(&bridge, &server, "unlisted", FileStatus::Local);
-        seed_uploaded_row(&bridge, &server, "listed");
+        seed_version_zero_row(&bridge, &server, "f54b1023-367a-54d0-9383-9b1fcefc40a9", FileStatus::Local);
+        seed_uploaded_row(&bridge, &server, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1");
         bridge.db.set_sync_cursor(0).unwrap();
-        let w = fp_save(&bridge, dir.path(), "unlisted", "notes.txt", b"first edit", "0");
-        let w_op = bridge.db.list_operations_for_file("unlisted").unwrap().remove(0).op_id;
-        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "listed", "notes.txt", 1, false)] });
+        let w = fp_save(&bridge, dir.path(), "f54b1023-367a-54d0-9383-9b1fcefc40a9", "notes.txt", b"first edit", "0");
+        let w_op = bridge.db.list_operations_for_file("f54b1023-367a-54d0-9383-9b1fcefc40a9").unwrap().remove(0).op_id;
+        let listed = serde_json::json!({ "seq_id": 1, "nodes": [node(&master_key, "bfd11147-9d33-58c7-99ae-b5bcf9aee4b1", "notes.txt", 1, false)] });
         for _ in 0..10 {
             server
                 .state
@@ -138,7 +138,7 @@ use super::*;
         let n = fp_save(
             &bridge,
             dir.path(),
-            "unlisted",
+            "f54b1023-367a-54d0-9383-9b1fcefc40a9",
             "notes.txt",
             b"first edit, second edit",
             &w.token.unwrap(),
@@ -151,7 +151,7 @@ use super::*;
             "no request with a base the client knows is unknown: {:?}",
             state.init_summary()
         );
-        let ops = bridge.db.list_operations_for_file("unlisted").unwrap();
+        let ops = bridge.db.list_operations_for_file("f54b1023-367a-54d0-9383-9b1fcefc40a9").unwrap();
         assert_eq!(ops.len(), 1, "the save took the parked write's role: {ops:?}");
         assert_ne!(ops[0].op_id, w_op);
         assert_eq!(ops[0].attempts, ops[0].max_attempts, "and parked the same way");
@@ -179,31 +179,31 @@ use super::*;
         };
 
         // A landing: the fill reaches the waiting write's row, then the write lands.
-        seed_version_zero_row(&bridge, &server, "landing", FileStatus::Local);
-        fp_save(&bridge, dir.path(), "landing", "notes.txt", b"edit", "0");
-        fill("landing");
-        assert!(filled("landing"));
+        seed_version_zero_row(&bridge, &server, "3f58c864-efeb-5981-85b6-5eccd08beabc", FileStatus::Local);
+        fp_save(&bridge, dir.path(), "3f58c864-efeb-5981-85b6-5eccd08beabc", "notes.txt", b"edit", "0");
+        fill("3f58c864-efeb-5981-85b6-5eccd08beabc");
+        assert!(filled("3f58c864-efeb-5981-85b6-5eccd08beabc"));
         drain_upload_queue(&bridge, &sync_root).await;
-        assert!(!filled("landing"), "a landing clears it");
+        assert!(!filled("3f58c864-efeb-5981-85b6-5eccd08beabc"), "a landing clears it");
 
         // A content op from another device.
-        seed_version_zero_row(&bridge, &server, "content-op", FileStatus::Local);
-        fill("content-op");
-        assert!(filled("content-op"));
+        seed_version_zero_row(&bridge, &server, "b8fcdb66-cc54-59bd-bdf1-c29c597cb4f4", FileStatus::Local);
+        fill("b8fcdb66-cc54-59bd-bdf1-c29c597cb4f4");
+        assert!(filled("b8fcdb66-cc54-59bd-bdf1-c29c597cb4f4"));
         let update = crate::api_client::SyncOp {
             seq_id: 3,
             op_type: "file_update".into(),
-            payload: serde_json::json!({ "id": "content-op", "version_number": 2, "size_bytes": 11 }),
+            payload: serde_json::json!({ "id": "b8fcdb66-cc54-59bd-bdf1-c29c597cb4f4", "version_number": 2, "size_bytes": 11 }),
         };
         apply_sync_op(&bridge, &sync_root, &update, now_secs(), &mut Vec::new()).unwrap();
-        assert!(!filled("content-op"), "a content op clears it");
+        assert!(!filled("b8fcdb66-cc54-59bd-bdf1-c29c597cb4f4"), "a content op clears it");
 
         // An accepted Finder write, before it lands.
-        seed_version_zero_row(&bridge, &server, "accepted", FileStatus::Local);
-        fill("accepted");
-        assert!(filled("accepted"));
-        fp_save(&bridge, dir.path(), "accepted", "notes.txt", b"edit", "1");
-        assert!(!filled("accepted"), "an accepted write clears it");
+        seed_version_zero_row(&bridge, &server, "9bb42630-e4eb-5425-be9e-f93415515ecc", FileStatus::Local);
+        fill("9bb42630-e4eb-5425-be9e-f93415515ecc");
+        assert!(filled("9bb42630-e4eb-5425-be9e-f93415515ecc"));
+        fp_save(&bridge, dir.path(), "9bb42630-e4eb-5425-be9e-f93415515ecc", "notes.txt", b"edit", "1");
+        assert!(!filled("9bb42630-e4eb-5425-be9e-f93415515ecc"), "an accepted write clears it");
         drop(server.finish());
     }
 
@@ -220,21 +220,21 @@ use super::*;
         let master_key = [81u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_version_zero_row(&bridge, &server, "pictured", FileStatus::Local);
+        seed_version_zero_row(&bridge, &server, "5f9400c6-7b5f-58bf-ac3e-8b87fe4b037e", FileStatus::Local);
         let snapshot = crate::api_client::SyncSnapshot {
             seq_id: 2,
-            nodes: vec![node(&master_key, "pictured", "notes.txt", 1, false)],
+            nodes: vec![node(&master_key, "5f9400c6-7b5f-58bf-ac3e-8b87fe4b037e", "notes.txt", 1, false)],
         };
         apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None);
-        let filled = || bridge.db.item_presentation("pictured").unwrap().unwrap().version_filled;
+        let filled = || bridge.db.item_presentation("5f9400c6-7b5f-58bf-ac3e-8b87fe4b037e").unwrap().unwrap().version_filled;
         assert!(filled());
 
         for (seq_id, flag) in [(3, "has_thumbnail"), (4, "has_large_thumbnail")] {
             let thumbnail = crate::api_client::SyncOp {
                 seq_id,
                 op_type: "file_update".into(),
-                payload: serde_json::json!({ "id": "pictured", flag: true }),
+                payload: serde_json::json!({ "id": "5f9400c6-7b5f-58bf-ac3e-8b87fe4b037e", flag: true }),
             };
             apply_sync_op(&bridge, &sync_root, &thumbnail, now_secs(), &mut Vec::new()).unwrap();
             assert!(filled(), "a {flag} op is not a content op: the fill stands");
@@ -249,7 +249,7 @@ use super::*;
         let content = crate::api_client::SyncOp {
             seq_id: 5,
             op_type: "file_update".into(),
-            payload: serde_json::json!({ "id": "pictured", "size_bytes": 12 }),
+            payload: serde_json::json!({ "id": "5f9400c6-7b5f-58bf-ac3e-8b87fe4b037e", "size_bytes": 12 }),
         };
         apply_sync_op(&bridge, &sync_root, &content, now_secs(), &mut Vec::new()).unwrap();
         assert!(!filled(), "a versionless content op clears the fill");
@@ -331,8 +331,8 @@ use super::*;
             .unwrap()
             .delay_complete
             .insert("session-1".into(), Duration::from_millis(400));
-        seed_uploaded_row(&bridge, &server, "landing-race");
-        let w = fp_save(&bridge, dir.path(), "landing-race", "notes.txt", b"W", "1")
+        seed_uploaded_row(&bridge, &server, "814a6c78-c515-516a-834f-41af230c2b93");
+        let w = fp_save(&bridge, dir.path(), "814a6c78-c515-516a-834f-41af230c2b93", "notes.txt", b"W", "1")
             .token
             .unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -347,12 +347,12 @@ use super::*;
                 seen_at_seam
                     .lock()
                     .unwrap()
-                    .push(held_content_version(&saver, "landing-race"));
-                fp_save(&saver, &save_dir, "landing-race", "notes.txt", b"W N", &w_token);
+                    .push(held_content_version(&saver, "814a6c78-c515-516a-834f-41af230c2b93"));
+                fp_save(&saver, &save_dir, "814a6c78-c515-516a-834f-41af230c2b93", "notes.txt", b"W N", &w_token);
                 seen_at_seam
                     .lock()
                     .unwrap()
-                    .push(held_content_version(&saver, "landing-race"));
+                    .push(held_content_version(&saver, "814a6c78-c515-516a-834f-41af230c2b93"));
             });
         });
         drain_upload_queue(&bridge, &sync_root).await;
@@ -360,14 +360,14 @@ use super::*;
         assert_eq!(
             state.init_summary(),
             vec![
-                (json!("landing-race"), json!(1), 201),
-                (json!("landing-race"), json!(2), 201)
+                (json!("814a6c78-c515-516a-834f-41af230c2b93"), json!(1), 201),
+                (json!("814a6c78-c515-516a-834f-41af230c2b93"), json!(2), 201)
             ],
             "N lands on W's produced version"
         );
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen[0], w, "at the seam: W's token");
-        let n = held_content_version(&bridge, "landing-race");
+        let n = held_content_version(&bridge, "814a6c78-c515-516a-834f-41af230c2b93");
         assert_eq!(seen[1], n, "after N's accept: N's token, kept through the landing");
         assert!(
             seen.iter()

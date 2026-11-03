@@ -46,17 +46,17 @@ use super::*;
     #[tokio::test]
     async fn after_an_outage_a_counted_failure_still_has_its_remaining_attempts() {
         let (dir, sync_root, server, bridge) = rule3_setup([166u8; 32]);
-        seed_uploaded_row(&bridge, &server, "after-outage");
+        seed_uploaded_row(&bridge, &server, "375b241b-64ae-5601-951b-21f91a915416");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("after-outage".into(), "503 Service Unavailable");
-        fp_save(&bridge, dir.path(), "after-outage", "notes.txt", b"a save", "1");
+            .insert("375b241b-64ae-5601-951b-21f91a915416".into(), "503 Service Unavailable");
+        fp_save(&bridge, dir.path(), "375b241b-64ae-5601-951b-21f91a915416", "notes.txt", b"a save", "1");
         let mut now = now_secs();
-        failing_passes(&bridge, &sync_root, "after-outage", 30, &mut now).await;
-        let op = bridge.db.list_operations_for_file("after-outage").unwrap().remove(0);
+        failing_passes(&bridge, &sync_root, "375b241b-64ae-5601-951b-21f91a915416", 30, &mut now).await;
+        let op = bridge.db.list_operations_for_file("375b241b-64ae-5601-951b-21f91a915416").unwrap().remove(0);
         assert_eq!(op.attempts, backoff_cap_attempts(), "the outage used no more than that");
         let remaining = op.max_attempts - op.attempts;
         assert!(remaining >= 19, "{remaining} attempts left");
@@ -65,7 +65,7 @@ use super::*;
             .lock()
             .unwrap()
             .refuse_init
-            .insert("after-outage".into(), "400 Bad Request");
+            .insert("375b241b-64ae-5601-951b-21f91a915416".into(), "400 Bad Request");
         let mut counted = 0;
         loop {
             bridge.process_due_operations(&sync_root, now).await.unwrap();
@@ -92,23 +92,23 @@ use super::*;
     async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
         let master_key = [167u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "reaped");
+        seed_uploaded_row(&bridge, &server, "abb2ac63-26f4-506d-a275-7ef18b27841e");
         refuse(
             &server,
             Refused::Chunk,
-            "reaped",
+            "abb2ac63-26f4-506d-a275-7ef18b27841e",
             ("503 Service Unavailable", json!({ "error": "unavailable" })),
         );
         fp_save(
             &bridge,
             dir.path(),
-            "reaped",
+            "abb2ac63-26f4-506d-a275-7ef18b27841e",
             "notes.txt",
             b"saved through the outage",
             "1",
         );
         let mut now = now_secs();
-        failing_passes(&bridge, &sync_root, "reaped", 24, &mut now).await;
+        failing_passes(&bridge, &sync_root, "abb2ac63-26f4-506d-a275-7ef18b27841e", 24, &mut now).await;
         {
             let mut s = server.state.lock().unwrap();
             assert_eq!(
@@ -116,13 +116,13 @@ use super::*;
                 1,
                 "precondition: one session, resumed after the first attempt"
             );
-            s.refuse_chunk_with.remove("reaped");
+            s.refuse_chunk_with.remove("abb2ac63-26f4-506d-a275-7ef18b27841e");
             s.sessions.clear(); // the server reaped it
         }
         let reaped = bridge.process_due_operations(&sync_root, now).await.unwrap();
         now += 10_000;
         assert!(reaped.invalidated_item_ids.is_empty(), "nothing parked: {reaped:?}");
-        let op = bridge.db.list_operations_for_file("reaped").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("abb2ac63-26f4-506d-a275-7ef18b27841e").unwrap().remove(0);
         assert!(
             op.attempts < op.max_attempts,
             "not parked: {} of {}",
@@ -136,13 +136,13 @@ use super::*;
         );
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("reaped").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("abb2ac63-26f4-506d-a275-7ef18b27841e").unwrap().is_empty(),
             "landed on a fresh upload"
         );
         let state = server.finish();
         assert_eq!(state.inits.len(), 2, "a fresh init after the gone session");
         assert_eq!(
-            state.latest_plaintext("reaped", master_key),
+            state.latest_plaintext("abb2ac63-26f4-506d-a275-7ef18b27841e", master_key),
             b"saved through the outage"
         );
     }
@@ -154,24 +154,24 @@ use super::*;
     async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
         let master_key = [169u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "bad-session");
+        seed_uploaded_row(&bridge, &server, "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a");
         refuse(
             &server,
             Refused::Chunk,
-            "bad-session",
+            "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a",
             ("503 Service Unavailable", json!({ "error": "unavailable" })),
         );
-        fp_save(&bridge, dir.path(), "bad-session", "notes.txt", b"a save", "1");
+        fp_save(&bridge, dir.path(), "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a", "notes.txt", b"a save", "1");
         let op_id = bridge
             .db
-            .list_operations_for_file("bad-session")
+            .list_operations_for_file("f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a")
             .unwrap()
             .remove(0)
             .op_id;
         let mut now = now_secs();
         // An outage first: the count sits at the backoff's cap, where a transient failure no
         // longer moves it, so only a counted failure can.
-        failing_passes(&bridge, &sync_root, "bad-session", 8, &mut now).await;
+        failing_passes(&bridge, &sync_root, "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a", 8, &mut now).await;
         let before = bridge.db.get_operation(&op_id).unwrap().unwrap().attempts;
         assert_eq!(before, backoff_cap_attempts(), "precondition: at the backoff's cap");
         assert!(
@@ -181,7 +181,7 @@ use super::*;
         refuse(
             &server,
             Refused::Chunk,
-            "bad-session",
+            "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a",
             ("400 Bad Request", json!({ "error": "bad_request" })),
         );
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
@@ -191,15 +191,15 @@ use super::*;
             bridge.db.get_upload_resume(&op_id).unwrap().is_none(),
             "the session was abandoned"
         );
-        stop_refusing(&server, "bad-session");
+        stop_refusing(&server, "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a");
         bridge.process_due_operations(&sync_root, now + 20_000).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("bad-session").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a").unwrap().is_empty(),
             "landed on a fresh upload"
         );
         let state = server.finish();
         assert_eq!(state.inits.len(), 2, "the next attempt started fresh");
-        assert_eq!(state.latest_plaintext("bad-session", master_key), b"a save");
+        assert_eq!(state.latest_plaintext("f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a", master_key), b"a save");
     }
 
     /// Spec §8.4 (fix round 5): a server that answers 400 to every fresh session still parks the
@@ -207,15 +207,15 @@ use super::*;
     #[tokio::test]
     async fn a_server_that_refuses_every_session_with_400_parks_the_write() {
         let (dir, sync_root, server, bridge) = rule3_setup([170u8; 32]);
-        seed_uploaded_row(&bridge, &server, "every-400");
+        seed_uploaded_row(&bridge, &server, "c276b1a0-4526-5eb0-8238-e1fbd4a9a194");
         refuse(
             &server,
             Refused::Chunk,
-            "every-400",
+            "c276b1a0-4526-5eb0-8238-e1fbd4a9a194",
             ("400 Bad Request", json!({ "error": "bad_request" })),
         );
-        fp_save(&bridge, dir.path(), "every-400", "notes.txt", b"a save", "1");
-        let op_id = bridge.db.list_operations_for_file("every-400").unwrap().remove(0).op_id;
+        fp_save(&bridge, dir.path(), "c276b1a0-4526-5eb0-8238-e1fbd4a9a194", "notes.txt", b"a save", "1");
+        let op_id = bridge.db.list_operations_for_file("c276b1a0-4526-5eb0-8238-e1fbd4a9a194").unwrap().remove(0).op_id;
         let mut now = now_secs();
         let mut parked_at = None;
         for pass in 1..=30 {
@@ -228,7 +228,7 @@ use super::*;
         }
         assert_eq!(parked_at, Some(25), "parked when its attempts were used up");
         assert_eq!(
-            bridge.db.get_file("every-400").unwrap().unwrap().status,
+            bridge.db.get_file("c276b1a0-4526-5eb0-8238-e1fbd4a9a194").unwrap().unwrap().status,
             FileStatus::Error
         );
         assert_eq!(
@@ -245,15 +245,15 @@ use super::*;
     #[tokio::test]
     async fn a_404_on_every_new_session_parks_the_write() {
         let (dir, sync_root, server, bridge) = rule3_setup([172u8; 32]);
-        seed_uploaded_row(&bridge, &server, "every-404");
+        seed_uploaded_row(&bridge, &server, "800250eb-b5ce-5a2b-8653-67e110b79347");
         refuse(
             &server,
             Refused::Chunk,
-            "every-404",
+            "800250eb-b5ce-5a2b-8653-67e110b79347",
             ("404 Not Found", json!({ "error": "not_found" })),
         );
-        fp_save(&bridge, dir.path(), "every-404", "notes.txt", b"a save", "1");
-        let op_id = bridge.db.list_operations_for_file("every-404").unwrap().remove(0).op_id;
+        fp_save(&bridge, dir.path(), "800250eb-b5ce-5a2b-8653-67e110b79347", "notes.txt", b"a save", "1");
+        let op_id = bridge.db.list_operations_for_file("800250eb-b5ce-5a2b-8653-67e110b79347").unwrap().remove(0).op_id;
         let mut now = now_secs();
         let mut parked_at = None;
         for pass in 1..=30 {
@@ -266,7 +266,7 @@ use super::*;
         }
         assert_eq!(parked_at, Some(25), "parked when its attempts were used up");
         assert_eq!(
-            bridge.db.get_file("every-404").unwrap().unwrap().status,
+            bridge.db.get_file("800250eb-b5ce-5a2b-8653-67e110b79347").unwrap().unwrap().status,
             FileStatus::Error,
             "presented read-only"
         );
@@ -282,19 +282,19 @@ use super::*;
     #[tokio::test]
     async fn the_gone_session_line_logs_a_category_not_its_text() {
         let (dir, sync_root, server, bridge) = rule3_setup([171u8; 32]);
-        seed_uploaded_row(&bridge, &server, "gone-line");
+        seed_uploaded_row(&bridge, &server, "aed0a62d-d7d2-5e26-9d3d-42554cf4da99");
         refuse(
             &server,
             Refused::Chunk,
-            "gone-line",
+            "aed0a62d-d7d2-5e26-9d3d-42554cf4da99",
             ("503 Service Unavailable", json!({ "error": "unavailable" })),
         );
-        fp_save(&bridge, dir.path(), "gone-line", "notes.txt", b"a save", "1");
+        fp_save(&bridge, dir.path(), "aed0a62d-d7d2-5e26-9d3d-42554cf4da99", "notes.txt", b"a save", "1");
         let now = now_secs();
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         {
             let mut s = server.state.lock().unwrap();
-            s.refuse_chunk_with.remove("gone-line");
+            s.refuse_chunk_with.remove("aed0a62d-d7d2-5e26-9d3d-42554cf4da99");
             s.sessions.clear();
         }
         let logs = capture_logs_async(async {

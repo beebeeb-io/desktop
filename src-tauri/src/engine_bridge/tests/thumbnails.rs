@@ -126,12 +126,12 @@ use super::*;
     async fn a_snapshot_that_keeps_failing_no_longer_holds_the_queue() {
         let master_key = [155u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "held-by-snapshot");
+        seed_uploaded_row(&bridge, &server, "a7a64666-3270-5569-9c06-791f0846979a");
         bridge.db.set_sync_cursor(0).unwrap();
         fp_save(
             &bridge,
             dir.path(),
-            "held-by-snapshot",
+            "a7a64666-3270-5569-9c06-791f0846979a",
             "notes.txt",
             b"saved while the snapshot fails",
             "1",
@@ -157,7 +157,7 @@ use super::*;
         assert!(
             bridge
                 .db
-                .list_operations_for_file("held-by-snapshot")
+                .list_operations_for_file("a7a64666-3270-5569-9c06-791f0846979a")
                 .unwrap()
                 .is_empty(),
             "the write whose base is known landed"
@@ -170,7 +170,7 @@ use super::*;
             "200 OK".into(),
             serde_json::json!({
                 "seq_id": 3,
-                "nodes": [node(&master_key, "held-by-snapshot", "notes.txt", 2, false)]
+                "nodes": [node(&master_key, "a7a64666-3270-5569-9c06-791f0846979a", "notes.txt", 2, false)]
             }),
         ));
         assert!(tick(&bridge, &sync_root).await, "the snapshot succeeded");
@@ -188,13 +188,13 @@ use super::*;
     #[tokio::test]
     async fn a_landing_with_no_content_type_keeps_the_rows() {
         let (dir, sync_root, server, bridge) = rule3_setup([156u8; 32]);
-        seed_uploaded_row(&bridge, &server, "typed");
-        let mut contract = bridge.db.get_file_contract_state("typed").unwrap().unwrap();
+        seed_uploaded_row(&bridge, &server, "a1f1e7d0-8c7b-57aa-bce6-12351453ef81");
+        let mut contract = bridge.db.get_file_contract_state("a1f1e7d0-8c7b-57aa-bce6-12351453ef81").unwrap().unwrap();
         contract.content_type = Some("text/markdown".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
         let contents = dir.path().join("save-typed");
         std::fs::write(&contents, b"edit").unwrap();
-        let mut target = finder_file_target(Some("typed"), "notes", &contents, Some("1".into()));
+        let mut target = finder_file_target(Some("a1f1e7d0-8c7b-57aa-bce6-12351453ef81"), "notes", &contents, Some("1".into()));
         target.content_type = None;
         bridge.queue_file_provider_modify(target).unwrap();
         server
@@ -206,10 +206,10 @@ use super::*;
         drain_upload_queue(&bridge, &sync_root).await;
         drop(server.finish());
         assert!(
-            bridge.db.list_operations_for_file("typed").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("a1f1e7d0-8c7b-57aa-bce6-12351453ef81").unwrap().is_empty(),
             "landed"
         );
-        let contract = bridge.db.get_file_contract_state("typed").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state("a1f1e7d0-8c7b-57aa-bce6-12351453ef81").unwrap().unwrap();
         assert_eq!(contract.current_version, 2, "precondition: the retried landing");
         assert_eq!(
             contract.content_type.as_deref(),
@@ -226,7 +226,7 @@ use super::*;
     #[tokio::test]
     async fn an_accept_whose_copy_the_start_sweep_removed_is_retried_later() {
         let (dir, _sync_root, server, bridge) = rule3_setup([168u8; 32]);
-        seed_uploaded_row(&bridge, &server, "swept");
+        seed_uploaded_row(&bridge, &server, "7051838c-b073-5630-90fc-7e9c7964ba46");
         let bases = FinderStagingBases {
             data: Some(dir.path().join("data")),
             cache: Some(dir.path().join("cache")),
@@ -245,7 +245,7 @@ use super::*;
         let contents = dir.path().join("save.txt");
         std::fs::write(&contents, b"a save the sweep caught").unwrap();
         let result = bridge.queue_file_provider_modify(finder_file_target(
-            Some("swept"),
+            Some("7051838c-b073-5630-90fc-7e9c7964ba46"),
             "notes.txt",
             &contents,
             Some("1".into()),
@@ -265,7 +265,7 @@ use super::*;
             "{reply:?}"
         );
         assert!(
-            bridge.db.list_operations_for_file("swept").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("7051838c-b073-5630-90fc-7e9c7964ba46").unwrap().is_empty(),
             "nothing was queued"
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no copy is left");
@@ -274,7 +274,7 @@ use super::*;
             "and no journal row"
         );
         assert_eq!(
-            bridge.db.get_file("swept").unwrap().unwrap().status,
+            bridge.db.get_file("7051838c-b073-5630-90fc-7e9c7964ba46").unwrap().unwrap().status,
             FileStatus::Local,
             "the row is as it was"
         );

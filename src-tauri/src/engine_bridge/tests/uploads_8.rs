@@ -58,8 +58,8 @@ use super::*;
         let master_key = [83u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "recorded");
-        fp_save(&bridge, dir.path(), "recorded", "notes.txt", b"edit", "1");
+        seed_uploaded_row(&bridge, &server, "35bf2b92-6739-57f1-900c-3ae371776e8c");
+        fp_save(&bridge, dir.path(), "35bf2b92-6739-57f1-900c-3ae371776e8c", "notes.txt", b"edit", "1");
         crate::state_db::fail_next_landings_for_test(1);
         let now = now_secs();
         bridge.process_due_operations(&sync_root, now).await.unwrap();
@@ -73,10 +73,10 @@ use super::*;
             &state.requests[before..]
         );
         assert!(
-            bridge.db.list_operations_for_file("recorded").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("35bf2b92-6739-57f1-900c-3ae371776e8c").unwrap().is_empty(),
             "landed"
         );
-        let contract = bridge.db.get_file_contract_state("recorded").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state("35bf2b92-6739-57f1-900c-3ae371776e8c").unwrap().unwrap();
         assert_eq!(contract.current_version, 2);
         assert_eq!(
             contract.content_type.as_deref(),
@@ -127,8 +127,8 @@ use super::*;
             server.base_url.clone(),
             master_key,
         ));
-        seed_uploaded_row(&bridge, &server, "window");
-        let w = fp_save(&bridge, dir.path(), "window", "notes.txt", b"W", "1")
+        seed_uploaded_row(&bridge, &server, "6b552140-b1a8-5b4b-aced-8af66c66456e");
+        let w = fp_save(&bridge, dir.path(), "6b552140-b1a8-5b4b-aced-8af66c66456e", "notes.txt", b"W", "1")
             .token
             .unwrap();
         let (saver, save_dir) = (Arc::clone(&bridge), dir.path().to_path_buf());
@@ -136,7 +136,7 @@ use super::*;
         let fired_in_seam = Arc::clone(&fired);
         bridge.seams.arm("outcome:before_tx", move || {
             run_competing(move || {
-                fp_save(&saver, &save_dir, "window", "notes.txt", b"W N", &w);
+                fp_save(&saver, &save_dir, "6b552140-b1a8-5b4b-aced-8af66c66456e", "notes.txt", b"W N", &w);
             });
             fired_in_seam.store(true, Ordering::SeqCst);
         });
@@ -148,13 +148,13 @@ use super::*;
         assert!(fired.load(Ordering::SeqCst), "the seam fired and N was accepted");
         assert_eq!(
             state.init_summary(),
-            vec![(json!("window"), json!(1), 201), (json!("window"), json!(2), 201)],
+            vec![(json!("6b552140-b1a8-5b4b-aced-8af66c66456e"), json!(1), 201), (json!("6b552140-b1a8-5b4b-aced-8af66c66456e"), json!(2), 201)],
             "N lands on W's produced version: {logs}"
         );
-        assert_eq!(state.latest_plaintext("window", master_key), b"W N");
+        assert_eq!(state.latest_plaintext("6b552140-b1a8-5b4b-aced-8af66c66456e", master_key), b"W N");
         assert!(!logs.contains("predecessor_lost"), "{logs}");
         assert!(
-            bridge.db.list_operations_for_file("window").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("6b552140-b1a8-5b4b-aced-8af66c66456e").unwrap().is_empty(),
             "nothing parked"
         );
     }
@@ -172,12 +172,12 @@ use super::*;
         let master_key = [86u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "reply");
-        let w = fp_save(&bridge, dir.path(), "reply", "notes.txt", b"W", "1");
+        seed_uploaded_row(&bridge, &server, "efeb496c-96cc-51f9-90a0-227927e1fe18");
+        let w = fp_save(&bridge, dir.path(), "efeb496c-96cc-51f9-90a0-227927e1fe18", "notes.txt", b"W", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "reply",
+            "efeb496c-96cc-51f9-90a0-227927e1fe18",
             "notes.txt",
             b"W N",
             w.token.as_deref().unwrap(),
@@ -190,27 +190,27 @@ use super::*;
             .insert("session-1".into());
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
         assert_eq!(
-            server.state.lock().unwrap().files["reply"].versions.len(),
+            server.state.lock().unwrap().files["efeb496c-96cc-51f9-90a0-227927e1fe18"].versions.len(),
             2,
             "precondition: W is version 2 on the server, and its reply was lost"
         );
         assert!(matches!(
-            bridge.db.apply_snapshot_version("reply", 2, 1, false).unwrap(),
+            bridge.db.apply_snapshot_version("efeb496c-96cc-51f9-90a0-227927e1fe18", 2, 1, false).unwrap(),
             crate::state_db::SnapshotVersion::Raised { old: 1, new: 2 }
         ));
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("reply"), json!(1), 201), (json!("reply"), json!(2), 201)],
+            vec![(json!("efeb496c-96cc-51f9-90a0-227927e1fe18"), json!(1), 201), (json!("efeb496c-96cc-51f9-90a0-227927e1fe18"), json!(2), 201)],
             "N is based on the version W produced"
         );
-        assert_eq!(state.latest_plaintext("reply", master_key), b"W N");
-        assert!(bridge.db.list_operations_for_file("reply").unwrap().is_empty());
+        assert_eq!(state.latest_plaintext("efeb496c-96cc-51f9-90a0-227927e1fe18", master_key), b"W N");
+        assert!(bridge.db.list_operations_for_file("efeb496c-96cc-51f9-90a0-227927e1fe18").unwrap().is_empty());
         assert_eq!(
             bridge
                 .db
-                .get_file_contract_state("reply")
+                .get_file_contract_state("efeb496c-96cc-51f9-90a0-227927e1fe18")
                 .unwrap()
                 .unwrap()
                 .current_version,
@@ -353,9 +353,9 @@ use super::*;
         let master_key = [89u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "copy-gone");
-        fp_save(&bridge, dir.path(), "copy-gone", "notes.txt", b"edit", "1");
-        let op = bridge.db.list_operations_for_file("copy-gone").unwrap().remove(0);
+        seed_uploaded_row(&bridge, &server, "53f36314-23d5-5798-9248-d8d87cd0cb1f");
+        fp_save(&bridge, dir.path(), "53f36314-23d5-5798-9248-d8d87cd0cb1f", "notes.txt", b"edit", "1");
+        let op = bridge.db.list_operations_for_file("53f36314-23d5-5798-9248-d8d87cd0cb1f").unwrap().remove(0);
         crate::state_db::fail_next_landings_for_test(1);
         let now = now_secs();
         bridge.process_due_operations(&sync_root, now).await.unwrap();
@@ -374,7 +374,7 @@ use super::*;
         .await;
         let state = server.finish();
         assert!(
-            bridge.db.list_operations_for_file("copy-gone").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("53f36314-23d5-5798-9248-d8d87cd0cb1f").unwrap().is_empty(),
             "landed: {logs}"
         );
         assert!(!logs.contains("upload parked"), "{logs}");
@@ -382,7 +382,7 @@ use super::*;
         assert_eq!(
             bridge
                 .db
-                .get_file_contract_state("copy-gone")
+                .get_file_contract_state("53f36314-23d5-5798-9248-d8d87cd0cb1f")
                 .unwrap()
                 .unwrap()
                 .current_version,
@@ -401,10 +401,10 @@ use super::*;
         let master_key = [92u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "untyped");
+        seed_uploaded_row(&bridge, &server, "0ed8039f-64ef-5f57-b95a-18aa59af5622");
         let contents = dir.path().join("save-untyped");
         std::fs::write(&contents, b"edit").unwrap();
-        let mut target = finder_file_target(Some("untyped"), "notes", &contents, Some("1".into()));
+        let mut target = finder_file_target(Some("0ed8039f-64ef-5f57-b95a-18aa59af5622"), "notes", &contents, Some("1".into()));
         target.content_type = None;
         bridge.queue_file_provider_modify(target).unwrap();
         crate::state_db::fail_next_landings_for_test(1);
@@ -413,13 +413,13 @@ use super::*;
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
         drop(server.finish());
         assert!(
-            bridge.db.list_operations_for_file("untyped").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("0ed8039f-64ef-5f57-b95a-18aa59af5622").unwrap().is_empty(),
             "landed on the retry"
         );
         assert_eq!(
             bridge
                 .db
-                .get_file_contract_state("untyped")
+                .get_file_contract_state("0ed8039f-64ef-5f57-b95a-18aa59af5622")
                 .unwrap()
                 .unwrap()
                 .content_type
@@ -440,18 +440,18 @@ use super::*;
         let master_key = [90u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "busy");
-        fp_save(&bridge, dir.path(), "busy", "notes.txt", b"edit", "1");
+        seed_uploaded_row(&bridge, &server, "9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b");
+        fp_save(&bridge, dir.path(), "9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b", "notes.txt", b"edit", "1");
         crate::state_db::fail_next_landings_as_locked_for_test(1);
         let now = now_secs();
         let outcome = bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(outcome.paused_op_ids.is_empty(), "never paused: {outcome:?}");
-        let op = bridge.db.list_operations_for_file("busy").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b").unwrap().remove(0);
         assert_eq!(op.attempts, 1, "retried on the normal backoff");
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();
         let state = server.finish();
         assert!(
-            bridge.db.list_operations_for_file("busy").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b").unwrap().is_empty(),
             "landed on the retry"
         );
         assert_eq!(state.inits.len(), 1);
@@ -526,31 +526,31 @@ use super::*;
     async fn a_finder_write_outlives_thirty_server_errors_and_lands() {
         let master_key = [140u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "outage-503");
+        seed_uploaded_row(&bridge, &server, "5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("outage-503".into(), "503 Service Unavailable");
+            .insert("5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca".into(), "503 Service Unavailable");
         fp_save(
             &bridge,
             dir.path(),
-            "outage-503",
+            "5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca",
             "notes.txt",
             b"saved during the outage",
             "1",
         );
         let mut now = now_secs();
         let logs = capture_logs_async(async {
-            let outcomes = failing_passes(&bridge, &sync_root, "outage-503", 30, &mut now).await;
-            assert_kept_uploading(&bridge, "outage-503", &outcomes, OperationFailureClass::Retryable);
-            server.state.lock().unwrap().refuse_init.remove("outage-503");
+            let outcomes = failing_passes(&bridge, &sync_root, "5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca", 30, &mut now).await;
+            assert_kept_uploading(&bridge, "5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca", &outcomes, OperationFailureClass::Retryable);
+            server.state.lock().unwrap().refuse_init.remove("5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca");
             bridge.process_due_operations(&sync_root, now).await.unwrap();
         })
         .await;
         assert!(
-            bridge.db.list_operations_for_file("outage-503").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca").unwrap().is_empty(),
             "landed once the server answered"
         );
         assert!(!logs.contains("parked"), "{logs}");
@@ -561,7 +561,7 @@ use super::*;
             "30 refusals reached the server"
         );
         assert_eq!(
-            state.latest_plaintext("outage-503", master_key),
+            state.latest_plaintext("5aa4d0e0-fc64-5a6d-a236-1eecfcfe2fca", master_key),
             b"saved during the outage"
         );
     }
@@ -584,31 +584,31 @@ use super::*;
             format!("http://{}", listener.local_addr().unwrap())
         };
         let offline = test_bridge_with_api(&dir.path().join("state.db"), closed, master_key);
-        seed_uploaded_db_row(&offline, "outage-offline");
+        seed_uploaded_db_row(&offline, "c66134ff-51c8-549b-96fd-32d350309854");
         fp_save(
             &offline,
             dir.path(),
-            "outage-offline",
+            "c66134ff-51c8-549b-96fd-32d350309854",
             "notes.txt",
             b"saved offline",
             "1",
         );
         let mut now = now_secs();
-        let outcomes = failing_passes(&offline, &sync_root, "outage-offline", 30, &mut now).await;
-        assert_kept_uploading(&offline, "outage-offline", &outcomes, OperationFailureClass::Retryable);
+        let outcomes = failing_passes(&offline, &sync_root, "c66134ff-51c8-549b-96fd-32d350309854", 30, &mut now).await;
+        assert_kept_uploading(&offline, "c66134ff-51c8-549b-96fd-32d350309854", &outcomes, OperationFailureClass::Retryable);
         // The network comes back: the same queue, with an API that answers.
         let server = VersionedServerMock::start();
-        server.seed_file("outage-offline", 1);
+        server.seed_file("c66134ff-51c8-549b-96fd-32d350309854", 1);
         let bridge = EngineBridge::new(
             offline.db.clone(),
             Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key)),
         );
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("outage-offline").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("c66134ff-51c8-549b-96fd-32d350309854").unwrap().is_empty(),
             "landed once the network came back"
         );
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("outage-offline", master_key), b"saved offline");
+        assert_eq!(state.latest_plaintext("c66134ff-51c8-549b-96fd-32d350309854", master_key), b"saved offline");
     }
 

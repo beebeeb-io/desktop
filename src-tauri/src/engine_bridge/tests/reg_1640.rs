@@ -377,7 +377,7 @@ use super::*;
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, b"agreed").unwrap();
         db.upsert_file(&FileEntry {
-            file_id: "f".into(),
+            file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
             path: "notes.txt".into(),
             status: FileStatus::Local,
             size_bytes: 6,
@@ -388,23 +388,23 @@ use super::*;
             item_kind: ItemKind::File,
         })
         .unwrap();
-        let content = |os_in_sync| sync_folder_content(&db, "f", &path, os_in_sync).unwrap();
+        let content = |os_in_sync| sync_folder_content(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", &path, os_in_sync).unwrap();
         assert_eq!(content(None), SyncFolderContent::Unknown, "no agreed content recorded");
         // Task 2191 (G-engine): with no agreed content recorded, the platform's "in sync" is not
         // agreement (0.8.12 marked edits in sync). It was Agreed before 2191.
         assert_eq!(content(Some(true)), SyncFolderContent::Unknown, "in sync, but the content is unknown");
-        db.record_local_baseline("f", 3, &sha256_hex(b"agreed")).unwrap();
+        db.record_local_baseline("f97d7f90-511b-52b5-9303-7201b53df85f", 3, &sha256_hex(b"agreed")).unwrap();
         assert_eq!(content(Some(true)), SyncFolderContent::Agreed, "the platform says in sync");
         assert_eq!(content(None), SyncFolderContent::Agreed);
         std::fs::write(&path, b"edited").unwrap();
         assert_eq!(content(None), SyncFolderContent::Changed { base: Some(3) });
         assert_eq!(content(Some(false)), SyncFolderContent::Changed { base: Some(3) });
-        db.record_local_baseline("f", 0, &sha256_hex(b"agreed")).unwrap();
+        db.record_local_baseline("f97d7f90-511b-52b5-9303-7201b53df85f", 0, &sha256_hex(b"agreed")).unwrap();
         assert_eq!(content(None), SyncFolderContent::Changed { base: None }, "no base known");
         db.enqueue_operation(&PendingOperation {
             op_id: "u".into(),
             kind: OperationKind::UploadVersion,
-            file_id: Some("f".into()),
+            file_id: Some("f97d7f90-511b-52b5-9303-7201b53df85f".into()),
             parent_id: None,
             target_path: Some("notes.txt".into()),
             metadata_json: None,
@@ -1018,7 +1018,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(&dir.path().join("state.db")).unwrap();
         db.upsert_file(&FileEntry {
-            file_id: "f".into(),
+            file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
             path: "notes.txt".into(),
             status: FileStatus::Local,
             size_bytes: 1,
@@ -1029,26 +1029,26 @@ use super::*;
             item_kind: ItemKind::File,
         })
         .unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), None);
-        assert!(db.mark_no_fetched_content("f").unwrap(), "its placeholder created where nothing was");
-        db.record_fetched_version("f", 3, "h3").unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))));
-        db.record_fetched_version("f", 3, "h3").unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), Some((3, Some("h3".into()))), "same version: kept");
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), None);
+        assert!(db.mark_no_fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), "its placeholder created where nothing was");
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 3, "h3").unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), Some((3, Some("h3".into()))));
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 3, "h3").unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), Some((3, Some("h3".into()))), "same version: kept");
         // Self-review #7: the same version with other bytes (a legacy download that under-claims).
         regression_1640_new_placeholder(&db, "g", "g.txt");
         db.record_fetched_version("g", 3, "h3").unwrap();
         db.record_fetched_version("g", 3, "other bytes labelled 3").unwrap();
         assert_eq!(db.fetched_content("g").unwrap(), Some((3, None)), "the same version, other bytes: mixed");
-        db.record_fetched_version("f", 2, "h2").unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), Some((2, None)), "another version: mixed, the lower one");
-        db.record_fetched_version("f", 2, "h2").unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), Some((2, None)), "mixed stays mixed");
-        db.record_local_baseline("f", 4, "h4").unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), None, "a write of the whole file replaces it");
-        db.record_fetched_version("f", 5, "h5").unwrap();
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), Some((2, None)), "another version: mixed, the lower one");
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 2, "h2").unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), Some((2, None)), "mixed stays mixed");
+        db.record_local_baseline("f97d7f90-511b-52b5-9303-7201b53df85f", 4, "h4").unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), None, "a write of the whole file replaces it");
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 5, "h5").unwrap();
         assert_eq!(
-            (db.get_file_contract_state("f").unwrap().unwrap().local_hash, db.fetched_content("f").unwrap()),
+            (db.get_file_contract_state("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap().unwrap().local_hash, db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap()),
             (None, Some((4, None))),
             "a fetch on agreed bytes: they join the candidate, which is mixed at the lower version"
         );
@@ -1064,7 +1064,7 @@ use super::*;
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, b"part of an old version, part of version two").unwrap();
         db.upsert_file(&FileEntry {
-            file_id: "f".into(),
+            file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
             path: "notes.txt".into(),
             status: FileStatus::Local,
             size_bytes: 1,
@@ -1075,12 +1075,12 @@ use super::*;
             item_kind: ItemKind::File,
         })
         .unwrap();
-        db.record_fetched_version("f", 2, &sha256_hex(b"version two")).unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), None, "no candidate over bytes nobody can name");
-        assert_eq!(sync_folder_content(&db, "f", &path, None).unwrap(), SyncFolderContent::Unknown);
-        assert!(!db.mark_no_fetched_content("f").unwrap(), "fetched into: never marked empty after the fact");
-        db.record_local_baseline("f", 2, &sha256_hex(b"version two")).unwrap();
-        assert!(db.get_file_contract_state("f").unwrap().unwrap().local_hash.is_some(), "a whole write makes it known");
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 2, &sha256_hex(b"version two")).unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), None, "no candidate over bytes nobody can name");
+        assert_eq!(sync_folder_content(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", &path, None).unwrap(), SyncFolderContent::Unknown);
+        assert!(!db.mark_no_fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), "fetched into: never marked empty after the fact");
+        db.record_local_baseline("f97d7f90-511b-52b5-9303-7201b53df85f", 2, &sha256_hex(b"version two")).unwrap();
+        assert!(db.get_file_contract_state("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap().unwrap().local_hash.is_some(), "a whole write makes it known");
     }
 
     /// Review F1 (replaces condition 1's clear): a file that goes cloud-only (dehydrated, freed,

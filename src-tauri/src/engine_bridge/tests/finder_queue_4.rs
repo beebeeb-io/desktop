@@ -34,19 +34,19 @@ use super::*;
         let master_key = [58u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "server-known");
+        seed_uploaded_row(&bridge, &server, "6a4d439a-a6ea-5a25-bfee-3497c85bfcf2");
         let created = fp_create(&bridge, dir.path(), "never-uploaded.txt", b"local only");
         let provisional = created.outcome_file_id();
         bridge
             .db
-            .insert_alias_for_test("older-provisional", "server-known", now_secs());
+            .insert_alias_for_test("older-provisional", "6a4d439a-a6ea-5a25-bfee-3497c85bfcf2", now_secs());
         bridge.db.purge_all_local_state().unwrap();
         assert!(
             bridge.db.get_file(&provisional).unwrap().is_none(),
             "no ghost row after sign-out"
         );
         assert!(
-            bridge.db.get_file("server-known").unwrap().is_some(),
+            bridge.db.get_file("6a4d439a-a6ea-5a25-bfee-3497c85bfcf2").unwrap().is_some(),
             "server-known rows are kept"
         );
         assert_eq!(bridge.db.alias_count_for_test(), 0);
@@ -63,18 +63,18 @@ use super::*;
         let master_key = [59u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "c1");
-        fp_save(&bridge, dir.path(), "c1", "notes.txt", b"A", "1");
+        seed_uploaded_row(&bridge, &server, "56e3b263-b09d-5252-9784-71a28c38a13d");
+        fp_save(&bridge, dir.path(), "56e3b263-b09d-5252-9784-71a28c38a13d", "notes.txt", b"A", "1");
         drain_upload_queue(&bridge, &sync_root).await;
-        let base = held_content_version(&bridge, "c1"); // what the system holds after re-reading
-        fp_save(&bridge, dir.path(), "c1", "notes.txt", b"A B", &base);
+        let base = held_content_version(&bridge, "56e3b263-b09d-5252-9784-71a28c38a13d"); // what the system holds after re-reading
+        fp_save(&bridge, dir.path(), "56e3b263-b09d-5252-9784-71a28c38a13d", "notes.txt", b"A B", &base);
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("c1"), json!(1), 201), (json!("c1"), json!(2), 201)]
+            vec![(json!("56e3b263-b09d-5252-9784-71a28c38a13d"), json!(1), 201), (json!("56e3b263-b09d-5252-9784-71a28c38a13d"), json!(2), 201)]
         );
-        assert_eq!(state.latest_plaintext("c1", master_key), b"A B");
+        assert_eq!(state.latest_plaintext("56e3b263-b09d-5252-9784-71a28c38a13d", master_key), b"A B");
     }
 
     #[tokio::test]
@@ -91,8 +91,8 @@ use super::*;
             .unwrap()
             .delay_chunks
             .insert("session-1".into(), Duration::from_millis(400));
-        seed_uploaded_row(&bridge, &server, "c3");
-        let a = fp_save(&bridge, dir.path(), "c3", "notes.txt", b"A", "1");
+        seed_uploaded_row(&bridge, &server, "272216e1-099f-5c7a-832e-f8cdd363c9e0");
+        let a = fp_save(&bridge, dir.path(), "272216e1-099f-5c7a-832e-f8cdd363c9e0", "notes.txt", b"A", "1");
         let ((), ()) = tokio::join!(
             async {
                 drain_upload_queue(&bridge, &sync_root).await;
@@ -108,7 +108,7 @@ use super::*;
                 let b = fp_save(
                     &bridge,
                     dir.path(),
-                    "c3",
+                    "272216e1-099f-5c7a-832e-f8cdd363c9e0",
                     "notes.txt",
                     b"A B",
                     a.token.as_deref().unwrap(),
@@ -116,7 +116,7 @@ use super::*;
                 fp_save(
                     &bridge,
                     dir.path(),
-                    "c3",
+                    "272216e1-099f-5c7a-832e-f8cdd363c9e0",
                     "notes.txt",
                     b"A B C",
                     b.token.as_deref().unwrap(),
@@ -128,12 +128,12 @@ use super::*;
         assert_eq!(
             state.init_summary(),
             vec![
-                (json!("c3"), json!(1), 201),
-                (json!("c3"), json!(2), 201),
-                (json!("c3"), json!(3), 201)
+                (json!("272216e1-099f-5c7a-832e-f8cdd363c9e0"), json!(1), 201),
+                (json!("272216e1-099f-5c7a-832e-f8cdd363c9e0"), json!(2), 201),
+                (json!("272216e1-099f-5c7a-832e-f8cdd363c9e0"), json!(3), 201)
             ]
         );
-        assert_eq!(state.latest_plaintext("c3", master_key), b"A B C");
+        assert_eq!(state.latest_plaintext("272216e1-099f-5c7a-832e-f8cdd363c9e0", master_key), b"A B C");
     }
 
     #[cfg(unix)] // asserts a token through `held_content_version`
@@ -156,20 +156,20 @@ use super::*;
             .unwrap()
             .fail_first_chunk_once
             .insert("session-1".into());
-        seed_uploaded_row(&bridge, &server, "ordered");
-        let w = fp_save(&bridge, dir.path(), "ordered", "notes.txt", b"W", "1");
+        seed_uploaded_row(&bridge, &server, "1672eade-e439-5ad0-972f-53bb8688c354");
+        let w = fp_save(&bridge, dir.path(), "1672eade-e439-5ad0-972f-53bb8688c354", "notes.txt", b"W", "1");
         bridge
-            .queue_restore_version("ordered", "object-ordered-v1", None)
+            .queue_restore_version("1672eade-e439-5ad0-972f-53bb8688c354", "object-ordered-v1", None)
             .unwrap();
         assert_eq!(
-            held_content_version(&bridge, "ordered"),
+            held_content_version(&bridge, "1672eade-e439-5ad0-972f-53bb8688c354"),
             w.token.clone().unwrap(),
             "kept while W is queued"
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
-            state.files["ordered"].versions.len(),
+            state.files["1672eade-e439-5ad0-972f-53bb8688c354"].versions.len(),
             3,
             "v1, W as v2, the restore as v3"
         );
@@ -186,9 +186,9 @@ use super::*;
         assert!(complete_at < restore_at, "W lands first: {:?}", state.requests);
         assert_eq!(
             state.restores,
-            vec![("ordered".to_string(), "object-ordered-v1".to_string())]
+            vec![("1672eade-e439-5ad0-972f-53bb8688c354".to_string(), "object-ordered-v1".to_string())]
         );
-        assert_eq!(held_content_version(&bridge, "ordered"), "3");
+        assert_eq!(held_content_version(&bridge, "1672eade-e439-5ad0-972f-53bb8688c354"), "3");
     }
 
     /// The server's restore is not idempotent (each call mints a
@@ -203,9 +203,9 @@ use super::*;
         let server = VersionedServerMock::start();
         let db_path = dir.path().join("state.db");
         let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "restore-once");
+        seed_uploaded_row(&bridge, &server, "421ef12f-65e1-55da-bcfa-ab09bed0b382");
         bridge
-            .queue_restore_version("restore-once", "object-restore-once-v1", None)
+            .queue_restore_version("421ef12f-65e1-55da-bcfa-ab09bed0b382", "object-restore-once-v1", None)
             .unwrap();
         assert_eq!(
             bridge.db.peek_resnapshot_request().unwrap(),
@@ -227,7 +227,7 @@ use super::*;
         let state = server.finish();
         assert_eq!(
             state.restores,
-            vec![("restore-once".to_string(), "object-restore-once-v1".to_string())],
+            vec![("421ef12f-65e1-55da-bcfa-ab09bed0b382".to_string(), "object-restore-once-v1".to_string())],
             "the restore is sent once"
         );
         assert!(
@@ -243,7 +243,7 @@ use super::*;
             .filter(|line| line.contains("restore_bookkeeping_failed"))
             .collect();
         assert_eq!(lines.len(), 1, "one line for the failed record:\n{logs}");
-        assert!(lines[0].contains("WARN") && lines[0].contains("restore-once"), "{logs}");
+        assert!(lines[0].contains("WARN") && lines[0].contains("421ef12f-65e1-55da-bcfa-ab09bed0b382"), "{logs}");
         assert!(
             !logs.contains("fp_changes"),
             "the raw error never reaches the log:\n{logs}"

@@ -18,15 +18,15 @@ use super::*;
         let master_key = [23u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "two-saves");
+        seed_uploaded_row(&bridge, &server, "9690ce99-8b64-586d-be39-c3e39124022b");
 
         // Both saves are based on version 1: the second came before the
         // system learned of the version the first produces.
-        queue_save(&bridge, dir.path(), "two-saves", "notes.txt", b"first save", "1");
+        queue_save(&bridge, dir.path(), "9690ce99-8b64-586d-be39-c3e39124022b", "notes.txt", b"first save", "1");
         queue_save(
             &bridge,
             dir.path(),
-            "two-saves",
+            "9690ce99-8b64-586d-be39-c3e39124022b",
             "notes.txt",
             b"first save, second save",
             "1",
@@ -37,20 +37,20 @@ use super::*;
         assert_eq!(
             state.init_summary(),
             vec![
-                (serde_json::json!("two-saves"), serde_json::json!(1), 201),
-                (serde_json::json!("two-saves"), serde_json::json!(2), 201),
+                (serde_json::json!("9690ce99-8b64-586d-be39-c3e39124022b"), serde_json::json!(1), 201),
+                (serde_json::json!("9690ce99-8b64-586d-be39-c3e39124022b"), serde_json::json!(2), 201),
             ],
             "the second upload is based on the version the first produced"
         );
-        assert_eq!(state.files["two-saves"].versions.len(), 3);
+        assert_eq!(state.files["9690ce99-8b64-586d-be39-c3e39124022b"].versions.len(), 3);
         assert_eq!(
-            state.latest_plaintext("two-saves", master_key),
+            state.latest_plaintext("9690ce99-8b64-586d-be39-c3e39124022b", master_key),
             b"first save, second save",
             "the newest bytes are the file's latest version"
         );
         assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
         assert_eq!(
-            bridge.db.get_file("two-saves").unwrap().unwrap().status,
+            bridge.db.get_file("9690ce99-8b64-586d-be39-c3e39124022b").unwrap().unwrap().status,
             FileStatus::Local
         );
     }
@@ -63,7 +63,7 @@ use super::*;
         let master_key = [24u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "backoff");
+        seed_uploaded_row(&bridge, &server, "a08315d5-a79a-5b65-9bd6-0c418cd1a14b");
         // The first save's upload fails once (a dropped chunk) and backs off.
         server
             .state
@@ -72,11 +72,11 @@ use super::*;
             .fail_first_chunk_once
             .insert("session-1".into());
 
-        queue_save(&bridge, dir.path(), "backoff", "notes.txt", b"older save", "1");
+        queue_save(&bridge, dir.path(), "a08315d5-a79a-5b65-9bd6-0c418cd1a14b", "notes.txt", b"older save", "1");
         queue_save(
             &bridge,
             dir.path(),
-            "backoff",
+            "a08315d5-a79a-5b65-9bd6-0c418cd1a14b",
             "notes.txt",
             b"older save, newer save",
             "1",
@@ -84,9 +84,9 @@ use super::*;
         drain_upload_queue(&bridge, &sync_root).await;
 
         let state = server.finish();
-        assert_eq!(state.files["backoff"].versions.len(), 3, "{:?}", state.init_summary());
+        assert_eq!(state.files["a08315d5-a79a-5b65-9bd6-0c418cd1a14b"].versions.len(), 3, "{:?}", state.init_summary());
         assert_eq!(
-            state.latest_plaintext("backoff", master_key),
+            state.latest_plaintext("a08315d5-a79a-5b65-9bd6-0c418cd1a14b", master_key),
             b"older save, newer save",
             "the older save must not land after the newer one: {:?}",
             state.init_summary()
@@ -102,18 +102,18 @@ use super::*;
         let master_key = [41u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "clock");
-        queue_save(&bridge, dir.path(), "clock", "notes.txt", b"older save", "1");
+        seed_uploaded_row(&bridge, &server, "0e922871-34b2-58f3-99dc-2e99508f5a94");
+        queue_save(&bridge, dir.path(), "0e922871-34b2-58f3-99dc-2e99508f5a94", "notes.txt", b"older save", "1");
         queue_save(
             &bridge,
             dir.path(),
-            "clock",
+            "0e922871-34b2-58f3-99dc-2e99508f5a94",
             "notes.txt",
             b"older save, newer save",
             "1",
         );
         // The wall clock stepped back between the two saves.
-        let ops = bridge.db.list_operations_for_file("clock").unwrap();
+        let ops = bridge.db.list_operations_for_file("0e922871-34b2-58f3-99dc-2e99508f5a94").unwrap();
         assert_eq!(ops.len(), 2);
         bridge.db.set_created_at_for_test(&ops[0].op_id, 2_000_000_000);
         bridge.db.set_created_at_for_test(&ops[1].op_id, 1_000_000_000);
@@ -121,9 +121,9 @@ use super::*;
         drain_upload_queue(&bridge, &sync_root).await;
 
         let state = server.finish();
-        assert_eq!(state.files["clock"].versions.len(), 3, "{:?}", state.init_summary());
+        assert_eq!(state.files["0e922871-34b2-58f3-99dc-2e99508f5a94"].versions.len(), 3, "{:?}", state.init_summary());
         assert_eq!(
-            state.latest_plaintext("clock", master_key),
+            state.latest_plaintext("0e922871-34b2-58f3-99dc-2e99508f5a94", master_key),
             b"older save, newer save",
             "the newest bytes land last: {:?}",
             state.init_summary()
@@ -149,20 +149,20 @@ use super::*;
             .fail_first_chunk_once
             .insert("session-1".into());
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "revoked");
+        seed_uploaded_row(&bridge, &server, "43c0df67-e887-5a79-9f9a-772247f56239");
         queue_save(
             &bridge,
             dir.path(),
-            "revoked",
+            "43c0df67-e887-5a79-9f9a-772247f56239",
             "notes.txt",
             b"save under a share that goes away",
             "1",
         );
-        seed_uploaded_row(&bridge, &server, "kept");
-        queue_save(&bridge, dir.path(), "kept", "other.txt", b"the second file's save", "1");
-        let w = bridge.db.list_operations_for_file("revoked").unwrap().remove(0);
+        seed_uploaded_row(&bridge, &server, "06b9da0b-043d-50fc-acd4-87909064b924");
+        queue_save(&bridge, dir.path(), "06b9da0b-043d-50fc-acd4-87909064b924", "other.txt", b"the second file's save", "1");
+        let w = bridge.db.list_operations_for_file("43c0df67-e887-5a79-9f9a-772247f56239").unwrap().remove(0);
         // The first file is content of a share; the share is revoked while W's init is in flight.
-        let mut contract = bridge.db.get_file_contract_state("revoked").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("43c0df67-e887-5a79-9f9a-772247f56239").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("revoked-root".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
@@ -208,7 +208,7 @@ use super::*;
             state.requests
         );
         assert_eq!(
-            state.latest_plaintext("kept", master_key),
+            state.latest_plaintext("06b9da0b-043d-50fc-acd4-87909064b924", master_key),
             b"the second file's save",
             "the other file's save is untouched and lands"
         );
@@ -237,12 +237,12 @@ use super::*;
             .lock()
             .unwrap()
             .refuse_init
-            .insert("purged".into(), refusal);
+            .insert("f0b40592-4cab-5cd2-96b3-661bf4c703c2".into(), refusal);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [43u8; 32]);
-        seed_uploaded_row(&bridge, &server, "purged");
-        queue_save(&bridge, dir.path(), "purged", "notes.txt", b"a save in a share", "1");
-        let op_id = bridge.db.list_operations_for_file("purged").unwrap().remove(0).op_id;
-        let mut contract = bridge.db.get_file_contract_state("purged").unwrap().unwrap();
+        seed_uploaded_row(&bridge, &server, "f0b40592-4cab-5cd2-96b3-661bf4c703c2");
+        queue_save(&bridge, dir.path(), "f0b40592-4cab-5cd2-96b3-661bf4c703c2", "notes.txt", b"a save in a share", "1");
+        let op_id = bridge.db.list_operations_for_file("f0b40592-4cab-5cd2-96b3-661bf4c703c2").unwrap().remove(0).op_id;
+        let mut contract = bridge.db.get_file_contract_state("f0b40592-4cab-5cd2-96b3-661bf4c703c2").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("purged-root".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
@@ -439,27 +439,27 @@ use super::*;
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [26u8; 32]);
         // The server is at version 2; this File Provider save is based on 1 (stale).
         // Only a Finder write parks at once (spec §8.4).
-        seed_uploaded_row(&bridge, &server, "stale-file");
-        server.seed_file("stale-file", 2);
+        seed_uploaded_row(&bridge, &server, "9f036aec-d506-5a8b-a7a7-d10f1d9299db");
+        server.seed_file("9f036aec-d506-5a8b-a7a7-d10f1d9299db", 2);
         fp_save(
             &bridge,
             dir.path(),
-            "stale-file",
+            "9f036aec-d506-5a8b-a7a7-d10f1d9299db",
             "private-notes.txt",
             b"stale save",
             "1",
         );
-        let stale = bridge.db.list_operations_for_file("stale-file").unwrap().remove(0);
+        let stale = bridge.db.list_operations_for_file("9f036aec-d506-5a8b-a7a7-d10f1d9299db").unwrap().remove(0);
         // Another upload fails once for a different reason (500): not a 409.
-        seed_uploaded_row(&bridge, &server, "flaky-file");
+        seed_uploaded_row(&bridge, &server, "13da8fb7-10bd-5e55-9aeb-3f4406bed444");
         server
             .state
             .lock()
             .unwrap()
             .fail_first_chunk_once
             .insert("session-1".into());
-        fp_save(&bridge, dir.path(), "flaky-file", "other-notes.txt", b"flaky save", "1");
-        let flaky = bridge.db.list_operations_for_file("flaky-file").unwrap().remove(0);
+        fp_save(&bridge, dir.path(), "13da8fb7-10bd-5e55-9aeb-3f4406bed444", "other-notes.txt", b"flaky save", "1");
+        let flaky = bridge.db.list_operations_for_file("13da8fb7-10bd-5e55-9aeb-3f4406bed444").unwrap().remove(0);
 
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
@@ -469,11 +469,11 @@ use super::*;
         let stale_inits: Vec<_> = state
             .init_summary()
             .into_iter()
-            .filter(|(file, _, _)| *file == json!("stale-file"))
+            .filter(|(file, _, _)| *file == json!("9f036aec-d506-5a8b-a7a7-d10f1d9299db"))
             .collect();
         assert_eq!(
             stale_inits,
-            vec![(json!("stale-file"), json!(1), 409)],
+            vec![(json!("9f036aec-d506-5a8b-a7a7-d10f1d9299db"), json!(1), 409)],
             "one refused attempt, then parked: {:?}",
             state.init_summary()
         );
@@ -485,7 +485,7 @@ use super::*;
             "the refusal says the op parked, and why:\n{logs}"
         );
         assert!(
-            refused[0].contains(&stale.op_id) && refused[0].contains("stale-file") && refused[0].contains("409"),
+            refused[0].contains(&stale.op_id) && refused[0].contains("9f036aec-d506-5a8b-a7a7-d10f1d9299db") && refused[0].contains("409"),
             "{logs}"
         );
         assert!(
@@ -501,7 +501,7 @@ use super::*;
             !logs.contains(crate::api_client::STALE_BASE_MESSAGE),
             "the server's text never reaches the log, only the class:\n{logs}"
         );
-        let parked = bridge.db.list_operations_for_file("stale-file").unwrap().remove(0);
+        let parked = bridge.db.list_operations_for_file("9f036aec-d506-5a8b-a7a7-d10f1d9299db").unwrap().remove(0);
         assert_eq!(parked.attempts, parked.max_attempts, "parked after one attempt");
     }
 

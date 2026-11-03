@@ -181,14 +181,14 @@ use super::*;
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
         let server = VersionedServerMock::start();
-        server.seed_file("legacy-3", 2);
+        server.seed_file("7bdc152a-c29e-5024-aec5-2448f7248f3c", 2);
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [22u8; 32]);
-        seed_legacy_row(&bridge, "legacy-3", None);
+        seed_legacy_row(&bridge, "7bdc152a-c29e-5024-aec5-2448f7248f3c", None);
         let contents = dir.path().join("edit.txt");
         std::fs::write(&contents, b"edited bytes").unwrap();
         bridge
             .queue_file_provider_modify(finder_file_target(
-                Some("legacy-3"),
+                Some("7bdc152a-c29e-5024-aec5-2448f7248f3c"),
                 "d2-fixture.txt",
                 &contents,
                 Some("1791550250".into()),
@@ -202,7 +202,7 @@ use super::*;
             "an identifier of older content is a stale base: {:?}",
             state.init_summary()
         );
-        assert_eq!(state.files["legacy-3"].versions.len(), 2, "no version was added");
+        assert_eq!(state.files["7bdc152a-c29e-5024-aec5-2448f7248f3c"].versions.len(), 2, "no version was added");
     }
 
     #[test]

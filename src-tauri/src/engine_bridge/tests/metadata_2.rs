@@ -40,9 +40,9 @@ use super::*;
         let master_key = [103u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "to-top");
-        fp_rename_or_move(&bridge, "to-top", "at-top.txt", None);
-        let ops = bridge.db.list_operations_for_file("to-top").unwrap();
+        seed_row_in_folder(&bridge, &server, "c95cb134-ba2c-52e1-93e9-25cb8b280748");
+        fp_rename_or_move(&bridge, "c95cb134-ba2c-52e1-93e9-25cb8b280748", "at-top.txt", None);
+        let ops = bridge.db.list_operations_for_file("c95cb134-ba2c-52e1-93e9-25cb8b280748").unwrap();
         assert_eq!(
             (ops[0].kind.clone(), ops[0].parent_id.clone()),
             (OperationKind::MoveFile, None),
@@ -52,7 +52,7 @@ use super::*;
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
-            patched_parents(&state, "to-top"),
+            patched_parents(&state, "c95cb134-ba2c-52e1-93e9-25cb8b280748"),
             vec![Some(serde_json::Value::Null)],
             "the PATCH names the top level"
         );
@@ -62,12 +62,12 @@ use super::*;
             (
                 501,
                 "file_move",
-                serde_json::json!({ "id": "to-top", "old_parent_id": "folder-a", "new_parent_id": null }),
+                serde_json::json!({ "id": "c95cb134-ba2c-52e1-93e9-25cb8b280748", "old_parent_id": "14d2a297-b916-52d6-959d-7cc821b7a978", "new_parent_id": null }),
             ),
             (
                 502,
                 "file_rename",
-                serde_json::json!({ "id": "to-top", "old_name_encrypted": "x", "new_name_encrypted": name }),
+                serde_json::json!({ "id": "c95cb134-ba2c-52e1-93e9-25cb8b280748", "old_name_encrypted": "x", "new_name_encrypted": name }),
             ),
         ] {
             let op = crate::api_client::SyncOp {
@@ -78,12 +78,12 @@ use super::*;
             apply_sync_op(&bridge, &sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
         }
         assert_eq!(
-            name_parent_status(&bridge, "to-top"),
+            name_parent_status(&bridge, "c95cb134-ba2c-52e1-93e9-25cb8b280748"),
             ("at-top.txt".into(), None, FileStatus::Local),
             "at the top level"
         );
-        assert!(listed_under(&bridge, FP_ROOT).contains(&"to-top".to_string()));
-        assert!(!listed_under(&bridge, "folder-a").contains(&"to-top".to_string()));
+        assert!(listed_under(&bridge, FP_ROOT).contains(&"c95cb134-ba2c-52e1-93e9-25cb8b280748".to_string()));
+        assert!(!listed_under(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978").contains(&"c95cb134-ba2c-52e1-93e9-25cb8b280748".to_string()));
     }
 
     /// Spec §7.2 (final review): the watcher's rename tells "the root" from "not found". A file in
@@ -100,7 +100,7 @@ use super::*;
         let master_key = [108u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "watched");
+        seed_row_in_folder(&bridge, &server, "dbfd72f1-a5db-5d18-ad12-79b2013dc0b8");
         crate::watcher::handle_rename(
             &bridge,
             &sync_root,
@@ -108,26 +108,26 @@ use super::*;
             &sync_root.join("Unknown").join("renamed.txt"),
         )
         .await;
-        let ops = bridge.db.list_operations_for_file("watched").unwrap();
+        let ops = bridge.db.list_operations_for_file("dbfd72f1-a5db-5d18-ad12-79b2013dc0b8").unwrap();
         assert_eq!(ops[0].kind, OperationKind::RenameFile, "a rename");
         // The sync root itself is still the top level: a move there names it.
-        server.seed_file("to-root", 1);
+        server.seed_file("a964aa59-fb2d-5ac2-9dd1-e25d15b90188", 1);
         bridge
             .db
             .upsert_file_with_contract(
                 &FileEntry {
-                    file_id: "to-root".into(),
+                    file_id: "a964aa59-fb2d-5ac2-9dd1-e25d15b90188".into(),
                     path: "Docs/other.txt".into(),
                     status: FileStatus::Local,
                     size_bytes: 10,
                     modified_at: 1_700_000_000,
                     content_hash: None,
                     remote_updated_at: 1_700_000_000,
-                    parent_id: Some("folder-a".into()),
+                    parent_id: Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()),
                     item_kind: ItemKind::File,
                 },
                 |contract| {
-                    contract.parent_id = Some("folder-a".into());
+                    contract.parent_id = Some("14d2a297-b916-52d6-959d-7cc821b7a978".into());
                     contract.current_version = 1;
                 },
             )
@@ -139,7 +139,7 @@ use super::*;
             &sync_root.join("other.txt"),
         )
         .await;
-        let ops = bridge.db.list_operations_for_file("to-root").unwrap();
+        let ops = bridge.db.list_operations_for_file("a964aa59-fb2d-5ac2-9dd1-e25d15b90188").unwrap();
         assert_eq!(
             (ops[0].kind.clone(), ops[0].parent_id.clone()),
             (OperationKind::MoveFile, None),
@@ -147,9 +147,9 @@ use super::*;
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
-        assert_eq!(patched_parents(&state, "watched"), vec![None], "no parent_id key");
+        assert_eq!(patched_parents(&state, "dbfd72f1-a5db-5d18-ad12-79b2013dc0b8"), vec![None], "no parent_id key");
         assert_eq!(
-            patched_parents(&state, "to-root"),
+            patched_parents(&state, "a964aa59-fb2d-5ac2-9dd1-e25d15b90188"),
             vec![Some(serde_json::Value::Null)],
             "the top level"
         );
@@ -165,14 +165,14 @@ use super::*;
         let master_key = [104u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "renamed-in-place");
-        fp_rename_or_move(&bridge, "renamed-in-place", "renamed.txt", Some("folder-a"));
-        let ops = bridge.db.list_operations_for_file("renamed-in-place").unwrap();
+        seed_row_in_folder(&bridge, &server, "0fae1d7f-fc86-5d53-bf32-202636c2d9d7");
+        fp_rename_or_move(&bridge, "0fae1d7f-fc86-5d53-bf32-202636c2d9d7", "renamed.txt", Some("14d2a297-b916-52d6-959d-7cc821b7a978"));
+        let ops = bridge.db.list_operations_for_file("0fae1d7f-fc86-5d53-bf32-202636c2d9d7").unwrap();
         assert_eq!(ops[0].kind, OperationKind::RenameFile, "a rename");
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
-            patched_parents(&state, "renamed-in-place"),
+            patched_parents(&state, "0fae1d7f-fc86-5d53-bf32-202636c2d9d7"),
             vec![None],
             "the PATCH has no parent_id key"
         );
@@ -190,27 +190,27 @@ use super::*;
         let master_key = [105u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "saved");
-        let in_place = fp_save_moved(&bridge, dir.path(), "saved", "notes.txt", "folder-a", b"in place", "1");
+        seed_row_in_folder(&bridge, &server, "89ea34e4-1bd4-5c43-87a5-3479bccfadfa");
+        let in_place = fp_save_moved(&bridge, dir.path(), "89ea34e4-1bd4-5c43-87a5-3479bccfadfa", "notes.txt", "14d2a297-b916-52d6-959d-7cc821b7a978", b"in place", "1");
         drain_upload_queue(&bridge, &sync_root).await;
         fp_save(
             &bridge,
             dir.path(),
-            "saved",
+            "89ea34e4-1bd4-5c43-87a5-3479bccfadfa",
             "notes.txt",
             b"moved to the top",
             &in_place.token.unwrap(),
         );
         assert_eq!(
-            name_parent_status(&bridge, "saved"),
+            name_parent_status(&bridge, "89ea34e4-1bd4-5c43-87a5-3479bccfadfa"),
             ("notes.txt".into(), None, FileStatus::Uploading)
         );
         drain_upload_queue(&bridge, &sync_root).await;
-        assert!(listed_under(&bridge, FP_ROOT).contains(&"saved".to_string()));
+        assert!(listed_under(&bridge, FP_ROOT).contains(&"89ea34e4-1bd4-5c43-87a5-3479bccfadfa".to_string()));
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("saved", master_key), b"moved to the top");
+        assert_eq!(state.latest_plaintext("89ea34e4-1bd4-5c43-87a5-3479bccfadfa", master_key), b"moved to the top");
         assert_eq!(
-            patched_parents(&state, "saved"),
+            patched_parents(&state, "89ea34e4-1bd4-5c43-87a5-3479bccfadfa"),
             vec![None, Some(serde_json::Value::Null)],
             "no parent for the save in place; null for the move to the top level"
         );
@@ -227,13 +227,13 @@ use super::*;
         let master_key = [106u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "moved-then-saved");
+        seed_row_in_folder(&bridge, &server, "543e440f-b7da-526d-be98-8b341fe8265d");
         // W moves the file to the top level; N, a save in place after it, does not.
-        let w = fp_save(&bridge, dir.path(), "moved-then-saved", "notes.txt", b"W", "1");
+        let w = fp_save(&bridge, dir.path(), "543e440f-b7da-526d-be98-8b341fe8265d", "notes.txt", b"W", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "moved-then-saved",
+            "543e440f-b7da-526d-be98-8b341fe8265d",
             "notes.txt",
             b"W N",
             w.token.as_deref().unwrap(),
@@ -241,15 +241,15 @@ use super::*;
         // W parks before its metadata step (its copy is gone), and N takes over.
         let w_op = bridge
             .db
-            .list_operations_for_file("moved-then-saved")
+            .list_operations_for_file("543e440f-b7da-526d-be98-8b341fe8265d")
             .unwrap()
             .remove(0);
         std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("moved-then-saved", master_key), b"W N");
+        assert_eq!(state.latest_plaintext("543e440f-b7da-526d-be98-8b341fe8265d", master_key), b"W N");
         assert_eq!(
-            patched_parents(&state, "moved-then-saved"),
+            patched_parents(&state, "543e440f-b7da-526d-be98-8b341fe8265d"),
             vec![Some(serde_json::Value::Null)],
             "N carried W's move to the top level"
         );

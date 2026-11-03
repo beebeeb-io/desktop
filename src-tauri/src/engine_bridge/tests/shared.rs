@@ -136,7 +136,7 @@ use super::*;
         let db = StateDb::open(dir.path().join("state.db")).expect("state db");
         let root = SharedRootMapping {
             invite_id: "invite-folder".into(),
-            file_id: "root-folder".into(),
+            file_id: "929317e7-4e2f-583b-895f-8f0152b1530d".into(),
             display_name: "Shared folder".into(),
             is_folder: true,
             size_bytes: 0,
@@ -187,7 +187,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "malicious-shared-file".into(),
+                file_id: "9d27e191-f4bd-5042-a3a0-94ebd208d5c5".into(),
                 path: "Shared with me/folder/../../outside.txt".into(),
                 status: FileStatus::CloudOnly,
                 size_bytes: 12,
@@ -200,17 +200,17 @@ use super::*;
             .unwrap();
         let mut contract = bridge
             .db
-            .get_file_contract_state("malicious-shared-file")
+            .get_file_contract_state("9d27e191-f4bd-5042-a3a0-94ebd208d5c5")
             .unwrap()
             .unwrap();
         contract.namespace = Namespace::SharedWithMe;
-        contract.shared_root_id = Some("root-folder".into());
+        contract.shared_root_id = Some("929317e7-4e2f-583b-895f-8f0152b1530d".into());
         contract.share_id = Some("invite-folder".into());
         contract.permission_bits = PERMISSION_READ;
         bridge.db.set_file_contract_state(&contract).unwrap();
 
         let err = bridge
-            .ensure_shared_hydrate_path_safe("malicious-shared-file")
+            .ensure_shared_hydrate_path_safe("9d27e191-f4bd-5042-a3a0-94ebd208d5c5")
             .unwrap_err()
             .to_string();
 
@@ -253,7 +253,7 @@ use super::*;
         let op = PendingOperation {
             op_id: "op-auth-1".into(),
             kind: OperationKind::UploadVersion,
-            file_id: Some("server-file-1".into()),
+            file_id: Some("6d2d20bc-321b-533d-931c-778b0b34a9fc".into()),
             parent_id: None,
             target_path: Some("Docs/notes.txt".into()),
             metadata_json: None,

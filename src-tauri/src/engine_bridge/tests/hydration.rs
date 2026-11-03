@@ -295,10 +295,10 @@ use super::*;
         let bridge = test_bridge(&dir.path().join("state.db"));
         // Task 1698: an UNKNOWN item is now an idempotent Ignored (ruling:
         // "unknown items report success") — a delete needs a real row.
-        seed_bridge_entry(&bridge, "file-1", "file-1.txt", None, FileStatus::Local, false, 10);
+        seed_bridge_entry(&bridge, "891ade83-2178-5932-91bd-4bea46844faa", "file-1.txt", None, FileStatus::Local, false, 10);
 
         let outcome = bridge
-            .queue_finder_delete("file-1", Some("9:1700000000:100".into()))
+            .queue_finder_delete("891ade83-2178-5932-91bd-4bea46844faa", Some("9:1700000000:100".into()))
             .unwrap();
         let FinderWriteOutcome::Queued { kind, .. } = outcome else {
             panic!("expected queued trash op");
@@ -317,12 +317,12 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
 
-        record_moved_to_trash_activity(&db, "server-file-1", "docs/doomed.txt", 200).unwrap();
+        record_moved_to_trash_activity(&db, "6d2d20bc-321b-533d-931c-778b0b34a9fc", "docs/doomed.txt", 200).unwrap();
 
         let events = db.list_recent_local_activity(5).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, LocalActivityKind::MovedToTrash);
-        assert_eq!(events[0].file_id.as_deref(), Some("server-file-1"));
+        assert_eq!(events[0].file_id.as_deref(), Some("6d2d20bc-321b-533d-931c-778b0b34a9fc"));
         assert_eq!(events[0].file_name, "doomed.txt");
         assert_eq!(events[0].rel_path.as_deref(), Some("docs/doomed.txt"));
         assert_eq!(events[0].occurred_at, 200);
@@ -347,7 +347,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "server-file-1".into(),
+                file_id: "6d2d20bc-321b-533d-931c-778b0b34a9fc".into(),
                 path: "doomed.txt".into(),
                 status: FileStatus::Trashing,
                 size_bytes: 5,
@@ -363,7 +363,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-trash-1".into(),
                 kind: OperationKind::TrashFile,
-                file_id: Some("server-file-1".into()),
+                file_id: Some("6d2d20bc-321b-533d-931c-778b0b34a9fc".into()),
                 parent_id: None,
                 target_path: None,
                 metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
@@ -389,7 +389,7 @@ use super::*;
         // row never re-creates the placeholder; the row itself is removed later by
         // prune/op-echo once the server trash propagates.
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        let row = bridge.db.get_file("server-file-1").unwrap();
+        let row = bridge.db.get_file("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap();
         assert!(row.is_some(), "trash op must KEEP the row on success (not delete it)");
         assert_eq!(
             row.unwrap().status,
@@ -399,7 +399,7 @@ use super::*;
         let events = bridge.db.list_recent_local_activity(5).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, crate::state_db::LocalActivityKind::MovedToTrash);
-        assert_eq!(events[0].file_id.as_deref(), Some("server-file-1"));
+        assert_eq!(events[0].file_id.as_deref(), Some("6d2d20bc-321b-533d-931c-778b0b34a9fc"));
         assert_eq!(events[0].file_name, "doomed.txt");
         assert_eq!(events[0].rel_path.as_deref(), Some("doomed.txt"));
         assert_eq!(events[0].occurred_at, 200);

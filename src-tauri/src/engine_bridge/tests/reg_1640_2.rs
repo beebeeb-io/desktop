@@ -10,7 +10,7 @@ use super::*;
         let path = dir.path().join("notes.txt");
         std::fs::write(&path, b"version three").unwrap();
         db.upsert_file(&FileEntry {
-            file_id: "f".into(),
+            file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
             path: "notes.txt".into(),
             status: FileStatus::Local,
             size_bytes: 13,
@@ -21,13 +21,13 @@ use super::*;
             item_kind: ItemKind::File,
         })
         .unwrap();
-        assert!(db.mark_no_fetched_content("f").unwrap());
-        db.record_fetched_version("f", 3, &sha256_hex(b"version three")).unwrap();
-        let content = || sync_folder_content(&db, "f", &path, None).unwrap();
+        assert!(db.mark_no_fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap());
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 3, &sha256_hex(b"version three")).unwrap();
+        let content = || sync_folder_content(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", &path, None).unwrap();
         assert_eq!(content(), SyncFolderContent::Agreed, "the candidate's bytes");
         std::fs::write(&path, b"edited, never sent").unwrap();
         assert_eq!(content(), SyncFolderContent::Changed { base: Some(3) }, "an edit, on the candidate's version");
-        db.record_fetched_version("f", 2, &sha256_hex(b"version two")).unwrap();
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 2, &sha256_hex(b"version two")).unwrap();
         assert_eq!(content(), SyncFolderContent::Changed { base: Some(2) }, "mixed: never agreed, the oldest");
     }
 
@@ -61,7 +61,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(&dir.path().join("state.db")).unwrap();
         db.upsert_file(&FileEntry {
-            file_id: "f".into(),
+            file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
             path: "notes.txt".into(),
             status: FileStatus::Local,
             size_bytes: 1,
@@ -73,24 +73,24 @@ use super::*;
         })
         .unwrap();
         let candidate = sha256_hex(b"version three");
-        assert!(db.mark_no_fetched_content("f").unwrap());
-        db.record_fetched_version("f", 3, &candidate).unwrap();
+        assert!(db.mark_no_fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap());
+        db.record_fetched_version("f97d7f90-511b-52b5-9303-7201b53df85f", 3, &candidate).unwrap();
         let promote = |local, wholly, bytes: &'static [u8]| {
-            promote_fetched_content(&db, "f", local, wholly, &mut || Ok(sha256_hex(bytes))).unwrap()
+            promote_fetched_content(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", local, wholly, &mut || Ok(sha256_hex(bytes))).unwrap()
         };
         assert!(!promote(LocalEntry::InSync, true, b"other bytes"), "other bytes: no");
         assert!(!promote(LocalEntry::PartlyLocal, true, b"version three"), "out of sync or modified: no");
         assert!(!promote(LocalEntry::InSync, false, b"version three"), "not wholly on disk: no");
-        db.set_status("f", FileStatus::Uploading).unwrap();
+        db.set_status("f97d7f90-511b-52b5-9303-7201b53df85f", FileStatus::Uploading).unwrap();
         assert!(!promote(LocalEntry::InSync, true, b"version three"), "the row moved on: no");
-        db.set_status("f", FileStatus::Local).unwrap();
+        db.set_status("f97d7f90-511b-52b5-9303-7201b53df85f", FileStatus::Local).unwrap();
         assert!(promote(LocalEntry::InSync, true, b"version three"), "its own bytes: promoted");
-        let contract = db.get_file_contract_state("f").unwrap().unwrap();
+        let contract = db.get_file_contract_state("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap().unwrap();
         assert_eq!((contract.local_base_version, contract.local_hash), (3, Some(candidate)));
-        assert_eq!(db.fetched_content("f").unwrap(), None);
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), None);
         // A mixed candidate is never promoted.
         db.upsert_file(&FileEntry {
-            file_id: "m".into(),
+            file_id: "ead1903c-d8ae-5ad1-a577-ff626ebb2b20".into(),
             path: "mixed.txt".into(),
             status: FileStatus::Local,
             size_bytes: 1,
@@ -101,11 +101,11 @@ use super::*;
             item_kind: ItemKind::File,
         })
         .unwrap();
-        assert!(db.mark_no_fetched_content("m").unwrap());
-        db.record_fetched_version("m", 3, "h3").unwrap();
-        db.record_fetched_version("m", 2, "h2").unwrap();
+        assert!(db.mark_no_fetched_content("ead1903c-d8ae-5ad1-a577-ff626ebb2b20").unwrap());
+        db.record_fetched_version("ead1903c-d8ae-5ad1-a577-ff626ebb2b20", 3, "h3").unwrap();
+        db.record_fetched_version("ead1903c-d8ae-5ad1-a577-ff626ebb2b20", 2, "h2").unwrap();
         assert!(
-            !promote_fetched_content(&db, "m", LocalEntry::InSync, true, &mut || Ok("h2".into())).unwrap(),
+            !promote_fetched_content(&db, "ead1903c-d8ae-5ad1-a577-ff626ebb2b20", LocalEntry::InSync, true, &mut || Ok("h2".into())).unwrap(),
             "mixed: never"
         );
     }
@@ -173,15 +173,15 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(&dir.path().join("state.db")).unwrap();
         let path = dir.path().join("notes.txt");
-        regression_1640_new_placeholder(&db, "f", "notes.txt");
-        regression_1640_fetch(&db, "f", 1, b"version one");
-        regression_1640_tick_partly_on_disk(&db, "f");
-        regression_1640_fetch(&db, "f", 2, b"version two");
-        regression_1640_tick_partly_on_disk(&db, "f");
-        db.set_status("f", FileStatus::Local).unwrap();
-        assert_eq!(db.fetched_content("f").unwrap(), Some((1, None)), "mixed, at the lower version");
+        regression_1640_new_placeholder(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", "notes.txt");
+        regression_1640_fetch(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", 1, b"version one");
+        regression_1640_tick_partly_on_disk(&db, "f97d7f90-511b-52b5-9303-7201b53df85f");
+        regression_1640_fetch(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", 2, b"version two");
+        regression_1640_tick_partly_on_disk(&db, "f97d7f90-511b-52b5-9303-7201b53df85f");
+        db.set_status("f97d7f90-511b-52b5-9303-7201b53df85f", FileStatus::Local).unwrap();
+        assert_eq!(db.fetched_content("f97d7f90-511b-52b5-9303-7201b53df85f").unwrap(), Some((1, None)), "mixed, at the lower version");
         std::fs::write(&path, b"ranges of one and two, then edited").unwrap();
-        assert_eq!(sync_folder_content(&db, "f", &path, None).unwrap(), SyncFolderContent::Changed { base: Some(1) });
+        assert_eq!(sync_folder_content(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", &path, None).unwrap(), SyncFolderContent::Changed { base: Some(1) });
         // Same when the file had agreed content at 1 before it was partly freed.
         regression_1640_new_placeholder(&db, "g", "other.txt");
         db.record_local_baseline("g", 1, &sha256_hex(b"version one")).unwrap();
@@ -499,7 +499,7 @@ use super::*;
             } else {
                 db.delete_file_subtree("folder-docs").unwrap();
                 db.upsert_file(&FileEntry {
-                    file_id: "file-moved-here".into(),
+                    file_id: "fe32d353-1497-59d2-a4df-b3cbef768941".into(),
                     path: "docs/notes.txt".into(),
                     status: FileStatus::Local,
                     size_bytes: 1,
@@ -522,7 +522,7 @@ use super::*;
                 // Self-review #4: the bytes there are still the deleted file's (copied already); they go
                 // so the other file's placeholder can be created there. The remove is the engine's own.
                 assert!(!docs.join("notes.txt").exists(), "{case}: the deleted file's bytes go");
-                assert_eq!(db.get_file_by_path("docs/notes.txt").unwrap().unwrap().file_id, "file-moved-here", "{case}");
+                assert_eq!(db.get_file_by_path("docs/notes.txt").unwrap().unwrap().file_id, "fe32d353-1497-59d2-a4df-b3cbef768941", "{case}");
             }
             assert!(!db.is_kept_original_pending("docs/notes.txt").unwrap(), "{case}: nothing waits any more");
             let kept = db.list_kept_copies().unwrap();

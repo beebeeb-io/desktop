@@ -129,7 +129,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "server-file-1".into(),
+                file_id: "6d2d20bc-321b-533d-931c-778b0b34a9fc".into(),
                 path: "Docs/conflict.txt".into(),
                 status: FileStatus::Conflict,
                 size_bytes: 99,
@@ -140,7 +140,7 @@ use super::*;
                 item_kind: ItemKind::File,
             })
             .unwrap();
-        let mut contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap();
         contract.parent_id = Some("folder-1".into());
         contract.content_type = Some("text/plain".into());
         contract.current_version = 3;
@@ -149,16 +149,16 @@ use super::*;
         bridge.db.set_file_contract_state(&contract).unwrap();
 
         let before = now_secs();
-        bridge.resolve_keep_mine("server-file-1", &sync_root).await.unwrap();
+        bridge.resolve_keep_mine("6d2d20bc-321b-533d-931c-778b0b34a9fc", &sync_root).await.unwrap();
 
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let entry = bridge.db.get_file("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
         assert_eq!(entry.path, "Docs/conflict.txt");
         assert_eq!(entry.size_bytes, 19);
         assert_eq!(entry.content_hash.as_deref(), Some("local-conflict-hash"));
         assert!(entry.remote_updated_at >= before);
 
-        let contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap();
         assert_eq!(contract.current_version, 1);
         assert_eq!(contract.local_base_version, 1);
         assert_eq!(contract.current_object_version_id.as_deref(), Some("object-complete-1"));
@@ -170,7 +170,7 @@ use super::*;
         assert_eq!(requests[0].method, "POST");
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
         let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert_eq!(init_body["file_id"], "server-file-1");
+        assert_eq!(init_body["file_id"], "6d2d20bc-321b-533d-931c-778b0b34a9fc");
         assert_eq!(init_body["file_size_bytes"], 19);
         assert_eq!(init_body["parent_id"], "folder-1");
         assert_eq!(init_body["chunk_count"], 1);
@@ -185,7 +185,7 @@ use super::*;
         assert_ne!(requests[2].body, b"mine upload payload");
 
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"server-file-1");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"6d2d20bc-321b-533d-931c-778b0b34a9fc");
         assert_eq!(
             beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
             b"mine upload payload"
@@ -206,7 +206,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "server-file-1".into(),
+                file_id: "6d2d20bc-321b-533d-931c-778b0b34a9fc".into(),
                 path: "conflict.txt".into(),
                 status: FileStatus::Conflict,
                 size_bytes: 8,
@@ -217,20 +217,20 @@ use super::*;
                 item_kind: ItemKind::File,
             })
             .unwrap();
-        let mut contract = bridge.db.get_file_contract_state("server-file-1").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap();
         contract.content_type = Some("text/plain".into());
         contract.current_version = 3;
         contract.local_base_version = 2;
         bridge.db.set_file_contract_state(&contract).unwrap();
 
         let err = bridge
-            .resolve_keep_mine("server-file-1", &sync_root)
+            .resolve_keep_mine("6d2d20bc-321b-533d-931c-778b0b34a9fc", &sync_root)
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("500 Internal Server Error"));
 
-        let entry = bridge.db.get_file("server-file-1").unwrap().unwrap();
+        let entry = bridge.db.get_file("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Conflict);
         assert_eq!(entry.remote_updated_at, 90);
 
@@ -309,7 +309,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-photo".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-photo-1".into()),
+                file_id: Some("c5aa9a16-7bdc-5b79-a7ac-9469701c135c".into()),
                 parent_id: None,
                 target_path: Some("Photos/photo.png".into()),
                 metadata_json: Some(
@@ -396,7 +396,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-photo-thumb-fail".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-photo-1".into()),
+                file_id: Some("c5aa9a16-7bdc-5b79-a7ac-9469701c135c".into()),
                 parent_id: None,
                 target_path: Some("Photos/photo.png".into()),
                 metadata_json: Some(

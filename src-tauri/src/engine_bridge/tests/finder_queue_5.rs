@@ -7,34 +7,34 @@ use super::*;
     async fn a_finder_write_refused_as_locked_thirty_times_lands_and_is_never_paused() {
         let master_key = [142u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "outage-locked");
+        seed_uploaded_row(&bridge, &server, "3c8d48c4-6dd0-5428-a3c0-4340524db744");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("outage-locked".into(), "423 Locked");
+            .insert("3c8d48c4-6dd0-5428-a3c0-4340524db744".into(), "423 Locked");
         fp_save(
             &bridge,
             dir.path(),
-            "outage-locked",
+            "3c8d48c4-6dd0-5428-a3c0-4340524db744",
             "notes.txt",
             b"saved while locked",
             "1",
         );
         let mut now = now_secs();
-        let outcomes = failing_passes(&bridge, &sync_root, "outage-locked", 30, &mut now).await;
-        assert_kept_uploading(&bridge, "outage-locked", &outcomes, OperationFailureClass::Locked);
-        server.state.lock().unwrap().refuse_init.remove("outage-locked");
+        let outcomes = failing_passes(&bridge, &sync_root, "3c8d48c4-6dd0-5428-a3c0-4340524db744", 30, &mut now).await;
+        assert_kept_uploading(&bridge, "3c8d48c4-6dd0-5428-a3c0-4340524db744", &outcomes, OperationFailureClass::Locked);
+        server.state.lock().unwrap().refuse_init.remove("3c8d48c4-6dd0-5428-a3c0-4340524db744");
         bridge.process_due_operations(&sync_root, now).await.unwrap();
         assert!(
-            bridge.db.list_operations_for_file("outage-locked").unwrap().is_empty(),
+            bridge.db.list_operations_for_file("3c8d48c4-6dd0-5428-a3c0-4340524db744").unwrap().is_empty(),
             "landed once the lock cleared"
         );
         let state = server.finish();
         assert_eq!(state.inits.iter().filter(|(_, status)| *status == 423).count(), 30);
         assert_eq!(
-            state.latest_plaintext("outage-locked", master_key),
+            state.latest_plaintext("3c8d48c4-6dd0-5428-a3c0-4340524db744", master_key),
             b"saved while locked"
         );
     }
@@ -192,14 +192,14 @@ use super::*;
             );
         }
         let (dir, sync_root, server, bridge) = rule3_setup([199u8; 32]);
-        seed_uploaded_row(&bridge, &server, "plain-413");
+        seed_uploaded_row(&bridge, &server, "bcbb5e6c-b7dc-5967-9f07-555d94a3a2b9");
         refuse(
             &server,
             Refused::Init,
-            "plain-413",
+            "bcbb5e6c-b7dc-5967-9f07-555d94a3a2b9",
             ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
         );
-        fp_save(&bridge, dir.path(), "plain-413", "notes.txt", b"bytes", "1");
+        fp_save(&bridge, dir.path(), "bcbb5e6c-b7dc-5967-9f07-555d94a3a2b9", "notes.txt", b"bytes", "1");
         let outcome = bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
         assert!(
             !outcome.account_refused,
@@ -319,7 +319,7 @@ use super::*;
                 ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
             ),
             ("other-409", trial_ended()),
-            ("other-403", ("403 Forbidden", json!({ "error": "forbidden" }))),
+            ("other-403", ("403 Forbidden", json!({ "error": "ba168ca1-ec2b-5945-8692-4a58b11c325a" }))),
         ] {
             seed_uploaded_row(&bridge, &server, file_id);
             refuse(&server, Refused::Init, file_id, refusal);
@@ -383,17 +383,17 @@ use super::*;
     #[tokio::test]
     async fn a_finder_write_the_server_forbids_parks_permission_denied() {
         let (dir, sync_root, server, bridge) = rule3_setup([144u8; 32]);
-        seed_uploaded_row(&bridge, &server, "forbidden");
+        seed_uploaded_row(&bridge, &server, "ba168ca1-ec2b-5945-8692-4a58b11c325a");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("forbidden".into(), "403 Forbidden");
+            .insert("ba168ca1-ec2b-5945-8692-4a58b11c325a".into(), "403 Forbidden");
         fp_save(
             &bridge,
             dir.path(),
-            "forbidden",
+            "ba168ca1-ec2b-5945-8692-4a58b11c325a",
             "notes.txt",
             b"a save the server refuses",
             "1",
@@ -406,8 +406,8 @@ use super::*;
         .await;
         let outcome = outcome.unwrap();
         assert!(outcome.paused_op_ids.is_empty(), "never paused: {outcome:?}");
-        assert_eq!(outcome.invalidated_item_ids, vec!["forbidden".to_string()]);
-        let op = bridge.db.list_operations_for_file("forbidden").unwrap().remove(0);
+        assert_eq!(outcome.invalidated_item_ids, vec!["ba168ca1-ec2b-5945-8692-4a58b11c325a".to_string()]);
+        let op = bridge.db.list_operations_for_file("ba168ca1-ec2b-5945-8692-4a58b11c325a").unwrap().remove(0);
         assert_eq!(op.attempts, op.max_attempts, "parked");
         assert_eq!(op.last_error.as_deref(), Some("permission_denied"));
         assert_eq!(
@@ -416,7 +416,7 @@ use super::*;
             "its bytes are kept"
         );
         assert_eq!(
-            bridge.db.get_file("forbidden").unwrap().unwrap().status,
+            bridge.db.get_file("ba168ca1-ec2b-5945-8692-4a58b11c325a").unwrap().unwrap().status,
             FileStatus::Error
         );
         let parked: Vec<&str> = logs

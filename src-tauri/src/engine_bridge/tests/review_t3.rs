@@ -371,6 +371,26 @@ async fn review_p1_1_a_spoofed_envelope_on_an_owner_row_is_not_a_request_row() {
     assert!(!bridge.is_request_row(owner), "nor the in-memory set");
 }
 
+/// P2-1: a non-canonical id the SERVER planted as a roster row still gets no
+/// derived write key — holding a row under that text proves nothing, and the
+/// derived key would be one nobody can open.
+#[test]
+fn review_p2_1_a_server_planted_non_canonical_row_has_no_derived_write_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_bridge_row(&bridge, "not-a-uuid", "planted.txt", None, FileStatus::Local, 4);
+    let err = match owned_key_and_pin(&bridge.db(), &[7u8; 32], "not-a-uuid") {
+        Ok(_) => panic!("a server-planted non-canonical row must have no write key"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("item key is unavailable"),
+        "a non-canonical row gets no derived write key: {err}"
+    );
+}
+
 #[test]
 fn review_p2_2_a_non_canonical_id_has_no_derived_key() {
     let dir = tempfile::tempdir().unwrap();

@@ -14,8 +14,8 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-live".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-file-1".into()),
-                parent_id: Some("folder-1".into()),
+                file_id: Some("6cc778db-0fc3-5a51-927a-b6e4a06d4864".into()),
+                parent_id: Some("846c7080-936d-5ffd-879c-39f630bfb30d".into()),
                 target_path: Some("Reports/report.txt".into()),
                 metadata_json: Some(
                     serde_json::json!({
@@ -49,7 +49,7 @@ use super::*;
         let requests = server.finish();
         let item_id = init_item_id(&requests);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
+        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_none());
 
         let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);
@@ -72,7 +72,7 @@ use super::*;
             "a create must send the id this device chose, never let the server mint one"
         );
         assert_eq!(init_body["file_size_bytes"], 19);
-        assert_eq!(init_body["parent_id"], "folder-1");
+        assert_eq!(init_body["parent_id"], "846c7080-936d-5ffd-879c-39f630bfb30d");
         assert_eq!(init_body["chunk_count"], 1);
         assert_eq!(requests[1].method, "PATCH");
         assert_eq!(requests[2].method, "PUT");
@@ -107,8 +107,8 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-empty".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-file-empty".into()),
-                parent_id: Some("folder-1".into()),
+                file_id: Some("67f5e5ca-6ef8-5ef9-9264-c618d1f5308a".into()),
+                parent_id: Some("846c7080-936d-5ffd-879c-39f630bfb30d".into()),
                 target_path: Some("Project/empty.txt".into()),
                 metadata_json: Some(
                     serde_json::json!({

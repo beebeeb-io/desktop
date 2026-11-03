@@ -13,7 +13,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-retry".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-file-2".into()),
+                file_id: Some("78cd3eb2-6aee-527c-ad1c-9130e4ed62ad".into()),
                 parent_id: None,
                 target_path: Some("retry.txt".into()),
                 metadata_json: Some(
@@ -140,7 +140,7 @@ use super::*;
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [12u8; 32]);
         bridge
             .db
-            .enqueue_operation(&slice2_upload_op("op-2", "local-file-2", "retry.txt", &payload))
+            .enqueue_operation(&slice2_upload_op("op-2", "78cd3eb2-6aee-527c-ad1c-9130e4ed62ad", "retry.txt", &payload))
             .unwrap();
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
@@ -428,7 +428,7 @@ use super::*;
         PendingOperation {
             op_id: "op-upload-resume".into(),
             kind: OperationKind::UploadVersion,
-            file_id: Some("local-file-resume".into()),
+            file_id: Some("5e4695e9-9205-5630-9c10-2d7e3b050643".into()),
             parent_id: None,
             target_path: Some("resume.bin".into()),
             metadata_json: Some(
@@ -998,7 +998,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "server-file-1".into(),
+                file_id: "6d2d20bc-321b-533d-931c-778b0b34a9fc".into(),
                 path: "conflict.bin".into(),
                 status: FileStatus::Conflict,
                 size_bytes: 20,
@@ -1031,7 +1031,7 @@ use super::*;
         };
         let work = commands.run(async {
             bridge
-                .resolve_keep_mine("server-file-1", &root)
+                .resolve_keep_mine("6d2d20bc-321b-533d-931c-778b0b34a9fc", &root)
                 .await
                 .map_err(|e| e.to_string())
         });
@@ -1056,7 +1056,7 @@ use super::*;
             1
         );
         assert_eq!(
-            bridge.db.get_file("server-file-1").unwrap().unwrap().status,
+            bridge.db.get_file("6d2d20bc-321b-533d-931c-778b0b34a9fc").unwrap().unwrap().status,
             FileStatus::Conflict,
             "cancelled Keep Mine must restore the conflict state"
         );
@@ -1071,7 +1071,7 @@ use super::*;
             "sign-out must preserve the original unsynced conflict"
         );
         // User resolves/moves the original; subsequent account purge leaves zero staged plaintext.
-        bridge.db.set_status("server-file-1", FileStatus::Local).unwrap();
+        bridge.db.set_status("6d2d20bc-321b-533d-931c-778b0b34a9fc", FileStatus::Local).unwrap();
         bridge.db.windows_signout_preflight().unwrap();
         bridge.db.finish_windows_signout().unwrap();
         assert_eq!(staged.iter().filter(|p| std::path::Path::new(p).exists()).count(), 0);

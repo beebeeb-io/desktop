@@ -8,14 +8,14 @@ use super::*;
     #[tokio::test]
     async fn an_earlier_builds_modify_without_a_base_parks_base_unknown_and_sends_nothing() {
         let (dir, sync_root, server, bridge) = rule3_setup([103u8; 32]);
-        seed_uploaded_row(&bridge, &server, "no-base");
+        seed_uploaded_row(&bridge, &server, "2537b462-b8ec-5985-b74d-668d9a382eb3");
         // The way an earlier build queued it: through the shared entry point, no write id, no base.
         let contents = dir.path().join("no-base.txt");
         std::fs::write(&contents, b"an earlier build's save, no base").unwrap();
         bridge
-            .queue_finder_modify(finder_file_target(Some("no-base"), "notes.txt", &contents, None))
+            .queue_finder_modify(finder_file_target(Some("2537b462-b8ec-5985-b74d-668d9a382eb3"), "notes.txt", &contents, None))
             .unwrap();
-        let op = bridge.db.list_operations_for_file("no-base").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("2537b462-b8ec-5985-b74d-668d9a382eb3").unwrap().remove(0);
         assert_eq!(op.base_version, None, "precondition: queued without a base");
         assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 1);
 
@@ -308,14 +308,14 @@ use super::*;
     #[tokio::test]
     async fn log_upload_refused_with_its_class() {
         let (dir, sync_root, server, bridge) = rule3_setup([102u8; 32]);
-        seed_uploaded_row(&bridge, &server, "busy");
+        seed_uploaded_row(&bridge, &server, "9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b");
         server
             .state
             .lock()
             .unwrap()
             .conflict_init_once
-            .insert("busy".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
-        fp_save(&bridge, dir.path(), "busy", PLANTED, b"edit", "1");
+            .insert("9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
+        fp_save(&bridge, dir.path(), "9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b", PLANTED, b"edit", "1");
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
         })
@@ -326,32 +326,32 @@ use super::*;
             &["op_id", "file_id", "attempt", "max_attempts", "class"],
             dir.path(),
         );
-        assert!(line.contains("\"in_progress\"") && line.contains("busy"), "{line}");
-        assert_eq!(server.finish().latest_plaintext("busy", [102u8; 32]), b"edit");
+        assert!(line.contains("\"in_progress\"") && line.contains("9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b"), "{line}");
+        assert_eq!(server.finish().latest_plaintext("9a0db8e3-5b50-5b02-ab5b-9e14d640eb3b", [102u8; 32]), b"edit");
     }
 
     /// The scenario of T23 (`i4_a_doomed_earlier_write_never_blocks_hours`), named `PLANTED`:
     /// W's staged copy is gone, so W parks and N takes over. Returns W's op id and the logs.
     async fn doomed_predecessor_logs(master_key: [u8; 32]) -> (tempfile::TempDir, String, String) {
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "doomed");
-        let w = fp_save(&bridge, dir.path(), "doomed", PLANTED, b"W", "1");
+        seed_uploaded_row(&bridge, &server, "37a968b8-d2c1-5d62-9613-a6191c25ef8f");
+        let w = fp_save(&bridge, dir.path(), "37a968b8-d2c1-5d62-9613-a6191c25ef8f", PLANTED, b"W", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "doomed",
+            "37a968b8-d2c1-5d62-9613-a6191c25ef8f",
             PLANTED,
             b"W N",
             w.token.as_deref().unwrap(),
         );
-        let w_op = bridge.db.list_operations_for_file("doomed").unwrap().remove(0);
+        let w_op = bridge.db.list_operations_for_file("37a968b8-d2c1-5d62-9613-a6191c25ef8f").unwrap().remove(0);
         std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
         })
         .await;
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("doomed", master_key), b"W N", "N landed");
+        assert_eq!(state.latest_plaintext("37a968b8-d2c1-5d62-9613-a6191c25ef8f", master_key), b"W N", "N landed");
         (dir, w_op.op_id, logs)
     }
 
@@ -454,18 +454,18 @@ use super::*;
     async fn log_base_from_snapshot() {
         let master_key = [107u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_version_zero_row(&bridge, &server, "legacy", FileStatus::Local);
+        seed_version_zero_row(&bridge, &server, "e1b3818d-a25f-5dbf-9781-abd804401fff", FileStatus::Local);
         bridge.db.set_sync_cursor(0).unwrap();
-        fp_save(&bridge, dir.path(), "legacy", PLANTED, b"edit", "0");
+        fp_save(&bridge, dir.path(), "e1b3818d-a25f-5dbf-9781-abd804401fff", PLANTED, b"edit", "0");
         drain_upload_queue(&bridge, &sync_root).await;
         assert!(
             server.state.lock().unwrap().inits.is_empty(),
             "precondition: no init until the version is known"
         );
-        let op = bridge.db.list_operations_for_file("legacy").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("e1b3818d-a25f-5dbf-9781-abd804401fff").unwrap().remove(0);
         let snapshot = crate::api_client::SyncSnapshot {
             seq_id: 1,
-            nodes: vec![node(&master_key, "legacy", PLANTED, 1, false)],
+            nodes: vec![node(&master_key, "e1b3818d-a25f-5dbf-9781-abd804401fff", PLANTED, 1, false)],
         };
         let logs = capture_logs_async(async {
             apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();

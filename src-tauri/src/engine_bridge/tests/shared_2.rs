@@ -7,21 +7,21 @@ use super::*;
         let bridge = test_bridge(&dir.path().join("state.db"));
         seed_bridge_row(
             &bridge,
-            "shared-readonly",
+            "9fbd4545-08ef-5963-b5c4-854dcf0a2696",
             "/Shared with me/Readonly.txt",
             None,
             FileStatus::Local,
             100,
         );
-        let mut contract = bridge.db.get_file_contract_state("shared-readonly").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("9fbd4545-08ef-5963-b5c4-854dcf0a2696").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
-        contract.shared_root_id = Some("shared-readonly".into());
+        contract.shared_root_id = Some("9fbd4545-08ef-5963-b5c4-854dcf0a2696".into());
         contract.share_id = Some("invite-1".into());
         contract.permission_bits = PERMISSION_READ;
         bridge.db.set_file_contract_state(&contract).unwrap();
 
         let err = bridge
-            .queue_finder_delete("shared-readonly", Some("1:1:100".into()))
+            .queue_finder_delete("9fbd4545-08ef-5963-b5c4-854dcf0a2696", Some("1:1:100".into()))
             .unwrap_err()
             .to_string();
         assert!(err.contains("read-only shared item"));
@@ -36,13 +36,13 @@ use super::*;
         let bridge = test_bridge(&dir.path().join("state.db"));
         seed_bridge_row(
             &bridge,
-            "shared-editable",
+            "7abab15f-3dc4-52fd-a52f-57e1ca48b22d",
             "/Shared with me/Editable.txt",
             None,
             FileStatus::Local,
             100,
         );
-        let mut contract = bridge.db.get_file_contract_state("shared-editable").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("7abab15f-3dc4-52fd-a52f-57e1ca48b22d").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("shared-root".into());
         contract.share_id = Some("invite-2".into());
@@ -52,7 +52,7 @@ use super::*;
 
         bridge
             .queue_finder_modify(FinderWriteTarget {
-                file_id: Some("shared-editable".into()),
+                file_id: Some("7abab15f-3dc4-52fd-a52f-57e1ca48b22d".into()),
                 parent_id: None,
                 filename: "Editable.txt".into(),
                 rel_path: None,
@@ -81,7 +81,7 @@ use super::*;
         bridge
             .db
             .upsert_file(&FileEntry {
-                file_id: "conflict-file".into(),
+                file_id: "4d8a88a2-2b0b-5998-a927-e86d618fd2cd".into(),
                 path: "/Work/conflict.md".into(),
                 status: FileStatus::Conflict,
                 size_bytes: 64,
@@ -97,7 +97,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-quota".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("quota-file".into()),
+                file_id: Some("bae2f5bc-4334-5bda-b126-8b9da6b0392f".into()),
                 parent_id: None,
                 target_path: Some("/Work/quota.png".into()),
                 metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
@@ -118,8 +118,8 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-permission".into(),
                 kind: OperationKind::MoveFile,
-                file_id: Some("shared-file".into()),
-                parent_id: Some("shared-folder".into()),
+                file_id: Some("368fe66c-62cc-5fbe-a437-bde9e491ffa9".into()),
+                parent_id: Some("daaa7805-8904-54fd-9a6b-6f4ddf86520d".into()),
                 target_path: Some("/Shared/blocked.txt".into()),
                 metadata_json: Some(r#"{"operation":"metadata_update"}"#.into()),
                 payload_path: None,
@@ -139,7 +139,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-stale".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("stale-file".into()),
+                file_id: Some("9f036aec-d506-5a8b-a7a7-d10f1d9299db".into()),
                 parent_id: None,
                 target_path: Some("/Work/stale.txt".into()),
                 metadata_json: Some(r#"{"operation":"upload_version","base_version_identifier":"7:1700:12"}"#.into()),
@@ -159,7 +159,7 @@ use super::*;
         let feed = bridge.version_conflict_feed().unwrap();
         assert!(feed.iter().any(|entry| {
             entry.kind == "conflict"
-                && entry.file_id == "conflict-file"
+                && entry.file_id == "4d8a88a2-2b0b-5998-a927-e86d618fd2cd"
                 && entry.file_name == "conflict.md"
                 && entry.action == "open_conflict"
         }));
@@ -186,14 +186,14 @@ use super::*;
 
         let queued = bridge
             .queue_restore_version(
-                "file-restore",
+                "9caae7f4-8a43-57d1-836d-1a661efac518",
                 "version-2",
                 Some("direct restore failed: network offline".into()),
             )
             .unwrap();
 
         assert_eq!(queued.kind, OperationKind::RestoreVersion);
-        assert_eq!(queued.file_id.as_deref(), Some("file-restore"));
+        assert_eq!(queued.file_id.as_deref(), Some("9caae7f4-8a43-57d1-836d-1a661efac518"));
         assert_eq!(queued.base_object_version_id.as_deref(), Some("version-2"));
         let metadata: serde_json::Value = serde_json::from_str(queued.metadata_json.as_deref().unwrap()).unwrap();
         assert_eq!(metadata["operation"], "restore_version");
@@ -202,7 +202,7 @@ use super::*;
         let feed = bridge.version_conflict_feed().unwrap();
         assert!(feed.iter().any(|entry| {
             entry.kind == "restore"
-                && entry.file_id == "file-restore"
+                && entry.file_id == "9caae7f4-8a43-57d1-836d-1a661efac518"
                 && entry.version_id.as_deref() == Some("version-2")
                 && entry.last_error.as_deref() == Some("direct restore failed: network offline")
         }));

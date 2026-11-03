@@ -6,12 +6,12 @@ use super::*;
     async fn an_empty_save_lands_and_is_served_from_the_queue() {
         let master_key = [94u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "empty");
-        fp_save(&bridge, dir.path(), "empty", "notes.txt", b"", "1");
+        seed_uploaded_row(&bridge, &server, "bc87e59f-377e-59f3-ad18-492fe79c2ec5");
+        fp_save(&bridge, dir.path(), "bc87e59f-377e-59f3-ad18-492fe79c2ec5", "notes.txt", b"", "1");
         let dest = dir.path().join("fetch").join("notes.txt");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         assert_eq!(
-            bridge.serve_hydrate("empty", &dest, &[dir.path()], None).await.unwrap(),
+            bridge.serve_hydrate("bc87e59f-377e-59f3-ad18-492fe79c2ec5", &dest, &[dir.path()], None).await.unwrap(),
             HydrateSource::Queue
         );
         assert_eq!(
@@ -21,8 +21,8 @@ use super::*;
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
-        assert_eq!(state.files["empty"].versions.len(), 2);
-        assert!(state.latest_plaintext("empty", master_key).is_empty());
+        assert_eq!(state.files["bc87e59f-377e-59f3-ad18-492fe79c2ec5"].versions.len(), 2);
+        assert!(state.latest_plaintext("bc87e59f-377e-59f3-ad18-492fe79c2ec5", master_key).is_empty());
     }
 
     // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
@@ -33,8 +33,8 @@ use super::*;
     #[tokio::test]
     async fn a_retrying_upload_keeps_the_item_writable() {
         let (dir, sync_root, server, bridge) = rule3_setup([95u8; 32]);
-        seed_uploaded_row(&bridge, &server, "retrying");
-        fp_save(&bridge, dir.path(), "retrying", "notes.txt", b"edit", "1");
+        seed_uploaded_row(&bridge, &server, "ad4f26df-8274-576d-b6bf-9e0f85e94e59");
+        fp_save(&bridge, dir.path(), "ad4f26df-8274-576d-b6bf-9e0f85e94e59", "notes.txt", b"edit", "1");
         server
             .state
             .lock()
@@ -42,14 +42,14 @@ use super::*;
             .fail_first_chunk_once
             .insert("session-1".into());
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // one transient failure
-        let op = bridge.db.list_operations_for_file("retrying").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("ad4f26df-8274-576d-b6bf-9e0f85e94e59").unwrap().remove(0);
         assert_eq!(op.attempts, 1, "precondition: one failed attempt, to be retried");
         assert_eq!(
-            bridge.db.get_file("retrying").unwrap().unwrap().status,
+            bridge.db.get_file("ad4f26df-8274-576d-b6bf-9e0f85e94e59").unwrap().unwrap().status,
             FileStatus::Uploading,
             "the row is not rolled back to Error"
         );
-        let entry = bridge.db.get_file("retrying").unwrap().unwrap();
+        let entry = bridge.db.get_file("ad4f26df-8274-576d-b6bf-9e0f85e94e59").unwrap().unwrap();
         let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
         assert_eq!(payload.status, "uploading");
         assert_ne!(payload.capabilities & crate::ipc_socket::CAP_WRITE, 0, "writable");
@@ -62,15 +62,15 @@ use super::*;
     #[tokio::test]
     async fn a_trashing_row_is_never_presented_uploading() {
         let (dir, _sync_root, server, bridge) = rule3_setup([96u8; 32]);
-        seed_uploaded_row(&bridge, &server, "trashed-here");
-        let w = fp_save(&bridge, dir.path(), "trashed-here", "notes.txt", b"edit", "1");
-        bridge.queue_finder_delete("trashed-here", w.token).unwrap();
-        let entry = bridge.db.get_file("trashed-here").unwrap().unwrap();
+        seed_uploaded_row(&bridge, &server, "faee2ad8-326e-568c-9127-c87604262d4a");
+        let w = fp_save(&bridge, dir.path(), "faee2ad8-326e-568c-9127-c87604262d4a", "notes.txt", b"edit", "1");
+        bridge.queue_finder_delete("faee2ad8-326e-568c-9127-c87604262d4a", w.token).unwrap();
+        let entry = bridge.db.get_file("faee2ad8-326e-568c-9127-c87604262d4a").unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Trashing, "precondition: in the trash");
         assert!(
             bridge
                 .db
-                .item_presentation("trashed-here")
+                .item_presentation("faee2ad8-326e-568c-9127-c87604262d4a")
                 .unwrap()
                 .unwrap()
                 .unparked_finder_upload,
@@ -99,16 +99,16 @@ use super::*;
     async fn a_save_that_lands_under_a_trashing_row_keeps_it_in_the_trash() {
         let master_key = [102u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        seed_uploaded_row(&bridge, &server, "lands-in-trash");
-        let w = fp_save(&bridge, dir.path(), "lands-in-trash", "notes.txt", b"edit", "1");
-        bridge.queue_finder_delete("lands-in-trash", w.token).unwrap();
+        seed_uploaded_row(&bridge, &server, "867458ce-f714-50f4-9bc4-3e52405092f6");
+        let w = fp_save(&bridge, dir.path(), "867458ce-f714-50f4-9bc4-3e52405092f6", "notes.txt", b"edit", "1");
+        bridge.queue_finder_delete("867458ce-f714-50f4-9bc4-3e52405092f6", w.token).unwrap();
         // The save is listed first, so it lands before the trash op runs. The seam fires once, at
         // the save's outcome: the trash op has not reached the server yet.
         let seen = Arc::new(Mutex::new(None));
         let (db, server_state, seen_in_seam) = (bridge.db.clone(), Arc::clone(&server.state), Arc::clone(&seen));
         bridge.seams.arm("outcome:before_tx", move || {
             let trashes = server_state.lock().unwrap().trashes.len();
-            let entry = db.get_file("lands-in-trash").unwrap().unwrap();
+            let entry = db.get_file("867458ce-f714-50f4-9bc4-3e52405092f6").unwrap().unwrap();
             let payload = crate::ipc_socket::file_entry_payload_for_db(&db, &entry, "root");
             *seen_in_seam.lock().unwrap() = Some((trashes, entry.status, payload));
         });
@@ -128,19 +128,19 @@ use super::*;
         );
         assert_eq!(payload.parent_identifier, crate::ipc_socket::FP_TRASH_APPLE);
         assert_eq!(
-            bridge.db.get_file("lands-in-trash").unwrap().unwrap().status,
+            bridge.db.get_file("867458ce-f714-50f4-9bc4-3e52405092f6").unwrap().unwrap().status,
             FileStatus::Trashing,
             "still in the trash after the trash op"
         );
         let state = server.finish();
         assert_eq!(
-            state.latest_plaintext("lands-in-trash", master_key),
+            state.latest_plaintext("867458ce-f714-50f4-9bc4-3e52405092f6", master_key),
             b"edit",
             "precondition: the save landed"
         );
         assert_eq!(
             state.trashes,
-            vec!["lands-in-trash".to_string()],
+            vec!["867458ce-f714-50f4-9bc4-3e52405092f6".to_string()],
             "precondition: the trash op ran"
         );
     }
@@ -155,11 +155,11 @@ use super::*;
         let master_key = [97u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
         let db_path = dir.path().join("state.db");
-        seed_uploaded_row(&bridge, &server, "restart");
+        seed_uploaded_row(&bridge, &server, "3eb48f67-982a-5177-b0d6-d836206ae36e");
         let token = fp_save(
             &bridge,
             dir.path(),
-            "restart",
+            "3eb48f67-982a-5177-b0d6-d836206ae36e",
             "notes.txt",
             b"saved before the restart",
             "1",
@@ -173,7 +173,7 @@ use super::*;
             .fail_complete_once
             .insert("session-1".into());
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // every chunk acknowledged, no completion
-        let op_id = bridge.db.list_operations_for_file("restart").unwrap().remove(0).op_id;
+        let op_id = bridge.db.list_operations_for_file("3eb48f67-982a-5177-b0d6-d836206ae36e").unwrap().remove(0).op_id;
         let resume = bridge
             .db
             .get_upload_resume(&op_id)
@@ -192,12 +192,12 @@ use super::*;
         assert_eq!(bridge.db.engine_start_repair().unwrap().claims_cleared, 1);
         bridge.db.reconcile_stale_in_flight_on_startup().unwrap();
         assert_eq!(
-            bridge.db.get_file("restart").unwrap().unwrap().status,
+            bridge.db.get_file("3eb48f67-982a-5177-b0d6-d836206ae36e").unwrap().unwrap().status,
             FileStatus::Uploading,
             "still writable"
         );
         assert_eq!(
-            held_content_version(&bridge, "restart"),
+            held_content_version(&bridge, "3eb48f67-982a-5177-b0d6-d836206ae36e"),
             token,
             "same name: no re-download"
         );
@@ -205,10 +205,10 @@ use super::*;
         let state = server.finish();
         assert_eq!(state.inits.len(), 1, "the session resumed: {:?}", state.init_summary());
         assert_eq!(
-            state.latest_plaintext("restart", master_key),
+            state.latest_plaintext("3eb48f67-982a-5177-b0d6-d836206ae36e", master_key),
             b"saved before the restart"
         );
-        assert_eq!(held_content_version(&bridge, "restart"), token);
+        assert_eq!(held_content_version(&bridge, "3eb48f67-982a-5177-b0d6-d836206ae36e"), token);
     }
 
     /// RF5 / Review Focus 5 (§9.1, m-8): a save of a file that was trashed on the web while the
@@ -218,11 +218,11 @@ use super::*;
     #[tokio::test]
     async fn a_save_to_a_file_trashed_elsewhere_keeps_its_bytes() {
         let (dir, sync_root, server, bridge) = rule3_setup([98u8; 32]);
-        seed_uploaded_row(&bridge, &server, "trashed-on-web");
+        seed_uploaded_row(&bridge, &server, "6b80b427-4f4a-5820-9175-957ef1637092");
         fp_save(
             &bridge,
             dir.path(),
-            "trashed-on-web",
+            "6b80b427-4f4a-5820-9175-957ef1637092",
             "notes.txt",
             b"an edit the person made",
             "1",
@@ -230,7 +230,7 @@ use super::*;
         let trash = crate::api_client::SyncOp {
             seq_id: 7,
             op_type: "file_trash".into(),
-            payload: serde_json::json!({ "id": "trashed-on-web" }),
+            payload: serde_json::json!({ "id": "6b80b427-4f4a-5820-9175-957ef1637092" }),
         };
         apply_sync_op(&bridge, &sync_root, &trash, now_secs(), &mut Vec::new()).unwrap();
         server
@@ -238,9 +238,9 @@ use super::*;
             .lock()
             .unwrap()
             .trashed_files
-            .insert("trashed-on-web".into());
+            .insert("6b80b427-4f4a-5820-9175-957ef1637092".into());
         drain_upload_queue(&bridge, &sync_root).await;
-        let op = bridge.db.list_operations_for_file("trashed-on-web").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("6b80b427-4f4a-5820-9175-957ef1637092").unwrap().remove(0);
         assert!(
             op.attempts < op.max_attempts,
             "class other: retried, not parked at once"
@@ -250,7 +250,7 @@ use super::*;
             b"an edit the person made",
             "the bytes are kept"
         );
-        let entry = bridge.db.get_file("trashed-on-web").unwrap().unwrap();
+        let entry = bridge.db.get_file("6b80b427-4f4a-5820-9175-957ef1637092").unwrap().unwrap();
         let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
         assert_ne!(payload.status, "uploading", "an item in the trash never looks writable");
         assert_eq!(

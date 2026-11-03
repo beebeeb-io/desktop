@@ -10,9 +10,9 @@ use super::*;
         let master_key = [56u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "moved").await;
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "2f5298db-599c-5dab-960f-a0f15f695657").await;
         let rename = FinderWriteTarget {
-            file_id: Some("moved".into()),
+            file_id: Some("2f5298db-599c-5dab-960f-a0f15f695657".into()),
             parent_id: None,
             filename: "renamed.txt".into(),
             rel_path: None,
@@ -22,9 +22,9 @@ use super::*;
             base_version_identifier: Some(token.clone()),
         };
         bridge.queue_file_provider_modify(rename).unwrap();
-        assert_eq!(held_content_version(&bridge, "moved"), token, "rename");
-        bridge.queue_finder_delete("moved", Some(token.clone())).unwrap();
-        assert_eq!(held_content_version(&bridge, "moved"), token, "trash");
+        assert_eq!(held_content_version(&bridge, "2f5298db-599c-5dab-960f-a0f15f695657"), token, "rename");
+        bridge.queue_finder_delete("2f5298db-599c-5dab-960f-a0f15f695657", Some(token.clone())).unwrap();
+        assert_eq!(held_content_version(&bridge, "2f5298db-599c-5dab-960f-a0f15f695657"), token, "trash");
         drop(server.finish());
     }
 
@@ -53,15 +53,15 @@ use super::*;
     /// [`seed_uploaded_row`], nested as a snapshot writes it: `Docs/notes.txt` in `folder-a`
     /// (`Docs`). The folders `folder-b` (`Other`) and `folder-c` (`Third`) exist too.
     pub(super) fn seed_row_in_folder(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str) {
-        seed_folder_row(bridge, "folder-a", "Docs");
-        seed_folder_row(bridge, "folder-b", "Other");
-        seed_folder_row(bridge, "folder-c", "Third");
+        seed_folder_row(bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "Docs");
+        seed_folder_row(bridge, "4d64314e-c797-53d6-b683-0acfb4adc54a", "Other");
+        seed_folder_row(bridge, "5879c118-ab77-5965-882b-ea6a03545476", "Third");
         seed_uploaded_row(bridge, server, file_id);
         let mut entry = bridge.db.get_file(file_id).unwrap().unwrap();
         entry.path = "Docs/notes.txt".into();
         bridge.db.upsert_file(&entry).unwrap();
         let mut contract = bridge.db.get_file_contract_state(file_id).unwrap().unwrap();
-        contract.parent_id = Some("folder-a".into());
+        contract.parent_id = Some("14d2a297-b916-52d6-959d-7cc821b7a978".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
     }
 
@@ -100,13 +100,13 @@ use super::*;
         let master_key = [96u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "moved-save");
+        seed_row_in_folder(&bridge, &server, "62dfcead-faf8-5758-9d18-ef1888c496af");
         let reply = fp_save_moved(
             &bridge,
             dir.path(),
-            "moved-save",
+            "62dfcead-faf8-5758-9d18-ef1888c496af",
             "renamed.txt",
-            "folder-b",
+            "4d64314e-c797-53d6-b683-0acfb4adc54a",
             b"saved under a new name",
             "1",
         );
@@ -116,14 +116,14 @@ use super::*;
         };
         assert_eq!(
             (item.filename.as_str(), item.parent_identifier.as_str()),
-            ("renamed.txt", "folder-b"),
+            ("renamed.txt", "4d64314e-c797-53d6-b683-0acfb4adc54a"),
             "the reply describes the item as the person left it"
         );
         assert_eq!(
-            name_parent_status(&bridge, "moved-save"),
+            name_parent_status(&bridge, "62dfcead-faf8-5758-9d18-ef1888c496af"),
             (
                 "Other/renamed.txt".into(),
-                Some("folder-b".into()),
+                Some("4d64314e-c797-53d6-b683-0acfb4adc54a".into()),
                 FileStatus::Uploading
             ),
             "the accept applied the name and the parent, with the full relative path"
@@ -131,24 +131,24 @@ use super::*;
 
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
-            name_parent_status(&bridge, "moved-save"),
-            ("Other/renamed.txt".into(), Some("folder-b".into()), FileStatus::Local),
+            name_parent_status(&bridge, "62dfcead-faf8-5758-9d18-ef1888c496af"),
+            ("Other/renamed.txt".into(), Some("4d64314e-c797-53d6-b683-0acfb4adc54a".into()), FileStatus::Local),
             "the landing keeps them"
         );
         let state = server.finish();
         assert_eq!(
-            state.latest_plaintext("moved-save", master_key),
+            state.latest_plaintext("62dfcead-faf8-5758-9d18-ef1888c496af", master_key),
             b"saved under a new name"
         );
         let parents: Vec<_> = state
             .patches
             .iter()
-            .filter(|(id, _)| id == "moved-save")
+            .filter(|(id, _)| id == "62dfcead-faf8-5758-9d18-ef1888c496af")
             .map(|(_, body)| body["parent_id"].clone())
             .collect();
         assert_eq!(
             parents,
-            vec![serde_json::json!("folder-b")],
+            vec![serde_json::json!("4d64314e-c797-53d6-b683-0acfb4adc54a")],
             "the move reached the server"
         );
     }
@@ -164,7 +164,7 @@ use super::*;
         let master_key = [97u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "two-moves");
+        seed_row_in_folder(&bridge, &server, "cba7146f-3770-5f4d-a1de-fc379ad3c342");
         // The second save's first chunk fails once, so the first save lands alone.
         server
             .state
@@ -172,28 +172,28 @@ use super::*;
             .unwrap()
             .fail_first_chunk_once
             .insert("session-2".into());
-        let first = fp_save_moved(&bridge, dir.path(), "two-moves", "first.txt", "folder-b", b"first", "1");
+        let first = fp_save_moved(&bridge, dir.path(), "cba7146f-3770-5f4d-a1de-fc379ad3c342", "first.txt", "4d64314e-c797-53d6-b683-0acfb4adc54a", b"first", "1");
         fp_save_moved(
             &bridge,
             dir.path(),
-            "two-moves",
+            "cba7146f-3770-5f4d-a1de-fc379ad3c342",
             "second.txt",
-            "folder-c",
+            "5879c118-ab77-5965-882b-ea6a03545476",
             b"second",
             &first.token.unwrap(),
         );
 
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
         assert_eq!(
-            server.state.lock().unwrap().files["two-moves"].versions.len(),
+            server.state.lock().unwrap().files["cba7146f-3770-5f4d-a1de-fc379ad3c342"].versions.len(),
             2,
             "the first save landed, the second did not"
         );
         assert_eq!(
-            name_parent_status(&bridge, "two-moves"),
+            name_parent_status(&bridge, "cba7146f-3770-5f4d-a1de-fc379ad3c342"),
             (
                 "Third/second.txt".into(),
-                Some("folder-c".into()),
+                Some("5879c118-ab77-5965-882b-ea6a03545476".into()),
                 FileStatus::Uploading
             ),
             "the first landing kept the later save's name and parent"
@@ -201,20 +201,20 @@ use super::*;
 
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
-            name_parent_status(&bridge, "two-moves"),
-            ("Third/second.txt".into(), Some("folder-c".into()), FileStatus::Local)
+            name_parent_status(&bridge, "cba7146f-3770-5f4d-a1de-fc379ad3c342"),
+            ("Third/second.txt".into(), Some("5879c118-ab77-5965-882b-ea6a03545476".into()), FileStatus::Local)
         );
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("two-moves", master_key), b"second");
+        assert_eq!(state.latest_plaintext("cba7146f-3770-5f4d-a1de-fc379ad3c342", master_key), b"second");
         let parents: Vec<_> = state
             .patches
             .iter()
-            .filter(|(id, _)| id == "two-moves")
+            .filter(|(id, _)| id == "cba7146f-3770-5f4d-a1de-fc379ad3c342")
             .map(|(_, body)| body["parent_id"].clone())
             .collect();
         assert_eq!(
             parents,
-            vec![serde_json::json!("folder-b"), serde_json::json!("folder-c")],
+            vec![serde_json::json!("4d64314e-c797-53d6-b683-0acfb4adc54a"), serde_json::json!("5879c118-ab77-5965-882b-ea6a03545476")],
             "each save's parent, in order"
         );
     }
@@ -229,22 +229,22 @@ use super::*;
         let master_key = [98u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "parked-move");
+        seed_row_in_folder(&bridge, &server, "13152f4d-7b00-585f-a154-970b16533910");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("parked-move".into(), "403 Forbidden");
-        fp_save_moved(&bridge, dir.path(), "parked-move", "kept.txt", "folder-b", b"kept", "1");
+            .insert("13152f4d-7b00-585f-a154-970b16533910".into(), "403 Forbidden");
+        fp_save_moved(&bridge, dir.path(), "13152f4d-7b00-585f-a154-970b16533910", "kept.txt", "4d64314e-c797-53d6-b683-0acfb4adc54a", b"kept", "1");
 
         drain_upload_queue(&bridge, &sync_root).await;
-        let op = bridge.db.list_operations_for_file("parked-move").unwrap();
+        let op = bridge.db.list_operations_for_file("13152f4d-7b00-585f-a154-970b16533910").unwrap();
         assert_eq!(op.len(), 1, "the save is kept, parked");
         assert_eq!(op[0].attempts, op[0].max_attempts, "parked");
         assert_eq!(
-            name_parent_status(&bridge, "parked-move"),
-            ("Other/kept.txt".into(), Some("folder-b".into()), FileStatus::Error)
+            name_parent_status(&bridge, "13152f4d-7b00-585f-a154-970b16533910"),
+            ("Other/kept.txt".into(), Some("4d64314e-c797-53d6-b683-0acfb4adc54a".into()), FileStatus::Error)
         );
         drop(server.finish());
     }
@@ -293,8 +293,8 @@ use super::*;
         let master_key = [99u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_folder_row(&bridge, "r9-folder", "r9-folder");
-        let created = fp_create_in(&bridge, dir.path(), "r9-folder", "n1.txt", b"nested");
+        seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "1ad409cd-dac8-56e2-bcd5-cef1881546f4");
+        let created = fp_create_in(&bridge, dir.path(), "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "n1.txt", b"nested");
         let p = created.outcome_file_id();
         let ipc = crate::ipc_socket::write_outcome_response("create", &bridge.db, Ok(created));
         let crate::ipc_socket::IpcResponse::WriteQueued { item: Some(item), .. } = ipc else {
@@ -302,14 +302,14 @@ use super::*;
         };
         assert_eq!(
             (item.filename.as_str(), item.parent_identifier.as_str()),
-            ("n1.txt", "r9-folder"),
+            ("n1.txt", "1ad409cd-dac8-56e2-bcd5-cef1881546f4"),
             "the reply places the new file in its folder, never at the top level"
         );
         assert_eq!(
             name_parent_status(&bridge, &p),
             (
                 "r9-folder/n1.txt".into(),
-                Some("r9-folder".into()),
+                Some("1ad409cd-dac8-56e2-bcd5-cef1881546f4".into()),
                 FileStatus::Uploading
             )
         );
@@ -318,7 +318,7 @@ use super::*;
             "not listed at the top level while queued"
         );
         assert_eq!(
-            listed_under(&bridge, "r9-folder"),
+            listed_under(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4"),
             vec![p.clone()],
             "listed in its folder"
         );
@@ -332,14 +332,14 @@ use super::*;
         );
         assert_eq!(
             name_parent_status(&bridge, &s),
-            ("r9-folder/n1.txt".into(), Some("r9-folder".into()), FileStatus::Local),
+            ("r9-folder/n1.txt".into(), Some("1ad409cd-dac8-56e2-bcd5-cef1881546f4".into()), FileStatus::Local),
             "the landing keeps the full relative path and the parent"
         );
         assert!(
             !listed_under(&bridge, FP_ROOT).contains(&s),
             "not at the top level once landed"
         );
-        assert_eq!(listed_under(&bridge, "r9-folder"), vec![s.clone()]);
+        assert_eq!(listed_under(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4"), vec![s.clone()]);
         let state = server.finish();
         assert_eq!(state.latest_plaintext(&s, master_key), b"nested");
         let parents: Vec<_> = state
@@ -350,7 +350,7 @@ use super::*;
             .collect();
         assert_eq!(
             parents,
-            vec![serde_json::json!("r9-folder")],
+            vec![serde_json::json!("1ad409cd-dac8-56e2-bcd5-cef1881546f4")],
             "the server file is in the folder"
         );
     }

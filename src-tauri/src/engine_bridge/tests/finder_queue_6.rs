@@ -94,24 +94,24 @@ use super::*;
     #[tokio::test]
     async fn a_finder_write_the_server_keeps_refusing_parks_when_its_attempts_are_used_up() {
         let (dir, sync_root, server, bridge) = rule3_setup([157u8; 32]);
-        seed_uploaded_row(&bridge, &server, "bad-request");
+        seed_uploaded_row(&bridge, &server, "6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("bad-request".into(), "400 Bad Request");
+            .insert("6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68".into(), "400 Bad Request");
         fp_save(
             &bridge,
             dir.path(),
-            "bad-request",
+            "6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68",
             "notes.txt",
             b"a save the server refuses",
             "1",
         );
         let op_id = bridge
             .db
-            .list_operations_for_file("bad-request")
+            .list_operations_for_file("6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68")
             .unwrap()
             .remove(0)
             .op_id;
@@ -125,7 +125,7 @@ use super::*;
                 parked_at = Some(pass);
                 assert_eq!(
                     outcome.invalidated_item_ids,
-                    vec!["bad-request".to_string()],
+                    vec!["6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68".to_string()],
                     "the attempt that used them up is in the tick's signal"
                 );
             }
@@ -134,7 +134,7 @@ use super::*;
         let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
         assert_eq!(op.attempts, op.max_attempts);
         assert_eq!(
-            bridge.db.get_file("bad-request").unwrap().unwrap().status,
+            bridge.db.get_file("6e3e2a13-624a-5cd7-b46d-d9ff5fa6ee68").unwrap().unwrap().status,
             FileStatus::Error,
             "presented read-only"
         );
@@ -306,18 +306,18 @@ use super::*;
     #[tokio::test]
     async fn a_fetch_served_from_the_queue_records_its_destination() {
         let (dir, _sync_root, server, bridge) = rule3_setup([150u8; 32]);
-        seed_uploaded_row(&bridge, &server, "recorded-dest");
-        fp_save(&bridge, dir.path(), "recorded-dest", "notes.txt", b"queued bytes", "1");
+        seed_uploaded_row(&bridge, &server, "8d8e18bd-71a1-5b6f-8e2a-afca0865d12b");
+        fp_save(&bridge, dir.path(), "8d8e18bd-71a1-5b6f-8e2a-afca0865d12b", "notes.txt", b"queued bytes", "1");
         let dest = dir.path().join("fetch").join("notes.txt");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         assert_eq!(
             bridge
-                .serve_hydrate("recorded-dest", &dest, &[dir.path()], None)
+                .serve_hydrate("8d8e18bd-71a1-5b6f-8e2a-afca0865d12b", &dest, &[dir.path()], None)
                 .await
                 .unwrap(),
             HydrateSource::Queue
         );
-        let contract = bridge.db.get_file_contract_state("recorded-dest").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state("8d8e18bd-71a1-5b6f-8e2a-afca0865d12b").unwrap().unwrap();
         assert_eq!(
             contract.cache_path.as_deref(),
             Some(dest.to_string_lossy().as_ref()),
@@ -325,7 +325,7 @@ use super::*;
         );
         assert_eq!(contract.cache_bytes, 12);
         assert_eq!(
-            bridge.db.get_file("recorded-dest").unwrap().unwrap().status,
+            bridge.db.get_file("8d8e18bd-71a1-5b6f-8e2a-afca0865d12b").unwrap().unwrap().status,
             FileStatus::Uploading,
             "the upload's status stays"
         );

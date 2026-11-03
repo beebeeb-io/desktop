@@ -39,7 +39,7 @@ fn land_request_bundles_the_landing_inputs() {
     let op = PendingOperation {
         op_id: "op-1".to_string(),
         kind: OperationKind::UploadVersion,
-        file_id: Some("file-1".to_string()),
+        file_id: Some("891ade83-2178-5932-91bd-4bea46844faa".to_string()),
         parent_id: None,
         target_path: None,
         metadata_json: None,
@@ -56,7 +56,7 @@ fn land_request_bundles_the_landing_inputs() {
     };
     let mut post_complete_errors = vec!["thumbnail: skipped".to_string()];
     let request = LandRequest {
-        local_file_id: LocalFileId::new("file-1"),
+        local_file_id: LocalFileId::new("891ade83-2178-5932-91bd-4bea46844faa"),
         op: &op,
         claim: None,
         server_file_id: ServerFileId::new("server-file-1"),
@@ -70,7 +70,7 @@ fn land_request_bundles_the_landing_inputs() {
         post_complete_errors: &mut post_complete_errors,
         sync_root: Path::new("/sync"),
     };
-    assert_eq!(request.local_file_id.as_str(), "file-1");
+    assert_eq!(request.local_file_id.as_str(), "891ade83-2178-5932-91bd-4bea46844faa");
     assert_eq!(request.op.op_id, "op-1");
     assert!(request.claim.is_none());
     assert_eq!(request.server_file_id.as_str(), "server-file-1");

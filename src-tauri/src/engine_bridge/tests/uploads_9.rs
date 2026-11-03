@@ -7,12 +7,12 @@ use super::*;
     #[tokio::test]
     async fn i1_a_landing_with_a_later_write_queued_keeps_it_uploading() {
         let (dir, sync_root, server, bridge) = rule3_setup([80u8; 32]);
-        seed_uploaded_row(&bridge, &server, "kept-up");
-        let a = fp_save(&bridge, dir.path(), "kept-up", "notes.txt", b"A", "1");
+        seed_uploaded_row(&bridge, &server, "e3ab802e-f604-5e5c-a66b-334950ef0e77");
+        let a = fp_save(&bridge, dir.path(), "e3ab802e-f604-5e5c-a66b-334950ef0e77", "notes.txt", b"A", "1");
         let b = fp_save(
             &bridge,
             dir.path(),
-            "kept-up",
+            "e3ab802e-f604-5e5c-a66b-334950ef0e77",
             "notes.txt",
             b"A, and B's longer bytes",
             a.token.as_deref().unwrap(),
@@ -24,7 +24,7 @@ use super::*;
             .fail_first_chunk_once
             .insert("session-2".into()); // B backs off
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
-        let entry = bridge.db.get_file("kept-up").unwrap().unwrap();
+        let entry = bridge.db.get_file("e3ab802e-f604-5e5c-a66b-334950ef0e77").unwrap().unwrap();
         let payload = crate::ipc_socket::file_entry_payload_for_db(&bridge.db, &entry, "root");
         assert_eq!(payload.status, "uploading");
         assert_eq!(
@@ -36,7 +36,7 @@ use super::*;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("kept-up"), json!(1), 201), (json!("kept-up"), json!(2), 201)],
+            vec![(json!("e3ab802e-f604-5e5c-a66b-334950ef0e77"), json!(1), 201), (json!("e3ab802e-f604-5e5c-a66b-334950ef0e77"), json!(2), 201)],
             "precondition: A landed and B's attempt began"
         );
     }
@@ -47,12 +47,12 @@ use super::*;
     #[tokio::test]
     async fn a_landing_with_a_later_write_queued_is_uploading_when_its_outcome_is_recorded() {
         let (dir, sync_root, server, bridge) = rule3_setup([99u8; 32]);
-        seed_uploaded_row(&bridge, &server, "outcome");
-        let a = fp_save(&bridge, dir.path(), "outcome", "notes.txt", b"A", "1");
+        seed_uploaded_row(&bridge, &server, "1f0cf4ce-d5e7-526f-98b9-3696300fe8d2");
+        let a = fp_save(&bridge, dir.path(), "1f0cf4ce-d5e7-526f-98b9-3696300fe8d2", "notes.txt", b"A", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "outcome",
+            "1f0cf4ce-d5e7-526f-98b9-3696300fe8d2",
             "notes.txt",
             b"A B",
             a.token.as_deref().unwrap(),
@@ -60,8 +60,8 @@ use super::*;
         let seen = Arc::new(Mutex::new(None));
         let (db, seen_in_seam) = (bridge.db.clone(), Arc::clone(&seen));
         bridge.seams.arm("outcome:before_tx", move || {
-            let ops_left = db.list_operations_for_file("outcome").unwrap().len();
-            let status = db.get_file("outcome").unwrap().unwrap().status;
+            let ops_left = db.list_operations_for_file("1f0cf4ce-d5e7-526f-98b9-3696300fe8d2").unwrap().len();
+            let status = db.get_file("1f0cf4ce-d5e7-526f-98b9-3696300fe8d2").unwrap().unwrap().status;
             *seen_in_seam.lock().unwrap() = Some((ops_left, status));
         });
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
@@ -169,20 +169,20 @@ use super::*;
     #[tokio::test]
     async fn a_landing_whose_only_later_write_parked_leaves_the_parked_status() {
         let (dir, sync_root, server, bridge) = rule3_setup([101u8; 32]);
-        seed_uploaded_row(&bridge, &server, "modified");
-        fp_save(&bridge, dir.path(), "modified", "notes.txt", b"A", "1");
+        seed_uploaded_row(&bridge, &server, "cb1e6a6c-0825-5070-8a3f-3a919b21e080");
+        fp_save(&bridge, dir.path(), "cb1e6a6c-0825-5070-8a3f-3a919b21e080", "notes.txt", b"A", "1");
         let no_base = dir.path().join("no-base.txt");
         std::fs::write(&no_base, b"A, and B").unwrap();
         bridge
-            .queue_file_provider_modify(finder_file_target(Some("modified"), "notes.txt", &no_base, None))
+            .queue_file_provider_modify(finder_file_target(Some("cb1e6a6c-0825-5070-8a3f-3a919b21e080"), "notes.txt", &no_base, None))
             .unwrap();
-        let ops = bridge.db.list_operations_for_file("modified").unwrap();
+        let ops = bridge.db.list_operations_for_file("cb1e6a6c-0825-5070-8a3f-3a919b21e080").unwrap();
         assert_eq!(
             ops[1].attempts, ops[1].max_attempts,
             "precondition: B parked at its accept"
         );
         assert_eq!(
-            bridge.db.get_file("modified").unwrap().unwrap().status,
+            bridge.db.get_file("cb1e6a6c-0825-5070-8a3f-3a919b21e080").unwrap().unwrap().status,
             FileStatus::Uploading,
             "precondition: A still uploads"
         );
@@ -205,7 +205,7 @@ use super::*;
         let server_id = state
             .files_with_content()
             .into_iter()
-            .find(|id| id != "modified")
+            .find(|id| id != "cb1e6a6c-0825-5070-8a3f-3a919b21e080")
             .expect("the create landed");
         assert_eq!(server_id, provisional, "the create landed under the id it chose");
         let parked = bridge.db.get_operation(&successor.op_id).unwrap().unwrap();
@@ -219,12 +219,12 @@ use super::*;
             "a parked upload presents error"
         );
         assert_eq!(
-            state.latest_plaintext("modified", [101u8; 32]),
+            state.latest_plaintext("cb1e6a6c-0825-5070-8a3f-3a919b21e080", [101u8; 32]),
             b"A",
             "precondition: A landed"
         );
         assert_eq!(
-            bridge.db.get_file("modified").unwrap().unwrap().status,
+            bridge.db.get_file("cb1e6a6c-0825-5070-8a3f-3a919b21e080").unwrap().unwrap().status,
             FileStatus::Error,
             "after a modify's landing, its parked successor presents error"
         );
@@ -239,21 +239,21 @@ use super::*;
     async fn an_old_timestamp_base_parks_at_its_first_attempt() {
         // The two QA shapes (spec §2 item 11); this is the first.
         let (dir, sync_root, server, bridge) = rule3_setup([99u8; 32]);
-        seed_uploaded_row(&bridge, &server, "qa-89da");
+        seed_uploaded_row(&bridge, &server, "1db7b53d-bbcf-5bd0-ae6d-c144cbfaaaab");
         // The way the round-3 QA build queued it: through the shared entry point, no write id,
         // a base that is a wall-clock second (QA/inv2-statedb-copy-queries.log).
         let contents = dir.path().join("old.txt");
         std::fs::write(&contents, b"forty bytes the old build queued, here.").unwrap();
         bridge
             .queue_finder_modify(finder_file_target(
-                Some("qa-89da"),
+                Some("1db7b53d-bbcf-5bd0-ae6d-c144cbfaaaab"),
                 "notes.txt",
                 &contents,
                 Some("1791550250".into()),
             ))
             .unwrap();
         assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 1);
-        let op = bridge.db.list_operations_for_file("qa-89da").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("1db7b53d-bbcf-5bd0-ae6d-c144cbfaaaab").unwrap().remove(0);
         assert_eq!(op.base_version, Some(1_791_550_250), "no re-base");
         assert_eq!(
             bridge.db.finder_write(&op.op_id).unwrap().unwrap().origin,
@@ -263,7 +263,7 @@ use super::*;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("qa-89da"), json!(1_791_550_250_i64), 409)],
+            vec![(json!("1db7b53d-bbcf-5bd0-ae6d-c144cbfaaaab"), json!(1_791_550_250_i64), 409)],
             "one init with the timestamp base"
         );
         let op = bridge.db.get_operation(&op.op_id).unwrap().unwrap();
@@ -273,7 +273,7 @@ use super::*;
             "its bytes are kept"
         );
         assert!(
-            bridge.db.item_presentation("qa-89da").unwrap().unwrap().held.is_none(),
+            bridge.db.item_presentation("1db7b53d-bbcf-5bd0-ae6d-c144cbfaaaab").unwrap().unwrap().held.is_none(),
             "no held token"
         );
     }
@@ -296,7 +296,7 @@ use super::*;
         std::fs::create_dir_all(&old_root).unwrap();
         let mut queued = Vec::new();
         for (file_id, bytes, base) in [
-            ("moved-on", &b"an earlier build's edit of version 1"[..], "1"),
+            ("a3c0af61-de27-59e9-9c0b-6a9c538216d6", &b"an earlier build's edit of version 1"[..], "1"),
             ("old-good", &b"an earlier build's save"[..], "1"),
         ] {
             seed_uploaded_row(&bridge, &server, file_id);
@@ -334,7 +334,7 @@ use super::*;
         let (a_op, a_copy, a_bytes) = queued[0].clone();
         let (b_op, b_copy, b_bytes) = queued[1].clone();
         // (a)'s file changed elsewhere: the server is at version 2, which this row has not seen.
-        server.seed_file("moved-on", 2);
+        server.seed_file("a3c0af61-de27-59e9-9c0b-6a9c538216d6", 2);
 
         assert_eq!(bridge.db.mark_earlier_build_uploads().unwrap(), 2);
         for (op_id, copy) in [(&a_op, &a_copy), (&b_op, &b_copy)] {
@@ -348,7 +348,7 @@ use super::*;
         // A newer save of (a)'s file, on the version the system holds, queued behind it. Had the
         // marking minted (a) as the accept does (a held token and the minted origin), rule 3 would
         // make this save (a)'s successor, and its claim would hand (a) over.
-        fp_save(&bridge, dir.path(), "moved-on", "notes.txt", b"a newer save", "1");
+        fp_save(&bridge, dir.path(), "a3c0af61-de27-59e9-9c0b-6a9c538216d6", "notes.txt", b"a newer save", "1");
 
         let logs = capture_logs_async(async {
             drain_upload_queue(&bridge, &sync_root).await;
@@ -359,9 +359,9 @@ use super::*;
         assert_eq!(
             state.init_summary(),
             vec![
-                (json!("moved-on"), json!(1), 409),
+                (json!("a3c0af61-de27-59e9-9c0b-6a9c538216d6"), json!(1), 409),
                 (json!("old-good"), json!(1), 201),
-                (json!("moved-on"), json!(1), 409)
+                (json!("a3c0af61-de27-59e9-9c0b-6a9c538216d6"), json!(1), 409)
             ],
             "(a) refused once, (b) uploaded once, and the newer save is sent on its own base"
         );
@@ -387,7 +387,7 @@ use super::*;
                 .any(|(path, _, completed)| path == a_copy.to_string_lossy().as_ref() && !completed),
             "(a)'s journal row stays, not released"
         );
-        let ops = bridge.db.list_operations_for_file("moved-on").unwrap();
+        let ops = bridge.db.list_operations_for_file("a3c0af61-de27-59e9-9c0b-6a9c538216d6").unwrap();
         assert_eq!(ops.len(), 2, "(a) and the newer save both remain: no hand-over");
         assert!(ops.iter().all(|op| op.attempts == op.max_attempts), "both parked");
         assert_eq!(

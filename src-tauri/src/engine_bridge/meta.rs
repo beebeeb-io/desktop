@@ -85,16 +85,14 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
         )?;
         return Ok((key, metadata.chunk_format));
     }
-    // P2-8/P2-2: a foreign id has no derived key, and neither has text that is
-    // not a canonical id at all — unless this device already holds a row under
-    // that id (legacy or synthetic stored ids). Attacker-chosen text from an op
-    // or an IPC argument names no row, so it gets no key; the read twin refuses
+    // P2-8/P2-1: a foreign id has no derived key, and neither has text that is
+    // not a canonical id at all — whatever row the server planted under it.
+    // Attacker-chosen text from an op or an IPC argument names no row, and a
+    // derivation under it would be a key nobody can open; the read twin refuses
     // it too.
-    if beebeeb_core::item_id::item_class(id).is_err() && db.get_file(id)?.is_none() {
-        return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
-    }
-    if beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Foreign) {
-        return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
+    match beebeeb_core::item_id::item_class(id) {
+        Ok(beebeeb_core::item_id::ItemClass::Owner) => {}
+        _ => return Err(EngineError::from(anyhow::anyhow!("item key is unavailable"))),
     }
     Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))
 }

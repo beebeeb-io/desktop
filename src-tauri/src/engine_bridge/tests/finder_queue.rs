@@ -52,13 +52,13 @@ use super::*;
     async fn test_process_due_operations_records_retry_for_upload_worker_handoff() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
+        seed_bridge_row(&bridge, "891ade83-2178-5932-91bd-4bea46844faa", "Draft.txt", None, FileStatus::Uploading, 0);
         bridge
             .db
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("file-1".into()),
+                file_id: Some("891ade83-2178-5932-91bd-4bea46844faa".into()),
                 parent_id: None,
                 target_path: Some("Draft.txt".into()),
                 metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
@@ -92,7 +92,7 @@ use super::*;
                 .contains("staged upload payload is missing")
         );
         assert_eq!(
-            bridge.db.get_file("file-1").unwrap().unwrap().status,
+            bridge.db.get_file("891ade83-2178-5932-91bd-4bea46844faa").unwrap().unwrap().status,
             FileStatus::Error,
             "a failed/deferred upload must not remain counted as active Uploading"
         );
@@ -122,7 +122,7 @@ use super::*;
         }
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "file-1", "Draft.txt", None, FileStatus::Uploading, 0);
+        seed_bridge_row(&bridge, "891ade83-2178-5932-91bd-4bea46844faa", "Draft.txt", None, FileStatus::Uploading, 0);
         let locked = dir.path().join("staged-403");
         std::fs::create_dir(&locked).unwrap();
         let payload = locked.join("payload");
@@ -138,7 +138,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("file-1".into()),
+                file_id: Some("891ade83-2178-5932-91bd-4bea46844faa".into()),
                 parent_id: None,
                 target_path: Some("Draft.txt".into()),
                 metadata_json: Some(r#"{"operation":"upload_version"}"#.into()),
@@ -197,7 +197,7 @@ use super::*;
         let _registration = Registration(root.clone());
         let local = root.join("report.txt");
         std::fs::write(&local, b"live upload payload").unwrap();
-        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&local, "local-file-1").unwrap();
+        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&local, "6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap();
         use std::os::windows::fs::OpenOptionsExt;
         let held = std::fs::OpenOptions::new()
             .read(true)
@@ -214,8 +214,8 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-upload-live".into(),
                 kind: OperationKind::UploadVersion,
-                file_id: Some("local-file-1".into()),
-                parent_id: Some("folder-1".into()),
+                file_id: Some("6cc778db-0fc3-5a51-927a-b6e4a06d4864".into()),
+                parent_id: Some("846c7080-936d-5ffd-879c-39f630bfb30d".into()),
                 target_path: Some("report.txt".into()),
                 metadata_json: Some(
                     serde_json::json!({
@@ -247,7 +247,7 @@ use super::*;
             "completed payload proof must survive a busy identity stamp"
         );
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        assert!(bridge.db.get_file("local-file-1").unwrap().is_none());
+        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_none());
         // SF-0001 (L13): the create lands under the id it sent to init.
         let item_id = {
             let recorded = server.requests.lock().unwrap();
@@ -292,7 +292,7 @@ use super::*;
             "a create sends the canonical id this device chose, never none"
         );
         assert_eq!(init_body["file_size_bytes"], 19);
-        assert_eq!(init_body["parent_id"], "folder-1");
+        assert_eq!(init_body["parent_id"], "846c7080-936d-5ffd-879c-39f630bfb30d");
         assert_eq!(init_body["chunk_count"], 1);
         assert_eq!(requests[1].method, "PATCH");
         assert_eq!(requests[2].method, "PUT");

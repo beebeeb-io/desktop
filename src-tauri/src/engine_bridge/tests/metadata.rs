@@ -106,7 +106,7 @@ use super::*;
             .enqueue_operation(&PendingOperation {
                 op_id: "op-pin".into(),
                 kind: OperationKind::PinTree,
-                file_id: Some("folder-1".into()),
+                file_id: Some("846c7080-936d-5ffd-879c-39f630bfb30d".into()),
                 parent_id: None,
                 target_path: None,
                 metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
@@ -125,7 +125,7 @@ use super::*;
 
         let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
         assert_eq!(outcome.completed_op_ids, vec!["op-pin".to_string()]);
-        assert_eq!(outcome.invalidated_item_ids, vec!["folder-1".to_string()]);
+        assert_eq!(outcome.invalidated_item_ids, vec!["846c7080-936d-5ffd-879c-39f630bfb30d".to_string()]);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
     }
 
@@ -151,7 +151,7 @@ use super::*;
         db.enqueue_operation(&PendingOperation {
             op_id: "op-pin-1".into(),
             kind: OperationKind::PinTree,
-            file_id: Some("folder-1".into()),
+            file_id: Some("846c7080-936d-5ffd-879c-39f630bfb30d".into()),
             parent_id: None,
             target_path: None,
             metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
@@ -170,7 +170,7 @@ use super::*;
         db.enqueue_operation(&PendingOperation {
             op_id: "op-pin-2".into(),
             kind: OperationKind::PinTree,
-            file_id: Some("folder-2".into()),
+            file_id: Some("45c5d6dd-c5d7-554c-af8a-485f4bc39549".into()),
             parent_id: None,
             target_path: None,
             metadata_json: Some(r#"{"operation":"pin_tree","pinned":true}"#.into()),
@@ -236,7 +236,7 @@ use super::*;
         assert!(create_result.is_err(), "queue_finder_create must refuse while stopping");
 
         let modify_result = bridge.queue_finder_modify(FinderWriteTarget {
-            file_id: Some("file-1".into()),
+            file_id: Some("891ade83-2178-5932-91bd-4bea46844faa".into()),
             parent_id: None,
             filename: "renamed.txt".into(),
             rel_path: None,
@@ -247,7 +247,7 @@ use super::*;
         });
         assert!(modify_result.is_err(), "queue_finder_modify must refuse while stopping");
 
-        let delete_result = bridge.queue_finder_delete("file-1", None);
+        let delete_result = bridge.queue_finder_delete("891ade83-2178-5932-91bd-4bea46844faa", None);
         assert!(delete_result.is_err(), "queue_finder_delete must refuse while stopping");
 
         assert!(
@@ -264,8 +264,8 @@ use super::*;
     fn every_finder_change_after_the_close_queues_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "folder-a", "A", None, FileStatus::Local, 0);
-        seed_bridge_row(&bridge, "in-a", "A/x.txt", Some("folder-a"), FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "A", None, FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6", "A/x.txt", Some("14d2a297-b916-52d6-959d-7cc821b7a978"), FileStatus::Local, 0);
         let target = |file_id: Option<&str>, parent_id: Option<&str>, filename: &str, kind: FinderWriteItemKind| {
             FinderWriteTarget {
                 file_id: file_id.map(str::to_string),
@@ -283,26 +283,26 @@ use super::*;
             (
                 "a rename",
                 bridge.queue_finder_modify(target(
-                    Some("in-a"),
-                    Some("folder-a"),
+                    Some("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6"),
+                    Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
                     "renamed.txt",
                     FinderWriteItemKind::File,
                 )),
             ),
             (
                 "a move to the top level",
-                bridge.queue_finder_modify(target(Some("in-a"), None, "x.txt", FinderWriteItemKind::File)),
+                bridge.queue_finder_modify(target(Some("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6"), None, "x.txt", FinderWriteItemKind::File)),
             ),
             (
                 "a folder create",
                 bridge.queue_finder_create(target(
                     None,
-                    Some("folder-a"),
+                    Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
                     "New folder",
                     FinderWriteItemKind::Folder,
                 )),
             ),
-            ("a delete", bridge.queue_finder_delete("in-a", None)),
+            ("a delete", bridge.queue_finder_delete("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6", None)),
         ];
         for (what, result) in changes {
             let error = result.expect_err(what);
@@ -319,7 +319,7 @@ use super::*;
             bridge.db.get_file_by_path("A/New folder").unwrap().is_none(),
             "the refused folder create left no row"
         );
-        let row = bridge.db.get_file("in-a").unwrap().unwrap();
+        let row = bridge.db.get_file("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6").unwrap().unwrap();
         assert_eq!(
             (row.path.as_str(), row.status),
             ("A/x.txt", FileStatus::Local),
@@ -328,8 +328,8 @@ use super::*;
         bridge.db.reopen_finder_accepts().unwrap();
         bridge
             .queue_finder_modify(target(
-                Some("in-a"),
-                Some("folder-a"),
+                Some("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6"),
+                Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
                 "renamed.txt",
                 FinderWriteItemKind::File,
             ))
@@ -340,7 +340,7 @@ use super::*;
         bridge
             .queue_finder_create(target(
                 None,
-                Some("folder-a"),
+                Some("14d2a297-b916-52d6-959d-7cc821b7a978"),
                 "New folder",
                 FinderWriteItemKind::Folder,
             ))
@@ -352,7 +352,7 @@ use super::*;
             .expect("the folder create's row");
         assert_eq!(
             (folder.item_kind, folder.parent_id.as_deref()),
-            (ItemKind::Folder, Some("folder-a")),
+            (ItemKind::Folder, Some("14d2a297-b916-52d6-959d-7cc821b7a978")),
             "the folder create's row is a folder, under its parent"
         );
         assert_eq!(bridge.db.list_due_operations(i64::MAX).unwrap().len(), 2);
@@ -366,7 +366,7 @@ use super::*;
     fn a_file_provider_save_after_the_close_is_retried_later() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_bridge_row(&bridge, "in-a", "x.txt", None, FileStatus::Local, 0);
+        seed_bridge_row(&bridge, "7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6", "x.txt", None, FileStatus::Local, 0);
         let contents = dir.path().join("new.txt");
         std::fs::write(&contents, b"new bytes").unwrap();
         bridge.db.close_finder_accepts().unwrap();
@@ -379,7 +379,7 @@ use super::*;
             (
                 "a save",
                 "modify",
-                bridge.queue_file_provider_modify(finder_file_target(Some("in-a"), "x.txt", &contents, None)),
+                bridge.queue_file_provider_modify(finder_file_target(Some("7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6"), "x.txt", &contents, None)),
             ),
         ];
         for (what, op, result) in saves {
@@ -408,6 +408,6 @@ use super::*;
             .into_iter()
             .map(|row| row.file_id)
             .collect();
-        assert_eq!(rows, ["in-a"], "the refused new file left no row");
+        assert_eq!(rows, ["7fe7a0c1-6f3f-5fbe-8900-d7feca5f43d6"], "the refused new file left no row");
     }
 

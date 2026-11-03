@@ -7,15 +7,15 @@ use super::*;
         // at the claim and runs. N's `init` is answered "in progress", a plain retry, which
         // adds no id of its own.
         let (dir, sync_root, server, bridge) = rule3_setup([124u8; 32]);
-        seed_uploaded_row(&bridge, &server, "handover-signal");
-        let w = fp_save(&bridge, dir.path(), "handover-signal", "notes.txt", b"W", "1");
-        let w_op = bridge.db.list_operations_for_file("handover-signal").unwrap().remove(0);
+        seed_uploaded_row(&bridge, &server, "d2aeddeb-8b87-53e4-8532-16505d07e9e9");
+        let w = fp_save(&bridge, dir.path(), "d2aeddeb-8b87-53e4-8532-16505d07e9e9", "notes.txt", b"W", "1");
+        let w_op = bridge.db.list_operations_for_file("d2aeddeb-8b87-53e4-8532-16505d07e9e9").unwrap().remove(0);
         std::fs::remove_file(w_op.payload_path.as_deref().unwrap()).unwrap();
         bridge.process_due_operations(&sync_root, now_secs()).await.unwrap(); // W parks
         fp_save(
             &bridge,
             dir.path(),
-            "handover-signal",
+            "d2aeddeb-8b87-53e4-8532-16505d07e9e9",
             "notes.txt",
             b"W N",
             w.token.as_deref().unwrap(),
@@ -25,7 +25,7 @@ use super::*;
             .lock()
             .unwrap()
             .conflict_init_once
-            .insert("handover-signal".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
+            .insert("d2aeddeb-8b87-53e4-8532-16505d07e9e9".into(), crate::api_client::IN_PROGRESS_MESSAGE.into());
 
         let mut outcome = None;
         let logs = capture_logs_async(async {
@@ -34,17 +34,17 @@ use super::*;
         .await;
 
         assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
-        let ops = bridge.db.list_operations_for_file("handover-signal").unwrap();
+        let ops = bridge.db.list_operations_for_file("d2aeddeb-8b87-53e4-8532-16505d07e9e9").unwrap();
         assert_eq!(ops.len(), 1, "precondition: W's op is gone");
         assert_eq!(ops[0].attempts, 1, "precondition: N ran once and will retry");
         assert_eq!(
             outcome.unwrap().invalidated_item_ids,
-            vec!["handover-signal".to_string()]
+            vec!["d2aeddeb-8b87-53e4-8532-16505d07e9e9".to_string()]
         );
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("handover-signal"), json!(1), 409)],
+            vec![(json!("d2aeddeb-8b87-53e4-8532-16505d07e9e9"), json!(1), 409)],
             "N ran on W's base"
         );
     }
@@ -54,12 +54,12 @@ use super::*;
         // `ClaimOutcome::Parked` with a hand-over, the fixture of
         // `a_base_unknown_predecessor_hands_over_and_the_successor_parks_without_a_request`.
         let (dir, sync_root, server, bridge) = rule3_setup([125u8; 32]);
-        seed_uploaded_row(&bridge, &server, "unknown-base-signal"); // version 1, not filled
-        let w = fp_save(&bridge, dir.path(), "unknown-base-signal", "notes.txt", b"W", "0");
+        seed_uploaded_row(&bridge, &server, "82787d46-2fcf-5eec-836a-59aef6459f31"); // version 1, not filled
+        let w = fp_save(&bridge, dir.path(), "82787d46-2fcf-5eec-836a-59aef6459f31", "notes.txt", b"W", "0");
         fp_save(
             &bridge,
             dir.path(),
-            "unknown-base-signal",
+            "82787d46-2fcf-5eec-836a-59aef6459f31",
             "notes.txt",
             b"W N",
             w.token.as_deref().unwrap(),
@@ -72,7 +72,7 @@ use super::*;
         .await;
 
         assert_eq!(logs.matches("queued write took over a parked one").count(), 1, "{logs}");
-        let ops = bridge.db.list_operations_for_file("unknown-base-signal").unwrap();
+        let ops = bridge.db.list_operations_for_file("82787d46-2fcf-5eec-836a-59aef6459f31").unwrap();
         assert_eq!(ops.len(), 1, "precondition: W's op is gone");
         assert_eq!(
             ops[0].last_error.as_deref(),
@@ -81,7 +81,7 @@ use super::*;
         );
         assert_eq!(
             outcome.unwrap().invalidated_item_ids,
-            vec!["unknown-base-signal".to_string()]
+            vec!["82787d46-2fcf-5eec-836a-59aef6459f31".to_string()]
         );
         drop(server.finish());
     }
@@ -93,17 +93,17 @@ use super::*;
     #[tokio::test]
     async fn the_attempt_at_the_cap_leaves_a_finder_write_uploading_and_out_of_the_signal() {
         let (dir, sync_root, server, bridge) = rule3_setup([126u8; 32]);
-        seed_uploaded_row(&bridge, &server, "given-up-signal");
+        seed_uploaded_row(&bridge, &server, "829468d7-4660-5a3d-a795-7074384ee957");
         server
             .state
             .lock()
             .unwrap()
             .refuse_init
-            .insert("given-up-signal".into(), "500 Internal Server Error");
-        fp_save(&bridge, dir.path(), "given-up-signal", "notes.txt", b"a save", "1");
+            .insert("829468d7-4660-5a3d-a795-7074384ee957".into(), "500 Internal Server Error");
+        fp_save(&bridge, dir.path(), "829468d7-4660-5a3d-a795-7074384ee957", "notes.txt", b"a save", "1");
         let op_id = bridge
             .db
-            .list_operations_for_file("given-up-signal")
+            .list_operations_for_file("829468d7-4660-5a3d-a795-7074384ee957")
             .unwrap()
             .remove(0)
             .op_id;
@@ -131,7 +131,7 @@ use super::*;
         let op = bridge.db.get_operation(&op_id).unwrap().unwrap();
         assert_eq!(op.attempts, op.max_attempts - 1, "its attempts are never used up");
         assert_eq!(
-            bridge.db.get_file("given-up-signal").unwrap().unwrap().status,
+            bridge.db.get_file("829468d7-4660-5a3d-a795-7074384ee957").unwrap().unwrap().status,
             FileStatus::Uploading,
             "the row still presents uploading"
         );
@@ -148,16 +148,16 @@ use super::*;
         // `outcome:before_tx` seam): `park_claimed` writes nothing, so nothing changed for the
         // system and no id is reported.
         let (dir, sync_root, server, bridge) = rule3_setup([127u8; 32]);
-        seed_uploaded_row(&bridge, &server, "moved-signal");
-        server.seed_file("moved-signal", 2);
-        fp_save(&bridge, dir.path(), "moved-signal", "notes.txt", b"edit on v1", "1");
+        seed_uploaded_row(&bridge, &server, "eef0840b-33a7-55ce-a234-5e789411720d");
+        server.seed_file("eef0840b-33a7-55ce-a234-5e789411720d", 2);
+        fp_save(&bridge, dir.path(), "eef0840b-33a7-55ce-a234-5e789411720d", "notes.txt", b"edit on v1", "1");
         let op_id = bridge
             .db
-            .list_operations_for_file("moved-signal")
+            .list_operations_for_file("eef0840b-33a7-55ce-a234-5e789411720d")
             .unwrap()
             .remove(0)
             .op_id;
-        let mut contract = bridge.db.get_file_contract_state("moved-signal").unwrap().unwrap();
+        let mut contract = bridge.db.get_file_contract_state("eef0840b-33a7-55ce-a234-5e789411720d").unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("moved-root".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
@@ -192,7 +192,7 @@ use super::*;
             "a park that did not commit is not reported"
         );
         let state = server.finish();
-        assert_eq!(state.init_summary(), vec![(json!("moved-signal"), json!(1), 409)]);
+        assert_eq!(state.init_summary(), vec![(json!("eef0840b-33a7-55ce-a234-5e789411720d"), json!(1), 409)]);
     }
 
     // ── The accept transaction and the base mapping (spec §6.1, §6.3.1, §8.7 S1.1, S3, S5) ──
@@ -205,12 +205,12 @@ use super::*;
         let master_key = [44u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "zero-base");
-        fp_save(&bridge, dir.path(), "zero-base", "notes.txt", b"edit on a stale 0", "0");
+        seed_uploaded_row(&bridge, &server, "264bb291-f121-5df9-8680-1a8ad36c57e1");
+        fp_save(&bridge, dir.path(), "264bb291-f121-5df9-8680-1a8ad36c57e1", "notes.txt", b"edit on a stale 0", "0");
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert!(state.inits.is_empty(), "nothing is sent: {:?}", state.init_summary());
-        let op = bridge.db.list_operations_for_file("zero-base").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("264bb291-f121-5df9-8680-1a8ad36c57e1").unwrap().remove(0);
         assert_eq!(op.attempts, op.max_attempts, "parked at once");
         assert!(
             std::path::Path::new(op.payload_path.as_deref().unwrap()).is_file(),
@@ -226,25 +226,25 @@ use super::*;
         let master_key = [45u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "too-big");
+        seed_uploaded_row(&bridge, &server, "cbe007c9-a763-53b7-a3f8-76aed6347b1b");
         fp_save(
             &bridge,
             dir.path(),
-            "too-big",
+            "cbe007c9-a763-53b7-a3f8-76aed6347b1b",
             "notes.txt",
             b"a base beyond i32",
             "3000000000",
         );
-        seed_uploaded_row(&bridge, &server, "no-base");
+        seed_uploaded_row(&bridge, &server, "2537b462-b8ec-5985-b74d-668d9a382eb3");
         fp_save(
             &bridge,
             dir.path(),
-            "no-base",
+            "2537b462-b8ec-5985-b74d-668d9a382eb3",
             "notes.txt",
             b"a base that went missing",
             "1",
         );
-        let op = bridge.db.list_operations_for_file("no-base").unwrap().remove(0);
+        let op = bridge.db.list_operations_for_file("2537b462-b8ec-5985-b74d-668d9a382eb3").unwrap().remove(0);
         bridge.db.set_base_version_for_test(&op.op_id, None);
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
@@ -253,7 +253,7 @@ use super::*;
             "no replace without a base: {:?}",
             state.init_summary()
         );
-        for file in ["too-big", "no-base"] {
+        for file in ["cbe007c9-a763-53b7-a3f8-76aed6347b1b", "2537b462-b8ec-5985-b74d-668d9a382eb3"] {
             let op = bridge.db.list_operations_for_file(file).unwrap().remove(0);
             assert_eq!(op.attempts, op.max_attempts, "{file} parked");
         }
@@ -267,12 +267,12 @@ use super::*;
         let master_key = [46u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "two");
-        let first = fp_save(&bridge, dir.path(), "two", "notes.txt", b"first", "1");
+        seed_uploaded_row(&bridge, &server, "f05e9de2-3d3e-5e26-9562-5f163659cee3");
+        let first = fp_save(&bridge, dir.path(), "f05e9de2-3d3e-5e26-9562-5f163659cee3", "notes.txt", b"first", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "two",
+            "f05e9de2-3d3e-5e26-9562-5f163659cee3",
             "notes.txt",
             b"first, second",
             first.token.as_deref().unwrap_or("1"),
@@ -281,14 +281,14 @@ use super::*;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("two"), json!(1), 201), (json!("two"), json!(2), 201)],
+            vec![(json!("f05e9de2-3d3e-5e26-9562-5f163659cee3"), json!(1), 201), (json!("f05e9de2-3d3e-5e26-9562-5f163659cee3"), json!(2), 201)],
             "one upload per save, in order"
         );
         assert_eq!(
-            state.files["two"].versions.len(),
+            state.files["f05e9de2-3d3e-5e26-9562-5f163659cee3"].versions.len(),
             3,
             "both saves are versions in the history"
         );
-        assert_eq!(state.latest_plaintext("two", master_key), b"first, second");
+        assert_eq!(state.latest_plaintext("f05e9de2-3d3e-5e26-9562-5f163659cee3", master_key), b"first, second");
     }
 

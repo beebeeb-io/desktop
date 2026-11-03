@@ -12,31 +12,31 @@ use super::*;
         let master_key = [110u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "in-deleted-folder");
+        seed_row_in_folder(&bridge, &server, "bea1f15d-cba5-5325-a4c9-47f37d861d4e");
         fp_save_moved(
             &bridge,
             dir.path(),
-            "in-deleted-folder",
+            "bea1f15d-cba5-5325-a4c9-47f37d861d4e",
             "notes.txt",
-            "folder-a",
+            "14d2a297-b916-52d6-959d-7cc821b7a978",
             b"saved",
             "1",
         );
         let delete = crate::api_client::SyncOp {
             seq_id: 703,
             op_type: "file_delete".into(),
-            payload: serde_json::json!({ "id": "folder-a" }),
+            payload: serde_json::json!({ "id": "14d2a297-b916-52d6-959d-7cc821b7a978" }),
         };
         apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
         assert_eq!(
-            name_parent_status(&bridge, "in-deleted-folder"),
+            name_parent_status(&bridge, "bea1f15d-cba5-5325-a4c9-47f37d861d4e"),
             ("notes.txt".into(), None, FileStatus::Uploading)
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("in-deleted-folder", master_key), b"saved");
+        assert_eq!(state.latest_plaintext("bea1f15d-cba5-5325-a4c9-47f37d861d4e", master_key), b"saved");
         assert_eq!(
-            patched_parents(&state, "in-deleted-folder"),
+            patched_parents(&state, "bea1f15d-cba5-5325-a4c9-47f37d861d4e"),
             vec![Some(serde_json::Value::Null)],
             "the save sent the move to the top level"
         );
@@ -54,39 +54,39 @@ use super::*;
         let master_key = [107u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_row_in_folder(&bridge, &server, "deleted-elsewhere");
+        seed_row_in_folder(&bridge, &server, "cfb3cae9-5a11-5b06-9a3d-c8b439e82b97");
         fp_save_moved(
             &bridge,
             dir.path(),
-            "deleted-elsewhere",
+            "cfb3cae9-5a11-5b06-9a3d-c8b439e82b97",
             "notes.txt",
-            "folder-a",
+            "14d2a297-b916-52d6-959d-7cc821b7a978",
             b"the edit",
             "1",
         );
         // The server deleted it for good.
-        server.state.lock().unwrap().files.remove("deleted-elsewhere");
+        server.state.lock().unwrap().files.remove("cfb3cae9-5a11-5b06-9a3d-c8b439e82b97");
         let delete = crate::api_client::SyncOp {
             seq_id: 702,
             op_type: "file_delete".into(),
-            payload: serde_json::json!({ "id": "deleted-elsewhere" }),
+            payload: serde_json::json!({ "id": "cfb3cae9-5a11-5b06-9a3d-c8b439e82b97" }),
         };
         apply_sync_op(&bridge, &sync_root, &delete, now_secs(), &mut Vec::new()).unwrap();
         assert!(
-            bridge.db.get_file("deleted-elsewhere").unwrap().is_some(),
+            bridge.db.get_file("cfb3cae9-5a11-5b06-9a3d-c8b439e82b97").unwrap().is_some(),
             "the row with a queued save is kept"
         );
-        assert!(listed_under(&bridge, "folder-a").contains(&"deleted-elsewhere".to_string()));
+        assert!(listed_under(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978").contains(&"cfb3cae9-5a11-5b06-9a3d-c8b439e82b97".to_string()));
 
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
-            name_parent_status(&bridge, "deleted-elsewhere"),
-            ("Docs/notes.txt".into(), Some("folder-a".into()), FileStatus::Local),
+            name_parent_status(&bridge, "cfb3cae9-5a11-5b06-9a3d-c8b439e82b97"),
+            ("Docs/notes.txt".into(), Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()), FileStatus::Local),
             "re-created, in its folder"
         );
-        assert!(listed_under(&bridge, "folder-a").contains(&"deleted-elsewhere".to_string()));
+        assert!(listed_under(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978").contains(&"cfb3cae9-5a11-5b06-9a3d-c8b439e82b97".to_string()));
         let state = server.finish();
-        assert_eq!(state.latest_plaintext("deleted-elsewhere", master_key), b"the edit");
+        assert_eq!(state.latest_plaintext("cfb3cae9-5a11-5b06-9a3d-c8b439e82b97", master_key), b"the edit");
     }
 
     /// Spec §7.2 (final review): a move to the top level made elsewhere (`file_move` or
@@ -101,7 +101,7 @@ use super::*;
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_folder_row(&bridge, "folder-a", "Docs");
+        seed_folder_row(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "Docs");
         let rows = [
             (
                 "local-file",
@@ -138,11 +138,11 @@ use super::*;
                         modified_at: 1_700_000_000,
                         content_hash: None,
                         remote_updated_at: 1_700_000_000,
-                        parent_id: Some("folder-a".into()),
+                        parent_id: Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()),
                         item_kind: kind.clone(),
                     },
                     |contract| {
-                        contract.parent_id = Some("folder-a".into());
+                        contract.parent_id = Some("14d2a297-b916-52d6-959d-7cc821b7a978".into());
                         contract.item_kind = kind.clone();
                     },
                 )
@@ -151,15 +151,15 @@ use super::*;
         let ops = [
             (
                 "file_move",
-                serde_json::json!({ "id": "local-file", "old_parent_id": "folder-a", "new_parent_id": null }),
+                serde_json::json!({ "id": "local-file", "old_parent_id": "14d2a297-b916-52d6-959d-7cc821b7a978", "new_parent_id": null }),
             ),
             (
                 "file_move",
-                serde_json::json!({ "id": "cloud-file", "old_parent_id": "folder-a", "new_parent_id": null }),
+                serde_json::json!({ "id": "cloud-file", "old_parent_id": "14d2a297-b916-52d6-959d-7cc821b7a978", "new_parent_id": null }),
             ),
             (
                 "folder_move",
-                serde_json::json!({ "id": "sub-folder", "old_parent_id": "folder-a", "new_parent_id": null }),
+                serde_json::json!({ "id": "sub-folder", "old_parent_id": "14d2a297-b916-52d6-959d-7cc821b7a978", "new_parent_id": null }),
             ),
             // The restore re-home: `file_move` for a folder too, with the id and a null parent only.
             (
@@ -176,7 +176,7 @@ use super::*;
             apply_sync_op(&bridge, &sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
         }
         let root = listed_under(&bridge, FP_ROOT);
-        let old_folder = listed_under(&bridge, "folder-a");
+        let old_folder = listed_under(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978");
         for (id, _, _, _, name) in &rows {
             let row = bridge.db.get_file(id).unwrap().unwrap();
             assert_eq!((row.path.as_str(), row.parent_id.as_deref()), (*name, None), "{id}");
@@ -194,11 +194,11 @@ use super::*;
     fn ingestion_writes_a_new_row_with_its_parent_and_namespace() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_folder_row(&bridge, "folder-a", "Docs");
+        seed_folder_row(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "Docs");
         // The person's own tree, nested.
         apply_metadata_file_row(
             &bridge.db,
-            &serde_json::json!({ "id": "nested", "name": "n.txt", "parent_id": "folder-a", "size_bytes": 3 }),
+            &serde_json::json!({ "id": "nested", "name": "n.txt", "parent_id": "14d2a297-b916-52d6-959d-7cc821b7a978", "size_bytes": 3 }),
             Namespace::MyFiles,
             None,
             None,
@@ -211,7 +211,7 @@ use super::*;
         // A shared folder's child.
         let root = SharedRootMapping {
             invite_id: "invite-1".into(),
-            file_id: "shared-root".into(),
+            file_id: "9ec057bf-6090-56d6-8643-6c6175e9d208".into(),
             display_name: "Team".into(),
             is_folder: true,
             size_bytes: 0,
@@ -242,7 +242,7 @@ use super::*;
         } = bridge
             .queue_finder_create(FinderWriteTarget {
                 file_id: None,
-                parent_id: Some("folder-a".into()),
+                parent_id: Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()),
                 filename: "w.txt".into(),
                 rel_path: Some("Docs/w.txt".into()),
                 kind: FinderWriteItemKind::File,
@@ -258,15 +258,15 @@ use super::*;
         let contract = |id: &str| bridge.db.get_file_contract_state(id).unwrap().unwrap();
         assert_eq!(
             (contract("nested").parent_id, contract("nested").namespace),
-            (Some("folder-a".into()), Namespace::MyFiles)
+            (Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()), Namespace::MyFiles)
         );
         assert_eq!(
             (contract("shared-child").parent_id, contract("shared-child").namespace),
-            (Some("shared-root".into()), Namespace::SharedWithMe)
+            (Some("9ec057bf-6090-56d6-8643-6c6175e9d208".into()), Namespace::SharedWithMe)
         );
         assert_eq!(
             (contract(&watched).parent_id, contract(&watched).item_kind),
-            (Some("folder-a".into()), ItemKind::File)
+            (Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()), ItemKind::File)
         );
         let at_root = listed_under(&bridge, FP_ROOT);
         for id in ["nested", "shared-child", watched.as_str()] {
@@ -320,38 +320,38 @@ use super::*;
         let sync_root = dir.path().join("sync-root");
         std::fs::create_dir_all(&sync_root).unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_folder_row(&bridge, "folder-a", "Docs");
+        seed_folder_row(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978", "Docs");
         bridge
             .db
             .upsert_file_with_contract(
                 &FileEntry {
-                    file_id: "kept-file".into(),
+                    file_id: "56f4970a-1edd-5e28-aca8-7fabb4ca5d35".into(),
                     path: "Docs/kept.txt".into(),
                     status: FileStatus::Local,
                     size_bytes: 3,
                     modified_at: 1_700_000_000,
                     content_hash: None,
                     remote_updated_at: 1_700_000_000,
-                    parent_id: Some("folder-a".into()),
+                    parent_id: Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()),
                     item_kind: ItemKind::File,
                 },
-                |contract| contract.parent_id = Some("folder-a".into()),
+                |contract| contract.parent_id = Some("14d2a297-b916-52d6-959d-7cc821b7a978".into()),
             )
             .unwrap();
         let op = crate::api_client::SyncOp {
             seq_id: 801,
             op_type: "file_move".into(),
-            payload: serde_json::json!({ "id": "kept-file" }),
+            payload: serde_json::json!({ "id": "56f4970a-1edd-5e28-aca8-7fabb4ca5d35" }),
         };
         apply_sync_op(&bridge, &sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
-        let row = bridge.db.get_file("kept-file").unwrap().unwrap();
+        let row = bridge.db.get_file("56f4970a-1edd-5e28-aca8-7fabb4ca5d35").unwrap().unwrap();
         assert_eq!(
             (row.path.as_str(), row.parent_id.as_deref()),
-            ("Docs/kept.txt", Some("folder-a")),
+            ("Docs/kept.txt", Some("14d2a297-b916-52d6-959d-7cc821b7a978")),
             "the parent and the path are kept together"
         );
-        assert!(listed_under(&bridge, "folder-a").contains(&"kept-file".to_string()));
-        assert!(!listed_under(&bridge, FP_ROOT).contains(&"kept-file".to_string()));
+        assert!(listed_under(&bridge, "14d2a297-b916-52d6-959d-7cc821b7a978").contains(&"56f4970a-1edd-5e28-aca8-7fabb4ca5d35".to_string()));
+        assert!(!listed_under(&bridge, FP_ROOT).contains(&"56f4970a-1edd-5e28-aca8-7fabb4ca5d35".to_string()));
     }
 
     /// Spec §7.2 (final review): the writers that insert a row from the server or a create write

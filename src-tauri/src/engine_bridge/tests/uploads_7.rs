@@ -15,8 +15,8 @@ use super::*;
             .unwrap()
             .delay_chunks
             .insert("session-1".into(), Duration::from_millis(400));
-        seed_uploaded_row(&bridge, &server, "live");
-        let first = fp_save(&bridge, dir.path(), "live", "notes.txt", b"first", "1");
+        seed_uploaded_row(&bridge, &server, "3f073819-c91c-50d0-9651-c7580d996a29");
+        let first = fp_save(&bridge, dir.path(), "3f073819-c91c-50d0-9651-c7580d996a29", "notes.txt", b"first", "1");
         let first_token = first.token.clone().unwrap();
         let ((), ()) = tokio::join!(
             async {
@@ -30,17 +30,17 @@ use super::*;
                 })
                 .await
                 .expect("init never reached the mock");
-                fp_save(&bridge, dir.path(), "live", "notes.txt", b"first, second", &first_token);
+                fp_save(&bridge, dir.path(), "3f073819-c91c-50d0-9651-c7580d996a29", "notes.txt", b"first, second", &first_token);
             }
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("live"), json!(1), 201), (json!("live"), json!(2), 201)],
+            vec![(json!("3f073819-c91c-50d0-9651-c7580d996a29"), json!(1), 201), (json!("3f073819-c91c-50d0-9651-c7580d996a29"), json!(2), 201)],
             "the second save is based on what the first produced"
         );
-        assert_eq!(state.latest_plaintext("live", master_key), b"first, second");
+        assert_eq!(state.latest_plaintext("3f073819-c91c-50d0-9651-c7580d996a29", master_key), b"first, second");
     }
 
     #[tokio::test]
@@ -56,8 +56,8 @@ use super::*;
             server.base_url.clone(),
             master_key,
         ));
-        seed_uploaded_row(&bridge, &server, "race");
-        let w = fp_save(&bridge, dir.path(), "race", "notes.txt", b"W", "1");
+        seed_uploaded_row(&bridge, &server, "7bdb906a-112b-5689-8de2-2181b7556601");
+        let w = fp_save(&bridge, dir.path(), "7bdb906a-112b-5689-8de2-2181b7556601", "notes.txt", b"W", "1");
         let w_token = w.token.clone().unwrap();
         // N's accept stops at its seam; W's landing commits meanwhile (review sequence C).
         let runner = Arc::clone(&bridge);
@@ -74,17 +74,17 @@ use super::*;
             });
         });
         let logs = capture_logs_async(async {
-            fp_save(&bridge, dir.path(), "race", "notes.txt", b"W, then N", &w_token);
+            fp_save(&bridge, dir.path(), "7bdb906a-112b-5689-8de2-2181b7556601", "notes.txt", b"W, then N", &w_token);
             drain_upload_queue(&bridge, &sync_root).await;
         })
         .await;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
-            vec![(json!("race"), json!(1), 201), (json!("race"), json!(2), 201)],
+            vec![(json!("7bdb906a-112b-5689-8de2-2181b7556601"), json!(1), 201), (json!("7bdb906a-112b-5689-8de2-2181b7556601"), json!(2), 201)],
             "N is based on W's produced version"
         );
-        assert_eq!(state.latest_plaintext("race", master_key), b"W, then N");
+        assert_eq!(state.latest_plaintext("7bdb906a-112b-5689-8de2-2181b7556601", master_key), b"W, then N");
         assert!(!logs.contains("predecessor_lost"), "{logs}");
         assert!(
             bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
@@ -100,30 +100,30 @@ use super::*;
         let master_key = [49u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "chain");
-        let w1 = fp_save(&bridge, dir.path(), "chain", "notes.txt", b"1", "1");
+        seed_uploaded_row(&bridge, &server, "309b7156-af1e-5661-ab87-76ef6910aff2");
+        let w1 = fp_save(&bridge, dir.path(), "309b7156-af1e-5661-ab87-76ef6910aff2", "notes.txt", b"1", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "chain",
+            "309b7156-af1e-5661-ab87-76ef6910aff2",
             "notes.txt",
             b"1 2",
             w1.token.as_deref().unwrap(),
         );
         // The system sent this save before it recorded either reply.
-        fp_save(&bridge, dir.path(), "chain", "notes.txt", b"1 2 3", "1");
+        fp_save(&bridge, dir.path(), "309b7156-af1e-5661-ab87-76ef6910aff2", "notes.txt", b"1 2 3", "1");
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
         assert_eq!(
             state.init_summary(),
             vec![
-                (json!("chain"), json!(1), 201),
-                (json!("chain"), json!(2), 201),
-                (json!("chain"), json!(3), 201)
+                (json!("309b7156-af1e-5661-ab87-76ef6910aff2"), json!(1), 201),
+                (json!("309b7156-af1e-5661-ab87-76ef6910aff2"), json!(2), 201),
+                (json!("309b7156-af1e-5661-ab87-76ef6910aff2"), json!(3), 201)
             ],
             "the third save follows the newest write of the chain"
         );
-        assert_eq!(state.latest_plaintext("chain", master_key), b"1 2 3");
+        assert_eq!(state.latest_plaintext("309b7156-af1e-5661-ab87-76ef6910aff2", master_key), b"1 2 3");
     }
 
     #[tokio::test]
@@ -134,22 +134,22 @@ use super::*;
         let master_key = [50u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "unknown-token");
-        server.seed_file("unknown-token", 3);
-        let mut contract = bridge.db.get_file_contract_state("unknown-token").unwrap().unwrap();
+        seed_uploaded_row(&bridge, &server, "0584a909-92ea-5cb6-b49a-96b67c238425");
+        server.seed_file("0584a909-92ea-5cb6-b49a-96b67c238425", 3);
+        let mut contract = bridge.db.get_file_contract_state("0584a909-92ea-5cb6-b49a-96b67c238425").unwrap().unwrap();
         contract.current_version = 3;
         bridge.db.set_file_contract_state(&contract).unwrap();
         fp_save(
             &bridge,
             dir.path(),
-            "unknown-token",
+            "0584a909-92ea-5cb6-b49a-96b67c238425",
             "notes.txt",
             b"edit",
             &format!("3:w{}", "c".repeat(32)),
         );
         drain_upload_queue(&bridge, &sync_root).await;
         let state = server.finish();
-        assert_eq!(state.init_summary(), vec![(json!("unknown-token"), json!(3), 201)]);
+        assert_eq!(state.init_summary(), vec![(json!("0584a909-92ea-5cb6-b49a-96b67c238425"), json!(3), 201)]);
     }
 
     #[tokio::test]
@@ -161,17 +161,17 @@ use super::*;
         let master_key = [51u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "stores-b");
-        let w1 = fp_save(&bridge, dir.path(), "stores-b", "notes.txt", b"1", "1");
+        seed_uploaded_row(&bridge, &server, "6548c70b-05a9-564f-8b21-aa7414a2a41d");
+        let w1 = fp_save(&bridge, dir.path(), "6548c70b-05a9-564f-8b21-aa7414a2a41d", "notes.txt", b"1", "1");
         fp_save(
             &bridge,
             dir.path(),
-            "stores-b",
+            "6548c70b-05a9-564f-8b21-aa7414a2a41d",
             "notes.txt",
             b"1 2",
             w1.token.as_deref().unwrap(),
         );
-        let ops = bridge.db.list_operations_for_file("stores-b").unwrap();
+        let ops = bridge.db.list_operations_for_file("6548c70b-05a9-564f-8b21-aa7414a2a41d").unwrap();
         assert_eq!(ops[1].base_version, Some(1), "after W1, stored as W1's b");
         let created = fp_create(&bridge, dir.path(), "new.txt", b"created");
         let provisional = created.outcome_file_id();
@@ -199,13 +199,13 @@ use super::*;
         let master_key = [52u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "named");
-        let reply = fp_save(&bridge, dir.path(), "named", "notes.txt", b"edit", "1");
+        seed_uploaded_row(&bridge, &server, "af192e2a-bd09-5654-ba8d-e8ca05addbcb");
+        let reply = fp_save(&bridge, dir.path(), "af192e2a-bd09-5654-ba8d-e8ca05addbcb", "notes.txt", b"edit", "1");
         let token = reply.token.clone().unwrap();
         assert!(token.starts_with("1:w"), "{token}");
-        assert_eq!(held_content_version(&bridge, "named"), token, "while queued");
+        assert_eq!(held_content_version(&bridge, "af192e2a-bd09-5654-ba8d-e8ca05addbcb"), token, "while queued");
         drain_upload_queue(&bridge, &sync_root).await;
-        assert_eq!(held_content_version(&bridge, "named"), token, "after our own landing");
+        assert_eq!(held_content_version(&bridge, "af192e2a-bd09-5654-ba8d-e8ca05addbcb"), token, "after our own landing");
         drop(server.finish());
     }
 

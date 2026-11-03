@@ -138,7 +138,7 @@ use super::*;
         let bridge = test_bridge(&dir.path().join("state.db"));
         let file = "echo0000-0000-4000-8000-000000000001";
         seed_bridge_entry(&bridge, file, "doomed.txt", None, FileStatus::Trashing, false, 10);
-        enqueue_test_operation(&bridge, "op-trash-echo", OperationKind::TrashFile, file, 100);
+        enqueue_test_operation(&bridge, "4ae33359-9e84-59f6-959d-2f62cb9d6a7e", OperationKind::TrashFile, file, 100);
 
         let op = crate::api_client::SyncOp {
             seq_id: 12,
@@ -152,7 +152,7 @@ use super::*;
         assert_eq!(row.status, FileStatus::Trashing);
         let queued = bridge.db().list_due_operations(999).unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].op_id, "op-trash-echo");
+        assert_eq!(queued[0].op_id, "4ae33359-9e84-59f6-959d-2f62cb9d6a7e");
         assert!(conflicts.is_empty());
     }
 
@@ -229,7 +229,7 @@ use super::*;
         let local = "local000-0000-4000-8000-000000000001";
         let other = "other000-0000-4000-8000-000000000002";
         seed_bridge_entry(&bridge, local, "report.txt", None, FileStatus::Error, false, 10);
-        enqueue_test_operation(&bridge, "op-upload-offline", OperationKind::UploadVersion, local, 100);
+        enqueue_test_operation(&bridge, "7c988b48-ad5b-59bf-abd7-757e7ca8bb05", OperationKind::UploadVersion, local, 100);
 
         let snapshot = crate::api_client::SyncSnapshot {
             seq_id: 77,
@@ -243,7 +243,7 @@ use super::*;
         assert_eq!(row.status, FileStatus::Error);
         assert_eq!(
             bridge.db().list_due_operations(999).unwrap()[0].op_id,
-            "op-upload-offline",
+            "7c988b48-ad5b-59bf-abd7-757e7ca8bb05",
             "pending local upload remains durable after rebootstrap"
         );
         assert!(bridge.db().get_file(other).unwrap().is_some());
