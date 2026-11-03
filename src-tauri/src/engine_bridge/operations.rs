@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// The ops that give an item a key of its own: a create, a new version, a
+/// rename or a move. A trash or restore does not, so it owes no notice.
+fn writes_a_key(kind: &OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::UploadVersion
+            | OperationKind::UploadFile
+            | OperationKind::CreateFolder
+            | OperationKind::RenameFile
+            | OperationKind::MoveFile
+    )
+}
+
 impl EngineBridge {
     #[cfg(test)]
     pub fn version_conflict_feed(&self) -> anyhow::Result<Vec<VersionConflictEntry>> {
@@ -56,6 +69,10 @@ impl EngineBridge {
         base_object_version_id: Option<String>,
         folder: Option<crate::state_db::FinderFolderRow<'_>>,
     ) -> Result<FinderWriteOutcome, EngineError> {
+        // L15/A14b: an owner write into a shared folder stays owner-only.
+        let owner_only = writes_a_key(&kind)
+            .then(|| self.owner_only_notice(file_id.as_deref(), parent_id.as_deref()))
+            .flatten();
         let op = self.finder_operation(
             kind.clone(),
             file_id.clone(),
@@ -76,7 +93,11 @@ impl EngineBridge {
                 file_id,
                 kind,
                 ignored: false,
-                message: "queued for encrypted sync".to_string(),
+                // L15/A14b: an owner write into a shared folder says it stays
+                // owner-only instead of the plain queue copy.
+                message: owner_only
+                    .unwrap_or("queued for encrypted sync")
+                    .to_string(),
             }),
         }
     }

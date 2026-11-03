@@ -294,6 +294,8 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
         };
         prepared.staged.retain();
+        // L15/A14b: a create under a shared folder stays owner-only.
+        let notice = self.owner_only_notice(Some(&prepared.file_id), target.parent_id.as_deref());
         Ok(Some((
             FpWrite {
                 outcome: FinderWriteOutcome::Queued {
@@ -301,7 +303,7 @@ impl EngineBridge {
                     file_id: Some(prepared.file_id),
                     kind: OperationKind::UploadVersion,
                     ignored: false,
-                    message: "queued for encrypted sync".to_string(),
+                    message: notice.unwrap_or("queued for encrypted sync").to_string(),
                 },
                 token: Some(token),
                 present_as: None,

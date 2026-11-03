@@ -1073,6 +1073,34 @@ impl<'a> AccountScope<'a> {
     }
 }
 
+impl crate::engine_bridge::EngineBridge {
+    /// Whether `folder_id` lies inside a shared folder whose custody this device
+    /// holds (the folder itself included). A bounded walk of the DB ancestry.
+    pub(crate) fn inside_shared_folder(&self, folder_id: &str) -> bool {
+        let mut current = Some(folder_id.to_string());
+        for _ in 0..256 {
+            let Some(folder) = current else { return false };
+            if self.db().has_seen_folder_custody(&folder).unwrap_or(false) {
+                return true;
+            }
+            current = self.db().get_file(&folder).ok().flatten().and_then(|entry| entry.parent_id);
+        }
+        false
+    }
+
+    /// L15/A14b: the owner-only copy a write of `item_id` under `parent_id`
+    /// owes the person. Only an owner-class item in a shared folder says it: a
+    /// foreign item is already someone else's, and a request row is never the
+    /// owner's to publish.
+    pub(crate) fn owner_only_notice(&self, item_id: Option<&str>, parent_id: Option<&str>) -> Option<&'static str> {
+        let id = item_id?;
+        if beebeeb_core::item_id::item_class(id).ok() != Some(ItemClass::Owner) || self.is_request_row(id) {
+            return None;
+        }
+        parent_id.filter(|parent| self.inside_shared_folder(parent)).map(|_| OWNER_ONLY_NOTICE)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1080,6 +1108,12 @@ mod tests;
 /// The visible mark every client owes an F item (L12): the class, never a
 /// server field, says someone else added it.
 pub const ADDED_BY_SOMEONE_ELSE: &str = "Added by someone else";
+
+/// L15 (option A): the desktop never publishes an owner key, so an owner
+/// write into a shared folder stays owner-only. The exact copy both clients
+/// owe the person (A14b).
+pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
+
 
 /// Recoverable item copy. Only an authenticated, decrypted label may be passed here.
 pub fn cannot_open_message(label: Option<&str>, member_added: bool) -> String {

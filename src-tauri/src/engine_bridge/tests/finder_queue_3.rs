@@ -427,3 +427,43 @@ use super::*;
         );
     }
 
+/// A14b / L15 (option A): an owner write into a shared folder is never
+/// published. Its queue reply carries the exact owner-only copy, and no
+/// pending key envelope is written for the new item.
+#[test]
+fn a14b_owner_write_into_a_shared_folder_stays_owner_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, "40000000-0000-4000-8000-0000000000a1", "r14-plain");
+    seed_folder_row(&bridge, "40000000-0000-4000-8000-0000000000a2", "r14-shared");
+    bridge.db().remember_folder_custody_at_revision("40000000-0000-4000-8000-0000000000a2", 0).unwrap();
+    let target = |parent: &str, name: &str| FinderWriteTarget {
+        file_id: None,
+        parent_id: Some(parent.into()),
+        filename: name.into(),
+        rel_path: None,
+        kind: FinderWriteItemKind::Folder,
+        contents_path: None,
+        content_type: None,
+        base_version_identifier: None,
+    };
+    let FinderWriteOutcome::Queued { file_id: Some(plain), message: plain_message, .. } =
+        bridge.queue_finder_create(target("40000000-0000-4000-8000-0000000000a1", "plain")).unwrap()
+    else {
+        panic!("a queued folder create")
+    };
+    assert_eq!(plain_message, "queued for encrypted sync");
+    let FinderWriteOutcome::Queued { file_id: Some(shared), message, .. } =
+        bridge.queue_finder_create(target("40000000-0000-4000-8000-0000000000a2", "owner-only")).unwrap()
+    else {
+        panic!("a queued folder create")
+    };
+    assert_eq!(message, crate::owner_keys::OWNER_ONLY_NOTICE);
+    for id in [&plain, &shared] {
+        let record = bridge.db().get_owned_key_record(id).unwrap();
+        assert!(
+            record.and_then(|record| record.pending_owner_wrap).is_none(),
+            "an owner write is never wrapped for a share: {id}"
+        );
+    }
+}
