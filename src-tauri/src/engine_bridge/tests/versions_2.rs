@@ -293,7 +293,7 @@ use super::*;
         let master_key = [99u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "1ad409cd-dac8-56e2-bcd5-cef1881546f4");
+        seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "r9-folder");
         let created = fp_create_in(&bridge, dir.path(), "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "n1.txt", b"nested");
         let p = created.outcome_file_id();
         let ipc = crate::ipc_socket::write_outcome_response("create", &bridge.db, Ok(created));

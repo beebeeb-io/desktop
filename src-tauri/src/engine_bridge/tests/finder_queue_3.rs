@@ -8,7 +8,7 @@ use super::*;
     fn a_nested_folder_create_is_listed_in_its_folder_only() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
-        seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "1ad409cd-dac8-56e2-bcd5-cef1881546f4");
+        seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "r9-folder");
         let outcome = bridge
             .queue_finder_create(FinderWriteTarget {
                 file_id: None,
@@ -263,7 +263,7 @@ use super::*;
             let server = VersionedServerMock::start();
             let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
             if folder_row {
-                seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "1ad409cd-dac8-56e2-bcd5-cef1881546f4");
+                seed_folder_row(&bridge, "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "r9-folder");
             }
             let created = fp_create_in(&bridge, dir.path(), "1ad409cd-dac8-56e2-bcd5-cef1881546f4", "n1.txt", b"queued");
             let p = created.outcome_file_id();
