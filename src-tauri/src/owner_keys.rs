@@ -225,7 +225,7 @@ mod activity;
 mod moves;
 mod requests;
 
-pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, rename_material, request_envelope, request_upload_fields};
+#[allow(unused_imports)] pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, rename_material, request_envelope, request_upload_fields};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
