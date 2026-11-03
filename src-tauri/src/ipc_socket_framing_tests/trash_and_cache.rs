@@ -325,7 +325,7 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
     // previous content (28 bytes here; the edit is 40).
     let fx = IpcFixture::start(|db| {
         db.upsert_file(&FileEntry {
-            file_id: "edited-item".into(),
+            file_id: "7a000000-0000-4000-8000-000000000001".into(),
             path: "t.txt".into(),
             status: FileStatus::Local,
             size_bytes: 28,
@@ -336,7 +336,7 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
             item_kind: ItemKind::File,
         })
         .unwrap();
-        let mut contract = db.get_file_contract_state("edited-item").unwrap().unwrap();
+        let mut contract = db.get_file_contract_state("7a000000-0000-4000-8000-000000000001").unwrap().unwrap();
         contract.current_version = 1;
         db.set_file_contract_state(&contract).unwrap();
     });
@@ -350,7 +350,7 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
         .as_secs() as i64;
     let reply = fx.rt.block_on(send_one(
         &fx,
-        modify_request_on_base("edited-item", "t.txt", &path, "1"),
+        modify_request_on_base("7a000000-0000-4000-8000-000000000001", "t.txt", &path, "1"),
     ));
     let item = &reply["WriteQueued"]["item"];
     let ops = operations_of_kind(&fx, OperationKind::UploadVersion);
@@ -378,6 +378,6 @@ fn a_queued_modify_replies_with_the_size_of_the_bytes_it_was_handed() {
     // The Linux arm does not mint: the reply keeps today's content version.
     #[cfg(not(target_os = "macos"))]
     assert_eq!(content_version, "1", "{reply}");
-    let row = fx.db.get_file("edited-item").unwrap().unwrap();
+    let row = fx.db.get_file("7a000000-0000-4000-8000-000000000001").unwrap().unwrap();
     assert_eq!(row.size_bytes, 40, "the row records the staged size too");
 }
