@@ -361,13 +361,12 @@ use super::*;
     /// writes its row and contract through `enqueue_finder_change`, with its op.
     #[test]
     fn ingestion_writers_use_the_single_transaction_api() {
-        let source = include_str!("../../engine_bridge.rs");
-        let production = source.split("\nmod tests {").next().unwrap();
+        let production = production_tree("engine_bridge");
         assert!(
             !production.contains(".set_file_contract_state("),
             "production code writes a contract in a second call"
         );
-        let state_db = include_str!("../../state_db.rs");
+        let state_db = production_tree_raw("state_db");
         let at = state_db
             .find("    pub fn set_file_contract_state(")
             .expect("the test-only writer");
@@ -406,14 +405,14 @@ use super::*;
         ] {
             // Task 2204 S0.3: the pull's writer is `upsert_server_file_row`, the same one-transaction
             // write with the Windows-rename hold decided inside it.
-            let body = body(production, writer);
+            let body = body(&production, writer);
             assert_eq!(
                 body.matches("upsert_file_with_contract(").count() + body.matches("upsert_server_file_row(").count(),
                 calls,
                 "{writer} writes each row and its contract in one call"
             );
         }
-        let held = body(state_db, "    pub fn upsert_server_file_row(");
+        let held = body(&state_db, "    pub fn upsert_server_file_row(");
         assert!(
             held.contains("upsert_file_conn(") && held.contains("set_file_contract_state_conn(") && held.contains("tx.commit()"),
             "{held}"
@@ -421,10 +420,10 @@ use super::*;
         // Spec 2026-10-10 §5.2 step 6: a Finder folder create writes its row and its contract in the same
         // transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
         assert!(
-            body(production, "pub fn queue_finder_create_from(").contains("Some(crate::state_db::FinderFolderRow {"),
+            body(&production, "pub fn queue_finder_create_from(").contains("Some(crate::state_db::FinderFolderRow {"),
             "the folder branch hands its row to the fenced enqueue"
         );
-        let fenced = body(state_db, "    pub fn enqueue_finder_change(");
+        let fenced = body(&state_db, "    pub fn enqueue_finder_change(");
         assert!(
             fenced.contains("upsert_file_conn(") && fenced.contains("set_file_contract_state_conn("),
             "{fenced}"

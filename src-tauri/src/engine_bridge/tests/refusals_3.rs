@@ -66,35 +66,35 @@ use super::*;
         // call, why it queues no content on a Mac)
         let allowed: [(&str, &str, &str, &[&str], &str); 8] = [
             (
-                "engine_bridge.rs",
+                "engine_bridge/finder_create.rs",
                 "self.queue_finder_create_from(target, None)",
                 "pub fn queue_finder_create(",
                 &[],
                 "a wrapper: its callers are counted under its own name",
             ),
             (
-                "engine_bridge.rs",
+                "engine_bridge/finder_edit.rs",
                 "self.queue_finder_modify_from(target, None)",
                 "pub fn queue_finder_modify(",
                 &[],
                 "a wrapper: its callers are counted under its own name",
             ),
             (
-                "engine_bridge.rs",
+                "engine_bridge/finder_create.rs",
                 "return self.queue_finder_create_from(target, contents).map(FpWrite::plain);",
                 "pub fn queue_file_provider_create_from(",
                 &["if target.kind == FinderWriteItemKind::Folder {"],
                 "a folder: a create_folder op",
             ),
             (
-                "engine_bridge.rs",
+                "engine_bridge/finder_edit.rs",
                 "return self.queue_finder_modify_from(target, contents).map(|outcome| FpWrite {",
                 "pub fn queue_file_provider_modify_from(",
                 &["let Some(contents_path) = target.contents_path.clone() else {"],
                 "no contents: a rename or move op",
             ),
             (
-                "engine_bridge.rs",
+                "engine_bridge/local_layout.rs",
                 "match self.queue_finder_create(target) {",
                 "pub fn ensure_local_folder(",
                 &["kind: FinderWriteItemKind::Folder,", "contents_path: None,"],
@@ -164,6 +164,13 @@ use super::*;
                     stack.push(path);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let rel = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    if rel == "tests.rs"
+                        || rel.ends_with("/tests.rs")
+                        || rel.ends_with("_tests.rs")
+                        || rel.split('/').any(|part| part == "tests")
+                    {
+                        continue; // test-only files are not production
+                    }
                     let module = rel.split('/').next().unwrap().trim_end_matches(".rs").to_string();
                     if matches!(module.as_str(), "lib" | "main") || compiled(&module) {
                         sources.push((rel, macos_compiled(&read(&path))));
