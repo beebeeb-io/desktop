@@ -179,7 +179,7 @@ use super::*;
             "Keep Mine is an explicit conflict override, not a stale-base retry"
         );
         assert_eq!(requests[1].method, "PATCH");
-        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[1].path, "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc");
         assert_eq!(requests[2].method, "PUT");
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
         assert_ne!(requests[2].body, b"mine upload payload");
@@ -237,7 +237,7 @@ use super::*;
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].path, "/api/v1/uploads/init");
-        assert_eq!(requests[1].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[1].path, "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc");
         assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
     }
 

@@ -116,7 +116,7 @@ use super::*;
             dir.path(),
         );
         assert!(
-            line.contains("file_id=\"recorded\"") && line.contains("attempt=1"),
+            line.contains("file_id=\"35bf2b92-6739-57f1-900c-3ae371776e8c\"") && line.contains("attempt=1"),
             "{line}"
         );
         bridge.process_due_operations(&sync_root, now + 10_000).await.unwrap();

@@ -407,6 +407,6 @@ use super::*;
         let requests = server.finish();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "DELETE");
-        assert_eq!(requests[0].path, "/api/v1/files/server-file-1");
+        assert_eq!(requests[0].path, "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc");
     }
 
