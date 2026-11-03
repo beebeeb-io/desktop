@@ -437,3 +437,174 @@ fn sf2279_prepare_owned_rows_revives_a_deferred_root() {
         "the next pass repairs the index: {seen:?}"
     );
 }
+
+/// An L14 world: the root's proven custody and inventory, one listing under the
+/// root, and the row detail for every listed id.
+fn l14_world(
+    root: &'static str,
+    folder: &beebeeb_core::kdf::FileKey,
+    rows: Vec<Value>,
+    inventory: Vec<Value>,
+) -> (Fixture, Arc<Mutex<Vec<String>>>) {
+    use beebeeb_core::kdf::MasterKey;
+    let master = MasterKey::from_bytes([7; 32]);
+    let custody = STANDARD.encode(beebeeb_sync::key_resolution::wrap_folder_custody(&master, root, folder).unwrap());
+    let served = rows.clone();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        let row = served.iter().find(|row| {
+            req.path == format!("/api/v1/files/{}", row["id"].as_str().unwrap_or_default())
+        });
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (200, json!({"invites":[]}))
+        } else if req.path == format!("/api/v1/shared-folders/{root}") {
+            (200, json!({"folder_id":root,"role":"owner","key_version":1,"owner_wrapped_folder_key":custody}))
+        } else if req.path.starts_with(&format!("/api/v1/shared-folders/{root}/keys")) {
+            (200, json!({"keys":inventory,"next_cursor":null}))
+        } else if let Some(row) = row {
+            (200, row.clone())
+        } else if let Some(parent) = req.path.split("parent_id=").nth(1) {
+            let parent = parent.split('&').next().unwrap_or_default();
+            let page: Vec<Value> = served
+                .iter()
+                .filter(|row| row["parent_id"].as_str() == Some(parent))
+                .cloned()
+                .collect();
+            (200, json!({"files":page,"next_cursor":null}))
+        } else if req.path == format!("/api/v1/shared-folders/{root}/search-index/shards") {
+            (200, json!({"shards":[]}))
+        } else if req.method == "PUT" && req.path.contains("/search-index/shards/") {
+            (200, json!({"bucket":0,"page":0,"version":1}))
+        } else {
+            (404, json!({}))
+        };
+        Some((status, serde_json::to_vec(&body).unwrap()))
+    });
+    (fixture, seen)
+}
+
+fn l14_bridge(fixture: &Fixture) -> (Arc<StateDb>, crate::engine_bridge::EngineBridge) {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    // Keep the temp dir alive for the DB's lifetime by leaking it: the test
+    // process is the only user.
+    std::mem::forget(temp);
+    (db, bridge)
+}
+
+/// A10 (L14): an item listed under R, readable through its own derived key but
+/// with no wrap for (R, X, kind), is not indexed.
+#[test]
+fn a10_index_skips_listed_item_without_wrap() {
+    use beebeeb_core::kdf::MasterKey;
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000040";
+    let item = "40000000-0000-4000-8000-000000000040";
+    let derived = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "outside.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":item,"name_encrypted":name,"parent_id":root,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1});
+    let (fixture, seen) = l14_world(root, &beebeeb_core::kdf::FileKey::from_bytes([55; 32]), vec![row], vec![]);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert_eq!(report.skip_reasons.get("no_wrap"), Some(&1), "{seen:?}");
+    assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
+}
+
+/// A11 (L14): a wrap of another item's key is skipped as `wrap_key_mismatch`,
+/// even though the item itself reads through its owner envelope.
+#[test]
+fn a11_index_skips_wrap_of_another_items_key() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000041";
+    let item = "20000000-0000-8000-8000-000000000041";
+    let folder = FileKey::from_bytes([55; 32]);
+    let item_key = FileKey::from_bytes([66; 32]);
+    let other = FileKey::from_bytes([161; 32]);
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &item_key,
+        "transferred.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":item,"name_encrypted":name,"parent_id":root,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&master, item, &item_key).unwrap())});
+    let inventory = vec![json!({
+        "file_id":item,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, item, 1, &other).unwrap()),
+    })];
+    let (fixture, seen) = l14_world(root, &folder, vec![row], inventory);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert_eq!(report.skip_reasons.get("wrap_key_mismatch"), Some(&1), "{seen:?}");
+    assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
+}
+
+/// A12 (L14): a folder listed under R that the proven key does not prove is not
+/// descended into, so its (well-wrapped) child is not indexed either.
+#[test]
+fn a12_index_does_not_descend_into_unproven_folder() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000042";
+    let nested = "20000000-0000-8000-8000-000000000042";
+    let child = "20000000-0000-8000-8000-000000000043";
+    let folder = FileKey::from_bytes([55; 32]);
+    let nested_key = FileKey::from_bytes([66; 32]);
+    let child_key = FileKey::from_bytes([77; 32]);
+    let folder_name = beebeeb_core::encrypt::encrypt_name_for(
+        &nested_key,
+        "Nested",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let nested_row = json!({"id":nested,"name_encrypted":folder_name,"parent_id":root,"is_folder":true,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&master, nested, &nested_key).unwrap())});
+    let child_name = beebeeb_core::encrypt::encrypt_name_for(
+        &child_key,
+        "inner.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let child_row = json!({"id":child,"name_encrypted":child_name,"parent_id":nested,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1,
+        "acted_via_share_id":"fixture-share","uploaded_by":null,
+        "owner_wrapped_file_key":STANDARD.encode(
+            beebeeb_sync::key_resolution::wrap_owner_file_key(&master, child, &child_key).unwrap())});
+    // Only the grandchild has a wrap; the unproven folder itself has none.
+    let inventory = vec![json!({
+        "file_id":child,
+        "encrypted_file_key":STANDARD.encode(
+            beebeeb_core::owned_keys::wrap_child_key(&folder, root, child, 1, &child_key).unwrap()),
+    })];
+    let (fixture, seen) = l14_world(root, &folder, vec![nested_row, child_row], inventory);
+    let (_, bridge) = l14_bridge(&fixture);
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert_eq!(report.skip_reasons.get("no_wrap"), Some(&1), "{seen:?}");
+    assert_eq!(
+        count(&seen, &format!("parent_id={nested}")),
+        0,
+        "an unproven folder is never walked: {seen:?}"
+    );
+    assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
+}

@@ -3,7 +3,7 @@
 use crate::{api_client::ApiClient, state_db::StateDb};
 use base64::{
     Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    engine::general_purpose::STANDARD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -904,6 +904,22 @@ impl crate::engine_bridge::EngineBridge {
             return Err(anyhow::Error::new(SharedFolderKeyError::NoCustody));
         }
         Ok(Arc::new(custody.key))
+    }
+
+    /// L14: the L7 child wraps THIS root's own inventory holds, by item id.
+    /// A wrap held by another root is never returned here.
+    pub(crate) async fn shared_root_child_wraps(&self, root: &str) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+        let scope = self.owner_key_scope();
+        let rows = scope.inventory(root).await?;
+        scope.check()?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let id = row["file_id"].as_str()?;
+                let wrap = normalize_wrap(&row["encrypted_file_key"]).ok().flatten()?;
+                Some((id.to_string(), wrap))
+            })
+            .collect())
     }
 
     pub async fn shared_folder_activity(&self, id: &str) -> anyhow::Result<Vec<Value>> {
