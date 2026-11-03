@@ -317,6 +317,79 @@ fn review_p1_2_an_upload_with_a_parent_change_is_refused() {
     assert_eq!(count(&seen, &format!("PATCH /api/v1/files/{GUEST}")), 0, "{seen:?}");
 }
 
+/// P1-2: a File Provider content save moves the row inside the accept
+/// transaction, so by the time the upload's guard runs the DB parent is the
+/// destination. With no `vacated_parent_id` recorded, the old guard read the
+/// destination, found no shared root and allowed the move — leaving the F
+/// subtree without adoption. The source is unknown here; the guard must refuse.
+#[test]
+fn review_p1_2_an_accept_that_moved_the_row_first_still_refuses_the_move() {
+    let (fixture, seen) = bare_world();
+    let temp = tempfile::tempdir().unwrap();
+    let sync_root = temp.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    bridge.db().remember_folder_custody_at_revision(ROOT, 0).unwrap();
+    seed(&bridge, ROOT, ItemKind::Folder, None);
+    seed(&bridge, PRIVATE, ItemKind::Folder, None);
+    // The accept already moved the row to the destination.
+    seed(&bridge, GUEST, ItemKind::File, Some(PRIVATE));
+    let payload = temp.path().join("payload.bin");
+    std::fs::write(&payload, b"abcd").unwrap();
+    let guest = FileKey::from_bytes([66; 32]);
+    let name = beebeeb_core::encrypt::encrypt_name_for(&guest, "added.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
+    let metadata = json!({
+        "name_encrypted": name,
+        "content_type": "text/plain",
+        "parent_changed": true,
+    });
+    let op = crate::state_db::PendingOperation {
+        op_id: "op-p1-2-accept".into(),
+        kind: crate::state_db::OperationKind::UploadVersion,
+        file_id: Some(GUEST.into()),
+        parent_id: Some(PRIVATE.into()),
+        target_path: Some("Private/added.txt".into()),
+        metadata_json: Some(metadata.to_string()),
+        payload_path: Some(payload.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 1,
+        updated_at: 1,
+    };
+    bridge.db().enqueue_operation(&op).unwrap();
+    let outcome = run(bridge.process_due_operations(&sync_root, i64::MAX / 2)).unwrap();
+    assert!(
+        outcome.retried_op_ids.contains(&op.op_id) || outcome.paused_op_ids.contains(&op.op_id),
+        "the upload did not land: {outcome:?}"
+    );
+    let error = bridge.db().get_operation(&op.op_id).unwrap().unwrap().last_error.unwrap_or_default();
+    assert!(error.contains("move needs adoption"), "{error}");
+    assert_eq!(count(&seen, &format!("PATCH /api/v1/files/{GUEST}")), 0, "{seen:?}");
+}
+
+/// P1-2/P2-4: a rehomed kept row has no parent at all, so its source is
+/// unknown too. A move of a subtree that holds F ids is refused, never allowed
+/// on the destination's word.
+#[test]
+fn review_p1_2_a_rehomed_kept_row_with_a_foreign_subtree_is_refused() {
+    const KEPT: &str = "40000000-0000-4000-8000-0000000000c6";
+    const GUEST_TWO: &str = "20000000-0000-8000-8000-0000000000c7";
+    let (fixture, _seen) = bare_world();
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = bare_bridge(temp.path(), &fixture);
+    seed(&bridge, KEPT, ItemKind::Folder, None);
+    seed(&bridge, GUEST_TWO, ItemKind::File, Some(KEPT));
+    let error = run(bridge.adopt_foreign_subtree(KEPT, None, Some(PRIVATE)))
+        .expect_err("a rehomed kept row's source is unknown; its F subtree is not adopted blind");
+    assert!(format!("{error}").contains("move needs adoption"), "{error}");
+}
+
 /// More than 10,000 foreign items under a moved folder is refused with a
 /// message that says so, never a silent stop.
 #[test]

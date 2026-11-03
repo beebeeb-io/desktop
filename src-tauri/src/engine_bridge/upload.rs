@@ -570,11 +570,12 @@ impl EngineBridge {
             // shared folder takes the same adoption guard as a queued move.
             let parent_change = upload_parent_change(op, metadata);
             if !matches!(parent_change, crate::api_client::ParentChange::Unchanged) {
-                let from_parent = metadata["vacated_parent_id"]
-                    .as_str()
-                    .map(str::to_string)
-                    .or_else(|| self.db.get_file(&server_file_id).ok().flatten().and_then(|entry| entry.parent_id));
-                self.adopt_foreign_subtree(&server_file_id, from_parent.as_deref(), op.parent_id.as_deref())
+                // P1-2: the row is already at the destination here, so the DB
+                // parent is never the source. Only the op's recorded vacated
+                // parent can name it; when it is absent the guard refuses a
+                // foreign subtree instead of reading the destination (moves.rs).
+                let from_parent = metadata["vacated_parent_id"].as_str();
+                self.adopt_foreign_subtree(&server_file_id, from_parent, op.parent_id.as_deref())
                     .await?;
             }
             self.api

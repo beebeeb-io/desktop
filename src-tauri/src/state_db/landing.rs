@@ -196,6 +196,9 @@ impl StateDb {
         let parent_id = accept.parent_id.map(str::to_string);
         // A modify's record, for the upload's metadata step, of whether it moved the file.
         let mut parent_changed: Option<bool> = None;
+        // P1-2: the parent such a move vacated. The row is already at the destination
+        // by the time the upload runs, so the A19 guard cannot read it back from the DB.
+        let mut vacated_parent: Option<String> = None;
         let (decision, object_version_id) = match &accept.kind {
             FinderAcceptKind::Create { row } => {
                 debug_assert_eq!(row.file_id, accept.file_id);
@@ -231,6 +234,9 @@ impl StateDb {
                 let decision = decide_base(&facts, *incoming_base);
                 record_local_write_conn(&tx, accept.file_id, accept.size_bytes, accept.modified_at)?;
                 let moved = entry.parent_id != parent_id;
+                if moved {
+                    vacated_parent = entry.parent_id.clone();
+                }
                 apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;
                 // §7.2 (final review): the upload's metadata step sends a parent only for a save
                 // that moved the file, or that follows a queued save of the file that did: that
@@ -265,6 +271,9 @@ impl StateDb {
                 let mut metadata: serde_json::Value = serde_json::from_str(accept.metadata_json)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                 metadata["parent_changed"] = serde_json::json!(changed);
+                if let Some(vacated) = &vacated_parent {
+                    metadata["vacated_parent_id"] = serde_json::json!(vacated);
+                }
                 metadata.to_string()
             }
         };

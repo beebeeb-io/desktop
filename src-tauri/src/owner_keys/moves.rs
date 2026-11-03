@@ -52,7 +52,23 @@ impl crate::engine_bridge::EngineBridge {
                 .filter(|seen| *seen)
                 .map(|_| item_id.to_string())
         });
-        let Some(from_root) = from_root else { return Ok(()) };
+        let Some(from_root) = from_root else {
+            // P2-4: the source root is unknown (pruned, created only on the server,
+            // or a rehomed kept row). If the subtree holds foreign ids, allowing the
+            // move would strand their custody key: refuse rather than adopt blind.
+            let subtree = self.subtree_ids(item_id).ok_or_else(|| {
+                anyhow::anyhow!("refusing a move whose local subtree exceeds the inspection bound")
+            })?;
+            let foreign = subtree
+                .iter()
+                .filter(|id| beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false))
+                .count();
+            anyhow::ensure!(
+                foreign == 0,
+                "move needs adoption: an unknown source for a subtree of {foreign} foreign items"
+            );
+            return Ok(());
+        };
         if self.shared_folder_root_of(new_parent).as_deref() == Some(from_root.as_str()) {
             return Ok(());
         }
