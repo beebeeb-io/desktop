@@ -387,10 +387,14 @@ async fn review_p1_1_a_never_seen_malformed_row_is_blocked_and_has_no_write_key(
     let dir = tempfile::tempdir().unwrap();
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
     // (file id, the served field value that makes the carried envelope malformed)
-    let malformed = [(
-        "40000000-0000-4000-8000-0000000000e8",
-        serde_json::json!("%%%not-base64%%%"),
-    )];
+    let malformed = [
+        (
+            "40000000-0000-4000-8000-0000000000e8",
+            serde_json::json!("%%%not-base64%%%"),
+        ),
+        // P3-3: a present-but-null field carries (malformed), never absent.
+        ("40000000-0000-4000-8000-0000000000e9", serde_json::Value::Null),
+    ];
     for (row_id, _) in malformed.iter() {
         assert!(
             bridge.db().get_owned_key_record(row_id).unwrap().is_none(),
