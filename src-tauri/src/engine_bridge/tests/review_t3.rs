@@ -243,3 +243,204 @@ fn review_p2_8_an_unknown_foreign_item_has_no_derived_key() {
     assert_eq!(format, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
     let _ = key;
 }
+
+/// A one-route HTTP fixture: answers each request with the JSON body chosen by
+/// its path, and 404 otherwise. Enough for the request-row name fetch.
+fn json_server(
+    answer: impl Fn(&str) -> Option<serde_json::Value> + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
+            let body = answer(&path).map(|value| serde_json::to_vec(&value).unwrap());
+            let (status, body) = match body {
+                Some(body) => ("200 OK", body),
+                None => ("404 Not Found", b"{}".to_vec()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    (base, handle)
+}
+
+/// P3-8: a request row whose name is sealed under `C` (the common un-renamed
+/// case) must name its edited copy from core's resolved request-row name, not
+/// "edited file".
+#[tokio::test]
+async fn review_p3_8_a_c_sealed_request_row_names_the_copy_from_core() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    use beebeeb_core::opaque::derive_x25519_public;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e1";
+    let master = MasterKey::from_bytes([7; 32]);
+    let content = [0x33u8; 32];
+    let r_priv = [0x21u8; 32];
+    let r_pub = derive_x25519_public(&r_priv);
+    let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", &content).unwrap();
+    let (wrapped_private, wrap_nonce) =
+        beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &FileKey::from_bytes(content),
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = serde_json::json!({
+        "id": REQUEST,
+        "name_encrypted": name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+        "file_request_id": REQUEST_ID,
+        "sender_ephemeral_pubkey": STANDARD.encode(sealed.e_pub),
+        "wrapped_content_key": STANDARD.encode(&sealed.wrapped_key),
+    });
+    let requests = serde_json::json!({"file_requests": [{
+        "id": REQUEST_ID,
+        "wrapped_private_key": STANDARD.encode(&wrapped_private),
+        "wrap_nonce": STANDARD.encode(&wrap_nonce),
+    }]});
+    let (base, _server) = json_server(move |path| {
+        if path == "/api/v1/file-requests" {
+            Some(requests.clone())
+        } else if path == format!("/api/v1/files/{REQUEST}") {
+            Some(row.clone())
+        } else {
+            None
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(&bridge, REQUEST, "Inbox/report.txt", Some(FOLDER), FileStatus::Local, 4);
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: name.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let payload = dir.path().join("payload.bin");
+    std::fs::write(&payload, b"edit").unwrap();
+    let op = PendingOperation {
+        op_id: "op-p3-8-c".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/report.txt".into()),
+        metadata_json: Some(serde_json::json!({"name_encrypted": name}).to_string()),
+        payload_path: Some(payload.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut errors = Vec::new();
+    bridge.upload_version(&op, None, &sync_root, &mut errors).await.expect("re-planned");
+    let rows = bridge.db().list_files().unwrap();
+    assert!(
+        rows.iter().any(|row| row.path == "Inbox/report (edited).txt"),
+        "the copy keeps the C-sealed row's real name: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.path.contains("edited file")),
+        "never the placeholder name: {rows:?}"
+    );
+}
+
+/// P3-8 (data loss): a file on disk that the scan has not seen yet must not be
+/// overwritten by the edited copy; the next free sibling name is used.
+#[tokio::test]
+async fn review_p3_8_an_unscanned_file_on_disk_is_never_overwritten() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(sync_root.join("Inbox")).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(&bridge, REQUEST, "Inbox/report.txt", Some(FOLDER), FileStatus::Local, 4);
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, REQUEST.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: name.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+    // On disk, not in the DB: the scan has not seen it yet.
+    let unscanned = sync_root.join("Inbox/report (edited).txt");
+    std::fs::write(&unscanned, b"someone else's bytes").unwrap();
+    let payload = dir.path().join("payload.bin");
+    std::fs::write(&payload, b"edit").unwrap();
+    let op = PendingOperation {
+        op_id: "op-p3-8-disk".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/report.txt".into()),
+        metadata_json: Some(serde_json::json!({"name_encrypted": name}).to_string()),
+        payload_path: Some(payload.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut errors = Vec::new();
+    bridge.upload_version(&op, None, &sync_root, &mut errors).await.expect("re-planned");
+    assert_eq!(
+        std::fs::read(&unscanned).unwrap(),
+        b"someone else's bytes",
+        "the unscanned file is untouched"
+    );
+    let rows = bridge.db().list_files().unwrap();
+    assert!(
+        rows.iter().any(|row| row.path == "Inbox/report (edited 2).txt"),
+        "the copy takes the next free name: {rows:?}"
+    );
+}

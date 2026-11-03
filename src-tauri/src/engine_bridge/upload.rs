@@ -703,6 +703,21 @@ impl EngineBridge {
         thumbnails
     }
 
+    /// The request row's display name as core resolves it: the name key is the
+    /// derived convention first, else `C` (§15). Falls back to the stored
+    /// record's name when the canonical row cannot be read.
+    async fn request_row_display_name(&self, request_id: &str) -> String {
+        if let Ok(row) = self.api.get_file(request_id).await
+            && let Ok(keys) = self.request_row_keys(&row).await
+        {
+            return keys.name.name;
+        }
+        crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "edited file".to_string())
+    }
+
     /// L13/P1-1: a content edit of a 2236 request row is saved as a NEW owner
     /// item under a fresh id (its derived key), never written over the row,
     /// whose bytes are sealed under the anonymous uploader's `C`. The edited
@@ -718,12 +733,18 @@ impl EngineBridge {
             .db
             .get_file(request_id)?
             .ok_or_else(|| anyhow::anyhow!("request row missing from state"))?;
-        let current = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())?
-            .unwrap_or_else(|| "edited file".to_string());
+        // P3-8: the copy's name must come from core's resolved request-row keys:
+        // `stored_name` runs the derived convention only and returns None for a
+        // name sealed under `C`, which would name every un-renamed row
+        // "edited file".
+        let current = self.request_row_display_name(request_id).await;
         let leaf = edited_sibling_name(&current, 1);
         let mut rel = sibling_path(&entry.path, &leaf);
+        // P3-8 (data loss): a free DB row is not enough. A file on disk that the
+        // scan has not seen yet must never be overwritten by the copy.
         for n in 2.. {
-            if self.db.get_file_by_path(&rel).ok().flatten().is_none() {
+            let candidate = local_file_path_under_sync_root(sync_root, &rel)?;
+            if self.db.get_file_by_path(&rel).ok().flatten().is_none() && !candidate.exists() {
                 break;
             }
             rel = sibling_path(&entry.path, &edited_sibling_name(&current, n));
