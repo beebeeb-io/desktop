@@ -7,6 +7,7 @@
 //! Tests: `a9c_`.
 
 use super::*;
+use beebeeb_core::chunk_stream::ExpectedChunkFormat;
 
 const OWNER: &str = "40000000-0000-4000-8000-00000000000b";
 const REQUEST: &str = "0f000000-0000-4000-8000-000000000001";
@@ -96,5 +97,130 @@ fn a9c_request_row_keeps_content_under_c_and_name_under_derived() {
     assert_ne!(resolved.as_bytes(), derived.as_bytes());
 
     // Read-only: nothing was adopted or published.
+    assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
+}
+
+/// The a9c row: content under `C`, name under the derived string convention,
+/// with the pre-2236 empty-context wraps.
+fn request_world(
+    content: [u8; 32],
+    name_key: &beebeeb_core::kdf::FileKey,
+    plaintext: &[u8],
+) -> (Fixture, Arc<Mutex<Vec<String>>>, Value) {
+    use beebeeb_core::opaque::derive_x25519_public;
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let r_priv = [0x21u8; 32];
+    let r_pub = derive_x25519_public(&r_priv);
+    let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", &content).unwrap();
+    let (wrapped_private, wrap_nonce) = beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
+    let name = beebeeb_core::encrypt::encrypt_name_for(name_key, "report.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
+    let row = json!({
+        "id": OWNER,
+        "name_encrypted": name,
+        "parent_id": null,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": plaintext.len(),
+        "chunk_count": 1,
+        "chunk_size_bytes": plaintext.len(),
+        "updated_at": 1,
+        "acted_via_share_id": "fixture-share",
+        "uploaded_by": null,
+        "file_request_id": REQUEST,
+        "sender_ephemeral_pubkey": STANDARD.encode(sealed.e_pub),
+        "wrapped_content_key": STANDARD.encode(&sealed.wrapped_key),
+    });
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let served = row.clone();
+    let requests = json!({"file_requests": [{
+        "id": REQUEST,
+        "wrapped_private_key": STANDARD.encode(&wrapped_private),
+        "wrap_nonce": STANDARD.encode(&wrap_nonce),
+    }]});
+    let wire = {
+        let key = beebeeb_core::kdf::FileKey::from_bytes(content);
+        let blob = beebeeb_core::encrypt::encrypt_chunk(&key, plaintext).unwrap();
+        let mut wire = blob.nonce.clone();
+        wire.extend_from_slice(&blob.ciphertext);
+        wire
+    };
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        if req.path.contains("/file-requests") {
+            Some((200, serde_json::to_vec(&requests).unwrap()))
+        } else if req.path.ends_with("/chunks/0") {
+            Some((200, wire.clone()))
+        } else if req.path == format!("/api/v1/files/{OWNER}") {
+            Some((200, serde_json::to_vec(&served).unwrap()))
+        } else {
+            Some((404, b"{}".to_vec()))
+        }
+    });
+    (fixture, seen, row)
+}
+
+#[test]
+fn review_p2_2_request_keys_load_once_per_bridge() {
+    let derived = beebeeb_core::kdf::derive_file_key(&MasterKey::from_bytes([7; 32]), OWNER.as_bytes());
+    let (fixture, seen, row) = request_world([0x77; 32], &derived, b"hello");
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+    let first = run(bridge.request_row_keys(&row)).unwrap();
+    let second = run(bridge.request_row_keys(&row)).unwrap();
+    assert_eq!(first.content_key.as_bytes(), [0x77; 32].as_slice());
+    assert_eq!(second.content_key.as_bytes(), first.content_key.as_bytes());
+    assert_eq!(
+        count(&seen, "/file-requests"),
+        1,
+        "the request list is loaded once and cached on the bridge: {seen:?}"
+    );
+}
+
+#[test]
+fn review_p2_3_a_request_row_hydrates_whole_and_by_range() {
+    use crate::state_db::{FileEntry, FileStatus, ItemKind};
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = beebeeb_core::kdf::derive_file_key(&master, OWNER.as_bytes());
+    let plaintext = b"hello range".to_vec();
+    let (fixture, seen, row) = request_world([0x77; 32], &derived, &plaintext);
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let entry = FileEntry {
+        file_id: OWNER.into(),
+        path: "report.txt".into(),
+        status: FileStatus::CloudOnly,
+        size_bytes: plaintext.len() as i64,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 0,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    db.upsert_file_with_contract(&entry, |_| {}).unwrap();
+    // The durable L12 fact: the row is a request upload, so its content key is
+    // `C` and its name key the derived convention.
+    db.put_owned_key_record(&OwnedKeyRecord {
+        file_id: OWNER.into(),
+        name_encrypted: row["name_encrypted"].as_str().unwrap().into(),
+        request_row: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+
+    let dest = temp.path().join("report.txt");
+    run(bridge.hydrate_file(OWNER, &dest, &[temp.path()])).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), plaintext, "the whole file decrypts under C with the name key");
+
+    let range = run(bridge.hydrate_file_range(OWNER, 6, 5)).unwrap().expect("a range is served");
+    let start = (6 - range.range_start_bytes) as usize;
+    assert_eq!(&range.data[start..start + 5], b"range", "the range reads under C with the name key");
+    assert!(range.covers_whole_file);
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
 }
