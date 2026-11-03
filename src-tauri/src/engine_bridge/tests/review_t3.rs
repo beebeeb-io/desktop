@@ -104,6 +104,108 @@ async fn review_p1_1_a_version_upload_of_a_request_row_creates_a_new_item() {
     );
 }
 
+/// P1-1: a remote rename of a request row arrives as a synthesized sync op that
+/// carries no 2236 envelope. The durable fact must survive it, so the next local
+/// edit is still re-planned as a new item instead of a version sealed under the
+/// derived name key.
+#[tokio::test]
+async fn review_p1_1_a_remote_rename_of_a_request_row_keeps_the_fact() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(
+        &bridge,
+        REQUEST,
+        "Inbox/report.txt",
+        Some(FOLDER),
+        FileStatus::Local,
+        4,
+    );
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, REQUEST.as_bytes());
+    let renamed = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "renamed.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: renamed.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    // The server renames the request row under the derived string convention and
+    // ships a sparse `file_rename` op: no 2236 envelope fields.
+    let op = crate::api_client::SyncOp {
+        seq_id: 9,
+        op_type: "file_rename".into(),
+        payload: serde_json::json!({
+            "id": REQUEST,
+            "new_name_encrypted": renamed,
+            "parent_id": FOLDER,
+        }),
+    };
+    let prepared = crate::engine_bridge::syncflow::prepare_owned_sync_op(&bridge, &op)
+        .await
+        .expect("the rename is enriched");
+    assert!(prepared.is_some(), "a rename op is carried through");
+    assert!(
+        bridge.db().get_owned_key_record(REQUEST).unwrap().unwrap().request_row,
+        "the durable request-row fact survives a synthesized sync row"
+    );
+    assert!(bridge.is_request_row(REQUEST), "the in-memory set keeps it too");
+
+    // A following local edit must be re-planned as a NEW owner item.
+    let payload_path = dir.path().join("edit.bin");
+    std::fs::write(&payload_path, b"edited body").unwrap();
+    let edit = PendingOperation {
+        op_id: "op-request-edit-after-rename".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/renamed.txt".into()),
+        metadata_json: Some(
+            serde_json::json!({"name_encrypted": renamed, "content_type": "text/plain"}).to_string(),
+        ),
+        payload_path: Some(payload_path.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut errors = Vec::new();
+    let done = bridge
+        .upload_version(&edit, None, &sync_root, &mut errors)
+        .await
+        .expect("the edit is re-planned, not sealed under the derived key");
+    assert!(matches!(done, OpDone::Remove { .. }), "the request op is done, not sent");
+    let rows = bridge.db().list_files().unwrap();
+    let created: Vec<_> = rows
+        .iter()
+        .filter(|row| row.path == "Inbox/renamed (edited).txt")
+        .collect();
+    assert_eq!(created.len(), 1, "a NEW item under a fresh id: {rows:?}");
+    assert_ne!(created[0].file_id, REQUEST, "never a version under the request row");
+    assert!(
+        bridge.db().list_operations_for_file(REQUEST).unwrap().is_empty(),
+        "no version is sealed under the request row's derived key"
+    );
+}
+
 #[test]
 fn review_p2_8_an_unknown_foreign_item_has_no_derived_key() {
     let dir = tempfile::tempdir().unwrap();
