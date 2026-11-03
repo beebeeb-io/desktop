@@ -255,6 +255,9 @@ fn request_envelope_fixture(request_id: &str, content: [u8; 32]) -> (serde_json:
 
 /// P1-1: a row that carries the 2236 envelope with one malformed field is
 /// unreadable, and never clears the durable fact or overwrites the record.
+///
+/// Review 4 P3-4: mutant-proven — treating a malformed envelope as absent
+/// (`request_envelope(&row).ok().flatten()`) turns this red.
 #[tokio::test]
 async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write() {
     use beebeeb_core::kdf::{MasterKey, derive_file_key};
