@@ -441,3 +441,45 @@ fn review_p2_3_a_watcher_edit_in_a_shared_folder_uploads() {
     assert!(!error.contains("move needs adoption"), "an edit is not a move: {error}");
     assert_eq!(count(&seen, &format!("PATCH /api/v1/files/{GUEST}")), 1, "{seen:?}");
 }
+
+/// P3-1: a real accept-level move (the row leaves OWNER_FOLDER for PRIVATE) records
+/// the parent it vacated in the queued save's metadata, so the upload's adoption
+/// guard can name the source the row no longer shows. Removing that record from
+/// `state_db::landing` turns this red.
+#[test]
+fn review_p3_1_an_accept_that_moves_a_row_records_the_vacated_parent() {
+    use crate::state_db::{AcceptOutcome, FinderAccept, FinderAcceptKind};
+
+    let (fixture, _seen) = bare_world();
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = bare_bridge(temp.path(), &fixture);
+    bridge.db().track_staged_payload("/staged/p3-1", None, false).unwrap();
+    let metadata = json!({"name_encrypted": "opaque", "content_type": "text/plain"});
+    let accepted = bridge
+        .db()
+        .accept_finder_write(
+            &FinderAccept {
+                retire_parked: None,
+                op_id: "op-p3-1-move",
+                file_id: GUEST,
+                kind: FinderAcceptKind::Modify { incoming_base: None },
+                parent_id: Some(PRIVATE),
+                target_path: Some("Private/added.txt"),
+                metadata_json: &metadata.to_string(),
+                payload_path: "/staged/p3-1",
+                size_bytes: 4,
+                modified_at: 100,
+                backup_source_key: None,
+                now: 100,
+            },
+            &|_, _| Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(accepted, AcceptOutcome::Queued { .. }), "{accepted:?}");
+
+    let op = bridge.db().get_operation("op-p3-1-move").unwrap().expect("the save is queued");
+    let queued: Value = serde_json::from_str(op.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(queued["parent_changed"], json!(true));
+    assert_eq!(queued["vacated_parent_id"], json!(OWNER_FOLDER), "the source the guard needs: {queued}");
+    assert_eq!(bridge.db().get_file(GUEST).unwrap().unwrap().parent_id.as_deref(), Some(PRIVATE));
+}
