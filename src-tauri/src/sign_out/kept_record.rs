@@ -325,8 +325,8 @@ mod tests {
 
         // Every other save stays as it was: no flush in `save_to` (spec §7.3, amended for 1889). Line ends are read as
         // LF, because a Windows checkout has CRLF.
-        let config_rs = include_str!("../config.rs").replace("\r\n", "\n");
-        let from = config_rs.find("    fn save_to(&self, path: &Path)").expect("save_to");
+        let config_rs = include_str!("../config/store.rs").replace("\r\n", "\n");
+        let from = config_rs.find("fn save_to(&self, path: &Path)").expect("save_to");
         let save_to = &config_rs[from..from + config_rs[from..].find("\n    }\n").unwrap()];
         assert!(!save_to.contains("sync_all"), "{save_to}");
         // Nothing else picks the durable write: the two plain ways in pass no write step, and `config.rs` names the
@@ -368,7 +368,7 @@ mod tests {
 
     /// `text` as production code: the part before its test module, without the lines that are comments.
     fn production_text(text: &str) -> String {
-        let end = text.find("#[cfg(test)]\nmod tests").expect("the test module");
+        let end = text.find("#[cfg(test)]\nmod tests").unwrap_or(text.len());
         text[..end]
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
