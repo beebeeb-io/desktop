@@ -225,7 +225,7 @@ mod activity;
 mod moves;
 mod requests;
 
-pub(crate) use requests::{RequestKeys, rename_material, request_row_fact, request_upload_fields};
+pub(crate) use requests::{RequestKeys, rename_material, request_envelope, request_upload_fields};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
@@ -756,22 +756,23 @@ impl crate::engine_bridge::EngineBridge {
             let mut candidate = (!malformed && class.is_some())
                 .then(|| record_key(&master, &record, row_kind(&row)).ok())
                 .flatten();
-            // T3.2/P1-1: the name key is derived first, else `C`; only a row carrying
-            // the 2236 envelope may set or clear the durable fact (a sync row keeps it).
-            let is_request = match request_row_fact(&row) {
-                Some(is_request) => {
-                    record.request_row = is_request;
-                    self.set_request_row(id, is_request);
-                    is_request
-                }
-                None => record.request_row,
-            };
-            if is_request && candidate.is_none() {
+            // T3.2/P1-1: only the 2236 envelope may decide the durable fact, and
+            // only core's `resolve_request_row` may say a carrying row IS a
+            // request row — the server can plant three well-formed fields on an
+            // owner row. A malformed envelope is an error (the row is unreadable,
+            // nothing is written). The fact is sticky: server data never clears it.
+            if crate::owner_keys::request_envelope(&row)?.is_some() {
                 if requests.is_none() {
                     requests = Some(RequestKeys::load(&self.api()).await);
                 }
                 if let Some(found) = requests.as_mut().and_then(|keys| keys.row_keys(&master, &row)) {
-                    candidate = Some((found.name_key, found.name));
+                    if candidate.is_none() {
+                        candidate = Some((found.name_key, found.name));
+                    }
+                    if !record.request_row {
+                        record.request_row = true;
+                        self.set_request_row(id, true);
+                    }
                 }
             }
             let ordinary_legacy =

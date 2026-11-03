@@ -227,6 +227,150 @@ async fn review_p1_1_a_remote_rename_of_a_request_row_keeps_the_fact() {
     );
 }
 
+/// The sealed 2236 envelope fields of a real request row, plus the owner's
+/// wrapped request private key (served at `GET /api/v1/file-requests`).
+fn request_envelope_fixture(request_id: &str, content: [u8; 32]) -> (serde_json::Value, serde_json::Value) {
+    use beebeeb_core::kdf::MasterKey;
+    use beebeeb_core::opaque::derive_x25519_public;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let master = MasterKey::from_bytes([7; 32]);
+    let r_priv = [0x21u8; 32];
+    let r_pub = derive_x25519_public(&r_priv);
+    let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", &content).unwrap();
+    let (wrapped_private, wrap_nonce) =
+        beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
+    let envelope = serde_json::json!({
+        "file_request_id": request_id,
+        "sender_ephemeral_pubkey": STANDARD.encode(sealed.e_pub),
+        "wrapped_content_key": STANDARD.encode(&sealed.wrapped_key),
+    });
+    let requests = serde_json::json!({"file_requests": [{
+        "id": request_id,
+        "wrapped_private_key": STANDARD.encode(&wrapped_private),
+        "wrap_nonce": STANDARD.encode(&wrap_nonce),
+    }]});
+    (envelope, requests)
+}
+
+/// P1-1: a row that carries the 2236 envelope with one malformed field is
+/// unreadable, and never clears the durable fact or overwrites the record.
+#[tokio::test]
+async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e2";
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, REQUEST.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let (envelope, requests) = request_envelope_fixture(REQUEST_ID, [0x44u8; 32]);
+    let mut row = serde_json::json!({
+        "id": REQUEST,
+        "name_encrypted": name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+    });
+    row.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
+    let (base, _server) = json_server(move |path| {
+        if path == "/api/v1/file-requests" {
+            Some(requests.clone())
+        } else {
+            None
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    // The real row sets the durable fact through core's resolver.
+    let prepared = bridge
+        .prepare_owned_rows(&[row.clone()])
+        .await
+        .expect("the request row is readable");
+    assert_eq!(prepared.len(), 1);
+    let record = bridge.db().get_owned_key_record(REQUEST).unwrap().expect("the row is recorded");
+    assert!(record.request_row, "core resolved the request row");
+    assert!(bridge.is_request_row(REQUEST));
+
+    // The same row with one field that does not decode: carrying-but-malformed.
+    let mut malformed = row.clone();
+    malformed["wrapped_content_key"] = serde_json::json!("%%%not-base64%%%");
+    malformed["name_encrypted"] = serde_json::json!(beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "changed.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap());
+    let err = match bridge.prepare_owned_rows(&[malformed]).await {
+        Ok(_) => panic!("a carrying-but-malformed envelope is an error"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("malformed"), "the row is unreadable: {err}");
+    let record = bridge.db().get_owned_key_record(REQUEST).unwrap().expect("the row is still recorded");
+    assert!(record.request_row, "the durable fact is never cleared by server data");
+    assert_eq!(record.name_encrypted, name, "the unreadable row writes nothing");
+    assert!(bridge.is_request_row(REQUEST), "the in-memory set keeps it too");
+}
+
+/// P1-1: three well-formed envelope fields on a normal OWNER row come from the
+/// server, so only core's `resolve_request_row` success may make it a request
+/// row — here the seal does not open, so it stays an ordinary owner row.
+#[tokio::test]
+async fn review_p1_1_a_spoofed_envelope_on_an_owner_row_is_not_a_request_row() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e3";
+    let (_, requests) = request_envelope_fixture(REQUEST_ID, [0x45u8; 32]);
+    let (base, _server) = json_server(move |path| {
+        if path == "/api/v1/file-requests" {
+            Some(requests.clone())
+        } else {
+            None
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    let owner = "4f000000-0000-4000-8000-0000000000e4";
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, owner.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "plain.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    // The three fields decode, but no seal opens under the request key.
+    let row = serde_json::json!({
+        "id": owner,
+        "name_encrypted": name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+        "file_request_id": REQUEST_ID,
+        "sender_ephemeral_pubkey": STANDARD.encode([0x55u8; 32]),
+        "wrapped_content_key": STANDARD.encode([0x66u8; 48]),
+    });
+    let prepared = bridge
+        .prepare_owned_rows(&[row])
+        .await
+        .expect("a well-formed-shaped envelope does not break an owner row");
+    assert_eq!(prepared.len(), 1);
+    let record = bridge.db().get_owned_key_record(owner).unwrap().expect("the owner row is recorded");
+    assert!(!record.request_row, "a spoofed envelope never flips an owner row to request_row");
+    assert!(!bridge.is_request_row(owner), "nor the in-memory set");
+}
+
 #[test]
 fn review_p2_2_a_non_canonical_id_has_no_derived_key() {
     let dir = tempfile::tempdir().unwrap();

@@ -112,13 +112,23 @@ impl RequestKeys {
     }
 }
 
-/// The durable request-row fact a row may set or clear (P1-1): only a row that
-/// carries the 2236 envelope decides; a synthesized sync row returns `None`.
-pub(crate) fn request_row_fact(row: &Value) -> Option<bool> {
+/// The 2236 envelope a row carries (P1-1): `Ok(None)` when it carries none —
+/// a synthesized sync row never decides the durable fact. A row that carries
+/// all three fields must carry a well-formed envelope: a malformed one is an
+/// error, so the row is unreadable and its stored record is left alone.
+/// Whether a carrying row IS a request row is core's to say
+/// ([`RequestKeys::row_keys`]), never field presence: the server can plant a
+/// well-formed-shaped envelope on a normal owner row.
+pub(crate) fn request_envelope(row: &Value) -> anyhow::Result<Option<RequestUploadFields>> {
     let carries = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
         .iter()
         .all(|field| row.get(field).is_some());
-    carries.then(|| request_upload_fields(row).is_some())
+    if !carries {
+        return Ok(None);
+    }
+    request_upload_fields(row)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope"))
 }
 
 /// The key and pin a rename of a request row must seal under (§15): core's
