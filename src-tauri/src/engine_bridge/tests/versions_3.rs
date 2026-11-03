@@ -262,8 +262,8 @@ use super::*;
             seq_id: 5,
             op_type: "file_create".into(),
             payload: serde_json::json!({
-                "id": "phone-file",
-                "name_encrypted": enc_name(&master_key, "phone-file", "notes.txt"),
+                "id": "b1000000-0000-4000-8000-000000000005",
+                "name_encrypted": enc_name(&master_key, "b1000000-0000-4000-8000-000000000005", "notes.txt"),
                 "parent_id": null,
                 "size_bytes": 10
             }),
@@ -273,20 +273,20 @@ use super::*;
             bridge.db.peek_resnapshot_request().unwrap().is_some(),
             "a versionless op asks for a snapshot"
         );
-        bridge.db.set_status("phone-file", FileStatus::Local).unwrap();
+        bridge.db.set_status("b1000000-0000-4000-8000-000000000005", FileStatus::Local).unwrap();
         let snapshot = crate::api_client::SyncSnapshot {
             seq_id: 6,
-            nodes: vec![node(&master_key, "phone-file", "notes.txt", 1, false)],
+            nodes: vec![node(&master_key, "b1000000-0000-4000-8000-000000000005", "notes.txt", 1, false)],
         };
         apply_snapshot(&bridge, &sync_root, &snapshot, now_secs(), now_secs(), &mut Vec::new()).unwrap();
-        let presentation = bridge.db.item_presentation("phone-file").unwrap().unwrap();
+        let presentation = bridge.db.item_presentation("b1000000-0000-4000-8000-000000000005").unwrap().unwrap();
         assert_eq!(
             presentation.contract.current_version, 1,
             "filled although the row is Local"
         );
         assert!(presentation.version_filled);
         assert_eq!(
-            bridge.db.get_file("phone-file").unwrap().unwrap().status,
+            bridge.db.get_file("b1000000-0000-4000-8000-000000000005").unwrap().unwrap().status,
             FileStatus::Local,
             "content untouched"
         );
@@ -411,13 +411,13 @@ use super::*;
         let master_key = [77u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "b1000000-0000-4000-8000-000000000003").await;
         let replace = crate::api_client::SyncOp {
             seq_id: 9,
             op_type: "file_create".into(),
             payload: serde_json::json!({
-                "id": "replaced",
-                "name_encrypted": enc_name(&master_key, "replaced", "notes.txt"),
+                "id": "b1000000-0000-4000-8000-000000000003",
+                "name_encrypted": enc_name(&master_key, "b1000000-0000-4000-8000-000000000003", "notes.txt"),
                 "parent_id": null,
                 "size_bytes": 12
             }),
@@ -425,31 +425,31 @@ use super::*;
         apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
         let seen = bridge.db.peek_resnapshot_request().unwrap().expect("requested");
         assert_eq!(
-            held_content_version(&bridge, "replaced"),
+            held_content_version(&bridge, "b1000000-0000-4000-8000-000000000003"),
             token,
             "the op alone cannot tell a replace"
         );
         // The legacy init bumped the version before the bytes exist: skipped, the request stays.
         let mid = crate::api_client::SyncSnapshot {
             seq_id: 10,
-            nodes: vec![node(&master_key, "replaced", "notes.txt", 3, true)],
+            nodes: vec![node(&master_key, "b1000000-0000-4000-8000-000000000003", "notes.txt", 3, true)],
         };
         apply_snapshot(&bridge, &sync_root, &mid, now_secs(), now_secs(), &mut Vec::new()).unwrap();
-        assert_eq!(held_content_version(&bridge, "replaced"), token);
+        assert_eq!(held_content_version(&bridge, "b1000000-0000-4000-8000-000000000003"), token);
         assert!(
             !bridge.db.clear_resnapshot_request(seen).unwrap(),
             "the skip kept the request"
         );
         let done = crate::api_client::SyncSnapshot {
             seq_id: 11,
-            nodes: vec![node(&master_key, "replaced", "notes.txt", 3, false)],
+            nodes: vec![node(&master_key, "b1000000-0000-4000-8000-000000000003", "notes.txt", 3, false)],
         };
         let logs = capture_logs_async(async {
             apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         })
         .await;
         assert_eq!(
-            held_content_version(&bridge, "replaced"),
+            held_content_version(&bridge, "b1000000-0000-4000-8000-000000000003"),
             "3",
             "the system re-downloads the phone's bytes"
         );
@@ -470,23 +470,23 @@ use super::*;
         let master_key = [82u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
-        let landed = bridge.db.get_file_contract_state("replaced").unwrap().unwrap();
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "b1000000-0000-4000-8000-000000000003").await;
+        let landed = bridge.db.get_file_contract_state("b1000000-0000-4000-8000-000000000003").unwrap().unwrap();
         assert_eq!((landed.current_version, landed.local_base_version), (2, 2));
         assert!(landed.current_object_version_id.is_some());
         let replace = crate::api_client::SyncOp {
             seq_id: 9,
             op_type: "file_create".into(),
             payload: serde_json::json!({
-                "id": "replaced",
-                "name_encrypted": enc_name(&master_key, "replaced", "notes.txt"),
+                "id": "b1000000-0000-4000-8000-000000000003",
+                "name_encrypted": enc_name(&master_key, "b1000000-0000-4000-8000-000000000003", "notes.txt"),
                 "parent_id": null,
                 "size_bytes": 12
             }),
         };
         apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
-        assert_eq!(held_content_version(&bridge, "replaced"), token);
-        let mut newer = node(&master_key, "replaced", "notes.txt", 3, false);
+        assert_eq!(held_content_version(&bridge, "b1000000-0000-4000-8000-000000000003"), token);
+        let mut newer = node(&master_key, "b1000000-0000-4000-8000-000000000003", "notes.txt", 3, false);
         newer["updated_at"] = serde_json::json!(now_secs() + 60);
         newer["size_bytes"] = serde_json::json!(12);
         let done = crate::api_client::SyncSnapshot {
@@ -495,11 +495,11 @@ use super::*;
         };
         apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         assert_eq!(
-            held_content_version(&bridge, "replaced"),
+            held_content_version(&bridge, "b1000000-0000-4000-8000-000000000003"),
             "3",
             "the system re-downloads the phone's bytes"
         );
-        let contract = bridge.db.get_file_contract_state("replaced").unwrap().unwrap();
+        let contract = bridge.db.get_file_contract_state("b1000000-0000-4000-8000-000000000003").unwrap().unwrap();
         assert_eq!(contract.current_version, 3);
         assert_eq!(
             contract.local_base_version, 2,
@@ -510,10 +510,10 @@ use super::*;
             "the snapshot names no object version, and version 2's is not current"
         );
         assert!(
-            !bridge.db.item_presentation("replaced").unwrap().unwrap().version_filled,
+            !bridge.db.item_presentation("b1000000-0000-4000-8000-000000000003").unwrap().unwrap().version_filled,
             "a raise is not a fill"
         );
-        assert_eq!(bridge.db.get_file("replaced").unwrap().unwrap().size_bytes, 12);
+        assert_eq!(bridge.db.get_file("b1000000-0000-4000-8000-000000000003").unwrap().unwrap().size_bytes, 12);
         drop(server.finish());
     }
 

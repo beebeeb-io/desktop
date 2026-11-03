@@ -1091,6 +1091,7 @@ fn review_p3_6_a_name_that_is_not_a_safe_component_never_names_the_copy() {
 /// at the first candidate looked free (`exists()` follows the link) and the copy
 /// was written through it, landing outside the sync tree. The link now counts as
 /// occupied and the copy takes the next sibling name.
+#[cfg(unix)] // `std::os::unix::fs::symlink`
 #[tokio::test]
 async fn review_p3_7_a_dangling_symlink_is_not_a_free_name() {
     use beebeeb_core::kdf::{MasterKey, derive_file_key};

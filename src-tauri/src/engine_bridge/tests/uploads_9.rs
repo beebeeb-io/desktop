@@ -297,7 +297,7 @@ use super::*;
         let mut queued = Vec::new();
         for (file_id, bytes, base) in [
             ("a3c0af61-de27-59e9-9c0b-6a9c538216d6", &b"an earlier build's edit of version 1"[..], "1"),
-            ("old-good", &b"an earlier build's save"[..], "1"),
+            ("b1000000-0000-4000-8000-000000000006", &b"an earlier build's save"[..], "1"),
         ] {
             seed_uploaded_row(&bridge, &server, file_id);
             let contents = dir.path().join(format!("{file_id}.txt"));
@@ -360,7 +360,7 @@ use super::*;
             state.init_summary(),
             vec![
                 (json!("a3c0af61-de27-59e9-9c0b-6a9c538216d6"), json!(1), 409),
-                (json!("old-good"), json!(1), 201),
+                (json!("b1000000-0000-4000-8000-000000000006"), json!(1), 201),
                 (json!("a3c0af61-de27-59e9-9c0b-6a9c538216d6"), json!(1), 409)
             ],
             "(a) refused once, (b) uploaded once, and the newer save is sent on its own base"
@@ -402,7 +402,7 @@ use super::*;
             "(a) is still marked as from an earlier build"
         );
         // (b) read from the old root, landed, and released as any landing is.
-        assert_eq!(state.latest_plaintext("old-good", master_key), b_bytes);
+        assert_eq!(state.latest_plaintext("b1000000-0000-4000-8000-000000000006", master_key), b_bytes);
         assert!(bridge.db.get_operation(&b_op).unwrap().is_none(), "(b) landed");
         assert!(
             !b_copy.exists(),

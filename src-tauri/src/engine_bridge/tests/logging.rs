@@ -8,13 +8,13 @@ use super::*;
     async fn log_version_raised() {
         let master_key = [108u8; 32];
         let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "replaced").await;
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "b1000000-0000-4000-8000-000000000001").await;
         let replace = crate::api_client::SyncOp {
             seq_id: 9,
             op_type: "file_create".into(),
             payload: serde_json::json!({
-                "id": "replaced",
-                "name_encrypted": enc_name(&master_key, "replaced", PLANTED),
+                "id": "b1000000-0000-4000-8000-000000000001",
+                "name_encrypted": enc_name(&master_key, "b1000000-0000-4000-8000-000000000001", PLANTED),
                 "parent_id": null,
                 "size_bytes": 12
             }),
@@ -22,12 +22,12 @@ use super::*;
         apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
         let mid = crate::api_client::SyncSnapshot {
             seq_id: 10,
-            nodes: vec![node(&master_key, "replaced", PLANTED, 3, true)],
+            nodes: vec![node(&master_key, "b1000000-0000-4000-8000-000000000001", PLANTED, 3, true)],
         };
         apply_snapshot(&bridge, &sync_root, &mid, now_secs(), now_secs(), &mut Vec::new()).unwrap();
         let done = crate::api_client::SyncSnapshot {
             seq_id: 11,
-            nodes: vec![node(&master_key, "replaced", PLANTED, 3, false)],
+            nodes: vec![node(&master_key, "b1000000-0000-4000-8000-000000000001", PLANTED, 3, false)],
         };
         let logs = capture_logs_async(async {
             apply_snapshot(&bridge, &sync_root, &done, now_secs(), now_secs(), &mut Vec::new()).unwrap();
@@ -40,7 +40,9 @@ use super::*;
             dir.path(),
         );
         assert!(
-            line.contains("file_id=replaced") && line.contains("old_version=2") && line.contains("new_version=3"),
+            line.contains("file_id=b1000000-0000-4000-8000-000000000001")
+                && line.contains("old_version=2")
+                && line.contains("new_version=3"),
             "{line}"
         );
         drop(server.finish());

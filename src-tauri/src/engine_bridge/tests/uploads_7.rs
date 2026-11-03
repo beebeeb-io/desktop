@@ -301,13 +301,13 @@ use super::*;
         let master_key = [55u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "restored").await;
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "b1000000-0000-4000-8000-000000000002").await;
         bridge
-            .queue_restore_version("restored", "object-restored-v1", None)
+            .queue_restore_version("b1000000-0000-4000-8000-000000000002", "object-restored-v1", None)
             .unwrap();
         drain_upload_queue(&bridge, &sync_root).await;
         assert_eq!(
-            held_content_version(&bridge, "restored"),
+            held_content_version(&bridge, "b1000000-0000-4000-8000-000000000002"),
             "3",
             "the restore's version, so the system re-downloads"
         );
