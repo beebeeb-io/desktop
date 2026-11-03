@@ -217,7 +217,7 @@ pub fn display_name(file_meta: &Value, id: &str, master_key: &[u8; 32]) -> Optio
     Some(display).filter(|name| safe_display_name(name))
 }
 
-fn safe_display_name(name: &str) -> bool {
+pub(crate) fn safe_display_name(name: &str) -> bool {
     crate::reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\')
 }
 

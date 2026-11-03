@@ -708,19 +708,22 @@ impl EngineBridge {
     }
 
     /// The request row's display name as core resolves it: the name key is the
-    /// derived convention first, else `C` (§15). Falls back to the stored
-    /// record's name when the canonical row cannot be read.
+    /// derived convention first, else `C` (§15). P3-6: a name that is not a
+    /// safe single path component never names the copy. Falls back to the
+    /// stored record's name when the canonical row cannot be read.
     async fn request_row_display_name(&self, request_id: &str) -> String {
         // The common path: the stored record's name opens under the derived
         // convention, so no network call is made.
         if let Some(name) = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
             .ok()
             .flatten()
+            .filter(|name| crate::owner_keys::safe_display_name(name))
         {
             return name;
         }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
+            && crate::owner_keys::safe_display_name(&keys.name.name)
         {
             return keys.name.name;
         }

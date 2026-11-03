@@ -677,3 +677,106 @@ fn review_p3_5_a_request_row_has_no_content_key() {
     let renamed = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&derived, &sealed).unwrap();
     assert_eq!(renamed.name, "renamed.txt");
 }
+
+/// P3-6: a request row's name is server-side data, and the copy's name must be
+/// a safe single path component. `safe_display_name` is the one filter both the
+/// stored name and core's resolved name run before `edited_sibling_name`.
+#[tokio::test]
+async fn review_p3_6_an_unsafe_request_row_name_never_names_the_copy() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(
+        &bridge,
+        REQUEST,
+        "Inbox/report.txt",
+        Some(FOLDER),
+        FileStatus::Local,
+        4,
+    );
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, REQUEST.as_bytes());
+    let unsafe_name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "C:evil.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: unsafe_name.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let payload = dir.path().join("payload.bin");
+    std::fs::write(&payload, b"edit").unwrap();
+    let original_disk = sync_root.join("Inbox/report.txt");
+    std::fs::create_dir_all(original_disk.parent().unwrap()).unwrap();
+    std::fs::write(&original_disk, b"original request bytes").unwrap();
+    let op = PendingOperation {
+        op_id: "op-request-unsafe-name".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/report.txt".into()),
+        metadata_json: Some(
+            serde_json::json!({"name_encrypted": unsafe_name, "content_type": "text/plain"}).to_string(),
+        ),
+        payload_path: Some(payload.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut errors = Vec::new();
+    bridge
+        .upload_version(&op, None, &sync_root, &mut errors)
+        .await
+        .expect("a request-row edit is re-planned, not refused");
+
+    let rows = bridge.db().list_files().unwrap();
+    let created: Vec<_> = rows.iter().filter(|row| row.file_id != REQUEST && row.path != "Inbox").collect();
+    assert_eq!(created.len(), 1, "one new item: {rows:?}");
+    assert_eq!(
+        created[0].path, "Inbox/edited file (edited)",
+        "the unsafe name never names the copy"
+    );
+    assert!(
+        rows.iter().all(|row| !row.path.contains("C:")),
+        "no row is named from the unsafe component: {rows:?}"
+    );
+    assert!(
+        !sync_root.join("Inbox/C:evil.txt").exists(),
+        "nothing was written under the unsafe name"
+    );
+}
+
+/// P3-6: the copy's name must be a safe single path component — the filter that
+/// `request_row_display_name` now runs on both the stored name and core's
+/// resolved name, exactly as `display_name` does.
+#[test]
+fn review_p3_6_a_name_that_is_not_a_safe_component_never_names_the_copy() {
+    for unsafe_name in ["", " ", "C:evil.txt", "evil/name.txt", "evil\\name.txt", "/abs.txt", "\\\\srv\\share.txt"] {
+        assert!(
+            !crate::owner_keys::safe_display_name(unsafe_name),
+            "{unsafe_name:?} must never name the copy"
+        );
+    }
+    for safe in ["report.txt", "edited file (edited).txt", "report v2.txt"] {
+        assert!(crate::owner_keys::safe_display_name(safe), "{safe:?} is a plain name");
+    }
+}
