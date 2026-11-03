@@ -247,7 +247,7 @@ use super::*;
             "completed payload proof must survive a busy identity stamp"
         );
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_none());
+        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_some());
         // SF-0001 (L13): the create lands under the id it sent to init.
         let item_id = {
             let recorded = server.requests.lock().unwrap();
