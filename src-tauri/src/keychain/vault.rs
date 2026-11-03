@@ -72,9 +72,9 @@ pub fn holds_vault_key<S: AuthSecretStore>(store: &S) -> bool {
 }
 
 pub struct AuthVault<S: AuthSecretStore> {
-    pub(super) store: S,
-    pub(super) state: VaultLockState,
-    pub(super) master_key: Option<SecretBytes>,
+    store: S,
+    state: VaultLockState,
+    master_key: Option<SecretBytes>,
 }
 
 impl<S: AuthSecretStore> AuthVault<S> {
@@ -90,6 +90,12 @@ impl<S: AuthSecretStore> AuthVault<S> {
     #[cfg(test)]
     pub fn lock_state(&self) -> VaultLockState {
         self.state
+    }
+
+    /// Tests only: no production caller reads the store back; it asserts what the store holds.
+    #[cfg(test)]
+    pub(super) fn store(&self) -> &S {
+        &self.store
     }
 
     pub fn install_session(&self, token: SessionToken) -> AuthResult<()> {

@@ -611,7 +611,7 @@ mod tests {
         assert!(vault.session_token().unwrap().is_none(), "the revoked token is gone");
         assert_eq!(vault.account_email().unwrap().as_deref(), Some("sam@beebeeb.io"));
         assert!(
-            vault.store.load_wrapped_master_key().unwrap().is_some(),
+            vault.store().load_wrapped_master_key().unwrap().is_some(),
             "R8: the vault key stays"
         );
     }
@@ -628,11 +628,11 @@ mod tests {
         vault.store_account_email("sam@beebeeb.io").unwrap();
         vault.clear_session_token().unwrap();
         assert!(
-            holds_vault_key(&vault.store),
+            holds_vault_key(vault.store()),
             "R9: the revoked token goes, the key stays"
         );
         vault.clear_session().unwrap();
-        assert!(!holds_vault_key(&vault.store), "after the switch the old key is gone");
+        assert!(!holds_vault_key(vault.store()), "after the switch the old key is gone");
         assert_eq!(vault.account_email().unwrap(), None);
     }
 
@@ -666,11 +666,11 @@ mod tests {
     #[test]
     fn holds_vault_key_sees_a_retained_key_and_fails_closed() {
         let vault = AuthVault::new(MemoryStore::default());
-        assert!(!holds_vault_key(&vault.store));
+        assert!(!holds_vault_key(vault.store()));
         vault
             .store_wrapped_master_key(SecretBytes::new_master_key(&[7u8; 32]))
             .unwrap();
-        assert!(holds_vault_key(&vault.store));
+        assert!(holds_vault_key(vault.store()));
 
         struct Answers(fn() -> AuthStoreError);
         impl AuthSecretStore for Answers {
@@ -822,12 +822,12 @@ mod tests {
     fn the_default_presence_answers_follow_the_reads_and_fail_closed() {
         let vault = AuthVault::new(MemoryStore::default());
         assert!(
-            !holds_session_token(&vault.store) && !holds_vault_key(&vault.store) && !holds_account_email(&vault.store)
+            !holds_session_token(vault.store()) && !holds_vault_key(vault.store()) && !holds_account_email(vault.store())
         );
         vault.install_session(SessionToken::new("tok").unwrap()).unwrap();
         vault.store_account_email("sam@beebeeb.io").unwrap();
         assert!(
-            holds_session_token(&vault.store) && holds_account_email(&vault.store) && !holds_vault_key(&vault.store)
+            holds_session_token(vault.store()) && holds_account_email(vault.store()) && !holds_vault_key(vault.store())
         );
 
         struct Reads(fn() -> AuthStoreError);
@@ -876,7 +876,7 @@ mod tests {
         let mut token = SessionToken::new("a-secret-session-token").unwrap();
         token.zeroize();
         assert_eq!(token.expose_for_request(), "", "the text is gone");
-        let source = include_str!("../keychain.rs").replace("\r\n", "\n");
+        let source = include_str!("../keychain/session.rs").replace("\r\n", "\n");
         let drop_impl = &source[source
             .find("impl Drop for SessionToken {")
             .expect("the token wipes on drop")..];
@@ -893,7 +893,21 @@ mod tests {
         let mut key = SecretBytes::new_master_key(&[7u8; MASTER_KEY_BYTES]);
         key.zeroize();
         assert!(key.expose_for_crypto().is_empty(), "the bytes are gone");
-        let source = include_str!("../keychain.rs").replace("\r\n", "\n");
+        let source = concat!(
+            include_str!("../keychain.rs"),
+            "\n",
+            include_str!("../keychain/session.rs"),
+            "\n",
+            include_str!("../keychain/vault.rs"),
+            "\n",
+            include_str!("../keychain/legacy.rs"),
+            "\n",
+            include_str!("../keychain/accounts.rs"),
+            "\n",
+            include_str!("../keychain/errors.rs"),
+            "\n",
+        )
+        .replace("\r\n", "\n");
         let plain_fill = concat!(".fill", "(0)");
         assert_eq!(
             source.matches(plain_fill).count(),
