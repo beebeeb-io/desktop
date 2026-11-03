@@ -374,6 +374,9 @@ async fn review_p1_1_a_spoofed_envelope_on_an_owner_row_is_not_a_request_row() {
 /// P2-1: a non-canonical id the SERVER planted as a roster row still gets no
 /// derived write key — holding a row under that text proves nothing, and the
 /// derived key would be one nobody can open.
+///
+/// Review 4 P3-3: mutant-proven — deleting the unconditional class bail in
+/// `owned_key_and_pin` turns this red.
 #[test]
 fn review_p2_1_a_server_planted_non_canonical_row_has_no_derived_write_key() {
     let dir = tempfile::tempdir().unwrap();
