@@ -753,31 +753,30 @@ impl crate::engine_bridge::EngineBridge {
             }
             record.member_added |= !row["uploaded_by"].is_null();
             record.blocked_fingerprint = None;
-            let mut candidate = (!malformed && class.is_some())
-                .then(|| record_key(&master, &record, row_kind(&row)).ok())
-                .flatten();
             // Review 4 P2-1: a malformed envelope makes only this row unreadable.
-            let Ok(envelope) = crate::owner_keys::request_envelope(&row) else {
+            let outcome = self
+                .resolve_envelope(&master, &row, &mut requests, &mut record, id)
+                .await;
+            let Ok(outcome) = outcome else {
                 record.blocked_fingerprint = Some(record.fingerprint());
                 prepared.push(PreparedOwnedRow { row, record, readable: false });
                 continue;
             };
-            if envelope.is_some() {
-                if requests.is_none() {
-                    requests = Some(RequestKeys::load(&self.api()).await);
-                }
-                if let Some(found) = requests.as_mut().and_then(|keys| keys.row_keys(&master, &row)) {
-                    record.request_name = Some(requests::request_name(&found));
-                    if candidate.is_none() {
-                        candidate = Some((found.name_key, found.name));
-                    }
-                    if !record.request_row {
-                        record.request_row = true;
-                        self.set_request_row(id, true);
-                    }
-                }
+            // Review 4 P2-2: carrying but unresolved is never an owner row.
+            let unresolved_request =
+                matches!(&outcome, crate::owner_keys::requests::EnvelopeOutcome::Unresolved);
+            let mut candidate = (!malformed && !unresolved_request && class.is_some())
+                .then(|| record_key(&master, &record, row_kind(&row)).ok())
+                .flatten();
+            if let crate::owner_keys::requests::EnvelopeOutcome::Resolved { key, metadata } = outcome
+                && candidate.is_none()
+            {
+                candidate = Some((key, metadata));
             }
-            let ordinary_legacy = !is_foreign && class.is_some() && (derived_readable || (text.is_none() && !sparse));
+            let ordinary_legacy = !unresolved_request
+                && !is_foreign
+                && class.is_some()
+                && (derived_readable || (text.is_none() && !sparse));
             if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {

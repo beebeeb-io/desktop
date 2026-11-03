@@ -372,7 +372,8 @@ async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write()
 
 /// P1-1: three well-formed envelope fields on a normal OWNER row come from the
 /// server, so only core's `resolve_request_row` success may make it a request
-/// row — here the seal does not open, so it stays an ordinary owner row.
+/// row — here the seal does not open, so it stays blocked, never an owner row
+/// (review 4 P2-2), and never flips the durable fact.
 #[tokio::test]
 async fn review_p1_1_a_spoofed_envelope_on_an_owner_row_is_not_a_request_row() {
     use base64::Engine as _;
@@ -420,6 +421,89 @@ async fn review_p1_1_a_spoofed_envelope_on_an_owner_row_is_not_a_request_row() {
     let record = bridge.db().get_owned_key_record(owner).unwrap().expect("the owner row is recorded");
     assert!(!record.request_row, "a spoofed envelope never flips an owner row to request_row");
     assert!(!bridge.is_request_row(owner), "nor the in-memory set");
+}
+
+/// P2-2: a row that carries a WELL-FORMED envelope core cannot resolve (the
+/// request list did not load, or has no such id) must never fall through to the
+/// ordinary owner path. It stays blocked with no derived write key, so a local
+/// edit is not sealed as a version under the string key; a later pass that can
+/// load the request list resolves it.
+#[tokio::test]
+async fn review_p2_2_an_unresolvable_envelope_row_never_becomes_an_owner_row() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST_ID: &str = "0f000000-0000-4000-8000-0000000000e6";
+    const ROW: &str = "4f000000-0000-4000-8000-0000000000e6";
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, ROW.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let (envelope, requests) = request_envelope_fixture(REQUEST_ID, [0x46u8; 32]);
+    let loaded = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = loaded.clone();
+    let (base, _server) = json_server(move |path| {
+        (path == "/api/v1/file-requests").then(|| {
+            if flag.load(Ordering::SeqCst) {
+                requests.clone()
+            } else {
+                serde_json::json!({"file_requests": []})
+            }
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), base, [7u8; 32]);
+    let mut row = serde_json::json!({
+        "id": ROW,
+        "name_encrypted": name,
+        "parent_id": FOLDER,
+        "is_folder": false,
+        "version_number": 1,
+        "size_bytes": 4,
+        "updated_at": 1,
+    });
+    row.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
+
+    // The request list is withheld. The derived name opens, but the row carries
+    // an envelope, so it must not become an owner row.
+    let prepared = bridge
+        .prepare_owned_rows(&[row.clone()])
+        .await
+        .expect("one unresolved row never aborts the pass");
+    assert_eq!(prepared.len(), 1);
+    assert!(!prepared[0].readable, "a carrying-but-unresolved row is blocked");
+    let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is recorded");
+    assert!(record.blocked_fingerprint.is_some(), "it is blocked, not an owner row");
+    assert!(!record.request_row, "core never resolved it");
+    // No derived write key: a local edit cannot be sealed as a version under it.
+    let err = match owned_key_and_pin(&bridge.db(), &[7u8; 32], ROW) {
+        Ok(_) => panic!("an unresolved envelope row has no write key"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("item key is unavailable"), "{err}");
+    let err = match crate::engine_bridge::meta::owned_metadata_for_name(
+        &bridge.db(),
+        &[7u8; 32],
+        ROW,
+        "edited.txt",
+        None,
+    ) {
+        Ok(_) => panic!("a local edit of an unresolved row is not sealed under the derived key"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("item key is unavailable"), "{err}");
+
+    // A later pass that loads the request list resolves the same row.
+    loaded.store(true, Ordering::SeqCst);
+    let prepared = bridge.prepare_owned_rows(&[row]).await.expect("the resolved row prepares");
+    assert!(prepared[0].readable, "core resolves the row once the list loads");
+    let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is recorded");
+    assert!(record.request_row, "the durable fact is learned");
+    assert!(bridge.is_request_row(ROW));
 }
 
 /// P2-1: a non-canonical id the SERVER planted as a roster row still gets no

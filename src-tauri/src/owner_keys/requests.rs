@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use beebeeb_core::kdf::MasterKey;
+use beebeeb_core::encrypt::NameMetadata;
+use beebeeb_core::kdf::{FileKey, MasterKey};
 use crate::api_client::ApiClient;
 
 /// A 2236 request upload row's envelope fields (L12). The row is an owner-class
@@ -110,6 +111,50 @@ impl RequestKeys {
             encrypted,
         )
         .ok()
+    }
+}
+
+/// What one row's carried 2236 envelope turned out to be (review 4 P2-1/P2-2).
+pub(crate) enum EnvelopeOutcome {
+    /// The row carries no envelope: an ordinary row.
+    Absent,
+    /// It carries a well-formed envelope this pass cannot resolve. It is never
+    /// an owner row: it stays blocked, with no derived write key.
+    Unresolved,
+    /// Core resolved it; the record now carries the durable request fact.
+    Resolved { key: FileKey, metadata: NameMetadata },
+}
+
+impl crate::engine_bridge::EngineBridge {
+    /// Apply a carried 2236 envelope to `record` (P1-1/P2-1/P2-2). A malformed
+    /// envelope is `Err` for that row only; a well-formed one core cannot
+    /// resolve is [`EnvelopeOutcome::Unresolved`], never an owner row.
+    pub(crate) async fn resolve_envelope(
+        &self,
+        master: &MasterKey,
+        row: &Value,
+        cached: &mut Option<RequestKeys>,
+        record: &mut crate::owner_keys::OwnedKeyRecord,
+        id: &str,
+    ) -> anyhow::Result<EnvelopeOutcome> {
+        let Some(_) = request_envelope(row)? else {
+            return Ok(EnvelopeOutcome::Absent);
+        };
+        if cached.is_none() {
+            *cached = Some(RequestKeys::load(&self.api()).await);
+        }
+        let Some(found) = cached.as_mut().and_then(|keys| keys.row_keys(master, row)) else {
+            return Ok(EnvelopeOutcome::Unresolved);
+        };
+        record.request_name = Some(request_name(&found));
+        if !record.request_row {
+            record.request_row = true;
+            self.set_request_row(id, true);
+        }
+        Ok(EnvelopeOutcome::Resolved {
+            key: found.name_key,
+            metadata: found.name,
+        })
     }
 }
 
