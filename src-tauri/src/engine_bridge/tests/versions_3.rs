@@ -1,5 +1,6 @@
 //! `versions_3` engine tests, split out of `engine_bridge.rs`.
 
+#[cfg(unix)]
 use super::*;
     #[cfg(unix)] // names `arm_builder_seam`
     #[tokio::test]

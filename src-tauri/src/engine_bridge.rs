@@ -545,7 +545,8 @@ mod typed_ids;
 use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
 use finder_queue_2::{capture_logs_async, fp_create};
 use finder_queue_5::{Refused, refuse, stop_refusing};
-use ipc::{IpcHydrationMock};
+#[cfg(unix)]
+use ipc::IpcHydrationMock;
 use metadata_2::{patched_parents};
 use refusals_2::{reqwest_status_error, transient};
 use refusals_3::{PLANTED, assert_clean_line};
@@ -558,13 +559,18 @@ use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
 use sync::{SyncMockServer, enc_name, snap_node};
 use sync_5::{landed_create, rule3_setup, thumbnail_blob};
 use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
-use uploads::{HydrationMockServer, MockResponse, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, hydration_mock_response, hydration_test_key, read_http_request, upload_mock_response};
+use uploads::{HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, hydration_test_key, read_http_request, upload_mock_response};
+#[cfg(unix)]
+use uploads::{MockResponse, hydration_mock_response};
 use uploads_3::{ResumableUploadMock, ResumeMockMode, count_requests, init_item_id, resumable_create_op};
 use uploads_5::{fp_save, queue_save, seed_uploaded_db_row, seed_uploaded_row};
+#[cfg(unix)]
 use uploads_7::{land_one_save, remote_update};
 use uploads_8::{assert_kept_uploading, failing_passes};
 use versions::{drain_upload_queue, finder_file_target, held_content_version, run_competing, versioned_server_answer};
-use versions_2::{FP_ROOT, fp_create_in, fp_save_moved, listed_under, name_parent_status, reparented_changes, seed_folder_row, seed_row_in_folder};
+use versions_2::{fp_save_moved, name_parent_status, seed_folder_row, seed_row_in_folder};
+#[cfg(unix)]
+use versions_2::{FP_ROOT, fp_create_in, listed_under, reparented_changes};
 #[cfg(target_os = "macos")]
 use versions_3::*;
 }

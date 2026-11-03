@@ -1,5 +1,6 @@
 //! `ipc` engine tests, split out of `engine_bridge.rs`.
 
+#[cfg(unix)]
 use super::*;
     /// Self-terminating HTTP mock for the IPC end-to-end hydration tests. Unlike
     /// `HydrationMockServer` (blocking accept, fixed request count), this one is
