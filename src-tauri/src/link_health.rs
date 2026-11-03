@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn the_shown_timeout_is_the_one_the_client_is_built_with() {
         // The constant feeds both the client and the words "timeout after N s".
-        let source = include_str!("api_client.rs").replace("\r\n", "\n");
+        let source = include_str!("api_client/client.rs").replace("\r\n", "\n");
         assert!(
             source.contains(".timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))"),
             "ApiClient::new must build its client with link_health::API_REQUEST_TIMEOUT_SECS"

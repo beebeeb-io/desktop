@@ -247,6 +247,26 @@ fn round7_recovery_guard_rejects_held_transition_and_missing_final_fence() {
 /// is created. The popover's storage fetch is the one such task: `cached_storage` spawns the future its `fetch`
 /// returns, the snapshot's `fetch` is `session_bound`, and on Windows `session_bound` is `SESSION_COMMANDS.bind`.
 /// A second spawn in popover_data.rs turns the count red: bind it the same way, then raise the count.
+/// The popover_data module's production text, from the facade and every file the split moved its
+/// code into (the storage fetch now lives in `popover_data/storage.rs`).
+fn popover_source() -> String {
+    concat!(
+        include_str!("../src/popover_data.rs"),
+        "\n",
+        include_str!("../src/popover_data/constants.rs"),
+        "\n",
+        include_str!("../src/popover_data/review.rs"),
+        "\n",
+        include_str!("../src/popover_data/runtime.rs"),
+        "\n",
+        include_str!("../src/popover_data/snapshot.rs"),
+        "\n",
+        include_str!("../src/popover_data/storage.rs"),
+        "\n",
+    )
+    .replace("\r\n", "\n")
+}
+
 fn detached_fetch_is_bound(source: &str, popover: &str) -> bool {
     let Some(at) = source.find("fn session_bound<") else {
         return false;
@@ -261,16 +281,14 @@ fn detached_fetch_is_bound(source: &str, popover: &str) -> bool {
 }
 #[test]
 fn a_fetch_that_outlives_its_command_is_bound_to_the_session() {
-    let popover = include_str!("../src/popover_data.rs").replace("\r\n", "\n");
+    let popover = popover_source();
     assert!(detached_fetch_is_bound(&SOURCE, &popover));
 }
 #[test]
 fn the_bound_fetch_guard_rejects_an_unbound_fetch_and_a_new_spawn() {
     for ending in ["\n", "\r\n"] {
         let source = SOURCE.replace('\n', ending).replace("\r\n", "\n");
-        let popover = include_str!("../src/popover_data.rs")
-            .replace('\n', ending)
-            .replace("\r\n", "\n");
+        let popover = popover_source();
         assert!(detached_fetch_is_bound(&source, &popover), "line ending: {ending:?}");
         for mutation in [
             source.replace(

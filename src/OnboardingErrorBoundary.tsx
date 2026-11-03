@@ -1,3 +1,6 @@
+// Keeps a render failure in first-run setup from unmounting the whole WebView, so the person can
+// retry instead of facing a blank window. Catches render errors only, not command failures.
+
 import { Component, type ReactNode } from 'react'
 
 /** Keep a render/update failure in setup from unmounting the entire WebView. */

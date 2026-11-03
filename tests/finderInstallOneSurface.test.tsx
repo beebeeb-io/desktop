@@ -30,7 +30,7 @@ import * as macSettingsModel from '../src/macSettingsModel'
 import { T } from '../src/windows/ui'
 import { mount, textOf, visibleErrorSurfaces, type Mounted } from './fixtures/componentHarness'
 import { finderBus, finderView, tick, useFinderSetupModule } from './fixtures/finderSetupHarness'
-import { rustStr } from './fixtures/rustConstants'
+import { rustStr, rustStrIn } from './fixtures/rustConstants'
 
 const TIMEOUT = 'Timed out waiting for the Beebeeb File Provider domain to become available'
 const OTHER = 'Finder location must be absolute: relative/path'
@@ -337,7 +337,7 @@ describe('SyncFolder on macOS follows the reconciler (spec §10)', () => {
   // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: shown verbatim as
   // a neutral note, never as a toast or a second error surface.
   test('a failed Try again says Rust\'s sentence as a neutral note: no toast, no second error surface', async () => {
-    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    const sentence = rustStrIn('finder_setup/driver', 'NOT_RUNNING')
     const backend = { ...macBackend({ view: finderView({ setup: 'failed', reason: 'timeout' }) }), finder_setup_retry: () => { throw sentence } }
     const { m } = mountSyncFolder(backend, { caps: 'macos', extra: { finderStatusPill: finderSetupCopy.finderStatusPill } })
     await settle(m)
@@ -506,7 +506,7 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
     const installName = windows ? 'install_windows_shell_integration' : 'install_finder_location'
     const stateName = windows ? 'windows_shell_integration_state' : 'finder_location_state'
     let persisted: any = persistedBefore ? failed(persistedBefore) : missing
-    const m = mount('windows/views/SettingsView.tsx', 'ExplorerIntegrationPanel', {
+    const m = mount('windows/views/SettingsView/integrationPanels.tsx', 'ExplorerIntegrationPanel', {
       backend: {
         [stateName]: () => persisted,
         [installName]: () => {
@@ -543,7 +543,7 @@ describe('Settings panel: Windows (ExplorerIntegrationPanel) is unchanged; macOS
 
     async function openMacPanel(view: unknown, over: Record<string, any> = {}) {
       const bus = finderBus()
-      const m = mount('windows/views/SettingsView.tsx', 'MacFinderIntegrationPanel', {
+      const m = mount('windows/views/SettingsView/integrationPanels.tsx', 'MacFinderIntegrationPanel', {
         expand: true,
         backend: {
           finder_setup_state: () => { if (view instanceof Error) throw view; return view },

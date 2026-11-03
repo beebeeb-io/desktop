@@ -1,3 +1,6 @@
+// The Settings navigation model: section ids and their platform labels, so Finder and Explorer are
+// one page under two names. Must not resolve the platform itself; the caller passes it in.
+
 import type { PlatformName } from '../platform'
 
 export type SettingsNavId =

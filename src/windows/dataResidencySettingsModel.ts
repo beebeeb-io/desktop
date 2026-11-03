@@ -1,3 +1,6 @@
+// The data-residency settings model: the load state, the rows to show and the save payload, kept
+// pure so the macOS group and the Windows panel share one reading of the API's answer.
+
 import type {
   CommandResult,
   RegionInfo,

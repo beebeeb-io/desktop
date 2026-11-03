@@ -8,8 +8,8 @@ use beebeeb_core::{
 use beebeeb_sync::key_resolution::{wrap_child_key, wrap_folder_custody, wrap_owner_file_key};
 use std::collections::BTreeMap;
 const ROOT: &str = "10000000-0000-4000-8000-000000000001";
-const FOLDER: &str = "20000000-0000-4000-8000-000000000002";
-const GUEST: &str = "30000000-0000-4000-8000-000000000003";
+const FOLDER: &str = "20000000-0000-8000-8000-000000000002";
+const GUEST: &str = "30000000-0000-8000-8000-000000000003";
 const SECOND: &str = "40000000-0000-4000-8000-000000000004";
 fn master() -> MasterKey {
     MasterKey::from_bytes([7; 32])
@@ -444,8 +444,26 @@ fn sf2237d_t4_own_and_shared_index_repair() {
 #[test]
 fn sf2237d_t4_activity_stays_local() {
     let world = Arc::new(Mutex::new(World::new(false)));
+    let share = "50000000-0000-4000-8000-000000000005";
     world.lock().unwrap().activity = vec![
-        json!({"id":"event","kind":"add","item_count":1,"share_label_encrypted":name(&folder_key(),"Family"),"actor_name_encrypted":name(&folder_key(),"Lewis")}),
+        json!({
+            "id":"event","kind":"add","item_count":1,
+            "share_id":share,
+            "share_label_encrypted":serde_json::to_string(&beebeeb_core::kdf::wrap_link_label(&master(), uuid::Uuid::parse_str(share).unwrap().as_bytes(), "Family").unwrap()).unwrap(),
+            "actor_name_encrypted":beebeeb_core::kdf::seal_folder_actor_name(&folder_key(), uuid::Uuid::parse_str(ROOT).unwrap().as_bytes(), "Lewis").unwrap(),
+        }),
+        json!({
+            "id":"legacy","kind":"add","item_count":1,
+            "share_id":share,
+            "share_label_encrypted":name(&folder_key(),"Family"),
+            "actor_name_encrypted":name(&folder_key(),"Lewis"),
+        }),
+        json!({
+            "id":"garbage","kind":"add","item_count":1,
+            "share_id":share,
+            "share_label_encrypted":"not-an-envelope",
+            "actor_name_encrypted":"not-an-envelope",
+        }),
     ];
     let fixture = World::fixture(world.clone());
     let temp = tempfile::tempdir().unwrap();
@@ -453,6 +471,11 @@ fn sf2237d_t4_activity_stays_local() {
     let activity = run(b.shared_folder_activity(ROOT)).unwrap();
     assert_eq!(activity[0]["label"], "Family");
     assert_eq!(activity[0]["actor"], "Lewis");
+    // L16/L16c: no legacy label reader — an old-format blob opens as nothing.
+    assert_eq!(activity[1]["label"], Value::Null);
+    assert_eq!(activity[1]["actor"], Value::Null);
+    assert_eq!(activity[2]["label"], Value::Null, "nothing opens: nothing is shown");
+    assert_eq!(activity[2]["actor"], Value::Null);
     b.db()
         .put_owned_key_record(&OwnedKeyRecord {
             file_id: GUEST.into(),
@@ -466,9 +489,13 @@ fn sf2237d_t4_activity_stays_local() {
         page: Some(1),
     };
     run(b.append_shared_activity(&mut feed)).unwrap();
-    assert_eq!(feed.events.len(), 1);
-    assert_eq!(feed.events[0].subject.as_deref(), Some("Family"));
-    assert!(feed.events[0].details.as_ref().unwrap().contains("Lewis"));
+    assert_eq!(feed.events.len(), 3);
+    assert_eq!(feed.events.iter().filter(|event| event.subject.as_deref() == Some("Family")).count(), 1);
+    assert_eq!(
+        feed.events.iter().filter(|event| event.subject.as_deref() == Some("shared folder")).count(),
+        2,
+        "only the bound row shows its label; both legacy-format rows fall back"
+    );
     assert_eq!(
         world
             .lock()

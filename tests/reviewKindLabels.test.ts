@@ -7,10 +7,12 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { rustModuleSource } from './fixtures/rustConstants'
 
 const ROOT = join(import.meta.dir, '..')
-const ENGINE = readFileSync(join(ROOT, 'src-tauri', 'src', 'engine_bridge.rs'), 'utf8').replace(/\r\n/g, '\n')
-const PRODUCTION = ENGINE.slice(0, ENGINE.indexOf('\n#[cfg(test)]\nmod tests {'))
+// The split moved the feed's builders into `engine_bridge/` children (`landing.rs` holds the kinds and
+// `classify_review_operation`); read the facade and every child, production code only.
+const PRODUCTION = rustModuleSource('engine_bridge').replace(/\r\n/g, '\n')
 const API = readFileSync(join(ROOT, 'src', 'desktopApi.ts'), 'utf8')
 const LABELS = readFileSync(join(ROOT, 'src', 'reviewKindLabel.ts'), 'utf8')
 

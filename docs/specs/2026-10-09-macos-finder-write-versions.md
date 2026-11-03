@@ -1390,7 +1390,7 @@ The fetch count has to be proven before it is trusted.
     - For a stream that was not running, `/usr/bin/log show --start <T>` with the same predicate is the fallback, because Default lines are persisted.
   - **Count:** `grep -c 'done executing.*fetch-content(<id>)' R5-<step>-fetch.log`.
 - **Instrument 2, our side: the daemon's `Finder hydrate served file_id=<id> source=…` line** (`info!`, §11) in `R5-app-stdout.log`. (The `pinned=…` field is split off, §12. — lead ruling, 2026-10-10 (spec r4b))
-  - The app's default filter is `info` (`src-tauri/src/lib.rs:8825`).
+  - The app's default filter is `info` (`src-tauri/src/lib.rs:8820`).
   - Every fetch the system makes for our domain enters the extension's `fetchContents` (`FPE:75`), which asks the daemon exactly once (`FPE:163`).
   - The one exception fails before the daemon is asked: the App Group destination could not be created (`FPE:115-119`). That fetch still shows in instrument 1, as a failed job.
 - **Dropped:** download rows in `transfer_activity`. A fetch served from the queue never writes one, so the table cannot show "no fetch" on the path that matters.

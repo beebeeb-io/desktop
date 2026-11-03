@@ -1,3 +1,6 @@
+// The compact shell's Account page: plan, usage, sign-out and vault lock. Commands come from
+// `desktopApi`; the page presents what they return and asks before anything destructive.
+
 import { useRegionLabel } from '../windows/useRegion'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useToast } from '../windows/ui'

@@ -5,7 +5,9 @@
  *
  * What the guard scans: every `.ts` / `.tsx` under `src/` and every `.rs` under `src-tauri/src/`,
  * with comments removed, and for Rust with every `#[cfg(test)]` item removed (test code may name a
- * city to prove it is absent). Two rules:
+ * city to prove it is absent). A split moves a `#[cfg(test)] mod tests` into its own
+ * `<module>/tests/*.rs` children, so those files are skipped whole: the attribute that makes them
+ * test-only sits at the include site, not in the file. Two rules:
  *   1. a city NAME (Falkenstein, Helsinki, Nuremberg, Nürnberg, Ede as a place) appears nowhere;
  *   2. no code reads a `city` / `example_city` field: that is how a city reaches the screen from
  *      the payload (the server sends `city` for one more release and it must stay unread).
@@ -133,10 +135,15 @@ function walk(dir: string, ext: RegExp, out: string[] = []): string[] {
   return out
 }
 
+/** A Rust file that only a `#[cfg(test)]` module includes: a split's `<module>/tests/*.rs` child. */
+function isRustTestModule(file: string, root: string): boolean {
+  return relative(join(root, 'src-tauri/src'), file).split(/[\\/]/).includes('tests')
+}
+
 /** Every scanned file under `root` with its hits (files with none are left out). */
 export function scan(root: string): { files: number; offenders: Record<string, string[]> } {
   const ts = walk(join(root, 'src'), /\.(ts|tsx)$/)
-  const rs = walk(join(root, 'src-tauri/src'), /\.rs$/)
+  const rs = walk(join(root, 'src-tauri/src'), /\.rs$/).filter((file) => !isRustTestModule(file, root))
   const offenders: Record<string, string[]> = {}
   for (const file of [...ts, ...rs]) {
     const found = hits(readFileSync(file, 'utf8'), file.endsWith('.rs') ? 'rs' : 'ts')

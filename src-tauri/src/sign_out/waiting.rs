@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn waiting_changes_is_one_read() {
         // A Windows checkout may carry CRLF; the body search below is on `\n`.
-        let state_db = include_str!("../state_db.rs").replace("\r\n", "\n");
+        let state_db = include_str!("../state_db/signout.rs").replace("\r\n", "\n");
         let from = state_db.find("pub fn waiting_rows(").expect("waiting_rows");
         let body = &state_db[from..from + state_db[from..].find("\n    }\n").unwrap()];
         assert_eq!(body.matches(".lock()").count(), 1, "{body}");

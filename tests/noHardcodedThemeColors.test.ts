@@ -146,7 +146,8 @@ function listSourceFiles(dir: string): string[] {
 // colour belongs in `design.css` as a token with a light AND a dark value.
 export const OKLCH_ALLOWLIST: Record<string, number> = {
   'UpdateBanner.tsx': 1,
-  'WindowsApp.tsx': 2,
+  'WindowsApp/filesView.tsx': 1,
+  'WindowsApp/trashView.tsx': 1,
   'WindowsFirstRun.tsx': 19,
   'WindowsTray.tsx': 5,
   'windows/KnownFolderOnboarding.tsx': 1,
@@ -159,7 +160,8 @@ export const OKLCH_ALLOWLIST: Record<string, number> = {
   'windows/views/InsightsView.tsx': 3,
   'windows/views/SecurityView.tsx': 5,
   'windows/views/SelectiveSyncView.tsx': 2,
-  'windows/views/SettingsView.tsx': 2,
+  'windows/views/SettingsView/appActivityPanel.tsx': 1,
+  'windows/views/SettingsView/dataResidencyPanel.tsx': 1,
 }
 export const OKLCH_ALLOWLIST_TOTAL = 63
 

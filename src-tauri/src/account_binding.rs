@@ -67,7 +67,28 @@ pub enum Binding {
     Refuse,
 }
 
-pub fn decide(owner: Option<&Identity>, session: &Identity, has_local_data: bool) -> Binding {
+/// What the local database holds, as far as the binding is concerned: account data that must be accounted
+/// for, or nothing yet. A named form of the `has_local_data` fact (spec §3.4), so the decision's branches say
+/// what the boolean meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingKind {
+    /// No account data: a fresh computer, or a purge that finished.
+    NoLocalData,
+    /// Account data exists and must be compared with the recorded owner before it can be kept.
+    LocalData,
+}
+
+impl BindingKind {
+    pub fn of(has_local_data: bool) -> Self {
+        if has_local_data { Self::LocalData } else { Self::NoLocalData }
+    }
+
+    pub fn has_data(self) -> bool {
+        self == Self::LocalData
+    }
+}
+
+pub fn decide(owner: Option<&Identity>, session: &Identity, kind: BindingKind) -> Binding {
     // A session that does not know who it is (a sign-in whose account record could not be fetched) is never
     // compared with, adopted into or reset against anything: nothing starts and nothing is deleted until a fetch
     // names it, whatever the data says (owned, unowned or none).
@@ -80,7 +101,7 @@ pub fn decide(owner: Option<&Identity>, session: &Identity, has_local_data: bool
             Some(false) => Binding::Reset,
             None => Binding::Refuse,
         },
-        None if has_local_data => Binding::Reset,
+        None if kind.has_data() => Binding::Reset,
         None => Binding::Proceed,
     }
 }
@@ -159,8 +180,8 @@ pub fn bind_before_engine_start(
     reset_allowed: bool,
 ) -> Result<Bound, String> {
     let owner = data.owner()?.filter(Identity::is_known);
-    let has_local_data = data.has_account_data()?;
-    match decide(owner.as_ref(), session, has_local_data) {
+    let kind = BindingKind::of(data.has_account_data()?);
+    match decide(owner.as_ref(), session, kind) {
         Binding::Proceed => {
             // The same account, or nothing here yet: keep everything and keep the record current
             // (an id learned later completes an email-only record; a changed email replaces the old).
@@ -263,6 +284,15 @@ mod tests {
         }
     }
 
+    /// The old `has_local_data` branches, one row per boolean: the kind says the same thing.
+    #[test]
+    fn binding_kind_maps_the_has_local_data_flag_table_driven() {
+        for (has_local_data, kind) in [(false, BindingKind::NoLocalData), (true, BindingKind::LocalData)] {
+            assert_eq!(BindingKind::of(has_local_data), kind, "has_local_data = {has_local_data}");
+            assert_eq!(kind.has_data(), has_local_data, "has_local_data = {has_local_data}");
+        }
+    }
+
     #[test]
     fn the_r10_table() {
         let a = id(Some("u-a"), Some("a@beebeeb.io"));
@@ -349,7 +379,11 @@ mod tests {
                 Binding::Refuse,
             ),
         ] {
-            assert_eq!(decide(owner, session, has_local_data), expected, "{name}");
+            assert_eq!(
+                decide(owner, session, BindingKind::of(has_local_data)),
+                expected,
+                "{name}"
+            );
         }
     }
 

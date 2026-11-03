@@ -23,8 +23,12 @@ Truth lines: `cargo test` → per-binary `test result: ok. N passed; 0 failed` (
 disk (`ls` them, paste the listing). A Windows cross-check on Linux is not a native test pass. A release is verified by `RELEASE_NOTES.md` naming the
 version AND the workflow run green AND the manifest resolving: three counts, not one adjective. "Cannot be done here" is the normal state
 (macOS signing/notary, Windows installers, Finder/File Provider need hardware and credentials): route to `.claude/tasks/decisions/`; never fake a local folder root or a UI timeout to pass a gate.
+Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target; Rust stays the Legion gate's.
 
 ## Module map
+
+Module map: `MAP.md` (generated; `make map REPO=desktop`) — start here for "where does X live"; do not hand-edit.
+Task recipes: `docs/agents/recipes.md` — the four changes asked for most, each naming a real file and item (`bun scripts/outline/recipes.ts desktop` from the workspace root).
 
 ```
 src/main.tsx, MacApp.tsx, PopoverApp.tsx   frontend roots: Windows/Linux windows, the Mac `main` window, the menu-bar popover

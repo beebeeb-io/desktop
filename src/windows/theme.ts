@@ -1,3 +1,6 @@
+// Applies the stored theme preference to the document root and follows the OS colour scheme,
+// dropping its listener on cleanup. Must not persist the preference; settings own that write.
+
 import { command, DEFAULT_CONFIG, type DesktopConfig } from '../desktopApi'
 import { normalizeThemePreference, resolveThemePreference, type ThemePreference } from './advancedSettingsModel'
 

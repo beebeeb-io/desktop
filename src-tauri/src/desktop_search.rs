@@ -1,3 +1,6 @@
+//! The local search index and its server sync: build it from `state.db`, rank results for a
+//! query, and push/pull the encrypted shards. Must not touch the UI or decide Finder revealability.
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -203,10 +206,7 @@ pub(crate) fn local_index_signature(db: &StateDb) -> anyhow::Result<u64> {
     Ok(hasher.finish())
 }
 
-pub(crate) async fn load_remote_index(api: &ApiClient) -> anyhow::Result<Option<SearchIndex>> {
-    load_remote_index_from_store(api).await
-}
-
+#[cfg(test)]
 async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::Result<Option<SearchIndex>> {
     let manifest = store.fetch_manifest().await?;
     if manifest.is_empty() {

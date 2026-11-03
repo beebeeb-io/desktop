@@ -1,3 +1,10 @@
+// The auth facade is included whole so its store contract is exercised here. Its platform stores,
+// its legacy-migration constructors and its source-text helpers are reached only from the lib's own
+// tests, so this copy's dead-code analysis sees them as unused; that is the include, not dead code.
+#![allow(dead_code)]
+// The include also re-exports the production migration entry point, which only the lib calls.
+#![allow(unused_imports)]
+
 #[path = "../src/keychain.rs"]
 mod keychain;
 

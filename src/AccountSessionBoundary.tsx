@@ -1,3 +1,6 @@
+// Remounts every account view when the native session revision changes, so no stale callback or
+// module cache outlives a sign-out. Observes the session only; it never decides who is signed in.
+
 import { Fragment, useEffect, useSyncExternalStore, type ReactNode } from 'react'
 import { accountSessionRevision, subscribeAccountSession } from './accountSession'
 import { observeSessionStatus } from './desktopApi'

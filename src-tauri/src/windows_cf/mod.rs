@@ -1247,7 +1247,7 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 /// ## Idempotent + delta-only
 ///
 /// We compute the desired status/pin from the on-disk attribute mask
-/// ([`crate::state_db::decode_os_state`]) and push to the batch **only** when it
+/// ([`crate::state_db::sql`]'s `decode_os_state`) and push to the batch **only** when it
 /// differs from the live row. In steady state — and for every file changed via
 /// the in-app path (DB + OS written together) — there is no delta, so nothing is
 /// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
@@ -1451,7 +1451,7 @@ pub fn retry_pending_marks(sync_root: &std::path::Path) {
 }
 
 /// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
-/// the copy was made ([`crate::engine_bridge::retry_kept_originals`]).
+/// the copy was made ([`crate::engine_bridge::landing`]'s `retry_kept_originals`).
 pub fn retry_kept_originals(sync_root: &std::path::Path) {
     let Some(bridge) = bridge() else {
         return;

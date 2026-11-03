@@ -380,8 +380,20 @@ mod wiring_tests {
         source(include_str!("../lib.rs"))
     }
 
+    /// The runner module's text, from the facade and every file the split moved its code into.
     fn runner_rs() -> String {
-        source(include_str!("../runner.rs"))
+        source(concat!(
+            include_str!("../runner.rs"),
+            "\n",
+            include_str!("../runner/lifecycle.rs"),
+            "\n",
+            include_str!("../runner/telemetry.rs"),
+            "\n",
+            include_str!("../runner/tick_loop.rs"),
+            "\n",
+            include_str!("../runner/working_set_signal.rs"),
+            "\n",
+        ))
     }
 
     /// The text from `signature` to the next top-level item.

@@ -1,7 +1,7 @@
 // Sparse event bodies follow server folder_public.rs at server main 7dd40237.
 const A: &str = "40000000-0000-4000-8000-000000000004";
 const B: &str = "50000000-0000-4000-8000-000000000005";
-const MEMBER: &str = "60000000-0000-4000-8000-000000000006";
+const MEMBER: &str = "60000000-0000-8000-8000-000000000006";
 struct Convergence {
     dir: tempfile::TempDir,
     root: PathBuf,
@@ -386,7 +386,7 @@ async fn sf2237d_t6_local_dirty_is_held() {
             .iter()
             .any(|r| r.file_id == ID && r.kind == "held_edit")
     );
-    assert!(matches!(f.bridge.hydrate_file(ID,&path,&[f.root.as_path()]).await,Err(e) if e.is::<UnsentLocalChange>()));
+    assert!(matches!(f.bridge.hydrate_file(ID,&path,&[f.root.as_path()]).await,Err(e) if engine_cause::<UnsentLocalChange>(&e).is_some()));
     let held_bytes = std::fs::read(&path).unwrap();
     assert_eq!(held_bytes, local_edits);
     assert_eq!(

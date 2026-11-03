@@ -23,8 +23,10 @@ describe('product residency copy wiring', () => {
   for (const file of [...productSurfaces, 'src/windows/views/SettingsView.tsx']) {
     test(`${file} derives every product location claim from the shared hook`, () => {
       const source = read(file)
+      // The Windows/Linux Explorer panel and the macOS Finder panel are the product surface; the split
+      // moved them to their own module, so the slice runs over that module instead of the facade.
       const product = file.endsWith('SettingsView.tsx')
-        ? source.slice(source.indexOf('function ExplorerIntegrationPanel'), source.indexOf('export function UpdatesPanel'))
+        ? read('src/windows/views/SettingsView/integrationPanels.tsx').split('function ExplorerIntegrationPanel')[1]
         : source
       expect(/useRegionLabel\((?:step|currentStep)?\)/.test(product)).toBe(true)
       expect(product.includes('{regionLabel}')).toBe(true)

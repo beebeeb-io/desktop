@@ -1,3 +1,6 @@
+// The updater surface: listens for the desktop updater event and offers download or install through
+// the shared toast. A Mac only ever downloads; the bounded timeout keeps the action from sticking.
+
 import ManualUpdateFeedback from './ManualUpdateFeedback'
 import { useCapabilities, canInstallUpdate } from './capabilities'
 /**

@@ -11,7 +11,7 @@ test('native menu queues a frontend check instead of swallowing the IPC failure 
 })
 
 test('Settings and the always-mounted update surface use the same check controller', () => {
-  const settings = readFileSync(new URL('../src/windows/views/SettingsView.tsx', import.meta.url), 'utf8')
+  const settings = readFileSync(new URL('../src/windows/views/SettingsView/updatesPanel.tsx', import.meta.url), 'utf8')
   const banner = readFileSync(new URL('../src/UpdateBanner.tsx', import.meta.url), 'utf8')
   expect(settings).toContain('desktopUpdateCheck.check')
   expect(settings).not.toContain('await checkForDesktopUpdatesNow()')

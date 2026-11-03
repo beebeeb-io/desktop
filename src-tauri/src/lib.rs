@@ -12486,7 +12486,7 @@ fn dehydrate_excluded_subtrees_windows(
 /// synced the folder), falling back to a stable id-derived label
 /// (`"Folder 7f3a1c…"`) when the path is empty. When we fall back to the
 /// top-level API path (empty DB), names are decrypted via
-/// [`try_decrypt_name`] as before.
+/// [`owner_keys::display_name`] as before.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct VaultItem {
     id: String,
@@ -12908,27 +12908,14 @@ fn subtree_file_ids(rows: &[(String, Option<String>, bool)], root_folder_ids: &[
 /// an entry encrypted under a different key, should still appear in
 /// the list (with a fallback name) rather than abort the whole call.
 ///
-/// Routes through the consolidated `beebeeb_core::encrypt::decrypt_name`, the
-/// single decrypt path all clients share (web/cli/desktop). Unlike the previous
-/// local helper — which handled only native `EncryptedBlob` blobs derived from
-/// the BINARY UUID — `decrypt_name` covers the full format/key matrix: native
-/// blobs AND web base64 `{nonce,ciphertext}` envelopes, derived from EITHER the
-/// string-UUID (the web app's `TextEncoder.encode(fileId)`) or the binary UUID.
-/// A bare plaintext name passes straight through. We deliberately swallow the
+/// Routes through core's resolver (`beebeeb_core::owned_keys::resolve_owned_key`),
+/// the single decision path all clients share. The served id class decides
+/// (task 2275, L12): an owner id's key is derived and must authenticate the
+/// name, and any served attribution or envelope is ignored; a foreign id opens
+/// only through its L8 envelope. Unlike the previous `decrypt_name` call this
+/// covers the string, binary and read-only uppercase-repair conventions and
+/// never treats a foreign row as an owner row. We deliberately swallow the
 /// error to `None` so the SelectiveSync row falls back to a stable id label.
-fn try_decrypt_name(file_meta: &serde_json::Value, id: &str, master_key: &[u8; 32]) -> Option<String> {
-    let name = file_meta["name_encrypted"].as_str()?;
-    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
-    let owner = owner_keys::normalize_wrap(&file_meta["owner_wrapped_file_key"]).ok()?;
-    let foreign = !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null();
-    if owner.is_some() || foreign {
-        let resolved = beebeeb_sync::key_resolution::resolve_owned_key(&mk, id, owner.as_deref(), None, foreign).ok()?;
-        return beebeeb_core::encrypt::decrypt_file_metadata_with_key(&resolved.key, name).ok()
-            .map(|m| m.name).filter(|name| reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\'));
-    }
-    beebeeb_core::encrypt::decrypt_name(&mk, id, name).ok()
-}
-
 /// Build the nested SelectiveSync folder tree.
 ///
 /// Wave-2 change (task 0090 backing): the tree is built from the LOCAL
@@ -13013,7 +13000,7 @@ async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec<VaultItem>
             // server-provided plaintext `path` if present (some legacy
             // entries surface plaintext here), then to a stable, short
             // id-based label so the user can still tell folders apart.
-            let display = try_decrypt_name(f, id, &master_key)
+            let display = owner_keys::display_name(f, id, &master_key)
                 .or_else(|| {
                     if !f["acted_via_share_id"].is_null() || !f["uploaded_by"].is_null() || !f["owner_wrapped_file_key"].is_null() { return None; }
                     let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -13417,7 +13404,7 @@ fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
 
 fn trash_item_from_meta(file_meta: &serde_json::Value, master_key: &[u8; 32]) -> Option<account_dto::DesktopTrashItem> {
     let id = file_meta.get("id").and_then(|v| v.as_str())?.to_string();
-    let name = try_decrypt_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
+    let name = owner_keys::display_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
     let updated_at = file_meta
         .get("updated_at")
         .and_then(|v| {
@@ -24461,6 +24448,7 @@ mod finder_setup_wiring_tests {
             if name == "macos_file_provider.rs" {
                 continue; // the bridge itself
             }
+            if name == "tests.rs" || name.ends_with("/tests.rs") || name.ends_with("_tests.rs") || name.split('/').any(|part| part == "tests") { continue; }
             let text = std::fs::read_to_string(&file)
                 .expect("read a source file")
                 .replace("\r\n", "\n");
@@ -28171,7 +28159,7 @@ mod account_binding_tests {
             production.contains("type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);"),
             "the alias is the wrapped pair"
         );
-        let runner = include_str!("runner.rs").replace("\r\n", "\n");
+        let runner = [include_str!("runner.rs"), include_str!("runner/lifecycle.rs"), include_str!("runner/telemetry.rs"), include_str!("runner/tick_loop.rs"), include_str!("runner/working_set_signal.rs")].join("\n").replace("\r\n", "\n");
         for (entry, end) in [("pub fn spawn(", ") -> Self {"), ("async fn run(", ") {\n")] {
             let at = runner.find(entry).unwrap_or_else(|| panic!("{entry}"));
             let signature = &runner[at..at + runner[at..].find(end).unwrap_or_else(|| panic!("the end of {entry}"))];
@@ -35971,6 +35959,7 @@ mod finder_removal_wiring_tests {
                     stack.push(path);
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    if name == "tests.rs" || name.ends_with("/tests.rs") || name.ends_with("_tests.rs") || name.split('/').any(|part| part == "tests") { continue; }
                     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
                     let text = text.replace("\r\n", "\n");
                     let production = if name == "lib.rs" {
@@ -36322,8 +36311,7 @@ mod finder_removal_wiring_tests {
             !provider.contains("pub fn install("),
             "no macOS install() to clean up after"
         );
-        let core = include_str!("finder_setup/core.rs").replace("\r\n", "\n");
-        let core = &core[..core.find("\n#[cfg(test)]\nmod tests {").expect("tests follow")];
+        let core = { let facade = include_str!("finder_setup/core.rs").replace("\r\n", "\n"); format!("{}\n{}", &facade[..facade.find("\n#[cfg(test)]\nmod tests {").expect("tests follow")], [include_str!("finder_setup/core/decide.rs"), include_str!("finder_setup/core/landing.rs"), include_str!("finder_setup/core/results.rs"), include_str!("finder_setup/core/types.rs")].join("\n")) }.replace("\r\n", "\n");
         assert_eq!(
             core.matches("s.phase = Phase::Removing {").count(),
             4,
@@ -36729,6 +36717,7 @@ mod config_write_pin_tests {
                     stack.push(path);
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+                    if name == "tests.rs" || name.ends_with("/tests.rs") || name.ends_with("_tests.rs") || name.split('/').any(|part| part == "tests") { continue; }
                     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
                     let production = without_items(&text.replace("\r\n", "\n"), &["#[cfg(test)]", "#[cfg(all(test"]);
                     let code = production
@@ -36972,7 +36961,7 @@ mod config_write_pin_tests {
     fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper() {
         let files = production_files();
         for (name, text) in &files {
-            if name == "config.rs" {
+            if name == "config/store.rs" {
                 continue;
             }
             for banned in [".save()", ".save_to("] {
@@ -36984,19 +36973,15 @@ mod config_write_pin_tests {
             }
         }
 
-        let config = &files.iter().find(|(name, _)| name == "config.rs").unwrap().1;
-        assert!(!config.contains("fn save("), "config.rs has no `save` to call");
+        let config = &files.iter().find(|(name, _)| name == "config/store.rs").unwrap().1;
+        assert!(!config.contains("fn save("), "config/store.rs has no `save` to call");
         assert_eq!(
             config.matches("save_to(").count(),
             2,
             "config.rs writes in one place: the definition of `save_to` and its one call"
         );
-        assert_eq!(
-            config.matches("config_write_guard()").count(),
-            2,
-            "the lock is taken in one place: its definition and its one call"
-        );
-        let one_place = item(config, "    fn try_update_at_then<R>(");
+        assert_eq!(config.matches("config_write_guard()").count() + files.iter().find(|(name, _)| name == "config/lock.rs").expect("config/lock.rs is production").1.matches("config_write_guard()").count(), 2, "the lock is defined once (config/lock.rs) and taken in one place (config/store.rs)");
+        let one_place = item(config, "    pub(super) fn try_update_at_then<R>(");
         let lock = one_place
             .find("let _writing = config_write_guard();")
             .expect("it takes the lock");
@@ -37030,9 +37015,9 @@ mod config_write_pin_tests {
                 "Self::update_at(&Self::path()?, change)",
             ),
             ("    pub(crate) fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
-            ("    pub(crate) fn ensure_account_id_at(", "Self::update_at(path,"),
+            ("    pub(crate) fn ensure_account_id_at(", "Self::try_update_at(path,"),
         ] {
-            let body = item(config, start);
+            let body = item(if start.contains("update_held_at") { &files.iter().find(|(name, _)| name == "config/lock.rs").unwrap().1 } else { config }, start);
             assert!(body.contains(calls), "{start} is `{calls}`:\n{body}");
             assert!(!body.contains("load_from(") && !body.contains("save_to("), "{body}");
         }
@@ -37418,7 +37403,7 @@ mod config_write_pin_tests {
     fn test_1889_no_stale_whole_copy_is_written_through_an_update_closure() {
         let mut found = Vec::new();
         for (name, text) in production_files() {
-            if name == "config.rs" {
+            if name == "config/store.rs" || name == "config/lock.rs" {
                 continue;
             }
             for line in whole_copy_writes(&text) {

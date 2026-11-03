@@ -1,3 +1,6 @@
+//! The Rust side of the macOS File Provider bridge: decode `BeebeebFpErrorC` from the Objective-C
+//! shim into `FpError` and name the domain and item calls. Must not decide what Finder sees.
+
 use std::ffi::{CStr, c_void};
 use std::os::raw::c_char;
 use std::time::Duration;
@@ -122,7 +125,7 @@ pub fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
 
 /// The GATED half of "Open in Finder" (task 1885, fix round 1 I1): resolves the Beebeeb domain's root to the
 /// security-scoped URL macOS returns for it, as a retained handle. `Ok(None)` is "macOS reports no location" (the
-/// domain is not added). The open itself is [`crate::macos_workspace::open_scoped`], which runs after the gate is
+/// domain is not added). The open itself is [`crate::macos_workspace`]'s `open_scoped`, which runs after the gate is
 /// released: `NSWorkspace` is not a File Provider call and can stall for seconds. There is no path string anywhere in
 /// the chain: a path carries no sandbox extension.
 pub fn resolve_location() -> Result<Option<ScopedUrl>, FpError> {
@@ -265,9 +268,6 @@ pub enum WorkingSetSignalOutcome {
     /// The system accepted the signal (or the domain is not registered —
     /// nothing to signal is not a failure; sync continues regardless).
     Delivered,
-    /// The signal itself failed (timeout, NSFileProviderManager error). Logged
-    /// by the caller; never blocks the sync tick that produced it.
-    Failed,
 }
 
 /// Task 1698 part 3 (closes 1696, audit G8): the ONE domain we own. The

@@ -9,7 +9,10 @@ pub struct AuthAttempts {
     state: Mutex<(u64, bool)>,
 }
 pub struct Attempt(CallbackLease<()>);
+/// Windows only: the sign-out's Cloud Files shutdown installs it (see `lib.rs`), so no other OS builds it.
+#[cfg(target_os = "windows")]
 pub struct ReopenOnDrop<'a>(pub &'a AuthAttempts);
+#[cfg(target_os = "windows")]
 impl Drop for ReopenOnDrop<'_> {
     fn drop(&mut self) {
         self.0.finish_close();

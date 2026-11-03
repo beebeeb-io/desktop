@@ -12,6 +12,17 @@ pub struct IndexRepairReport {
     pub written: usize,
     pub deferred: usize,
     pub partial: bool,
+    /// L14: rows left out of the index, by reason. A skipped row never makes
+    /// the repair partial; it is simply not provably a member of this folder.
+    pub skipped: usize,
+    pub skip_reasons: BTreeMap<&'static str, usize>,
+}
+
+impl IndexRepairReport {
+    fn skip(&mut self, reason: &'static str) {
+        self.skipped += 1;
+        *self.skip_reasons.entry(reason).or_default() += 1;
+    }
 }
 
 impl EngineBridge {
@@ -74,6 +85,10 @@ impl EngineBridge {
         let mut seen = HashSet::new();
         let mut pairs = Vec::new();
         let mut listed = HashSet::new();
+        let mut current = HashSet::new();
+        // L14: the check compares against THIS root's inventory. A wrap another
+        // root holds proves nothing about membership in the folder repaired.
+        let wraps = self.shared_root_child_wraps(folder_id).await?;
         while let Some(parent) = queue.pop_front() {
             if !seen.insert(parent.clone()) {
                 report.partial = true;
@@ -96,21 +111,56 @@ impl EngineBridge {
                     }
                     let id = item.record.file_id.clone();
                     listed.insert(id.clone());
-                    if !item.readable {
-                        report.partial = true;
+                    // L14: request rows and plaintext-named items are never
+                    // indexed, and a row whose name does not authenticate is
+                    // left out (counted, not partial).
+                    if owner_keys::request_upload_fields(&item.row).is_some() {
+                        report.skip("request_row");
                         continue;
                     }
-                    if item.row["is_folder"] == true {
-                        queue.push_back(id.clone());
+                    if !item.record.name_encrypted.starts_with('{') {
+                        report.skip("plaintext_name");
+                        continue;
+                    }
+                    if !item.readable {
+                        report.skip("name_unauthenticated");
+                        continue;
+                    }
+                    let kind = owner_keys::row_kind(&item.row);
+                    // L14 (1): THIS root's inventory must hold the wrap. A
+                    // missing wrap is `no_wrap` whatever other root holds one.
+                    let Some(wrap) = wraps.get(&id) else {
+                        report.skip("no_wrap");
+                        continue;
+                    };
+                    // L14 (2): it must open under the root's proven custody key.
+                    if beebeeb_core::owned_keys::unwrap_child_key(&key, folder_id, &id, kind.as_u8(), wrap).is_err() {
+                        report.skip("wrap_does_not_open");
+                        continue;
                     }
                     let master = MasterKey::from_bytes(*self.api().master_key());
-                    let name = owner_keys::record_key(&master, &item.record)
-                        .map(|(_, m)| m.name)
-                        .or_else(|_| {
-                            beebeeb_core::encrypt::decrypt_name(&master, &id, &item.record.name_encrypted)
-                                .map_err(anyhow::Error::from)
-                        })?;
-                    pairs.push((id, name));
+                    let Ok((item_key, metadata)) = owner_keys::record_key(&master, &item.record, kind) else {
+                        report.skip("name_unauthenticated");
+                        continue;
+                    };
+                    // L14 (3) the opened key equals the resolver's key, and
+                    // (4) the name authenticates under it (record_key proved it).
+                    if !beebeeb_core::owned_keys::child_wrap_matches(
+                        &key,
+                        folder_id,
+                        &id,
+                        kind.as_u8(),
+                        wrap,
+                        &item_key,
+                    ) {
+                        report.skip("wrap_key_mismatch");
+                        continue;
+                    }
+                    current.insert(id.clone());
+                    if kind == beebeeb_core::owned_keys::ItemKind::Folder {
+                        queue.push_back(id.clone());
+                    }
+                    pairs.push((id, metadata.name));
                 }
                 if listed.len() >= 20_000 {
                     queue.clear();
@@ -131,12 +181,30 @@ impl EngineBridge {
         }
         // Replay only our known changes/removals. A concurrent device's entries
         // survive even if a fresh listing has not observed that device yet.
+        // P3-6/P2-1: an earlier build indexed owner items too — files AND
+        // folders. They never pass L14 (their class is derived, not wrapped), so
+        // they are removed by class and by the root's local subtree; the class
+        // filter is the discriminator, not the item kind.
+        let root_path = self.db().get_file(folder_id).ok().flatten().map(|entry| entry.path);
+        let prefix = root_path.map(|path| format!("{path}/"));
+        let earlier_owner_ids: Vec<String> = self
+            .db()
+            .list_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| prefix.as_ref().is_some_and(|prefix| entry.path.starts_with(prefix)))
+            .map(|entry| entry.file_id)
+            .filter(|id| {
+                beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Owner)
+            })
+            .collect();
         let removals: Vec<String> = self
             .db()
             .list_owned_key_records()?
             .into_iter()
-            .filter(|r| r.shared_root_id.as_deref() == Some(folder_id) && !listed.contains(&r.file_id))
+            .filter(|r| r.shared_root_id.as_deref() == Some(folder_id) && !current.contains(&r.file_id))
             .map(|r| r.file_id)
+            .chain(earlier_owner_ids.into_iter().filter(|id| !current.contains(id)))
             .collect();
         for attempt in 0..3 {
             scope.check()?;

@@ -3,7 +3,9 @@ use beebeeb_core::{
     chunk_stream::{ChunkDecryptor, ChunkEncryptor, ExpectedChunkFormat},
     kdf::{FileKey, MasterKey},
 };
-const ID: &str = "30000000-0000-4000-8000-000000000003";
+const ID: &str = "30000000-0000-8000-8000-000000000003";
+/// An owner-class item: the same flows with no attribution and no envelope.
+const OWNER: &str = "40000000-0000-4000-8000-000000000004";
 const ROOT: &str = "10000000-0000-4000-8000-000000000001";
 const OBJECT: &str = "90000000-0000-4000-8000-000000000009";
 fn random_key() -> FileKey {
@@ -58,6 +60,13 @@ struct ContentServer {
 }
 impl ContentServer {
     fn start(key: &FileKey, pin: ExpectedChunkFormat) -> Self {
+        Self::start_as(ID, key, pin)
+    }
+    /// An owner-class item served from the same fixture.
+    fn start_owner(key: &FileKey, pin: ExpectedChunkFormat) -> Self {
+        Self::start_as(OWNER, key, pin)
+    }
+    fn start_as(id: &str, key: &FileKey, pin: ExpectedChunkFormat) -> Self {
         let plain = b"guest bytes!";
         let state = Arc::new(Mutex::new(ContentState {
             rv_routes: Default::default(),
@@ -65,8 +74,8 @@ impl ContentServer {
             ops: vec![],
             seq: 0,
             invites: json!({"invites":[]}),
-            meta: json!({"id":ID,"name_encrypted":named(key,"guest.txt",pin),"size_bytes":plain.len(),"chunk_count":3,"chunk_size_bytes":4,"version_number":1}),
-            frames: frames(key, ID, plain, pin),
+            meta: json!({"id":id,"name_encrypted":named(key,"guest.txt",pin),"size_bytes":plain.len(),"chunk_count":3,"chunk_size_bytes":4,"version_number":1}),
+            frames: frames(key, id, plain, pin),
             requests: vec![],
             uploads: vec![],
             gone: 0,
@@ -168,16 +177,21 @@ impl ContentServer {
     }
     fn bridge(&self, path: &Path, foreign: bool) -> EngineBridge {
         let b = test_bridge_with_api(path, self.base.clone(), [7; 32]);
+        let id = self.state.lock().unwrap().meta["id"].as_str().unwrap().to_string();
         if foreign {
             b.db.put_owned_key_record(&OwnedKeyRecord {
-                file_id: ID.into(),
+                file_id: id.clone(),
                 name_encrypted: self.state.lock().unwrap().meta["name_encrypted"]
                     .as_str()
                     .unwrap()
                     .into(),
                 owner_wrap: Some(
-                    beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), ID, &random_key())
-                        .unwrap(),
+                    beebeeb_sync::key_resolution::wrap_owner_file_key(
+                        &MasterKey::from_bytes([7; 32]),
+                        &id,
+                        &random_key(),
+                    )
+                    .unwrap(),
                 ),
                 foreign_added: true,
                 shared_root_id: Some(ROOT.into()),
@@ -185,7 +199,7 @@ impl ContentServer {
             })
             .unwrap();
         }
-        seed_bridge_row(&b, ID, "guest.txt", None, FileStatus::CloudOnly, 0);
+        seed_bridge_row(&b, &id, "guest.txt", None, FileStatus::CloudOnly, 0);
         b
     }
 }
@@ -205,19 +219,25 @@ fn runtime() -> tokio::runtime::Runtime {
 fn sf2237d_t5_whole_and_range_open() {
     for foreign in [true, false] {
         for pin in [ExpectedChunkFormat::Unrecorded, ExpectedChunkFormat::V2] {
+            // L12: the id class decides, so an owner flow needs an owner id.
+            let id = if foreign { ID } else { OWNER };
             let key = if foreign {
                 random_key()
             } else {
-                hydration_test_key([7; 32], ID)
+                hydration_test_key([7; 32], id)
             };
-            let server = ContentServer::start(&key, pin);
+            let server = if foreign {
+                ContentServer::start(&key, pin)
+            } else {
+                ContentServer::start_owner(&key, pin)
+            };
             let temp = tempfile::tempdir().unwrap();
             let b = server.bridge(&temp.path().join("db"), foreign);
-            let whole = runtime().block_on(b.do_hydrate(ID, None)).unwrap();
+            let whole = runtime().block_on(b.do_hydrate(id, None)).unwrap();
             let opened_hash = sha256_hex(&whole);
             let guest_hash = sha256_hex(b"guest bytes!");
             assert_eq!(opened_hash, guest_hash);
-            let range = runtime().block_on(b.hydrate_file_range(ID, 4, 4)).unwrap().unwrap();
+            let range = runtime().block_on(b.hydrate_file_range(id, 4, 4)).unwrap().unwrap();
             assert_eq!(&*range.data, b"t by");
         }
     }
@@ -280,22 +300,23 @@ fn sf2237d_t5_whole_and_range_open() {
     // Exercise the direct transport with the same recorded pins and random keys.
     for foreign in [false, true] {
         for pin in [ExpectedChunkFormat::Unrecorded, ExpectedChunkFormat::V2] {
+            let id = if foreign { ID } else { OWNER };
             let key = if foreign {
                 random_key()
             } else {
-                hydration_test_key([7; 32], ID)
+                hydration_test_key([7; 32], id)
             };
-            let pair = crate::direct_download::test_support::Pair::start_with([7; 32], ID, 4, b"guest bytes!".to_vec());
-            pair.knobs().version.frames = frames(&key, ID, b"guest bytes!", pin);
+            let pair = crate::direct_download::test_support::Pair::start_with([7; 32], id, 4, b"guest bytes!".to_vec());
+            pair.knobs().version.frames = frames(&key, id, b"guest bytes!", pin);
             let temp = tempfile::tempdir().unwrap();
             let b = test_bridge_with_api(&temp.path().join("db"), pair.api.base.clone(), [7; 32]);
             let name = named(&key, "direct.txt", pin);
             if foreign {
                 b.db.put_owned_key_record(&OwnedKeyRecord {
-                    file_id: ID.into(),
+                    file_id: id.into(),
                     name_encrypted: name.clone(),
                     owner_wrap: Some(
-                        beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), ID, &key)
+                        beebeeb_sync::key_resolution::wrap_owner_file_key(&MasterKey::from_bytes([7; 32]), id, &key)
                             .unwrap(),
                     ),
                     foreign_added: true,
@@ -303,9 +324,9 @@ fn sf2237d_t5_whole_and_range_open() {
                 })
                 .unwrap();
             }
-            let mut meta = json!({"id":ID,"name_encrypted":name,"size_bytes":12,"chunk_count":3,"chunk_size_bytes":4,"download_version":pair.knobs().version.manifest()});
+            let mut meta = json!({"id":id,"name_encrypted":name,"size_bytes":12,"chunk_count":3,"chunk_size_bytes":4,"download_version":pair.knobs().version.manifest()});
             assert_eq!(
-                &*runtime().block_on(b.do_hydrate_with_meta(ID, &meta, None)).unwrap(),
+                &*runtime().block_on(b.do_hydrate_with_meta(id, &meta, None)).unwrap(),
                 b"guest bytes!"
             );
             assert_eq!(pair.storage_requests(), 3);
@@ -320,7 +341,7 @@ fn sf2237d_t5_whole_and_range_open() {
                 meta["chunk_count"] = json!(2);
                 meta["size_bytes"] = json!(8);
                 assert!(
-                    runtime().block_on(b.do_hydrate_with_meta(ID, &meta, None)).is_err(),
+                    runtime().block_on(b.do_hydrate_with_meta(id, &meta, None)).is_err(),
                     "direct finish must reject truncated v2"
                 );
                 assert!(
@@ -340,7 +361,7 @@ fn sf2237d_t5_thumbnail_preview_and_versions() {
         &*runtime().block_on(b.fetch_thumbnail_to_memory(ID, "small")).unwrap(),
         b"thumbnail"
     );
-    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, true));
+    let (preview, _) = runtime().block_on(b.remote_content_preview(ID, ContentKind::Text));
     assert_eq!(preview.text.as_deref(), Some("guest bytes!"));
     {
         let mut w = s.state.lock().unwrap();
@@ -398,7 +419,7 @@ fn sf2237d_t5_rename_and_replacement_keep_key() {
     b.db.put_upload_resume(&session).unwrap();
     runtime()
         .block_on(b.upload_session_body(
-            ID,
+            LocalFileId::new(ID),
             &op,
             &json!({}),
             &name,
@@ -466,11 +487,11 @@ fn sf2237d_t5_bad_key_never_publishes() {
 }
 #[test]
 fn sf2237d_t5_request_and_sharedwithme_unchanged() {
-    let key = hydration_test_key([7; 32], ID);
-    let s = ContentServer::start(&key, ExpectedChunkFormat::Unrecorded);
+    let key = hydration_test_key([7; 32], OWNER);
+    let s = ContentServer::start_owner(&key, ExpectedChunkFormat::Unrecorded);
     let temp = tempfile::tempdir().unwrap();
     let b = s.bridge(&temp.path().join("db"), false);
-    assert_eq!(&*runtime().block_on(b.do_hydrate(ID, None)).unwrap(), b"guest bytes!");
+    assert_eq!(&*runtime().block_on(b.do_hydrate(OWNER, None)).unwrap(), b"guest bytes!");
     let sender = MasterKey::from_bytes([8; 32]);
     let recipient = MasterKey::from_bytes([7; 32]);
     let sp = beebeeb_core::opaque::derive_x25519_public(&beebeeb_core::opaque::derive_x25519_private(&sender));
@@ -526,23 +547,23 @@ fn sf2237d_t5_request_and_sharedwithme_unchanged() {
 }
 #[test]
 fn sf2237d_t5_pin_and_object_change() {
-    let key = hydration_test_key([7; 32], ID);
-    let s = ContentServer::start(&key, ExpectedChunkFormat::V2);
+    let key = hydration_test_key([7; 32], OWNER);
+    let s = ContentServer::start_owner(&key, ExpectedChunkFormat::V2);
     let temp = tempfile::tempdir().unwrap();
     let b = s.bridge(&temp.path().join("db"), false);
-    s.state.lock().unwrap().frames = frames(&key, ID, b"guest bytes!", ExpectedChunkFormat::Unrecorded);
+    s.state.lock().unwrap().frames = frames(&key, OWNER, b"guest bytes!", ExpectedChunkFormat::Unrecorded);
     assert!(
-        runtime().block_on(b.do_hydrate(ID, None)).is_err(),
+        runtime().block_on(b.do_hydrate(OWNER, None)).is_err(),
         "v2 metadata cannot accept v1 frames"
     );
     {
         let mut w = s.state.lock().unwrap();
-        w.frames = frames(&key, ID, b"guest bytes!", ExpectedChunkFormat::V2);
+        w.frames = frames(&key, OWNER, b"guest bytes!", ExpectedChunkFormat::V2);
         w.meta["download_version"] = manifest(&w.frames, 12);
         w.meta_reads = 0;
         w.gone = 2;
     }
-    assert!(runtime().block_on(b.do_hydrate(ID, None)).is_err());
+    assert!(runtime().block_on(b.do_hydrate(OWNER, None)).is_err());
     let w = s.state.lock().unwrap();
     let object_restarts = w.meta_reads - 1;
     assert!(object_restarts <= 1);
@@ -558,8 +579,8 @@ fn sf2237d_t5_pin_and_object_change() {
 }
 #[test]
 fn sf2237d_1943_truncated_v2_never_publishes() {
-    let key = hydration_test_key([7; 32], ID);
-    let s = ContentServer::start(&key, ExpectedChunkFormat::V2);
+    let key = hydration_test_key([7; 32], OWNER);
+    let s = ContentServer::start_owner(&key, ExpectedChunkFormat::V2);
     {
         let mut w = s.state.lock().unwrap();
         w.frames.pop();
@@ -571,11 +592,11 @@ fn sf2237d_1943_truncated_v2_never_publishes() {
     let final_path = temp.path().join("result.txt");
     assert!(
         runtime()
-            .block_on(b.hydrate_file(ID, &final_path, &[temp.path()]))
+            .block_on(b.hydrate_file(OWNER, &final_path, &[temp.path()]))
             .is_err()
     );
     assert!(!final_path.exists());
-    assert_eq!(b.db.get_file_contract_state(ID).unwrap().unwrap().cache_bytes, 0);
+    assert_eq!(b.db.get_file_contract_state(OWNER).unwrap().unwrap().cache_bytes, 0);
 }
 #[test]
 fn sf2237d_l7b_custody_never_uses_legacy_reader() {
@@ -584,7 +605,7 @@ fn sf2237d_l7b_custody_never_uses_legacy_reader() {
     let folder = FileKey::from_bytes([23; 32]);
     let wrap = beebeeb_sync::key_resolution::wrap_child_key(&folder, ROOT, ID, 1, &random_key()).unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(wrap);
-    let got = unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &encoded, true);
+    let got = unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &encoded, KeyCustody::Custody);
     assert_eq!(
         LEGACY_CHILD_READS.with(|n| n.get()),
         0,
@@ -593,10 +614,10 @@ fn sf2237d_l7b_custody_never_uses_legacy_reader() {
     assert_eq!(got.unwrap().as_bytes(), random_key().as_bytes());
     let legacy = base64::engine::general_purpose::STANDARD
         .encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder, random_key().as_bytes()).unwrap());
-    assert!(unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, true).is_err());
+    assert!(unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, KeyCustody::Custody).is_err());
     assert_eq!(LEGACY_CHILD_READS.with(|n| n.get()), 0);
     assert_eq!(
-        unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, false)
+        unwrap_folder_child_for_format(folder.as_bytes(), ROOT, ID, 1, &legacy, KeyCustody::Invite)
             .unwrap()
             .as_bytes(),
         random_key().as_bytes()

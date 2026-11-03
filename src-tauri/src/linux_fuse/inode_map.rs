@@ -1,5 +1,8 @@
 #![cfg(any(target_os = "linux", test))]
 
+//! The FUSE inode table: one stable number per path and back for the lifetime of a mount, so a
+//! kernel handle survives a rename. Must not persist those numbers across mounts.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -123,6 +123,16 @@
 				<key>Label</key>
 				<string>Downloading</string>
 			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>io.beebeeb.app.decoration.added-by-someone</string>
+				<key>BadgeImageType</key>
+				<string>io.beebeeb.app.badge.added</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Added by someone else</string>
+			</dict>
 		</array>
 		<key>NSExtensionFileProviderDownloadPipelineDepth</key>
 		<integer>8</integer>
@@ -206,6 +216,18 @@
             </array>
             <key>UTTypeIconFile</key>
             <string>badge-downloading</string>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.beebeeb.app.badge.added</string>
+            <key>UTTypeDescription</key>
+            <string>Beebeeb added-by-someone badge</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>com.apple.icon-decoration.badge</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>badge-added</string>
         </dict>
     </array>
 

@@ -26,7 +26,7 @@ import * as signOutCopy from '../src/signOutCopy'
 import { SignOutFlow, signOutFlowApi, connectSignOutFlowEvents, connectSignOutFlowMenu } from '../src/signOutFlow'
 import { stripCode } from '../src/signOutCopy'
 import { expand, loadComponent, mount, textOf, visibleErrorSurfaces, type Mounted, type TreeNode } from './fixtures/componentHarness'
-import { rustStr } from './fixtures/rustConstants'
+import { rustStr, rustStrIn } from './fixtures/rustConstants'
 import { KeptFolderNotes, useKeptFoldersModule } from './fixtures/keptFolderHarness'
 
 const React = { createElement, Fragment }
@@ -1179,8 +1179,8 @@ describe('Sync tab', () => {
 
   // Row 15: Try again fails only with Rust's fixed sentences, which carry the remedy: a neutral note.
   test('a failed Try again is Rust\'s sentence as a neutral note, never a toast or a second error surface', async () => {
-    // The not-running answer, read from driver.rs so this feeds what Rust sends; it is the ruled sentence.
-    const sentence = rustStr('finder_setup/driver.rs', 'NOT_RUNNING')
+    // The not-running answer, read from its module (the split moved it to driver/handle.rs); the ruled sentence.
+    const sentence = rustStrIn('finder_setup/driver', 'NOT_RUNNING')
     expect(sentence).toBe('Beebeeb’s Finder setup isn’t running. Quit and reopen Beebeeb to start it again.')
     const { m } = await openSync({ finder: finder.failed, retry: () => { throw sentence } })
     await pressFinder(m, 'Try again')

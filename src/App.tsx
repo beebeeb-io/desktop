@@ -1,3 +1,6 @@
+// The compact app shell (and the macOS tray flyout): the sidebar pages plus the app-wide banners,
+// search and version overlays. Each page owns its own commands; this file only routes to them.
+
 import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { listen } from '@tauri-apps/api/event'
