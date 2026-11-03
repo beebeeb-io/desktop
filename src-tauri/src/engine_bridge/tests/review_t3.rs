@@ -632,10 +632,27 @@ async fn review_p3_1_an_unresolvable_envelope_never_clears_the_fact() {
     });
     row.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
 
+    // P3-2: before any record is written, only the in-memory set can carry the
+    // fact. A resolution that skips `set_request_row` never reaches the DB (the
+    // later `scope.put` would hide the omission), so pin the set itself here.
+    let mut scratch = OwnedKeyRecord { file_id: ROW.into(), ..Default::default() };
+    let mut cached = None;
+    let _resolved = bridge
+        .resolve_envelope(&master, &row, &mut cached, &mut scratch, ROW)
+        .await
+        .expect("core resolves the row");
+    assert!(scratch.request_row, "core resolved the request row");
+    assert!(bridge.db().get_owned_key_record(ROW).unwrap().is_none(), "nothing is persisted yet");
+    assert!(
+        bridge.is_request_row(ROW),
+        "the in-memory set carries the fact before the DB does"
+    );
+
     let prepared = bridge.prepare_owned_rows(&[row.clone()]).await.expect("the valid row prepares");
     assert!(prepared[0].readable);
     let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is recorded");
     assert!(record.request_row, "core resolved the request row");
+    let request_name = record.request_name.expect("core recorded the request name");
 
     // The request key is withheld on the next pass: unresolved, but the fact stays.
     loaded.store(false, Ordering::SeqCst);
@@ -643,7 +660,20 @@ async fn review_p3_1_an_unresolvable_envelope_never_clears_the_fact() {
     assert!(!prepared[0].readable, "the unresolved row is blocked");
     let record = bridge.db().get_owned_key_record(ROW).unwrap().expect("the row is still recorded");
     assert!(record.request_row, "an unresolvable envelope never clears the sticky fact");
+    assert_eq!(record.request_name, Some(request_name), "an unresolved pass keeps the request name");
     assert!(bridge.is_request_row(ROW), "the in-memory view keeps it too");
+    // P1-1: a blocked request row is not writable, not even by a rename.
+    let error = match crate::engine_bridge::meta::owned_metadata_for_rename(
+        &bridge.db(),
+        &[7u8; 32],
+        ROW,
+        "renamed.txt",
+        None,
+    ) {
+        Ok(_) => panic!("a blocked request row refuses a rename"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("item key is unavailable"), "{error}");
 }
 
 /// P2-1: a non-canonical id the SERVER planted as a roster row still gets no
