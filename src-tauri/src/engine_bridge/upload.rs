@@ -756,7 +756,14 @@ impl EngineBridge {
         // scan has not seen yet must never be overwritten by the copy.
         for n in 2.. {
             let candidate = local_file_path_under_sync_root(sync_root, &rel)?;
-            if self.db.get_file_by_path(&rel).ok().flatten().is_none() && !candidate.exists() {
+            // P3-7: `exists()` follows a symlink, so a dangling link at the
+            // candidate looked free and the copy was written through it. Only a
+            // path with no name at all on disk is free; anything present —
+            // including a link — is skipped, and an unreadable parent fails
+            // closed rather than being called free.
+            let free = std::fs::symlink_metadata(&candidate)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if self.db.get_file_by_path(&rel).ok().flatten().is_none() && free {
                 break;
             }
             rel = sibling_path(&entry.path, &edited_sibling_name(&current, n));

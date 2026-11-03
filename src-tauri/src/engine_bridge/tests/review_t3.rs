@@ -780,3 +780,91 @@ fn review_p3_6_a_name_that_is_not_a_safe_component_never_names_the_copy() {
         assert!(crate::owner_keys::safe_display_name(safe), "{safe:?} is a plain name");
     }
 }
+
+/// P3-7: the copy's free-name probe must not follow a symlink. A DANGLING link
+/// at the first candidate looked free (`exists()` follows the link) and the copy
+/// was written through it, landing outside the sync tree. The link now counts as
+/// occupied and the copy takes the next sibling name.
+#[tokio::test]
+async fn review_p3_7_a_dangling_symlink_is_not_a_free_name() {
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(sync_root.join("Inbox")).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(
+        &bridge,
+        REQUEST,
+        "Inbox/report.txt",
+        Some(FOLDER),
+        FileStatus::Local,
+        4,
+    );
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, REQUEST.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: name.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let payload = dir.path().join("payload.bin");
+    std::fs::write(&payload, b"edit").unwrap();
+    std::fs::write(sync_root.join("Inbox/report.txt"), b"original request bytes").unwrap();
+    // The trap: a dangling link where the first copy would land.
+    let outside = sync_root.join("outside.txt");
+    std::os::unix::fs::symlink(&outside, sync_root.join("Inbox/report (edited).txt")).unwrap();
+
+    let op = PendingOperation {
+        op_id: "op-request-dangling".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/report.txt".into()),
+        metadata_json: Some(
+            serde_json::json!({"name_encrypted": name, "content_type": "text/plain"}).to_string(),
+        ),
+        payload_path: Some(payload.to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let mut errors = Vec::new();
+    bridge
+        .upload_version(&op, None, &sync_root, &mut errors)
+        .await
+        .expect("a request-row edit is re-planned, not refused");
+
+    assert!(!outside.exists(), "the copy was written through the dangling link");
+    let rows = bridge.db().list_files().unwrap();
+    let created: Vec<_> = rows.iter().filter(|row| row.file_id != REQUEST && row.path != "Inbox").collect();
+    assert_eq!(created.len(), 1, "one new item: {rows:?}");
+    assert_eq!(
+        created[0].path, "Inbox/report (edited 2).txt",
+        "the occupied name is skipped"
+    );
+    assert_eq!(
+        std::fs::read(sync_root.join("Inbox/report (edited 2).txt")).unwrap(),
+        b"edit",
+        "the copy lands at the next free name"
+    );
+}
