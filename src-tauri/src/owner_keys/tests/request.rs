@@ -296,3 +296,111 @@ fn review_p2_2_a_c_sealed_request_row_renames_under_the_string_key() {
         "the new name does not open under C"
     );
 }
+
+/// The files row a rename needs, seeded for `id` at `path`.
+fn seed_rename_row(db: &StateDb, id: &str, path: &str) {
+    db.upsert_file(&crate::state_db::FileEntry {
+        file_id: id.into(),
+        path: path.into(),
+        status: crate::state_db::FileStatus::CloudOnly,
+        size_bytes: 5,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 0,
+        parent_id: None,
+        item_kind: crate::state_db::ItemKind::File,
+    })
+    .unwrap();
+}
+
+/// The queued rename's sealed name for `id`.
+fn queued_rename_name(bridge: &crate::engine_bridge::EngineBridge, id: &str) -> String {
+    use crate::engine_bridge::{FinderWriteItemKind, FinderWriteTarget};
+    bridge
+        .queue_finder_modify(FinderWriteTarget {
+            file_id: Some(id.into()),
+            parent_id: None,
+            filename: "renamed.txt".into(),
+            rel_path: None,
+            kind: FinderWriteItemKind::File,
+            contents_path: None,
+            content_type: None,
+            base_version_identifier: None,
+        })
+        .unwrap();
+    let op = bridge.db().list_operations_for_file(id).unwrap().remove(0);
+    let payload: Value = serde_json::from_str(op.metadata_json.as_deref().unwrap()).unwrap();
+    payload["name_encrypted"].as_str().unwrap().to_string()
+}
+
+/// P3-2: a request row whose name authenticates under the derived string
+/// convention renames under that same string key, carrying the pin its name
+/// records.
+#[test]
+fn review_p3_2_a_derived_name_request_row_renames_with_its_pin() {
+    use beebeeb_core::kdf::derive_file_key;
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let derived = derive_file_key(&master, OWNER.as_bytes());
+    let (fixture, _seen, row) = request_world([0x77; 32], &derived, b"hello", ExpectedChunkFormat::V2);
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    seed_rename_row(&db, OWNER, "report.txt");
+    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    assert_eq!(
+        prepared[0].record.request_name,
+        Some(RequestName {
+            key: RequestNameKey::Derived,
+            pin: ExpectedChunkFormat::V2.as_u8(),
+        })
+    );
+
+    let name_encrypted = queued_rename_name(&bridge, OWNER);
+    let renamed = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&derived, &name_encrypted)
+        .expect("the rename seals under the derived string key");
+    assert_eq!(renamed.name, "renamed.txt");
+    assert_eq!(renamed.chunk_format, ExpectedChunkFormat::V2, "the pin the name records is kept");
+}
+
+
+/// P3-2: the rename contract for every name origin core can report — the
+/// string-derived key with the pin core read, `C` included, a binary-derived
+/// name too — and a refusal for an upper-repair (read-only) or an unresolved
+/// name.
+#[test]
+fn review_p3_2_rename_material_takes_the_string_key_and_pin_for_every_origin() {
+    use beebeeb_core::kdf::derive_file_key;
+
+    let master = MasterKey::from_bytes([7; 32]);
+    let string = derive_file_key(&master, OWNER.as_bytes());
+    let record = |name: Option<RequestName>| OwnedKeyRecord {
+        file_id: OWNER.into(),
+        request_row: true,
+        request_name: name,
+        ..Default::default()
+    };
+    for (key, pin) in [
+        (RequestNameKey::Derived, 2u8),
+        (RequestNameKey::DerivedBinary, 0),
+        (RequestNameKey::Content, 2),
+    ] {
+        let (found, format) = crate::owner_keys::rename_material(&master, OWNER, &record(Some(RequestName { key, pin })))
+            .expect("a writable origin renames");
+        assert_eq!(found.as_bytes(), string.as_bytes(), "{key:?} renames under the string key");
+        assert_eq!(format.as_u8(), pin, "{key:?} keeps the pin its name records");
+    }
+    let upper = record(Some(RequestName {
+        key: RequestNameKey::UpperRepair,
+        pin: 0,
+    }));
+    let error = match crate::owner_keys::rename_material(&master, OWNER, &upper) {
+        Ok(_) => panic!("an upper-repair name is read-only"),
+        Err(error) => format!("{error}"),
+    };
+    assert!(error.contains("read-only"), "{error}");
+    assert!(
+        crate::owner_keys::rename_material(&master, OWNER, &record(None)).is_err(),
+        "a name that was never resolved on this device fails closed"
+    );
+}
