@@ -434,6 +434,26 @@ impl EngineBridge {
         error
     }
 
+    /// T3.2/P2-3: the content key and the key the served name authenticates
+    /// under. For an ordinary row both are the same. A request row's content is
+    /// under `C` while a rename by an old client seals the name under the
+    /// derived string key, so the chunk-format pin must come from the name key
+    /// (A9c).
+    pub(super) async fn file_keys_for_download(
+        &self,
+        file_id: &str,
+    ) -> Result<(beebeeb_core::kdf::FileKey, beebeeb_core::kdf::FileKey), EngineError> {
+        if self.is_request_row(file_id) {
+            let row = self.api.get_file(file_id).await?;
+            let found = self.request_row_keys(&row).await.map_err(EngineError::from)?;
+            return Ok((found.content_key, found.name_key));
+        }
+        let key = self.file_key_for_download(file_id).await?;
+        // `FileKey` is not `Copy`; the content key keeps this instance.
+        let name_key = beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes());
+        Ok((key, name_key))
+    }
+
     pub(super) async fn file_key_for_download(&self, file_id: &str) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
         // T3.2: a request row's content is sealed under the request key `C`, not
         // a derived key. Read-only: the row is never re-sealed or adopted.
@@ -591,8 +611,8 @@ impl EngineBridge {
                 .ok_or_else(|| anyhow::anyhow!("server response missing chunk_count"))? as u32,
         };
 
-        let file_key = self.file_key_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&file_key, meta)?;
+        let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&name_key, meta)?;
 
         // Rate-limit ceiling for downloads, and the transport (task 2173).
         let config = crate::config::DesktopConfig::load().ok();
@@ -925,8 +945,8 @@ impl EngineBridge {
 
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
-        let file_key = self.file_key_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&file_key, meta)?;
+        let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
+        let expected_format = recorded_content_format(&name_key, meta)?;
         let download_kbps_limit = crate::config::DesktopConfig::load()
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);

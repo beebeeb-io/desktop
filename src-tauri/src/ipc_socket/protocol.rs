@@ -199,6 +199,11 @@ pub struct FileProviderItemPayload {
     /// the pin set is this device's own today (deviation 1, task 1698).
     #[serde(default)]
     pub pinned: bool,
+    /// L12: this item's id is foreign-class, so it was added by someone else.
+    /// Decided from the id class, never a server field. Older Swift decoders
+    /// ignore it (`serde(default)` on the way back in).
+    #[serde(default)]
+    pub added_by_someone_else: bool,
 }
 
 /// One change-log row crossing the IPC bridge (task 1697).

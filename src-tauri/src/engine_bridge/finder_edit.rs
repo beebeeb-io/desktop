@@ -143,8 +143,8 @@ impl EngineBridge {
         // S0.4: a safe save's rename, new file and delete arrive within this; until then the
         // rename is not sent, and a file at the vacated path waits.
         op.next_retry_at = now_secs() + RENAME_SETTLE_SECS;
-        // L15/A14b: a rename or move into a shared folder stays owner-only.
-        let notice = self.owner_only_notice(Some(&file_id), target.parent_id.as_deref());
+        // L15/A14b: a rename or move of an existing item never claims the
+        // owner-only copy (it may be foreign or already wrapped).
         match self.db.enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())? {
             crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed).into()),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
@@ -152,7 +152,7 @@ impl EngineBridge {
                 file_id: Some(file_id),
                 kind,
                 ignored: false,
-                message: notice.unwrap_or("queued for encrypted sync").to_string(),
+                message: "queued for encrypted sync".to_string(),
             }),
         }
     }
@@ -313,15 +313,15 @@ impl EngineBridge {
             }
         };
         prepared.staged.retain();
-        // L15/A14b: a new version under a shared folder stays owner-only.
-        let notice = self.owner_only_notice(Some(&file_id), target.parent_id.as_deref());
+        // L15/A14b: a version of an existing item never claims the owner-only
+        // copy — the item may be foreign or already wrapped.
         Ok(FpWrite {
             outcome: FinderWriteOutcome::Queued {
                 op_id,
                 file_id: Some(file_id),
                 kind: OperationKind::UploadVersion,
                 ignored: false,
-                message: notice.unwrap_or("queued for encrypted sync").to_string(),
+                message: "queued for encrypted sync".to_string(),
             },
             token: Some(token),
             present_as,

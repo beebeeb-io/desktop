@@ -141,7 +141,7 @@ fn class_of(id: &str) -> anyhow::Result<ItemClass> {
     beebeeb_core::item_id::item_class(id).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-fn row_kind(row: &Value) -> ItemKind {
+pub(crate) fn row_kind(row: &Value) -> ItemKind {
     if folder(row) { ItemKind::Folder } else { ItemKind::File }
 }
 
@@ -164,7 +164,9 @@ pub fn record_key(
     record: &OwnedKeyRecord,
     kind: ItemKind,
 ) -> anyhow::Result<(FileKey, NameMetadata)> {
-    if record.blocked_fingerprint.as_ref() == Some(&record.fingerprint()) {
+    // A block already persisted by a build that fingerprinted it survives the
+    // fingerprint growing a field: the flag, not equality, is the block.
+    if record.blocked_fingerprint.is_some() {
         anyhow::bail!("item key is unavailable");
     }
     match class_of(&record.file_id)? {
@@ -220,6 +222,7 @@ fn safe_display_name(name: &str) -> bool {
 }
 
 mod activity;
+mod moves;
 mod requests;
 
 pub(crate) use requests::{RequestKeys, request_upload_fields};
@@ -234,6 +237,15 @@ pub fn blocked_name(id: &str) -> String {
     format!("Unavailable file {suffix}")
 }
 
+/// The item's real kind as this device last stored it. A key record does not
+/// carry one, and assuming a file would ask the resolver for the wrong L7 kind.
+pub(crate) fn kind_in_db(db: &StateDb, id: &str) -> ItemKind {
+    match db.get_file(id).ok().flatten().map(|entry| entry.item_kind) {
+        Some(crate::state_db::ItemKind::Folder) => ItemKind::Folder,
+        _ => ItemKind::File,
+    }
+}
+
 pub fn stored_name(db: &StateDb, id: &str, master: &[u8; 32]) -> anyhow::Result<Option<String>> {
     let Some(record) = db.get_owned_key_record(id)? else {
         return Ok(None);
@@ -241,9 +253,16 @@ pub fn stored_name(db: &StateDb, id: &str, master: &[u8; 32]) -> anyhow::Result<
     if record.blocked_fingerprint.is_some() {
         return Ok(Some(blocked_name(id)));
     }
-    Ok(record_key(&MasterKey::from_bytes(*master), &record, ItemKind::File)
-        .ok()
-        .map(|(_, metadata)| metadata.name))
+    Ok(
+        match record_key(&MasterKey::from_bytes(*master), &record, kind_in_db(db, id)) {
+            Ok((_, metadata)) => Some(metadata.name),
+            // P2-9: a foreign id has no derived key, so the listing's fallback
+            // reader would seal/open a key the attacker chose and then show the
+            // server's plaintext name. The row is unavailable, by its class.
+            Err(_) if class_of(id).ok() == Some(ItemClass::Foreign) => Some(blocked_name(id)),
+            Err(_) => None,
+        },
+    )
 }
 
 impl Batch {
@@ -533,6 +552,15 @@ impl Batch {
     }
 }
 
+/// Constant-time key comparison: the position of a difference must not leak.
+fn same_key(left: &FileKey, right: &FileKey) -> bool {
+    let mut diff = 0u8;
+    for (a, b) in left.as_bytes().iter().zip(right.as_bytes()) {
+        diff |= a ^ b;
+    }
+    std::hint::black_box(diff) == 0
+}
+
 async fn verify_winner(
     scope: &AccountScope<'_>,
     record: &mut OwnedKeyRecord,
@@ -543,7 +571,7 @@ async fn verify_winner(
         return Ok(false);
     };
     let winner = keys::unwrap_owner_file_key(&MasterKey::from_bytes(*scope.api.master_key()), &record.file_id, &frame)?;
-    if winner.as_bytes() != key.as_bytes() {
+    if !same_key(&winner, key) {
         record.blocked_fingerprint = Some(record.fingerprint());
         scope.put(record)?;
         anyhow::bail!("immutable owner envelope conflicts with authenticated item key");
@@ -564,7 +592,7 @@ async fn adopt(
     // A24: a served second wrap never replaces the authenticated winner.
     if let Some(frame) = record.owner_wrap.as_deref()
         && keys::unwrap_owner_file_key(&MasterKey::from_bytes(*scope.api.master_key()), &record.file_id, frame)
-            .is_ok_and(|winner| winner.as_bytes() != key.as_bytes())
+            .is_ok_and(|winner| !same_key(&winner, key))
     {
         record.blocked_fingerprint = Some(record.fingerprint());
         scope.put(record)?;
@@ -731,6 +759,7 @@ impl crate::engine_bridge::EngineBridge {
             // T3.2 (L12/L13): a 2236 request row's name key is derived first, else `C`.
             // Never adopted, wrapped at share time or published; content is read-only.
             let is_request = request_upload_fields(&row).is_some();
+            record.request_row = is_request;
             self.set_request_row(id, is_request);
             if is_request && candidate.is_none() {
                 if requests.is_none() {
@@ -840,7 +869,7 @@ impl crate::engine_bridge::EngineBridge {
         scope.check()?;
         let master = MasterKey::from_bytes(*self.api().master_key());
         if let Some(record) = self.db().get_owned_key_record(id)? {
-            return Ok(Arc::new(record_key(&master, &record, ItemKind::File)?.0));
+            return Ok(Arc::new(record_key(&master, &record, kind_in_db(self.db(), id))?.0));
         }
         match class_of(id)? {
             // No prepared record: an owner id's key is derived from it (the
@@ -851,14 +880,29 @@ impl crate::engine_bridge::EngineBridge {
         }
     }
 
-    /// T3.2: a request row's content key. The row is read-only; the key is the
-    /// sealed request key `C` from the owner's request, never a derived one.
-    pub(crate) async fn request_content_key(&self, row: &Value) -> anyhow::Result<FileKey> {
+    /// T3.2: a request row's keys. The row is read-only; content is the sealed
+    /// request key `C`, the name key is whatever authenticates the served name.
+    /// The owner's request list is loaded once per process (P2-2), never per
+    /// download.
+    pub(crate) async fn request_row_keys(&self, row: &Value) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
         let master = MasterKey::from_bytes(*self.api().master_key());
+        if let Some(found) = self
+            .request_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .and_then(|keys| keys.row_keys(&master, row))
+        {
+            return Ok(found);
+        }
         let mut keys = RequestKeys::load(&self.api()).await;
-        keys.row_keys(&master, row)
-            .map(|found| found.content_key)
-            .ok_or_else(|| anyhow::anyhow!("request keys are unavailable"))
+        let found = keys.row_keys(&master, row);
+        *self.request_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(keys);
+        found.ok_or_else(|| anyhow::anyhow!("request keys are unavailable"))
+    }
+
+    pub(crate) async fn request_content_key(&self, row: &Value) -> anyhow::Result<FileKey> {
+        self.request_row_keys(row).await.map(|found| found.content_key)
     }
 
     pub async fn retry_owner_adoptions(&self) -> anyhow::Result<usize> {
@@ -878,7 +922,7 @@ impl crate::engine_bridge::EngineBridge {
             if record.pending_owner_wrap.is_none() || record.blocked_fingerprint.is_some() {
                 continue;
             }
-            if let Ok((key, _)) = record_key(&master, &record, ItemKind::File) {
+            if let Ok((key, _)) = record_key(&master, &record, kind_in_db(self.db(), &record.file_id)) {
                 if adopt(&scope, &mut record, &key, true).await.unwrap_or(false) {
                     confirmed += 1;
                 }
@@ -965,6 +1009,10 @@ pub struct OwnedKeyRecord {
     pub foreign_added: bool,
     #[serde(default)]
     pub member_added: bool,
+    /// Durable L12 fact: this row carries a 2236 request envelope. Persisted so
+    /// a download in a later process still takes the request content key.
+    #[serde(default)]
+    pub request_row: bool,
     pub blocked_fingerprint: Option<String>,
 }
 
@@ -1077,7 +1125,7 @@ impl<'a> AccountScope<'a> {
 impl crate::engine_bridge::EngineBridge {
     /// The nearest ancestor (the id itself included) whose custody this device
     /// holds: the shared folder a move is judged against.
-    fn shared_folder_root_of(&self, folder_id: Option<&str>) -> Option<String> {
+    pub(super) fn shared_folder_root_of(&self, folder_id: Option<&str>) -> Option<String> {
         let mut current = folder_id.map(str::to_string);
         for _ in 0..256 {
             let folder = current?;
@@ -1087,68 +1135,6 @@ impl crate::engine_bridge::EngineBridge {
             current = self.db().get_file(&folder).ok().flatten().and_then(|entry| entry.parent_id);
         }
         None
-    }
-
-    /// `id` and every descendant in the local mirror, bounded.
-    fn subtree_ids(&self, id: &str) -> Vec<String> {
-        let entries = self.db().list_files().unwrap_or_default();
-        let mut ids = vec![id.to_string()];
-        let mut cursor = 0;
-        while cursor < ids.len() && ids.len() <= 20_000 {
-            let parent = ids[cursor].clone();
-            cursor += 1;
-            for entry in &entries {
-                if entry.parent_id.as_deref() == Some(parent.as_str()) && !ids.contains(&entry.file_id) {
-                    ids.push(entry.file_id.clone());
-                }
-            }
-        }
-        ids
-    }
-
-    /// A19: an owner move that takes an item (or a subtree) out of the shared
-    /// folder whose custody key opens its foreign descendants must adopt every
-    /// foreign item involved first, confirmed by read-back. A move that stays
-    /// in the same shared root, or touches no foreign item, needs nothing.
-    /// Anything else is refused with the reason.
-    pub(crate) async fn adopt_foreign_subtree(&self, item_id: &str, new_parent: Option<&str>) -> anyhow::Result<()> {
-        let scope = self.owner_key_scope();
-        scope.check()?;
-        let from_root = self
-            .db()
-            .get_file(item_id)?
-            .and_then(|entry| entry.parent_id)
-            .and_then(|parent| self.shared_folder_root_of(Some(&parent)));
-        let Some(from_root) = from_root else { return Ok(()) };
-        if self.shared_folder_root_of(new_parent).as_deref() == Some(from_root.as_str()) {
-            return Ok(());
-        }
-        let foreign: Vec<String> = self
-            .subtree_ids(item_id)
-            .into_iter()
-            .filter(|id| beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false))
-            .collect();
-        if foreign.is_empty() {
-            return Ok(());
-        }
-        let mut rows = Vec::with_capacity(foreign.len());
-        for id in &foreign {
-            let row = self.api().get_file(id).await?;
-            scope.check()?;
-            rows.push(row);
-        }
-        let prepared = self.prepare_owned_rows(&rows).await?;
-        for item in &prepared {
-            anyhow::ensure!(
-                item.readable
-                    && item.record.owner_wrap.is_some()
-                    && item.record.pending_owner_wrap.is_none()
-                    && item.record.blocked_fingerprint.is_none(),
-                "move needs adoption: {}",
-                item.record.file_id
-            );
-        }
-        Ok(())
     }
 
     /// Whether `folder_id` lies inside a shared folder whose custody this device
@@ -1165,11 +1151,20 @@ impl crate::engine_bridge::EngineBridge {
         false
     }
 
-    /// L15/A14b: the owner-only copy a write of `item_id` under `parent_id`
-    /// owes the person. Only an owner-class item in a shared folder says it: a
-    /// foreign item is already someone else's, and a request row is never the
-    /// owner's to publish.
-    pub(crate) fn owner_only_notice(&self, item_id: Option<&str>, parent_id: Option<&str>) -> Option<&'static str> {
+    /// L15/A14b: the owner-only copy a CREATE of this device's own new item
+    /// owes the person. A version, rename or move of an existing item says
+    /// nothing: if that item is foreign or already wrapped, the sentence would
+    /// be false. Only an owner-class, self-minted create in a shared folder
+    /// stays unpublished here.
+    pub(crate) fn owner_only_notice(
+        &self,
+        item_id: Option<&str>,
+        parent_id: Option<&str>,
+        creates: bool,
+    ) -> Option<&'static str> {
+        if !creates {
+            return None;
+        }
         let id = item_id?;
         if beebeeb_core::item_id::item_class(id).ok() != Some(ItemClass::Owner) || self.is_request_row(id) {
             return None;

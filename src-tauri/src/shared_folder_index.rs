@@ -89,13 +89,6 @@ impl EngineBridge {
         // L14: the check compares against THIS root's inventory. A wrap another
         // root holds proves nothing about membership in the folder repaired.
         let wraps = self.shared_root_child_wraps(folder_id).await?;
-        let elsewhere: HashSet<String> = self
-            .db()
-            .list_owned_key_records()?
-            .into_iter()
-            .filter(|r| r.shared_root_id.as_deref().is_some_and(|other| other != folder_id))
-            .map(|r| r.file_id)
-            .collect();
         while let Some(parent) = queue.pop_front() {
             if !seen.insert(parent.clone()) {
                 report.partial = true;
@@ -133,15 +126,11 @@ impl EngineBridge {
                         report.skip("name_unauthenticated");
                         continue;
                     }
-                    let is_folder = item.row["is_folder"] == true;
-                    let kind = if is_folder {
-                        beebeeb_core::owned_keys::ItemKind::Folder
-                    } else {
-                        beebeeb_core::owned_keys::ItemKind::File
-                    };
-                    // L14 (1): THIS root's inventory must hold the wrap.
+                    let kind = owner_keys::row_kind(&item.row);
+                    // L14 (1): THIS root's inventory must hold the wrap. A
+                    // missing wrap is `no_wrap` whatever other root holds one.
                     let Some(wrap) = wraps.get(&id) else {
-                        report.skip(if elsewhere.contains(&id) { "wrap_does_not_open" } else { "no_wrap" });
+                        report.skip("no_wrap");
                         continue;
                     };
                     // L14 (2): it must open under the root's proven custody key.
@@ -168,7 +157,7 @@ impl EngineBridge {
                         continue;
                     }
                     current.insert(id.clone());
-                    if is_folder {
+                    if kind == beebeeb_core::owned_keys::ItemKind::Folder {
                         queue.push_back(id.clone());
                     }
                     pairs.push((id, metadata.name));
@@ -192,12 +181,32 @@ impl EngineBridge {
         }
         // Replay only our known changes/removals. A concurrent device's entries
         // survive even if a fresh listing has not observed that device yet.
+        // P3-6: an earlier build indexed owner items too; they never pass L14
+        // (their class is derived, not wrapped), so they are removed by class
+        // and by the root's local subtree.
+        let root_path = self.db().get_file(folder_id).ok().flatten().map(|entry| entry.path);
+        let prefix = root_path.map(|path| format!("{path}/"));
+        let earlier_owner_ids: Vec<String> = self
+            .db()
+            .list_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| {
+                entry.item_kind == crate::state_db::ItemKind::File
+                    && prefix.as_ref().is_some_and(|prefix| entry.path.starts_with(prefix))
+            })
+            .map(|entry| entry.file_id)
+            .filter(|id| {
+                beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Owner)
+            })
+            .collect();
         let removals: Vec<String> = self
             .db()
             .list_owned_key_records()?
             .into_iter()
             .filter(|r| r.shared_root_id.as_deref() == Some(folder_id) && !current.contains(&r.file_id))
             .map(|r| r.file_id)
+            .chain(earlier_owner_ids.into_iter().filter(|id| !current.contains(id)))
             .collect();
         for attempt in 0..3 {
             scope.check()?;

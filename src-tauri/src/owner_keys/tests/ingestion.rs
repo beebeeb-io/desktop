@@ -471,9 +471,9 @@ fn sf2237d_t4_activity_stays_local() {
     let activity = run(b.shared_folder_activity(ROOT)).unwrap();
     assert_eq!(activity[0]["label"], "Family");
     assert_eq!(activity[0]["actor"], "Lewis");
-    // A legacy folder-key name still reads until every writer ships L16.
-    assert_eq!(activity[1]["label"], "Family");
-    assert_eq!(activity[1]["actor"], "Lewis");
+    // L16/L16c: no legacy label reader — an old-format blob opens as nothing.
+    assert_eq!(activity[1]["label"], Value::Null);
+    assert_eq!(activity[1]["actor"], Value::Null);
     assert_eq!(activity[2]["label"], Value::Null, "nothing opens: nothing is shown");
     assert_eq!(activity[2]["actor"], Value::Null);
     b.db()
@@ -490,11 +490,11 @@ fn sf2237d_t4_activity_stays_local() {
     };
     run(b.append_shared_activity(&mut feed)).unwrap();
     assert_eq!(feed.events.len(), 3);
-    assert_eq!(feed.events.iter().filter(|event| event.subject.as_deref() == Some("Family")).count(), 2);
+    assert_eq!(feed.events.iter().filter(|event| event.subject.as_deref() == Some("Family")).count(), 1);
     assert_eq!(
         feed.events.iter().filter(|event| event.subject.as_deref() == Some("shared folder")).count(),
-        1,
-        "only the row whose envelope never opens falls back"
+        2,
+        "only the bound row shows its label; both legacy-format rows fall back"
     );
     assert_eq!(
         world

@@ -12,13 +12,19 @@ impl EngineBridge {
         &self,
         op: &PendingOperation,
         claim: Option<&ClaimedOp>,
-        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+        sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
     ) -> Result<OpDone, EngineError> {
         let local_file_id = op
             .file_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("upload operation missing file_id"))?;
+        // L13: a request row's content lives under the anonymous uploader's `C`
+        // and is read-only. An edit is saved as a NEW owner item under a fresh
+        // id; the row itself is never re-sealed (P1-1).
+        if self.is_request_row(local_file_id) {
+            return self.replan_request_edit_as_new_item(local_file_id, op, sync_root).await;
+        }
         let previous_status = self.db.get_file(local_file_id)?.map(|entry| entry.status);
         // Write-keyed: a File Provider write (spec §9.1–§9.2). Keep Mine (`claim: None`) and
         // Windows and watcher uploads keep today's status handling.
@@ -560,11 +566,22 @@ impl EngineBridge {
             } else {
                 name_encrypted.to_string()
             };
+            // A19 (P2-7): an upload whose metadata step moves the item out of a
+            // shared folder takes the same adoption guard as a queued move.
+            let parent_change = upload_parent_change(op, metadata);
+            if !matches!(parent_change, crate::api_client::ParentChange::Unchanged) {
+                let from_parent = metadata["vacated_parent_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| self.db.get_file(&server_file_id).ok().flatten().and_then(|entry| entry.parent_id));
+                self.adopt_foreign_subtree(&server_file_id, from_parent.as_deref(), op.parent_id.as_deref())
+                    .await?;
+            }
             self.api
                 .update_metadata(
                     &server_file_id,
                     Some(&effective_name_encrypted),
-                    upload_parent_change(op, metadata),
+                    parent_change,
                 )
                 .await?;
             self.db.set_upload_resume_metadata_applied(&op.op_id)?;
@@ -685,6 +702,63 @@ impl EngineBridge {
         thumbnails
     }
 
+    /// L13/P1-1: a content edit of a 2236 request row is saved as a NEW owner
+    /// item under a fresh id (its derived key), never written over the row,
+    /// whose bytes are sealed under the anonymous uploader's `C`. The edited
+    /// bytes are copied to a sibling path and queued as a normal create, which
+    /// mints and seals under its own id. The request row is left untouched.
+    async fn replan_request_edit_as_new_item(
+        &self,
+        request_id: &str,
+        op: &PendingOperation,
+        sync_root: &Path,
+    ) -> Result<OpDone, EngineError> {
+        let entry = self
+            .db
+            .get_file(request_id)?
+            .ok_or_else(|| anyhow::anyhow!("request row missing from state"))?;
+        let current = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())?
+            .unwrap_or_else(|| "edited file".to_string());
+        let leaf = edited_sibling_name(&current, 1);
+        let mut rel = sibling_path(&entry.path, &leaf);
+        for n in 2.. {
+            if self.db.get_file_by_path(&rel).ok().flatten().is_none() {
+                break;
+            }
+            rel = sibling_path(&entry.path, &edited_sibling_name(&current, n));
+        }
+        let source = op
+            .payload_path
+            .as_deref()
+            .map(Path::new)
+            .filter(|path| path.is_file())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| local_file_path_under_sync_root(sync_root, &entry.path).unwrap_or_default());
+        let dest = local_file_path_under_sync_root(sync_root, &rel)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &dest)?;
+        let content_type = op
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|metadata| metadata["content_type"].as_str().map(str::to_string));
+        self.queue_finder_create(FinderWriteTarget {
+            file_id: None,
+            parent_id: entry.parent_id.clone(),
+            filename: rel.rsplit('/').next().unwrap_or(&leaf).to_string(),
+            rel_path: Some(rel),
+            kind: crate::engine_bridge::FinderWriteItemKind::File,
+            contents_path: Some(dest.to_string_lossy().into_owned()),
+            content_type,
+            base_version_identifier: None,
+        })?;
+        // The edited bytes now belong to the queued create; the original op is
+        // done and the request row keeps its server row and version.
+        Ok(OpDone::Remove { release: None })
+    }
+
     /// Give up on a persisted upload session (payload changed, session gone,
     /// not self-minted, or the op exhausted its retries). For a CREATE the
     /// server row holds no completed content and is only a broken
@@ -797,5 +871,27 @@ impl EngineBridge {
             stamped: false,
             review: None,
         }))
+    }
+}
+
+/// The leaf of the save-as-new item a request row's edit becomes: the row's
+/// own name, marked as an edited copy. `n` makes a second copy distinct.
+fn edited_sibling_name(name: &str, n: u32) -> String {
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    let suffix = if n <= 1 { " (edited)".to_string() } else { format!(" (edited {n})") };
+    match extension {
+        Some(extension) => format!("{stem}{suffix}.{extension}"),
+        None => format!("{stem}{suffix}"),
+    }
+}
+
+/// `leaf` beside the row at `path`: the same parent directory, a new name.
+fn sibling_path(path: &str, leaf: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => format!("{dir}/{leaf}"),
+        _ => leaf.to_string(),
     }
 }

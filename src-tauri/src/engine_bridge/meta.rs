@@ -70,9 +70,14 @@ pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
         let (key, metadata) = crate::owner_keys::record_key(
             &beebeeb_core::kdf::MasterKey::from_bytes(*master),
             &record,
-            beebeeb_core::owned_keys::ItemKind::File,
+            crate::owner_keys::kind_in_db(db, id),
         )?;
         return Ok((key, metadata.chunk_format));
+    }
+    // P2-8: a foreign id has no derived key. Its read twin refuses it already;
+    // deriving here would seal the write under a key the attacker can pick.
+    if beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Foreign) {
+        return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
     }
     Ok((file_key_for(master, id), beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded))
 }

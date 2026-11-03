@@ -28,6 +28,7 @@ impl EngineBridge {
             stopping,
             thumbnails_pending: std::sync::Mutex::new(HashSet::new()),
             request_rows: std::sync::Mutex::new(HashSet::new()),
+            request_keys: std::sync::Mutex::new(None),
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
@@ -55,6 +56,14 @@ impl EngineBridge {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(id)
+            // P3-3: the fact is persisted on the record, so a fresh process (or
+            // a row listed before this pass) still reads the seal as `C`.
+            || self
+                .db
+                .get_owned_key_record(id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| record.request_row)
     }
 
     pub(crate) fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {
@@ -590,10 +599,18 @@ impl EngineBridge {
                 // A19: a move out of a shared folder adopts every foreign item
                 // it takes with it (folders included) before the server hears
                 // of the move; otherwise the move is refused with the reason.
-                if op.kind == OperationKind::MoveFile {
-                    self.adopt_foreign_subtree(file_id, op.parent_id.as_deref()).await?;
-                }
+                // The source side is the op's `vacated_parent_id`: a local
+                // rename already moved the row, so reading it would see the
+                // destination (P1-2).
                 let metadata = operation_metadata(op)?;
+                if op.kind == OperationKind::MoveFile {
+                    self.adopt_foreign_subtree(
+                        file_id,
+                        metadata["vacated_parent_id"].as_str(),
+                        op.parent_id.as_deref(),
+                    )
+                    .await?;
+                }
                 let name = metadata["name_encrypted"].as_str();
                 // Spec §7.2 (final review): a rename leaves the parent alone; a move names its
                 // target, the top level (no parent) included.

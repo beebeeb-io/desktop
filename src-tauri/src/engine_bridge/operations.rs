@@ -2,17 +2,14 @@
 
 use super::*;
 
-/// The ops that give an item a key of its own: a create, a new version, a
-/// rename or a move. A trash or restore does not, so it owes no notice.
-fn writes_a_key(kind: &OperationKind) -> bool {
-    matches!(
-        kind,
-        OperationKind::UploadVersion
-            | OperationKind::UploadFile
-            | OperationKind::CreateFolder
-            | OperationKind::RenameFile
-            | OperationKind::MoveFile
-    )
+/// The ops that CREATE an item of this device's own: only these owe the
+/// owner-only copy. A version, rename or move of an existing item does not.
+fn creates_an_item(kind: &OperationKind, metadata: &serde_json::Value) -> bool {
+    match kind {
+        OperationKind::CreateFolder => true,
+        OperationKind::UploadVersion | OperationKind::UploadFile => is_create_file_operation(metadata),
+        _ => false,
+    }
 }
 
 impl EngineBridge {
@@ -69,9 +66,11 @@ impl EngineBridge {
         base_object_version_id: Option<String>,
         folder: Option<crate::state_db::FinderFolderRow<'_>>,
     ) -> Result<FinderWriteOutcome, EngineError> {
-        // L15/A14b: an owner write into a shared folder stays owner-only.
-        let owner_only = writes_a_key(&kind)
-            .then(|| self.owner_only_notice(file_id.as_deref(), parent_id.as_deref()))
+        // L15/A14b: a CREATE of this device's own item in a shared folder stays
+        // owner-only. A version/rename/move of an existing item must not claim
+        // it: that item may be foreign or already wrapped.
+        let owner_only = creates_an_item(&kind, &metadata)
+            .then(|| self.owner_only_notice(file_id.as_deref(), parent_id.as_deref(), true))
             .flatten();
         let op = self.finder_operation(
             kind.clone(),

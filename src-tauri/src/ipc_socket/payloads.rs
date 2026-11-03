@@ -177,6 +177,8 @@ pub(super) fn file_entry_payload(
         content_version: Some(content_version),
         metadata_version: Some(metadata_version),
         pinned: matches!(contract.effective_pin_state(), crate::state_db::PinState::Pinned),
+        // L12: the mark comes from the id's class, never from a server field.
+        added_by_someone_else: beebeeb_core::item_id::is_foreign_item_id(&entry.file_id).unwrap_or(false),
     }
 }
 
@@ -231,6 +233,8 @@ pub(super) fn file_entry_payload_without_contract(
         metadata_version: Some(metadata_version),
         // No contract = no pin state to resolve (fail-safe: unpinned).
         pinned: false,
+        // L12: the mark comes from the id's class, never from a server field.
+        added_by_someone_else: beebeeb_core::item_id::is_foreign_item_id(&entry.file_id).unwrap_or(false),
     }
 }
 

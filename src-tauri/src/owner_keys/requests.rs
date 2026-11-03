@@ -13,6 +13,7 @@ use base64::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use zeroize::Zeroizing;
 
 use beebeeb_core::{
     item_id::ItemClass,
@@ -64,7 +65,8 @@ pub(crate) fn request_upload_fields(row: &Value) -> Option<RequestUploadFields> 
 #[derive(Default)]
 pub(crate) struct RequestKeys {
     wrapped: HashMap<String, (Vec<u8>, Vec<u8>)>,
-    privs: HashMap<String, [u8; 32]>,
+    /// The unwrapped X25519 private halves, wiped on drop and never copied out.
+    privs: HashMap<String, Zeroizing<[u8; 32]>>,
 }
 
 impl RequestKeys {
@@ -90,16 +92,18 @@ impl RequestKeys {
         keys
     }
 
-    /// The request's X25519 private key. The pre-2236 wrap binds no request id,
-    /// so the context is empty — the same shape the CLI reads.
-    fn private(&mut self, master: &MasterKey, request_id: &str) -> Option<[u8; 32]> {
-        if let Some(key) = self.privs.get(request_id) {
-            return Some(*key);
+    /// The request's X25519 private key, lent from the zeroizing cache. The
+    /// pre-2236 wrap binds no request id, so the context is empty — the same
+    /// shape the CLI reads.
+    fn private(&mut self, master: &MasterKey, request_id: &str) -> Option<&[u8; 32]> {
+        if !self.privs.contains_key(request_id) {
+            let key = {
+                let (wrapped, nonce) = self.wrapped.get(request_id)?;
+                beebeeb_core::file_request::unwrap_request_private(master, b"", wrapped, nonce).ok()?
+            };
+            self.privs.insert(request_id.to_string(), key);
         }
-        let (wrapped, nonce) = self.wrapped.get(request_id)?;
-        let key = beebeeb_core::file_request::unwrap_request_private(master, b"", wrapped, nonce).ok()?;
-        self.privs.insert(request_id.to_string(), *key);
-        Some(*key)
+        self.privs.get(request_id).map(|key| &**key)
     }
 
     /// A request row's keys (L12): content key `C`; name key from the derived
@@ -132,7 +136,7 @@ impl RequestKeys {
         }
         let private = self.private(master, &fields.request_id)?;
         let content = beebeeb_core::file_request::open_request_upload(
-            &private,
+            private,
             &fields.e_pub,
             b"",
             &fields.wrapped_content_key,

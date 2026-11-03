@@ -295,7 +295,7 @@ impl EngineBridge {
         };
         prepared.staged.retain();
         // L15/A14b: a create under a shared folder stays owner-only.
-        let notice = self.owner_only_notice(Some(&prepared.file_id), target.parent_id.as_deref());
+        let notice = self.owner_only_notice(Some(&prepared.file_id), target.parent_id.as_deref(), true);
         Ok(Some((
             FpWrite {
                 outcome: FinderWriteOutcome::Queued {

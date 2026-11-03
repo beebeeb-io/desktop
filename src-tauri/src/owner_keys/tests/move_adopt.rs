@@ -102,13 +102,13 @@ fn a19_a_move_out_adopts_every_foreign_descendant_first() {
     let temp = tempfile::tempdir().unwrap();
     let bridge = bridge(temp.path(), &fixture);
     assert!(bridge.db().get_owned_key_record(GUEST).unwrap().is_none(), "nothing is adopted yet");
-    run(bridge.adopt_foreign_subtree(OWNER_FOLDER, None)).expect("adoption lands before the move");
+    run(bridge.adopt_foreign_subtree(OWNER_FOLDER, Some(ROOT), None)).expect("adoption lands before the move");
     let record = bridge.db().get_owned_key_record(GUEST).unwrap().expect("an adopted record");
     assert!(record.owner_wrap.is_some(), "read back: the served envelope opens");
     assert!(record.pending_owner_wrap.is_none());
     // Still inside the root: no adoption, no request.
     let before = count(&seen, "/owner-key");
-    run(bridge.adopt_foreign_subtree(OWNER_FOLDER, Some(ROOT))).expect("a move inside the root needs nothing");
+    run(bridge.adopt_foreign_subtree(OWNER_FOLDER, Some(ROOT), Some(ROOT))).expect("a move inside the root needs nothing");
     assert_eq!(count(&seen, "/owner-key"), before);
 }
 
@@ -117,7 +117,7 @@ fn a19_a_failed_adoption_refuses_the_move() {
     let (fixture, seen) = world(true);
     let temp = tempfile::tempdir().unwrap();
     let bridge = bridge(temp.path(), &fixture);
-    let error = run(bridge.adopt_foreign_subtree(OWNER_FOLDER, None)).expect_err("refused");
+    let error = run(bridge.adopt_foreign_subtree(OWNER_FOLDER, Some(ROOT), None)).expect_err("refused");
     assert!(format!("{error}").contains("move needs adoption"), "{error}");
     let record = bridge.db().get_owned_key_record(GUEST).unwrap().unwrap();
     assert!(record.owner_wrap.is_none(), "an envelope that does not open is never adopted");
