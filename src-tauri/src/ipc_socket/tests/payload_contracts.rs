@@ -479,3 +479,28 @@ use super::*;
         );
         assert_eq!(payload.identifier, "1697-item");
     }
+
+    #[test]
+    fn review_p2_6_a_foreign_item_is_marked_added_by_someone_else() {
+        let entry = |file_id: &str| FileEntry {
+            file_id: file_id.into(),
+            path: "/added.txt".into(),
+            status: FileStatus::Local,
+            size_bytes: 0,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        let foreign = entry("20000000-0000-8000-8000-0000000000e1");
+        let owner = entry("40000000-0000-4000-8000-0000000000e2");
+        assert!(
+            file_entry_payload_without_contract(&foreign, FP_ROOT_APPLE).added_by_someone_else,
+            "an F id says the item was added by someone else"
+        );
+        assert!(
+            !file_entry_payload_without_contract(&owner, FP_ROOT_APPLE).added_by_someone_else,
+            "an owner id does not"
+        );
+    }
