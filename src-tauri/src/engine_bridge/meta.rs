@@ -67,16 +67,11 @@ pub(super) struct SharedRootMapping {
 pub(super) fn owned_key_and_pin(db: &StateDb, master: &[u8; 32], id: &str)
     -> Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat), EngineError> {
     if let Some(record) = db.get_owned_key_record(id)? {
-        // §15: a request row's rename target is core's — the string-derived key
-        // and the pin its current name records, never `C`. An upper-repair name
-        // is read-only, and a name under `C` refuses here (fail closed).
+        // P3-5: a request row has no content key — its content is the sealed
+        // request key `C` and its rename material comes from the rename call
+        // site only. Every content/name write through here must refuse it.
         if record.request_row {
-            let (key, pin) = crate::owner_keys::rename_material(
-                &beebeeb_core::kdf::MasterKey::from_bytes(*master),
-                id,
-                &record,
-            )?;
-            return Ok((key, pin));
+            return Err(EngineError::from(anyhow::anyhow!("a request row has no content key")));
         }
         let (key, metadata) = crate::owner_keys::record_key(
             &beebeeb_core::kdf::MasterKey::from_bytes(*master),

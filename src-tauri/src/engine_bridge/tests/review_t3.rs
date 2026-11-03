@@ -635,3 +635,45 @@ async fn review_p3_8_an_unscanned_file_on_disk_is_never_overwritten() {
         "the copy takes the next free name: {rows:?}"
     );
 }
+
+/// P3-5: a request row has no content key, so the content/name path refuses it;
+/// only the rename entry point supplies rename material, from core's durable
+/// resolution.
+#[test]
+fn review_p3_5_a_request_row_has_no_content_key() {
+    use crate::engine_bridge::meta::{owned_metadata_for_name, owned_metadata_for_rename};
+    use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let master = MasterKey::from_bytes([7; 32]);
+    let request = "0f000000-0000-4000-8000-0000000000e5";
+    let derived = derive_file_key(&master, request.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(&derived, "report.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: request.into(),
+            name_encrypted: name,
+            request_row: true,
+            request_name: Some(crate::owner_keys::RequestName {
+                key: crate::owner_keys::RequestNameKey::Derived,
+                pin: ExpectedChunkFormat::Unrecorded.as_u8(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    let key = bridge.api().master_key();
+
+    let error = match owned_metadata_for_name(&bridge.db(), key, request, "renamed.txt", None) {
+        Ok(_) => panic!("a request row has no content key"),
+        Err(error) => format!("{error}"),
+    };
+    assert!(error.contains("request row"), "{error}");
+
+    // The rename entry point still resolves it: the string-derived key, never C.
+    let sealed = owned_metadata_for_rename(&bridge.db(), key, request, "renamed.txt", None).unwrap();
+    let renamed = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&derived, &sealed).unwrap();
+    assert_eq!(renamed.name, "renamed.txt");
+}
