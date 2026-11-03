@@ -236,10 +236,11 @@ use super::*;
         std::fs::create_dir_all(&sync_root).unwrap();
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        seed_uploaded_row(&bridge, &server, "purged");
-        fp_save(&bridge, dir.path(), "purged", "notes.txt", b"a save in a share", "1");
-        let op_id = bridge.db.list_operations_for_file("purged").unwrap().remove(0).op_id;
-        let mut contract = bridge.db.get_file_contract_state("purged").unwrap().unwrap();
+        const PURGED: &str = "40000000-0000-4000-8000-0000000000f4";
+        seed_uploaded_row(&bridge, &server, PURGED);
+        fp_save(&bridge, dir.path(), PURGED, "notes.txt", b"a save in a share", "1");
+        let op_id = bridge.db.list_operations_for_file(PURGED).unwrap().remove(0).op_id;
+        let mut contract = bridge.db.get_file_contract_state(PURGED).unwrap().unwrap();
         contract.namespace = Namespace::SharedWithMe;
         contract.shared_root_id = Some("purged-root".into());
         bridge.db.set_file_contract_state(&contract).unwrap();
@@ -294,9 +295,9 @@ use super::*;
         PurgedLanding {
             outcome: outcome.unwrap(),
             logs,
-            server_versions: state.files["purged"].versions.len(),
+            server_versions: state.files[PURGED].versions.len(),
             op_left: bridge.db.get_operation(&op_id).unwrap().is_some(),
-            row_left: bridge.db.get_file("purged").unwrap().is_some(),
+            row_left: bridge.db.get_file(PURGED).unwrap().is_some(),
             resume_left: bridge.db.get_upload_resume(&op_id).unwrap().is_some(),
             op_id,
         }

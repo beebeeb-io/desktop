@@ -81,7 +81,7 @@ use super::*;
                 payload_size: 20,
                 payload_mtime_ns: payload_mtime_ns(&payload),
                 upload_session_id: "session-1".into(),
-                server_file_id: "server-file-1".into(),
+                server_file_id: "40000000-0000-4000-8000-0000000000f5".into(),
                 object_version_id: "object-init-1".into(),
                 chunk_size_bytes: 8,
                 chunk_count: 3,
