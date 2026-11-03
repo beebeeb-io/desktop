@@ -370,8 +370,8 @@ fn open_exclusive_without_data(path: &std::path::Path) -> std::io::Result<std::f
         .open(path)
 }
 
-/// Task 2284 (tests only): run once, right before the data open of [`finalize_wholly_local`], [`stamp_if_agreed`] or
-/// [`promote_fetched_content`], so a native test can dehydrate the file between the state check and that open.
+// Task 2284 (tests only): run once, right before the data open of `finalize_wholly_local`, `stamp_if_agreed` or
+// `promote_fetched_content`, so a native test can dehydrate the file between the state check and that open.
 #[cfg(test)]
 thread_local! {
     pub(crate) static BEFORE_DATA_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&std::path::Path)>>> =
@@ -1143,12 +1143,12 @@ pub fn promote_fetched_content(db: &crate::state_db::StateDb, file_id: &str, pat
     } else {
         LocalEntry::PartlyLocal
     };
-    crate::engine_bridge::promote_fetched_content(db, file_id, local, wholly, &mut || {
+    Ok(crate::engine_bridge::promote_fetched_content(db, file_id, local, wholly, &mut || {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         std::io::copy(&mut file, &mut hasher)?;
         Ok(format!("{:x}", hasher.finalize()))
-    })
+    })?)
 }
 
 /// Task 1640 (review P2-4): mark the placeholder at `path` in sync when its bytes are the agreed
