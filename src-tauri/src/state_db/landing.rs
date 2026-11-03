@@ -237,12 +237,18 @@ impl StateDb {
                 if moved {
                     vacated_parent = entry.parent_id.clone();
                 }
+                // P2-3: a save that follows a queued save which moved the file
+                // sends that move too; the source it recorded travels with it.
+                let (queued_moved, queued_vacated) = queued_save_move_conn(&tx, accept.file_id)?;
+                if !moved && queued_moved {
+                    vacated_parent = queued_vacated;
+                }
                 apply_save_name_and_parent_conn(&tx, &entry, accept.target_path, parent_id.as_deref())?;
                 // §7.2 (final review): the upload's metadata step sends a parent only for a save
                 // that moved the file, or that follows a queued save of the file that did: that
                 // one may park before its own metadata step, and its move must still reach the
                 // server.
-                parent_changed = Some(moved || queued_save_moved_conn(&tx, accept.file_id)?);
+                parent_changed = Some(moved || queued_moved);
                 // A content write touched the row: its version is no longer a snapshot fill.
                 tx.execute(
                     "UPDATE files SET version_filled = 0 WHERE file_id = ?1",

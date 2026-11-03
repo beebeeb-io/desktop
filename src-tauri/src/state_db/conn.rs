@@ -277,6 +277,11 @@ pub(super) fn rehome_kept_row_conn<C: std::ops::Deref<Target = Connection>>(conn
         let metadata_json = metadata_json.map(|raw| match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(mut metadata) if metadata["operation"].as_str() != Some("create_file") && metadata.is_object() => {
                 metadata["parent_changed"] = serde_json::json!(true);
+                // P2-3: the folder it left is the source the adoption guard
+                // names; the row is already at the top level.
+                if let Some(parent) = &row.parent_id {
+                    metadata["vacated_parent_id"] = serde_json::json!(parent);
+                }
                 metadata.to_string()
             }
             _ => raw,
@@ -289,24 +294,28 @@ pub(super) fn rehome_kept_row_conn<C: std::ops::Deref<Target = Connection>>(conn
     record_file_change_conn(conn, file_id, FpChangeKind::Reparented, row.parent_id)
 }
 
-/// Spec §7.2 (final review): whether a queued File Provider save of `file_id`, parked or not,
-/// recorded that it moved the file.
-pub(super) fn queued_save_moved_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<bool> {
+/// Spec §7.2 (P2-3): whether a queued File Provider save of `file_id`, parked or not,
+/// recorded that it moved the file, and the parent it recorded as vacated with it — the
+/// source the upload's adoption guard needs, copied onto a follow-on save.
+pub(super) fn queued_save_move_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    file_id: &str,
+) -> Result<(bool, Option<String>)> {
     let mut stmt = conn.prepare(
         "SELECT metadata_json FROM operation_queue
          WHERE file_id = ?1 AND write_id IS NOT NULL AND kind IN ('upload_version', 'upload_file')",
     )?;
     let rows = stmt.query_map(params![file_id], |row| row.get::<_, Option<String>>(0))?;
     for raw in rows {
-        let moved = raw?
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|metadata| metadata.get("parent_changed").and_then(serde_json::Value::as_bool));
-        if moved == Some(true) {
-            return Ok(true);
+        let Some(metadata) = raw?.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        else {
+            continue;
+        };
+        if metadata["parent_changed"].as_bool() == Some(true) {
+            return Ok((true, metadata["vacated_parent_id"].as_str().map(str::to_string)));
         }
     }
-    Ok(false)
+    Ok((false, None))
 }
 
 /// The name and parent a File Provider save was made under, applied in its accept (spec §7.2).

@@ -568,14 +568,18 @@ impl EngineBridge {
             };
             // A19 (P2-7): an upload whose metadata step moves the item out of a
             // shared folder takes the same adoption guard as a queued move.
+            // P2-3: only a recorded move with a recorded source is one. A
+            // watcher/legacy save sends its parent without claiming a move, and
+            // a follow-on save or a rehome carries the source it copied
+            // (state_db::landing, state_db::conn).
             let parent_change = upload_parent_change(op, metadata);
-            if !matches!(parent_change, crate::api_client::ParentChange::Unchanged) {
+            if metadata["parent_changed"].as_bool() == Some(true)
+                && let Some(from_parent) = metadata["vacated_parent_id"].as_str()
+            {
                 // P1-2: the row is already at the destination here, so the DB
-                // parent is never the source. Only the op's recorded vacated
-                // parent can name it; when it is absent the guard refuses a
-                // foreign subtree instead of reading the destination (moves.rs).
-                let from_parent = metadata["vacated_parent_id"].as_str();
-                self.adopt_foreign_subtree(&server_file_id, from_parent, op.parent_id.as_deref())
+                // parent is never the source; only the op's recorded vacated
+                // parent can name it (moves.rs).
+                self.adopt_foreign_subtree(&server_file_id, Some(from_parent), op.parent_id.as_deref())
                     .await?;
             }
             self.api
