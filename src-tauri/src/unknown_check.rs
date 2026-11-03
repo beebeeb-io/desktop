@@ -537,6 +537,28 @@ mod tests {
     use crate::state_db::{FileEntry, ItemKind};
     use std::collections::HashSet;
 
+    /// The runner module's production text, from the facade and every file the split moved its
+    /// code into, so a source pin scans all of it.
+    fn runner_production() -> String {
+        [
+            include_str!("runner.rs"),
+            include_str!("runner/lifecycle.rs"),
+            include_str!("runner/telemetry.rs"),
+            include_str!("runner/tick_loop.rs"),
+            include_str!("runner/working_set_signal.rs"),
+        ]
+        .iter()
+        .map(|text| {
+            text.replace("\r\n", "\n")
+                .split("\nmod tests {")
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
     /// The guard's pass with nobody stopping it and no progress wanted (the 2191 tests' shape).
     fn guard(
         db: &StateDb,
@@ -771,14 +793,14 @@ mod tests {
     /// stamp pass comes after it (a source pin: the runner calls them on Windows only).
     #[test]
     fn task_2191_the_guard_runs_before_the_first_tick_and_every_tick_before_the_stamp() {
-        let runner = include_str!("runner.rs").replace("\r\n", "\n");
-        let production = runner.split("\nmod tests {").next().unwrap();
+        let production = runner_production();
         let at = |needle: &str| production.find(needle).unwrap_or_else(|| panic!("{needle} not found"));
         let seed = at("crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);");
         let guard = at("spawn_startup_guard(sync_root.clone());");
         let tick = at("let mut tick = tokio::time::interval(TICK_INTERVAL);");
         let after = |from: usize, needle: &str| from + production[from..].find(needle).unwrap_or_else(|| panic!("{needle} not found"));
-        const PAUSED: &str = "if sync_paused.load(Ordering::Relaxed) {";
+        // D-P2-7 named the mode: the pause check reads `RunMode::of_flag` before its `is_paused` arm.
+        const PAUSED: &str = "let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));";
         let retry = after(tick, "crate::windows_cf::retry_pending_marks(&mark_root)).await");
         let paused = after(retry, PAUSED);
         let stamp = after(paused, "crate::windows_cf::stamp_local_files_in_sync(&stamp_root);");
@@ -797,8 +819,7 @@ mod tests {
     /// and nothing between seeding and the tick loop is awaited.
     #[test]
     fn desktop_0815_uploads_start_without_waiting_for_the_guard() {
-        let runner = include_str!("runner.rs").replace("\r\n", "\n");
-        let production = runner.split("\nmod tests {").next().unwrap();
+        let production = runner_production();
         let at = |needle: &str| production.find(needle).unwrap_or_else(|| panic!("{needle} not found"));
         let seed = at("crate::windows_cf::seed_placeholders(bridge.clone(), &sync_root);");
         let guard = at("spawn_startup_guard(sync_root.clone());");
@@ -829,8 +850,7 @@ mod tests {
     #[test]
     fn desktop_0815_the_tick_stamps_nothing_until_the_start_up_pass_is_done() {
         use crate::source_pin::squeeze;
-        let runner = include_str!("runner.rs").replace("\r\n", "\n");
-        let production = runner.split("\nmod tests {").next().unwrap();
+        let production = runner_production();
         let stamp = production.find("crate::windows_cf::stamp_local_files_in_sync(&stamp_root);").unwrap();
         let kept = production.find("crate::windows_cf::retry_kept_originals(&stamp_root);").unwrap();
         let block = production[..stamp].rfind("let stamp_root = sync_root.clone();").unwrap();
@@ -850,8 +870,7 @@ mod tests {
     /// `sync_status` poll, and the changes held back as `changes_on_hold` on `sync_status`.
     #[test]
     fn desktop_0815_the_ui_reads_the_guard_s_progress_and_the_changes_on_hold() {
-        let runner = include_str!("runner.rs").replace("\r\n", "\n");
-        let production = runner.split("\nmod tests {").next().unwrap();
+        let production = runner_production();
         let emit = &production[production.find("fn emit_payload<").unwrap()..];
         let emit = &emit[..emit.find("\n}\n").unwrap()];
         assert!(emit.contains("app.emit(crate::engine_status::EVENT, with_startup_guard(payload))"), "{emit}");
