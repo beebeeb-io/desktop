@@ -15,6 +15,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { censusOfSource, familyLiterals, KEPT_FOLDER_READERS, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
+import { rustModuleSource } from './fixtures/rustConstants'
 
 // Every test here reads, scans or copies the real source tree, which takes seconds when the machine is loaded (a gate at
 // load 60 timed three of them out at bun's default 5 s; the same tests take under 4 s together at load 14). Their results do
@@ -300,8 +301,12 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     const tryAgain = body(lib, 'async fn finder_setup_try_again(state: &AppState, base_url: &str) -> Result<(), String> {')
     expect(tryAgain).not.toMatch(/\?;|Err\(/)
     expect(tryAgain.trim().endsWith('finder_setup_retry_impl(state)')).toBe(true)
-    const driver = readFileSync(new URL('../src-tauri/src/finder_setup/driver.rs', import.meta.url), 'utf8')
-    expect(body(driver, 'pub fn trigger(&self, trigger: Trigger) -> Result<(), String> {')).toContain('.map_err(|_| NOT_RUNNING.to_string())')
+    // The split moved the handle to driver/handle.rs and named the reason it failed with (`HandleError`):
+    // trigger has exactly one failure, NotRunning, and its sentence is the NOT_RUNNING constant.
+    const driver = rustModuleSource('finder_setup/driver')
+    expect(body(driver, 'pub fn trigger(&self, trigger: Trigger) -> Result<(), String> {')).toContain('self.send_trigger(trigger).map_err(HandleError::sentence)')
+    expect(body(driver, 'fn send_trigger(&self, trigger: Trigger) -> Result<(), HandleError> {')).toContain('.map_err(|_| HandleError::NotRunning)')
+    expect(body(driver, 'pub fn sentence(self) -> String {')).toContain('Self::NotRunning => NOT_RUNNING.to_string()')
   })
 
   test('the uses that sit only on a non-macOS side are seen, so the analysis did read them (pinned)', () => {
