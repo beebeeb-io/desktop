@@ -181,9 +181,10 @@ impl EngineBridge {
         }
         // Replay only our known changes/removals. A concurrent device's entries
         // survive even if a fresh listing has not observed that device yet.
-        // P3-6: an earlier build indexed owner items too; they never pass L14
-        // (their class is derived, not wrapped), so they are removed by class
-        // and by the root's local subtree.
+        // P3-6/P2-1: an earlier build indexed owner items too — files AND
+        // folders. They never pass L14 (their class is derived, not wrapped), so
+        // they are removed by class and by the root's local subtree; the class
+        // filter is the discriminator, not the item kind.
         let root_path = self.db().get_file(folder_id).ok().flatten().map(|entry| entry.path);
         let prefix = root_path.map(|path| format!("{path}/"));
         let earlier_owner_ids: Vec<String> = self
@@ -191,10 +192,7 @@ impl EngineBridge {
             .list_files()
             .unwrap_or_default()
             .into_iter()
-            .filter(|entry| {
-                entry.item_kind == crate::state_db::ItemKind::File
-                    && prefix.as_ref().is_some_and(|prefix| entry.path.starts_with(prefix))
-            })
+            .filter(|entry| prefix.as_ref().is_some_and(|prefix| entry.path.starts_with(prefix)))
             .map(|entry| entry.file_id)
             .filter(|id| {
                 beebeeb_core::item_id::item_class(id).ok() == Some(beebeeb_core::item_id::ItemClass::Owner)

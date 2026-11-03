@@ -760,3 +760,100 @@ fn a12_a_correctly_wrapped_child_of_a_proven_folder_is_indexed() {
     assert!(report.written >= 1, "folder and child are indexed: {:?} {seen:?}", report.skip_reasons);
     assert_eq!(count(&seen, &format!("parent_id={nested}")), 1, "the proven folder is walked: {seen:?}");
 }
+
+/// P2-1: an earlier build indexed owner FOLDERS too. The class filter is the
+/// discriminator, so a folder under the root's local subtree is removed from
+/// the old shared index exactly as a file is — its name must not stay sealed
+/// under the folder key.
+#[test]
+fn review_p2_1_an_earlier_indexed_owner_folder_is_removed() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    use beebeeb_core::search_index::{EncryptedShard, SearchIndex, ShardKeySource};
+    use std::collections::HashMap;
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-00000000004a";
+    let owner_folder = "40000000-0000-4000-8000-00000000004a";
+    let folder = FileKey::from_bytes([55; 32]);
+    let custody = STANDARD.encode(beebeeb_sync::key_resolution::wrap_folder_custody(&master, root, &folder).unwrap());
+    // The old index holds the owner folder's name, sealed under the folder key.
+    let initial: Vec<EncryptedShard> = SearchIndex::build(&[(owner_folder.into(), "OwnerFolder".into())], 64)
+        .encrypt_shards_with(ShardKeySource::Folder(&folder))
+        .unwrap();
+    let blobs: Arc<Mutex<HashMap<(u32, u32), Vec<u8>>>> =
+        Arc::new(Mutex::new(initial.iter().map(|s| ((s.bucket, s.page), s.blob.clone())).collect()));
+    let puts: Arc<Mutex<Vec<(String, u32, u32, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (served_blobs, captured) = (blobs.clone(), puts.clone());
+    let fixture = Fixture::wire(move |req| {
+        let json_body = |value: serde_json::Value| serde_json::to_vec(&value).unwrap();
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (200, json_body(json!({"invites": []})))
+        } else if req.path == format!("/api/v1/shared-folders/{root}") {
+            (200, json_body(json!({"folder_id": root, "role": "owner", "key_version": 1,
+                         "owner_wrapped_folder_key": custody})))
+        } else if req.path.starts_with(&format!("/api/v1/shared-folders/{root}/keys")) {
+            (200, json_body(json!({"keys": [], "next_cursor": null})))
+        } else if req.path.starts_with("/api/v1/files?") {
+            (200, json_body(json!({"files": [], "next_cursor": null})))
+        } else if req.path == format!("/api/v1/shared-folders/{root}/search-index/shards") {
+            let shards: Vec<_> = served_blobs
+                .lock()
+                .unwrap()
+                .keys()
+                .map(|(bucket, page)| json!({"bucket": bucket, "page": page, "version": 1}))
+                .collect();
+            (200, json_body(json!({"shards": shards})))
+        } else if let Some(rest) = req.path.split("/search-index/shards/").nth(1) {
+            let rest = rest.split('?').next().unwrap_or_default();
+            let mut parts = rest.split('/');
+            let bucket: u32 = parts.next().unwrap_or_default().parse().unwrap_or(0);
+            let page: u32 = parts.next().unwrap_or_default().parse().unwrap_or(0);
+            if req.method == "PUT" || req.method == "DELETE" {
+                captured.lock().unwrap().push((req.method.clone(), bucket, page, req.bytes.clone()));
+                (200, serde_json::to_vec(&json!({"bucket": bucket, "page": page, "version": 2})).unwrap())
+            } else {
+                match served_blobs.lock().unwrap().get(&(bucket, page)) {
+                    Some(blob) => (200, blob.clone()),
+                    None => (404, Vec::new()),
+                }
+            }
+        } else {
+            (404, Vec::new())
+        };
+        Some((status, body))
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let row = |id: &str, path: &str, kind: crate::state_db::ItemKind| crate::state_db::FileEntry {
+        file_id: id.into(),
+        path: path.into(),
+        status: crate::state_db::FileStatus::Local,
+        size_bytes: 0,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 0,
+        parent_id: None,
+        item_kind: kind,
+    };
+    for (id, path, kind) in [
+        (root, "Shared", crate::state_db::ItemKind::Folder),
+        (owner_folder, "Shared/OwnerFolder", crate::state_db::ItemKind::Folder),
+    ] {
+        let entry = row(id, path, kind.clone());
+        db.upsert_file_with_contract(&entry, |contract| contract.item_kind = kind).unwrap();
+    }
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert!(report.written >= 1, "the repaired index is written: {report:?}");
+    let written = puts.lock().unwrap();
+    assert!(!written.is_empty(), "the repaired index is written");
+    let shards: Vec<EncryptedShard> = written
+        .iter()
+        .filter(|(method, ..)| method == "PUT")
+        .map(|(_, bucket, page, blob)| EncryptedShard { bucket: *bucket, page: *page, blob: blob.clone() })
+        .collect();
+    let repaired = SearchIndex::from_encrypted_shards_with(ShardKeySource::Folder(&folder), &shards, 64).unwrap();
+    assert!(
+        !repaired.query("OwnerFolder").contains(&owner_folder.to_string()),
+        "an owner folder's name is removed from the old shared index"
+    );
+}
