@@ -269,33 +269,33 @@ use super::*;
 
     #[tokio::test]
     async fn an_upload_without_a_write_id_still_pauses_for_auth() {
-        assert_upload_without_a_write_id_pauses([145u8; 32], "plain-auth", "401 Unauthorized").await;
+        assert_upload_without_a_write_id_pauses([145u8; 32], "d1000000-0000-4000-8000-000000000001", "401 Unauthorized").await;
     }
 
     #[tokio::test]
     async fn an_upload_without_a_write_id_still_pauses_for_quota() {
-        assert_upload_without_a_write_id_pauses([146u8; 32], "plain-quota", "507 Insufficient Storage").await;
+        assert_upload_without_a_write_id_pauses([146u8; 32], "d1000000-0000-4000-8000-000000000002", "507 Insufficient Storage").await;
     }
 
     #[tokio::test]
     async fn an_upload_without_a_write_id_still_pauses_for_permission() {
-        assert_upload_without_a_write_id_pauses([147u8; 32], "plain-permission", "403 Forbidden").await;
+        assert_upload_without_a_write_id_pauses([147u8; 32], "d1000000-0000-4000-8000-000000000003", "403 Forbidden").await;
     }
 
     #[tokio::test]
     async fn an_upload_without_a_write_id_still_pauses_when_locked() {
-        assert_upload_without_a_write_id_pauses([148u8; 32], "plain-locked", "423 Locked").await;
+        assert_upload_without_a_write_id_pauses([148u8; 32], "d1000000-0000-4000-8000-000000000004", "423 Locked").await;
     }
 
     /// Today's give-up: a retryable failure at the last attempt uses the attempts up.
     #[tokio::test]
     async fn an_upload_without_a_write_id_still_gives_up_after_its_attempts() {
         let (outcome, op) =
-            refused_upload_without_a_write_id([149u8; 32], "plain-retry", "503 Service Unavailable", 24).await;
+            refused_upload_without_a_write_id([149u8; 32], "d1000000-0000-4000-8000-000000000005", "503 Service Unavailable", 24).await;
         assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
         assert_eq!(op.attempts, op.max_attempts, "its attempts are used up");
         assert_eq!(op.max_attempts, 25);
-        assert_eq!(outcome.invalidated_item_ids, vec!["plain-retry".to_string()]);
+        assert_eq!(outcome.invalidated_item_ids, vec!["d1000000-0000-4000-8000-000000000005".to_string()]);
     }
 
     // ── The final review's small items ──

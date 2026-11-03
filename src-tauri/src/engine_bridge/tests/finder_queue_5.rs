@@ -171,7 +171,7 @@ use super::*;
         ];
         for (index, refusal) in refusals.into_iter().enumerate() {
             let key = [190u8 + index as u8; 32];
-            let file_id = format!("account-{index}");
+            let file_id = format!("c2000000-0000-4000-8000-{index:012}");
             let (dir, sync_root, server, bridge) = rule3_setup(key);
             seed_uploaded_row(&bridge, &server, &file_id);
             refuse(&server, Refused::Init, &file_id, refusal);
@@ -246,62 +246,62 @@ use super::*;
 
     #[tokio::test]
     async fn a_finder_write_over_quota_at_init_lands_once_space_is_free() {
-        a_curable_refusal_lands_once_cured([143u8; 32], "quota-init", Refused::Init, quota_exceeded()).await;
+        a_curable_refusal_lands_once_cured([143u8; 32], "c1000000-0000-4000-8000-000000000001", Refused::Init, quota_exceeded()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_over_quota_at_a_chunk_lands_once_space_is_free() {
-        a_curable_refusal_lands_once_cured([159u8; 32], "quota-chunk", Refused::Chunk, quota_exceeded()).await;
+        a_curable_refusal_lands_once_cured([159u8; 32], "c1000000-0000-4000-8000-000000000002", Refused::Chunk, quota_exceeded()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_over_quota_at_complete_lands_once_space_is_free() {
-        a_curable_refusal_lands_once_cured([160u8; 32], "quota-complete", Refused::Complete, quota_exceeded()).await;
+        a_curable_refusal_lands_once_cured([160u8; 32], "c1000000-0000-4000-8000-000000000003", Refused::Complete, quota_exceeded()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_over_the_object_budget_lands_once_objects_are_freed() {
-        a_curable_refusal_lands_once_cured([161u8; 32], "budget-chunk", Refused::Chunk, object_budget_exceeded()).await;
+        a_curable_refusal_lands_once_cured([161u8; 32], "c1000000-0000-4000-8000-000000000004", Refused::Chunk, object_budget_exceeded()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_refused_while_billing_is_read_only_lands_once_paid() {
-        a_curable_refusal_lands_once_cured([162u8; 32], "billing-init", Refused::Init, billing_read_only()).await;
+        a_curable_refusal_lands_once_cured([162u8; 32], "c1000000-0000-4000-8000-000000000005", Refused::Init, billing_read_only()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_refused_for_a_lapsed_account_lands_once_subscribed() {
-        a_curable_refusal_lands_once_cured([163u8; 32], "lapsed-init", Refused::Init, account_lapsed()).await;
-        a_curable_refusal_lands_once_cured([173u8; 32], "lapsed-chunk", Refused::Chunk, account_lapsed()).await;
-        a_curable_refusal_lands_once_cured([174u8; 32], "lapsed-complete", Refused::Complete, account_lapsed()).await;
+        a_curable_refusal_lands_once_cured([163u8; 32], "c1000000-0000-4000-8000-000000000006", Refused::Init, account_lapsed()).await;
+        a_curable_refusal_lands_once_cured([173u8; 32], "c1000000-0000-4000-8000-000000000007", Refused::Chunk, account_lapsed()).await;
+        a_curable_refusal_lands_once_cured([174u8; 32], "c1000000-0000-4000-8000-000000000008", Refused::Complete, account_lapsed()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_refused_for_no_plan_lands_once_subscribed() {
-        a_curable_refusal_lands_once_cured([175u8; 32], "no-plan-init", Refused::Init, plan_required()).await;
-        a_curable_refusal_lands_once_cured([176u8; 32], "no-plan-chunk", Refused::Chunk, plan_required()).await;
-        a_curable_refusal_lands_once_cured([177u8; 32], "no-plan-complete", Refused::Complete, plan_required()).await;
+        a_curable_refusal_lands_once_cured([175u8; 32], "c1000000-0000-4000-8000-000000000009", Refused::Init, plan_required()).await;
+        a_curable_refusal_lands_once_cured([176u8; 32], "c1000000-0000-4000-8000-00000000000a", Refused::Chunk, plan_required()).await;
+        a_curable_refusal_lands_once_cured([177u8; 32], "c1000000-0000-4000-8000-00000000000b", Refused::Complete, plan_required()).await;
     }
 
     #[tokio::test]
     async fn a_finder_write_refused_after_a_cancelled_trial_lands_once_subscribed() {
         a_curable_refusal_lands_once_cured(
             [178u8; 32],
-            "cancelled-init",
+            "c1000000-0000-4000-8000-00000000000c",
             Refused::Init,
             trial_cancelled_read_only(),
         )
         .await;
         a_curable_refusal_lands_once_cured(
             [179u8; 32],
-            "cancelled-chunk",
+            "c1000000-0000-4000-8000-00000000000d",
             Refused::Chunk,
             trial_cancelled_read_only(),
         )
         .await;
         a_curable_refusal_lands_once_cured(
             [180u8; 32],
-            "cancelled-complete",
+            "c1000000-0000-4000-8000-00000000000e",
             Refused::Complete,
             trial_cancelled_read_only(),
         )
@@ -315,11 +315,11 @@ use super::*;
         let (dir, sync_root, server, bridge) = rule3_setup([164u8; 32]);
         for (file_id, refusal) in [
             (
-                "other-413",
+                "c1000000-0000-4000-8000-00000000000f",
                 ("413 Payload Too Large", json!({ "error": "payload_too_large" })),
             ),
-            ("other-409", trial_ended()),
-            ("other-403", ("403 Forbidden", json!({ "error": "ba168ca1-ec2b-5945-8692-4a58b11c325a" }))),
+            ("c1000000-0000-4000-8000-000000000010", trial_ended()),
+            ("c1000000-0000-4000-8000-000000000011", ("403 Forbidden", json!({ "error": "ba168ca1-ec2b-5945-8692-4a58b11c325a" }))),
         ] {
             seed_uploaded_row(&bridge, &server, file_id);
             refuse(&server, Refused::Init, file_id, refusal);
@@ -334,11 +334,11 @@ use super::*;
             now += 10_000;
             assert!(outcome.paused_op_ids.is_empty(), "{outcome:?}");
         }
-        for file_id in ["other-413", "other-409"] {
+        for file_id in ["c1000000-0000-4000-8000-00000000000f", "c1000000-0000-4000-8000-000000000010"] {
             let op = bridge.db.list_operations_for_file(file_id).unwrap().remove(0);
             assert_eq!(op.attempts, passes, "{file_id}: counted, once per pass");
         }
-        let forbidden = bridge.db.list_operations_for_file("other-403").unwrap().remove(0);
+        let forbidden = bridge.db.list_operations_for_file("c1000000-0000-4000-8000-000000000011").unwrap().remove(0);
         assert_eq!(
             forbidden.last_error.as_deref(),
             Some("permission_denied"),
@@ -349,8 +349,8 @@ use super::*;
         // Without a write id: a quota refusal uses up an attempt and a billing refusal pauses,
         // as before.
         for (file_id, refusal, paused) in [
-            ("plain-quota-413", quota_exceeded(), false),
-            ("plain-billing-403", billing_read_only(), true),
+            ("c1000000-0000-4000-8000-000000000012", quota_exceeded(), false),
+            ("c1000000-0000-4000-8000-000000000013", billing_read_only(), true),
         ] {
             let (dir, sync_root, server, bridge) = rule3_setup([165u8; 32]);
             seed_uploaded_row(&bridge, &server, file_id);

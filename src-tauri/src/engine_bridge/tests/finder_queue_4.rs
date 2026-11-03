@@ -10,15 +10,15 @@ use super::*;
         let master_key = [57u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "signed-out").await;
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "9b1c3d5e-7f20-4a6b-8c9d-0e1f2a3b4c5d").await;
         bridge
             .db
-            .insert_alias_for_test("provisional-1", "signed-out", now_secs());
+            .insert_alias_for_test("provisional-1", "9b1c3d5e-7f20-4a6b-8c9d-0e1f2a3b4c5d", now_secs());
         bridge.db.purge_all_local_state().unwrap();
         assert!(
             bridge
                 .db
-                .item_presentation("signed-out")
+                .item_presentation("9b1c3d5e-7f20-4a6b-8c9d-0e1f2a3b4c5d")
                 .unwrap()
                 .unwrap()
                 .held
@@ -263,24 +263,24 @@ use super::*;
             server.base_url.clone(),
             master_key,
         ));
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "guarded").await;
-        remote_update(&bridge, &sync_root, "guarded", 3, "object-elsewhere-v3");
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "7c0e2f5a-1b3d-4c6e-9a80-2f4b6d8e1c37").await;
+        remote_update(&bridge, &sync_root, "7c0e2f5a-1b3d-4c6e-9a80-2f4b6d8e1c37", 3, "object-elsewhere-v3");
         // Between the builder's read (W, no longer current) and its clear, a save sets held = N.
         let saver = Arc::clone(&bridge);
         let save_dir = dir.path().to_path_buf();
         let n_token = Arc::new(Mutex::new(None));
         let n_slot = Arc::clone(&n_token);
         crate::ipc_socket::arm_builder_seam(move || {
-            let n = fp_save(&saver, &save_dir, "guarded", "notes.txt", b"N", "3");
+            let n = fp_save(&saver, &save_dir, "7c0e2f5a-1b3d-4c6e-9a80-2f4b6d8e1c37", "notes.txt", b"N", "3");
             *n_slot.lock().unwrap() = n.token;
         });
-        let _ = held_content_version(&bridge, "guarded");
+        let _ = held_content_version(&bridge, "7c0e2f5a-1b3d-4c6e-9a80-2f4b6d8e1c37");
         let n = n_token
             .lock()
             .unwrap()
             .clone()
             .expect("the seam fired and N was accepted");
-        let held = bridge.db.item_presentation("guarded").unwrap().unwrap().held;
+        let held = bridge.db.item_presentation("7c0e2f5a-1b3d-4c6e-9a80-2f4b6d8e1c37").unwrap().unwrap().held;
         assert_eq!(
             held.map(|held| held.token()),
             Some(n),
