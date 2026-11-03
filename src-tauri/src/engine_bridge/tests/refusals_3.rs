@@ -64,7 +64,7 @@ use super::*;
         ];
         // (file, the call, the function it is in, lines between that function's start and the
         // call, why it queues no content on a Mac)
-        let allowed: [(&str, &str, &str, &[&str], &str); 8] = [
+        let allowed: [(&str, &str, &str, &[&str], &str); 9] = [
             (
                 "engine_bridge/finder_create.rs",
                 "self.queue_finder_create_from(target, None)",
@@ -120,6 +120,13 @@ use super::*;
                 "pub(crate) async fn handle_rename(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
+            ),
+            (
+                "engine_bridge/upload.rs",
+                "self.queue_finder_create(FinderWriteTarget {",
+                "async fn replan_request_edit_as_new_item(",
+                &[],
+                "P1-1: a request-row edit is saved as a new O item, never sealed in place",
             ),
         ];
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -183,7 +190,7 @@ use super::*;
                 && !sources.iter().any(|(rel, _)| rel.starts_with("windows_cf/")),
             "the module filter sees what a Mac compiles"
         );
-        let mut matched = [0usize; 8];
+        let mut matched = [0usize; 9];
         for (rel, mac) in &sources {
             let lines: Vec<&str> = mac.lines().map(str::trim).collect();
             for (i, line) in lines.iter().enumerate() {
