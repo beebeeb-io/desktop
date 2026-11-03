@@ -49,7 +49,7 @@ use super::*;
         let requests = server.finish();
         let item_id = init_item_id(&requests);
         assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
-        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_none());
+        assert!(bridge.db.get_file("6cc778db-0fc3-5a51-927a-b6e4a06d4864").unwrap().is_some());
 
         let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
         assert_eq!(entry.status, FileStatus::Local);

@@ -251,24 +251,24 @@ use super::*;
         let master_key = [53u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "remote").await;
-        remote_update(&bridge, &sync_root, "remote", 3, "object-elsewhere-v3");
-        assert_eq!(held_content_version(&bridge, "remote"), "3");
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "f1000000-0000-4000-8000-000000000001").await;
+        remote_update(&bridge, &sync_root, "f1000000-0000-4000-8000-000000000001", 3, "object-elsewhere-v3");
+        assert_eq!(held_content_version(&bridge, "f1000000-0000-4000-8000-000000000001"), "3");
         assert!(
-            bridge.db.item_presentation("remote").unwrap().unwrap().held.is_none(),
+            bridge.db.item_presentation("f1000000-0000-4000-8000-000000000001").unwrap().unwrap().held.is_none(),
             "the builder cleared it"
         );
 
         // A new version under the SAME object id: the legacy one-shot `file_update` carries no
         // `current_object_version_id`, so the row keeps its own (EB:6169-6174).
-        land_one_save(&bridge, &server, dir.path(), &sync_root, "remote-same-object").await;
+        land_one_save(&bridge, &server, dir.path(), &sync_root, "f1000000-0000-4000-8000-000000000002").await;
         let replace = crate::api_client::SyncOp {
             seq_id: 200,
             op_type: "file_update".into(),
-            payload: serde_json::json!({ "id": "remote-same-object", "version_number": 3, "size_bytes": 11 }),
+            payload: serde_json::json!({ "id": "f1000000-0000-4000-8000-000000000002", "version_number": 3, "size_bytes": 11 }),
         };
         apply_sync_op(&bridge, &sync_root, &replace, now_secs(), &mut Vec::new()).unwrap();
-        assert_eq!(held_content_version(&bridge, "remote-same-object"), "3");
+        assert_eq!(held_content_version(&bridge, "f1000000-0000-4000-8000-000000000002"), "3");
         drop(server.finish());
     }
 
@@ -281,10 +281,10 @@ use super::*;
         let master_key = [54u8; 32];
         let server = VersionedServerMock::start();
         let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
-        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "echo").await;
-        remote_update(&bridge, &sync_root, "echo", 2, "object-echo-v2");
+        let token = land_one_save(&bridge, &server, dir.path(), &sync_root, "f1000000-0000-4000-8000-000000000003").await;
+        remote_update(&bridge, &sync_root, "f1000000-0000-4000-8000-000000000003", 2, "object-f1000000-0000-4000-8000-000000000003-v2");
         assert_eq!(
-            held_content_version(&bridge, "echo"),
+            held_content_version(&bridge, "f1000000-0000-4000-8000-000000000003"),
             token,
             "the echo of our own landing changes nothing"
         );

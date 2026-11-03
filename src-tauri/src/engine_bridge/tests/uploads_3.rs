@@ -428,7 +428,7 @@ use super::*;
         PendingOperation {
             op_id: "op-upload-resume".into(),
             kind: OperationKind::UploadVersion,
-            file_id: Some("5e4695e9-9205-5630-9c10-2d7e3b050643".into()),
+            file_id: Some("local-file-resume".into()),
             parent_id: None,
             target_path: Some("resume.bin".into()),
             metadata_json: Some(

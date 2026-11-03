@@ -137,18 +137,18 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&dir.path().join("state.db"));
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-1", None, "1791550370"),
+            queued_modify_base(&bridge, dir.path(), "e1000000-0000-4000-8000-000000000001", None, "1791550370"),
             Some(2),
             "the old content version of the row as it is now"
         );
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-1", None, "1791550370:1791550370:18"),
+            queued_modify_base(&bridge, dir.path(), "e1000000-0000-4000-8000-000000000001", None, "1791550370:1791550370:18"),
             Some(2),
             "the old full version identifier of the row as it is now"
         );
 
         assert_eq!(
-            queued_modify_base(&bridge, dir.path(), "legacy-hash", Some("abc123"), "1791550370:abc123"),
+            queued_modify_base(&bridge, dir.path(), "e1000000-0000-4000-8000-000000000002", Some("abc123"), "1791550370:abc123"),
             Some(2),
             "the old content version with the row's content hash"
         );
@@ -168,7 +168,7 @@ use super::*;
             "1791550370:1791550370:17",
         ] {
             assert_eq!(
-                queued_modify_base(&bridge, dir.path(), "legacy-2", Some("abc123"), older),
+                queued_modify_base(&bridge, dir.path(), "e1000000-0000-4000-8000-000000000003", Some("abc123"), older),
                 parse_base_version_number(Some(older)),
                 "{older} does not describe the row's current content and is parsed as before"
             );
@@ -218,7 +218,7 @@ use super::*;
             ("0", None),
         ] {
             assert_eq!(
-                queued_modify_base(&bridge, dir.path(), "current-1", Some("abc123"), identifier),
+                queued_modify_base(&bridge, dir.path(), "e1000000-0000-4000-8000-000000000004", Some("abc123"), identifier),
                 base,
                 "{identifier}"
             );
