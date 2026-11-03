@@ -220,6 +220,7 @@ fn safe_display_name(name: &str) -> bool {
     crate::reject_unsafe_rel_path(name).is_ok() && !name.contains('/') && !name.contains('\\')
 }
 
+mod activity;
 mod requests;
 
 pub(crate) use requests::{RequestKeys, request_upload_fields};
@@ -716,10 +717,6 @@ impl crate::engine_bridge::EngineBridge {
                 record.pending_owner_wrap = None;
             }
             record.member_added |= !row["uploaded_by"].is_null();
-            record.origin_label_encrypted = row["origin_label_encrypted"]
-                .as_str()
-                .map(str::to_string)
-                .or(record.origin_label_encrypted);
             record.blocked_fingerprint = None;
             let mut candidate = if malformed || class.is_none() {
                 None
@@ -934,17 +931,19 @@ impl crate::engine_bridge::EngineBridge {
             .key;
         let body = self.api().shared_folder_activity(id).await?;
         scope.check()?;
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api().master_key());
+        let root = uuid::Uuid::parse_str(id).ok();
         let mut result = Vec::new();
         for row in body["activity"].as_array().into_iter().flatten() {
             let mut dto = serde_json::json!({"id":row["id"],"kind":row["kind"],"item_count":row["item_count"],"first_at":row["first_at"],"last_at":row["last_at"]});
-            for (encrypted, plain) in [("share_label_encrypted", "label"), ("actor_name_encrypted", "actor")] {
-                dto[plain] = row[encrypted]
-                    .as_str()
-                    .filter(|s| s.starts_with('{'))
-                    .and_then(|s| beebeeb_core::encrypt::decrypt_name_metadata_with_key(key, s).ok())
-                    .map(|m| Value::String(m.name))
-                    .unwrap_or(Value::Null);
-            }
+            // L16 readers (task 2275): a bound envelope wins. The link label is
+            // sealed to the master key and bound to the share id (L16a); the
+            // actor name is sealed under a folder-key subkey bound to this root
+            // (L16b). Until every writer ships L16, a legacy folder-key name
+            // still reads, exactly as the 2236 request rows keep their R5 gate.
+            let (label, actor) = activity::open_labels(&master, key, root, row);
+            dto["label"] = label;
+            dto["actor"] = actor;
             result.push(dto);
         }
         Ok(result)
@@ -963,7 +962,6 @@ pub struct OwnedKeyRecord {
     pub foreign_added: bool,
     #[serde(default)]
     pub member_added: bool,
-    pub origin_label_encrypted: Option<String>,
     pub blocked_fingerprint: Option<String>,
 }
 

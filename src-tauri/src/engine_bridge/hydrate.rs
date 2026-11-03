@@ -428,20 +428,7 @@ impl EngineBridge {
         if let Ok(Some(record)) = self.db.get_owned_key_record(file_id)
             && record.foreign_added {
             let _ = self.db.set_status_if(file_id, FileStatus::Downloading, FileStatus::CloudOnly);
-            let label = if let (Some(root), Some(encrypted)) = (record.shared_root_id.as_deref(), record.origin_label_encrypted.as_deref()) {
-                // Display only, read-only custody lookup. Never re-seed custody during an open failure.
-                let scope = self.owner_key_scope();
-                let custody = self.api.get_shared_folder(root).await.ok();
-                if let Err(error) = scope.check() { return error; }
-                let key = custody.and_then(|row| crate::owner_keys::normalize_wrap(&row["owner_wrapped_folder_key"]).ok().flatten())
-                    .and_then(|wrap| beebeeb_sync::key_resolution::unwrap_folder_custody(
-                        &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()), root, &wrap).ok());
-                if let Some(key) = key {
-                    if let Err(error) = scope.remember_custody(root) { return error; }
-                    beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, encrypted).ok().map(|metadata| metadata.name)
-                } else { None }
-            } else { None };
-            let message = crate::owner_keys::cannot_open_message(label.as_deref(), record.member_added);
+            let message = crate::owner_keys::cannot_open_message(None, record.member_added);
             return anyhow::anyhow!("{} — {message}", crate::owner_keys::ADDED_BY_SOMEONE_ELSE);
         }
         error
