@@ -306,7 +306,7 @@ use super::*;
         ];
         for (what, result) in changes {
             let error = result.expect_err(what);
-            assert!(error.is::<AcceptsClosed>(), "{what}: {error:#}");
+            assert!(engine_cause::<AcceptsClosed>(&error).is_some(), "{what}: {error:#}");
         }
         // Every row, due or not: a paused, parked or backed-off op is still a queued change.
         let queued: i64 = bridge
@@ -384,7 +384,7 @@ use super::*;
         ];
         for (what, op, result) in saves {
             let error = result.err().unwrap_or_else(|| panic!("{what} ({op}): queued"));
-            assert!(error.is::<AcceptsClosed>(), "{what} ({op}): {error:#}");
+            assert!(engine_cause::<AcceptsClosed>(&error).is_some(), "{what} ({op}): {error:#}");
             #[cfg(unix)]
             {
                 let response = crate::ipc_socket::write_outcome_response(op, &bridge.db, Err(error));

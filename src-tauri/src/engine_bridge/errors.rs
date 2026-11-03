@@ -738,3 +738,160 @@ pub(crate) fn land_error_to_anyhow(error: EngineError) -> anyhow::Error {
         EngineError::Api(error) => error,
     }
 }
+
+/// `T` in `error`, bare or inside [`EngineError`].
+///
+/// The bridge's own error crosses an `anyhow` boundary in two shapes: [`land_error_to_anyhow`]
+/// hands the typed marker out bare, while a `?` into a function returning `anyhow::Result` boxes
+/// the whole [`EngineError`]. Walking the chain reaches both, because `EngineError::source` is
+/// the variant's own error. `is::<T>()` and `downcast_ref::<T>()` see only the top-level one, so
+/// a refusal raised by the bridge's own error became unrecognised (the macOS staging refusal
+/// answered an error instead of `WriteRetryLater`). Every error class asks here instead.
+pub(crate) fn engine_cause<T: std::error::Error + 'static>(error: &anyhow::Error) -> Option<&T> {
+    error.chain().find_map(|cause| cause.downcast_ref::<T>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `engine_cause` finds every type [`EngineError`] wraps in both shapes it crosses the
+    /// `anyhow` boundary in: handed out bare, and boxed whole. The macOS staging refusal was the
+    /// boxed shape, which the bare downcast missed.
+    macro_rules! engine_cause_is_found {
+        ($name:ident, $ty:ty, $bare:expr, $engine:expr) => {
+            #[test]
+            fn $name() {
+                let bare = anyhow::Error::new($bare);
+                assert!(engine_cause::<$ty>(&bare).is_some(), "bare");
+                let wrapped = anyhow::Error::new($engine);
+                assert!(engine_cause::<$ty>(&wrapped).is_some(), "inside EngineError");
+                assert!(
+                    engine_cause::<$ty>(&bare.context("outer")).is_some(),
+                    "bare under context"
+                );
+                assert!(
+                    engine_cause::<$ty>(&wrapped.context("outer")).is_some(),
+                    "inside EngineError under context"
+                );
+            }
+        };
+    }
+
+    engine_cause_is_found!(
+        engine_cause_unknown_item,
+        UnknownItem,
+        UnknownItem {
+            requested_id: "id".into()
+        },
+        EngineError::from(UnknownItem {
+            requested_id: "id".into()
+        })
+    );
+    engine_cause_is_found!(
+        engine_cause_queued_copy_missing,
+        QueuedCopyMissing,
+        QueuedCopyMissing,
+        EngineError::from(QueuedCopyMissing)
+    );
+    engine_cause_is_found!(
+        engine_cause_unsent_local_change,
+        UnsentLocalChange,
+        UnsentLocalChange,
+        EngineError::from(UnsentLocalChange)
+    );
+    engine_cause_is_found!(
+        engine_cause_thumbnail_not_yet,
+        ThumbnailNotYet,
+        ThumbnailNotYet,
+        EngineError::from(ThumbnailNotYet)
+    );
+    engine_cause_is_found!(
+        engine_cause_staged_copy_gone,
+        StagedCopyGone,
+        StagedCopyGone,
+        EngineError::from(StagedCopyGone)
+    );
+    engine_cause_is_found!(
+        engine_cause_accepts_closed,
+        AcceptsClosed,
+        AcceptsClosed,
+        EngineError::from(AcceptsClosed)
+    );
+    engine_cause_is_found!(
+        engine_cause_item_in_trash,
+        ItemInTrash,
+        ItemInTrash,
+        EngineError::from(ItemInTrash)
+    );
+    engine_cause_is_found!(
+        engine_cause_queue_state_moved,
+        QueueStateMoved,
+        QueueStateMoved,
+        EngineError::from(QueueStateMoved)
+    );
+    engine_cause_is_found!(
+        engine_cause_park_now,
+        ParkNow,
+        ParkNow(ParkReason::BaseUnknown),
+        EngineError::from(ParkNow(ParkReason::BaseUnknown))
+    );
+    engine_cause_is_found!(
+        engine_cause_database,
+        rusqlite::Error,
+        rusqlite::Error::QueryReturnedNoRows,
+        EngineError::from(rusqlite::Error::QueryReturnedNoRows)
+    );
+    engine_cause_is_found!(
+        engine_cause_io,
+        std::io::Error,
+        std::io::Error::from(std::io::ErrorKind::NotFound),
+        EngineError::from(std::io::Error::from(std::io::ErrorKind::NotFound))
+    );
+    engine_cause_is_found!(
+        engine_cause_media,
+        MediaError,
+        MediaError::ZeroDimensions,
+        EngineError::from(MediaError::ZeroDimensions)
+    );
+    engine_cause_is_found!(
+        engine_cause_staging,
+        FinderStagingUnavailable,
+        FinderStagingUnavailable(None),
+        EngineError::from(FinderStagingUnavailable(None))
+    );
+    engine_cause_is_found!(
+        engine_cause_manifest,
+        crate::download_pin::BadManifest,
+        a_bad_manifest(),
+        EngineError::from(a_bad_manifest())
+    );
+    engine_cause_is_found!(
+        engine_cause_core,
+        beebeeb_core::CoreError,
+        beebeeb_core::CoreError::Decryption,
+        EngineError::from(beebeeb_core::CoreError::Decryption)
+    );
+    engine_cause_is_found!(
+        engine_cause_malformed,
+        MalformedRecord,
+        MalformedRecord::Json(serde_json::from_str::<u8>("x").expect_err("not a byte")),
+        EngineError::Malformed(MalformedRecord::Json(
+            serde_json::from_str::<u8>("x").expect_err("not a byte")
+        ))
+    );
+
+    fn a_bad_manifest() -> crate::download_pin::BadManifest {
+        crate::download_pin::PinnedVersion::from_metadata(&serde_json::json!({ "download_version": {} }))
+            .expect_err("a manifest with no fields is refused")
+    }
+
+    #[test]
+    fn engine_cause_ignores_a_sibling_engine_error() {
+        let error = anyhow::Error::new(EngineError::from(UnknownItem {
+            requested_id: "id".into(),
+        }));
+        assert!(engine_cause::<StagedCopyGone>(&error).is_none());
+        assert!(engine_cause::<FinderStagingUnavailable>(&error).is_none());
+    }
+}

@@ -208,7 +208,7 @@ use super::*;
         };
         let (_, during) = tokio::join!(drain_upload_queue(&bridge, &sync_root), in_the_window);
         let error = during.expect_err("refused while the landed version's thumbnails upload");
-        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        assert!(engine_cause::<ThumbnailNotYet>(&error).is_some(), "{error:#}");
         let served = bridge.finder_thumbnail(photo, "small").await.unwrap();
         assert_ne!(
             &served[..],
@@ -258,7 +258,7 @@ use super::*;
             .finder_thumbnail(photo, "small")
             .await
             .expect_err("the server still holds the previous version's thumbnail");
-        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        assert!(engine_cause::<ThumbnailNotYet>(&error).is_some(), "{error:#}");
         let state = server.finish();
         assert!(!state.thumbnail_puts.is_empty(), "the upload was attempted");
         assert!(state.thumbnail_requests.is_empty(), "nothing asked of the server");

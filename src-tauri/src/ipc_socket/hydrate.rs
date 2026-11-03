@@ -215,7 +215,7 @@ pub(crate) fn hydrate_failure_reply(file_id: &str, error: anyhow::Error) -> IpcR
 
 /// Fixed category for a failed hydrate, for [`hydrate_failure_reply`].
 pub(super) fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
-    if error.is::<crate::engine_bridge::QueuedCopyMissing>() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::QueuedCopyMissing>(error).is_some() {
         return "queued_copy_missing";
     }
     if let Some(status) = crate::engine_bridge::error_http_status(error) {

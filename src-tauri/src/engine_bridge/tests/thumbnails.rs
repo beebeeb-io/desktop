@@ -63,7 +63,7 @@ use super::*;
             .finder_thumbnail(photo, "small")
             .await
             .expect_err("refused: the server holds the previous version's thumbnail");
-        assert!(error.is::<ThumbnailNotYet>(), "{error:#}");
+        assert!(engine_cause::<ThumbnailNotYet>(&error).is_some(), "{error:#}");
         let bridge = Arc::try_unwrap(bridge).unwrap_or_else(|_| panic!("the seam ran and released its handle"));
         drop(bridge);
         assert!(

@@ -628,7 +628,7 @@ use super::*;
         sync_tick_outcome(&bridge, &sync_root).await.unwrap();
         let refused = matches!(
             bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await,
-            Err(e) if e.is::<UnsentLocalChange>()
+            Err(e) if engine_cause::<UnsentLocalChange>(&e).is_some()
         );
         let kinds = bridge
             .version_conflict_feed()
@@ -811,7 +811,7 @@ use super::*;
         // 5. The next hydrate, as a fetch after "Free up space" (or a pinned refresh) runs it.
         let hydrate_refused = match bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await {
             Ok(()) => false,
-            Err(e) if e.is::<UnsentLocalChange>() => true,
+            Err(e) if engine_cause::<UnsentLocalChange>(&e).is_some() => true,
             Err(e) => panic!("the hydrate failed for another reason: {e:#}"),
         };
 

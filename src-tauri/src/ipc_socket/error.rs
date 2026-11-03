@@ -37,19 +37,19 @@ impl IpcError {
     /// whether a full disk is retryable (a create/modify queued nothing) or a
     /// definitive error (a delete's reply item is never read).
     pub(super) fn from_engine(op: &'static str, error: anyhow::Error) -> Self {
-        if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
+        if crate::engine_bridge::engine_cause::<crate::engine_bridge::FinderStagingUnavailable>(&error).is_some() {
             return Self::RetryLater {
                 category: "staging_root_unavailable",
                 message: error.to_string(),
             };
         }
-        if error.is::<crate::engine_bridge::StagedCopyGone>() {
+        if crate::engine_bridge::engine_cause::<crate::engine_bridge::StagedCopyGone>(&error).is_some() {
             return Self::RetryLater {
                 category: "staged_copy_gone",
                 message: error.to_string(),
             };
         }
-        if error.is::<crate::engine_bridge::AcceptsClosed>() {
+        if crate::engine_bridge::engine_cause::<crate::engine_bridge::AcceptsClosed>(&error).is_some() {
             return Self::RetryLater {
                 category: "accepts_closed",
                 message: error.to_string(),
@@ -66,7 +66,7 @@ impl IpcError {
                 message: "the disk or Beebeeb's local database is full".into(),
             };
         }
-        match error.downcast_ref::<crate::engine_bridge::UnknownItem>() {
+        match crate::engine_bridge::engine_cause::<crate::engine_bridge::UnknownItem>(&error) {
             Some(unknown) => Self::UnknownItem {
                 requested_id: unknown.requested_id.clone(),
                 message: error.to_string(),
@@ -141,6 +141,36 @@ impl std::error::Error for IpcError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The macOS staging refusal reaches the write path boxed in `EngineError` (a `?` into
+    /// `anyhow::Result`), not bare: a top-level downcast missed it and the extension got a
+    /// definitive error instead of `WriteRetryLater`. This is that shape, and the bare one.
+    #[test]
+    fn the_write_classes_see_an_engine_error_variant_behind_the_anyhow_boundary() {
+        let wrapped = anyhow::Error::new(crate::engine_bridge::EngineError::from(
+            crate::engine_bridge::StagedCopyGone,
+        ));
+        assert_eq!(write_refusal_category(&wrapped), "staged_copy_gone");
+        assert!(IpcError::from_engine("modify", wrapped).is_retry_later());
+
+        let bare = anyhow::Error::new(crate::engine_bridge::StagedCopyGone);
+        assert_eq!(write_refusal_category(&bare), "staged_copy_gone");
+        assert!(IpcError::from_engine("modify", bare).is_retry_later());
+    }
+
+    #[test]
+    fn an_unknown_item_behind_the_anyhow_boundary_keeps_its_refusal() {
+        let wrapped = anyhow::Error::new(crate::engine_bridge::EngineError::from(
+            crate::engine_bridge::UnknownItem {
+                requested_id: "id".into(),
+            },
+        ));
+        assert_eq!(write_refusal_category(&wrapped), "unknown_item");
+        assert!(matches!(
+            IpcError::from_engine("modify", wrapped),
+            IpcError::UnknownItem { .. }
+        ));
+    }
 
     #[test]
     fn destination_refusal_keeps_the_engine_message() {

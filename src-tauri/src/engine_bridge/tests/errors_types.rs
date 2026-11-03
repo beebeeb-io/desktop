@@ -131,7 +131,7 @@ fn media_error_keeps_its_step_text_in_engine_error() {
 #[test]
 fn land_error_boundary_keeps_the_queue_moved_signal() {
     let error = land_error_to_anyhow(EngineError::QueueStateMoved(QueueStateMoved));
-    assert!(error.downcast_ref::<QueueStateMoved>().is_some());
+    assert!(engine_cause::<QueueStateMoved>(&error).is_some());
     assert_eq!(error.to_string(), "queue state moved");
 }
 

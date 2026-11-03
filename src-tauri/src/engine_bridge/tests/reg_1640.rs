@@ -279,7 +279,7 @@ use super::*;
         );
         assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Error);
         let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
-        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert!(engine_cause::<UnsentLocalChange>(&refused).is_some(), "{refused:#}");
         assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder", "the edit stays on disk");
         let kinds: Vec<String> = bridge
             .version_conflict_feed()
@@ -301,7 +301,7 @@ use super::*;
         regression_1640_web_saves(&server, master_key, file, b"edited on the web");
         std::fs::write(&local, b"edited in the sync folder").unwrap();
         let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
-        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert!(engine_cause::<UnsentLocalChange>(&refused).is_some(), "{refused:#}");
         assert_eq!(std::fs::read(&local).unwrap(), b"edited in the sync folder");
         assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local, "status untouched");
         drop(server.finish());
@@ -612,7 +612,7 @@ use super::*;
             .unwrap();
         std::fs::write(&local, b"an edit 0.8.12 never sent").unwrap();
         let refused = bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap_err();
-        assert!(refused.is::<UnsentLocalChange>(), "{refused:#}");
+        assert!(engine_cause::<UnsentLocalChange>(&refused).is_some(), "{refused:#}");
         assert_eq!(std::fs::read(&local).unwrap(), b"an edit 0.8.12 never sent");
         bridge.db.set_status(file, FileStatus::Conflict).unwrap();
         bridge.hydrate_file(file, &local, &[sync_root.as_path()]).await.unwrap();

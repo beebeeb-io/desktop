@@ -6,25 +6,25 @@ use super::*;
 /// [`log_refused_write`]. The error's text can carry user data (names, paths),
 /// so it is classified, never logged.
 pub(super) fn write_refusal_category(error: &anyhow::Error) -> &'static str {
-    if error.downcast_ref::<crate::engine_bridge::UnknownItem>().is_some() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::UnknownItem>(error).is_some() {
         return "unknown_item";
     }
-    if error.is::<crate::engine_bridge::FinderStagingUnavailable>() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::FinderStagingUnavailable>(error).is_some() {
         return "staging_root_unavailable";
     }
-    if error.is::<crate::engine_bridge::StagedCopyGone>() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::StagedCopyGone>(error).is_some() {
         return "staged_copy_gone";
     }
-    if error.is::<crate::engine_bridge::AcceptsClosed>() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::AcceptsClosed>(error).is_some() {
         return "accepts_closed";
     }
-    if error.is::<crate::engine_bridge::ItemInTrash>() {
+    if crate::engine_bridge::engine_cause::<crate::engine_bridge::ItemInTrash>(error).is_some() {
         return "in_trash";
     }
-    if error.downcast_ref::<std::io::Error>().is_some() {
+    if crate::engine_bridge::engine_cause::<std::io::Error>(error).is_some() {
         return "io";
     }
-    if error.downcast_ref::<rusqlite::Error>().is_some() {
+    if crate::engine_bridge::engine_cause::<rusqlite::Error>(error).is_some() {
         return "database";
     }
     let text = error.to_string();

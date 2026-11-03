@@ -386,7 +386,7 @@ async fn sf2237d_t6_local_dirty_is_held() {
             .iter()
             .any(|r| r.file_id == ID && r.kind == "held_edit")
     );
-    assert!(matches!(f.bridge.hydrate_file(ID,&path,&[f.root.as_path()]).await,Err(e) if e.is::<UnsentLocalChange>()));
+    assert!(matches!(f.bridge.hydrate_file(ID,&path,&[f.root.as_path()]).await,Err(e) if engine_cause::<UnsentLocalChange>(&e).is_some()));
     let held_bytes = std::fs::read(&path).unwrap();
     assert_eq!(held_bytes, local_edits);
     assert_eq!(

@@ -694,7 +694,7 @@ pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_S
 mod errors;
 use errors::*;
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
-pub(crate) use errors::{EngineError, UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
+pub(crate) use errors::{EngineError, engine_cause, UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
 
 mod content;
 use content::*;

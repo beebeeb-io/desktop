@@ -346,7 +346,7 @@ impl EngineBridge {
             // §8.6 rule 6: an upload whose completion is recorded never parks, is never paused
             // and is never abandoned: whatever failed, its retry repeats the landing (rule 4).
             // Write-keyed: only a File Provider write records a completion.
-            let completed = matches!(&result, Err(error) if error.downcast_ref::<QueueStateMoved>().is_none())
+            let completed = matches!(&result, Err(error) if engine_cause::<QueueStateMoved>(error).is_none())
                 && claimed.write.is_some()
                 && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile)
                 && self
@@ -382,10 +382,9 @@ impl EngineBridge {
                     outcome.completed_op_ids.push(op.op_id);
                 }
                 // The attempt already logged the step that found the op gone.
-                Err(error) if error.downcast_ref::<QueueStateMoved>().is_some() => continue,
-                Err(error) if !completed && error.downcast_ref::<ParkNow>().is_some() => {
-                    let reason = error
-                        .downcast_ref::<ParkNow>()
+                Err(error) if engine_cause::<QueueStateMoved>(&error).is_some() => continue,
+                Err(error) if !completed && engine_cause::<ParkNow>(&error).is_some() => {
+                    let reason = engine_cause::<ParkNow>(&error)
                         .map(|park| park.0)
                         .unwrap_or(ParkReason::BaseUnknown);
                     if !self.db.park_claimed(&op.op_id, &claimed.claim_id, reason, now)? {

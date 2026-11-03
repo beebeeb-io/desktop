@@ -241,7 +241,7 @@ use super::*;
             .serve_hydrate(live, &dest, &[dir.path()], None)
             .await
             .expect_err("the bytes the token names are missing");
-        assert!(error.is::<QueuedCopyMissing>(), "{error:#}");
+        assert!(engine_cause::<QueuedCopyMissing>(&error).is_some(), "{error:#}");
         assert!(!dest.exists(), "nothing was written");
         assert_eq!(bridge.db.get_file(live).unwrap().unwrap().status, FileStatus::Uploading);
         let state = server.finish();
@@ -273,7 +273,7 @@ use super::*;
             .serve_hydrate(live, &dest, &[dir.path()], None)
             .await
             .expect_err("the mock has no metadata route");
-        assert!(!error.is::<QueuedCopyMissing>(), "no longer queued: {error:#}");
+        assert!(engine_cause::<QueuedCopyMissing>(&error).is_none(), "no longer queued: {error:#}");
         let state = server.finish();
         assert!(
             state
