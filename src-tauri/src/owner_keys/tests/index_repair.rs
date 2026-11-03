@@ -608,3 +608,43 @@ fn a12_index_does_not_descend_into_unproven_folder() {
     );
     assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
 }
+
+/// P3-6: a wrap held by ANOTHER root is no evidence at all, so the skip reason
+/// is `no_wrap` — never the old `wrap_does_not_open`.
+#[test]
+fn review_p3_6_a_wrap_under_another_root_does_not_change_the_skip_reason() {
+    use beebeeb_core::kdf::MasterKey;
+    let master = MasterKey::from_bytes([7; 32]);
+    let root = "10000000-0000-4000-8000-000000000046";
+    let other_root = "10000000-0000-4000-8000-000000000047";
+    let item = "40000000-0000-4000-8000-000000000046";
+    let derived = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "elsewhere.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = json!({"id":item,"name_encrypted":name,"parent_id":root,"is_folder":false,
+        "version_number":1,"size_bytes":4,"updated_at":1});
+    let (fixture, seen) = l14_world(root, &beebeeb_core::kdf::FileKey::from_bytes([55; 32]), vec![row], vec![]);
+    let (db, bridge) = l14_bridge(&fixture);
+    // An earlier pass indexed the item under another root: that record's wrap
+    // proves nothing about membership in THIS root.
+    db.put_owned_key_record(&OwnedKeyRecord {
+        file_id: item.into(),
+        name_encrypted: name,
+        shared_root_id: Some(other_root.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let report = run(bridge.repair_shared_folder_index(root)).unwrap();
+    assert_eq!(report.skip_reasons.get("no_wrap"), Some(&1), "{seen:?}");
+    assert!(
+        report.skip_reasons.get("wrap_does_not_open").is_none(),
+        "another root's wrap is not a reason: {:?}",
+        report.skip_reasons
+    );
+    assert_eq!(report.written, 0, "nothing is indexed: {seen:?}");
+}
