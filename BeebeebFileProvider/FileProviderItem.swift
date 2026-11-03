@@ -35,6 +35,10 @@ struct BeebeebProviderItem: Codable {
     /// this device's own (`files.pin_state`), so the mapping is real but its
     /// inputs are local-only (task 1698 deviation 1).
     let pinned: Bool
+    /// Task 2275 (L15): the daemon marks an F item the user did not add. It is
+    /// surfaced as the "Added by someone else" badge when no sync-state badge
+    /// takes the one slot Finder renders.
+    let addedBySomeoneElse: Bool
 
     static let read = 1 << 0
     static let write = 1 << 1
@@ -61,6 +65,7 @@ struct BeebeebProviderItem: Codable {
     static let decorationTrashing = "io.beebeeb.app.decoration.trashing"
     static let decorationUploading = "io.beebeeb.app.decoration.uploading"
     static let decorationDownloading = "io.beebeeb.app.decoration.downloading"
+    static let decorationAddedBySomeoneElse = "io.beebeeb.app.decoration.added-by-someone"
 
     /// The sync-state badge for a daemon `status` string — at most ONE
     /// identifier per item: macOS renders only the FIRST decoration in the
@@ -102,7 +107,8 @@ struct BeebeebProviderItem: Codable {
         childItemCount: Int64? = nil,
         contentVersion: String? = nil,
         metadataVersion: String? = nil,
-        pinned: Bool = false
+        pinned: Bool = false,
+        addedBySomeoneElse: Bool = false
     ) {
         self.identifier = identifier
         self.parentIdentifier = parentIdentifier
@@ -119,6 +125,7 @@ struct BeebeebProviderItem: Codable {
         self.contentVersion = contentVersion
         self.metadataVersion = metadataVersion
         self.pinned = pinned
+        self.addedBySomeoneElse = addedBySomeoneElse
     }
 
     /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
@@ -299,7 +306,11 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
 // copied by scripts/build-fileprovider-extension.sh).
 extension FileProviderItem: NSFileProviderItemDecorating {
     var decorations: [NSFileProviderItemDecorationIdentifier]? {
-        guard let identifier = BeebeebProviderItem.decorationIdentifier(forStatus: model.status) else {
+        // One badge slot: a sync-state badge wins; otherwise an F item the user
+        // did not add says so (task 2275 L15).
+        let identifier = BeebeebProviderItem.decorationIdentifier(forStatus: model.status)
+            ?? (model.addedBySomeoneElse ? BeebeebProviderItem.decorationAddedBySomeoneElse : nil)
+        guard let identifier else {
             return nil
         }
         return [NSFileProviderItemDecorationIdentifier(identifier)]

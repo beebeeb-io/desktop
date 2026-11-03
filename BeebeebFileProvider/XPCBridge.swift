@@ -687,7 +687,8 @@ final class XPCBridge {
             childItemCount: (dictionary["child_item_count"] as? NSNumber)?.int64Value,
             contentVersion: dictionary["content_version"] as? String,
             metadataVersion: dictionary["metadata_version"] as? String,
-            pinned: (dictionary["pinned"] as? NSNumber)?.boolValue ?? false
+            pinned: (dictionary["pinned"] as? NSNumber)?.boolValue ?? false,
+            addedBySomeoneElse: (dictionary["added_by_someone_else"] as? NSNumber)?.boolValue ?? false
         )
     }
 
