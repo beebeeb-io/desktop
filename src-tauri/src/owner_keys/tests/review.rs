@@ -89,8 +89,12 @@ fn review_p3_5_equal_keys_compare_equal_and_one_flipped_byte_does_not() {
     let left = beebeeb_core::kdf::derive_file_key(&master, b"left");
     let right = beebeeb_core::kdf::derive_file_key(&master, b"left");
     assert!(same_key(&left, &right), "the same key is the same key");
-    let mut bytes = *right.as_bytes();
-    bytes[17] ^= 1;
-    let other = beebeeb_core::kdf::FileKey::from_bytes(bytes);
-    assert!(!same_key(&left, &other), "one flipped byte is a different key");
+    // P3-1: the first, middle and last byte each decide the compare, so a
+    // mutant that skips any of them cannot survive.
+    for position in [0usize, 17, 31] {
+        let mut bytes = *right.as_bytes();
+        bytes[position] ^= 1;
+        let other = beebeeb_core::kdf::FileKey::from_bytes(bytes);
+        assert!(!same_key(&left, &other), "one flipped byte at {position} is a different key");
+    }
 }

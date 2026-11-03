@@ -405,4 +405,10 @@ fn review_p2_7_a_move_of_more_than_ten_thousand_foreign_items_is_refused() {
         .expect_err("above the bound the move is refused");
     let text = format!("{error}");
     assert!(text.contains("above the 10,000"), "{text}");
+    // P3-3: the boundary itself — exactly ten thousand is allowed, ten
+    // thousand and one is not.
+    crate::owner_keys::moves::ensure_adoption_bound(10_000).expect("exactly 10,000 is allowed");
+    let error = crate::owner_keys::moves::ensure_adoption_bound(10_001)
+        .expect_err("10,001 is above the bound");
+    assert!(format!("{error}").contains("above the 10,000"), "{error}");
 }

@@ -81,11 +81,7 @@ impl crate::engine_bridge::EngineBridge {
             .collect();
         // §5: above ten thousand foreign items the move is refused, not judged
         // from a truncated list.
-        anyhow::ensure!(
-            foreign.len() <= 10_000,
-            "refusing a move of {} foreign items: above the 10,000 items this device can adopt at once",
-            foreign.len()
-        );
+        ensure_adoption_bound(foreign.len())?;
         if foreign.is_empty() {
             return Ok(());
         }
@@ -109,5 +105,15 @@ impl crate::engine_bridge::EngineBridge {
         Ok(())
     }
 
+}
+
+/// §5: the adoption bound. Exactly 10,000 is allowed; 10,001 is refused, never
+/// judged from a truncated list.
+pub(crate) fn ensure_adoption_bound(count: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        count <= 10_000,
+        "refusing a move of {count} foreign items: above the 10,000 items this device can adopt at once"
+    );
+    Ok(())
 }
 

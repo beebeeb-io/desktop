@@ -887,8 +887,8 @@ impl crate::engine_bridge::EngineBridge {
 
     /// T3.2: a request row's keys. The row is read-only; content is the sealed
     /// request key `C`, the name key is whatever authenticates the served name.
-    /// The owner's request list is loaded once per process (P2-2), never per
-    /// download.
+    /// The owner's request list is cached per bridge (P2-2), so two calls on
+    /// this bridge cost one GET; a prepare pass loads its own copy.
     pub(crate) async fn request_row_keys(&self, row: &Value) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
         let master = MasterKey::from_bytes(*self.api().master_key());
         if let Some(found) = self
@@ -1165,11 +1165,7 @@ impl crate::engine_bridge::EngineBridge {
         &self,
         item_id: Option<&str>,
         parent_id: Option<&str>,
-        creates: bool,
     ) -> Option<&'static str> {
-        if !creates {
-            return None;
-        }
         let id = item_id?;
         if beebeeb_core::item_id::item_class(id).ok() != Some(ItemClass::Owner) || self.is_request_row(id) {
             return None;

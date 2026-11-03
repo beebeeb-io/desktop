@@ -503,4 +503,16 @@ use super::*;
             !file_entry_payload_without_contract(&owner, FP_ROOT_APPLE).added_by_someone_else,
             "an owner id does not"
         );
+        // P3-4: both payload constructors carry the mark, not just the
+        // contract-less one.
+        let mut contract = live_contract();
+        contract.parent_id = Some(FP_ROOT_APPLE.into());
+        assert!(
+            file_entry_payload(&foreign, &contract, FP_ROOT_APPLE).added_by_someone_else,
+            "the with-contract constructor marks an F id too"
+        );
+        assert!(
+            !file_entry_payload(&owner, &contract, FP_ROOT_APPLE).added_by_someone_else,
+            "and does not mark an owner id"
+        );
     }

@@ -53,6 +53,10 @@ async fn review_p1_1_a_version_upload_of_a_request_row_creates_a_new_item() {
 
     let payload = dir.path().join("payload.bin");
     std::fs::write(&payload, b"edit").unwrap();
+    // P3-2: the request row's bytes on disk must stay exactly as they were.
+    let original_disk = sync_root.join("Inbox/report.txt");
+    std::fs::create_dir_all(original_disk.parent().unwrap()).unwrap();
+    std::fs::write(&original_disk, b"original request bytes").unwrap();
     let op = PendingOperation {
         op_id: "op-request-edit".into(),
         kind: OperationKind::UploadVersion,
@@ -98,9 +102,26 @@ async fn review_p1_1_a_version_upload_of_a_request_row_creates_a_new_item() {
         "no version is uploaded under the request row"
     );
     let ops = bridge.db().list_operations_for_file(&created[0].file_id).unwrap();
-    assert!(
-        ops.iter().any(|queued| queued.kind == OperationKind::UploadVersion),
-        "the new item carries the version upload: {ops:?}"
+    let upload = ops
+        .iter()
+        .find(|queued| queued.kind == OperationKind::UploadVersion)
+        .expect("the new item carries the version upload");
+    // P3-2: the fresh id's derived key opens the copy's name...
+    let fresh = beebeeb_core::kdf::derive_file_key(&master, created[0].file_id.as_bytes());
+    let metadata: serde_json::Value =
+        serde_json::from_str(upload.metadata_json.as_deref().expect("the create carries metadata")).unwrap();
+    let name_encrypted = metadata["name_encrypted"].as_str().expect("the create seals a name");
+    let decoded = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&fresh, name_encrypted)
+        .expect("the copy's name opens under the fresh id's derived key");
+    assert_eq!(decoded.name, "report (edited).txt");
+    // ...and points at the edited bytes, not the original.
+    let copied = std::fs::read(upload.payload_path.as_deref().expect("the create carries the copy")).unwrap();
+    assert_eq!(copied, b"edit", "the copy holds the staged edit");
+    // The request row's own bytes are untouched.
+    assert_eq!(
+        std::fs::read(&original_disk).unwrap(),
+        b"original request bytes",
+        "the request row's bytes are never rewritten"
     );
 }
 

@@ -70,7 +70,7 @@ impl EngineBridge {
         // owner-only. A version/rename/move of an existing item must not claim
         // it: that item may be foreign or already wrapped.
         let owner_only = creates_an_item(&kind, &metadata)
-            .then(|| self.owner_only_notice(file_id.as_deref(), parent_id.as_deref(), true))
+            .then(|| self.owner_only_notice(file_id.as_deref(), parent_id.as_deref()))
             .flatten();
         let op = self.finder_operation(
             kind.clone(),

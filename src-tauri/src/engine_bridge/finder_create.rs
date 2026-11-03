@@ -140,11 +140,16 @@ impl EngineBridge {
         // Honour a caller-supplied id (task 0811 folder scaffolding writes the
         // local row under a known id and needs the server CreateFolder to reuse
         // it — the server accepts a client `folder_id`). The file path and the
-        // legacy IPC always pass `None`, getting a fresh uuid as before.
-        let file_id = target
-            .file_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // legacy IPC always pass `None`, getting a fresh id from core's minter
+        // (L13: the class tag is minted with the id, never a bare uuid).
+        let file_id = match target.file_id.clone() {
+            Some(id) => id,
+            None => beebeeb_core::item_id::NewItemId::owner(&beebeeb_core::kdf::MasterKey::from_bytes(
+                *self.api().master_key(),
+            ))?
+            .as_str()
+            .to_string(),
+        };
         // Full server-relative key for this item: the FULL nested path when the
         // caller supplied one (`docs/a.txt`), else the leaf filename (top-level /
         // legacy IPC). This is stored as the row's `path` AND threaded as the
@@ -295,7 +300,7 @@ impl EngineBridge {
         };
         prepared.staged.retain();
         // L15/A14b: a create under a shared folder stays owner-only.
-        let notice = self.owner_only_notice(Some(&prepared.file_id), target.parent_id.as_deref(), true);
+        let notice = self.owner_only_notice(Some(&prepared.file_id), target.parent_id.as_deref());
         Ok(Some((
             FpWrite {
                 outcome: FinderWriteOutcome::Queued {
