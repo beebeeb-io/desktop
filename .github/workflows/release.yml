@@ -96,18 +96,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          blockers_path="RELEASE_BLOCKERS.md"
-          items=""
-          if [[ -f "$blockers_path" ]]; then
-            items="$(grep -nE '^[[:space:]]*[-*][[:space:]]' "$blockers_path" || true)"
-          fi
+          # Delegate parsing and scope logic to the shared checker so both the
+          # workflow (Windows + Linux) and the macOS local script use the same rules.
+          # The workflow builds Windows and Linux only; pass "linux" to skip items
+          # that are explicitly scoped to macOS (- [macOS] prefix).
+          items="$(bash scripts/release-blockers-check.sh linux)" || true
 
           if [[ -n "$items" ]]; then
-            echo "::error file=$blockers_path::RELEASE_BLOCKERS.md lists release blockers. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
+            echo "::error file=RELEASE_BLOCKERS.md::RELEASE_BLOCKERS.md lists release blockers binding this platform. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
             printf '%s\n' "$items"
             exit 1
           fi
-          echo "RELEASE_BLOCKERS.md lists no item"
+          echo "RELEASE_BLOCKERS.md lists no item for this platform"
 
   test:
     name: Run release test gate

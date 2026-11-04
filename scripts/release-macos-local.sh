@@ -500,12 +500,12 @@ $(printf '%s\n' "$notes_bad" | sed 's/^/      /')"
   fi
 
   # RELEASE_BLOCKERS.md lists what must be fixed before any desktop release; each blocker is one
-  # list item. The release workflow refuses the same way (release.yml, validate-release-notes).
+  # list item. Items prefixed "- [macOS] " are macOS-only; the Windows/Linux release workflow
+  # skips them. The release workflow refuses the same way (release.yml, validate-release-notes).
+  # Parsing is delegated to the shared checker so both callers use the same scope rules.
   HINT="Resolve each item of RELEASE_BLOCKERS.md on main and remove it from the file in the same change, then re-cut the release and build from the new tag. See docs/RELEASING.md."
   blockers=""
-  if [[ -f RELEASE_BLOCKERS.md ]]; then
-    blockers="$(grep -nE '^[[:space:]]*[-*][[:space:]]' RELEASE_BLOCKERS.md || true)"
-  fi
+  blockers="$(bash scripts/release-blockers-check.sh macos)" || true
   if [[ -z "$blockers" ]]; then
     say "RELEASE_BLOCKERS.md lists no item"
   elif is_dry; then

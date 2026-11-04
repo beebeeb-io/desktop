@@ -33,6 +33,7 @@ EXPECTED_CHECKS=410
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
 SUT="${BB_RELEASE_SCRIPT_UNDER_TEST:-$ROOT_DIR/scripts/release-macos-local.sh}"
+BLOCKER_CHECK="${BB_BLOCKER_CHECK_UNDER_TEST:-$ROOT_DIR/scripts/release-blockers-check.sh}"
 SHIM_SRC="$ROOT_DIR/scripts/fixtures/release-macos-shim.sh"
 REAL_GIT="$(command -v git)"
 REAL_TAR="$(command -v tar)"
@@ -132,6 +133,8 @@ new_fixture() { # name
     "$HOME_FX/.private_keys/macos-developer-id-profiles"
   cp "$SUT" "$REPO/scripts/release-macos-local.sh"
   chmod +x "$REPO/scripts/release-macos-local.sh"
+  cp "$BLOCKER_CHECK" "$REPO/scripts/release-blockers-check.sh"
+  chmod +x "$REPO/scripts/release-blockers-check.sh"
   # Stand-in for the real preflight (it needs plutil, security, ruby, nm, otool): record the call.
   cat >"$REPO/scripts/macos-release-preflight.sh" <<'STUB'
 #!/usr/bin/env bash
