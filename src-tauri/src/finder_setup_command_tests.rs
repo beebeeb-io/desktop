@@ -594,22 +594,20 @@
         &source[from..to]
     }
 
-    /// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
-    /// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
-    /// the first line that ends with `;`, or that opens and closes its braces on one line (`fn f() {}`), or, when a
-    /// line ending with `{` comes first, at the `}`
-    /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
-    /// on an argument or field (the next line ends with `,`) covers that one line.
-    /// Spec §4.8 (LD-0057): the files `lib.rs` declares as `#[cfg(test)] mod x;` (or
-    /// `#[cfg(all(test, …))]`), named from `src/` the way the scanners name a file. Inline, these
-    /// modules were `#[cfg(test)]` items of `lib.rs` that a scanner left out; as files of their
-    /// own they are left out the same way.
+    /// The three files `lib.rs` already declared as `#[cfg(test)] mod x;` before the split
+    /// (5e6a888): the scanners read them then, so `test_module_files` leaves them in.
+    const DECLARED_AS_FILES_BEFORE_THE_SPLIT: [&str; 3] = ["test_sandbox.rs", "source_pin.rs", "extension_log_pin.rs"];
+
+    /// Spec §4.8 (LD-0057): the files of the test modules the split moved out of `lib.rs`, the ones
+    /// it declares as `#[cfg(test)] mod x;` (or `#[cfg(all(test, …))]`), named from `src/` the way
+    /// the scanners name a file. Inline, these modules were `#[cfg(test)]` items of `lib.rs` that a
+    /// scanner left out; as files of their own they are left out the same way.
     pub(super) fn test_module_files(src: &std::path::Path) -> std::collections::HashSet<String> {
         let lib = std::fs::read_to_string(src.join("lib.rs")).expect("read lib.rs").replace("\r\n", "\n");
         let lines: Vec<&str> = lib.lines().collect();
         let mut files = std::collections::HashSet::new();
         for (at, line) in lines.iter().enumerate() {
-            let declaration = line.strip_prefix("pub ").unwrap_or(line);
+            let declaration = ["pub(crate) ", "pub "].iter().find_map(|vis| line.strip_prefix(vis)).unwrap_or(line);
             let Some(name) = declaration.strip_prefix("mod ").and_then(|rest| rest.strip_suffix(';')) else {
                 continue;
             };
@@ -617,7 +615,8 @@
                 continue;
             }
             let (mut test_only, mut path) = (false, None);
-            for attribute in lines[..at].iter().rev().take_while(|l| l.starts_with("#[")) {
+            let above = lines[..at].iter().rev().take_while(|l| l.starts_with("#[") || l.starts_with("///"));
+            for attribute in above {
                 test_only |= attribute.starts_with("#[cfg(test)]") || attribute.starts_with("#[cfg(all(test");
                 if let Some(value) = attribute.strip_prefix("#[path = \"").and_then(|v| v.strip_suffix("\"]")) {
                     path = Some(value.to_string());
@@ -630,11 +629,30 @@
                 Some(path) => vec![path],
                 None => vec![format!("{name}.rs"), format!("{name}/mod.rs")],
             };
-            files.extend(candidates.into_iter().filter(|candidate| src.join(candidate).is_file()));
+            files.extend(candidates.into_iter().filter(|candidate| {
+                src.join(candidate).is_file() && !DECLARED_AS_FILES_BEFORE_THE_SPLIT.contains(&candidate.as_str())
+            }));
         }
         files
     }
 
+    /// `lib` with the moved test modules' files after it: what `include_str!("lib.rs")` read
+    /// before the split, when those modules were inline (spec §4.8).
+    pub(super) fn with_test_modules(lib: &str) -> String {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<String> = test_module_files(&src).into_iter().collect();
+        files.sort();
+        files.iter().fold(lib.to_string(), |all, file| {
+            all + "\n" + &std::fs::read_to_string(src.join(file)).expect("read a test module").replace("\r\n", "\n")
+        })
+    }
+
+    /// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
+    /// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
+    /// the first line that ends with `;`, or that opens and closes its braces on one line (`fn f() {}`), or, when a
+    /// line ending with `{` comes first, at the `}`
+    /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
+    /// on an argument or field (the next line ends with `,`) covers that one line.
     pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
         let lines: Vec<&str> = source.lines().collect();
         let mut kept = String::new();

@@ -1252,6 +1252,7 @@
             source.contains("static SIGN_OUT_TEST_PURGE_GATE: tokio::sync::Mutex<()>"),
             "the gate is one process-wide lock"
         );
+        let source = super::finder_setup_command_tests::with_test_modules(&source);
         assert!(
             !source.contains(concat!("sign_out_", "retrying")),
             "no retry around a busy database is left"
