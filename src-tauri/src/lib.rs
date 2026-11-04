@@ -9686,36 +9686,7 @@ fn require_open_folder_root(path: Option<String>) -> Result<PathBuf, String> {
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
-mod open_folder_tests {
-    use super::*;
-
-    #[test]
-    fn open_folder_rejects_missing_root_without_suggestion() {
-        assert_eq!(
-            require_open_folder_root(None),
-            Err("Not configured on this PC yet".to_string())
-        );
-    }
-
-    #[test]
-    fn open_folder_rejects_empty_root() {
-        for root in ["", "   "] {
-            assert_eq!(
-                require_open_folder_root(Some(root.to_string())),
-                Err("Not configured on this PC yet".to_string())
-            );
-        }
-    }
-
-    #[test]
-    fn open_folder_preserves_explicit_root() {
-        let root = "D:\\Private files\\資料\\Sync";
-        assert_eq!(
-            require_open_folder_root(Some(root.to_string())),
-            Ok(PathBuf::from(root))
-        );
-    }
-}
+mod open_folder_tests;
 
 /// Runs `call` on tokio's blocking pool and awaits its answer. For work that blocks, such as the File Provider reads
 /// that wait up to 3 s (`BRIDGE_GATE_WAIT`) for the bridge gate: a plain `#[tauri::command]` fn and a native-menu
