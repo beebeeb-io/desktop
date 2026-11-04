@@ -28,7 +28,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=410
+EXPECTED_CHECKS=428
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -468,6 +468,37 @@ run_release 0.8.7 alpha
 expect_stop 1 "RELEASE_BLOCKERS.md lists release blockers" pre-upload
 check "names the blocker" out_has "A sign-out discards Finder saves that are still waiting to upload."
 check "no build was attempted" log_lacks '^bunx '
+
+echo "== scenario: RELEASE_BLOCKERS.md lists a [macOS]-scoped item (step 1) =="
+# macOS items bind the macOS local script (which calls checker macos); they do
+# NOT bind the Windows/Linux workflow (which calls checker linux/windows).
+new_fixture blockers_macos_scoped
+(
+  cd "$REPO" || exit 1
+  echo '- [macOS] Window manager saves during Finder sync must flush.' >>RELEASE_BLOCKERS.md
+  "$REAL_GIT" commit -q -am "a macos-scoped release blocker"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "RELEASE_BLOCKERS.md lists release blockers" pre-upload
+check "names the macOS-scoped blocker" out_has "Window manager saves during Finder sync must flush."
+
+echo "== scenario: release-blockers-check.sh exits with an unexpected code (step 1) =="
+# An impostor checker that exits 2 (usage error) must cause the release to refuse
+# rather than silently treating it as "no items bound".
+new_fixture blocker_bad_rc
+(
+  printf '#!/usr/bin/env bash\nexit 2\n' >"$REPO/scripts/release-blockers-check.sh"
+  chmod +x "$REPO/scripts/release-blockers-check.sh"
+  cd "$REPO" || exit 1
+  "$REAL_GIT" commit -q -am "impostor checker that exits 2"
+  "$REAL_GIT" tag -f -a desktop-v0.8.7 -m x >/dev/null
+  "$REAL_GIT" push -q -f origin desktop-v0.8.7
+) >/dev/null 2>&1
+run_release 0.8.7 alpha
+expect_stop 1 "release-blockers-check.sh exited" pre-upload
+check "names the unexpected exit code" out_has "exited 2"
 
 echo "== scenario: no RELEASE_BLOCKERS.md at all lets the release through =="
 new_fixture noblockers

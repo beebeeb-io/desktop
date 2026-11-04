@@ -18,15 +18,21 @@
 #
 # An item is any line that starts with optional whitespace followed by - or *
 # and then one space (the same pattern used elsewhere in the release gate).
+# Items detected by either a hyphen (-) or an asterisk (*) bullet.
+# Leading whitespace is allowed (indented list items are matched).
+# A tab is a valid separator between the bullet and the text.
 #
 # Usage:
 #   scripts/release-blockers-check.sh macos     # list items that block macOS
 #   scripts/release-blockers-check.sh linux     # list items that block Linux
 #   scripts/release-blockers-check.sh windows   # list items that block Windows
 #
+# Output: "N: <line>" for each binding item (N is the 1-based line number in
+#   the file), one per line.  Nothing when no items bind.
+#
 # Exit codes:
 #   0 - no items bind this platform (or file absent)
-#   1 - one or more items bind this platform (names printed to stdout)
+#   1 - one or more items bind this platform (printed to stdout)
 #   2 - usage error
 
 set -euo pipefail
@@ -50,20 +56,25 @@ if [[ ! -f "$BLOCKERS_FILE" ]]; then
 fi
 
 binding=""
-while IFS= read -r line; do
-  # Match a list item: optional leading whitespace, then - or *, then one space.
+lineno=0
+# "|| [[ -n "$line" ]]" handles files that do not end with a newline:
+# the last line is non-empty after EOF, so it is processed too.
+while IFS= read -r line || [[ -n "$line" ]]; do
+  lineno=$((lineno + 1))
+  # Match a list item: optional leading whitespace, then - or *, then one space
+  # or tab (IFS-collapsed separators are still valid bullets in Markdown).
   if [[ "$line" =~ ^[[:space:]]*[-*][[:space:]] ]]; then
     # Exact macOS scope: "- [macOS] " or "* [macOS] " with optional leading whitespace.
     # The bracket content must be exactly "macOS" (case-sensitive) with no extra whitespace.
     if [[ "$line" =~ ^[[:space:]]*[-*][[:space:]]\[macOS\][[:space:]] ]]; then
       # macOS-scoped: binds macOS only; skip for every other platform.
       if [[ "$PLATFORM" == "macos" ]]; then
-        binding="${binding}${line}
+        binding="${binding}${lineno}: ${line}
 "
       fi
     else
       # Unscoped (or any non-exact bracket pattern): binds every platform.
-      binding="${binding}${line}
+      binding="${binding}${lineno}: ${line}
 "
     fi
   fi

@@ -64,6 +64,18 @@ tested in `tests/releaseChannelChecks.test.ts`):
     offer a download on stable and the release page on alpha/beta (`src/macUpdateOffer.ts`).
   - Any other sentence in that section about updating, the updater or automatic delivery must name Windows and
     must not name macOS. A Linux-scoped sentence fails on purpose, until in-app delivery on Linux is verified.
+- **Windows + Linux only release (when `[macOS]` blockers bind).** When `RELEASE_BLOCKERS.md`
+  lists one or more `[macOS]`-scoped items at the release ref, the version is a Windows + Linux
+  release; macOS follows as a later separate version and is never re-cut from the same tag.
+  In that case the notes validator does **not** require the macOS Install line. Instead it requires
+  the line:
+
+  > macOS: not in this release; it follows in a later version.
+
+  (`MACOS_NOT_IN_RELEASE_LINE` in `scripts/release-channel-checks.mjs`.) The `release.yml`
+  workflow detects the binding `[macOS]` items automatically and passes `--no-macos` to the
+  validator; `scripts/test-release-blockers-check.sh` and `tests/releaseChannelChecks.test.ts`
+  cover both branches.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
