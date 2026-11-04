@@ -126,7 +126,7 @@
     #[test]
     fn rb3_f1_every_save_of_the_rows_folder_goes_through_the_one_function_that_tells_the_windows() {
         let full = source();
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests;").expect("this module")].to_string();
         let code_only = |text: &str| {
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -320,7 +320,7 @@
     #[test]
     fn test_1882_the_kept_folder_alert_logs_that_it_was_shown_and_closed() {
         let full = source();
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests;").expect("this module")].to_string();
         let alert = item(&source, "fn show_preserved_files_alert(");
         assert!(
             alert.contains("let Some((title, message)) = finder_removal::kept_folder_alert(preserved_location) else {"),
@@ -347,7 +347,7 @@
     #[test]
     fn test_1882_r2_every_removal_path_saves_the_kept_folder_for_the_sync_row() {
         let full = source();
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests;").expect("this module")].to_string();
         let code_only = |text: &str| {
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -504,7 +504,7 @@
     #[test]
     fn test_1882_r2_the_install_cleanup_and_failed_removals_surface_their_folder() {
         let full = source();
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests;").expect("this module")].to_string();
         let code_only = |text: &str| {
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -559,7 +559,7 @@
     fn test_1882_every_removal_path_surfaces_the_kept_folder() {
         let full = source();
         // Everything above this module, so the literals below cannot match themselves.
-        let source = full[..full.find("\nmod finder_removal_wiring_tests {").expect("this module")].to_string();
+        let source = full[..full.find("\nmod finder_removal_wiring_tests;").expect("this module")].to_string();
         let code_only = |text: &str| {
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))

@@ -69,8 +69,12 @@
         let mut files = Vec::new();
         rust_files(&src, &mut files);
         let mut vaults = 0;
+        let test_modules = super::finder_setup_command_tests::test_module_files(&src);
         for file in files {
             let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            if test_modules.contains(&name) {
+                continue;
+            }
             let text = std::fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
             let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
             let code: String = production

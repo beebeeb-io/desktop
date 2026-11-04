@@ -1232,7 +1232,8 @@
             "the gate is taken before the purge"
         );
         // The one test that seeds the shared database itself works under the gate, from its first write to its last check.
-        let seeding = &source[source
+        let seeding_file = include_str!("finder_lock_and_sign_out_tests.rs").replace("\r\n", "\n");
+        let seeding = &seeding_file[seeding_file
             .find(concat!("fn a_sign_out_leaves_no_account_row_", "and_no_owner() {"))
             .expect("the seeding test")..];
         let seeding = &seeding[..seeding.find("\n    }\n").unwrap()];

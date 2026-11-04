@@ -119,7 +119,7 @@
     #[test]
     fn a_startup_401_drops_only_the_token_on_macos_and_linux_and_everything_on_windows() {
         let source = include_str!("lib.rs").replace("\r\n", "\n");
-        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let production = &source[..source.find("#[cfg(test)]\nmod tests;").unwrap()];
         let non_windows = production
             .find("#[cfg(not(target_os = \"windows\"))]\nfn discard_unusable_startup_session(")
             .expect("a non-Windows discard");
@@ -164,7 +164,7 @@
     #[test]
     fn a_switch_after_a_revoked_token_leaves_no_vault_key_behind() {
         let source = include_str!("lib.rs").replace("\r\n", "\n");
-        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let production = &source[..source.find("#[cfg(test)]\nmod tests;").unwrap()];
         let clear = &production[production.find("async fn clear_session_impl(").unwrap()..];
         let clear = &clear[..clear.find("\n}\n").unwrap()];
         let already = &clear[clear
@@ -275,7 +275,7 @@
     /// The production part of `lib.rs` (the test modules start at `mod tests`).
     fn production() -> String {
         let source = include_str!("lib.rs").replace("\r\n", "\n");
-        source[..source.find("#[cfg(test)]\nmod tests {").unwrap()].to_string()
+        source[..source.find("#[cfg(test)]\nmod tests;").unwrap()].to_string()
     }
 
     /// The body of the function whose signature starts with `signature`.
@@ -614,7 +614,7 @@
     #[test]
     fn the_keychain_writers_borrow_the_vault_key() {
         let source = include_str!("lib.rs").replace("\r\n", "\n");
-        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let production = &source[..source.find("#[cfg(test)]\nmod tests;").unwrap()];
         for signature in [
             "fn persist_vault_key_to_keychain(",
             "fn persist_session_to_keychain(",
@@ -650,7 +650,7 @@
         );
         assert_ne!(super::SIGN_IN_LOCAL_DATA_UNREADABLE, super::SIGN_IN_ACCOUNT_UNKNOWN);
         let source = include_str!("lib.rs").replace("\r\n", "\n");
-        let production = &source[..source.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let production = &source[..source.find("#[cfg(test)]\nmod tests;").unwrap()];
         let settle = &production[production.find("async fn settle_sign_in(").unwrap()..];
         let settle = &settle[..settle.find("\n}\n").unwrap()];
         assert!(

@@ -600,6 +600,41 @@
     /// line ending with `{` comes first, at the `}`
     /// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
     /// on an argument or field (the next line ends with `,`) covers that one line.
+    /// Spec §4.8 (LD-0057): the files `lib.rs` declares as `#[cfg(test)] mod x;` (or
+    /// `#[cfg(all(test, …))]`), named from `src/` the way the scanners name a file. Inline, these
+    /// modules were `#[cfg(test)]` items of `lib.rs` that a scanner left out; as files of their
+    /// own they are left out the same way.
+    pub(super) fn test_module_files(src: &std::path::Path) -> std::collections::HashSet<String> {
+        let lib = std::fs::read_to_string(src.join("lib.rs")).expect("read lib.rs").replace("\r\n", "\n");
+        let lines: Vec<&str> = lib.lines().collect();
+        let mut files = std::collections::HashSet::new();
+        for (at, line) in lines.iter().enumerate() {
+            let declaration = line.strip_prefix("pub ").unwrap_or(line);
+            let Some(name) = declaration.strip_prefix("mod ").and_then(|rest| rest.strip_suffix(';')) else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                continue;
+            }
+            let (mut test_only, mut path) = (false, None);
+            for attribute in lines[..at].iter().rev().take_while(|l| l.starts_with("#[")) {
+                test_only |= attribute.starts_with("#[cfg(test)]") || attribute.starts_with("#[cfg(all(test");
+                if let Some(value) = attribute.strip_prefix("#[path = \"").and_then(|v| v.strip_suffix("\"]")) {
+                    path = Some(value.to_string());
+                }
+            }
+            if !test_only {
+                continue;
+            }
+            let candidates = match path {
+                Some(path) => vec![path],
+                None => vec![format!("{name}.rs"), format!("{name}/mod.rs")],
+            };
+            files.extend(candidates.into_iter().filter(|candidate| src.join(candidate).is_file()));
+        }
+        files
+    }
+
     pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
         let lines: Vec<&str> = source.lines().collect();
         let mut kept = String::new();

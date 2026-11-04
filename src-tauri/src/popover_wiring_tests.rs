@@ -5,7 +5,7 @@
         // the command (and the runner's progress board) fail at run time, not at compile time.
         let full = include_str!("lib.rs").replace("\r\n", "\n");
         // Everything before this test module: the mock-app helpers below also call `manage`.
-        let source = &full[..full.find("mod popover_snapshot_command_tests {").unwrap()];
+        let source = &full[..full.find("mod popover_snapshot_command_tests;").unwrap()];
         assert_eq!(
             source
                 .matches(".manage(popover_data::PopoverRuntime::default())")
