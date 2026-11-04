@@ -504,7 +504,6 @@ $(printf '%s\n' "$notes_bad" | sed 's/^/      /')"
   # skips them. The release workflow refuses the same way (release.yml, validate-release-notes).
   # Parsing is delegated to the shared checker so both callers use the same scope rules.
   HINT="Resolve each item of RELEASE_BLOCKERS.md on main and remove it from the file in the same change, then re-cut the release and build from the new tag. See docs/RELEASING.md."
-  blockers=""
   blockers="$(bash scripts/release-blockers-check.sh macos)" || true
   if [[ -z "$blockers" ]]; then
     say "RELEASE_BLOCKERS.md lists no item"
