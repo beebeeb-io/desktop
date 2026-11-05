@@ -2,11 +2,13 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { libRsSource } from './fixtures/rustConstants'
 import { rustTestFiles } from './fixtures/rustTestFiles'
 
 const root = join(import.meta.dir, '..')
 // CRLF-tolerant: Windows checkouts (autocrlf) must scan identically to LF (task 1639).
-const read = (path: string) => readFileSync(join(root, path), 'utf8').replace(/\r\n/g, '\n')
+// `src-tauri/src/lib.rs` is read as it was before its split (LD-0057): the hub with its children spliced back in.
+const read = (path: string) => (path === 'src-tauri/src/lib.rs' ? libRsSource(join(root, 'src-tauri/src')) : readFileSync(join(root, path), 'utf8')).replace(/\r\n/g, '\n')
 
 const productSurfaces = [
   'src/Onboarding.tsx',

@@ -7,23 +7,40 @@
 //! its first three lines (that header, a blank line, `use super::*;`) and the `pub(super) ` the split gave
 //! a private item are not part of the old text.
 //! Must not: be used by production code (it reads the source tree at run time).
-//! Tests: every scanner that reads the crate root goes through [`lib_rs`].
+//! Tests: every scanner that reads the crate root goes through [`lib_rs`]; a scanner that walks the tree reads
+//! `lib.rs` as [`lib_rs`] and skips the children ([`lib_rs_child`]), so it reads each line once, where it read it before.
+
+fn src() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+/// The child `name` of the hub line `line` (`mod <name>;`), with its text, when it is one split out of `lib.rs`.
+fn child_of(line: &str) -> Option<(&str, String)> {
+    let name = line
+        .trim_end_matches(['\r', '\n'])
+        .strip_prefix("mod ")
+        .and_then(|rest| rest.strip_suffix(';'))?;
+    let text = std::fs::read_to_string(src().join(format!("{name}.rs"))).ok()?;
+    let header = format!("//! `{name}` items split out of `lib.rs`.");
+    text.starts_with(&header).then_some((name, text))
+}
+
+/// Whether `name` (a path under `src`, `/`-separated) is a child that [`lib_rs`] splices back into `lib.rs`.
+// `tests/windows_session_wiring.rs` includes this file through `#[path]` and reads only `lib_rs`.
+#[allow(dead_code)]
+pub(crate) fn lib_rs_child(name: &str) -> bool {
+    let hub = std::fs::read_to_string(src().join("lib.rs")).expect("read src/lib.rs");
+    hub.split_inclusive('\n')
+        .filter_map(child_of)
+        .any(|(child, _)| format!("{child}.rs") == name)
+}
 
 /// `src-tauri/src/lib.rs` with each split-out child spliced back in at its `mod <child>;` line.
 pub(crate) fn lib_rs() -> String {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let hub = std::fs::read_to_string(src.join("lib.rs")).expect("read src/lib.rs");
+    let hub = std::fs::read_to_string(src().join("lib.rs")).expect("read src/lib.rs");
     let mut out = String::with_capacity(hub.len() * 40);
     for line in hub.split_inclusive('\n') {
-        let child = line
-            .trim_end_matches(['\r', '\n'])
-            .strip_prefix("mod ")
-            .and_then(|rest| rest.strip_suffix(';'));
-        let text = child.and_then(|name| {
-            let text = std::fs::read_to_string(src.join(format!("{name}.rs"))).ok()?;
-            let header = format!("//! `{name}` items split out of `lib.rs`.");
-            text.starts_with(&header).then_some(text)
-        });
+        let text = child_of(line).map(|(_, text)| text);
         match text {
             Some(text) => {
                 // The split's only edit inside a child is a `pub(super) ` it gave a private item, field or

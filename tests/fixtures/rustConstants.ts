@@ -22,18 +22,16 @@ export function rustSource(file: string): string {
  * `lib.rs` after its split (LD-0057 PR 2): each `mod <child>;` line whose file opens with
  * `` //! `<child>` items split out of `lib.rs`. `` is replaced by that child's items (its first three
  * lines, the header, a blank line and `use super::*;`, were never part of `lib.rs`), so the crate root
- * reads back in its old order. The Rust twin is `crate::root_source::lib_rs`.
+ * reads back in its old order. The Rust twin is `crate::root_source::lib_rs`. `dir` is a `src-tauri/src`
+ * (a scratch copy of the tree, for the tests that mutate one).
  */
-export function libRsSource(): string {
-  const hub = readFileSync(join(RUST_SRC, 'lib.rs'), 'utf8')
+export function libRsSource(dir: string = RUST_SRC): string {
+  const hub = readFileSync(join(dir, 'lib.rs'), 'utf8')
   return hub
     .split(/(?<=\n)/)
     .map((line) => {
-      const child = /^mod ([a-z_][a-z0-9_]*);\r?\n?$/.exec(line)?.[1]
-      const path = child === undefined ? '' : join(RUST_SRC, `${child}.rs`)
-      if (child === undefined || !existsSync(path)) return line
-      const text = readFileSync(path, 'utf8')
-      if (!text.startsWith(`//! \`${child}\` items split out of \`lib.rs\`.`)) return line
+      const text = childOf(dir, line)
+      if (text === null) return line
       // The split's only edit inside a child is a `pub(super) ` on a private item, field or method.
       return text
         .split(/(?<=\n)/)
@@ -42,6 +40,28 @@ export function libRsSource(): string {
         .join('')
     })
     .join('')
+}
+
+/** The text of the child the hub line `line` (`mod <child>;`) declares, when it is one split out of `lib.rs`. */
+function childOf(dir: string, line: string): string | null {
+  const child = /^mod ([a-z_][a-z0-9_]*);\r?\n?$/.exec(line)?.[1]
+  const path = child === undefined ? '' : join(dir, `${child}.rs`)
+  if (child === undefined || !existsSync(path)) return null
+  const text = readFileSync(path, 'utf8')
+  return text.startsWith(`//! \`${child}\` items split out of \`lib.rs\`.`) ? text : null
+}
+
+/**
+ * The files (names under `dir`) that `libRsSource` splices back into `lib.rs`. A scanner that reads the tree
+ * file by file reads `lib.rs` as `libRsSource` and skips these, so it reads each line once, where it read it before.
+ */
+export function libRsChildren(dir: string = RUST_SRC): string[] {
+  const lib = join(dir, 'lib.rs')
+  if (!existsSync(lib)) return []
+  return readFileSync(lib, 'utf8')
+    .split(/(?<=\n)/)
+    .filter((line) => childOf(dir, line) !== null)
+    .map((line) => `${/^mod ([a-z_][a-z0-9_]*);/.exec(line)![1]}.rs`)
 }
 
 /**

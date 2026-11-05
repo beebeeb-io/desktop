@@ -23,6 +23,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import ts from 'typescript'
 import { stripComments, stripRustTestItems } from './cityGuard'
+import { libRsChildren, libRsSource } from './rustConstants'
 import { rustTestFiles } from './rustTestFiles'
 
 /**
@@ -109,7 +110,7 @@ export interface Violation extends CopyString {
 export function commandNames(root: string): string[] {
   const lib = join(root, 'src-tauri/src/lib.rs')
   if (!existsSync(lib)) return []
-  const source = readFileSync(lib, 'utf8')
+  const source = libRsSource(dirname(lib))
   const start = source.indexOf('tauri::generate_handler![')
   if (start < 0) return []
   const end = source.indexOf('])', start)
@@ -395,9 +396,11 @@ export function scanRust(repo: string): { files: number; sentences: number; viol
   const violations: Violation[] = []
   let sentences = 0
   const testModules = rustTestFiles(repo)
-  const files = rustFiles(repo).filter((path) => !testModules.has(path))
+  const dir = join(repo, 'src-tauri/src')
+  const children = new Set(libRsChildren(dir).map((name) => join(dir, name)))
+  const files = rustFiles(repo).filter((path) => !testModules.has(path) && !children.has(path))
   for (const path of files) {
-    for (const entry of rustSentencesIn(relative(repo, path), readFileSync(path, 'utf8'))) {
+    for (const entry of rustSentencesIn(relative(repo, path), path === join(dir, 'lib.rs') ? libRsSource(dir) : readFileSync(path, 'utf8'))) {
       sentences += 1
       for (const word of DEVELOPER_WORDS) {
         if (!RUST_EXEMPT_RULES.has(word.id) && word.pattern.test(entry.text)) violations.push({ ...entry, how: 'rust sentence', rule: word.id })

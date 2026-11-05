@@ -19,6 +19,7 @@ import {
   scanRust,
   violationsInSource,
 } from './fixtures/copyGuard'
+import { libRsChildren } from './fixtures/rustConstants'
 
 /**
  * Task 1683 slice 5 (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §10.1, §12 row 5): no developer
@@ -253,7 +254,7 @@ describe('what a Mac can read', () => {
     try {
       cpSync(join(ROOT, 'src'), join(scratch, 'src'), { recursive: true })
       mkdirSync(join(scratch, 'src-tauri/src'), { recursive: true })
-      cpSync(join(ROOT, 'src-tauri/src/lib.rs'), join(scratch, 'src-tauri/src/lib.rs'))
+      for (const file of ['lib.rs', ...libRsChildren(join(ROOT, 'src-tauri/src'))]) cpSync(join(ROOT, 'src-tauri/src', file), join(scratch, 'src-tauri/src', file))
       const before = scan(scratch).violations.length
       const inject = (file: string, from: string, to: string) => {
         const path = join(scratch, 'src', file)
@@ -304,7 +305,7 @@ describe('what a command says (Rust sentences, which reach the screen as the rea
     try {
       cpSync(join(ROOT, 'src-tauri/src'), join(scratch, 'src-tauri/src'), { recursive: true })
       expect(scanRust(scratch).violations).toEqual([])
-      const path = join(scratch, 'src-tauri/src/lib.rs')
+      const path = join(scratch, 'src-tauri/src/vault_tree.rs')
       const source = readFileSync(path, 'utf8')
       const anchor = 'Choose a sync folder before changing offline availability.'
       expect(source).toContain(anchor)
