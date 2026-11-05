@@ -1216,7 +1216,7 @@
     /// wait for what it holds.
     #[test]
     fn the_sign_out_purge_takes_turns_in_tests_and_nothing_retries_around_it() {
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let clear = &source[source.find("async fn clear_session_impl(").unwrap()..];
         let clear = &clear[..clear.find("\n}\n").unwrap()];
         let held = "let _one_purge_at_a_time = if PURGE_GATE_HELD.try_with(|_| ()).is_ok() {\n            None\n        } else {\n            Some(SIGN_OUT_TEST_PURGE_GATE.lock().await)\n        };";

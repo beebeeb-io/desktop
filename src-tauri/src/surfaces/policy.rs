@@ -377,7 +377,7 @@ mod wiring_tests {
     }
 
     fn lib_rs() -> String {
-        source(include_str!("../lib.rs"))
+        source(&crate::root_source::lib_rs())
     }
 
     /// The runner module's text, from the facade and every file the split moved its code into.

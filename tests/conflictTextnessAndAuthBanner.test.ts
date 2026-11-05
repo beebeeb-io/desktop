@@ -18,6 +18,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { libRsSource } from './fixtures/rustConstants'
 
 const read = (rel: string) => readFileSync(join(import.meta.dir, '..', rel), 'utf8').replace(/\r\n/g, '\n')
 
@@ -64,7 +65,7 @@ describe('forced reauth wiring (findings 2 and 5)', () => {
   })
 
   test('sync_status reports auth_expired independently of logged_in', () => {
-    const src = read('src-tauri/src/lib.rs')
+    const src = libRsSource()
     expect(src).toContain('"auth_expired": auth_expired')
   })
 })

@@ -1,7 +1,7 @@
     use super::MacosIntegrationResetResult;
 
     fn source() -> String {
-        include_str!("lib.rs").replace("\r\n", "\n")
+        crate::root_source::lib_rs().replace("\r\n", "\n")
     }
 
     /// The text of the item starting at `start`, up to the next line that is exactly `}`.
@@ -185,6 +185,7 @@
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
                     if name == "tests.rs" || name.ends_with("/tests.rs") || name.ends_with("_tests.rs") || name.split('/').any(|part| part == "tests") { continue; }
+                    if crate::root_source::lib_rs_child(&name) { continue; }
                     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
                     let text = text.replace("\r\n", "\n");
                     let production = if name == "lib.rs" {

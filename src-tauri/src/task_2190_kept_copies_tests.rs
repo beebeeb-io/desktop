@@ -43,7 +43,7 @@
     /// Review-169 #8: a decision that changed something tells an open Sync tab to read its rows again.
     #[test]
     fn task_2190_a_decision_tells_an_open_sync_tab() {
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let decide = &source[source.find("async fn resolve_parked_conflict(").expect("the decision command")..];
         let decide = &decide[..decide.find("\n}\n").expect("its end")];
         assert!(decide.contains(

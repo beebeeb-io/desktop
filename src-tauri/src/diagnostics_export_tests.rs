@@ -151,7 +151,7 @@
     /// because the thread a command runs on is not observable in a unit test.
     #[test]
     fn bundle_commands_run_off_the_main_thread() {
-        let src = include_str!("lib.rs");
+        let src = crate::root_source::lib_rs();
         for name in ["report_problem", "export_diagnostics"] {
             let needle = format!("fn {name}(");
             let at = src.find(&needle).unwrap_or_else(|| panic!("{name} not found"));

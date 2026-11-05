@@ -875,7 +875,7 @@ mod tests {
         let emit = &emit[..emit.find("\n}\n").unwrap()];
         assert!(emit.contains("app.emit(crate::engine_status::EVENT, with_startup_guard(payload))"), "{emit}");
         assert_eq!(production.matches("crate::engine_status::EVENT").count(), 1, "every engine-status event goes through emit_payload");
-        let lib = include_str!("lib.rs").replace("\r\n", "\n");
+        let lib = crate::root_source::lib_rs().replace("\r\n", "\n");
         let status = &lib[lib.find("async fn sync_status(").unwrap()..];
         let status = &status[..status.find("\n}\n").unwrap()];
         let literal = status.rfind("Ok(serde_json::json!({").unwrap();

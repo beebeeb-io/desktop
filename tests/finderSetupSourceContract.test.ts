@@ -15,7 +15,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { censusOfSource, familyLiterals, KEPT_FOLDER_READERS, type Site, type Violation, type ViolationKind } from './fixtures/finderResultCensus'
-import { rustModuleSource } from './fixtures/rustConstants'
+import { rustModuleSource, libRsSource } from './fixtures/rustConstants'
 
 // Every test here reads, scans or copies the real source tree, which takes seconds when the machine is loaded (a gate at
 // load 60 timed three of them out at bun's default 5 s; the same tests take under 4 s together at load 14). Their results do
@@ -291,7 +291,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
     expect(trace).toBeGreaterThan(run.indexOf('} else {', guard))
     expect(run.slice(trace)).toMatch(/^const said = result\.reason\.trim\(\)\s*console\.warn\(action, result\.unsupported \? 'unsupported' : \/\^\[A-Za-z\]\[\\w\.\]\*\\s-\?\\d\+\$\/\.test\(said\) \? said : 'other'\)/)
 
-    const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    const lib = libRsSource()
     const body = (text: string, start: string) => text.slice(text.indexOf(start), text.indexOf('\n}\n', text.indexOf(start)))
     const retry = body(lib, 'fn finder_setup_retry_impl(state: &AppState) -> Result<(), String> {')
     expect(retry.match(/Err\(|\?;|\?\n/g)).toEqual(['?;', 'Err('])
@@ -368,7 +368,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
   })
 
   test('exemption 1, WindowsTray: it opens only the status root, and a Mac\'s status never has one', () => {
-    const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    const rust = libRsSource()
     expect(rust).toMatch(/#\[cfg\(target_os = "macos"\)\]\s*let sync_root = None::<String>;/)
     const tray = functionText('WindowsTray.tsx', 'WindowsTray')
     const open = tray.indexOf("command<void>('open_finder_location'")

@@ -191,7 +191,7 @@ mod tests {
     fn test_1885_open_in_finder_checks_the_namespace_before_it_asks_the_file_provider() {
         use crate::finder_setup_command_tests::{body_between, macos_compiled};
         use crate::source_pin::squeeze;
-        let on_a_mac = macos_compiled(&read("src/lib.rs"));
+        let on_a_mac = macos_compiled(&crate::root_source::lib_rs());
         let body = squeeze(body_between(&on_a_mac, "fn open_in_finder_blocking(", "\n}\n"));
         let shape = body
             .find("macos_validate_hydrate_item_identifier(&item_id)")
@@ -255,7 +255,7 @@ mod tests {
     fn test_1885_the_search_command_drops_shared_rows_only_for_finder_on_a_mac() {
         use crate::finder_setup_command_tests::{body_between, without_items};
         use crate::source_pin::squeeze;
-        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        let production = without_items(&crate::root_source::lib_rs(), &["#[cfg(test)]", "#[cfg(all(test"]);
         let command = squeeze(body_between(&production, "async fn desktop_search_files(", "\n}\n"));
         assert!(
             command.contains(&squeeze(
@@ -288,7 +288,7 @@ mod tests {
     fn test_1885_the_fallback_opens_never_block_the_caller() {
         use crate::finder_setup_command_tests::{body_between, without_items};
         use crate::source_pin::squeeze;
-        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        let production = without_items(&crate::root_source::lib_rs(), &["#[cfg(test)]", "#[cfg(all(test"]);
         for function in [
             "fn upload_files_to_sync_root_impl(",
             "fn create_folder_in_sync_root_impl(",
@@ -373,7 +373,7 @@ mod tests {
     fn test_1885_the_menus_open_folder_shows_a_failure_before_it_logs_it() {
         use crate::finder_setup_command_tests::{body_between, without_items};
         use crate::source_pin::squeeze;
-        let production = without_items(&read("src/lib.rs"), &["#[cfg(test)]", "#[cfg(all(test"]);
+        let production = without_items(&crate::root_source::lib_rs(), &["#[cfg(test)]", "#[cfg(all(test"]);
         let arm = squeeze(body_between(
             &production,
             "DesktopMenuAction::OpenFolder =>",
@@ -524,7 +524,7 @@ mod tests {
     fn test_1885_the_three_macos_open_actions_go_through_the_bridge_and_return_its_outcome() {
         use crate::finder_setup_command_tests::{body_between, macos_compiled};
         use crate::source_pin::squeeze;
-        let on_a_mac = macos_compiled(&read("src/lib.rs"));
+        let on_a_mac = macos_compiled(&crate::root_source::lib_rs());
 
         let open = squeeze(body_between(&on_a_mac, "fn open_finder_location_blocking(", "\n}\n"));
         assert!(
@@ -562,7 +562,7 @@ mod tests {
                 "finder_open::finder_open_outcome(finder_setup::macos_ports::reveal_item(item_id),",
             ),
         ] {
-            let production = without_tests(&read("src/lib.rs"));
+            let production = without_tests(&crate::root_source::lib_rs());
             let body = squeeze(body_between(&production, wrapper, "\n}\n"));
             assert!(
                 body.contains(&squeeze(call)),

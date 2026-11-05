@@ -64,7 +64,7 @@ use super::*;
         assert!(body("signal_working_set_owing").contains("owed.take_command_debt();"));
         assert!(body("signal_owed_debt_after_a_failed_tick").contains("owed_working_set_signal.take_command_debt();"));
         // The decision owes what its own signal did not deliver.
-        let lib = include_str!("../../lib.rs").replace("\r\n", "\n");
+        let lib = crate::root_source::lib_rs().replace("\r\n", "\n");
         let decide = &lib[lib.find("async fn resolve_parked_conflict(").expect("the decision command")..];
         assert!(decide.contains(
             "if crate::finder_setup::macos_ports::signal_working_set().is_err() {\n                crate::runner::owe_working_set_signal(&ids);"

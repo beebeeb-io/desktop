@@ -14,7 +14,71 @@ import { fileURLToPath } from 'node:url'
 const RUST_SRC = fileURLToPath(new URL('../../src-tauri/src/', import.meta.url))
 
 export function rustSource(file: string): string {
+  if (file === 'lib.rs') return libRsSource()
   return readFileSync(new URL(`../../src-tauri/src/${file}`, import.meta.url), 'utf8')
+}
+
+/**
+ * `lib.rs` after its split (LD-0057 PR 2): each `mod <child>;` line whose file opens with
+ * `` //! `<child>` items split out of `lib.rs`. `` is replaced by that child's items (its first three
+ * lines, the header, a blank line and `use super::*;`, were never part of `lib.rs`), so the crate root
+ * reads back in its old order. The Rust twin is `crate::root_source::lib_rs`. `dir` is a `src-tauri/src`
+ * (a scratch copy of the tree, for the tests that mutate one).
+ */
+export function libRsSource(dir: string = RUST_SRC): string {
+  const hub = readFileSync(join(dir, 'lib.rs'), 'utf8')
+  let children = 0
+  const out = hub
+    .split(/(?<=\n)/)
+    .map((line) => {
+      const text = childOf(dir, line)
+      if (text === null) return line
+      children += 1
+      // The split's only edit inside a child is a `pub(super) ` on a private item, field or method. As in the Rust
+      // twin: the first three lines go, then one blank line if it follows them.
+      const body = text
+        .split(/(?<=\n)/)
+        .slice(3)
+        .map((l) => l.replace(/^(\s*)pub\(super\) /, '$1'))
+        .join('')
+      return body.replace(/^\r?\n/, '')
+    })
+    .join('')
+  checkChildren(children, dir)
+  return out
+}
+
+/** How many children the split moved out of `lib.rs` (`CHILDREN` in `root_source.rs`). */
+const CHILDREN = 19
+
+/** A child whose header stopped matching drops its lines from every scanner's input: count them. 0 is a tree that was
+ * never split (a scratch fixture). */
+function checkChildren(found: number, dir: string): void {
+  if (found !== 0 && found !== CHILDREN) throw new Error(`${dir}/lib.rs splices ${CHILDREN} children back in, found ${found}`)
+}
+
+/** The text of the child the hub line `line` (`mod <child>;`) declares, when it is one split out of `lib.rs`. */
+function childOf(dir: string, line: string): string | null {
+  const child = /^mod ([a-z_][a-z0-9_]*);\r?\n?$/.exec(line)?.[1]
+  const path = child === undefined ? '' : join(dir, `${child}.rs`)
+  if (child === undefined || !existsSync(path)) return null
+  const text = readFileSync(path, 'utf8')
+  return text.startsWith(`//! \`${child}\` items split out of \`lib.rs\`.`) ? text : null
+}
+
+/**
+ * The files (names under `dir`) that `libRsSource` splices back into `lib.rs`. A scanner that reads the tree
+ * file by file reads `lib.rs` as `libRsSource` and skips these, so it reads each line once, where it read it before.
+ */
+export function libRsChildren(dir: string = RUST_SRC): string[] {
+  const lib = join(dir, 'lib.rs')
+  if (!existsSync(lib)) return []
+  const children = readFileSync(lib, 'utf8')
+    .split(/(?<=\n)/)
+    .filter((line) => childOf(dir, line) !== null)
+    .map((line) => `${/^mod ([a-z_][a-z0-9_]*);/.exec(line)![1]}.rs`)
+  checkChildren(children.length, dir)
+  return children
 }
 
 /**
