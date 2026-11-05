@@ -89,6 +89,10 @@ Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before
 specs in `docs/specs/` and the design files in `design/` (design wins over code; deviations are recorded before the code changes).
 New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, permission in `capabilities/default.json` if it touches an OS API.
 
+## Design files
+
+`design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite, and tests read them (`tests/accountViewCopy.test.ts`, `finderSetupCopy.test.ts`, `macSettingsModel.test.ts`, `menuBarHintModel.test.ts`, `reauthInPlace.test.tsx`), so do not move or rename them. All other design files live in the workspace root `../../design/hifi/` — never copy them into this public repo (a snapshot once published a false external-audit claim; removed in task 1365). A code comment or README that names `design/hifi/hifi-*.jsx`, `styles.css` or `hifi-styles.css` means that workspace copy.
+
 ## Graphify and shared docs
 
 Knowledge graph at `graphify-out/`. Architecture question: `graphify query "<question>"` / `graphify explain <symbol>` /
