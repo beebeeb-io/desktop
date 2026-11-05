@@ -235,7 +235,9 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>, between: &mu
     // 7. The pin as it was.
     if pin != CF_PIN_STATE_UNSPECIFIED {
         // SAFETY: `handle` is open.
-        let _ = unsafe { CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None) };
+        if let Err(e) = unsafe { CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None) } {
+            tracing::warn!(error = %e, "poison sweep: emptied, but its pin could not be set again");
+        }
     }
     Emptied::Emptied
 }
@@ -253,10 +255,19 @@ pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) ->
     };
     let mut outcomes = Vec::new();
     for row in rows {
-        let Ok(Some(entry)) = db.get_file(&row.file_id) else {
-            // The row is gone (deleted or renamed away): nothing of it is left to empty here.
-            let _ = db.clear_poison(&row.file_id);
-            continue;
+        let entry = match db.get_file(&row.file_id) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                // The row is gone (deleted or renamed away): nothing of it is left to empty here.
+                let _ = db.clear_poison(&row.file_id);
+                continue;
+            }
+            Err(e) => {
+                // An unreadable row is not a gone one: the poison stays (I5), as the fetch check
+                // counts a database error as poisoned.
+                tracing::warn!(error = %e, file_id = %row.file_id, "poison sweep: could not read the row; the poison stays");
+                continue;
+            }
         };
         let Ok(path) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path) else {
             continue;

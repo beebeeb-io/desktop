@@ -615,3 +615,19 @@ fn ld0105_s6_native_a_failed_step_restores_not_in_sync_and_the_pin() {
     assert!(matches!(outcome, Emptied::Failed(_)), "IN_SYNC refused with no provider connected: {outcome:?}");
     assert_eq!(after, (OnDisk::Wholly, false, true), "untouched, not in sync, still pinned");
 }
+
+/// Self-review (desktop PR 224): a database error while the sweep reads a poisoned file's row is not
+/// "the row is gone". The poison stays (I5), as the fetch check fails closed on the same error.
+#[test]
+fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
+    use crate::windows_cf::poison::sweep_poisoned;
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-unreadable", "unreadable.bin")]);
+    db.record_poison("qa-unreadable", "corrupt", Some((1, 2)), 1).unwrap();
+    db.make_file_rows_unreadable_for_test();
+    assert!(db.get_file("qa-unreadable").is_err(), "the row read fails");
+    let outcomes = sweep_poisoned(&db, state.path());
+    println!("ld0105-s6-native: unreadable row: outcomes {outcomes:?}");
+    assert!(outcomes.is_empty(), "nothing is emptied or cleared: {outcomes:?}");
+    assert!(db.poison("qa-unreadable").unwrap().is_some(), "the poison stays");
+}

@@ -103,6 +103,14 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute("DELETE FROM cf_poison WHERE file_id = ?1", params![file_id])? == 1)
     }
+
+    /// Test only: every read of a `files` row fails from now on (the table is renamed away), while
+    /// `cf_poison` stays readable. Its one caller is a Windows-native test.
+    #[cfg(all(test, windows))]
+    pub(crate) fn make_file_rows_unreadable_for_test(&self) {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute_batch("ALTER TABLE files RENAME TO files_unreadable_for_test").unwrap();
+    }
 }
 
 fn poison_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PoisonRow> {
