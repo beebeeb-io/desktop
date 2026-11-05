@@ -1660,7 +1660,7 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
                     // Task 2180 / LD-0105 S3: the version the listing shows now is this placeholder's
                     // identity. Without a record its bytes are never trusted, so a failure only costs a
                     // later refetch, never mixed versions.
-                    if let Err(e) = db.record_minted_version(&entry.file_id) {
+                    if let Err(e) = db.record_minted_version(&entry.file_id, entry.size_bytes) {
                         tracing::debug!(error = %e, file_id = %entry.file_id, "could not record the placeholder's version");
                     }
                 }

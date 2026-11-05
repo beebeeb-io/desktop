@@ -13,7 +13,8 @@ use windows::Win32::Storage::CloudFilters::*;
 use windows::core::PCWSTR;
 
 use crate::unknown_check::{OnDisk, PlatformView};
-use crate::windows_cf::fetch_progress::{fail_transfer_for_tests, keep_fetch_alive, transfer_range_for_tests};
+use crate::windows_cf::callbacks::{fail_transfer, transfer_range};
+use crate::windows_cf::fetch_progress::keep_fetch_alive;
 use crate::windows_cf::placeholders;
 
 /// A registered (and optionally connected) QA root; unregistered on drop, whatever the test did.
@@ -59,6 +60,14 @@ impl QaRoot {
         }
         .unwrap();
         self.key = Some(key);
+    }
+
+    /// What an app restart does to the connection: it ends.
+    fn disconnect(&mut self) {
+        if let Some(key) = self.key.take() {
+            // SAFETY: the key of the connection made in `connect`, disconnected once.
+            let _ = unsafe { CfDisconnectSyncRoot(key) };
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -120,9 +129,9 @@ unsafe extern "system" fn serve_first_64k(info: *const CF_CALLBACK_INFO, params:
     let served = r.length.min(64 * 1024);
     // SAFETY: the keys of this live request.
     unsafe {
-        let _ = transfer_range_for_tests(r.connection, r.transfer, r.request, &data, r.offset, served);
+        let _ = transfer_range(r.connection, r.transfer, r.request, &data, || false, r.offset, served);
         if served < r.length {
-            fail_transfer_for_tests(
+            fail_transfer(
                 r.connection,
                 r.transfer,
                 r.request,
@@ -224,8 +233,8 @@ unsafe extern "system" fn slow_fetch(info: *const CF_CALLBACK_INFO, params: *con
     });
     let data = content(r.file_size as usize);
     // SAFETY: the keys of this live request.
-    if unsafe { transfer_range_for_tests(r.connection, r.transfer, r.request, &data, r.offset, r.length) }.is_err() {
-        unsafe { fail_transfer_for_tests(r.connection, r.transfer, r.request, r.offset, r.length) };
+    if unsafe { transfer_range(r.connection, r.transfer, r.request, &data, || false, r.offset, r.length) }.is_err() {
+        unsafe { fail_transfer(r.connection, r.transfer, r.request, r.offset, r.length) };
     }
 }
 
@@ -274,10 +283,18 @@ fn ld0105_w1_native_the_upgrade_from_partial_to_progressive_keeps_every_placehol
     // cloud-only placeholder on a connected PARTIAL root makes Windows fetch it, so `cloud-pinned.bin`
     // is partly hydrated here, not cloud-only.)
     for on_disk in [OnDisk::Nothing, OnDisk::Partly, OnDisk::Wholly] {
-        assert!(before.iter().any(|(_, d, _, _)| *d == on_disk), "a {on_disk:?} placeholder before the upgrade: {before:?}");
+        assert!(
+            before.iter().any(|(_, d, _, _)| *d == on_disk),
+            "a {on_disk:?} placeholder before the upgrade: {before:?}"
+        );
     }
-    assert!(before.iter().any(|(_, _, _, p)| *p) && before.iter().any(|(_, _, _, p)| !*p), "pinned and unpinned: {before:?}");
-    // The 0.8.22 engine start: the same registration call the app makes, with UPDATE, no unregister.
+    assert!(
+        before.iter().any(|(_, _, _, p)| *p) && before.iter().any(|(_, _, _, p)| !*p),
+        "pinned and unpinned: {before:?}"
+    );
+    // The 0.8.22 engine start: the old process's connection is gone, then the same registration call
+    // the app makes before it connects, with UPDATE, no unregister.
+    qa.disconnect();
     crate::windows_cf::register_sync_root_with(
         &qa.root,
         &crate::windows_cf::QA_PROVIDER,
@@ -331,8 +348,11 @@ fn ld0105_w1_native_a_fresh_registration_is_progressive_and_d6_is_recorded() {
     let after = census(&qa, &names);
     assert_eq!(after, before, "a second start keeps every placeholder");
     // The record (spec §5.1 D-6, plan W1): what a WinRT Unregister → Register does to this root.
-    // Not asserted: this is the measurement that says why nothing in the app may do it.
-    let unregistered = StorageProviderSyncRootManager::Unregister(&HSTRING::from(id.as_str())).map_err(|e| e.to_string());
+    // Not asserted: this is the measurement that says why nothing in the app may do it. Disconnected
+    // first, as at sign-out (a connected root refuses it: 0x8007017C, measured).
+    qa.disconnect();
+    let unregistered =
+        StorageProviderSyncRootManager::Unregister(&HSTRING::from(id.as_str())).map_err(|e| e.to_string());
     let left: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), qa.path(n).exists())).collect();
     let views: Vec<String> = names
         .iter()
@@ -340,6 +360,24 @@ fn ld0105_w1_native_a_fresh_registration_is_progressive_and_d6_is_recorded() {
         .collect();
     println!("ld0105-w1-native: D-6 record, WinRT Unregister {unregistered:?}: present {left:?}");
     println!("ld0105-w1-native: D-6 record, views {views:?}");
+}
+
+/// Set once the S6 fixture is poisoned: from then on its provider refuses every fetch, as the
+/// production callback refuses a poisoned file (I5). Without it the platform's re-issued fetch for the
+/// rest of a partly hydrated file is served after the poison, which production never does.
+static S6_POISONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "system" fn s6_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if !S6_POISONED.load(std::sync::atomic::Ordering::SeqCst) {
+        // SAFETY: forwarded as received.
+        return unsafe { serve_first_64k(info, params) };
+    }
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: valid for the duration of the callback.
+    let r = unsafe { request_of(info, params) };
+    unsafe { fail_transfer(r.connection, r.transfer, r.request, r.offset, r.length) };
 }
 
 // ── S6: the empty step, against hand-poisoned placeholders ───────────────────────────────────────
@@ -375,9 +413,10 @@ fn poison(db: &crate::state_db::StateDb, qa: &QaRoot, id: &str, name: &str) {
 fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_measured_order() {
     use crate::windows_cf::poison::{Emptied, empty_poisoned, sweep_poisoned};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
-    qa.connect(serve_first_64k); // this process is the connected provider: only it may set IN_SYNC
+    qa.connect(s6_fetch); // this process is the connected provider: only it may set IN_SYNC
     let names = mint_five(&qa);
     assert_eq!(names.len(), 5);
+    S6_POISONED.store(true, std::sync::atomic::Ordering::SeqCst);
     let state = tempfile::tempdir().unwrap();
     let db_path = state.path().to_path_buf();
     {

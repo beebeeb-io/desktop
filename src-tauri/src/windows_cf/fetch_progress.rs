@@ -4,53 +4,6 @@
 
 use windows::Win32::Storage::CloudFilters::*;
 
-/// Tests only (LD-0105 native rungs): [`super::callbacks::transfer_range`] with nothing to cancel it.
-///
-/// SAFETY: the keys must be those of a live FETCH_DATA request.
-#[cfg(test)]
-pub(crate) unsafe fn transfer_range_for_tests(
-    connection_key: CF_CONNECTION_KEY,
-    transfer_key: i64,
-    request_key: i64,
-    plaintext: &[u8],
-    required_offset: i64,
-    required_length: i64,
-) -> windows::core::Result<()> {
-    unsafe {
-        super::callbacks::transfer_range(
-            connection_key,
-            transfer_key,
-            request_key,
-            plaintext,
-            || false,
-            required_offset,
-            required_length,
-        )
-    }
-}
-
-/// Tests only (LD-0105 native rungs): [`super::callbacks::fail_transfer`].
-///
-/// SAFETY: the keys must be those of a live FETCH_DATA request.
-#[cfg(test)]
-pub(crate) unsafe fn fail_transfer_for_tests(
-    connection_key: CF_CONNECTION_KEY,
-    transfer_key: i64,
-    request_key: i64,
-    required_offset: i64,
-    required_length: i64,
-) {
-    unsafe {
-        super::callbacks::fail_transfer(
-            connection_key,
-            transfer_key,
-            request_key,
-            required_offset,
-            required_length,
-        )
-    }
-}
-
 /// LD-0105 S0: report `meter` (this fetch's body bytes, per read) to Cloud Files for the pending
 /// request `transfer_key`, by [`crate::cf_keepalive::KeepAlive`]'s rule, until the future is dropped:
 /// the caller selects it against the download, so it ends with the download. Each report resets

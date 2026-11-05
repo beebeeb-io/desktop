@@ -188,7 +188,8 @@ pub unsafe extern "system" fn fetch_data_callback(
 
     // LD-0105 I5: a poisoned placeholder (a failed fetch wrote into it) is never fetched into again
     // until the empty step has dehydrated it: fail at once, no request to the server.
-    if matches!(bridge.db().poison(&file_id), Ok(Some(_))) {
+    // A database error counts as poisoned: the fetch fails closed.
+    if !matches!(bridge.db().poison(&file_id), Ok(None)) {
         tracing::info!(file_id = %file_id, "fetch of a poisoned placeholder refused until it is emptied");
         unsafe { fail_transfer(connection_key, transfer_key, request_key, required_offset, required_length) };
         return;
@@ -607,21 +608,22 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         }
     }
 
+    // Task 1640: a close by this process (the upload driver reading a synced file to compare
+    // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
+    // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
+    if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
+        return;
+    }
+
     // LD-0105 S6: a close is the moment a poisoned placeholder can be emptied (no handle is left to
-    // refuse the exclusive open). The empty step runs off this callback thread.
+    // refuse the exclusive open). The empty step runs off this callback thread. Our own closes (the
+    // empty step's own handle among them) were filtered out above, so it cannot trigger itself.
     if info.FileIdentityLength > 0 && !info.FileIdentity.is_null() {
         // SAFETY: Windows hands us `FileIdentityLength` valid bytes for the duration of the callback.
         let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
         if let Ok(file_id) = std::str::from_utf8(identity) {
             super::poison::after_close(file_id);
         }
-    }
-
-    // Task 1640: a close by this process (the upload driver reading a synced file to compare
-    // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
-    // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
-    if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
-        return;
     }
 
     let Some(path) = notify_full_path(info) else {

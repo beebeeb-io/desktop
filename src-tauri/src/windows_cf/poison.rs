@@ -39,8 +39,11 @@ pub(crate) enum Emptied {
     /// The file changed after it was poisoned (or its stamp was never recorded): it is left as it is,
     /// not in sync, and the poison stays.
     Changed,
-    /// The placeholder is gone, or is no placeholder: nothing to empty; the poison is cleared.
+    /// The path is no placeholder any more (a plain file): nothing to empty; the poison is cleared.
     Gone,
+    /// Nothing at the row's path: the file may have been renamed or moved and the database not told
+    /// yet. The poison stays (it follows the file id), and a later sweep tries again.
+    Missing,
     /// A step failed: NOT_IN_SYNC and the pin state were restored first. The status word only.
     Failed(&'static str),
 }
@@ -50,17 +53,23 @@ const NOT_A_CLOUD_FILE: HRESULT = HRESULT(0x8007_0178_u32 as i32);
 const FILE_NOT_FOUND: HRESULT = HRESULT(0x8007_0002_u32 as i32);
 const PATH_NOT_FOUND: HRESULT = HRESULT(0x8007_0003_u32 as i32);
 
-/// The change stamp `(ChangeTime ticks, file index)` of `path`, read through a handle that fetches
-/// nothing. A poison records it right after the file is marked not in sync.
+/// The change stamp `(ChangeTime in 100 ns ticks since 1970, file index)` of `path`, read through an
+/// attribute-only handle opened as the reparse point (nothing is fetched). A poison records it right
+/// after the file is marked not in sync; the empty step reads the same pair through its own handle
+/// ([`stamp_of_handle`]), so one function computes both sides of the comparison.
 pub(crate) fn poison_stamp(path: &Path) -> Option<(i64, i64)> {
-    let stamp = super::placeholders::change_stamp(path).ok()?;
-    Some((stamp_ticks(stamp.change_time), stamp.file_index as i64))
-}
-
-fn stamp_ticks(time: std::time::SystemTime) -> i64 {
-    time.duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_nanos() / 100).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    stamp_of_handle(HANDLE(file.as_raw_handle()))
 }
 
 /// The change stamp of the file behind `win32` (an open Win32 handle).
@@ -123,13 +132,19 @@ pub(crate) fn empty_poisoned(path: &Path, recorded: Option<(i64, i64)>) -> Empti
     } {
         Ok(handle) => handle,
         Err(e) if e.code() == SHARING_VIOLATION => return Emptied::Busy,
-        Err(e) if [NOT_A_CLOUD_FILE, FILE_NOT_FOUND, PATH_NOT_FOUND].contains(&e.code()) => return Emptied::Gone,
+        Err(e) if e.code() == NOT_A_CLOUD_FILE => return Emptied::Gone,
+        Err(e) if [FILE_NOT_FOUND, PATH_NOT_FOUND].contains(&e.code()) => return Emptied::Missing,
         Err(_) => return Emptied::Failed("open"),
     };
     // SAFETY: `handle` is the protected handle opened above; it is closed exactly once, below.
     let outcome = unsafe { empty_under(handle, recorded) };
     // SAFETY: as above.
     unsafe { CfCloseHandle(handle) };
+    if matches!(outcome, Emptied::Failed(_)) {
+        // Step 6 restored NOT_IN_SYNC through the handle; when that call itself failed, nothing else
+        // would ever mark a partial file not in sync again, so it is marked once more by path (I6).
+        let _ = super::placeholders::mark_not_in_sync_path(path);
+    }
     outcome
 }
 
@@ -210,11 +225,23 @@ pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) ->
         let outcome = empty_poisoned(&path, stamp);
         match &outcome {
             Emptied::Emptied | Emptied::Gone => {
+                // Nothing of the failed attempt is on disk: the row says so too (as "Free up space" does).
+                if outcome == Emptied::Emptied
+                    && let Err(e) = db.mark_cloud_only_after_dehydrate(
+                        std::slice::from_ref(&row.file_id),
+                        chrono::Utc::now().timestamp(),
+                    )
+                {
+                    tracing::warn!(error = %e, file_id = %row.file_id, "poison sweep: emptied, but the row could not be marked cloud-only");
+                }
                 if let Err(e) = db.clear_poison(&row.file_id) {
                     tracing::warn!(error = %e, file_id = %row.file_id, "poison sweep: emptied, but the poison could not be cleared");
                 }
             }
             Emptied::Busy => tracing::debug!(file_id = %row.file_id, "poison sweep: still open; next time"),
+            Emptied::Missing => {
+                tracing::debug!(file_id = %row.file_id, "poison sweep: nothing at its path yet; next time")
+            }
             Emptied::Changed => {
                 tracing::warn!(file_id = %row.file_id, "poison sweep: changed since it was poisoned; left as it is")
             }
@@ -233,7 +260,10 @@ pub fn sweep_poisoned_now(sync_root: &Path) {
     if bridge.is_revoked() || bridge.is_stopping() {
         return;
     }
-    let emptied = sweep_poisoned(bridge.db(), sync_root).iter().filter(|(_, o)| *o == Emptied::Emptied).count();
+    let emptied = sweep_poisoned(bridge.db(), sync_root)
+        .iter()
+        .filter(|(_, o)| *o == Emptied::Emptied)
+        .count();
     if emptied > 0 {
         tracing::info!(emptied, "poisoned placeholders emptied");
     }

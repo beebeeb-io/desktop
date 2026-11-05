@@ -32,14 +32,20 @@ pub struct PoisonRow {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl StateDb {
-    /// Task 2180: the placeholder of `file_id` was just minted (or refreshed) from the listing: record
-    /// the version the listing shows for it now as its identity. `Ok(true)`: a row was updated. A row
-    /// whose listing named no version gets `NULL`, which counts as "no identity".
-    pub fn record_minted_version(&self, file_id: &str) -> Result<bool> {
+    /// Task 2180: the placeholder of `file_id` was just minted (or refreshed) from the listing with
+    /// `minted_size` bytes: record the version the listing shows for it now as its identity, but only
+    /// while the row still has that size. When a newer listing changed the size between the snapshot
+    /// and the mint, `NULL` is recorded: no identity, so nothing is ever trusted over that placeholder.
+    /// (An equal-size newer version is recorded as it is: the placeholder holds no bytes at its mint,
+    /// so its first fetch serves that version whole.) A listing with no version also records `NULL`.
+    /// `Ok(true)`: a row was updated.
+    pub fn record_minted_version(&self, file_id: &str, minted_size: i64) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn.execute(
-            "UPDATE files SET minted_object_version_id = current_object_version_id WHERE file_id = ?1",
-            params![file_id],
+            "UPDATE files SET minted_object_version_id =
+               CASE WHEN size_bytes = ?2 THEN current_object_version_id ELSE NULL END
+             WHERE file_id = ?1",
+            params![file_id, minted_size],
         )? == 1)
     }
 
@@ -152,7 +158,7 @@ mod tests {
             None,
             "nothing recorded before the mint"
         );
-        assert!(db.record_minted_version("f").unwrap());
+        assert!(db.record_minted_version("f", 10).unwrap());
         assert_eq!(db.minted_version("f").unwrap().as_deref(), Some(A));
         // B commits on the server; the listing moves on, the placeholder's identity does not.
         set_current(&db, "f", Some(B));
@@ -162,16 +168,23 @@ mod tests {
             "the placeholder still holds A"
         );
         // A refresh of the placeholder records the new identity.
-        assert!(db.record_minted_version("f").unwrap());
+        assert!(db.record_minted_version("f", 10).unwrap());
         assert_eq!(db.minted_version("f").unwrap().as_deref(), Some(B));
+        // A listing that changed the size after the snapshot the placeholder was minted from: no identity.
+        assert!(db.record_minted_version("f", 11).unwrap());
+        assert_eq!(
+            db.minted_version("f").unwrap(),
+            None,
+            "minted from another size: never trusted"
+        );
     }
 
     #[test]
     fn task_2180_a_listing_with_no_version_records_none_and_an_unknown_file_has_none() {
         let (_dir, db) = db_with("legacy", None);
-        assert!(db.record_minted_version("legacy").unwrap());
+        assert!(db.record_minted_version("legacy", 10).unwrap());
         assert_eq!(db.minted_version("legacy").unwrap(), None);
-        assert!(!db.record_minted_version("absent").unwrap());
+        assert!(!db.record_minted_version("absent", 10).unwrap());
         assert_eq!(db.minted_version("absent").unwrap(), None);
     }
 
