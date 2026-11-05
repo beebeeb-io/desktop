@@ -78,36 +78,71 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Refuse while RELEASE_BLOCKERS.md lists an item
+        shell: bash
+        id: blocker-check
+        run: |
+          set -euo pipefail
+
+          # Delegate parsing and scope logic to the shared checker so both the
+          # workflow (Windows + Linux) and the macOS local script use the same rules.
+          # This workflow builds Windows and Linux, so we check both platforms.
+          # Items prefixed "- [macOS] " are macOS-scoped and are skipped for both.
+          # Exit codes: 0 = no items bind, 1 = items bind, anything else = error.
+
+          run_check() {
+            local platform="$1" rc=0 items=""
+            items="$(bash scripts/release-blockers-check.sh "$platform")" || rc=$?
+            if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+              echo "::error::release-blockers-check.sh exited $rc for platform $platform (expected 0 or 1 — script missing or bad arguments). Refusing the release. See docs/RELEASING.md."
+              exit 1
+            fi
+            printf '%s' "$items"
+          }
+
+          win_items="$(run_check windows)"
+          lin_items="$(run_check linux)"
+
+          # Combine, sort, deduplicate (unscoped items appear for both platforms).
+          all_items="$(printf '%s\n%s\n' "$win_items" "$lin_items" | sort -u | grep -v '^$')" || true
+
+          if [[ -n "$all_items" ]]; then
+            echo "::error file=RELEASE_BLOCKERS.md::RELEASE_BLOCKERS.md lists release blockers binding this platform. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
+            printf '%s\n' "$all_items"
+            exit 1
+          fi
+          echo "RELEASE_BLOCKERS.md lists no item for windows or linux"
+
+          # Determine whether macOS items bind, so the notes validator can switch modes.
+          # rc 1 = macOS items bind (Windows+Linux-only release); rc 0 = macOS included.
+          mac_rc=0
+          bash scripts/release-blockers-check.sh macos >/dev/null || mac_rc=$?
+          if [[ $mac_rc -ne 0 && $mac_rc -ne 1 ]]; then
+            echo "::error::release-blockers-check.sh exited $mac_rc for platform macos (expected 0 or 1). See docs/RELEASING.md."
+            exit 1
+          fi
+          echo "macos_items_bind=$([[ $mac_rc -eq 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Validate authored release notes
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
+          MACOS_ITEMS_BIND: ${{ steps.blocker-check.outputs.macos_items_bind }}
         # Fails closed if RELEASE_NOTES.md is missing, does not name the exact version,
         # or promises automatic delivery to existing installs while the release is
         # published to alpha/beta only (desktop-v0.8.3 did exactly that and sat in
         # alpha for 57 days). On every channel it also requires the macOS line in the
         # Install / Update section and refuses delivery wording not scoped to Windows
-        # (task 2176: a Mac cannot install in-app). Covered by tests/releaseChannelChecks.test.ts.
-        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md
-
-      - name: Refuse while RELEASE_BLOCKERS.md lists an item
-        shell: bash
+        # (task 2176: a Mac cannot install in-app). When macOS items bind at the release
+        # ref (Windows+Linux-only release), --no-macos switches the validator: it no
+        # longer requires the macOS Install line; instead it requires a plain statement
+        # that macOS is not in this release. Covered by tests/releaseChannelChecks.test.ts.
         run: |
-          set -euo pipefail
-
-          blockers_path="RELEASE_BLOCKERS.md"
-          items=""
-          if [[ -f "$blockers_path" ]]; then
-            items="$(grep -nE '^[[:space:]]*[-*][[:space:]]' "$blockers_path" || true)"
-          fi
-
-          if [[ -n "$items" ]]; then
-            echo "::error file=$blockers_path::RELEASE_BLOCKERS.md lists release blockers. No desktop release is cut while it lists an item: resolve each on main, remove it from the file in the same change, then rerun this workflow. See docs/RELEASING.md."
-            printf '%s\n' "$items"
-            exit 1
-          fi
-          echo "RELEASE_BLOCKERS.md lists no item"
+          flags=""
+          [[ "${MACOS_ITEMS_BIND:-false}" == "true" ]] && flags="--no-macos"
+          # shellcheck disable=SC2086
+          node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md $flags
 
   test:
     name: Run release test gate

@@ -7,6 +7,7 @@ import path from 'node:path'
 import {
   checkStableMatchesLatest,
   MAC_INSTALL_LINE,
+  MACOS_NOT_IN_RELEASE_LINE,
   validateReleaseNotes,
 } from '../scripts/release-channel-checks.mjs'
 
@@ -208,5 +209,58 @@ describe('notes CLI (what the release workflow runs)', () => {
       status = (error as { status: number }).status
     }
     expect(status).toBe(1)
+  })
+})
+
+describe('validateReleaseNotes --no-macos (Windows+Linux-only release)', () => {
+  // When macOS items bind at the release ref the notes validator switches mode:
+  // it must NOT require MAC_INSTALL_LINE, and it MUST require MACOS_NOT_IN_RELEASE_LINE.
+
+  const baseNotes = (section: string) =>
+    `# Beebeeb Desktop 0.8.21\n\n### Install / Update\n\n${section}\n`
+
+  test('requires MACOS_NOT_IN_RELEASE_LINE in --no-macos mode', () => {
+    const withLine = baseNotes(
+      `Windows: in-app updater. ${MACOS_NOT_IN_RELEASE_LINE}`,
+    )
+    const withoutLine = baseNotes('Windows: in-app updater.')
+    expect(validateReleaseNotes(withLine, '0.8.21', 'alpha', { noMacos: true })).toEqual([])
+    expect(validateReleaseNotes(withoutLine, '0.8.21', 'alpha', { noMacos: true })).toHaveLength(1)
+  })
+
+  test('does NOT require MAC_INSTALL_LINE in --no-macos mode', () => {
+    // Notes with MACOS_NOT_IN_RELEASE_LINE but without MAC_INSTALL_LINE should pass.
+    const notes = baseNotes(
+      `Windows: in-app updater. ${MACOS_NOT_IN_RELEASE_LINE}`,
+    )
+    expect(validateReleaseNotes(notes, '0.8.21', 'alpha', { noMacos: true })).toEqual([])
+  })
+
+  test('without --no-macos, MAC_INSTALL_LINE is still required', () => {
+    const withMacLine = baseNotes(MAC_INSTALL_LINE)
+    const withoutMacLine = baseNotes('Windows: in-app updater.')
+    expect(validateReleaseNotes(withMacLine, '0.8.21', 'alpha')).toEqual([])
+    expect(validateReleaseNotes(withoutMacLine, '0.8.21', 'alpha')).toHaveLength(1)
+  })
+
+  test('CLI --no-macos flag: exits 0 with MACOS_NOT_IN_RELEASE_LINE, 1 without', () => {
+    function runCli(section: string, flags: string[]) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rcc-test-'))
+      try {
+        const notesFile = path.join(dir, 'RELEASE_NOTES.md')
+        fs.writeFileSync(notesFile, `# Beebeeb Desktop 0.8.21\n\n### Install / Update\n\n${section}\n`)
+        execFileSync('node', ['scripts/release-channel-checks.mjs', 'notes', '0.8.21', 'alpha', notesFile, ...flags], {
+          cwd: repoRoot,
+          stdio: 'pipe',
+        })
+        return 0
+      } catch (error) {
+        return (error as { status: number }).status
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    }
+    expect(runCli(`Windows: in-app updater. ${MACOS_NOT_IN_RELEASE_LINE}`, ['--no-macos'])).toBe(0)
+    expect(runCli('Windows: in-app updater.', ['--no-macos'])).toBe(1)
   })
 })

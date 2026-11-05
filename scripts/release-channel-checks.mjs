@@ -43,6 +43,13 @@ const AUTOMATIC_DELIVERY_CLAIM =
 export const MAC_INSTALL_LINE =
   'On macOS the in-app update cannot install: download the `.dmg` from this release and drag Beebeeb into Applications to replace the installed version.'
 
+// When macOS is not in this release (macOS items in RELEASE_BLOCKERS.md bind at the
+// release ref), the Install / Update section must carry this line instead of MAC_INSTALL_LINE
+// to tell Mac users what is happening. The macOS build follows in a later version; it
+// does NOT get a re-cut of this one.
+export const MACOS_NOT_IN_RELEASE_LINE =
+  'macOS: not in this release; it follows in a later version.'
+
 // A sentence about delivering the release to existing installs (hyphen variants included).
 const DELIVERY_WORDS = /\b(?:in[-\u2010\u2011 ]?app|(?:auto[-\u2010\u2011 ]?)?updat(?:e|er|es|ed|ing)|automatically)\b/i
 
@@ -72,7 +79,19 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-export function validateReleaseNotes(notes, version, channel) {
+/**
+ * Validate RELEASE_NOTES.md content.
+ *
+ * @param {string} notes - File content.
+ * @param {string} version - Semver like "0.8.21".
+ * @param {string} channel - "alpha", "beta", or "stable".
+ * @param {{ noMacos?: boolean }} [options]
+ *   noMacos: true when macOS items bind at the release ref (Windows+Linux-only release).
+ *     Skips the MAC_INSTALL_LINE check and instead requires MACOS_NOT_IN_RELEASE_LINE.
+ * @returns {string[]} List of error messages; empty on success.
+ */
+export function validateReleaseNotes(notes, version, channel, options = {}) {
+  const { noMacos = false } = options
   const errors = []
 
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
@@ -105,6 +124,15 @@ export function validateReleaseNotes(notes, version, channel) {
     errors.push(
       'RELEASE_NOTES.md has no "### Install / Update" section. Use the template in docs/RELEASING.md (task 2176: it carries the macOS line).',
     )
+  } else if (noMacos) {
+    // Windows+Linux-only release: macOS is not in this version.
+    // Require the "not in this release" statement; MAC_INSTALL_LINE is not expected.
+    const notInReleaseLine = collapse(MACOS_NOT_IN_RELEASE_LINE)
+    if (!collapse(section).includes(notInReleaseLine)) {
+      errors.push(
+        `RELEASE_NOTES.md's Install / Update section must state that macOS is not in this release, word for word: "${MACOS_NOT_IN_RELEASE_LINE}" macOS items in RELEASE_BLOCKERS.md bind at this ref; macOS follows in a later version. See docs/RELEASING.md.`,
+      )
+    }
   } else {
     const macLine = collapse(MAC_INSTALL_LINE)
     if (!collapse(section).includes(macLine)) {
@@ -158,9 +186,20 @@ async function main(argv) {
   const [command, ...rest] = argv
 
   if (command === 'notes') {
-    const [version, channel, notesPath = 'RELEASE_NOTES.md'] = rest
+    // Parse flags: --no-macos (Windows+Linux-only release; macOS follows in a later version).
+    const flags = rest.filter((a) => a.startsWith('--'))
+    const positional = rest.filter((a) => !a.startsWith('--'))
+    const noMacos = flags.includes('--no-macos')
+    const unknownFlags = flags.filter((f) => f !== '--no-macos')
+    if (unknownFlags.length > 0) {
+      console.error(`unknown flag(s): ${unknownFlags.join(' ')}`)
+      console.error('usage: release-channel-checks.mjs notes <version> <channel> [notes-path] [--no-macos]')
+      return 2
+    }
+
+    const [version, channel, notesPath = 'RELEASE_NOTES.md'] = positional
     if (!version || !channel) {
-      console.error('usage: release-channel-checks.mjs notes <version> <channel> [notes-path]')
+      console.error('usage: release-channel-checks.mjs notes <version> <channel> [notes-path] [--no-macos]')
       return 2
     }
     if (!fs.existsSync(notesPath)) {
@@ -169,9 +208,9 @@ async function main(argv) {
       )
       return 1
     }
-    const errors = validateReleaseNotes(fs.readFileSync(notesPath, 'utf8'), version, channel)
+    const errors = validateReleaseNotes(fs.readFileSync(notesPath, 'utf8'), version, channel, { noMacos })
     for (const error of errors) console.error(`::error file=${notesPath}::${error}`)
-    if (errors.length === 0) console.log(`release notes OK: ${version} on ${channel}`)
+    if (errors.length === 0) console.log(`release notes OK: ${version} on ${channel}${noMacos ? ' (windows+linux only, macOS follows)' : ''}`)
     return errors.length === 0 ? 0 : 1
   }
 

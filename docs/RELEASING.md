@@ -4,7 +4,7 @@ Desktop releases ship with authored, workbench-style release notes. The generate
 
 ## Release blockers
 
-`RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: `release.yml` fails closed in its "Validate release notes" job (step "Refuse while RELEASE_BLOCKERS.md lists an item", with an `::error` that names the file), and `scripts/release-macos-local.sh` stops at step 1 and prints the items. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. `scripts/test-release-macos-local.sh` has a scenario that proves the script refuses.
+`RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: `release.yml` fails closed in its "Validate release notes" job (step "Refuse while RELEASE_BLOCKERS.md lists an item", with an `::error` that names the file), and `scripts/release-macos-local.sh` stops at step 1 and prints the items. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. `scripts/test-release-macos-local.sh` has a scenario that proves the script refuses. An item prefixed `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows and Linux release workflow; `scripts/release-blockers-check.sh` implements the scope logic, and `scripts/test-release-blockers-check.sh` covers it.
 
 **Amended 2026-10-24:** that first item was removed for desktop 0.8.12 on a maintainer waiver after 1 of the 12 sign-out device checks had run and passed (spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`, §13.4 and §14). It goes back into the file after 0.8.12, so later releases stay gated until the other 11 pass.
 
@@ -64,6 +64,18 @@ tested in `tests/releaseChannelChecks.test.ts`):
     offer a download on stable and the release page on alpha/beta (`src/macUpdateOffer.ts`).
   - Any other sentence in that section about updating, the updater or automatic delivery must name Windows and
     must not name macOS. A Linux-scoped sentence fails on purpose, until in-app delivery on Linux is verified.
+- **Windows + Linux only release (when `[macOS]` blockers bind).** When `RELEASE_BLOCKERS.md`
+  lists one or more `[macOS]`-scoped items at the release ref, the version is a Windows + Linux
+  release; macOS follows as a later separate version and is never re-cut from the same tag.
+  In that case the notes validator does **not** require the macOS Install line. Instead it requires
+  the line:
+
+  > macOS: not in this release; it follows in a later version.
+
+  (`MACOS_NOT_IN_RELEASE_LINE` in `scripts/release-channel-checks.mjs`.) The `release.yml`
+  workflow detects the binding `[macOS]` items automatically and passes `--no-macos` to the
+  validator; `scripts/test-release-blockers-check.sh` and `tests/releaseChannelChecks.test.ts`
+  cover both branches.
 
 Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must

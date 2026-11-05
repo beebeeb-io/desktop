@@ -268,7 +268,24 @@ jobs:
             scripts/release-macos-local.sh \
             scripts/test-release-macos-local.sh \
             scripts/fixtures/release-macos-shim.sh \
-            scripts/macos-release-preflight.sh
+            scripts/macos-release-preflight.sh \
+            scripts/release-blockers-check.sh \
+            scripts/test-release-blockers-check.sh
+
+      - name: Release blockers checker self-test
+        run: bash scripts/test-release-blockers-check.sh --self-test
+
+      - name: Release blockers checker test (real checker)
+        run: |
+          set -o pipefail
+          bash scripts/test-release-blockers-check.sh 2>&1 | tee "$RUNNER_TEMP/blocker-check-test.log"
+
+      - name: Upload release blockers checker test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: blocker-check-test
+          path: ${{ runner.temp }}/blocker-check-test.log
 
       - name: Count guard self-test
         run: bash scripts/test-release-macos-local.sh --self-test
