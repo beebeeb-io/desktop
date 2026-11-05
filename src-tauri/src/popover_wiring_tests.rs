@@ -3,7 +3,7 @@
         // Structural, like the other wiring tests here: `run()` needs a real window system, so
         // the registration is asserted on the source. An unmanaged `PopoverRuntime` would make
         // the command (and the runner's progress board) fail at run time, not at compile time.
-        let full = include_str!("lib.rs").replace("\r\n", "\n");
+        let full = crate::root_source::lib_rs().replace("\r\n", "\n");
         // Everything before this test module: the mock-app helpers below also call `manage`.
         let source = &full[..full.find("mod popover_snapshot_command_tests;").unwrap()];
         assert_eq!(

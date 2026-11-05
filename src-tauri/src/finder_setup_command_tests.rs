@@ -46,7 +46,7 @@
     #[test]
     fn the_launch_trigger_follows_the_startup_restore() {
         // §5.3 (1): the launch check runs once the restore finished, so it sees the restored keys.
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let restore = source
             .find("restore_session_on_startup(&h).await;\n")
             .expect("the restore task");
@@ -264,7 +264,7 @@
 
     #[test]
     fn no_macos_compiled_path_calls_the_install_era_commands_and_the_macos_variants_exist() {
-        let mac = macos_compiled(&include_str!("lib.rs").replace("\r\n", "\n"));
+        let mac = macos_compiled(&crate::root_source::lib_rs().replace("\r\n", "\n"));
         for name in [
             "install_finder_location",
             "continue_without_finder_location",
@@ -296,7 +296,7 @@
 
     #[test]
     fn nothing_a_mac_compiles_writes_the_old_finder_install_keys() {
-        let mac = macos_compiled(&include_str!("lib.rs").replace("\r\n", "\n"));
+        let mac = macos_compiled(&crate::root_source::lib_rs().replace("\r\n", "\n"));
         for key in [
             "finder_install_status",
             "finder_install_last_error",
@@ -603,7 +603,7 @@
     /// the scanners name a file. Inline, these modules were `#[cfg(test)]` items of `lib.rs` that a
     /// scanner left out; as files of their own they are left out the same way.
     pub(super) fn test_module_files(src: &std::path::Path) -> std::collections::HashSet<String> {
-        let lib = std::fs::read_to_string(src.join("lib.rs")).expect("read lib.rs").replace("\r\n", "\n");
+        let lib = crate::root_source::lib_rs().replace("\r\n", "\n");
         let lines: Vec<&str> = lib.lines().collect();
         let mut files = std::collections::HashSet::new();
         for (at, line) in lines.iter().enumerate() {
@@ -636,7 +636,7 @@
         files
     }
 
-    /// `lib` with the moved test modules' files after it: what `include_str!("lib.rs")` read
+    /// `lib` with the moved test modules' files after it: what `crate::root_source::lib_rs()` read
     /// before the split, when those modules were inline (spec §4.8).
     pub(super) fn with_test_modules(lib: &str) -> String {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -756,7 +756,7 @@ fn after() {}
     /// `lib.rs` without its test modules, for the tests that read production code.
     pub(super) fn production_source() -> String {
         without_items(
-            &include_str!("lib.rs").replace("\r\n", "\n"),
+            &crate::root_source::lib_rs().replace("\r\n", "\n"),
             &["#[cfg(test)]", "#[cfg(all(test"],
         )
     }

@@ -33,7 +33,7 @@
     /// once the other polls stopped while their windows were hidden.
     #[test]
     fn task_2243_the_session_poll_reads_no_file() {
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let at = source.find("async fn sync_status(").expect("sync_status exists");
         let body = crate::source_pin::squeeze(&source[at..at + source[at..].find("\n}\n").unwrap()]);
         let early = body

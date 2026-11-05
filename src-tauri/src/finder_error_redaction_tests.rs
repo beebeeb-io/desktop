@@ -4,7 +4,7 @@
     const PATH_MESSAGE: &str = "The folder \u{201c}/Users/sam/Secret Folder\u{201d} already exists.";
 
     fn shim_body(signature: &str) -> String {
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let marker = format!("#[cfg(target_os = \"macos\")]\n{signature} {{\n");
         let start = source.find(&marker).unwrap_or_else(|| panic!("{signature} exists")) + marker.len();
         let end = start + source[start..].find("\n}\n").expect("the shim ends");
@@ -68,7 +68,7 @@
         for body in [&open, &reveal] {
             assert!(!body.contains("to_string"), "builds text from Display: {body}");
         }
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         assert!(
             !source.contains("#[cfg(target_os = \"macos\")]\nfn remove_file_provider_domain()"),
             "a Mac has no direct removal: the reconciler owns it"

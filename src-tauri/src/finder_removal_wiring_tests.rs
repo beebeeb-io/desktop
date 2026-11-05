@@ -1,7 +1,7 @@
     use super::MacosIntegrationResetResult;
 
     fn source() -> String {
-        include_str!("lib.rs").replace("\r\n", "\n")
+        crate::root_source::lib_rs().replace("\r\n", "\n")
     }
 
     /// The text of the item starting at `start`, up to the next line that is exactly `}`.

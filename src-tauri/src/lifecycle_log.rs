@@ -440,7 +440,7 @@ mod tests {
             !module.contains("Layer") && !module.contains("MakeWriter"),
             "the lifecycle log must not be a tracing sink"
         );
-        let lib = include_str!("lib.rs");
+        let lib = crate::root_source::lib_rs();
         let init = &lib[lib.find("pub fn run() {").expect("run()")..];
         let init = &init[..init.find(".try_init()").expect("tracing init")];
         assert!(!init.contains("lifecycle"), "{init}");

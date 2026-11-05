@@ -492,3 +492,6 @@ mod task_2243_poll_cost_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod task_2190_kept_copies_tests;
+
+#[cfg(test)]
+mod root_source;

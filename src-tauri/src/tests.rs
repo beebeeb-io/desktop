@@ -707,7 +707,7 @@
     fn install_finder_location_source() -> String {
         // Windows checkouts can carry CRLF line endings (CI run 36772299380 failed on exactly
         // that): normalise, so the multi-line shape check below is about code, not about EOLs.
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let start = source
             .find("async fn install_finder_location(")
             .expect("install_finder_location exists");
@@ -1799,7 +1799,7 @@
     /// hook builds the windows, so its `on_webview_ready` sees every webview.
     #[test]
     fn the_browser_keys_plugin_is_registered_before_any_window_is_built() {
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let source = crate::root_source::lib_rs().replace("\r\n", "\n");
         let run = &source[source.find("\npub fn run() {").expect("run()")..];
         let plugin = run.find(".plugin(webview_browser_keys::plugin())").expect("registered");
         let setup = run.find(".setup(|app|").expect("run() has a setup hook");
