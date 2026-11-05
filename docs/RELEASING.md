@@ -8,6 +8,8 @@ Desktop releases ship with authored, workbench-style release notes. The generate
 
 **Amended 2026-10-24:** that first item was removed for desktop 0.8.12 on a maintainer waiver after 1 of the 12 sign-out device checks had run and passed (spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`, §13.4 and §14). It goes back into the file after 0.8.12, so later releases stay gated until the other 11 pass.
 
+**Amended 2026-11-05:** the unscoped shared-folders item (2237d, Task 13's signed Finder/Explorer device rung) was moved out of this file before desktop 0.8.21. Guus ruled that it gates turning `shared_folders_v1` on for everyone (step 6 of `docs/superpowers/plans/2026-10-29-2237-flip-sequence-and-device-rungs.md` in the workspace), not a desktop release. The rung runs on released builds against production once the flag is on for the founders only (step 5), so it cannot also gate the release those builds come from. 0.8.21 ships with the flag off: on 2026-11-05 production's `shared_folders_v1` was disabled with 0 rules.
+
 ## Release Notes Template
 
 Create `RELEASE_NOTES.md` at the repository root for the exact plain semver version being released. Do not keep a reusable placeholder in the repo root; stale notes should make the release workflow fail.
