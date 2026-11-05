@@ -485,6 +485,7 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     );
     // A poisoned file refuses every fetch until it is emptied (I5) is the fetch callback's first check;
     // the emptied ones fetch again: a read of the partial file asks for bytes once more.
+    S6_POISONED.store(false, std::sync::atomic::Ordering::SeqCst); // the poison is cleared: production serves again
     let mut one = [0u8; 1];
     let reread = std::fs::File::open(qa.path("partial.bin")).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
     assert!(reread.is_ok(), "an emptied placeholder fetches again: {reread:?}");
