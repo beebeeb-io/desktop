@@ -327,7 +327,7 @@ fn rank_name(name: &str, query: &str) -> u8 {
 fn leaf_name(path: &str) -> String {
     let trimmed = path.trim_matches(|c| c == '/' || c == '\\');
     trimmed
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(trimmed)
         .to_string()

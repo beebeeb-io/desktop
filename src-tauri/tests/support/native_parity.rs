@@ -370,8 +370,8 @@ impl State {
             if self.upload.is_none() {
                 return Ok(Response::json(404, json!({"error":"no upload session"})));
             }
-            if method == "PUT" {
-                if let Some(index) = path.strip_prefix("/api/v1/uploads/fixture-upload/chunks/") {
+            if method == "PUT"
+                && let Some(index) = path.strip_prefix("/api/v1/uploads/fixture-upload/chunks/") {
                     let index: usize = index.parse()?;
                     if index == 1 && self.counts.faults == 0 {
                         self.counts.faults += 1;
@@ -402,7 +402,6 @@ impl State {
                         json!({"index":index,"size":body.len(),"skipped":skipped}),
                     ));
                 }
-            }
             if method == "POST" && path == "/api/v1/uploads/fixture-upload/complete" {
                 if self.upload.as_ref().unwrap().len() != self.objects[9].chunk_count(self.chunk_size) {
                     return Ok(Response::json(409, json!({"error":"missing chunks"})));

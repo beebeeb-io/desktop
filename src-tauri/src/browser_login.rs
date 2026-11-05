@@ -580,8 +580,8 @@ mod tests {
     async fn device_code_recv_returns_promptly_on_healthy_connection() {
         let mut ws = HealthyStream {
             frames: vec![
-                Message::Ping(vec![].into()),
-                Message::Pong(vec![].into()),
+                Message::Ping(vec![]),
+                Message::Pong(vec![]),
                 Message::Text(r#"{"user_code":"ABCD-1234","verification_uri":"https://beebeeb.io/cli","expires_in":300}"#.into()),
             ],
         };

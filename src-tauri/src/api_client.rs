@@ -417,12 +417,11 @@ impl ApiClient {
                 encode(variant)
             )
         };
-        if variant == "medium" {
-            if let Some(blurhash) = blurhash.filter(|value| !value.is_empty()) {
+        if variant == "medium"
+            && let Some(blurhash) = blurhash.filter(|value| !value.is_empty()) {
                 url.push_str("?blurhash=");
                 url.push_str(&encode(blurhash));
             }
-        }
         url
     }
 
@@ -650,7 +649,7 @@ impl ApiClient {
     pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
         let resp = self
             .client
-            .get(&self.chunk_url(file_id, chunk_idx))
+            .get(self.chunk_url(file_id, chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
@@ -709,7 +708,7 @@ impl ApiClient {
     /// `EncryptedBlob` JSON layout for parity).
     pub async fn upload_chunk(&self, file_id: &str, chunk_idx: u32, data: &[u8]) -> anyhow::Result<()> {
         self.client
-            .put(&self.chunk_url(file_id, chunk_idx))
+            .put(self.chunk_url(file_id, chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/octet-stream")
             .body(data.to_vec())

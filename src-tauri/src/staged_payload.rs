@@ -47,11 +47,10 @@ impl Drop for StagedPayload {
         // Never discard the only unsynced copy if the original disappeared or
         // changed during the upload. Its journal blocks sign-out for recovery.
         let duplicate = same_bytes(Path::new(&self.path), &self.source).unwrap_or(false);
-        if !Path::new(&self.path).exists() || duplicate {
-            if let Err(error) = remove(&self.db, Path::new(&self.path)) {
+        if (!Path::new(&self.path).exists() || duplicate)
+            && let Err(error) = remove(&self.db, Path::new(&self.path)) {
                 tracing::warn!(%error, "staged payload cleanup deferred; journal retained");
             }
-        }
     }
 }
 pub fn remove(db: &StateDb, path: &Path) -> anyhow::Result<()> {

@@ -205,7 +205,7 @@ fn file_attr(ino: u64, entry: &FileEntry) -> fuser::FileAttr {
     fuser::FileAttr {
         ino,
         size,
-        blocks: (size + 511) / 512,
+        blocks: size.div_ceil(512),
         atime: UNIX_EPOCH,
         mtime: UNIX_EPOCH + Duration::from_secs(modified_at),
         ctime: UNIX_EPOCH,

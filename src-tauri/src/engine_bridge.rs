@@ -1297,11 +1297,10 @@ impl EngineBridge {
         for cache in removed {
             removed_shared_file_ids.push(cache.file_id);
             if let Some(path) = cache.cache_path {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(path = %path, error = %e, "failed to remove revoked shared cache file");
                     }
-                }
                 removed_cache_paths.push(path);
             }
         }
@@ -4512,13 +4511,11 @@ fn shared_name_from_metadata(
     item_kind: &ItemKind,
     file_key: Option<&beebeeb_core::kdf::FileKey>,
 ) -> String {
-    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str()) {
-        if let Some(name) = decrypt_shared_name_with_key(key, name_encrypted) {
-            if let Some(leaf) = safe_shared_leaf_name(&name) {
+    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str())
+        && let Some(name) = decrypt_shared_name_with_key(key, name_encrypted)
+            && let Some(leaf) = safe_shared_leaf_name(&name) {
                 return leaf;
             }
-        }
-    }
 
     shared_placeholder_name(item_kind).to_string()
 }
@@ -5048,11 +5045,9 @@ fn apply_snapshot(
 
         if let Some((rel_path, _kind)) =
             process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
-        {
-            if !rel_path.is_empty() {
+            && !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
-        }
     }
 
     // Deletion reconciliation: anything in the local own-tree the snapshot did
@@ -5147,11 +5142,10 @@ fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_json::Value> 
     }
     // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
     for n in nodes {
-        if let Some(id) = n["id"].as_str() {
-            if emitted.insert(id) {
+        if let Some(id) = n["id"].as_str()
+            && emitted.insert(id) {
                 ordered.push(n);
             }
-        }
     }
     ordered
 }
@@ -6259,7 +6253,7 @@ mod tests {
 
     /// A range request that happens to cover the WHOLE file (offset 0, length
     /// >= size) — this is the `covers_whole_file` branch, which mirrors
-    /// `hydrate_file_to_memory`'s bookkeeping: mark `Local` + `mark_cached`.
+    /// > `hydrate_file_to_memory`'s bookkeeping: mark `Local` + `mark_cached`.
     #[test]
     fn hydrate_file_range_covering_whole_file_marks_local() {
         let dir = tempfile::tempdir().unwrap();
