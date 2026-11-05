@@ -259,6 +259,11 @@ fn ld0105_s0_native_a_90_s_fetch_kept_alive_by_progress_reports_completes() {
         );
     }
     let bytes = read.unwrap_or_else(|e| panic!("the open failed after {took:?}: {e} (0x800701AA = request timeout)"));
+    // The discriminating count (measured 2026-11-05): under PROGRESSIVE a silent fetch that times out at
+    // 60 s no longer fails the open; Windows issues a SECOND fetch instead, which in the app is a second
+    // whole-file download (LD-0105 H7). With the reports there is exactly one.
+    let fetches = S0_IMAGES.lock().unwrap().len();
+    assert_eq!(fetches, 1, "one fetch for one open; {fetches} means the 60 s timer fired");
     assert_eq!(bytes, content(size as usize), "the right bytes");
     assert!(
         took >= Duration::from_secs(85),
