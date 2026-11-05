@@ -38,16 +38,18 @@ impl QaRoot {
     }
 
     fn connect(&mut self, fetch: unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CALLBACK_PARAMETERS)) {
-        let table = [
-            CF_CALLBACK_REGISTRATION {
-                Type: CF_CALLBACK_TYPE_FETCH_DATA,
-                Callback: Some(fetch),
-            },
-            CF_CALLBACK_REGISTRATION {
-                Type: CF_CALLBACK_TYPE_NONE,
-                Callback: None,
-            },
-        ];
+        self.connect_table(&[CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_FETCH_DATA,
+            Callback: Some(fetch),
+        }]);
+    }
+
+    fn connect_table(&mut self, entries: &[CF_CALLBACK_REGISTRATION]) {
+        let mut table = entries.to_vec();
+        table.push(CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NONE,
+            Callback: None,
+        });
         let wide: Vec<u16> = self.root.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: the path and the table outlive the call; the callback is a static function.
         let key = unsafe {
@@ -385,6 +387,30 @@ unsafe extern "system" fn s6_fetch(info: *const CF_CALLBACK_INFO, params: *const
     unsafe { fail_transfer(r.connection, r.transfer, r.request, r.offset, r.length) };
 }
 
+
+// TEMPORARY (desktop PR 224 diagnostic): who opens and closes the S6 files, and when.
+unsafe fn s6_who(info: *const CF_CALLBACK_INFO, what: &str) {
+    if info.is_null() {
+        return;
+    }
+    let info = unsafe { &*info };
+    let (pid, image) = if info.ProcessInfo.is_null() {
+        (0, String::new())
+    } else {
+        let p = unsafe { &*info.ProcessInfo };
+        (p.ProcessId, unsafe { p.ImagePath.to_string() }.unwrap_or_default())
+    };
+    let path = unsafe { info.NormalizedPath.to_string() }.unwrap_or_default();
+    let name = path.rsplit('\\').next().unwrap_or("").to_string();
+    crate::windows_cf::poison::diag!("notify {what} {name} pid={pid} image={image}");
+}
+unsafe extern "system" fn s6_open(info: *const CF_CALLBACK_INFO, _p: *const CF_CALLBACK_PARAMETERS) {
+    unsafe { s6_who(info, "OPEN") }
+}
+unsafe extern "system" fn s6_close(info: *const CF_CALLBACK_INFO, _p: *const CF_CALLBACK_PARAMETERS) {
+    unsafe { s6_who(info, "CLOSE") }
+}
+
 // ── S6: the empty step, against hand-poisoned placeholders ───────────────────────────────────────
 
 fn qa_db(dir: &Path, rows: &[(&str, &str)]) -> crate::state_db::StateDb {
@@ -418,7 +444,22 @@ fn poison(db: &crate::state_db::StateDb, qa: &QaRoot, id: &str, name: &str) {
 fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_measured_order() {
     use crate::windows_cf::poison::{Emptied, empty_poisoned, sweep_poisoned};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
-    qa.connect(s6_fetch); // this process is the connected provider: only it may set IN_SYNC
+    // this process is the connected provider: only it may set IN_SYNC
+    qa.connect_table(&[
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_FETCH_DATA,
+            Callback: Some(s6_fetch),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+            Callback: Some(s6_open),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
+            Callback: Some(s6_close),
+        },
+    ]);
+    crate::windows_cf::poison::diag!("s6 connected");
     let names = mint_five(&qa);
     assert_eq!(names.len(), 5);
     S6_POISONED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -464,7 +505,20 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     // (d) the app restarted while poisoned: a new database handle, and the sweep that runs at start.
     let db = crate::state_db::StateDb::open(db_path.join("state.db")).unwrap();
     assert_eq!(db.poisoned().unwrap().len(), 3, "the poisons outlived the restart");
+    crate::windows_cf::poison::diag!("sweep starts");
     let outcomes = sweep_poisoned(&db, &qa.root);
+    crate::windows_cf::poison::diag!("sweep ends");
+    std::thread::sleep(Duration::from_millis(500));
+    for line in crate::windows_cf::poison::DIAG.lock().unwrap().iter() {
+        println!("ld0105-s6-diag: {line}");
+    }
+    let mp = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-MpComputerStatus | Select-Object AMRunningMode,RealTimeProtectionEnabled,OnAccessProtectionEnabled,IoavProtectionEnabled | Format-List; 'exclusions:'; (Get-MpPreference).ExclusionPath; 'search:'; (Get-Service WSearch -ErrorAction SilentlyContinue).Status"])
+        .output();
+    match mp {
+        Ok(o) => println!("ld0105-s6-diag: defender {}", String::from_utf8_lossy(&o.stdout)),
+        Err(e) => println!("ld0105-s6-diag: defender query failed {e}"),
+    }
     println!("ld0105-s6-native: sweep outcomes {outcomes:?}");
     let emptied = outcomes.iter().filter(|(_, o)| *o == Emptied::Emptied).count();
     let pinned_after = census_of(&qa.path("local-pinned.bin"));

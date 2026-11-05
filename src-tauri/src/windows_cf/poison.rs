@@ -29,6 +29,52 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::CloudFilters::*;
 use windows::core::{HRESULT, PCWSTR};
 
+// TEMPORARY (desktop PR 224 diagnostic for the windows-latest red; removed by the fix commit).
+#[cfg(test)]
+pub(crate) static DIAG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn diag_push(line: String) {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let t = T0.get_or_init(std::time::Instant::now).elapsed();
+    DIAG.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(format!("{:10.3}ms {:?} {line}", t.as_secs_f64() * 1e3, std::thread::current().id()));
+}
+macro_rules! diag {
+    ($($a:tt)*) => {{
+        #[cfg(test)]
+        $crate::windows_cf::poison::diag_push(format!($($a)*));
+    }};
+}
+pub(crate) use diag;
+fn rc(r: &windows::core::Result<()>) -> String {
+    match r {
+        Ok(()) => "ok".into(),
+        Err(e) => format!("{:#010x}", e.code().0 as u32),
+    }
+}
+/// Whether the protected handle is still valid (an oplock break invalidates it).
+unsafe fn alive(handle: HANDLE) -> bool {
+    let ok = unsafe { CfReferenceProtectedHandle(handle) }.as_bool();
+    if ok {
+        unsafe { CfReleaseProtectedHandle(handle) };
+    }
+    ok
+}
+fn info_diag(handle: HANDLE) -> String {
+    let mut buffer = vec![0u64; 512];
+    let r = unsafe {
+        CfGetPlaceholderInfo(handle, CF_PLACEHOLDER_INFO_STANDARD, buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None)
+    };
+    match r {
+        Ok(()) => {
+            let i = unsafe { &*(buffer.as_ptr() as *const CF_PLACEHOLDER_STANDARD_INFO) };
+            format!("info ok ondisk={} validated={} modified={} pin={} insync={}", i.OnDiskDataSize, i.ValidatedDataSize, i.ModifiedDataSize, i.PinState.0, i.InSyncState.0)
+        }
+        Err(e) => format!("info err {:#010x}", e.code().0 as u32),
+    }
+}
+
 /// What the empty step did with one placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Emptied {
@@ -130,21 +176,30 @@ pub(crate) fn empty_poisoned(path: &Path, recorded: Option<(i64, i64)>) -> Empti
             CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
         )
     } {
-        Ok(handle) => handle,
+        Ok(handle) => {
+            diag!("{} open ok", path.display());
+            handle
+        }
         Err(e) if e.code() == SHARING_VIOLATION => return Emptied::Busy,
         Err(e) if e.code() == NOT_A_CLOUD_FILE => return Emptied::Gone,
         Err(e) if [FILE_NOT_FOUND, PATH_NOT_FOUND].contains(&e.code()) => return Emptied::Missing,
-        Err(_) => return Emptied::Failed("open"),
+        Err(e) => {
+            diag!("{} open err {:#010x}", path.display(), e.code().0 as u32);
+            return Emptied::Failed("open");
+        }
     };
     // SAFETY: `handle` is the protected handle opened above; it is closed exactly once, below.
     let outcome = unsafe { empty_under(handle, recorded) };
+    diag!("{} outcome {outcome:?}, alive before close {}", path.display(), unsafe { alive(handle) });
     // SAFETY: as above.
     unsafe { CfCloseHandle(handle) };
     if matches!(outcome, Emptied::Failed(_)) {
         // Step 6 restored NOT_IN_SYNC through the handle; when that call itself failed, nothing else
         // would ever mark a partial file not in sync again, so it is marked once more by path (I6).
-        let _ = super::placeholders::mark_not_in_sync_path(path);
+        let r = super::placeholders::mark_not_in_sync_path(path);
+        diag!("{} by-path NOT_IN_SYNC {:?}", path.display(), r.map_err(|e| e.to_string()));
     }
+    diag!("{} by-path view after close {:?}", path.display(), super::placeholders::platform_view(path));
     outcome
 }
 
@@ -155,6 +210,7 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>) -> Emptied {
     // 2. Nothing written since the poison.
     // SAFETY: `handle` is open (the caller's contract).
     let win32 = unsafe { CfGetWin32HandleFromProtectedHandle(handle) };
+    diag!("stamp recorded {recorded:?} now {:?} alive {}", stamp_of_handle(win32), unsafe { alive(handle) });
     match (recorded, stamp_of_handle(win32)) {
         (Some(recorded), Some(now)) if recorded == now => {}
         _ => return Emptied::Changed,
@@ -163,31 +219,41 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>) -> Emptied {
         return Emptied::Failed("info");
     };
     // On any failure from here: NOT_IN_SYNC, then the pin, before the handle is released (step 6).
+    diag!("pre {} alive {}", info_diag(handle), unsafe { alive(handle) });
     let restore = |reason: &'static str| {
+        diag!("restore for {reason}: alive {}", unsafe { alive(handle) });
         // SAFETY: `handle` is still open; both calls only set state on it.
         unsafe {
-            let _ = CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None);
-            let _ = CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None);
+            let a = CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None);
+            let b = CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None);
+            diag!("restore NOT_IN_SYNC {} pin {}", rc(&a), rc(&b));
         }
         Emptied::Failed(reason)
     };
     // 3. The pin, recorded above, set to unspecified.
     if pin != CF_PIN_STATE_UNSPECIFIED {
         // SAFETY: `handle` is open.
-        if unsafe { CfSetPinState(handle, CF_PIN_STATE_UNSPECIFIED, CF_SET_PIN_FLAG_NONE, None) }.is_err() {
+        let r = unsafe { CfSetPinState(handle, CF_PIN_STATE_UNSPECIFIED, CF_SET_PIN_FLAG_NONE, None) };
+        diag!("unpin {} alive {}", rc(&r), unsafe { alive(handle) });
+        if r.is_err() {
             return restore("unpin");
         }
     }
     // 4. IN_SYNC: only the connected provider may.
     // SAFETY: `handle` is open.
-    if unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) }.is_err() {
+    let r = unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) };
+    diag!("in_sync {} alive {}", rc(&r), unsafe { alive(handle) });
+    if r.is_err() {
         return restore("in_sync");
     }
     // 5. Dehydrate the whole file, then check that nothing is left on disk.
     // SAFETY: `handle` is open; offset 0, length -1 is the whole file.
-    if unsafe { CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None) }.is_err() {
+    let r = unsafe { CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None) };
+    diag!("dehydrate {} alive {}", rc(&r), unsafe { alive(handle) });
+    if r.is_err() {
         return restore("dehydrate");
     }
+    diag!("verify {} alive {}", info_diag(handle), unsafe { alive(handle) });
     match standard_info(handle) {
         Some((_, 0)) => {}
         _ => return restore("still_on_disk"),
@@ -195,7 +261,8 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>) -> Emptied {
     // 7. The pin as it was.
     if pin != CF_PIN_STATE_UNSPECIFIED {
         // SAFETY: `handle` is open.
-        let _ = unsafe { CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None) };
+        let r = unsafe { CfSetPinState(handle, pin, CF_SET_PIN_FLAG_NONE, None) };
+        diag!("re-pin {}", rc(&r));
     }
     Emptied::Emptied
 }
