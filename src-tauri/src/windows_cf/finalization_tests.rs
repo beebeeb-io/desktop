@@ -839,8 +839,35 @@ fn walk(path: &Path, into: &mut Vec<PathBuf>) {
 
 /// Write `descriptor` (as [`dacl`] read it) back as `path`'s DACL. `SetFileSecurityW` sets this one object's
 /// descriptor and propagates nothing to what a folder holds.
+///
+/// LD-0066: `SetFileSecurityW` keeps `SE_DACL_AUTO_INHERITED` only when the descriptor written also carries
+/// `SE_DACL_AUTO_INHERIT_REQ`, and a read does not return that bit. Under a temp folder whose DACL is auto-inherited
+/// (a Windows 11 user profile, the Legion: the file read control 0x8404) the DACL came back with the same ACEs under
+/// control 0x8004, so I1 failed on the harness's own write. A file whose descriptor has no auto-inherited bit to lose
+/// (as the GitHub runner's evidently has) came back byte for byte. So an auto-inherited descriptor is written from a
+/// copy with the request bit raised, which writes it back byte for byte on both (the native probe of LD-0066).
 fn set_dacl(path: &Path, descriptor: &[u8]) -> Result<(), String> {
-    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW};
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
+        SetFileSecurityW, SetSecurityDescriptorControl,
+    };
+    let mut descriptor = descriptor.to_vec();
+    let control = descriptor
+        .get(2..4)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .ok_or("a descriptor too short for its control word")?;
+    if control & SE_DACL_AUTO_INHERITED.0 != 0 {
+        // SAFETY: `descriptor` is a self-relative security descriptor this function owns; it outlives the call, which
+        // writes only its control word.
+        unsafe {
+            SetSecurityDescriptorControl(
+                PSECURITY_DESCRIPTOR(descriptor.as_mut_ptr().cast()),
+                SE_DACL_AUTO_INHERIT_REQ,
+                SE_DACL_AUTO_INHERIT_REQ,
+            )
+        }
+        .map_err(|error| format!("{:?}", error.code()))?;
+    }
     let wide = wide(path);
     // SAFETY: `wide` is NUL-terminated and `descriptor` is a self-relative security descriptor; both outlive the call,
     // which only reads them.
