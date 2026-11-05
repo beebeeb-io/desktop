@@ -270,18 +270,13 @@ fn ld0105_w1_native_the_upgrade_from_partial_to_progressive_keeps_every_placehol
         crate::windows_cf::hydration_policy_of(&qa.root).unwrap().0,
         CF_HYDRATION_POLICY_PARTIAL.0
     );
-    let kinds: Vec<(OnDisk, bool)> = before.iter().map(|(_, d, _, p)| (*d, *p)).collect();
-    assert_eq!(
-        kinds,
-        vec![
-            (OnDisk::Nothing, false),
-            (OnDisk::Nothing, true),
-            (OnDisk::Partly, false),
-            (OnDisk::Wholly, false),
-            (OnDisk::Wholly, true)
-        ],
-        "the five kinds are there before the upgrade"
-    );
+    // Every on-disk state and both pin states are there before the upgrade. (Measured: pinning a
+    // cloud-only placeholder on a connected PARTIAL root makes Windows fetch it, so `cloud-pinned.bin`
+    // is partly hydrated here, not cloud-only.)
+    for on_disk in [OnDisk::Nothing, OnDisk::Partly, OnDisk::Wholly] {
+        assert!(before.iter().any(|(_, d, _, _)| *d == on_disk), "a {on_disk:?} placeholder before the upgrade: {before:?}");
+    }
+    assert!(before.iter().any(|(_, _, _, p)| *p) && before.iter().any(|(_, _, _, p)| !*p), "pinned and unpinned: {before:?}");
     // The 0.8.22 engine start: the same registration call the app makes, with UPDATE, no unregister.
     crate::windows_cf::register_sync_root_with(
         &qa.root,
@@ -337,13 +332,13 @@ fn ld0105_w1_native_a_fresh_registration_is_progressive_and_d6_is_recorded() {
     assert_eq!(after, before, "a second start keeps every placeholder");
     // The record (spec §5.1 D-6, plan W1): what a WinRT Unregister → Register does to this root.
     // Not asserted: this is the measurement that says why nothing in the app may do it.
-    let unregistered = StorageProviderSyncRootManager::Unregister(&HSTRING::from(id.as_str())).is_ok();
+    let unregistered = StorageProviderSyncRootManager::Unregister(&HSTRING::from(id.as_str())).map_err(|e| e.to_string());
     let left: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), qa.path(n).exists())).collect();
     let views: Vec<String> = names
         .iter()
         .map(|n| format!("{n}={:?}", placeholders::platform_view(&qa.path(n))))
         .collect();
-    println!("ld0105-w1-native: D-6 record, WinRT Unregister ok={unregistered}: present {left:?}");
+    println!("ld0105-w1-native: D-6 record, WinRT Unregister {unregistered:?}: present {left:?}");
     println!("ld0105-w1-native: D-6 record, views {views:?}");
 }
 
@@ -425,7 +420,9 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     // (d) the app restarted while poisoned: a new database handle, and the sweep that runs at start.
     let db = crate::state_db::StateDb::open(db_path.join("state.db")).unwrap();
     assert_eq!(db.poisoned().unwrap().len(), 3, "the poisons outlived the restart");
-    let emptied = sweep_poisoned(&db, &qa.root);
+    let outcomes = sweep_poisoned(&db, &qa.root);
+    println!("ld0105-s6-native: sweep outcomes {outcomes:?}");
+    let emptied = outcomes.iter().filter(|(_, o)| *o == Emptied::Emptied).count();
     let pinned_after = census_of(&qa.path("local-pinned.bin"));
     let partial_after = census_of(&qa.path("partial.bin"));
     let changed_after = census_of(&qa.path("local.bin"));

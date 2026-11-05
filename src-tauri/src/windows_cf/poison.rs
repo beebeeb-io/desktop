@@ -186,17 +186,17 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>) -> Emptied {
 }
 
 /// The empty step for every poisoned placeholder of `db` under `sync_root`; clears the poison of each
-/// one emptied (or gone). Returns how many were emptied. Runs on every engine tick, and so at engine
+/// one emptied (or gone). Returns each file's outcome. Runs on every engine tick, and so at engine
 /// start, and after each close completion of a poisoned file.
-pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) -> usize {
+pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) -> Vec<(String, Emptied)> {
     let rows = match db.poisoned() {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "poison sweep: could not read the poisoned placeholders");
-            return 0;
+            return Vec::new();
         }
     };
-    let mut emptied = 0;
+    let mut outcomes = Vec::new();
     for row in rows {
         let Ok(Some(entry)) = db.get_file(&row.file_id) else {
             // The row is gone (deleted or renamed away): nothing of it is left to empty here.
@@ -213,9 +213,6 @@ pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) ->
                 if let Err(e) = db.clear_poison(&row.file_id) {
                     tracing::warn!(error = %e, file_id = %row.file_id, "poison sweep: emptied, but the poison could not be cleared");
                 }
-                if outcome == Emptied::Emptied {
-                    emptied += 1;
-                }
             }
             Emptied::Busy => tracing::debug!(file_id = %row.file_id, "poison sweep: still open; next time"),
             Emptied::Changed => {
@@ -225,8 +222,9 @@ pub(crate) fn sweep_poisoned(db: &crate::state_db::StateDb, sync_root: &Path) ->
                 tracing::warn!(file_id = %row.file_id, step, "poison sweep: a step failed; restored")
             }
         }
+        outcomes.push((row.file_id, outcome));
     }
-    emptied
+    outcomes
 }
 
 /// The engine's periodic trigger: the connected bridge's database, this sync root.
@@ -235,7 +233,7 @@ pub fn sweep_poisoned_now(sync_root: &Path) {
     if bridge.is_revoked() || bridge.is_stopping() {
         return;
     }
-    let emptied = sweep_poisoned(bridge.db(), sync_root);
+    let emptied = sweep_poisoned(bridge.db(), sync_root).iter().filter(|(_, o)| *o == Emptied::Emptied).count();
     if emptied > 0 {
         tracing::info!(emptied, "poisoned placeholders emptied");
     }
