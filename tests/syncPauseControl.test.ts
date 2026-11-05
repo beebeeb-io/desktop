@@ -3,8 +3,9 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { PAUSE_FAILED, RESUME_FAILED } from '../src/windows/syncActivityUi'
+import { libRsSource } from './fixtures/rustConstants'
 
-const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+const lib = libRsSource()
 const api = readFileSync(new URL('../src/desktopApi.ts', import.meta.url), 'utf8')
 
 function rustConst(name: string): string {

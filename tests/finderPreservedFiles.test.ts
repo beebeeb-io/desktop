@@ -8,6 +8,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { libRsSource } from './fixtures/rustConstants'
 import {
   KEPT_FOLDER_ROW_SENTENCE,
   keptFolderAfterDismiss,
@@ -45,7 +46,7 @@ describe('kept-files note (1882)', () => {
     const rust = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'finder_removal.rs'), 'utf8').replace(/\r\n/g, '\n')
     const match = rust.match(/pub struct DismissOutcome \{\s*pub cleared: bool,\s*pub current: Option<String>,\s*\}/)
     expect(match).not.toBeNull()
-    const lib = readFileSync(join(import.meta.dir, '..', 'src-tauri', 'src', 'lib.rs'), 'utf8').replace(/\r\n/g, '\n')
+    const lib = libRsSource().replace(/\r\n/g, '\n')
     expect(lib).toContain('fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_removal::DismissOutcome, String>')
   })
 

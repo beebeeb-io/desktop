@@ -14,7 +14,34 @@ import { fileURLToPath } from 'node:url'
 const RUST_SRC = fileURLToPath(new URL('../../src-tauri/src/', import.meta.url))
 
 export function rustSource(file: string): string {
+  if (file === 'lib.rs') return libRsSource()
   return readFileSync(new URL(`../../src-tauri/src/${file}`, import.meta.url), 'utf8')
+}
+
+/**
+ * `lib.rs` after its split (LD-0057 PR 2): each `mod <child>;` line whose file opens with
+ * `` //! `<child>` items split out of `lib.rs`. `` is replaced by that child's items (its first three
+ * lines, the header, a blank line and `use super::*;`, were never part of `lib.rs`), so the crate root
+ * reads back in its old order. The Rust twin is `crate::root_source::lib_rs`.
+ */
+export function libRsSource(): string {
+  const hub = readFileSync(join(RUST_SRC, 'lib.rs'), 'utf8')
+  return hub
+    .split(/(?<=\n)/)
+    .map((line) => {
+      const child = /^mod ([a-z_][a-z0-9_]*);\r?\n?$/.exec(line)?.[1]
+      const path = child === undefined ? '' : join(RUST_SRC, `${child}.rs`)
+      if (child === undefined || !existsSync(path)) return line
+      const text = readFileSync(path, 'utf8')
+      if (!text.startsWith(`//! \`${child}\` items split out of \`lib.rs\`.`)) return line
+      // The split's only edit inside a child is a `pub(super) ` on a private item, field or method.
+      return text
+        .split(/(?<=\n)/)
+        .slice(4)
+        .map((l) => l.replace(/^(\s*)pub\(super\) /, '$1'))
+        .join('')
+    })
+    .join('')
 }
 
 /**

@@ -7,6 +7,7 @@ import SettingsView, { AdvancedPanel } from '../src/windows/views/SettingsView'
 import { SyncModeStep } from '../src/WindowsFirstRun'
 import { ToastProvider } from '../src/windows/ui'
 import type { DesktopConfig, SyncStatus } from '../src/desktopApi'
+import { libRsSource } from './fixtures/rustConstants'
 
 const cases = fixtures as Record<string, DesktopCapabilities>
 const status = { logged_in: true, engine: 'running', syncing: 0 } as SyncStatus
@@ -99,7 +100,7 @@ test('seven Rust wire fixtures distinguish install support and implemented prefe
 })
 
 test('capability IPC is registered in the shipping Rust handler', () => {
-  const rust = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const rust = libRsSource().replace(/\r\n/g, '\n')
   expect(rust.slice(rust.indexOf('.invoke_handler(tauri::generate_handler!['))).toMatch(/\bdesktop_capabilities,/)
 })
 

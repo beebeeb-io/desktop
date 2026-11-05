@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { POPOVER_HIDDEN_EVENT, POPOVER_SHOWN_EVENT } from '../src/popoverContract'
-import { rustModuleSource } from './fixtures/rustConstants'
+import { rustModuleSource, libRsSource } from './fixtures/rustConstants'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const read = (path: string) => existsSync(`${root}/${path}`) ? readFileSync(`${root}/${path}`, 'utf8') : ''
@@ -36,7 +36,7 @@ describe('the shipping macOS popover boundary', () => {
   test('every native command invoked by PopoverApp is registered exactly once', () => {
     const commands = [...read('src/PopoverApp.tsx').matchAll(/command(?:<[^>]*>)?\('([^']+)'/g)].map((m) => m[1]).filter((name) => name.startsWith('popover_') && name !== 'popover_snapshot')
     expect(new Set(commands).size).toBe(6)
-    const registered = read('src-tauri/src/lib.rs')
+    const registered = libRsSource()
     for (const name of new Set(commands)) expect(registered.match(new RegExp(`^            macos_popover::${name},$`, 'gm')), name).toHaveLength(1)
   })
 
@@ -44,8 +44,8 @@ describe('the shipping macOS popover boundary', () => {
     expect(native()).toContain('auth_health.is_expired()')
     expect(native()).toContain('on_tray_click(')
     expect(native()).toContain('record_blur_hide(')
-    expect(read('src-tauri/src/lib.rs')).toContain('macos_popover::toggle(app)')
-    expect(read('src-tauri/src/lib.rs')).toContain('#[cfg(not(target_os = "macos"))]\n    tray.set_menu(Some(tray_menu))?;')
+    expect(libRsSource()).toContain('macos_popover::toggle(app)')
+    expect(libRsSource()).toContain('#[cfg(not(target_os = "macos"))]\n    tray.set_menu(Some(tray_menu))?;')
   })
 
   test('every way the popover hides tells it, so it stops reading until it is shown again (review P2-2 of #160)', () => {
@@ -69,7 +69,7 @@ describe('the shipping macOS popover boundary', () => {
   test('closing the popover (⌘W, Close Window) goes through the same function (self-review of #202)', () => {
     // The app-wide close handler hides every window whose close policy is Hide, the popover included: a plain hide
     // there left the popover reading every 5 s with nothing on screen.
-    const lib = read('src-tauri/src/lib.rs')
+    const lib = libRsSource()
     const start = lib.indexOf('== surfaces::registry::ClosePolicy::Hide')
     expect(start).toBeGreaterThan(0)
     const branch = lib.slice(start, lib.indexOf('refresh_macos_dock_icon(', start))
@@ -83,7 +83,7 @@ describe('the shipping macOS popover boundary', () => {
   })
 
   test('while sign-out sends, a failed count leaves the count out, never the whole snapshot (review P3-5 of #160)', () => {
-    const lib = read('src-tauri/src/lib.rs')
+    const lib = libRsSource()
     const start = lib.indexOf('let sending = state.sign_out.phase')
     expect(start).toBeGreaterThan(0)
     const branch = lib.slice(start, lib.indexOf('Ok(snapshot)', start))
@@ -103,7 +103,7 @@ describe('the shipping macOS popover boundary', () => {
   })
 
   test('opening the Beebeeb window hides the popover, including an existing window', () => {
-    const lib = read('src-tauri/src/lib.rs')
+    const lib = libRsSource()
     const start = lib.indexOf('fn show_main_window(')
     const end = lib.indexOf('\n}\n', start)
     const body = lib.slice(start, end)
