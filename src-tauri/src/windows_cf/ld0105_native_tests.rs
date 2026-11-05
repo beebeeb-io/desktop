@@ -38,18 +38,16 @@ impl QaRoot {
     }
 
     fn connect(&mut self, fetch: unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CALLBACK_PARAMETERS)) {
-        self.connect_table(&[CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_FETCH_DATA,
-            Callback: Some(fetch),
-        }]);
-    }
-
-    fn connect_table(&mut self, entries: &[CF_CALLBACK_REGISTRATION]) {
-        let mut table = entries.to_vec();
-        table.push(CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_NONE,
-            Callback: None,
-        });
+        let table = [
+            CF_CALLBACK_REGISTRATION {
+                Type: CF_CALLBACK_TYPE_FETCH_DATA,
+                Callback: Some(fetch),
+            },
+            CF_CALLBACK_REGISTRATION {
+                Type: CF_CALLBACK_TYPE_NONE,
+                Callback: None,
+            },
+        ];
         let wide: Vec<u16> = self.root.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: the path and the table outlive the call; the callback is a static function.
         let key = unsafe {
@@ -387,30 +385,6 @@ unsafe extern "system" fn s6_fetch(info: *const CF_CALLBACK_INFO, params: *const
     unsafe { fail_transfer(r.connection, r.transfer, r.request, r.offset, r.length) };
 }
 
-
-// TEMPORARY (desktop PR 224 diagnostic): who opens and closes the S6 files, and when.
-unsafe fn s6_who(info: *const CF_CALLBACK_INFO, what: &str) {
-    if info.is_null() {
-        return;
-    }
-    let info = unsafe { &*info };
-    let (pid, image) = if info.ProcessInfo.is_null() {
-        (0, String::new())
-    } else {
-        let p = unsafe { &*info.ProcessInfo };
-        (p.ProcessId, unsafe { p.ImagePath.to_string() }.unwrap_or_default())
-    };
-    let path = unsafe { info.NormalizedPath.to_string() }.unwrap_or_default();
-    let name = path.rsplit('\\').next().unwrap_or("").to_string();
-    crate::windows_cf::poison::diag!("notify {what} {name} pid={pid} image={image}");
-}
-unsafe extern "system" fn s6_open(info: *const CF_CALLBACK_INFO, _p: *const CF_CALLBACK_PARAMETERS) {
-    unsafe { s6_who(info, "OPEN") }
-}
-unsafe extern "system" fn s6_close(info: *const CF_CALLBACK_INFO, _p: *const CF_CALLBACK_PARAMETERS) {
-    unsafe { s6_who(info, "CLOSE") }
-}
-
 // ── S6: the empty step, against hand-poisoned placeholders ───────────────────────────────────────
 
 fn qa_db(dir: &Path, rows: &[(&str, &str)]) -> crate::state_db::StateDb {
@@ -444,22 +418,7 @@ fn poison(db: &crate::state_db::StateDb, qa: &QaRoot, id: &str, name: &str) {
 fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_measured_order() {
     use crate::windows_cf::poison::{Emptied, empty_poisoned, sweep_poisoned};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
-    // this process is the connected provider: only it may set IN_SYNC
-    qa.connect_table(&[
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_FETCH_DATA,
-            Callback: Some(s6_fetch),
-        },
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
-            Callback: Some(s6_open),
-        },
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
-            Callback: Some(s6_close),
-        },
-    ]);
-    crate::windows_cf::poison::diag!("s6 connected");
+    qa.connect(s6_fetch); // this process is the connected provider: only it may set IN_SYNC
     let names = mint_five(&qa);
     assert_eq!(names.len(), 5);
     S6_POISONED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -505,22 +464,30 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     // (d) the app restarted while poisoned: a new database handle, and the sweep that runs at start.
     let db = crate::state_db::StateDb::open(db_path.join("state.db")).unwrap();
     assert_eq!(db.poisoned().unwrap().len(), 3, "the poisons outlived the restart");
-    crate::windows_cf::poison::diag!("sweep starts");
-    let outcomes = sweep_poisoned(&db, &qa.root);
-    crate::windows_cf::poison::diag!("sweep ends");
-    std::thread::sleep(Duration::from_millis(500));
-    for line in crate::windows_cf::poison::DIAG.lock().unwrap().iter() {
-        println!("ld0105-s6-diag: {line}");
+    // The sweep, again at the next "tick" for a file someone else had open (`Busy`), as the engine
+    // does, at most 10 times. On its own thread: a step that never returned would hang the suite.
+    let sweeps = {
+        let (db_file, root) = (db_path.join("state.db"), qa.root.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let db = crate::state_db::StateDb::open(db_file).unwrap();
+            let mut sweeps = vec![sweep_poisoned(&db, &root)];
+            while sweeps.len() < 10 && sweeps.last().unwrap().iter().any(|(_, o)| *o == Emptied::Busy) {
+                std::thread::sleep(Duration::from_millis(250));
+                sweeps.push(sweep_poisoned(&db, &root));
+            }
+            let _ = tx.send(sweeps);
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("the sweep returns (a step waiting on its own oplock would not)")
+    };
+    println!("ld0105-s6-native: {} sweep(s), outcomes {sweeps:?}", sweeps.len());
+    // Each file's last outcome (an emptied file has no poison left for a later sweep).
+    let mut last = std::collections::BTreeMap::new();
+    for (id, outcome) in sweeps.into_iter().flatten() {
+        last.insert(id, outcome);
     }
-    let mp = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Get-MpComputerStatus | Select-Object AMRunningMode,RealTimeProtectionEnabled,OnAccessProtectionEnabled,IoavProtectionEnabled | Format-List; 'exclusions:'; (Get-MpPreference).ExclusionPath; 'search:'; (Get-Service WSearch -ErrorAction SilentlyContinue).Status"])
-        .output();
-    match mp {
-        Ok(o) => println!("ld0105-s6-diag: defender {}", String::from_utf8_lossy(&o.stdout)),
-        Err(e) => println!("ld0105-s6-diag: defender query failed {e}"),
-    }
-    println!("ld0105-s6-native: sweep outcomes {outcomes:?}");
-    let emptied = outcomes.iter().filter(|(_, o)| *o == Emptied::Emptied).count();
+    let emptied = last.values().filter(|o| **o == Emptied::Emptied).count();
     let pinned_after = census_of(&qa.path("local-pinned.bin"));
     let partial_after = census_of(&qa.path("partial.bin"));
     let changed_after = census_of(&qa.path("local.bin"));
@@ -548,4 +515,103 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     let mut one = [0u8; 1];
     let reread = std::fs::File::open(qa.path("partial.bin")).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
     assert!(reread.is_ok(), "an emptied placeholder fetches again: {reread:?}");
+}
+
+/// A provider that refuses every fetch, as production refuses every fetch of a poisoned file (I5).
+unsafe extern "system" fn refuse_every_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: valid for the duration of the callback.
+    let r = unsafe { request_of(info, params) };
+    // SAFETY: the keys of this live request.
+    unsafe { fail_transfer(r.connection, r.transfer, r.request, r.offset, r.length) };
+}
+
+/// A whole, pinned, poisoned placeholder at `name` (the P1b case), and its poison's stamp.
+fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
+    let path = qa.path(name);
+    std::fs::write(&path, content(1 << 20)).unwrap();
+    placeholders::convert_to_in_sync_placeholder(&path, name).unwrap();
+    placeholders::set_pin_state(&path, true, false).unwrap();
+    placeholders::mark_not_in_sync_path(&path).unwrap();
+    assert_eq!(census_of(&path), (OnDisk::Wholly, false, true), "{name} poisoned as a failed fetch leaves it");
+    crate::windows_cf::poison::poison_stamp(&path)
+}
+
+/// The windows-latest red (desktop PR 224): between two of the empty step's calls the step's protected
+/// handle stopped being referenceable (an oplock break), and every later call on it failed with
+/// `0x80070006`, the restore of the pin included: `Failed("in_sync")`, `Failed("dehydrate")` or
+/// `Failed("still_on_disk")`, NOT_IN_SYNC set again by path, the pin lost. Here another open comes
+/// from a thread of this process at each point between two calls, which breaks the oplock the same
+/// way. The step holds a reference and works on the Win32 handle, so that open waits until the step
+/// ends, and the step completes.
+#[test]
+fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() {
+    use crate::windows_cf::poison::{Emptied, Step, empty_poisoned_with};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch); // this process is the connected provider: only it may set IN_SYNC
+    let mut seen = Vec::new();
+    for at in [Step::Checked, Step::InSync, Step::Dehydrated] {
+        let name = format!("open-at-{at:?}.bin");
+        let path = qa.path(&name);
+        let stamp = poisoned_whole_pinned(&qa, &name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut opener = None;
+        let mut done_early = None;
+        let started = Instant::now();
+        let outcome = empty_poisoned_with(&path, stamp, &mut |step| {
+            if step == at {
+                let (path, tx) = (path.clone(), tx.clone());
+                opener = Some(std::thread::spawn(move || {
+                    let opened = std::fs::File::open(&path).map(drop).map_err(|e| e.raw_os_error());
+                    let _ = tx.send((opened, started.elapsed()));
+                }));
+                // Time for that open to reach the oplock: on an unreferenced handle the break
+                // invalidates it well within this, and the open returns.
+                std::thread::sleep(Duration::from_millis(300));
+                done_early = rx.try_recv().ok();
+            }
+        });
+        let step_took = started.elapsed();
+        let (opened, open_took) = match done_early {
+            Some(early) => early,
+            None => rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the other open returns once the step's handle is closed"),
+        };
+        opener.expect("the step reached the point").join().unwrap();
+        let after = census_of(&path);
+        println!(
+            "ld0105-s6-native: open at {at:?}: outcome {outcome:?}, step {step_took:?}, other open {opened:?} after {open_took:?}, returned during the step: {}, census {after:?}",
+            done_early.is_some()
+        );
+        seen.push((at, outcome, after, done_early.is_some(), opened));
+    }
+    // Every point: emptied, in sync, its pin restored; the other open waited for the step, then opened.
+    let want = |at| (at, Emptied::Emptied, (OnDisk::Nothing, true, true), false, Ok(()));
+    let wanted: Vec<_> = [Step::Checked, Step::InSync, Step::Dehydrated].into_iter().map(want).collect();
+    assert_eq!(seen, wanted, "(point, outcome, census, the other open returned during the step, its result)");
+}
+
+/// The failure path (spec S6 step 6): a step that fails after the pin was cleared restores NOT_IN_SYNC
+/// and the pin before the handle is released. With no provider connected the dehydrate fails
+/// (measured on the Legion: `Failed("dehydrate")`, after the unpin and IN_SYNC succeeded).
+#[test]
+fn ld0105_s6_native_a_failed_step_restores_not_in_sync_and_the_pin() {
+    use crate::windows_cf::poison::{Emptied, empty_poisoned, poison_stamp};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let stamp = poisoned_whole_pinned(&qa, "failed.bin");
+    qa.disconnect();
+    let outcome = empty_poisoned(&qa.path("failed.bin"), stamp);
+    let after = census_of(&qa.path("failed.bin"));
+    // Not asserted, a record: whether a failed attempt leaves the stamp the poison holds (if not, the
+    // next sweep finds the file `Changed` and the poison stays).
+    let stamp_after = poison_stamp(&qa.path("failed.bin"));
+    println!(
+        "ld0105-s6-native: failed step: outcome {outcome:?}, census {after:?}, stamp {stamp:?} -> {stamp_after:?}"
+    );
+    assert!(matches!(outcome, Emptied::Failed(_)), "IN_SYNC refused with no provider connected: {outcome:?}");
+    assert_eq!(after, (OnDisk::Wholly, false, true), "untouched, not in sync, still pinned");
 }
