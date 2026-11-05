@@ -180,7 +180,7 @@ use super::*;
             }
         }
         let (_dir, sync_root, server, bridge) = rule3_setup([229u8; 32]);
-        crate::windows_cf::register_sync_root(&sync_root).unwrap();
+        crate::windows_cf::register_test_sync_root(&sync_root).unwrap();
         let table = Box::new([CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None }]);
         let wide: Vec<u16> = sync_root.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: the path and the table outlive the connection (the table until the end of the test).

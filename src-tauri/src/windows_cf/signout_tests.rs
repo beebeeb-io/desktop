@@ -288,7 +288,7 @@ struct RegisteredRoot(Fixture);
 impl RegisteredRoot {
     fn new() -> Self {
         let f = Fixture::new();
-        crate::windows_cf::register_sync_root(&f.root).unwrap();
+        crate::windows_cf::register_test_sync_root(&f.root).unwrap();
         Self(f)
     }
 }

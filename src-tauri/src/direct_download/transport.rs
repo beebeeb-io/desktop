@@ -79,9 +79,10 @@ pub(crate) enum Storage<'a> {
 }
 
 impl Storage<'_> {
-    pub(super) async fn fetch(self, grant: dt::ChunkGrant) -> Result<Vec<u8>, u16> {
+    /// Fetch one chunk, reporting each piece of its body to `on_body` as it arrives (LD-0105 S0).
+    pub(super) async fn fetch(self, grant: dt::ChunkGrant, on_body: crate::api_client::OnBody<'_>) -> Result<Vec<u8>, u16> {
         match self {
-            Storage::Client(client) => crate::api_client::fetch_from_storage(client, &grant).await,
+            Storage::Client(client) => crate::api_client::fetch_from_storage(client, &grant, on_body).await,
             #[cfg(test)]
             Storage::Fail(status) => Err(status),
         }

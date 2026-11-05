@@ -187,7 +187,7 @@ use super::*;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
-        crate::windows_cf::register_sync_root(&root).unwrap();
+        crate::windows_cf::register_test_sync_root(&root).unwrap();
         struct Registration(std::path::PathBuf);
         impl Drop for Registration {
             fn drop(&mut self) {

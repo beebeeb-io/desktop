@@ -50,8 +50,18 @@
 
 pub mod callbacks;
 pub mod placeholders;
+// LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
+pub(crate) mod poison;
+// LD-0105 S0: a fetch's byte progress reported to Cloud Files.
+pub(crate) mod fetch_progress;
+// LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
+mod registration;
+pub(crate) use registration::*;
 #[cfg(test)]
 mod reconcile_tests;
+// LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
+#[cfg(test)]
+mod ld0105_native_tests;
 pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
@@ -72,20 +82,18 @@ use crate::engine_bridge::EngineBridge;
 pub const PROVIDER_ID: &str = "Beebeeb";
 
 /// Provider version reported alongside `PROVIDER_ID`. It is written into the
-/// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`).
+/// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`) when a root
+/// is first registered.
 ///
-/// Bumping this is ALSO how we force a re-registration of the shell sync root
-/// when its policies change: `register_shell_sync_root` skips the
-/// `StorageProviderSyncRootManager::Register` call when an entry already exists
-/// for the (stable) Id. A first-launch entry registered with the old policy set
-/// would otherwise never pick up a policy change. The version is part of the
-/// shell metadata, so a re-register IS still required to apply the new policies
-/// — see `register_shell_sync_root`, which now force-unregisters a stale entry
-/// whose recorded version differs from this constant before re-registering.
+/// LD-0105 S7 (0.8.22): bumping it NO LONGER re-registers anything. Up to 0.8.21 a
+/// version that differed from (or could not be read back as) this constant made
+/// `register_shell_sync_root` run the WinRT `Unregister`, and an unregister deletes
+/// every cloud-only placeholder of the root. An existing registration is now kept as
+/// it is ([`shell_step`]); a policy change reaches existing installs through the Win32
+/// registration, which is re-applied with `CF_REGISTER_FLAG_UPDATE` on every start.
+/// A change that really needs a new Explorer registration needs its own migration.
 ///
-/// `1.0.0` → `1.1.0`: dropped `AutoDehydrationAllowed` from the hydration
-/// modifier (pinned/opened files must stay resident — see line ~486). Existing
-/// installs registered at 1.0.0 must re-register to apply the new modifier.
+/// `1.0.0` → `1.1.0`: dropped `AutoDehydrationAllowed` from the hydration modifier.
 pub const PROVIDER_VERSION: &str = "1.1.0";
 
 // Each connection carries a monotonically increasing context ID. Old OS
@@ -358,13 +366,23 @@ pub(crate) fn runtime() -> Option<tokio::runtime::Handle> {
 /// Idempotent at the OS layer: re-registering the same path with the
 /// same provider id returns success.
 pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+    register_sync_root_with(sync_root_path, &BEEBEEB_PROVIDER, HYDRATION_POLICY)
+}
+
+/// [`register_sync_root`] as `provider`, with the Win32 hydration policy `hydration` (a test passes
+/// `PARTIAL` to stand for a 0.8.21 install).
+pub(crate) fn register_sync_root_with(
+    sync_root_path: &std::path::Path,
+    provider: &SyncProvider,
+    hydration: CF_HYDRATION_POLICY_PRIMARY,
+) -> anyhow::Result<()> {
     let path_wide: Vec<u16> = sync_root_path
         .to_string_lossy()
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let provider_version: Vec<u16> = PROVIDER_VERSION.encode_utf16().chain(std::iter::once(0)).collect();
-    let display_name: Vec<u16> = PROVIDER_ID.encode_utf16().chain(std::iter::once(0)).collect();
+    let provider_version: Vec<u16> = provider.version.encode_utf16().chain(std::iter::once(0)).collect();
+    let display_name: Vec<u16> = provider.name.encode_utf16().chain(std::iter::once(0)).collect();
 
     // SAFETY: `info` and `policies` are stack-allocated structs whose
     // lifetimes outlive the `CfRegisterSyncRoot` call. The wide-string
@@ -384,12 +402,12 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
             // so the sync-root identity is deterministic across releases
             // and machines, rather than the previous GUID::zeroed() dev
             // shortcut that let Windows pick a per-machine default.
-            ProviderId: BEEBEEB_PROVIDER_GUID,
+            ProviderId: provider.guid,
         };
-        // Hydration policy `PARTIAL` = Windows hydrates ranges on demand
-        // rather than dragging down the whole file (large vault
-        // friendly) — this stays, the FETCH_DATA callback serves bytes
-        // lazily on open.
+        // Hydration policy (LD-0105 S7): [`HYDRATION_POLICY`] = `PROGRESSIVE` since 0.8.22 (was
+        // `PARTIAL`, which Microsoft documents as "not currently supported"). The FETCH_DATA callback
+        // serves the bytes on open; `PROGRESSIVE` lets a reader's IO complete as soon as its bytes
+        // are transferred. Modifier NONE: no streaming-only mode (the platform must keep the bytes).
         //
         // Population policy `ALWAYS_FULL` (was `FULL`, originally `PARTIAL`):
         // the provider PRE-POPULATES the whole namespace by eagerly minting a
@@ -424,7 +442,7 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
                 // newtypes (CF_HYDRATION_POLICY_PRIMARY(u16) etc.), and the
                 // `CF_*_PARTIAL` constants are already those newtypes — assign
                 // them directly rather than unwrapping `.0` into a raw int.
-                Primary: CF_HYDRATION_POLICY_PARTIAL,
+                Primary: hydration,
                 Modifier: CF_HYDRATION_POLICY_MODIFIER_NONE,
             },
             Population: CF_POPULATION_POLICY {
@@ -463,67 +481,6 @@ pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()
     Ok(())
 }
 
-/// Stable, deterministic 64-bit FNV-1a hash of the sync-root path bytes.
-///
-/// Used only to mint the WinRT shell-registration `Id` (see
-/// [`shell_sync_root_id`]). FNV-1a is chosen because it is tiny, dependency
-/// free, and — critically — STABLE across releases and machines (a fixed
-/// algorithm with fixed constants), which is exactly what the shell `Id`
-/// requires: the same sync root must hash to the same Id on every launch so
-/// re-registration is idempotent and [`unregister_shell_sync_root`] can
-/// reconstruct the Id from the persisted sync-root path alone.
-#[cfg(target_os = "windows")]
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
-}
-
-/// The stable WinRT shell-registration `Id` for a given sync root.
-///
-/// ## Id scheme — `Beebeeb!<fnv1a64(sync_root)>` (chosen + why)
-///
-/// `StorageProviderSyncRootManager::Register` keys every shell entry by this
-/// string Id; `Unregister` takes the same Id. So the Id MUST be:
-///
-/// 1. **Stable across releases/launches** — a re-register of the same root must
-///    hit the same entry (idempotent), and sign-out must be able to unregister
-///    it. We derive it purely from the sync-root path, which is persisted in
-///    `desktop.toml` (`DesktopConfig.sync_root`) and is the one piece of
-///    identity reachable from BOTH `register_shell_sync_root(sync_root)` and the
-///    sign-out path (`clear_session`, which has only the config, not the running
-///    engine). A fixed FNV-1a of the path is fully deterministic.
-/// 2. **Forward-compatible with multi-account** — each account maps to its own
-///    sync-root folder, so distinct accounts naturally hash to distinct Ids
-///    without any schema change here. When real multi-account lands, the same
-///    function keeps working per-root; if a SID/account component is later wanted
-///    for nav-pane grouping it can be appended as a third `!`-segment
-///    (`Beebeeb!<sid>!<account>`) without disturbing existing single-account Ids.
-///
-/// We deliberately do NOT embed the Windows user SID here (the OneDrive
-/// `OneDrive!<sid>!Business1` form): pulling the SID needs extra Win32 token +
-/// authorization features and an unsafe `GetTokenInformation`/`ConvertSidToStringSidW`
-/// dance, and `Register` accepts a plain `provider!stableid` Id for a
-/// single-account provider. The path hash gives the same stability with zero
-/// extra deps and trivial reconstruction at sign-out.
-///
-/// The `Beebeeb!` prefix namespaces the provider (mirrors OneDrive/ProtonDrive's
-/// `<Provider>!…` convention) and matches the Win32 [`PROVIDER_ID`] name so the
-/// two registrations read as the same provider in tooling.
-#[cfg(target_os = "windows")]
-fn shell_sync_root_id(sync_root: &std::path::Path) -> String {
-    // Normalise the path string the same way `register_sync_root` does (lossy
-    // UTF-8 of the OS path) so the Id is computed from a canonical byte form and
-    // both register + unregister agree.
-    let canonical = sync_root.to_string_lossy();
-    format!("{}!{:016x}", PROVIDER_ID, fnv1a64(canonical.as_bytes()))
-}
-
 /// Write the Explorer SHELL registration for the Beebeeb sync root via WinRT
 /// `StorageProviderSyncRootManager::Register`.
 ///
@@ -556,6 +513,11 @@ fn shell_sync_root_id(sync_root: &std::path::Path) -> String {
 /// "already registered" error is swallowed as success.
 #[cfg(target_os = "windows")]
 pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+    register_shell_sync_root_as(sync_root, &BEEBEEB_PROVIDER)
+}
+
+/// [`register_shell_sync_root`] as `provider` (a test root registers as [`QA_PROVIDER`]).
+pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider: &SyncProvider) -> anyhow::Result<()> {
     use windows::Foundation::Collections::IVector;
     use windows::Security::Cryptography::CryptographicBuffer;
     use windows::Storage::Provider::{
@@ -567,7 +529,7 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
     use windows::Storage::{IStorageFolder, StorageFolder};
     use windows::core::{HSTRING, Interface};
 
-    let id = shell_sync_root_id(sync_root);
+    let id = shell_sync_root_id_as(sync_root, provider.name);
     let id_h = HSTRING::from(id.as_str());
 
     // Resolve the sync-root folder as a WinRT StorageFolder (the `Path` property
@@ -579,42 +541,15 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
         .get()
         .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync failed for sync root: {e}"))?;
 
-    // Idempotency + policy-version guard. The shell Id is derived purely from the
-    // sync-root PATH (stable across releases) — it does NOT encode the provider
-    // version — so a plain "Id already exists" check would skip re-registration
-    // forever, and a policy change (e.g. dropping AutoDehydrationAllowed in
-    // PROVIDER_VERSION 1.1.0) would never reach an existing install. So we probe
-    // by Id and then compare the REGISTERED version against the current
-    // `PROVIDER_VERSION`:
-    //   - versions match  → genuine no-op, skip the re-register (a second Register
-    //     with the same Id throws ALREADY_EXISTS).
-    //   - versions differ (or the version can't be read) → the registration is
-    //     stale; Unregister it and fall through to Register with the new policies.
-    // This is what actually makes a PROVIDER_VERSION bump take effect on upgrade.
-    if let Ok(existing) = StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h) {
-        let registered_version = existing.Version().map(|h| h.to_string_lossy()).unwrap_or_default();
-        if registered_version == PROVIDER_VERSION {
-            tracing::info!(
-                sync_root = %sync_root.display(),
-                version = %PROVIDER_VERSION,
-                "Explorer shell sync root already registered at current version; skipping re-register"
-            );
-            return Ok(());
-        }
-        // Stale registration from an older provider version — tear it down so the
-        // Register below applies the new policy set (e.g. the new hydration
-        // modifier). Best-effort: if the Unregister fails the Register below will
-        // surface ALREADY_EXISTS, which we swallow, so the worst case is the old
-        // policies linger until the next clean sign-out — never a crash.
-        tracing::info!(
-            sync_root = %sync_root.display(),
-            from_version = %registered_version,
-            to_version = %PROVIDER_VERSION,
-            "Explorer shell sync root registered at an older version; re-registering with new policies"
-        );
-        if let Err(e) = StorageProviderSyncRootManager::Unregister(&id_h) {
-            tracing::warn!(error = %e, "Unregister of stale shell sync root failed; will attempt Register anyway");
-        }
+    // Idempotency guard (LD-0105 S7): an existing registration is kept, whatever version it
+    // recorded; see [`shell_step`]. Only a root with no registration is registered below.
+    let registered = StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h)
+        .ok()
+        .map(|existing| existing.Version().ok().map(|h| h.to_string_lossy()));
+    let step = shell_step(registered.as_ref().map(|v| v.as_deref()));
+    if let ShellStep::Keep(status) = step {
+        tracing::info!(status, "Explorer shell sync root already registered; kept as it is");
+        return Ok(());
     }
 
     let info = StorageProviderSyncRootInfo::new()
@@ -635,7 +570,7 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
         .map_err(|e| anyhow::anyhow!("cast StorageFolder→IStorageFolder failed: {e}"))?;
     info.SetPath(&folder_iface)
         .map_err(|e| anyhow::anyhow!("SetPath failed: {e}"))?;
-    info.SetDisplayNameResource(&HSTRING::from("Beebeeb"))
+    info.SetDisplayNameResource(&HSTRING::from(provider.name))
         .map_err(|e| anyhow::anyhow!("SetDisplayNameResource failed: {e}"))?;
 
     // Icon: the running exe's first icon resource, the same pattern OneDrive /
@@ -652,20 +587,16 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
     // ── Policies — MUST mirror the Win32 CF_SYNC_POLICIES so the platform and
     //    shell registrations agree (see register_sync_root) ──
     //
-    // Partial hydration ↔ CF_HYDRATION_POLICY_PARTIAL: ranges hydrate on open via
-    // the FETCH_DATA callback rather than dragging the whole file.
-    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Partial)
+    // Progressive ↔ CF_HYDRATION_POLICY_PROGRESSIVE ([`HYDRATION_POLICY`], LD-0105 S7). Only a root with
+    // no registration gets here (first install, or sign-in after a sign-out), so these values decide
+    // what a fresh root runs with: they must equal the Win32 ones.
+    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Progressive)
         .map_err(|e| anyhow::anyhow!("SetHydrationPolicy failed: {e}"))?;
-    // StreamingAllowed ONLY — stream bytes during hydration. We deliberately
-    // DROP `AutoDehydrationAllowed`: with it set, Windows freely auto-dehydrates
-    // an UNPINNED file the moment it is idle after a read, so a just-opened file
-    // never stays present — the root cause of "every file is perpetually
-    // cloud-only". Without it, an opened/hydrated file stays resident until the
-    // user (or our app via `free_up_space`) explicitly frees it, and "Always keep
-    // on this device" pins (CfSetPinState) are honoured rather than silently
-    // reclaimed. The native "Free up space" menu still works — it dehydrates on
-    // explicit user action regardless of this modifier.
-    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::StreamingAllowed)
+    // Modifier None (LD-0105 S7, review N-P2-1 (b)): was `StreamingAllowed`, under which the platform may
+    // keep no data on disk at all, which would break the one-version-per-placeholder record and every
+    // on-disk check. `AutoDehydrationAllowed` stays dropped (1.1.0): an opened file stays on disk until
+    // the person, or "Free up space", frees it, and pins are honoured.
+    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::None)
         .map_err(|e| anyhow::anyhow!("SetHydrationPolicyModifier failed: {e}"))?;
     // AlwaysFull ↔ CF_POPULATION_POLICY_ALWAYS_FULL: the namespace is always fully
     // present locally (we eagerly mint a placeholder per cloud-only row), so
@@ -684,7 +615,7 @@ pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<(
         .map_err(|e| anyhow::anyhow!("SetShowSiblingsAsGroup failed: {e}"))?;
     info.SetProtectionMode(StorageProviderProtectionMode::Unknown)
         .map_err(|e| anyhow::anyhow!("SetProtectionMode failed: {e}"))?;
-    info.SetVersion(&HSTRING::from(PROVIDER_VERSION))
+    info.SetVersion(&HSTRING::from(provider.version))
         .map_err(|e| anyhow::anyhow!("SetVersion failed: {e}"))?;
 
     // Context is an opaque per-provider blob Windows hands back to us; encode the
@@ -1129,6 +1060,20 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // Re-running on every engine spawn makes a re-login reconverge the shell entry.
     if let Err(e) = register_shell_sync_root(sync_root) {
         tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
+    }
+
+    // LD-0105 S7: the policy Windows holds now, after both registrations. Anything but PROGRESSIVE
+    // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
+    let read_back = hydration_policy_of(sync_root).ok();
+    *HYDRATION_IN_EFFECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
+    match read_back {
+        Some(policy) if hydration_policy_is_ours(Some(policy)) => {
+            tracing::info!("Cloud Files hydration policy in effect: progressive")
+        }
+        Some((primary, modifier)) => {
+            tracing::warn!(primary, modifier, "Cloud Files hydration policy in effect is not progressive; whole-file path kept")
+        }
+        None => tracing::warn!("Cloud Files hydration policy could not be read back; whole-file path kept"),
     }
 
     // Stand up the OneDrive-style breadcrumb STATUS FLYOUT (clicking "Beebeeb" in
@@ -1711,6 +1656,12 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
                 if !entry.is_dir() {
                     if let Err(e) = db.mark_no_fetched_content(&entry.file_id) {
                         tracing::debug!(error = %e, file_id = %entry.file_id, "could not mark the new placeholder empty");
+                    }
+                    // Task 2180 / LD-0105 S3: the version the listing shows now is this placeholder's
+                    // identity. Without a record its bytes are never trusted, so a failure only costs a
+                    // later refetch, never mixed versions.
+                    if let Err(e) = db.record_minted_version(&entry.file_id) {
+                        tracing::debug!(error = %e, file_id = %entry.file_id, "could not record the placeholder's version");
                     }
                 }
             }

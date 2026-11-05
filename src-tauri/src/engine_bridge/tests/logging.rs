@@ -741,6 +741,33 @@ use super::*;
         }
 
         #[tokio::test]
+        async fn ld0105_s0_a_metered_fetch_counts_every_body_byte_on_the_direct_and_the_api_route() {
+            // The Windows fetch callback reports this meter to Cloud Files (S0). Every route feeds it:
+            // direct, the pinned API route (forced), and the legacy unpinned API route.
+            for (transport, legacy, want) in [
+                (Transport::Auto, false, FileTransport::Direct),
+                (Transport::Api, false, FileTransport::Api),
+                (Transport::Api, true, FileTransport::Api),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+                pair.knobs().legacy = legacy;
+                let bridge = bridge_for(dir.path(), &pair);
+                bridge.seams.use_transport(transport);
+                let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+                let meter = crate::transfer_progress::ReceiveMeter::default();
+                let (plaintext, used) =
+                    bridge.hydrate_whole_file_metered(TEST_FILE_ID, &meta, None, Some(&meter)).await.unwrap();
+                assert_eq!((plaintext.to_vec(), used), (pair.plain(), want), "{transport:?} legacy={legacy}");
+                assert_eq!(
+                    meter.received(),
+                    pair.knobs().version.encrypted_size(),
+                    "{transport:?} legacy={legacy}: every body byte counted once"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn forcing_the_api_transport_keeps_the_old_requests() {
             let dir = tempfile::tempdir().unwrap();
             let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);

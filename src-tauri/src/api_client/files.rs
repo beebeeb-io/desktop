@@ -69,16 +69,22 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
-    /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
-    pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
-        let resp = self
+    /// chunk bytes. Decryption is the caller's job (`beebeeb_core`). Each piece of the body is
+    /// reported to `on_body` as it arrives (LD-0105 S0), not once the chunk is whole.
+    pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32, on_body: super::OnBody<'_>) -> anyhow::Result<Vec<u8>> {
+        let mut resp = self
             .client
             .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
+        let mut body = Vec::new();
+        while let Some(piece) = resp.chunk().await? {
+            on_body(piece.len() as u64);
+            body.extend_from_slice(&piece);
+        }
+        Ok(body)
     }
 
     /// `GET /api/v1/files/:id/thumbnail/{variant}` — returns the raw *encrypted*

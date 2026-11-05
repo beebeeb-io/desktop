@@ -329,11 +329,16 @@ pub(super) struct HydrateReport<'a> {
     /// The server's plaintext size (the API path's `total`).
     pub(super) total: u64,
     pub(super) progress: Option<&'a HydrateProgressFn>,
+    /// This fetch's own count of body bytes, per read (LD-0105 S0), when the caller keeps one.
+    pub(super) meter: Option<&'a crate::transfer_progress::ReceiveMeter>,
 }
 
 impl crate::direct_download::Progress for HydrateReport<'_> {
     fn received(&self, wire_bytes: u64) {
         self.bridge.wire.download_bytes.fetch_add(wire_bytes, Ordering::Relaxed);
+        if let Some(meter) = self.meter {
+            meter.add(wire_bytes);
+        }
     }
 
     fn decrypted(&self, plaintext_bytes: u64) {

@@ -27,7 +27,9 @@ pub(crate) struct Request<'a> {
 
 /// Where the driver reports progress: the same two numbers the API path reports.
 pub(crate) trait Progress {
-    /// A chunk body arrived (storage or API): its wire length.
+    /// Body bytes of a chunk arrived (storage or API): called per read as the body streams in, so a
+    /// chunk that takes minutes still reports (LD-0105 S0). The calls for one chunk add up to its
+    /// wire length; a chunk that fails part way has reported the bytes that did arrive.
     fn received(&self, wire_bytes: u64);
     /// A chunk was decrypted and appended, strictly in order: the plaintext length so far. Called
     /// with 0 once, when the direct attempt starts (the API path's first report).

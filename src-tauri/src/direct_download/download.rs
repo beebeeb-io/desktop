@@ -81,7 +81,7 @@ pub(crate) async fn download(
                         tasks.push(Box::pin(async move {
                             Event::Storage {
                                 index,
-                                result: storage.fetch(grant).await,
+                                result: storage.fetch(grant, &|n| progress.received(n)).await,
                             }
                         }));
                     }
@@ -97,7 +97,9 @@ pub(crate) async fn download(
                             Event::Api {
                                 index,
                                 result: api
-                                    .download_chunk_pinned(file_id, index, &object_version_id, length)
+                                    .download_chunk_pinned(file_id, index, &object_version_id, length, &|n| {
+                                        progress.received(n)
+                                    })
                                     .await,
                             }
                         }));
@@ -199,8 +201,8 @@ pub(crate) async fn download(
             }
             Some(Event::Storage { index, result }) => match result {
                 Ok(bytes) => {
+                    // Its body was reported to `progress` read by read as it arrived (LD-0105 S0).
                     wire_bytes += bytes.len() as u64;
-                    progress.received(bytes.len() as u64);
                     if let Err(e) = planner.fetch_ok(index) {
                         tracing::debug!(error = %e, "direct download: planner error");
                         return Ok(Outcome::UseApi);
@@ -217,8 +219,8 @@ pub(crate) async fn download(
             },
             Some(Event::Api { index, result }) => match result {
                 Ok(bytes) => {
+                    // Its body was reported to `progress` read by read as it arrived (LD-0105 S0).
                     wire_bytes += bytes.len() as u64;
-                    progress.received(bytes.len() as u64);
                     if let Err(e) = planner.fetch_ok(index) {
                         tracing::debug!(error = %e, "direct download: planner error");
                         return Ok(Outcome::UseApi);

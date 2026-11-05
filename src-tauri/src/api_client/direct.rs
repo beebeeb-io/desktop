@@ -112,8 +112,14 @@ enum Exact {
     Broken,
 }
 
-/// Read a body that must be exactly `expected` bytes, never more than that into memory.
-async fn read_exact_len(resp: &mut reqwest::Response, expected: u64) -> Exact {
+/// Where a chunk body's bytes are reported as they arrive, one call per read (LD-0105 S0): a Cloud
+/// Files fetch must show Windows real progress at least every 10 s, and a chunk on a slow link can
+/// take longer than Windows' 60 s limit, so counting only finished chunks is not enough.
+pub(crate) type OnBody<'a> = &'a (dyn Fn(u64) + Sync);
+
+/// Read a body that must be exactly `expected` bytes, never more than that into memory, reporting
+/// each piece to `on_body` as it arrives.
+async fn read_exact_len(resp: &mut reqwest::Response, expected: u64, on_body: OnBody<'_>) -> Exact {
     let mut body = Vec::new();
     loop {
         match resp.chunk().await {
@@ -121,6 +127,7 @@ async fn read_exact_len(resp: &mut reqwest::Response, expected: u64) -> Exact {
                 if body.len() as u64 + piece.len() as u64 > expected {
                     return Exact::WrongLength;
                 }
+                on_body(piece.len() as u64);
                 body.extend_from_slice(&piece);
             }
             Ok(None) => break,
@@ -181,9 +188,10 @@ fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<C
 
 /// Fetch one chunk from its presigned link: `200` with a `Content-Length` equal to the grant's
 /// `length`, nothing else. The error is at most a status (0: no HTTP answer): reqwest's error
-/// text holds the URL, so it never leaves this function.
-pub(crate) async fn fetch_from_storage(client: &Client, grant: &dt::ChunkGrant) -> Result<Vec<u8>, u16> {
-    let resp = client
+/// text holds the URL, so it never leaves this function. The body is read piece by piece and each
+/// piece is reported to `on_body` as it arrives (LD-0105 S0), never only once the chunk is whole.
+pub(crate) async fn fetch_from_storage(client: &Client, grant: &dt::ChunkGrant, on_body: OnBody<'_>) -> Result<Vec<u8>, u16> {
+    let mut resp = client
         .get(&grant.url)
         .timeout(storage_timeout(grant.length))
         .send()
@@ -194,10 +202,12 @@ pub(crate) async fn fetch_from_storage(client: &Client, grant: &dt::ChunkGrant) 
         return Err(status);
     }
     // The HTTP stack frames the body by that Content-Length: a short body is a read error, a longer
-    // one never reaches us. The grant's length was checked against the version's geometry by the
-    // planner, so memory is bounded by one chunk.
-    let body = resp.bytes().await.map_err(|_| 0u16)?;
-    Ok(body.to_vec())
+    // one never reaches us (and `read_exact_len` refuses one all the same). The grant's length was
+    // checked against the version's geometry by the planner, so memory is bounded by one chunk.
+    match read_exact_len(&mut resp, grant.length, on_body).await {
+        Exact::Body(body) => Ok(body),
+        Exact::WrongLength | Exact::Broken => Err(0),
+    }
 }
 
 impl ApiClient {
@@ -291,8 +301,9 @@ impl ApiClient {
         index: u32,
         version: &str,
         expected_len: u64,
+        on_body: OnBody<'_>,
     ) -> Result<Vec<u8>, ChunkApiError> {
-        self.download_chunk_pinned_with(PINNED_RETRY, file_id, index, version, expected_len)
+        self.download_chunk_pinned_with(PINNED_RETRY, file_id, index, version, expected_len, on_body)
             .await
     }
 
@@ -303,11 +314,12 @@ impl ApiClient {
         index: u32,
         version: &str,
         expected_len: u64,
+        on_body: OnBody<'_>,
     ) -> Result<Vec<u8>, ChunkApiError> {
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
-            let (asked, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
+            let (asked, message) = match self.pinned_attempt(file_id, index, version, expected_len, on_body).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
                 Err(PinnedFailure::Again { wait, message }) => (wait, message),
@@ -328,6 +340,7 @@ impl ApiClient {
         index: u32,
         version: &str,
         expected_len: u64,
+        on_body: OnBody<'_>,
     ) -> Result<Vec<u8>, PinnedFailure> {
         let resp = self
             .client
@@ -369,7 +382,7 @@ impl ApiClient {
         }
         // The body must be exactly the manifest's length: read at most that much, and check it.
         let mut resp = resp;
-        match read_exact_len(&mut resp, expected_len).await {
+        match read_exact_len(&mut resp, expected_len, on_body).await {
             Exact::Body(bytes) => Ok(bytes),
             Exact::WrongLength => Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
                 "chunk {index} through the API is not the length its version's manifest states"
@@ -412,7 +425,7 @@ mod tests {
             expires_at: "2026-10-25T00:00:00Z".into(),
         };
         let started = Instant::now();
-        assert_eq!(fetch_from_storage(&client, &grant).await, Err(0), "a failed fetch, no status");
+        assert_eq!(fetch_from_storage(&client, &grant, &|_| {}).await, Err(0), "a failed fetch, no status");
         let took = started.elapsed();
         assert!(took < Duration::from_secs(4), "the idle timeout ended it, not the server's 8 s silence: {took:?}");
     }
@@ -454,7 +467,7 @@ mod tests {
             base: Duration::from_millis(10),
         };
         let got = client
-            .download_chunk_pinned_with(fast, "f", 0, "11111111-2222-4333-8444-555555555555", 38)
+            .download_chunk_pinned_with(fast, "f", 0, "11111111-2222-4333-8444-555555555555", 38, &|_| {})
             .await;
         assert!(matches!(got, Err(super::ChunkApiError::Failed(_))), "{got:?}");
         assert_eq!(api.seen().len(), 4, "four attempts, then the caller's fallback");
@@ -466,9 +479,48 @@ mod tests {
             ..fast
         };
         let _ = client
-            .download_chunk_pinned_with(tight, "f", 0, "11111111-2222-4333-8444-555555555555", 38)
+            .download_chunk_pinned_with(tight, "f", 0, "11111111-2222-4333-8444-555555555555", 38, &|_| {})
             .await;
         assert_eq!(api.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ld0105_s0_both_api_chunk_routes_report_each_piece_of_the_body_as_it_arrives() {
+        // LD-0105 S0, the API route alike: a chunk trickled in 6 pieces 400 ms apart must be reported
+        // piece by piece, the first report long before the body ends. Counted once per finished chunk
+        // (the mutant), there is one report, at the end.
+        use crate::direct_download::test_support::{ApiScript, Pair};
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+        const FILE: &str = "0b9f3c2e-7d41-4a8e-9c55-2173d0000105";
+        let pair = Pair::start([5; 32], FILE, 6 * 1024, 6 * 1024);
+        let frame_len = pair.knobs().version.frames[0].len();
+        let version = pair.knobs().version.id.clone();
+        let client = ApiClient::new(pair.api.base.clone(), "token".into(), [5; 32]);
+        for pinned in [true, false] {
+            pair.knobs()
+                .api_chunks
+                .insert(0, VecDeque::from([ApiScript::Trickle(frame_len.div_ceil(6), Duration::from_millis(400))]));
+            let seen: Mutex<Vec<(Instant, u64)>> = Mutex::new(Vec::new());
+            let on_body = |n: u64| seen.lock().unwrap().push((Instant::now(), n));
+            let started = Instant::now();
+            let body = if pinned {
+                client.download_chunk_pinned(FILE, 0, &version, frame_len as u64, &on_body).await.expect("pinned chunk")
+            } else {
+                client.download_chunk(FILE, 0, &on_body).await.expect("legacy chunk")
+            };
+            let ended = Instant::now();
+            assert_eq!(body, pair.knobs().version.frames[0], "pinned={pinned}: the frame itself");
+            let seen = seen.into_inner().unwrap();
+            assert_eq!(seen.iter().map(|(_, n)| n).sum::<u64>(), frame_len as u64, "pinned={pinned}: every byte once");
+            assert!(seen.len() >= 4, "pinned={pinned}: reported per read, got {} report(s)", seen.len());
+            let first = seen[0].0.duration_since(started);
+            assert!(
+                ended.duration_since(started) - first >= Duration::from_millis(1200),
+                "pinned={pinned}: the first piece was reported {first:?} in, the body ended {:?} in",
+                ended.duration_since(started)
+            );
+        }
     }
 
     #[tokio::test]

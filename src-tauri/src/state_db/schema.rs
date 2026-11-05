@@ -427,6 +427,19 @@ impl StateDb {
              DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
         ))?;
         }
+        // LD-0105 / task 2180: the version a Windows placeholder was minted from (`cf_streaming.rs`).
+        // NULL on every row from before it: no identity, so bytes on disk for it are never trusted.
+        ensure_column(conn, "files", "minted_object_version_id", "TEXT")?;
+        // LD-0105 S6: placeholders a failed fetch wrote into, until the empty step has dehydrated them.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cf_poison (
+                file_id TEXT PRIMARY KEY,
+                poisoned_at INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                change_ticks INTEGER,
+                file_index INTEGER
+            );",
+        )?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(

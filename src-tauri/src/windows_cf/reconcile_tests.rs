@@ -65,7 +65,7 @@ impl Root {
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let db = StateDb::open(temp.path().join("state.db")).unwrap();
-        crate::windows_cf::register_sync_root(&root).unwrap();
+        crate::windows_cf::register_test_sync_root(&root).unwrap();
         Self {
             connected: None,
             db,

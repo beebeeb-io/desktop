@@ -57,6 +57,26 @@ pub fn parent_folder(path: &str) -> String {
     }
 }
 
+/// One fetch's body bytes, counted per read as they arrive on the wire (LD-0105 S0), on the
+/// direct route and the API route alike. A Windows Cloud Files fetch reports this count to the
+/// platform (`CfReportProviderProgress`) while it downloads, which resets Windows' fixed 60 s
+/// callback timer; a chunk on a slow link can take longer than that on its own, so a count of
+/// finished chunks would leave the fetch silent. Nothing here is secret: one counter.
+#[derive(Debug, Default)]
+pub struct ReceiveMeter(std::sync::atomic::AtomicU64);
+
+impl ReceiveMeter {
+    /// `wire_bytes` more arrived.
+    pub fn add(&self, wire_bytes: u64) {
+        self.0.fetch_add(wire_bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Every body byte counted so far.
+    pub fn received(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Transfer {
     pub direction: Direction,

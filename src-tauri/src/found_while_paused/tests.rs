@@ -734,7 +734,7 @@
         use windows::Win32::Storage::CloudFilters::{
             CF_CALLBACK_REGISTRATION, CF_CALLBACK_TYPE_NONE, CF_CONNECT_FLAG_NONE, CfConnectSyncRoot,
         };
-        crate::windows_cf::register_sync_root(root).unwrap();
+        crate::windows_cf::register_test_sync_root(root).unwrap();
         let registered = Registered(root.to_path_buf());
         let table = Box::new([CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None }]);
         let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
