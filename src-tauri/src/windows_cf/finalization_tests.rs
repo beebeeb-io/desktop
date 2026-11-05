@@ -843,31 +843,44 @@ fn walk(path: &Path, into: &mut Vec<PathBuf>) {
 /// LD-0066: `SetFileSecurityW` keeps `SE_DACL_AUTO_INHERITED` only when the descriptor written also carries
 /// `SE_DACL_AUTO_INHERIT_REQ`, and a read does not return that bit. Under a temp folder whose DACL is auto-inherited
 /// (a Windows 11 user profile, the Legion: the file read control 0x8404) the DACL came back with the same ACEs under
-/// control 0x8004, so I1 failed on the harness's own write. A file whose descriptor has no auto-inherited bit to lose
-/// (as the GitHub runner's evidently has) came back byte for byte. So an auto-inherited descriptor is written from a
-/// copy with the request bit raised, which writes it back byte for byte on both (the native probe of LD-0066).
+/// control 0x8004, so I1 failed on the harness's own write. A descriptor with no auto-inherited bit comes back byte
+/// for byte (the probe's lineage B; that the GitHub runner's file is one is inferred from it, not observed there). So
+/// an auto-inherited descriptor is written from a copy with the request bit raised. On the Legion that wrote every
+/// saved descriptor back byte for byte, its inherited ACEs included: also when the folder no longer propagates one of
+/// them, and when the inherited deny was still on the file (the LD-0066 probe, runs 2 and 3).
 fn set_dacl(path: &Path, descriptor: &[u8]) -> Result<(), String> {
     use windows::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
-        SetFileSecurityW, SetSecurityDescriptorControl,
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR, SE_DACL_AUTO_INHERIT_REQ,
+        SE_DACL_AUTO_INHERITED, SetFileSecurityW, SetSecurityDescriptorControl,
     };
-    let mut descriptor = descriptor.to_vec();
-    let control = descriptor
-        .get(2..4)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .ok_or("a descriptor too short for its control word")?;
-    if control & SE_DACL_AUTO_INHERITED.0 != 0 {
-        // SAFETY: `descriptor` is a self-relative security descriptor this function owns; it outlives the call, which
-        // writes only its control word.
+    let error = |error: windows::core::Error| format!("{:?}", error.code());
+    let (mut control, mut revision) = (0u16, 0u32);
+    // SAFETY: `descriptor` is a self-relative security descriptor, alive for the call, which only reads it.
+    unsafe {
+        GetSecurityDescriptorControl(
+            PSECURITY_DESCRIPTOR(descriptor.as_ptr().cast_mut().cast()),
+            &mut control,
+            &mut revision,
+        )
+    }
+    .map_err(error)?;
+    let mut requested;
+    let descriptor = if control & SE_DACL_AUTO_INHERITED.0 != 0 {
+        requested = descriptor.to_vec();
+        // SAFETY: `requested` is a copy of the descriptor this function owns; it outlives the call, which writes only
+        // its control word.
         unsafe {
             SetSecurityDescriptorControl(
-                PSECURITY_DESCRIPTOR(descriptor.as_mut_ptr().cast()),
+                PSECURITY_DESCRIPTOR(requested.as_mut_ptr().cast()),
                 SE_DACL_AUTO_INHERIT_REQ,
                 SE_DACL_AUTO_INHERIT_REQ,
             )
         }
-        .map_err(|error| format!("{:?}", error.code()))?;
-    }
+        .map_err(error)?;
+        &requested[..]
+    } else {
+        descriptor
+    };
     let wide = wide(path);
     // SAFETY: `wide` is NUL-terminated and `descriptor` is a self-relative security descriptor; both outlive the call,
     // which only reads them.
