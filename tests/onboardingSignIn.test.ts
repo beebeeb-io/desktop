@@ -161,7 +161,7 @@ describe('settledFrom (R8)', () => {
   })
 
   test('reads every JSON shape the Rust LoginOutcome contract pins (lib.rs), and none is unreadable', () => {
-    const lib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    const lib = readFileSync(new URL('../src-tauri/src/reauth_tests.rs', import.meta.url), 'utf8')
     const start = lib.indexOf('fn login_outcome_json_is_the_frontends_contract()')
     const body = lib.slice(start, lib.indexOf('\n    }\n', start))
     const shapes = [...body.matchAll(/r#"(\{.*?\})"#/g)].map((m) => JSON.parse(m[1]))

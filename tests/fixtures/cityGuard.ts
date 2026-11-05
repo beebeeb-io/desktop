@@ -14,6 +14,7 @@
  * Fixtures under `tests/` and `src-tauri/tests/` are outside the scan: they prove absence.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { rustTestFiles } from './rustTestFiles'
 import { join, relative } from 'node:path'
 
 export const CITY_NAME = /falkenstein|helsinki|nuremberg|n(?:ü|ue|u)rnberg/i
@@ -143,7 +144,8 @@ function isRustTestModule(file: string, root: string): boolean {
 /** Every scanned file under `root` with its hits (files with none are left out). */
 export function scan(root: string): { files: number; offenders: Record<string, string[]> } {
   const ts = walk(join(root, 'src'), /\.(ts|tsx)$/)
-  const rs = walk(join(root, 'src-tauri/src'), /\.rs$/).filter((file) => !isRustTestModule(file, root))
+  const testModules = rustTestFiles(root)
+  const rs = walk(join(root, 'src-tauri/src'), /\.rs$/).filter((file) => !isRustTestModule(file, root) && !testModules.has(file))
   const offenders: Record<string, string[]> = {}
   for (const file of [...ts, ...rs]) {
     const found = hits(readFileSync(file, 'utf8'), file.endsWith('.rs') ? 'rs' : 'ts')

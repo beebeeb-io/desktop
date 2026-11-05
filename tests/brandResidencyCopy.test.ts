@@ -1,7 +1,8 @@
 /** Product copy follows the effective continent; it never names a city (task 2050). */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { rustTestFiles } from './fixtures/rustTestFiles'
 
 const root = join(import.meta.dir, '..')
 // CRLF-tolerant: Windows checkouts (autocrlf) must scan identically to LF (task 1639).
@@ -48,7 +49,7 @@ test('frontend, legacy Windows and native tray/menu sources never name a provide
       return entry.isDirectory() ? sources(path) : /\.(tsx?|rs)$/.test(entry.name) ? [path] : []
     })
   }
-  const files = [...sources('src'), ...sources('windows/src'), 'src-tauri/src/lib.rs']
+  const files = [...sources('src'), ...sources('windows/src'), 'src-tauri/src/lib.rs', ...[...rustTestFiles(root)].map((file) => relative(root, file))]
   expect(files.length).toBeGreaterThan(50)
   for (const file of files) expect(read(file).match(/hetzner|ovhcloud|digitalocean/gi)).toBeNull()
 })

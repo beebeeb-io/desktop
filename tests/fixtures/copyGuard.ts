@@ -23,6 +23,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import ts from 'typescript'
 import { stripComments, stripRustTestItems } from './cityGuard'
+import { rustTestFiles } from './rustTestFiles'
 
 /**
  * The windows `main.tsx` mounts only on Windows (spec rows A5 to A7: not built on a Mac; §10.2 #25 leaves their copy alone).
@@ -393,7 +394,8 @@ export function rustSentencesIn(file: string, source: string): RustSentence[] {
 export function scanRust(repo: string): { files: number; sentences: number; violations: Violation[] } {
   const violations: Violation[] = []
   let sentences = 0
-  const files = rustFiles(repo)
+  const testModules = rustTestFiles(repo)
+  const files = rustFiles(repo).filter((path) => !testModules.has(path))
   for (const path of files) {
     for (const entry of rustSentencesIn(relative(repo, path), readFileSync(path, 'utf8'))) {
       sentences += 1

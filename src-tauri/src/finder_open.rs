@@ -439,7 +439,7 @@ mod tests {
     /// scan proves it sees them, so it cannot pass by reading nothing.
     #[test]
     fn test_1885_no_macos_code_path_spawns_open() {
-        use crate::finder_setup_command_tests::macos_compiled;
+        use crate::finder_setup_command_tests::{macos_compiled, test_module_files};
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         rust_files(&src, &mut files);
@@ -447,8 +447,12 @@ mod tests {
 
         let needles = spawn_needles();
         let (mut lines_on_a_mac, mut spawns_elsewhere) = (0, 0);
+        let test_modules = test_module_files(&src);
         for file in &files {
             let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            if test_modules.contains(&name) {
+                continue;
+            }
             let text = std::fs::read_to_string(file)
                 .expect("read a source file")
                 .replace("\r\n", "\n");
