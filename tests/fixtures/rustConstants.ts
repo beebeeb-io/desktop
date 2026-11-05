@@ -27,19 +27,34 @@ export function rustSource(file: string): string {
  */
 export function libRsSource(dir: string = RUST_SRC): string {
   const hub = readFileSync(join(dir, 'lib.rs'), 'utf8')
-  return hub
+  let children = 0
+  const out = hub
     .split(/(?<=\n)/)
     .map((line) => {
       const text = childOf(dir, line)
       if (text === null) return line
-      // The split's only edit inside a child is a `pub(super) ` on a private item, field or method.
-      return text
+      children += 1
+      // The split's only edit inside a child is a `pub(super) ` on a private item, field or method. As in the Rust
+      // twin: the first three lines go, then one blank line if it follows them.
+      const body = text
         .split(/(?<=\n)/)
-        .slice(4)
+        .slice(3)
         .map((l) => l.replace(/^(\s*)pub\(super\) /, '$1'))
         .join('')
+      return body.replace(/^\r?\n/, '')
     })
     .join('')
+  checkChildren(children, dir)
+  return out
+}
+
+/** How many children the split moved out of `lib.rs` (`CHILDREN` in `root_source.rs`). */
+const CHILDREN = 19
+
+/** A child whose header stopped matching drops its lines from every scanner's input: count them. 0 is a tree that was
+ * never split (a scratch fixture). */
+function checkChildren(found: number, dir: string): void {
+  if (found !== 0 && found !== CHILDREN) throw new Error(`${dir}/lib.rs splices ${CHILDREN} children back in, found ${found}`)
 }
 
 /** The text of the child the hub line `line` (`mod <child>;`) declares, when it is one split out of `lib.rs`. */
@@ -58,10 +73,12 @@ function childOf(dir: string, line: string): string | null {
 export function libRsChildren(dir: string = RUST_SRC): string[] {
   const lib = join(dir, 'lib.rs')
   if (!existsSync(lib)) return []
-  return readFileSync(lib, 'utf8')
+  const children = readFileSync(lib, 'utf8')
     .split(/(?<=\n)/)
     .filter((line) => childOf(dir, line) !== null)
     .map((line) => `${/^mod ([a-z_][a-z0-9_]*);/.exec(line)![1]}.rs`)
+  checkChildren(children.length, dir)
+  return children
 }
 
 /**

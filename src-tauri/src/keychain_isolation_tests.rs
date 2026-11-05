@@ -75,7 +75,8 @@
             if test_modules.contains(&name) {
                 continue;
             }
-            let text = std::fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
+            if crate::root_source::lib_rs_child(&name) { continue; }
+            let text = if name == "lib.rs" { crate::root_source::lib_rs() } else { std::fs::read_to_string(&file).unwrap() }.replace("\r\n", "\n");
             let production = without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]);
             let code: String = production
                 .lines()
