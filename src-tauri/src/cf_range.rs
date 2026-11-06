@@ -53,6 +53,25 @@ pub(crate) const REQUEST_KEY_DEFAULT: i64 = 0;
 /// withholds a piece that still finds none (and closes the session, [`StreamSink::withheld`]).
 pub(crate) const READ_AHEAD_ON_DEFAULT_KEY: bool = false;
 
+/// The streaming kill switch (lead ruling 2026-11-06, desktop #225), read once at engine start
+/// ([`fetch_route`]). On: a pinned file's fetches are demands on its W2 range session. Off: every
+/// fetch takes the whole-file path (S0/S2 on the PROGRESSIVE root), as before W2. ON in dev builds;
+/// release builds ship it OFF until the robocopy failure (QA F2b) is fixed and natively verified.
+pub(crate) const W2_STREAMING: bool = cfg!(debug_assertions);
+
+/// Where one `FETCH_DATA` goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchRoute {
+    RangeSession,
+    WholeFile,
+}
+
+/// The kill switch's rule: the range session only with the switch on, the root read back as
+/// PROGRESSIVE (S7), and the file not handed to the whole-file path by an earlier session.
+pub(crate) fn fetch_route(switch_on: bool, progressive: bool, whole_file_only: bool) -> FetchRoute {
+    if switch_on && progressive && !whole_file_only { FetchRoute::RangeSession } else { FetchRoute::WholeFile }
+}
+
 /// A session with no pending request, and none added or answered for this long, ends (desktop #225
 /// review P2): its lease, its 1640 ticket and its Activity row are released, as "not whole".
 pub(crate) const IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);

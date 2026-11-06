@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 18] = [
+pub(super) const ACCOUNT_TABLES: [&str; 19] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -31,6 +31,8 @@ pub(super) const ACCOUNT_TABLES: [&str; 18] = [
     "held_edits",
     // LD-0105 S6: placeholders a failed fetch wrote into, until emptied (file ids): the account's.
     "cf_poison",
+    // LD-0105 Amendment 4 (desktop #225): pins the empty step could not put back (file ids): the account's.
+    "cf_pin_restore",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no

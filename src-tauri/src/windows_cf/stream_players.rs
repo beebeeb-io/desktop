@@ -15,8 +15,9 @@
 //! **Switched on** ([`STREAMING_ENABLED`]) with the streaming callback (plan W2): a declined player's
 //! reads become range demands on the file's one range session (`windows_cf::streaming`).
 
-/// On with W2 (plan W3: "The decline is switched on only with W2").
-pub(crate) const STREAMING_ENABLED: bool = true;
+/// OFF for 0.8.22 (lead ruling 2026-11-06, desktop #225: D2-2 failed natively, VLC's open was served
+/// whole and never declined; per Amendment 5 the per-app decline ships switched off). The code stays.
+pub(crate) const STREAMING_ENABLED: bool = false;
 
 /// How a player is recognised. Never by image name alone: a renamed `vlc.exe` in a temp folder must
 /// get the whole file (D2-4).
@@ -250,12 +251,14 @@ mod tests {
         }
     }
 
+    /// Lead ruling 2026-11-06 (desktop #225): W3 ships off for 0.8.22. Red on the mutant "the switch
+    /// is on".
     #[test]
-    fn the_switch_is_on_with_the_streaming_callback() {
-        assert!(STREAMING_ENABLED, "W3 is switched on with W2");
+    fn the_switch_is_off_for_0822() {
+        assert!(!STREAMING_ENABLED, "W3 ships switched off");
         assert!(
-            decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true, || true),
-            "the shipped switch declines a listed player's open-time fetch of a media file"
+            !decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true, || true),
+            "the shipped switch declines nothing, not even a listed player's open of a media file"
         );
     }
 

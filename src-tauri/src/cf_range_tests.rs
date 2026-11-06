@@ -820,3 +820,26 @@ async fn ld0105_p1_a_cancelled_request_ends_it_and_never_poisons() {
     assert!(gets.values().all(|n| *n == 1), "no chunk fetched twice: {gets:?}");
     assert!(sink.withheld, "never promoted");
 }
+
+// ── The streaming kill switch (lead ruling, 2026-11-06) ─────────────────────────────────────────
+
+/// Switch ON (dev builds): a pinned file on a PROGRESSIVE root streams through its range session;
+/// a non-progressive root or a file an earlier session handed back still takes the whole-file path.
+#[test]
+fn ld0105_switch_on_streams_a_pinned_file_through_its_range_session() {
+    assert!(W2_STREAMING, "ON in dev builds (this test build is one)");
+    assert_eq!(fetch_route(true, true, false), FetchRoute::RangeSession);
+    assert_eq!(fetch_route(true, false, false), FetchRoute::WholeFile, "not progressive (S7)");
+    assert_eq!(fetch_route(true, true, true), FetchRoute::WholeFile, "handed back (UseApi, legacy)");
+}
+
+/// Switch OFF (0.8.22 release builds until F2b is verified): every fetch takes the whole-file path
+/// (S0/S2), whatever the root and the file. Red on the mutant "the route ignores the switch".
+#[test]
+fn ld0105_switch_off_routes_every_fetch_to_the_whole_file_path() {
+    for progressive in [true, false] {
+        for handed_back in [true, false] {
+            assert_eq!(fetch_route(false, progressive, handed_back), FetchRoute::WholeFile, "{progressive} {handed_back}");
+        }
+    }
+}

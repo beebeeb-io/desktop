@@ -55,6 +55,15 @@ impl Session {
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<Session>>>> = LazyLock::new(Default::default);
+/// The kill switch as read at engine start (`cf_range::W2_STREAMING`, desktop #225).
+static SWITCH_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Engine start: read the streaming kill switch once (lead ruling 2026-11-06).
+pub(crate) fn read_switch_at_engine_start() {
+    let on = crate::cf_range::W2_STREAMING;
+    SWITCH_ON.store(on, std::sync::atomic::Ordering::SeqCst);
+    tracing::info!(streaming = on, "LD-0105 W2 streaming switch read at engine start");
+}
 /// Files a session handed back to the whole-file path (`UseApi` before any write): their later fetches
 /// go there directly, until the process restarts.
 static WHOLE_FILE_ONLY: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
@@ -89,7 +98,12 @@ pub(super) enum Served {
 /// Serve `fetch` through the file's range session. `Served::WholeFilePath` when this file streams
 /// not (no progressive policy, a legacy file, a session that gave the file to the API path).
 pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>, handle: &tokio::runtime::Handle) -> Served {
-    if !super::registration::progressive_in_effect() || lock(&WHOLE_FILE_ONLY).contains(&fetch.file_id) {
+    let route = crate::cf_range::fetch_route(
+        SWITCH_ON.load(std::sync::atomic::Ordering::SeqCst),
+        super::registration::progressive_in_effect(),
+        lock(&WHOLE_FILE_ONLY).contains(&fetch.file_id),
+    );
+    if route == crate::cf_range::FetchRoute::WholeFile {
         return Served::WholeFilePath;
     }
     if declined(fetch, bridge, handle) {
@@ -284,8 +298,8 @@ async fn watch(session: Arc<Session>) {
 struct Quiet;
 impl beebeeb_transfer::Observer for Quiet {}
 
-/// `CfExecute(TRANSFER_DATA)` for one authenticated piece.
-struct CfOut(CF_CONNECTION_KEY);
+/// `CfExecute(TRANSFER_DATA)` for one authenticated piece; the last refusal's HRESULT, for the log.
+struct CfOut(CF_CONNECTION_KEY, Option<u32>);
 
 impl PieceOut for CfOut {
     fn transfer(&mut self, keys: RequestKeys, offset: u64, plain: &[u8]) -> std::io::Result<()> {
@@ -303,6 +317,9 @@ impl PieceOut for CfOut {
         }
         .map_err(|e| {
             let code = e.code().0 as u32;
+            self.1 = Some(code);
+            // QA logging gap (desktop #225): every refusal names its status.
+            tracing::warn!(hresult = %format!("0x{code:08X}"), offset, len = plain.len(), request_key = keys.request_key, gone = crate::cf_range::request_gone(code), "TRANSFER_DATA refused");
             // A cancelled request or a key no longer valid ends that request, never the file (#225).
             if crate::cf_range::request_gone(code) { crate::cf_range::gone_error() } else { std::io::Error::other(format!("CfExecute 0x{code:08X}")) }
         })
@@ -334,7 +351,7 @@ async fn run_session(
     };
     let progress = (board.clone(), session.meter.clone());
     let closing = session.clone();
-    let mut sink = StreamSink::new(session.book.clone(), CfOut(connection), records, file_size)
+    let mut sink = StreamSink::new(session.book.clone(), CfOut(connection, None), records, file_size)
         .with_progress(move |done| {
             progress.0.update(done);
             progress.1.keep(done.saturating_sub(progress.1.kept()));
@@ -347,7 +364,7 @@ async fn run_session(
         result = beebeeb_transfer::range_session(&io, &shared, beebeeb_transfer::RangeLessor::global(), request, file_key, &session.control, &mut sink, &Quiet) => result,
         () = super::cancelled(&bridge) => Ok(beebeeb_transfer::RangeOutcome::Closed(Default::default())),
     };
-    let (transferred, withheld) = (sink.transferred, sink.withheld);
+    let (transferred, withheld, refused) = (sink.transferred, sink.withheld, sink.out.1.map(|c| format!("0x{c:08X}")));
     drop(sink);
     // No demand joins a session that returned (review P1: one joining while the promotion hashes).
     {
@@ -397,7 +414,10 @@ async fn run_session(
         AfterSession::Leave => {
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::CloudOnly);
         }
-        AfterSession::Poison(reason) => super::poison::poison_now(bridge.db(), &file_id, &path, reason, key_before),
+        AfterSession::Poison(reason) => {
+            tracing::warn!(file_id = %file_id, reason, last_refusal = ?refused, error = ?result.as_ref().err().map(ToString::to_string), "range session failed after a write: poisoning");
+            super::poison::poison_now(bridge.db(), &file_id, &path, reason, key_before)
+        }
         // Nothing written: the whole-file path serves it (and resolves a size, task 0783, from the
         // authenticated length: review P2).
         AfterSession::WholeFilePath | AfterSession::ResolveSize => {
@@ -408,7 +428,7 @@ async fn run_session(
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::Error);
         }
     }
-    tracing::info!(file_id = %file_id, transferred, outcome = ?after_session(&result), "range session ended");
+    tracing::info!(file_id = %file_id, transferred, withheld, last_refusal = ?refused, outcome = ?after_session(&result), "range session ended");
     drop(ticket);
     end(&session, &file_id);
 }
@@ -576,6 +596,8 @@ impl Drop for Requester {
 }
 
 fn fail(fetch: &Fetch) {
+    // QA logging gap (desktop #225): every failed request, with the status we answer it with.
+    tracing::info!(file_id = %fetch.file_id, offset = fetch.offset, length = fetch.length, requester = fetch.requester, status = "0xC0000001", "fetch request failed");
     // SAFETY: the keys of this live request.
     unsafe { super::callbacks::fail_transfer(fetch.connection, fetch.keys.transfer_key, fetch.keys.request_key, fetch.offset, fetch.length) };
 }
@@ -586,7 +608,7 @@ unsafe fn decline(fetch: &Fetch) {
     if let Err(e) = unsafe {
         super::callbacks::transfer_one(fetch.connection, fetch.keys.transfer_key, fetch.keys.request_key, std::ptr::null(), fetch.offset, fetch.length.max(0), STATUS_DECLINED)
     } {
-        tracing::debug!(error = %e, "decline: CfExecute failed");
+        tracing::warn!(hresult = %format!("0x{:08X}", e.code().0 as u32), "decline: CfExecute failed");
     }
 }
 

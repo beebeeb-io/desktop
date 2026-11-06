@@ -1077,6 +1077,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
     let read_back = hydration_policy_of(sync_root).ok();
     *HYDRATION_IN_EFFECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
+    streaming::read_switch_at_engine_start();
     match read_back {
         Some(policy) if hydration_policy_is_ours(Some(policy)) => {
             tracing::info!("Cloud Files hydration policy in effect: progressive")

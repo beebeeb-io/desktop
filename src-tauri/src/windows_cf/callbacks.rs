@@ -866,7 +866,7 @@ pub(super) unsafe fn fail_transfer(
             STATUS_UNSUCCESSFUL,
         )
     } {
-        tracing::warn!(error = %e, "CfExecute(TRANSFER_DATA) failure-report itself failed");
+        tracing::warn!(hresult = %format!("0x{:08X}", e.code().0 as u32), required_offset, len, status = "0xC0000001", "CfExecute(TRANSFER_DATA) failure-report itself failed");
     }
 }
 
