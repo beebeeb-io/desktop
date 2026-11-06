@@ -28,11 +28,24 @@ import { useEffect, useState } from 'react'
 import {
   accountActivityFeed,
   accountNotifications,
+  discardAndDownloadAgain,
+  loadActiveTransfers,
+  type ActiveTransferRow,
   type ActivityFeed,
   type ActivityFeedEvent,
   type NotificationList,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { FileGlyph, getFileType, FILE_COLOR } from '../fileGlyph'
+import { activityDetail, progressFraction, shouldShowInProgressCard, transferUiState } from '../downloadProgressModel'
+import {
+  IN_PROGRESS_CARD_HEADER,
+  NEEDS_ATTENTION_ACTION,
+  NEEDS_ATTENTION_CONFIRM,
+  NEEDS_ATTENTION_ERROR_FALLBACK,
+  NEEDS_ATTENTION_ERRORS,
+} from '../downloadProgressCopy'
+import { pollWhileVisible } from '../visiblePoll'
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 // All wire timestamps are RFC3339 strings; guard null/undefined + unparseable.
@@ -146,7 +159,7 @@ function ErrorBlock({ reason, unsupported, onRetry }: { reason: string; unsuppor
         <div>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink2 }}>Not available in this build</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5, marginTop: 2 }}>
-            This view binds to a command that isn’t wired into the current desktop build.
+            This view binds to a command that isn't wired into the current desktop build.
           </div>
         </div>
       </Card>
@@ -157,7 +170,7 @@ function ErrorBlock({ reason, unsupported, onRetry }: { reason: string; unsuppor
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
         <NavIcon name="external" size={16} color={RED} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Couldn’t load</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Couldn't load</div>
           <div style={{ fontSize: 11.5, fontFamily: T.fontSans, color: T.ink3, lineHeight: 1.5, marginTop: 4, wordBreak: 'break-word' as const }}>
             {reason}
           </div>
@@ -178,6 +191,171 @@ function EmptyBlock({ icon, title, body }: { icon: string; title: string; body: 
       </div>
       <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{title}</div>
       <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.6, maxWidth: 360 }}>{body}</div>
+    </Card>
+  )
+}
+
+// ── In-progress card (LD-0105 U1) ────────────────────────────────────────────
+
+/** Poll the transfer board every 3 s while this component is visible (task 2243 pattern). */
+function useActiveTransfers(): ActiveTransferRow[] {
+  const [rows, setRows] = useState<ActiveTransferRow[]>([])
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const r = await loadActiveTransfers()
+      if (!cancelled && r.ok) setRows(r.value)
+    }
+    const stop = pollWhileVisible(refresh, 3000)
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [])
+  return rows
+}
+
+/** warn colour shared with WindowsTray.tsx — the WARN_STATUSES tint */
+const WARN_COLOR = 'var(--warn-text)'
+
+/**
+ * Per-row discard state for needs-attention rows.
+ * null = idle, 'confirm' = showing confirmation, 'loading' = API call in-flight,
+ * <string other than those> = one-line error message to show.
+ */
+type DiscardRowState = null | 'confirm' | 'loading' | string
+
+/**
+ * The "In progress" card: shown above the Timeline when at least one transfer is
+ * active, needs attention, or failed in the last 15 minutes (LD-0105 U1).
+ * One row per transfer.
+ *
+ * "Needs attention" rows (Amendment 4): file changed on this device after a
+ * failed download. Same icon and warn-text line as the failed row; no background
+ * tint (Amber stays for encryption state). The action "Discard and download again"
+ * triggers a one-step confirm before the IPC call.
+ */
+function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
+  // Tracks the discard flow per fileId (idle | confirm | loading | error message).
+  const [discardState, setDiscardState] = useState<Record<string, DiscardRowState>>({})
+
+  if (rows.length === 0) return null
+
+  const startDiscard = (fileId: string) =>
+    setDiscardState((s) => ({ ...s, [fileId]: 'confirm' }))
+
+  const cancelDiscard = (fileId: string) =>
+    setDiscardState((s) => ({ ...s, [fileId]: null }))
+
+  const confirmDiscard = async (fileId: string) => {
+    setDiscardState((s) => ({ ...s, [fileId]: 'loading' }))
+    const result = await discardAndDownloadAgain(fileId)
+    if (result.ok) {
+      setDiscardState((s) => ({ ...s, [fileId]: null }))
+    } else {
+      const msg = NEEDS_ATTENTION_ERRORS[result.reason] ?? NEEDS_ATTENTION_ERROR_FALLBACK
+      setDiscardState((s) => ({ ...s, [fileId]: msg }))
+    }
+  }
+
+  return (
+    <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+      {/* Header */}
+      <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <NavIcon name="folder" size={14} color={T.ink2} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>In progress</div>
+          <div style={{ fontSize: 11, color: T.ink3 }}>{IN_PROGRESS_CARD_HEADER}</div>
+        </div>
+      </div>
+      {/* One row per transfer */}
+      {rows.map((r, i) => {
+        const uiState = transferUiState(r)
+        const isNeedsAttention = uiState === 'needs_attention'
+        const fraction = progressFraction(r)
+        const detail = activityDetail(r)
+        const isLast = i === rows.length - 1
+        const ds = discardState[r.fileId] ?? null
+        // An error message is any string other than the two sentinel values.
+        const errorMsg = (typeof ds === 'string' && ds !== 'confirm' && ds !== 'loading') ? ds : null
+        // Compute once and reuse for both the `type` prop and the `color` lookup
+        // (P3 fix, LD-0105 U1 review 2026-11-06).
+        const fileType = getFileType(r.name)
+
+        return (
+          <div
+            key={r.fileId}
+            style={{ position: 'relative', padding: '11px 20px', display: 'flex', alignItems: 'flex-start', gap: 14, borderBottom: isLast ? 'none' : `1px solid ${T.line}` }}
+          >
+            {/* File-type icon from the shared palette — keeps its colour (brand exception,
+                task 2320). No warning triangle; warn-text line carries the state. */}
+            <div style={{ width: 28, height: 28, borderRadius: 6, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <FileGlyph type={fileType} size={13} color={FILE_COLOR[fileType]} />
+            </div>
+            {/* Name + detail */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: T.fontMono }}>
+                {r.name || r.fileId}
+              </div>
+              {r.folder && (
+                <div style={{ fontSize: 11, color: T.ink4, fontFamily: T.fontMono, marginTop: 1 }}>{r.folder}</div>
+              )}
+              {/* Warn-text colour for failed and needs_attention; ink3 for everything else */}
+              <div style={{ fontSize: 11, color: (isNeedsAttention || r.failed) ? WARN_COLOR : T.ink3, marginTop: 3, lineHeight: 1.5 }}>
+                {detail}
+              </div>
+              {/* One-line error from the discard command (e.g. "in_use") */}
+              {errorMsg && (
+                <div style={{ fontSize: 11, color: WARN_COLOR, marginTop: 3, lineHeight: 1.5 }}>
+                  {errorMsg}
+                </div>
+              )}
+              {/* Progress bar — 3px; not shown for failed or needs_attention (fraction is null) */}
+              {fraction != null && (
+                <div style={{ marginTop: 7, height: 3, borderRadius: 999, background: T.paper3, overflow: 'hidden' }}>
+                  <div
+                    style={{ width: `${Math.round(fraction * 100)}%`, height: '100%', background: T.ink3, borderRadius: 999, transition: 'width 0.5s linear' }}
+                  />
+                </div>
+              )}
+              {/* Needs-attention action: confirm before discarding (Amendment 4) */}
+              {isNeedsAttention && r.action === 'discard_and_download_again' && (
+                ds === 'confirm' ? (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 11.5, color: T.ink2, lineHeight: 1.5, marginBottom: 8 }}>
+                      {NEEDS_ATTENTION_CONFIRM}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const }}>
+                      <PrimaryBtn onClick={() => void confirmDiscard(r.fileId)}>
+                        {NEEDS_ATTENTION_ACTION}
+                      </PrimaryBtn>
+                      <button
+                        onClick={() => cancelDiscard(r.fileId)}
+                        style={{ padding: '6px 14px', fontSize: 12, fontFamily: T.fontSans, color: T.ink2, background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 7, cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : ds === 'loading' ? (
+                  <div style={{ marginTop: 8, fontSize: 11.5, color: T.ink3, fontStyle: 'italic' }}>
+                    Discarding…
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 8 }}>
+                    <button
+                      onClick={() => startDiscard(r.fileId)}
+                      style={{ padding: '5px 12px', fontSize: 11.5, fontFamily: T.fontSans, fontWeight: 500, color: T.ink, background: T.paper2, border: `1px solid ${T.line}`, borderRadius: 7, cursor: 'pointer' }}
+                    >
+                      {NEEDS_ATTENTION_ACTION}
+                    </button>
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        )
+      })}
     </Card>
   )
 }
@@ -502,12 +680,15 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 export default function ActivityView() {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
+  const allTransfers = useActiveTransfers()
+  // Keep only transfers that are active or failed within the last 15 min.
+  const liveTransfers = allTransfers.filter((r) => shouldShowInProgressCard([r]))
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Activity"
-        subtitle="Your account’s timeline and notifications. Notification preferences now live under Settings."
+        subtitle="Your account's timeline and notifications. Notification preferences now live under Settings."
         aside={
           <Chip tone="amber">
             <NavIcon name="shield" size={11} color={T.amberDeep} />
@@ -517,6 +698,11 @@ export default function ActivityView() {
       />
 
       <TabBar active={tab} onChange={setTab} />
+
+      {/* "In progress" card — shown above Timeline when files are arriving (LD-0105 U1). */}
+      {tab === 'timeline' && liveTransfers.length > 0 && (
+        <InProgressCard rows={liveTransfers} />
+      )}
 
       {/* Each section self-fetches on mount; remounting on tab change keeps the
           four-state handling self-contained and the data fresh on return. */}

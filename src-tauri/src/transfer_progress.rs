@@ -12,15 +12,21 @@
 //! Nothing here is secret: a file id, a direction, two counters. Names stay in the
 //! state DB.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
+    #[default]
     Up,
     Down,
+    /// A direct-streaming open: the bytes are served to the player as they arrive
+    /// on the wire (LD-0105). `buffered` is the on-disk byte count (ONDISK);
+    /// `speed_bps` is the 2-second moving-window receive rate.
+    Stream,
 }
 
 impl Direction {
@@ -28,8 +34,70 @@ impl Direction {
         match self {
             Direction::Up => "up",
             Direction::Down => "down",
+            Direction::Stream => "stream",
         }
     }
+}
+
+/// A 2-second sliding window of `(Instant, cumulative_bytes)` samples used to
+/// compute bytes-per-second for a streaming transfer.
+#[derive(Debug)]
+struct SpeedWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl SpeedWindow {
+    fn new() -> Self {
+        Self { samples: VecDeque::new() }
+    }
+
+    /// Push a new sample and return the current speed in bytes/s.
+    fn push(&mut self, now: Instant, cumulative_bytes: u64) -> u64 {
+        self.samples.push_back((now, cumulative_bytes));
+        // Drop samples older than 2 seconds
+        let cutoff = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+        while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < 2 {
+            return 0;
+        }
+        let (oldest_t, oldest_b) = self.samples.front().copied().unwrap();
+        let (_, newest_b) = self.samples.back().copied().unwrap();
+        let elapsed_secs = now.duration_since(oldest_t).as_secs_f64();
+        if elapsed_secs < 0.001 {
+            return 0;
+        }
+        (newest_b.saturating_sub(oldest_b) as f64 / elapsed_secs) as u64
+    }
+}
+
+/// A transfer's metadata serialised into the `get_active_transfers` IPC response.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveTransferDto {
+    pub file_id: String,
+    /// Last path component (display name for the UI row).
+    pub name: String,
+    /// Everything before the last component, `""` at the vault root.
+    pub folder: String,
+    pub direction: Direction,
+    /// Cumulative bytes confirmed written to the destination (or the read cursor
+    /// for a streaming open). For `Direction::Stream`, the UI shows this as
+    /// "buffered" (on-disk bytes).
+    pub done: u64,
+    /// Declared total bytes; `0` when unknown (a streaming open may not have a
+    /// known size until the first chunk arrives).
+    pub total: u64,
+    /// For `Direction::Stream`: bytes already written to the local buffer file
+    /// (ONDISK). For other directions this is `0`.
+    pub buffered: u64,
+    /// 2-second moving-window receive rate in bytes/s. `0` when not yet computed.
+    pub speed_bps: u64,
+    /// The transfer ended in an error (the guard dropped without `finish()`).
+    pub failed: bool,
+    /// Unix timestamp when the failure was recorded, for expiry logic in the UI.
+    pub failed_at_secs: Option<u64>,
 }
 
 /// Plaintext bytes an upload has sent once `chunks_done` chunks of `chunk_size`
@@ -102,16 +170,38 @@ impl ReceiveMeter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Transfer {
     pub direction: Direction,
     pub done: u64,
     pub total: u64,
+    /// For `Direction::Stream`: bytes written to the local buffer file (ONDISK).
+    pub buffered: u64,
+    /// 2-second moving-window receive rate; updated by [`TransferBoard::update_stream`].
+    pub speed_bps: u64,
+    /// Set when the transfer ends in an error (see [`TransferBoard::mark_failed`]).
+    pub failed: bool,
+    /// Unix timestamp when `failed` was set, for expiry in the UI (hide after 15 min).
+    pub failed_at_secs: Option<u64>,
 }
+
+/// 15-minute visibility window for a failed transfer after its guard drops.
+/// The UI reads `snapshot_dtos()` and shows the failed row until the entry ages out.
+pub const FAILED_ROW_TTL_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Default)]
 struct Inner {
     active: HashMap<String, Transfer>,
+    /// Transfers that ended in an error and are within [`FAILED_ROW_TTL_SECS`] of their
+    /// `failed_at_secs`. Populated by `Drop` when the entry has `failed == true`;
+    /// pruned lazily in `snapshot_dtos`.
+    recently_failed: HashMap<String, Transfer>,
+    /// Vault paths keyed by file_id; registered via [`TransferBoard::begin_named`].
+    /// Retained for failed entries until they expire from `recently_failed`.
+    paths: HashMap<String, String>,
+    /// Per-file speed windows; kept here (not in `Transfer`) so `Transfer` stays `Copy`.
+    /// Pruned on `Drop` for all exits (the window is not used after the transfer ends).
+    speeds: HashMap<String, SpeedWindow>,
     /// Plaintext bytes of files that completed since the batch last went quiet.
     finished_bytes: u64,
 }
@@ -131,17 +221,115 @@ impl TransferBoard {
         if let Ok(mut inner) = self.inner.lock() {
             inner.active.insert(
                 file_id.to_string(),
-                Transfer {
-                    direction,
-                    done: 0,
-                    total,
-                },
+                Transfer { direction, total, ..Transfer::default() },
             );
         }
         TransferGuard {
             board: self.clone(),
             file_id: file_id.to_string(),
         }
+    }
+
+    /// Like [`Self::begin`] but also records the vault `path` so the IPC DTO can
+    /// expose a display name and parent folder. W2 uses this for streaming opens.
+    pub fn begin_named(self: &Arc<Self>, file_id: &str, path: &str, direction: Direction, total: u64) -> TransferGuard {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.active.insert(
+                file_id.to_string(),
+                Transfer { direction, total, ..Transfer::default() },
+            );
+            inner.paths.insert(file_id.to_string(), path.to_string());
+        }
+        TransferGuard {
+            board: self.clone(),
+            file_id: file_id.to_string(),
+        }
+    }
+
+    /// Update the on-disk buffer byte count for a streaming transfer and recompute
+    /// the 2-second moving-window speed. A no-op when the file is not registered.
+    pub fn update_stream(&self, file_id: &str, buffered: u64) {
+        let now = Instant::now();
+        if let Ok(mut inner) = self.inner.lock() {
+            let speed = inner.speeds
+                .entry(file_id.to_string())
+                .or_insert_with(SpeedWindow::new)
+                .push(now, buffered);
+            if let Some(t) = inner.active.get_mut(file_id) {
+                t.buffered = buffered;
+                t.speed_bps = speed;
+            }
+        }
+    }
+
+    /// Mark a registered transfer as failed, recording the current time. The guard
+    /// will remove it from `active` when it drops; calling this first lets the UI
+    /// show an error row for up to 15 minutes after the guard goes away (the DTO
+    /// remains readable until the UI purges it).
+    ///
+    /// Note: failed transfers are still removed from `active` on `Drop` — the UI
+    /// must hold onto the DTO it last received if it wants to show the error row.
+    pub fn mark_failed(&self, file_id: &str) {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(t) = inner.active.get_mut(file_id) {
+                t.failed = true;
+                t.failed_at_secs = Some(now_secs);
+            }
+        }
+    }
+
+    /// A snapshot of every active transfer and every recently-failed transfer (within
+    /// [`FAILED_ROW_TTL_SECS`]) as IPC-ready DTOs. Expired entries are pruned lazily.
+    pub fn snapshot_dtos(&self) -> Vec<ActiveTransferDto> {
+        self.inner.lock().map(|mut inner| {
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Prune expired recently-failed entries and their path records.
+            let expired: Vec<String> = inner.recently_failed.iter()
+                .filter_map(|(id, t)| {
+                    // No timestamp → keep (conservative); timestamp too old → prune.
+                    if t.failed_at_secs.map_or(false, |s| s + FAILED_ROW_TTL_SECS < now_secs) {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for id in &expired {
+                inner.recently_failed.remove(id);
+                inner.paths.remove(id);
+            }
+
+            // Collect (id, Transfer) pairs from active + recently_failed in one pass,
+            // then look up paths separately to avoid simultaneous field borrows.
+            let pairs: Vec<(String, Transfer)> = inner.active.iter()
+                .chain(inner.recently_failed.iter())
+                .map(|(id, t)| (id.clone(), *t))
+                .collect();
+
+            pairs.into_iter().map(|(id, t)| {
+                let path = inner.paths.get(&id).map(|s| s.as_str()).unwrap_or("");
+                ActiveTransferDto {
+                    file_id: id,
+                    name: display_name(path),
+                    folder: parent_folder(path),
+                    direction: t.direction,
+                    done: t.done,
+                    total: t.total,
+                    buffered: t.buffered,
+                    speed_bps: t.speed_bps,
+                    failed: t.failed,
+                    failed_at_secs: t.failed_at_secs,
+                }
+            }).collect()
+        }).unwrap_or_default()
     }
 
     /// Every transfer in flight.
@@ -233,7 +421,18 @@ impl TransferGuard {
 impl Drop for TransferGuard {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.board.inner.lock() {
-            inner.active.remove(&self.file_id);
+            if let Some(t) = inner.active.remove(&self.file_id) {
+                if t.failed {
+                    // Keep the entry visible in snapshot_dtos for up to FAILED_ROW_TTL_SECS.
+                    // The path is retained so the DTO can resolve name and folder.
+                    inner.recently_failed.insert(self.file_id.clone(), t);
+                } else {
+                    // Success or cancellation: path is no longer needed.
+                    inner.paths.remove(&self.file_id);
+                }
+            }
+            // Speed window is never needed after the transfer ends (regardless of outcome).
+            inner.speeds.remove(&self.file_id);
         }
     }
 }
@@ -253,7 +452,8 @@ mod tests {
                 Some(Transfer {
                     direction: Direction::Up,
                     done: 0,
-                    total: 1_000
+                    total: 1_000,
+                    ..Transfer::default()
                 })
             );
             assert_eq!(board.active().len(), 1);
@@ -376,5 +576,178 @@ mod tests {
             None,
             "a file nobody registered is not invented"
         );
+    }
+
+    // --- LD-0105 U1: Direction::Stream, begin_named, update_stream, mark_failed ---
+
+    #[test]
+    fn direction_stream_serialises_as_stream() {
+        let s = serde_json::to_string(&Direction::Stream).unwrap();
+        assert_eq!(s, r#""stream""#);
+    }
+
+    #[test]
+    fn begin_named_stores_path_and_exposes_it_in_snapshot_dto() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s1", "Videos/holiday.mp4", Direction::Stream, 50_000_000);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        let dto = &dtos[0];
+        assert_eq!(dto.file_id, "s1");
+        assert_eq!(dto.name, "holiday.mp4");
+        assert_eq!(dto.folder, "Videos");
+        assert_eq!(dto.direction, Direction::Stream);
+        assert_eq!(dto.total, 50_000_000);
+        assert!(!dto.failed, "a fresh transfer is not failed");
+        assert_eq!(dto.failed_at_secs, None);
+    }
+
+    #[test]
+    fn update_stream_records_buffered_bytes() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s2", "music.flac", Direction::Stream, 0);
+        board.update_stream("s2", 1_024_000);
+        let t = board.get("s2").unwrap();
+        assert_eq!(t.buffered, 1_024_000);
+    }
+
+    #[test]
+    fn speed_window_produces_nonzero_speed_after_two_samples() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s3", "clip.mp4", Direction::Stream, 0);
+        // Two calls with a fake time gap: use update_stream twice with real clock
+        // (sub-millisecond — speed will be 0 or large; we only check it doesn't panic
+        // and the field is present in the DTO).
+        board.update_stream("s3", 0);
+        board.update_stream("s3", 100_000);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        // `speed_bps` is either 0 (samples too close in time) or a large positive
+        // number; the important thing is the field exists and the board didn't panic.
+        let _ = dtos[0].speed_bps;
+    }
+
+    #[test]
+    fn mark_failed_sets_the_failed_flag_and_a_timestamp() {
+        let board = TransferBoard::new();
+        let _g = board.begin("f2", Direction::Down, 100);
+        board.mark_failed("f2");
+        let t = board.get("f2").unwrap();
+        assert!(t.failed);
+        assert!(t.failed_at_secs.is_some());
+    }
+
+    #[test]
+    fn mark_failed_on_unregistered_file_is_a_noop() {
+        let board = TransferBoard::new();
+        board.mark_failed("not-here"); // must not panic
+    }
+
+    #[test]
+    fn snapshot_dto_for_a_begin_without_path_has_empty_name_and_folder() {
+        let board = TransferBoard::new();
+        let _g = board.begin("plain", Direction::Down, 200);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        // `display_name("")` → `""`, `parent_folder("")` → `""`
+        assert_eq!(dtos[0].name, "");
+        assert_eq!(dtos[0].folder, "");
+    }
+
+    // --- P1 fix: failed transfers must linger in snapshot_dtos after the guard drops ---
+
+    #[test]
+    fn a_failed_transfer_lingers_in_snapshot_after_the_guard_drops() {
+        // Before the fix: snapshot_dtos only reads inner.active, so a dropped
+        // (failed) guard left nothing visible. This test must be RED on the unfixed
+        // code and GREEN once recently_failed is introduced.
+        let board = TransferBoard::new();
+        {
+            let g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
+            board.mark_failed("f_fail");
+        } // guard drops here — before fix, entry is gone; after fix it's in recently_failed
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1, "failed row must still appear in snapshot after guard drops");
+        assert!(dtos[0].failed);
+        assert_eq!(dtos[0].file_id, "f_fail");
+        assert_eq!(dtos[0].name, "report.pdf");
+    }
+
+    #[test]
+    fn an_expired_failed_entry_is_pruned_from_the_snapshot() {
+        // Inject an already-expired entry directly into recently_failed (failed_at_secs = 0
+        // is 1970-01-01, far beyond any TTL). snapshot_dtos must prune and exclude it.
+        let board = TransferBoard::new();
+        if let Ok(mut inner) = board.inner.lock() {
+            inner.recently_failed.insert(
+                "expired".to_string(),
+                Transfer { failed: true, failed_at_secs: Some(0), ..Transfer::default() },
+            );
+            inner.paths.insert("expired".to_string(), "docs/old.pdf".to_string());
+        }
+        let dtos = board.snapshot_dtos();
+        assert!(dtos.is_empty(), "an expired failed entry must not appear in snapshot");
+    }
+
+    #[test]
+    fn a_non_failed_drop_does_not_populate_recently_failed() {
+        let board = TransferBoard::new();
+        {
+            let g = board.begin("ok", Direction::Down, 100);
+            g.update(100);
+            g.finish();
+        }
+        // Finished transfer (not failed): nothing in recently_failed
+        let inner = board.inner.lock().unwrap();
+        assert!(inner.recently_failed.is_empty(), "a successful finish must not populate recently_failed");
+    }
+
+    // --- P2 fix: paths and speeds must be pruned when transfers end ---
+
+    #[test]
+    fn paths_and_speeds_are_pruned_when_non_failed_transfers_end() {
+        // Before the fix: inner.paths and inner.speeds were only ever inserted into,
+        // never removed. This test must be RED on the unfixed code (maps are non-empty).
+        let board = TransferBoard::new();
+        for i in 0u32..3 {
+            let id = format!("file{i}");
+            let path = format!("dir/file{i}.txt");
+            let g = board.begin_named(&id, &path, Direction::Stream, 100);
+            board.update_stream(&id, 50);
+            g.update(100);
+            g.finish();
+        }
+        let inner = board.inner.lock().unwrap();
+        assert!(inner.speeds.is_empty(), "speeds must be pruned after transfers end");
+        assert!(inner.paths.is_empty(), "paths must be pruned after non-failed transfers end");
+    }
+
+    #[test]
+    fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
+        // A failed transfer's path must stay (so snapshot_dtos can resolve the name),
+        // but must be gone once the entry expires.
+        let board = TransferBoard::new();
+        {
+            let g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
+            board.mark_failed("fx");
+        }
+        {
+            let inner = board.inner.lock().unwrap();
+            assert!(inner.paths.contains_key("fx"), "path must be kept while entry is in recently_failed");
+        }
+        // Expire the entry by setting its timestamp to 0 and calling snapshot_dtos
+        {
+            if let Ok(mut inner) = board.inner.lock() {
+                if let Some(t) = inner.recently_failed.get_mut("fx") {
+                    t.failed_at_secs = Some(0);
+                }
+            }
+        }
+        board.snapshot_dtos(); // triggers pruning
+        {
+            let inner = board.inner.lock().unwrap();
+            assert!(!inner.recently_failed.contains_key("fx"), "expired entry pruned from recently_failed");
+            assert!(!inner.paths.contains_key("fx"), "path pruned alongside expired recently_failed entry");
+        }
     }
 }

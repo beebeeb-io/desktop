@@ -75,6 +75,10 @@
   --warn-bg:   oklch(0.965 0.025 255);
   --warn-line: oklch(0.86 0.05 255);
   --warn-icon: oklch(0.5 0.13 255);
+  /* Warm download-failure text — tray sublines and Activity detail for failed /
+   * needs-attention transfer rows (LD-0105 U1). Hue 55 (warm gold-orange) is
+   * distinct from --amber (hue 84) and from the blue --warn-* sync indicators. */
+  --warn-text: oklch(0.55 0.12 55);
 
   /* Diff highlighting (conflict resolution window) — soft, theme-aware
    * tints of --green/--red rather than the flat Tailwind gray-50-ish hexes
@@ -166,6 +170,7 @@
   --warn-bg:   oklch(0.26 0.04 255);
   --warn-line: oklch(0.38 0.06 255);
   --warn-icon: oklch(0.72 0.13 255);
+  --warn-text: oklch(0.74 0.14 55);
 
   --diff-add-bg:    oklch(0.32 0.06 155);
   --diff-remove-bg: oklch(0.32 0.07 25);
@@ -215,6 +220,7 @@
     --warn-bg:   oklch(0.26 0.04 255);
     --warn-line: oklch(0.38 0.06 255);
     --warn-icon: oklch(0.72 0.13 255);
+    --warn-text: oklch(0.74 0.14 55);
 
     --diff-add-bg:    oklch(0.32 0.06 155);
     --diff-remove-bg: oklch(0.32 0.07 25);

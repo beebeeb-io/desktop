@@ -8,6 +8,7 @@ import { finderOpenFailedToast } from '../src/finderSetup'
 import { FINDER_OPEN_FAILED } from '../src/finderSetupCopy'
 import { syncActivityView } from '../src/windows/syncActivityModel'
 import { pollWhileVisible } from '../src/windows/visiblePoll'
+import { traySubline, progressFraction, trayHeaderOverride, buildTransferMap } from '../src/windows/downloadProgressModel'
 
 // Execute the production component declarations/handlers with controlled hooks.
 // This does not claim browser layout, React scheduling, or native Explorer proof.
@@ -105,6 +106,9 @@ function harness(file: string, name: string, overrides: Record<string, unknown> 
     // covers what it says.
     syncActivityView, useSyncActivitySummary: () => ({ summary: undefined, refresh: async () => {} }),
     SyncActivityIcon: 'activity-icon', SyncCheckProgress: 'check-progress',
+    // LD-0105 U1: transfer board (the real model/traySubline/progressFraction/trayHeaderOverride; no active transfers in this harness).
+    loadActiveTransfers: async () => ({ ok: true as const, value: [] }),
+    traySubline, progressFraction, trayHeaderOverride, buildTransferMap,
     ...overrides,
   })
   function render() { cursor = 0; tree = View(props) }

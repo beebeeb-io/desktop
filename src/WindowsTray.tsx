@@ -38,117 +38,22 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
   desktopRecentFiles,
+  loadActiveTransfers,
   loadSyncStatus,
   openUrl,
   revealAndOpenFile,
+  type ActiveTransferRow,
   type RecentFile,
   type SyncStatus,
 } from './desktopApi'
+import { traySubline, progressFraction, trayHeaderOverride, buildTransferMap } from './windows/downloadProgressModel'
+import { FileGlyph, getFileType, FILE_COLOR } from './windows/fileGlyph'
 import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
 import { pollWhileVisible } from './windows/visiblePoll'
 
-// ── File-type classification (ported from repos/web file-icon.tsx getFileType,
-//    pure, no @beebeeb/shared import) ─────────────────────────────────────────
-
-type TrayFileType = 'pdf' | 'image' | 'video' | 'audio' | 'code' | 'archive' | 'default'
-
-function getFileType(name: string): TrayFileType {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-
-  if (ext === 'pdf') return 'pdf'
-
-  if (
-    ['jpg', 'jpeg', 'png', 'gif', 'heic', 'heif', 'webp', 'svg', 'ico', 'bmp', 'tiff', 'tif', 'avif', 'dng', 'cr2', 'cr3', 'nef', 'arw', 'orf', 'rw2', 'raf'].includes(ext)
-  )
-    return 'image'
-  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'hevc'].includes(ext)) return 'video'
-  if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma', 'm4a', 'aiff', 'opus'].includes(ext)) return 'audio'
-
-  if (
-    ['js', 'jsx', 'ts', 'tsx', 'py', 'rs', 'go', 'rb', 'java', 'kt', 'swift', 'c', 'cpp', 'h', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'r', 'scala', 'zig', 'asm', 'sql', 'graphql', 'proto'].includes(ext)
-  )
-    return 'code'
-  if (['html', 'htm', 'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'astro'].includes(ext)) return 'code'
-
-  if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz', 'zst', 'lz', 'dmg', 'iso'].includes(ext)) return 'archive'
-
-  return 'default'
-}
-
-// Per-type tint for the file glyph. Neutral by default; amber is reserved for
-// encryption state only (brand rule), so these are non-amber category hues.
-const FILE_COLOR: Record<TrayFileType, string> = {
-  pdf: '#dc2626',
-  image: '#0d9488',
-  video: '#9333ea',
-  audio: '#db2777',
-  code: '#0f766e',
-  archive: '#92400e',
-  default: T.ink3,
-}
-
-// ── Inline SVG file glyphs (no external dep) ─────────────────────────────────
-
-function FileGlyph({ type, size = 13, color }: { type: TrayFileType; size?: number; color: string }) {
-  const s = size
-  const common = { width: s, height: s, viewBox: '0 0 16 16', fill: 'none', stroke: color, strokeWidth: 1.4 }
-  switch (type) {
-    case 'pdf':
-      return (
-        <svg {...common}>
-          <path d="M4 2 L10 2 L12 4.5 L12 14 L4 14 Z" strokeLinejoin="round" />
-          <path d="M6 8 L10 8 M6 10.3 L9 10.3" strokeLinecap="round" />
-        </svg>
-      )
-    case 'image':
-      return (
-        <svg {...common}>
-          <rect x="2.5" y="3" width="11" height="10" rx="1.5" />
-          <circle cx="6" cy="6.5" r="1.1" fill={color} stroke="none" />
-          <path d="M3 12 L6.5 8.5 L9 11 L11 9 L13.5 12" strokeLinejoin="round" />
-        </svg>
-      )
-    case 'video':
-      return (
-        <svg {...common}>
-          <rect x="2" y="4" width="9" height="8" rx="1.5" />
-          <path d="M11 7 L14 5 L14 11 L11 9 Z" strokeLinejoin="round" />
-        </svg>
-      )
-    case 'audio':
-      return (
-        <svg {...common}>
-          <path d="M6 11 L6 4 L12 2.5 L12 9.5" strokeLinejoin="round" />
-          <circle cx="4.5" cy="11.5" r="1.6" />
-          <circle cx="10.5" cy="9.8" r="1.6" />
-        </svg>
-      )
-    case 'code':
-      return (
-        <svg {...common} strokeLinecap="round" strokeLinejoin="round">
-          <path d="M6 5 L3 8 L6 11" />
-          <path d="M10 5 L13 8 L10 11" />
-        </svg>
-      )
-    case 'archive':
-      return (
-        <svg {...common}>
-          <path d="M4 2 L12 2 L12 14 L4 14 Z" strokeLinejoin="round" />
-          <path d="M8 2 L8 4 M8 5.5 L8 7.5" strokeLinecap="round" />
-          <rect x="7" y="8" width="2" height="2.4" rx="0.4" />
-        </svg>
-      )
-    default:
-      return (
-        <svg {...common}>
-          <path d="M4 2 L10 2 L12 4.5 L12 14 L4 14 Z" strokeLinejoin="round" />
-          <path d="M6 7.5 L10 7.5 M6 10 L10 10" strokeLinecap="round" />
-        </svg>
-      )
-  }
-}
+// FileGlyph, getFileType, FILE_COLOR imported from ./windows/fileGlyph (shared with ActivityView)
 
 // ── Small action-bar / header icons ──────────────────────────────────────────
 
@@ -299,6 +204,7 @@ export default function WindowsTray() {
   const [recent, setRecent] = useState<RecentFile[]>([])
   const [loaded, setLoaded] = useState(false)
   const [signedOut, setSignedOut] = useState(false)
+  const [activeTransfers, setActiveTransfers] = useState<ActiveTransferRow[]>([])
 
   // Hide on blur (click-outside dismiss), like OneDrive. Set up once on mount.
   useEffect(() => {
@@ -322,6 +228,20 @@ export default function WindowsTray() {
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
+    }
+    const stop = pollWhileVisible(refresh, 3000)
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [])
+
+  // Poll active transfers (~3s) for the progress overlay on downloading / streaming rows (LD-0105 U1).
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const result = await loadActiveTransfers()
+      if (!cancelled && result.ok) setActiveTransfers(result.value)
     }
     const stop = pollWhileVisible(refresh, 3000)
     return () => {
@@ -408,6 +328,12 @@ export default function WindowsTray() {
   }
 
   const showViewAll = recent.length > TRAY_VIEW_ALL_THRESHOLD
+  // Map full vault path → active transfer DTO so two files with the same name in
+  // different folders each get the right row (P1 fix, LD-0105 U1 review 2026-11-06).
+  const transferByPath = buildTransferMap(activeTransfers)
+  // When any transfer is in a terminal error state, suppress the "synced" headline
+  // so the header doesn't contradict the visible warn row (LD-0105 U1, lead ruling 2026-11-06).
+  const headerWarn = trayHeaderOverride(activeTransfers)
 
   return (
     <div
@@ -469,7 +395,9 @@ export default function WindowsTray() {
         </button>
       </div>
 
-      {/* Status: one headline, then every other pending count, and the startup check's progress while it runs */}
+      {/* Status: one headline, then every other pending count, and the startup check's progress while it runs.
+          When any transfer is failed or needs attention, `headerWarn` overrides the headline so the header
+          never claims "synced" while a warn row is visible (honest over reassuring, LD-0105 U1). */}
       <div
         role="status"
         aria-live="polite"
@@ -484,18 +412,28 @@ export default function WindowsTray() {
           flexShrink: 0,
         }}
       >
-        <span style={{ display: 'flex', paddingTop: 0.5 }}>
-          <SyncActivityIcon view={activity} />
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2, lineHeight: 1.35 }}>{activity.headline}</div>
-          {activity.details.map((line) => (
-            <div key={line} style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.35 }}>
-              {line}
+        {headerWarn ? (
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--warn-text)', lineHeight: 1.35 }}>
+              {headerWarn}
             </div>
-          ))}
-          {activity.progress && <SyncCheckProgress check={activity.progress} compact />}
-        </div>
+          </div>
+        ) : (
+          <>
+            <span style={{ display: 'flex', paddingTop: 0.5 }}>
+              <SyncActivityIcon view={activity} />
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2, lineHeight: 1.35 }}>{activity.headline}</div>
+              {activity.details.map((line) => (
+                <div key={line} style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.35 }}>
+                  {line}
+                </div>
+              ))}
+              {activity.progress && <SyncCheckProgress check={activity.progress} compact />}
+            </div>
+          </>
+        )}
       </div>
 
       <div title={status?.sync_root ?? undefined} style={{ padding: '6px 14px', fontSize: 11, fontFamily: T.fontMono, color: T.ink3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 }}>
@@ -529,12 +467,23 @@ export default function WindowsTray() {
             const type = getFileType(name)
             const deleted = file.activity_type === 'moved_to_trash' || file.status === 'moved_to_trash'
             const warn = WARN_STATUSES.has(file.status)
+            // LD-0105 U1: overlay live progress from the transfer board.
+            // Strip any leading slash before lookup (vault paths are always slash-free on
+            // the DTO side after parent_folder strips them in Rust).
+            const transfer = !deleted ? transferByPath.get(file.path.replace(/^\/+/, '')) : undefined
+            const subline = transfer
+              ? traySubline(transfer)
+              : statusSubline(file.status, folder)
+            // needs_attention: failed=false but still shows the warn colour (Amendment 4)
+            const sublineWarn = transfer ? (transfer.failed || transfer.attention === 'changed_on_this_device') : warn
+            const fraction = transfer ? progressFraction(transfer) : null
             return (
               <button
                 key={`${file.status}:${file.path}:${file.modified_at}`}
                 title={deleted ? `${name} moved to trash` : `Open ${name}`}
                 onClick={() => void (deleted ? openRecycleBin() : revealAndOpenFile(file.path))}
                 style={{
+                  position: 'relative',
                   display: 'grid',
                   gridTemplateColumns: '30px 1fr auto',
                   alignItems: 'center',
@@ -593,7 +542,7 @@ export default function WindowsTray() {
                   <div
                     style={{
                       fontSize: 11,
-                      color: warn ? 'oklch(0.55 0.12 55)' : T.ink3,
+                      color: sublineWarn ? 'var(--warn-text)' : T.ink3,
                       marginTop: 2,
                       lineHeight: 1.2,
                       whiteSpace: 'nowrap',
@@ -601,7 +550,7 @@ export default function WindowsTray() {
                       textOverflow: 'ellipsis',
                     }}
                   >
-                    {statusSubline(file.status, folder)}
+                    {subline}
                   </div>
                 </div>
 
@@ -616,6 +565,32 @@ export default function WindowsTray() {
                 >
                   {relativeTime(file.modified_at)}
                 </div>
+
+                {/* Progress bar — 3px, sits on the bottom edge of the 48px row (LD-0105 U1).
+                    Amber is reserved for encryption state; use neutral ink-3 on paper-3. */}
+                {fraction != null && (
+                  <div
+                    aria-hidden
+                    style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: 3,
+                      background: T.paper3,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.round(fraction * 100)}%`,
+                        height: '100%',
+                        background: T.ink3,
+                        transition: 'width 0.5s linear',
+                      }}
+                    />
+                  </div>
+                )}
               </button>
             )
           })
