@@ -726,9 +726,9 @@ fn ld0105_a4_native_a_failed_pin_restore_through_the_handle_is_retried_by_path()
     let state = tempfile::tempdir().unwrap();
     let db = qa_db(state.path(), &[("qa-pin", "pin.bin")]);
     db.record_poison("qa-pin", "corrupt", key, 1).unwrap();
-    FAIL_PIN_RESTORE_BY_HANDLE.store(true, std::sync::atomic::Ordering::SeqCst);
+    FAIL_PIN_RESTORE_BY_HANDLE.set(true);
     let outcome = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
-    FAIL_PIN_RESTORE_BY_HANDLE.store(false, std::sync::atomic::Ordering::SeqCst);
+    FAIL_PIN_RESTORE_BY_HANDLE.set(false);
     let after = census_of(&qa.path("pin.bin"));
     println!("ld0105-a4-native: pin restore by handle refused: {outcome:?}, census {after:?}");
     assert_eq!(outcome, vec![("qa-pin".to_string(), Emptied::Emptied)]);
@@ -811,18 +811,17 @@ fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
 #[test]
 fn ld0105_p2_native_a_pin_lost_both_ways_outlives_the_empty_and_the_next_sweep_restores_it() {
     use crate::windows_cf::poison::{Emptied, FAIL_PIN_RESTORE_BY_HANDLE, FAIL_PIN_RESTORE_BY_PATH, SweepKind, sweep_poisoned};
-    use std::sync::atomic::Ordering::SeqCst;
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(refuse_every_fetch);
     let key = poisoned_whole_pinned(&qa, "lost-pin.bin");
     let state = tempfile::tempdir().unwrap();
     let db = qa_db(state.path(), &[("qa-lost-pin", "lost-pin.bin")]);
     db.record_poison("qa-lost-pin", "corrupt", key, 1).unwrap();
-    FAIL_PIN_RESTORE_BY_HANDLE.store(true, SeqCst);
-    FAIL_PIN_RESTORE_BY_PATH.store(true, SeqCst);
+    FAIL_PIN_RESTORE_BY_HANDLE.set(true);
+    FAIL_PIN_RESTORE_BY_PATH.set(true);
     let first = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
-    FAIL_PIN_RESTORE_BY_HANDLE.store(false, SeqCst);
-    FAIL_PIN_RESTORE_BY_PATH.store(false, SeqCst);
+    FAIL_PIN_RESTORE_BY_HANDLE.set(false);
+    FAIL_PIN_RESTORE_BY_PATH.set(false);
     let lost = (census_of(&qa.path("lost-pin.bin")), db.poison("qa-lost-pin").unwrap(), db.pin_to_restore("qa-lost-pin").unwrap());
     let second = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
     let restored = census_of(&qa.path("lost-pin.bin"));
@@ -844,7 +843,7 @@ fn ld0105_p2_native_the_promotion_reads_ondisk_through_an_attribute_handle() {
     qa.connect(serve_first_64k);
     let names = mint_five(&qa);
     let size = 1u64 << 20;
-    let seen: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), placeholders::on_disk_whole(&qa.path(n), size))).collect();
+    let seen: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), crate::windows_cf::streaming::on_disk_whole(&qa.path(n), size))).collect();
     println!("ld0105-p2-native: on_disk_whole {seen:?}, census {:?}", census(&qa, &names));
     let whole = |n: &str| seen.iter().find(|(name, _)| name == n).unwrap().1;
     assert!(whole("local.bin") && whole("local-pinned.bin"), "wholly on disk: {seen:?}");

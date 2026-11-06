@@ -534,7 +534,10 @@ async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its
         assert_eq!(met2.await.ok(), Some(Answer::Met));
         between
     };
-    let (out, between) = tokio::join!(session, driver);
+    // A mutant that ends the session early leaves the second read unanswered: red, never a hang.
+    let (out, between) = tokio::time::timeout(std::time::Duration::from_secs(20), async { tokio::join!(session, driver) })
+        .await
+        .expect("the session and both reads end");
     let log = log.lock().unwrap().clone();
     assert!(matches!(out, Ok(RangeOutcome::Whole(_))), "{out:?}");
     assert_eq!(*buf.lock().unwrap(), fx.plain, "the bytes are the file's");

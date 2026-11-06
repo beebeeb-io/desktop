@@ -107,8 +107,6 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
             return Served::Done;
         }
     };
-    // Spec S5: the session's watch fails this requester's demands when it exits (the answer below).
-    session.watch(fetch.requester);
     let met = handle.block_on(async {
         tokio::select! {
             biased;
@@ -150,6 +148,9 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
     // session can end, so `end`'s `fail_all` answers it (review P1: a demand added after `end` waited
     // for ever).
     let demand = |session: &Arc<Session>| {
+        // Spec S5: from its first request on (the preparation included), the requester is watched; its
+        // exit fails its demands (the callback's answer) and, with no request left, stops the session.
+        session.watch(fetch.requester);
         let (offset, length) = (fetch.offset.max(0) as u64, fetch.length.max(0) as u64);
         let (id, answer) = lock(&session.book).add(offset, length, fetch.requester, fetch.keys);
         session.control.demand(id, offset, length);
@@ -351,7 +352,7 @@ async fn run_session(
             let (check_path, check_id) = (path.clone(), file_id.clone());
             // The range query and a whole-file read: off the runtime's workers.
             let (on_disk_whole, read_back) = tokio::task::spawn_blocking(move || {
-                let whole = !withheld && super::placeholders::on_disk_whole(&check_path, file_size);
+                let whole = !withheld && on_disk_whole(&check_path, file_size);
                 (whole, whole.then(|| read_back(&check_path, &check_id)).flatten())
             })
             .await
@@ -403,6 +404,25 @@ fn bytes_held(path: &std::path::Path) -> u64 {
         crate::unknown_check::PlatformView::Placeholder { on_disk: crate::unknown_check::OnDisk::Nothing, .. } => 0,
         _ => u64::MAX,
     }
+}
+
+/// Desktop #225 review P2: is every byte of the placeholder at `path` on disk (ONDISK covers
+/// `[0, size)`)? The on-disk range query, through an attribute-only handle opened as the reparse point
+/// (nothing is fetched). Any error is "no": a session that ended whole is promoted only on what the
+/// platform holds, never on what was sent.
+pub(crate) fn on_disk_whole(path: &std::path::Path, size: u64) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()
+        .and_then(|file| super::placeholders::on_disk_ranges(&file, size).ok())
+        .is_some_and(|ranges| crate::cf_range::covers_whole(&ranges, size))
 }
 
 /// The session left the registry (after any poison was recorded) and no demand is left waiting.

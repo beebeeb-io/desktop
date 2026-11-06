@@ -164,20 +164,21 @@ pub(crate) fn change_time(path: &Path) -> Option<i64> {
     Some(basic.ChangeTime)
 }
 
-/// Test seam (Amendment 4's pin rung): make every pin restore through the step's handle fail, so the
-/// by-path retry is what puts the pin back.
 #[cfg(test)]
-pub(crate) static FAIL_PIN_RESTORE_BY_HANDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Test seam (desktop #225 review P2): make every pin restore by path fail too, so the pin is what the
-/// `cf_pin_restore` record keeps.
-#[cfg(test)]
-pub(crate) static FAIL_PIN_RESTORE_BY_PATH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// Test seam (Amendment 4's pin rung): make every pin restore through the step's handle fail, so
+    /// the by-path retry is what puts the pin back. Per thread (desktop #225): the sweep runs on the
+    /// test's own thread, and a process-wide switch failed the pin restores of tests running beside it.
+    pub(crate) static FAIL_PIN_RESTORE_BY_HANDLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test seam (desktop #225 review P2): make every pin restore by path fail too, so the pin is what
+    /// the `cf_pin_restore` record keeps.
+    pub(crate) static FAIL_PIN_RESTORE_BY_PATH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// `CfSetPinState(pin)` by path, with its own handle (the retry when the step's handle could not).
 fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
     #[cfg(test)]
-    if FAIL_PIN_RESTORE_BY_PATH.load(std::sync::atomic::Ordering::SeqCst) && pin != CF_PIN_STATE_UNSPECIFIED {
+    if FAIL_PIN_RESTORE_BY_PATH.get() && pin != CF_PIN_STATE_UNSPECIFIED {
         return false;
     }
     let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
@@ -286,7 +287,7 @@ struct Restore {
 /// SAFETY: `handle` is open.
 unsafe fn set_pin(handle: HANDLE, pin: CF_PIN_STATE) -> bool {
     #[cfg(test)]
-    if FAIL_PIN_RESTORE_BY_HANDLE.load(std::sync::atomic::Ordering::SeqCst) && pin != CF_PIN_STATE_UNSPECIFIED {
+    if FAIL_PIN_RESTORE_BY_HANDLE.get() && pin != CF_PIN_STATE_UNSPECIFIED {
         return false;
     }
     // SAFETY: the caller's contract.
