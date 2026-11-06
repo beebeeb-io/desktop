@@ -3,6 +3,23 @@
 use super::*;
 
 impl StateDb {
+    /// Test hook: drop `table.column` from a database, as a test simulates an older or damaged one. SQLite refuses
+    /// to drop a column a trigger names ("error in trigger … after drop column"), and LD-0113's triggers name
+    /// `operation_queue.payload_path`, so every trigger on `table` whose SQL names `column` goes first. Opening the
+    /// database again recreates the LD-0113 triggers (`CREATE TRIGGER IF NOT EXISTS`).
+    #[cfg(test)]
+    pub(crate) fn drop_column_for_test(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+        let naming: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 AND instr(sql, ?2) > 0")?
+            .query_map(params![table, column], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for trigger in naming {
+            conn.execute(&format!("DROP TRIGGER IF EXISTS {trigger}"), [])?;
+        }
+        conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+        Ok(())
+    }
+
     /// Test hook: hold the database lock so a test can park every writer behind
     /// it and force two requests to overlap deterministically (task 1684).
     #[cfg(test)]

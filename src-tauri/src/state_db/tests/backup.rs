@@ -135,3 +135,31 @@ use super::*;
             .unwrap();
         assert_eq!(journalled, 0, "the backup source was not journalled as a staged copy");
     }
+
+    /// The trigger order fix behind #231's macOS red (`reauth_tests` … `an_unreadable_count_settles_nothing`), on every
+    /// platform: a database whose queue lost `payload_path` (the damage that test simulates) can be made, opened again
+    /// (the open re-creates the LD-0113 triggers on a queue without the column) and read: the owner reads, and the
+    /// count it is counted by does not, so nothing says "0 changes".
+    #[test]
+    fn a_queue_without_payload_path_opens_and_its_count_is_unreadable() {
+        let (dir, db) = backup_db();
+        let path = dir.path().join("state.db");
+        drop(db);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let named: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'operation_queue'
+                       AND sql LIKE '%payload_path%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(named, 2, "the premise: two LD-0113 triggers name payload_path");
+            StateDb::drop_column_for_test(&conn, "operation_queue", "payload_path")
+                .expect("the column is dropped with the triggers that name it");
+        }
+        let reopened = StateDb::open(&path).expect("the open re-creates the triggers on a queue without the column");
+        assert!(reopened.backup_owner_key().unwrap().is_some(), "the owner still reads");
+        assert!(reopened.pending_changes_count().is_err(), "the count is unreadable, never 0");
+    }
