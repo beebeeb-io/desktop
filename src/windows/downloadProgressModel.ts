@@ -127,6 +127,31 @@ export function progressFraction(row: ActiveTransferRowLike): number | null {
   return row.total > 0 ? Math.min(1, row.done / row.total) : null
 }
 
+// ── Tray status header override ───────────────────────────────────────────────
+
+/**
+ * When one or more transfers are in a terminal error state (failed or needs
+ * attention), the tray's sync-status header must NOT claim "synced" — that
+ * would directly contradict the warn row the user can see.
+ *
+ * Returns a one-line override string to show instead (in warn-text colour, with
+ * no green check), or `null` to let the normal sync-activity view headline show.
+ *
+ * "needs attention" rows count the same as failed: they are stuck and not
+ * resolving without user action.
+ *
+ * (LD-0105 U1, lead ruling 2026-11-06)
+ */
+export function trayHeaderOverride(rows: ActiveTransferRowLike[]): string | null {
+  const count = rows.filter(
+    (r) => r.failed || r.attention === 'changed_on_this_device',
+  ).length
+  if (count === 0) return null
+  return count === 1
+    ? "1 file couldn't finish downloading"
+    : `${count} files couldn't finish downloading`
+}
+
 // ── "In progress" card visibility ────────────────────────────────────────────
 
 /** How long (ms) a failed transfer's card stays visible after failure. */

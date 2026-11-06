@@ -36,6 +36,7 @@ import {
   type NotificationList,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { FileGlyph, getFileType, FILE_COLOR } from '../fileGlyph'
 import { activityDetail, progressFraction, shouldShowInProgressCard, transferUiState } from '../downloadProgressModel'
 import {
   IN_PROGRESS_CARD_HEADER,
@@ -283,10 +284,10 @@ function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
             key={r.fileId}
             style={{ position: 'relative', padding: '11px 20px', display: 'flex', alignItems: 'flex-start', gap: 14, borderBottom: isLast ? 'none' : `1px solid ${T.line}` }}
           >
-            {/* File-type icon keeps its colour (brand exception — no warning triangle,
-                no background tint; warn-text line carries the state). */}
+            {/* File-type icon from the shared palette — keeps its colour (brand exception,
+                task 2320). No warning triangle; warn-text line carries the state. */}
             <div style={{ width: 28, height: 28, borderRadius: 6, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-              <NavIcon name="folder" size={13} color={T.ink2} />
+              <FileGlyph type={getFileType(r.name)} size={13} color={FILE_COLOR[getFileType(r.name)]} />
             </div>
             {/* Name + detail */}
             <div style={{ flex: 1, minWidth: 0 }}>

@@ -16,6 +16,7 @@ import {
   activityDetail,
   progressFraction,
   shouldShowInProgressCard,
+  trayHeaderOverride,
   type ActiveTransferRowLike,
 } from '../src/windows/downloadProgressModel'
 
@@ -209,6 +210,39 @@ describe('progressFraction', () => {
   test('never exceeds 1', () => {
     // mutant: removed Math.min(1, ...) → could return > 1
     expect(progressFraction({ ...downloading(), done: 2000 })).toBe(1)
+  })
+})
+
+// ── trayHeaderOverride ────────────────────────────────────────────────────────
+
+describe('trayHeaderOverride (LD-0105 U1, lead ruling 2026-11-06)', () => {
+  test('no transfers → null (normal sync-activity headline shows)', () => {
+    // mutant: returned a string for empty → would suppress the headline with no rows
+    expect(trayHeaderOverride([])).toBeNull()
+  })
+  test('all active (not failed, no attention) → null', () => {
+    expect(trayHeaderOverride([downloading(), streaming(), buffering()])).toBeNull()
+  })
+  test("one failed row → singular \"1 file couldn't finish downloading\"", () => {
+    // mutant: returned null → would claim "synced" above a visible warn row
+    expect(trayHeaderOverride([failed()])).toBe("1 file couldn't finish downloading")
+  })
+  test("one needs_attention row → same singular override (attention ≠ in-flight)", () => {
+    // mutant: treated attention row as active → returned null
+    expect(trayHeaderOverride([needsAttention()])).toBe("1 file couldn't finish downloading")
+  })
+  test("two failed rows → plural \"2 files couldn't finish downloading\"", () => {
+    expect(trayHeaderOverride([failed(), failed()])).toBe("2 files couldn't finish downloading")
+  })
+  test("mixed: one active + one failed → still returns the override (failed row is visible)", () => {
+    // mutant: returned null when any row was active → would suppress honest header
+    expect(trayHeaderOverride([downloading(), failed()])).toBe("1 file couldn't finish downloading")
+  })
+  test("mixed failed + needs_attention → both counted", () => {
+    expect(trayHeaderOverride([failed(), needsAttention()])).toBe("2 files couldn't finish downloading")
+  })
+  test("override never contains \"complete\"", () => {
+    expect(trayHeaderOverride([failed()])?.toLowerCase()).not.toContain('complete')
   })
 })
 
