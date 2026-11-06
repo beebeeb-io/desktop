@@ -749,6 +749,16 @@ pub(super) async fn desktop_recent_files(
     })
 }
 
+/// Every file transfer currently in flight, as a lightweight snapshot for the tray's
+/// "In progress" card and the Activity › Timeline view (LD-0105 U1). The board is
+/// process-wide and needs no session gate: a not-signed-in tray sees an empty list.
+#[tauri::command]
+pub(super) fn get_active_transfers(
+    runtime: State<'_, popover_data::PopoverRuntime>,
+) -> Vec<crate::transfer_progress::ActiveTransferDto> {
+    runtime.transfers.snapshot_dtos()
+}
+
 /// Query the local desktop file-name search index.
 ///
 /// The index is built from the local StateDb mirror and queried in-process, so

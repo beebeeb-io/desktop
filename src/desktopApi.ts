@@ -1198,6 +1198,58 @@ export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<
   return command<RecentFile[]>('desktop_recent_files', { recentLimit })
 }
 
+/**
+ * One transfer that is currently in flight (or recently failed) on this PC.
+ * Returned by the `get_active_transfers` Tauri command (LD-0105 U1).
+ */
+export interface ActiveTransferRow {
+  fileId: string
+  /** Last path component (display name). Empty when the caller did not register a path. */
+  name: string
+  /** Parent folder (everything before the last component). Empty at vault root. */
+  folder: string
+  direction: 'up' | 'down' | 'stream'
+  /** Bytes confirmed written to the destination (cumulative, monotonic). */
+  done: number
+  /** Declared total; `0` when unknown. */
+  total: number
+  /**
+   * For `direction === 'stream'`: bytes in the local buffer file (ONDISK).
+   * For other directions: `0`.
+   */
+  buffered: number
+  /** 2-second moving-window receive rate in bytes/s. */
+  speedBps: number
+  failed: boolean
+  failedAtSecs?: number | null
+  /**
+   * When the file changed on disk while it was downloading the provider poisons
+   * the row (LD-0105 W2, PR #225). Set to `"changed_on_this_device"`.
+   * Absent or `null` when the row is healthy.
+   */
+  attention?: 'changed_on_this_device' | null
+  /**
+   * The action the user can take to resolve an `attention` row.
+   * Currently only `"discard_and_download_again"`.
+   */
+  action?: 'discard_and_download_again' | null
+}
+
+/** Snapshot of every transfer currently in flight (or recently failed). */
+export function loadActiveTransfers(): Promise<CommandResult<ActiveTransferRow[]>> {
+  return command<ActiveTransferRow[]>('get_active_transfers', {})
+}
+
+/**
+ * Discard the poisoned partial download and schedule a fresh download.
+ * Returns Ok on success, Err with one of `"not_poisoned" | "in_use" | "missing" | <step>`
+ * when the action cannot be performed.
+ * Wired from PR #225 (LD-0105 W2); the command exists once that PR is merged.
+ */
+export function discardAndDownloadAgain(fileId: string): Promise<CommandResult<void>> {
+  return command<void>('discard_and_download_again', { fileId })
+}
+
 /** Query the local desktop file-name search index. Results are local mirror
  *  entries and are opened via the existing OS file-manager command. */
 export function desktopSearchFiles(

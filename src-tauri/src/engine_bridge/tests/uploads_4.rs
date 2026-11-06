@@ -46,7 +46,8 @@ use super::*;
             crate::transfer_progress::Transfer {
                 direction: crate::transfer_progress::Direction::Up,
                 done: 8,
-                total: 20
+                total: 20,
+                ..crate::transfer_progress::Transfer::default()
             }
         );
         assert!(board.active().is_empty(), "a cut upload must not linger as in flight");

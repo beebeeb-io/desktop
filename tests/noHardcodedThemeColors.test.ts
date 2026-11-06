@@ -149,7 +149,7 @@ export const OKLCH_ALLOWLIST: Record<string, number> = {
   'WindowsApp/filesView.tsx': 1,
   'WindowsApp/trashView.tsx': 1,
   'WindowsFirstRun.tsx': 19,
-  'WindowsTray.tsx': 5,
+  'WindowsTray.tsx': 4,
   'windows/KnownFolderOnboarding.tsx': 1,
   'windows/ui.tsx': 5,
   'windows/views/AccountView.tsx': 4,
@@ -163,7 +163,7 @@ export const OKLCH_ALLOWLIST: Record<string, number> = {
   'windows/views/SettingsView/appActivityPanel.tsx': 1,
   'windows/views/SettingsView/dataResidencyPanel.tsx': 1,
 }
-export const OKLCH_ALLOWLIST_TOTAL = 63
+export const OKLCH_ALLOWLIST_TOTAL = 62
 
 /** 1-based line numbers of every non-comment `oklch(` occurrence in `source` (one entry per occurrence). */
 export function oklchLiteralLines(source: string): number[] {
