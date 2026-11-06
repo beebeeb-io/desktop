@@ -336,23 +336,27 @@ extension BeebeebProviderItem {
         if let changedFields, !changedFields.contains(.filename), !changedFields.contains(.parentItemIdentifier) {
             return nil
         }
-        guard let item = model(), let deleteWords = item.protectedReason else {
+        // One fact (review #10): the daemon's `protected` flag; the words are only what to show, and
+        // without them the system's own text is shown.
+        guard let item = model(), item.isProtected else {
             return nil
         }
+        let deleteWords = item.protectedReason
+        let shown = { (words: String?) in words.map { [NSLocalizedDescriptionKey: $0] } ?? [:] }
         guard let changedFields else {
             return NSError(
                 domain: NSFileProviderErrorDomain,
                 code: NSFileProviderError.deletionRejected.rawValue,
-                userInfo: [NSLocalizedDescriptionKey: deleteWords]
+                userInfo: shown(deleteWords)
             )
         }
-        let words: String
+        let words: String?
         if changedFields.contains(.parentItemIdentifier) {
             words = newParent == .trashContainer ? deleteWords : (item.protectedMoveReason ?? deleteWords)
         } else {
             words = item.protectedRenameReason ?? deleteWords
         }
-        return NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [NSLocalizedDescriptionKey: words])
+        return NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: shown(words))
     }
 }
 

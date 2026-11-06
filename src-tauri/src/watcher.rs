@@ -489,7 +489,8 @@ pub(crate) async fn handle_delete_with(
         return;
     }
     match bridge.db().get_file_by_path(&rel) {
-        Ok(Some(entry)) => match bridge.queue_finder_delete(&entry.file_id, None) {
+        // The drive rule was applied above (or skipped on purpose for the engine's own change).
+        Ok(Some(entry)) => match bridge.queue_finder_delete_decided(&entry.file_id) {
             Ok(FinderWriteOutcome::Queued { op_id, .. }) => {
                 // CRITICAL (task 0802): mark the row `Trashing` so the Windows
                 // placeholder seeder (`populate_placeholders`, which only mints
@@ -639,8 +640,9 @@ pub(crate) async fn handle_rename_with(
     };
 
     let queued = match rekey_to.as_deref() {
-        Some(target_rel) => bridge.queue_local_rename(modify, target_rel),
-        None => bridge.queue_finder_modify(modify),
+        // The drive rule was applied above (skipped for the engine's own change, or sent as made).
+        Some(target_rel) => bridge.queue_local_rename_decided(modify, target_rel),
+        None => bridge.queue_finder_modify_decided(modify),
     };
     match queued {
         Ok(FinderWriteOutcome::Queued { op_id, .. }) => {

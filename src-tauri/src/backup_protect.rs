@@ -151,8 +151,9 @@ pub(crate) fn move_refusal(
 }
 
 /// A drive surface's delete, rename or move that the app refuses before anything is queued (the
-/// shared queueing functions, behind the Windows callbacks and the Finder extension). Its text is
-/// core's words, which the File Provider reply carries to Finder.
+/// shared queueing functions, behind the Finder extension). `message` is core's words, which the File
+/// Provider reply carries to Finder (`IpcError::from_engine`); the error's text is fixed, because the
+/// words can carry a path on this device and an error's text reaches the log.
 #[derive(Debug)]
 pub(crate) struct DriveChangeRefused {
     pub(crate) message: String,
@@ -160,8 +161,18 @@ pub(crate) struct DriveChangeRefused {
 
 impl std::fmt::Display for DriveChangeRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str("a drive change of a protected Backups item was refused")
     }
+}
+
+/// Who applies the drive rule to a queued change. `Check`: the queueing function does (the File
+/// Provider replies, any new caller). `Decided`: the caller already did, and can put the item back,
+/// which the queue cannot: the Windows watcher, which also passes the engine's own changes and a move
+/// it could not undo (sent as made) on purpose. One authority per surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DriveGuard {
+    Check,
+    Decided,
 }
 
 impl std::error::Error for DriveChangeRefused {}
@@ -225,24 +236,47 @@ pub(crate) fn mark_missing_cloud_only(db: &StateDb, sync_root: &Path, rel: &str)
         .count()
 }
 
-/// Start-up (LD-0113 review #4): [`mark_missing_cloud_only`] for each Backups root, before the first
-/// placeholder pass. Zero-knowledge: a count only. Windows calls it (`windows_cf::seed_placeholders`).
+/// Start-up (LD-0113 review #4): [`mark_missing_cloud_only`] for each Backups root. Returns how many
+/// rows are cloud-only again. Zero-knowledge: a count only.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn reconcile_backups_tree(db: &StateDb, sync_root: &Path) {
+pub(crate) fn reconcile_backups_tree(db: &StateDb, sync_root: &Path) -> usize {
     let roots = db.backups_roots().unwrap_or_default();
     let restored: usize = roots.iter().map(|(_, root)| mark_missing_cloud_only(db, sync_root, root)).sum();
     if restored > 0 {
         tracing::info!(restored, "backup protection: downloaded items missing from the Backups tree are put back");
     }
+    restored
 }
 
-/// A placeholder pass for what a refusal put back, off the async task that refused it: the pass walks
-/// every cloud-only row and calls Cloud Files per item.
+/// [`reconcile_backups_tree`] off the start-up path (it stats every downloaded item of the tree), then
+/// a placeholder pass when anything came back.
+#[cfg(target_os = "windows")]
+pub(crate) fn reconcile_backups_tree_soon(db: std::sync::Arc<StateDb>, sync_root: &Path) {
+    let sync_root = sync_root.to_path_buf();
+    let spawned = std::thread::Builder::new().name("backups-reconcile".into()).spawn(move || {
+        if reconcile_backups_tree(&db, &sync_root) > 0 {
+            restore_placeholders_soon(db, &sync_root);
+        }
+    });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "backup protection: the start-up reconcile could not start; the next start retries");
+    }
+}
+
+/// One placeholder pass at a time for what refusals put back, off the task that refused (the pass walks
+/// every cloud-only row and calls Cloud Files per item). A request while a pass runs is covered by it,
+/// or by the tick's refresh: passes never overlap, so parents are minted before children.
 #[cfg(target_os = "windows")]
 pub(crate) fn restore_placeholders_soon(db: std::sync::Arc<StateDb>, sync_root: &Path) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let sync_root = sync_root.to_path_buf();
     let pass = move || {
         let restored = crate::windows_cf::restore_placeholders(&db, &sync_root);
+        RUNNING.store(false, Ordering::SeqCst);
         // Zero-knowledge: a count, never the item.
         tracing::info!(restored, "protected item: placeholders put back");
     };

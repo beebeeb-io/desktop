@@ -20,7 +20,22 @@ impl EngineBridge {
         target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
     ) -> anyhow::Result<FinderWriteOutcome> {
-        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+        self.queue_finder_modify_guarded(target, contents, crate::backup_protect::DriveGuard::Check)
+    }
+
+    /// [`Self::queue_finder_modify`] for a caller that applied the drive rule itself (the Windows
+    /// watcher, `DriveGuard::Decided`).
+    pub(crate) fn queue_finder_modify_decided(&self, target: FinderWriteTarget) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_finder_modify_guarded(target, None, crate::backup_protect::DriveGuard::Decided)
+    }
+
+    fn queue_finder_modify_guarded(
+        &self,
+        target: FinderWriteTarget,
+        contents: Option<&std::fs::File>,
+        guard: crate::backup_protect::DriveGuard,
+    ) -> anyhow::Result<FinderWriteOutcome> {
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target, guard)? else {
             return Ok(ignored_finder_item(&target.filename));
         };
 
@@ -120,8 +135,25 @@ impl EngineBridge {
     /// Task 2204 S0.1: a Windows rename or move of a tracked FILE, queued with its row moved to
     /// `new_path` in the same transaction (`StateDb::enqueue_local_rename`). The op is marked
     /// `local_rename`, which holds the row against stale landings and pulls until it is sent.
+    /// The checked entry point (`DriveGuard::Check`); the Windows watcher calls
+    /// [`Self::queue_local_rename_decided`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn queue_local_rename(&self, target: FinderWriteTarget, new_path: &str) -> anyhow::Result<FinderWriteOutcome> {
-        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+        self.queue_local_rename_guarded(target, new_path, crate::backup_protect::DriveGuard::Check)
+    }
+
+    /// [`Self::queue_local_rename`] for the Windows watcher, which applied the drive rule itself.
+    pub(crate) fn queue_local_rename_decided(&self, target: FinderWriteTarget, new_path: &str) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_local_rename_guarded(target, new_path, crate::backup_protect::DriveGuard::Decided)
+    }
+
+    fn queue_local_rename_guarded(
+        &self,
+        target: FinderWriteTarget,
+        new_path: &str,
+        guard: crate::backup_protect::DriveGuard,
+    ) -> anyhow::Result<FinderWriteOutcome> {
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target, guard)? else {
             return Ok(ignored_finder_item(&target.filename));
         };
         let (kind, mut payload) = self.metadata_update_payload(&file_id, &target, item_contract.as_ref())?;
@@ -162,6 +194,7 @@ impl EngineBridge {
     fn start_finder_modify(
         &self,
         target: &FinderWriteTarget,
+        guard: crate::backup_protect::DriveGuard,
     ) -> Result<Option<(String, Option<FileContractState>)>, EngineError> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
@@ -176,35 +209,50 @@ impl EngineBridge {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
         let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
-        self.refuse_protected_drive_change(&file_id, target)?;
+        if guard == crate::backup_protect::DriveGuard::Check {
+            self.refuse_protected_drive_change(&file_id, target, item_contract.as_ref())?;
+        }
         Ok(Some((file_id, item_contract)))
     }
 
     /// LD-0113 (Amendment 6): a drive surface never queues a rename or move of an item in the Backups
-    /// tree, nor a move into it; a content edit (same name, same parent) is queued as before (spec
-    /// §6.2). Rename or move is read as `metadata_update_payload` reads it: a different parent is a
-    /// move. A new parent this device does not know is checked for the item only.
-    fn refuse_protected_drive_change(&self, file_id: &str, target: &FinderWriteTarget) -> Result<(), EngineError> {
+    /// tree, nor a move into it; a content edit is queued as before (spec §6.2). Same name and the
+    /// same parent (the row's or its contract's: live rows may leave `parent_id` empty) is a content
+    /// edit; so is the same name with a parent this device does not know, which shows no change. A
+    /// move is a different parent PATH.
+    fn refuse_protected_drive_change(
+        &self,
+        file_id: &str,
+        target: &FinderWriteTarget,
+        contract: Option<&FileContractState>,
+    ) -> Result<(), EngineError> {
         let Some(row) = self.db.get_file(file_id)? else {
             return Ok(());
         };
-        let moved = row.parent_id != target.parent_id;
-        let parent_path = if !moved {
-            Some(row.path.trim_matches('/').rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string()))
+        let path = row.path.trim_matches('/');
+        let (parent_path, leaf) = path.rsplit_once('/').unwrap_or(("", path));
+        let renamed = target.filename != leaf;
+        let same_parent =
+            target.parent_id == row.parent_id || contract.is_some_and(|contract| contract.parent_id == target.parent_id);
+        let new_parent = if same_parent {
+            Some(parent_path.to_string())
         } else {
             match target.parent_id.as_deref() {
                 None => Some(String::new()),
                 Some(parent_id) => self.db.get_file(parent_id)?.map(|parent| parent.path.trim_matches('/').to_string()),
             }
         };
-        let new_path = parent_path.map(|parent| match parent.as_str() {
-            "" => target.filename.clone(),
-            parent => format!("{parent}/{}", target.filename),
-        });
-        if new_path.as_deref() == Some(row.path.trim_matches('/')) {
+        if !renamed && new_parent.as_deref().is_none_or(|new_parent| new_parent == parent_path) {
             return Ok(());
         }
-        let mutation = if moved { beebeeb_core::backup::Mutation::Move } else { beebeeb_core::backup::Mutation::Rename };
+        let mutation = match new_parent.as_deref() {
+            Some(new_parent) if new_parent != parent_path => beebeeb_core::backup::Mutation::Move,
+            _ => beebeeb_core::backup::Mutation::Rename,
+        };
+        let new_path = new_parent.map(|new_parent| match new_parent.as_str() {
+            "" => target.filename.clone(),
+            new_parent => format!("{new_parent}/{}", target.filename),
+        });
         let own = crate::backup_protect::own_backups();
         match crate::backup_protect::move_refusal(&self.db, &own, &row.path, mutation, new_path.as_deref()) {
             Some(message) => Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }).into()),
@@ -294,7 +342,7 @@ impl EngineBridge {
                 present_as,
             });
         };
-        let Some((file_id, item_contract)) = self.start_finder_modify(&target)? else {
+        let Some((file_id, item_contract)) = self.start_finder_modify(&target, crate::backup_protect::DriveGuard::Check)? else {
             return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
         };
         let prepared =
@@ -372,6 +420,20 @@ impl EngineBridge {
         file_id: &str,
         base_version_identifier: Option<String>,
     ) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_finder_delete_guarded(file_id, base_version_identifier, crate::backup_protect::DriveGuard::Check)
+    }
+
+    /// [`Self::queue_finder_delete`] for the Windows watcher, which applied the drive rule itself.
+    pub(crate) fn queue_finder_delete_decided(&self, file_id: &str) -> anyhow::Result<FinderWriteOutcome> {
+        self.queue_finder_delete_guarded(file_id, None, crate::backup_protect::DriveGuard::Decided)
+    }
+
+    fn queue_finder_delete_guarded(
+        &self,
+        file_id: &str,
+        base_version_identifier: Option<String>,
+        guard: crate::backup_protect::DriveGuard,
+    ) -> anyhow::Result<FinderWriteOutcome> {
         // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
             return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
@@ -389,7 +451,7 @@ impl EngineBridge {
                 .map(|held| held.token());
             if held.is_some() && held == base_version_identifier {
                 log_alias_resolved("delete", file_id, &server_id);
-                return self.queue_finder_delete(&server_id, base_version_identifier);
+                return self.queue_finder_delete_guarded(&server_id, base_version_identifier, guard);
             }
             log_alias_delete_kept(file_id, &server_id);
             return Ok(FinderWriteOutcome::Ignored {
@@ -412,7 +474,8 @@ impl EngineBridge {
             contract => contract,
         };
         // LD-0113 (Amendment 6): a drive surface never queues a trash of an item in the Backups tree.
-        if let Some(row) = self.db.get_file(file_id)?
+        if guard == crate::backup_protect::DriveGuard::Check
+            && let Some(row) = self.db.get_file(file_id)?
             && let Some(message) = crate::backup_protect::protected_reason(
                 &self.db,
                 &crate::backup_protect::own_backups(),

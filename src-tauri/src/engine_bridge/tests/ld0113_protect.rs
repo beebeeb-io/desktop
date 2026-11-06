@@ -419,4 +419,14 @@ async fn the_queueing_functions_refuse_drive_changes_of_the_tree() {
     );
     assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1);
     assert_eq!(refused(bridge.queue_finder_modify(target(photo, None, "a.jpg"))), None, "no change of name or parent is not refused");
+    assert_eq!(
+        refused(bridge.queue_finder_modify(target(photo, Some("0b5ec0de-0000-4000-8000-0000000000bf"), "a.jpg"))),
+        None,
+        "the same name under a parent this device does not know shows no change (a content edit)"
+    );
+    // The Windows watcher applied the rule itself (the engine's own change, or a move sent as made).
+    assert!(
+        matches!(bridge.queue_finder_delete_decided(photo), Ok(FinderWriteOutcome::Queued { .. })),
+        "a Decided change is queued"
+    );
 }

@@ -1152,7 +1152,7 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // The callback can fire as soon as a placeholder exists, so the bridge must
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
-    crate::backup_protect::reconcile_backups_tree(bridge.db(), sync_root); // LD-0113 review #4
+    crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
     let created = populate_placeholders(bridge.db(), sync_root).created;
     // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
     tracing::info!(placeholders = created, "Cloud Files placeholders seeded");

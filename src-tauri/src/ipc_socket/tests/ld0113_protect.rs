@@ -143,3 +143,15 @@ fn flagging_the_root_tells_finder_about_everything_under_it() {
     assert!(db.list_file_changes(anchor.as_deref()).unwrap().unwrap().0.is_empty(), "an unchanged role records no change");
     assert_eq!(changed_by(None), want, "cleared: the same items, once each");
 }
+
+/// Self-review: a refused drive change keeps core's words out of the error's text (they can carry a
+/// path on this device, and the error's text reaches the log), and the File Provider reply carries them.
+#[test]
+fn a_refused_drive_change_shows_the_words_and_logs_none() {
+    let words = own_backup_refusal("/Users/qa/Pictures/a.jpg");
+    let error = anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message: words.clone() });
+    assert!(!error.to_string().contains("/Users/qa"), "no path in the error's text: {error}");
+    let reply = error::IpcError::from_engine("delete", error);
+    assert_eq!(reply.category(), "backup_protected");
+    assert_eq!(reply.message(), words);
+}

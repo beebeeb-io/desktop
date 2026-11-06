@@ -54,7 +54,7 @@ func runProtectedItemChecks() {
     }
 
     check("LD-0113 D2: the extension refuses a protected item's delete, trash, rename and move with the daemon's words") {
-        let item = decoded(["protected_reason": deleteWords, "protected_rename_reason": renameWords, "protected_move_reason": moveWords])!
+        let item = decoded(["protected": true, "protected_reason": deleteWords, "protected_rename_reason": renameWords, "protected_move_reason": moveWords])!
         let delete = BeebeebProviderItem.protectedRefusal(model: { item })
         try expect(delete?.domain == NSFileProviderErrorDomain && delete?.code == NSFileProviderError.deletionRejected.rawValue, "a delete is rejected")
         try expect(delete?.localizedDescription == deleteWords, "with the delete words, got \(String(describing: delete))")
@@ -69,5 +69,7 @@ func runProtectedItemChecks() {
         try expect(edit == nil && !asked, "a content edit is never intercepted, and asks the daemon nothing")
         let ordinary = decoded([:])!
         try expect(BeebeebProviderItem.protectedRefusal(model: { ordinary }) == nil, "an ordinary delete goes ahead")
+        let wordsOnly = decoded(["protected_reason": deleteWords])!
+        try expect(BeebeebProviderItem.protectedRefusal(model: { wordsOnly }) == nil, "words without the flag refuse nothing (one fact)")
     }
 }
