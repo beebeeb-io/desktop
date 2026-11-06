@@ -170,6 +170,11 @@ pub(super) fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_qu
 /// Called by the bulk `operation_queue` purges so a session never outlives
 /// its op (`finish_claimed` already clears its own row).
 pub(super) fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
+    // LD-0113: a backup op's session (its own table, no path) goes with its op the same way.
+    conn.execute(
+        "DELETE FROM backup_upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
+        [],
+    )?;
     conn.execute(
         "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
         [],

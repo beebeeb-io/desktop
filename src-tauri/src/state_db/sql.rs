@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 19] = [
+pub(super) const ACCOUNT_TABLES: [&str; 21] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -33,6 +33,10 @@ pub(super) const ACCOUNT_TABLES: [&str; 19] = [
     "cf_poison",
     // LD-0105 Amendment 4 (desktop #225): pins the empty step could not put back (file ids): the account's.
     "cf_pin_restore",
+    // LD-0113: what this device backed up (keys are paths inside a backed-up folder, remote ids): the account's.
+    "backup_records",
+    // LD-0113: a backup op's server upload session (session and file ids): the account's.
+    "backup_upload_resume",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no

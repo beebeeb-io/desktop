@@ -500,6 +500,7 @@ mod tests {
     // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
 
     mod startup_and_accepts;
+    mod backup;
 
     /// A row the server holds at version 1.
     fn seed_v1_row(db: &StateDb, file_id: &str) {
@@ -594,6 +595,8 @@ mod reconcile_tests {
 }
 
 mod activity;
+// LD-0113: backup ops, their sessions and records.
+mod backup;
 mod cache;
 // LD-0105: a Windows placeholder's minted version (task 2180) and the poisoned placeholders (spec S6).
 mod cf_streaming;
@@ -613,7 +616,7 @@ mod test_hooks;
 
 mod types;
 use types::*;
-pub use types::{UploadFinalization, FileStatus, PERMISSION_READ, PERMISSION_WRITE, PERMISSION_SHARE, PERMISSION_OWNER, Namespace, ItemKind, PinState, OperationKind, FpChangeKind, FileChange, PrunedRow, FileEntry, FileContractState, RevokedSharedCache, LocalStatePurge, LocalActivityKind, KeptReason, KeptCopyInput, KeptCopy, LocalActivityEventInput, LocalActivityEvent, TransferActivityInput, TransferActivity, TransferBacklog, PendingOperation, UploadResume, WriteOrigin, FinderWrite, ItemPresentation, WaitingRow, PurgeGuardRead, FinderEnqueue, FinderFolderRow, FinderAccept, RetireParked, FinderAcceptKind, AcceptOutcome, ParkReason, LandingInput, LandingOutcome, SnapshotVersion, ClaimedOp, TookOver, ClaimOutcome, EngineStartRepair, OperationPauseReason, QueueDiagnostics, QueueHold, HeldGroup, TreeRow, BandwidthSample};
+pub use types::{OpOrigin, NewBackupUpload, BackupEnqueue, BackupUploadOp, BackupUploadResume, UploadFinalization, FileStatus, PERMISSION_READ, PERMISSION_WRITE, PERMISSION_SHARE, PERMISSION_OWNER, Namespace, ItemKind, PinState, OperationKind, FpChangeKind, FileChange, PrunedRow, FileEntry, FileContractState, RevokedSharedCache, LocalStatePurge, LocalActivityKind, KeptReason, KeptCopyInput, KeptCopy, LocalActivityEventInput, LocalActivityEvent, TransferActivityInput, TransferActivity, TransferBacklog, PendingOperation, UploadResume, WriteOrigin, FinderWrite, ItemPresentation, WaitingRow, PurgeGuardRead, FinderEnqueue, FinderFolderRow, FinderAccept, RetireParked, FinderAcceptKind, AcceptOutcome, ParkReason, LandingInput, LandingOutcome, SnapshotVersion, ClaimedOp, TookOver, ClaimOutcome, EngineStartRepair, OperationPauseReason, QueueDiagnostics, QueueHold, HeldGroup, TreeRow, BandwidthSample};
 
 mod sql;
 use sql::*;

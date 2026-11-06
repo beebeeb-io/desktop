@@ -576,6 +576,87 @@ pub struct PendingOperation {
     pub updated_at: i64,
 }
 
+/// LD-0113: who queued an op (`operation_queue.origin`). A `Backup` op uploads a file from the person's own folder,
+/// where it is: the file is in `source_path`, which only [`BackupUploadOp`] carries, and `payload_path` is NULL (the
+/// schema's triggers refuse anything else). Every other op is `Sync`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpOrigin {
+    Sync,
+    Backup,
+}
+
+impl OpOrigin {
+    pub(super) fn from_db(value: &str) -> Self {
+        match value {
+            "backup" => OpOrigin::Backup,
+            _ => OpOrigin::Sync,
+        }
+    }
+}
+
+/// LD-0113: a backup upload to queue (`StateDb::enqueue_backup_upload`). The name is sealed by the caller for
+/// `file_id`, the id this device minted for the new server file.
+#[derive(Debug, Clone)]
+pub struct NewBackupUpload<'a> {
+    pub op_id: &'a str,
+    /// `beebeeb_types::backup::Category::key()`: also the op's `backup_source_key`, so turning the folder off purges it.
+    pub category: &'a str,
+    /// The `/`-joined path inside the backed-up folder (NFC).
+    pub key: &'a str,
+    pub source_path: &'a Path,
+    pub file_id: &'a str,
+    pub parent_id: &'a str,
+    pub name_encrypted: &'a str,
+    pub content_type: Option<&'a str>,
+    /// The fingerprint the pass saw. The uploader takes its own before the first chunk.
+    pub queued: beebeeb_backup::Fingerprint,
+    pub now: i64,
+}
+
+/// What [`StateDb::enqueue_backup_upload`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupEnqueue {
+    Queued,
+    /// An op for this (account, category, key) is already queued; nothing was added (`BackupHost::enqueue_upload`
+    /// is idempotent per key). Its id.
+    AlreadyQueued(String),
+    /// No account owner is recorded (R10): nothing is queued for nobody.
+    NoOwner,
+}
+
+/// LD-0113: one queued backup upload, as only the backup uploader reads it. Never a [`PendingOperation`]: the
+/// generic queue readers cannot see `source_path`, so none of them can treat it as a copy desktop owns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackupUploadOp {
+    pub op_id: String,
+    pub category: String,
+    pub key: String,
+    /// The person's own file. Opened read-only; never written, moved, renamed, truncated or deleted.
+    pub source_path: std::path::PathBuf,
+    pub file_id: String,
+    pub parent_id: String,
+    pub name_encrypted: String,
+    pub content_type: Option<String>,
+    /// `backup_records.account_owner` of the account it was queued for.
+    pub account_owner: String,
+}
+
+/// LD-0113: a backup op's server upload session, kept so a retry resumes instead of minting a second server row.
+/// It holds no path: the source is the op's, and the fingerprint says which bytes the acknowledged chunks are of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupUploadResume {
+    pub op_id: String,
+    pub server_file_id: String,
+    pub upload_session_id: String,
+    pub object_version_id: String,
+    pub chunk_size_bytes: i64,
+    pub chunk_count: i64,
+    pub acked_chunks: i64,
+    /// `beebeeb_core::chunk_stream::ChunkFormat::as_u8` of the writer that opened the session (core's `resume_policy`).
+    pub chunk_format: u8,
+    pub fingerprint: beebeeb_backup::Fingerprint,
+}
+
 /// Persisted resumable upload session for one queued upload op (flow 7).
 /// See the `upload_resume` table in [`StateDb::open`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,6 +975,8 @@ pub enum SnapshotVersion {
 #[derive(Debug, Clone)]
 pub struct ClaimedOp {
     pub op: PendingOperation,
+    /// LD-0113: a `Backup` claim runs the backup uploader only, never the sync-root upload, landing or cleanup.
+    pub origin: OpOrigin,
     pub claim_id: String,
     pub write: Option<FinderWrite>,
     /// The claim handed a parked predecessor's role to this op (spec §8.4).
