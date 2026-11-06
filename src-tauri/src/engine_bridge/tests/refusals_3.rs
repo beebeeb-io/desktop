@@ -117,7 +117,8 @@ use super::*;
             (
                 "watcher.rs",
                 "None => bridge.queue_finder_modify(modify),",
-                "pub(crate) async fn handle_rename(",
+                // LD-0113: `handle_rename` is `handle_rename_with(.., ProtectionCheck::Check)`.
+                "pub(crate) async fn handle_rename_with(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),
