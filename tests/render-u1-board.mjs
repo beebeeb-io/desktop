@@ -16,7 +16,8 @@
 //   A. no upload row is listed on the "In progress" card, and with no download row there is no card
 //      (the U0 design gives an upload no state on these surfaces);
 //   B. no tray row of an uploading file reads "Downloading";
-//   C. every named download row is on the card under its name with its state line, and its tray row shows that line.
+//   C. every named download row is on the card under its name with its state line, and its tray row shows that line;
+//   D. no line reads "0 B/s" (a download with no byte in its speed window shows no speed: lead, 2026-11-06).
 // What it does not prove: the native tray icon, WebView2, a real download (the release lane's RC rung).
 
 import assert from 'node:assert/strict'
@@ -109,6 +110,7 @@ try {
         const shown = cardCount > 0 && (pageText.includes(r.fileId) || (r.name !== '' && pageText.includes(r.name)))
         check(`A: upload ${r.name || r.fileId} not listed as arriving`, !shown)
       }
+      check('D: the Activity page shows no "0 B/s"', !pageText.includes('0 B/s'))
       for (const r of downs.filter((r) => r.name)) {
         await wait(activity, r.name).catch(() => undefined)
         const txt = await activity.locator('body').textContent()
@@ -129,6 +131,7 @@ try {
     await tray.screenshot({ path: shotT, fullPage: false })
     files.push(shotT)
     if (scheme === 'light') {
+      check('D: the tray shows no "0 B/s"', !(await tray.locator('body').textContent()).includes('0 B/s'))
       for (const f of recent) {
         const row = tray.locator(`button[title="Open ${path.posix.basename(f.path)}"]`)
         const txt = (await row.count()) > 0 ? await row.first().textContent() : ''

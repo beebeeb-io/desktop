@@ -202,8 +202,8 @@ fn ld0105_u1_the_cloud_files_callback_runs_that_sequence() {
     assert_eq!(body.matches("whole_fetch_row(").count(), 1);
 }
 
-/// The `get_active_transfers` and `desktop_recent_files` JSON of a downloading row, a failed one and an
-/// upload, as the commands serialise them, is `tests/fixtures/active-transfers.ld0105-u1.json`, which
+/// The `get_active_transfers` and `desktop_recent_files` JSON of a downloading row, one with no byte
+/// yet, a failed one and an upload, as the commands serialise them, is `tests/fixtures/active-transfers.ld0105-u1.json`, which
 /// the browser rung (`tests/render-u1-board.mjs`) renders: the fixture is this test's output, never a
 /// hand-written mock. `failedAtSecs` (the wall clock) is compared as present. To write it again:
 /// `BB_WRITE_U1_FIXTURE=1 cargo test ld0105_u1_the_ipc_rows_are_the_shared_fixture`.
@@ -212,20 +212,27 @@ fn ld0105_u1_the_ipc_rows_are_the_shared_fixture() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
     let (down, failed, up) = ("a1050000-0000-4000-8000-000000000001", "a1050000-0000-4000-8000-000000000002", "a1050000-0000-4000-8000-000000000003");
+    let waiting = "a1050000-0000-4000-8000-000000000004";
     for (id, path, status, size) in [
         (down, "Videos/holiday-2026.mp4", FileStatus::Downloading, 349_000_000),
         (failed, "Videos/lecture-03.mp4", FileStatus::Error, 212_000_000),
         (up, "Documents/notes-draft.txt", FileStatus::Uploading, 48_000),
+        (waiting, "Music/concert-live.flac", FileStatus::Downloading, 437_000_000),
     ] {
         seed_bridge_row(&bridge, id, path, None, status, size);
     }
     // The downloading fetch: 118.2 of 349 MB, 9.6 MB/s over the last 2 s (the U0 design's row).
     let downloading = bridge.whole_fetch_row(down, 349_000_000);
     let t0 = std::time::Instant::now();
-    for (s, kept) in [(0, 99_000_000), (1, 108_600_000), (2, 118_200_000)] {
-        bridge.transfers().received_at(down, kept, t0 + Duration::from_secs(s));
+    let (meter, mut speed) = (ReceiveMeter::default(), crate::transfer_progress::FetchSpeed::new());
+    for (s, bytes) in [(0, 99_000_000), (1, 108_600_000), (2, 118_200_000)] {
+        meter.add(bytes - meter.received());
+        let bps = speed.sample(t0 + Duration::from_secs(s), &meter);
+        bridge.transfers().received_at(down, meter.kept(), bps);
     }
     drop(bridge.whole_fetch_row(failed, 212_000_000));
+    // A fetch whose first byte has not arrived: no speed yet (the UI shows none, never "0 B/s").
+    let first_byte_pending = bridge.whole_fetch_row(waiting, 437_000_000);
     let upload = bridge.transfers().begin_named(up, "Documents/notes-draft.txt", Direction::Up, 48_000);
     upload.update(16_384);
 
@@ -251,5 +258,5 @@ fn ld0105_u1_the_ipc_rows_are_the_shared_fixture() {
     };
     let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(clock(emitted.clone()), clock(fixture), "the shared fixture is what the commands emit: {emitted:#}");
-    drop((downloading, upload));
+    drop((downloading, upload, first_byte_pending));
 }

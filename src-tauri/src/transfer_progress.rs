@@ -51,11 +51,11 @@ impl SpeedWindow {
         Self { samples: VecDeque::new() }
     }
 
-    /// Push a new sample and return the current speed in bytes/s.
-    fn push(&mut self, now: Instant, cumulative_bytes: u64) -> u64 {
+    /// Push a new sample and return the current speed in bytes/s over the last `span`.
+    fn push(&mut self, now: Instant, cumulative_bytes: u64, span: Duration) -> u64 {
         self.samples.push_back((now, cumulative_bytes));
-        // Drop samples older than 2 seconds
-        let cutoff = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+        // Drop samples older than `span`
+        let cutoff = now.checked_sub(span).unwrap_or(now);
         while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
             self.samples.pop_front();
         }
@@ -69,6 +69,36 @@ impl SpeedWindow {
             return 0;
         }
         (newest_b.saturating_sub(oldest_b) as f64 / elapsed_secs) as u64
+    }
+}
+
+/// The streaming row's speed: a 2-second moving window (U0 design).
+const STREAM_SPEED_SPAN: Duration = Duration::from_secs(2);
+
+/// A whole-file download's speed: the bytes that arrived over the last 10 seconds (LD-0105 U1, lead
+/// decision 2026-11-06 09:53; a deviation from the U0 design's 2 s window). Under a download limit the
+/// direct route holds new requests back (`direct_download::paced_until_ms`), so bytes arrive in
+/// bursts 3 to 5 s apart: a 2 s window was empty in 13 of 21 native samples and read "0 B/s".
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const DOWNLOAD_SPEED_SPAN: Duration = Duration::from_secs(10);
+
+/// One fetch's speed over its own [`ReceiveMeter::received`] (every body byte read, a retried
+/// attempt's included: the wire's real rate), sampled by [`FetchRow::follow`] over
+/// [`DOWNLOAD_SPEED_SPAN`]; `0` when no byte arrived in that span (the UI then shows no speed).
+#[derive(Debug)]
+pub(crate) struct FetchSpeed {
+    window: SpeedWindow,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl FetchSpeed {
+    pub(crate) fn new() -> Self {
+        FetchSpeed { window: SpeedWindow::new() }
+    }
+
+    /// `meter` read at `now`: the speed in bytes/s of its received bytes.
+    pub(crate) fn sample(&mut self, now: Instant, meter: &ReceiveMeter) -> u64 {
+        self.window.push(now, meter.received(), DOWNLOAD_SPEED_SPAN)
     }
 }
 
@@ -450,17 +480,16 @@ impl TransferBoard {
         }
     }
 
-    /// LD-0105 U1: a download's body bytes so far (`kept`, [`ReceiveMeter::kept`]) at `now`. They are
-    /// its progress (never backwards, never past the total) and its speed, a 2-second moving window
-    /// of that progress. A no-op for a file that is not registered.
+    /// LD-0105 U1: a download's kept body bytes ([`ReceiveMeter::kept`], counted per read, a failed
+    /// attempt's taken back) are its progress, never backwards and never past the total; `speed_bps`
+    /// is its fetch's [`FetchSpeed`]. A no-op for a file that is not registered.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn received_at(&self, file_id: &str, kept: u64, now: Instant) {
-        if let Ok(mut guard) = self.inner.lock() {
-            let inner = &mut *guard;
-            if let Some(t) = inner.active.get_mut(file_id) {
-                t.done = kept.min(t.total).max(t.done);
-                t.speed_bps = inner.speeds.entry(file_id.to_string()).or_insert_with(SpeedWindow::new).push(now, t.done);
-            }
+    pub fn received_at(&self, file_id: &str, kept: u64, speed_bps: u64) {
+        if let Ok(mut inner) = self.inner.lock()
+            && let Some(t) = inner.active.get_mut(file_id)
+        {
+            t.done = kept.min(t.total).max(t.done);
+            t.speed_bps = speed_bps;
         }
     }
 
@@ -472,7 +501,7 @@ impl TransferBoard {
             let speed = inner.speeds
                 .entry(file_id.to_string())
                 .or_insert_with(SpeedWindow::new)
-                .push(now, buffered);
+                .push(now, buffered, STREAM_SPEED_SPAN);
             if let Some(t) = inner.active.get_mut(file_id) {
                 t.buffered = buffered;
                 t.speed_bps = speed;
@@ -695,7 +724,7 @@ impl Drop for TransferGuard {
     }
 }
 
-/// How often [`FetchRow::follow`] reads its fetch's meter: twice inside the 2-second speed window.
+/// How often [`FetchRow::follow`] reads its fetch's meter.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 
@@ -725,8 +754,9 @@ impl FetchRow {
         self
     }
 
-    /// Report `meter`'s kept bytes ([`ReceiveMeter::kept`]) to the row every [`FOLLOW_EVERY`] until
-    /// the future is dropped: the caller selects it against the fetch, so it ends with the fetch.
+    /// Report `meter` to the row every [`FOLLOW_EVERY`] until the future is dropped (the caller
+    /// selects it against the fetch, so it ends with the fetch): its kept bytes as the progress, and
+    /// the speed of its received bytes ([`FetchSpeed`]).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn follow(&self, meter: &ReceiveMeter) -> std::convert::Infallible {
         let Some(guard) = &self.guard else {
@@ -734,9 +764,11 @@ impl FetchRow {
         };
         let mut tick = tokio::time::interval(FOLLOW_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut speed = FetchSpeed::new();
         loop {
             tick.tick().await;
-            guard.board.received_at(&guard.file_id, meter.kept(), tokio::time::Instant::now().into_std());
+            let bps = speed.sample(tokio::time::Instant::now().into_std(), meter);
+            guard.board.received_at(&guard.file_id, meter.kept(), bps);
         }
     }
 
@@ -1074,7 +1106,7 @@ mod tests {
         }
     }
 
-    // --- LD-0105 U1 board wiring: begin_download, received_at, FetchRow ---
+    // --- LD-0105 U1 board wiring: begin_download, received_at, FetchSpeed, FetchRow ---
 
     /// Brief U1.1: a second fetch of a file while one runs joins its row: no second row, progress
     /// not back to 0, and the row ends with the last fetch, by that fetch's outcome. Red on the
@@ -1082,9 +1114,8 @@ mod tests {
     #[test]
     fn ld0105_u1_a_second_fetch_of_a_file_joins_its_row() {
         let board = TransferBoard::new();
-        let t0 = Instant::now();
         let first = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
-        board.received_at("f", 60, t0);
+        board.received_at("f", 60, 0);
         let second = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
         let rows = board.snapshot_dtos();
         assert_eq!(rows.len(), 1, "one row: {rows:?}");
@@ -1093,30 +1124,95 @@ mod tests {
         let rows = board.snapshot_dtos();
         assert_eq!(rows.len(), 1, "the second fetch still holds the row");
         assert!(!rows[0].failed, "the second fetch, still running, decides how the row ends");
-        board.received_at("f", 100, t0 + Duration::from_secs(1));
+        board.received_at("f", 100, 0);
         second.finished();
         assert!(board.snapshot_dtos().is_empty(), "the last fetch delivered the file: no row left");
         assert_eq!(board.finished_bytes(), 100, "counted once");
     }
 
-    /// Brief U1.1: the row's progress is the meter's kept bytes, never backwards (a failed attempt's
-    /// bytes are taken back from the meter) and never past the total; its speed is a 2-second window.
+    /// Brief U1.1: the row's progress is the meter's kept b    /// Brief U1.1: the row's progress is the meter's kept bytes, never backwards (a failed attempt's
+    /// bytes are taken back from the meter) and never past the total; the speed is the caller's.
     #[test]
-    fn ld0105_u1_received_bytes_are_kept_progress_with_a_two_second_speed() {
+    fn ld0105_u1_kept_bytes_are_the_progress_never_backwards_never_past_the_total() {
         let board = TransferBoard::new();
         let _row = board.begin_download("f", "a.bin", 10_000);
-        let t0 = Instant::now();
-        board.received_at("f", 1_000, t0);
-        board.received_at("f", 2_000, t0 + Duration::from_secs(1));
-        board.received_at("f", 4_000, t0 + Duration::from_secs(2));
+        board.received_at("f", 4_000, 1_500);
         let t = board.get("f").unwrap();
-        assert_eq!((t.done, t.speed_bps), (4_000, 1_500), "3,000 bytes over the last 2 s");
-        board.received_at("f", 3_000, t0 + Duration::from_secs(3));
+        assert_eq!((t.done, t.speed_bps), (4_000, 1_500));
+        board.received_at("f", 3_000, 1_500);
         assert_eq!(board.get("f").unwrap().done, 4_000, "a rolled-back attempt never moves the row backwards");
-        board.received_at("f", 10_028, t0 + Duration::from_secs(4));
+        board.received_at("f", 10_028, 1_500);
         assert_eq!(board.get("f").unwrap().done, 10_000, "wire bytes (28-byte tags) never pass the total");
-        board.received_at("not-registered", 5, t0);
+        board.received_at("not-registered", 5, 1);
         assert_eq!(board.get("not-registered"), None);
+    }
+
+    /// The release lane's native 1 s samples of `done` during a 300 MB whole-file download at
+    /// 1e963bc (Windows, direct route, `download_kbps_limit` 12,500 KB/s, streaming OFF): the bytes
+    /// arrive in bursts while the pacer holds the next requests back. Kept = received on that run (no
+    /// discarded body), and these are per read: 118,159,856 is no multiple of 16 MiB.
+    const NATIVE_1E963BC: [u64; 23] = [
+        0, 33_554_432, 67_108_976, 67_108_976, 67_108_976, 67_108_976, 118_159_856, 134_217_952, 134_217_952,
+        134_217_952, 134_217_952, 170_967_324, 201_326_928, 201_326_928, 201_326_928, 201_326_928, 240_506_312,
+        267_741_438, 268_435_904, 268_435_904, 268_435_904, 268_435_904, 300_000_000,
+    ];
+
+    /// Lead decision 2026-11-06 09:53 (native: 13 of 21 mid-download samples read "0 B/s", the rest
+    /// 0.7 to 51.0 MB/s, at a real ≈12.3 MB/s): replayed second by second, the speed is non-zero at
+    /// every sample from the first byte to the last, and once its window is full it stays within a
+    /// third of the download's real average (the tail's bursts are smaller: 9.7 MB/s at 13.6). Red
+    /// on the mutant "2 s window" (kept = received on this trace, so the next test covers that one).
+    #[test]
+    fn ld0105_u1_the_native_bursts_read_as_a_steady_non_zero_speed() {
+        let t0 = Instant::now();
+        let meter = ReceiveMeter::default();
+        let mut speed = FetchSpeed::new();
+        let average = 300_000_000 / 22; // bytes per second, first byte to last
+        let mut seen = Vec::new();
+        for (s, received) in NATIVE_1E963BC.iter().enumerate() {
+            meter.add(received - meter.received());
+            let bps = speed.sample(t0 + Duration::from_secs(s as u64), &meter);
+            seen.push(bps / 100_000);
+            if s >= 1 {
+                assert!(bps > 0, "second {s}: a byte arrived in the window, so a speed shows");
+            }
+            if s >= 10 {
+                assert!(bps.abs_diff(average) * 3 <= average, "second {s}: {bps} B/s is within a third of {average}");
+            }
+        }
+        println!("ld0105-u1 native replay, 0.1 MB/s per second: {seen:?}");
+    }
+
+    /// Lead decision 2026-11-06 09:53: a fetch fed per-read bytes in chunk-sized bursts (16 MiB in
+    /// 64 KiB reads, then 4 s of nothing), with an attempt that fails and is taken back from the kept
+    /// progress, still reads a non-zero speed in every window after the first byte: the speed is the
+    /// meter's received bytes, the wire's real rate. Red on the mutant "speed of the kept progress".
+    #[test]
+    fn ld0105_u1_per_read_bursts_and_a_retry_keep_a_non_zero_speed() {
+        const CHUNK: u64 = 16 << 20;
+        let meter = ReceiveMeter::default();
+        let t0 = Instant::now();
+        let mut speed = FetchSpeed::new();
+        let mut seen = Vec::new();
+        for s in 0..30u64 {
+            if s % 5 == 1 {
+                let mark = meter.kept();
+                for _ in 0..(CHUNK / 65_536) {
+                    meter.add(65_536);
+                }
+                if s == 11 {
+                    meter.rollback_to(mark); // that body did not authenticate: fetched again
+                }
+            }
+            let bps = speed.sample(t0 + Duration::from_secs(s), &meter);
+            seen.push(bps);
+            if s >= 1 {
+                assert!(bps > 0, "second {s}: a speed shows");
+            }
+        }
+        let steady = &seen[10..];
+        let (low, high) = (steady.iter().min().unwrap(), steady.iter().max().unwrap());
+        assert!(high - low <= high / 4, "steady once the window is full: {steady:?}");
     }
 
     /// Brief U1.1: a fetch row dropped without `finished()` is a failed row, named, kept for the TTL;

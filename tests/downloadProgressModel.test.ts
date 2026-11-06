@@ -349,3 +349,19 @@ describe('uploads are not download rows', () => {
     expect(trayHeaderOverride([uploading({ failed: true, failedAtSecs: 1 })])).toBeNull()
   })
 })
+
+// ── No "0 B/s" on a downloading row (LD-0105 U1, lead decision 2026-11-06 09:53) ─
+// Native: 13 of 21 mid-download samples had speedBps 0 and the tray read "0 B/s".
+
+describe('a downloading row with no speed yet', () => {
+  test('the tray line and the Activity line show no speed, never "0 B/s"', () => {
+    // mutant: always format the speed → "Downloading · 34% · 0 B/s"
+    expect(traySubline(downloading({ speedBps: 0 }))).toBe('Downloading · 34%')
+    expect(activityDetail(downloading({ speedBps: 0 }))).toBe(
+      'Downloading · 34% · the program that opened it waits for the whole file',
+    )
+  })
+  test('with a speed, the line is the design\'s', () => {
+    expect(traySubline(downloading({ speedBps: 9_600_000 }))).toBe('Downloading · 34% · 9.2 MB/s')
+  })
+})

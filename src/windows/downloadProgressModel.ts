@@ -106,9 +106,9 @@ export function traySubline(row: DownloadRowLike): string {
     const pct = formatPercent(row.buffered, row.total)
     return TRAY_SUBLINE.streaming(pct, speed)
   }
-  // downloading
+  // downloading: no speed segment while no byte arrived in the window (LD-0105 U1, lead 2026-11-06)
   const pct = formatPercent(row.done, row.total)
-  return TRAY_SUBLINE.downloading(pct, speed)
+  return TRAY_SUBLINE.downloading(pct, row.speedBps > 0 ? speed : null)
 }
 
 // ── Activity detail ───────────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ export function activityDetail(row: DownloadRowLike): string {
     return ACTIVITY_DETAIL.streaming(pct, speed)
   }
   const pct = formatPercent(row.done, row.total)
-  return ACTIVITY_DETAIL.downloading(pct, speed)
+  return ACTIVITY_DETAIL.downloading(pct, row.speedBps > 0 ? speed : null)
 }
 
 // ── Progress bar fraction ─────────────────────────────────────────────────────
