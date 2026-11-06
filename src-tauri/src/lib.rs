@@ -155,9 +155,9 @@ mod cf_keepalive;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod cf_range;
 // LD-0105 D2 (W3): the ONE player allowlist and media types. It lives under `windows_cf/` (the contract's
-// path) but is pure and compiled everywhere, so its rules are tested on every platform. Switched off
-// (`STREAMING_ENABLED = false`) until the streaming callback (W2); nothing calls it yet.
-#[allow(dead_code)]
+// path) but is pure and compiled everywhere, so its rules are tested on every platform. Switched on with
+// the streaming callback (W2); `windows_cf::streaming` calls it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[path = "windows_cf/stream_players.rs"]
 mod stream_players;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;

@@ -171,6 +171,12 @@ impl EngineBridge {
         &self.db
     }
 
+    /// LD-0105 W2: the database for a range session's identity recorder, which outlives one call.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn db_arc(&self) -> Arc<StateDb> {
+        self.db.clone()
+    }
+
     /// Borrow the API client for the same reason.
     pub fn api(&self) -> &ApiClient {
         &self.api

@@ -210,6 +210,27 @@ pub unsafe extern "system" fn fetch_data_callback(
         }
     };
 
+    // LD-0105 W2: a pinned file streams through its range session (and W3 may decline a listed
+    // player's open-time fetch); a legacy file, or a root that is not progressive, takes the
+    // whole-file path below.
+    let streamed = super::streaming::Fetch {
+        connection: connection_key,
+        keys: crate::cf_range::RequestKeys { transfer_key, request_key },
+        file_id: file_id.clone(),
+        offset: required_offset,
+        length: required_length,
+        optional_length: fetch.OptionalLength,
+        file_size,
+        flags: fetch.Flags.0,
+        requester: if info.ProcessInfo.is_null() { 0 } else { unsafe { (*info.ProcessInfo).ProcessId } },
+        // SAFETY: valid for the duration of the callback, like `info` itself.
+        image: (!info.ProcessInfo.is_null()).then(|| unsafe { (*info.ProcessInfo).ImagePath.to_string() }.ok()).flatten(),
+        package: (!info.ProcessInfo.is_null()).then(|| unsafe { (*info.ProcessInfo).PackageName.to_string() }.ok()).flatten().filter(|p| !p.is_empty()),
+    };
+    if let super::streaming::Served::Done = super::streaming::serve(&streamed, &bridge, &handle) {
+        return;
+    }
+
     // Decrypt the whole file entirely in memory — plaintext is NEVER written
     // to disk. Zero-knowledge requirement: the Cloud Files runtime will receive
     // the bytes via CfExecute(TRANSFER_DATA) and write them into the placeholder
@@ -410,6 +431,16 @@ unsafe fn resolve_size_mismatch(
     file_id: &str,
     true_size: i64,
 ) {
+    resolve_size_with_path(normalized_path(info), bridge, file_id, true_size);
+}
+
+/// [`resolve_size_mismatch`] for a range session's 0783 check (spec S9), which has no callback info:
+/// the path comes from the state DB.
+pub(super) fn resolve_size_mismatch_by_id(bridge: &crate::engine_bridge::EngineBridge, file_id: &str, true_size: i64) {
+    resolve_size_with_path(None, bridge, file_id, true_size);
+}
+
+fn resolve_size_with_path(callback_path: Option<Vec<u16>>, bridge: &crate::engine_bridge::EngineBridge, file_id: &str, true_size: i64) {
     // Step 1 — correct the recorded size to the authenticated length. A failure
     // here is non-fatal: the placeholder resize below is what makes the next
     // open succeed; the DB value is for cross-surface consistency + reseeding.
@@ -435,7 +466,7 @@ unsafe fn resolve_size_mismatch(
     // usually empty): reconstruct `<sync_root>/<state-DB rel path>` by file_id.
     // We keep the wide form (when available) so Tier-2's mark_not_in_sync can
     // reuse the exact openable path the OS gave us.
-    let mut wide_path: Option<Vec<u16>> = normalized_path(info);
+    let mut wide_path: Option<Vec<u16>> = callback_path;
     let os_path: Option<std::path::PathBuf> = match &wide_path {
         Some(path) => {
             let path_no_nul: Vec<u16> = path.iter().copied().take_while(|&c| c != 0).collect();
@@ -502,7 +533,7 @@ unsafe fn resolve_size_mismatch(
 /// Only when the rel path is a clean sequence of normal components do we join
 /// it onto the sync root. Returns `None` (→ Tier-2) on any failure: missing
 /// sync root, absent row, empty/illegal rel path.
-fn db_placeholder_path(bridge: &crate::engine_bridge::EngineBridge, file_id: &str) -> Option<std::path::PathBuf> {
+pub(super) fn db_placeholder_path(bridge: &crate::engine_bridge::EngineBridge, file_id: &str) -> Option<std::path::PathBuf> {
     let sync_root = super::sync_root()?;
 
     let entry = match bridge.db().get_file(file_id) {
@@ -623,6 +654,7 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         let identity = unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
         if let Ok(file_id) = std::str::from_utf8(identity) {
             super::poison::after_close(file_id);
+            super::streaming::after_close(file_id);
         }
     }
 
@@ -867,7 +899,7 @@ pub(super) unsafe fn refuse_own_scoped_fetch(info: &CF_CALLBACK_INFO, identity: 
 /// SAFETY: `connection_key` / `transfer_key` identify a live transfer;
 /// `buffer` (if non-null) is valid for `length` bytes for the duration
 /// of the call. `CfExecute` consumes the buffer synchronously.
-unsafe fn transfer_one(
+pub(super) unsafe fn transfer_one(
     connection_key: CF_CONNECTION_KEY,
     transfer_key: i64,
     request_key: i64,
@@ -932,7 +964,7 @@ unsafe fn transfer_one(
 ///
 /// SAFETY: `path` is a NUL-terminated wide string; the opened CF handle
 /// is closed via `CfCloseHandle` before return.
-unsafe fn mark_in_sync(path: &[u16]) {
+pub(super) unsafe fn mark_in_sync(path: &[u16]) {
     use windows::core::PCWSTR;
 
     let handle = match unsafe { CfOpenFileWithOplock(PCWSTR(path.as_ptr()), CF_OPEN_FILE_FLAG_NONE) } {
@@ -1000,6 +1032,16 @@ fn normalized_path(info: &CF_CALLBACK_INFO) -> Option<Vec<u16>> {
     full.extend_from_slice(&rel);
     full.push(0);
     Some(full)
+}
+
+/// The file id a placeholder was minted with (`FileIdentity`, UTF-8), for the W2 callbacks.
+pub(super) fn file_id_of(info: &CF_CALLBACK_INFO) -> Option<String> {
+    if info.FileIdentity.is_null() || info.FileIdentityLength == 0 {
+        return None;
+    }
+    // SAFETY: Windows hands us `FileIdentityLength` valid bytes for the duration of the callback.
+    let bytes = unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
+    std::str::from_utf8(bytes).ok().map(str::to_string)
 }
 
 /// Copy a Windows `*const u16` NUL-terminated string into an owned Vec

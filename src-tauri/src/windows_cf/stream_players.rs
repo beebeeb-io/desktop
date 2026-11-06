@@ -12,12 +12,11 @@
 //! (no Windows call) and compiled on every platform, so the rules are tested everywhere; the Windows
 //! fetch callback feeds it the requester's `CF_PROCESS_INFO`.
 //!
-//! **Switched off** ([`STREAMING_ENABLED`] = `false`) until the streaming callback (plan W2) lands:
-//! before W2 every range fetch would still download the whole file, so a decline would only cost
-//! the player a second full download.
+//! **Switched on** ([`STREAMING_ENABLED`]) with the streaming callback (plan W2): a declined player's
+//! reads become range demands on the file's one range session (`windows_cf::streaming`).
 
-/// Off until W2 (plan W3: "The decline is switched on only with W2").
-pub(crate) const STREAMING_ENABLED: bool = false;
+/// On with W2 (plan W3: "The decline is switched on only with W2").
+pub(crate) const STREAMING_ENABLED: bool = true;
 
 /// How a player is recognised. Never by image name alone: a renamed `vlc.exe` in a temp folder must
 /// get the whole file (D2-4).
@@ -202,8 +201,15 @@ pub(crate) struct OpenFetches {
 impl OpenFetches {
     /// `NOTIFY_FILE_OPEN_COMPLETION` from `pid` on `file_id`.
     pub(crate) fn opened(&mut self, pid: u32, file_id: &str) {
+        // Bounded (desktop #224 follow-up): forgetting an armed open only means that open gets the
+        // whole file, never a wrong decline.
+        if self.armed.len() >= Self::MAX_ARMED {
+            self.armed.clear();
+        }
         self.armed.insert((pid, file_id.to_string()));
     }
+
+    const MAX_ARMED: usize = 4096;
 
     /// A whole-remainder fetch from `pid` on `file_id`: `true` only for the first one after its open.
     pub(crate) fn first_after_open(&mut self, pid: u32, file_id: &str) -> bool {
@@ -240,11 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_is_off_until_the_streaming_callback_ships() {
-        assert!(!STREAMING_ENABLED, "W3 is built but switched off until W2");
+    fn the_switch_is_on_with_the_streaming_callback() {
+        assert!(STREAMING_ENABLED, "W3 is switched on with W2");
         assert!(
-            !decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true),
-            "the shipped switch declines nothing"
+            decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true),
+            "the shipped switch declines a listed player's open-time fetch of a media file"
         );
     }
 

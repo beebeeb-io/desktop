@@ -406,17 +406,16 @@ fn qa_db(dir: &Path, rows: &[(&str, &str)]) -> crate::state_db::StateDb {
     db
 }
 
-/// Poison `name` by hand, as a failed fetch would: not in sync, then the stamp, then the record.
+/// Poison `name` as the W2 fetch path does (`poison_now`): not in sync, then the content key, then the
+/// record.
 fn poison(db: &crate::state_db::StateDb, qa: &QaRoot, id: &str, name: &str) {
-    placeholders::mark_not_in_sync_path(&qa.path(name)).unwrap();
-    let stamp = crate::windows_cf::poison::poison_stamp(&qa.path(name));
-    assert!(stamp.is_some(), "the stamp of {name} is readable");
-    db.record_poison(id, "corrupt", stamp, 1).unwrap();
+    crate::windows_cf::poison::poison_now(db, id, &qa.path(name), "corrupt");
+    assert!(db.poison(id).unwrap().unwrap().key.is_some(), "the key of {name} is readable");
 }
 
 #[test]
 fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_measured_order() {
-    use crate::windows_cf::poison::{Emptied, empty_poisoned, sweep_poisoned};
+    use crate::windows_cf::poison::{Check, Emptied, SweepKind, empty_poisoned, sweep_poisoned};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(s6_fetch); // this process is the connected provider: only it may set IN_SYNC
     let names = mint_five(&qa);
@@ -440,7 +439,7 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
         let open = std::fs::File::open(qa.path("local-pinned.bin")).unwrap();
         let stamp = db.poison("qa-local-pinned").unwrap().unwrap();
         assert_eq!(
-            empty_poisoned(&qa.path("local-pinned.bin"), stamp.change_ticks.zip(stamp.file_index)),
+            empty_poisoned(&qa.path("local-pinned.bin"), Check::Key(stamp.key)),
             Emptied::Busy
         );
         assert_eq!(
@@ -471,10 +470,10 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let db = crate::state_db::StateDb::open(db_file).unwrap();
-            let mut sweeps = vec![sweep_poisoned(&db, &root, true)];
+            let mut sweeps = vec![sweep_poisoned(&db, &root, SweepKind::ProcessStart)];
             while sweeps.len() < 10 && sweeps.last().unwrap().iter().any(|(_, o)| *o == Emptied::Busy) {
                 std::thread::sleep(Duration::from_millis(250));
-                sweeps.push(sweep_poisoned(&db, &root, false));
+                sweeps.push(sweep_poisoned(&db, &root, SweepKind::Tick));
             }
             let _ = tx.send(sweeps);
         });
@@ -505,10 +504,14 @@ fn ld0105_s6_native_the_empty_step_dehydrates_a_poisoned_placeholder_in_the_meas
     assert!(!changed_after.1, "and stays not in sync");
     assert_eq!(db.poison("qa-local-pinned").unwrap(), None);
     assert_eq!(db.poison("qa-partial").unwrap(), None);
+    // Amendment 4: a content write since the poison: never emptied, never cleared silently.
+    assert_eq!(last.get("qa-local"), Some(&Emptied::NeedsAttention), "{last:?}");
+    let changed = db.poison("qa-local").unwrap().expect("the poison stays");
+    assert!(changed.needs_attention, "the row needs attention");
     assert_eq!(
-        db.poison("qa-local").unwrap(),
-        None,
-        "a changed file is not the bytes that were poisoned: its poison is cleared (lead decision 2026-11-06)"
+        sweep_poisoned(&db, &qa.root, SweepKind::Tick),
+        vec![],
+        "a needs-attention row is not opened on a tick"
     );
     // A poisoned file refuses every fetch until it is emptied (I5) is the fetch callback's first check;
     // the emptied ones fetch again: a read of the partial file asks for bytes once more.
@@ -537,7 +540,7 @@ fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
     placeholders::set_pin_state(&path, true, false).unwrap();
     placeholders::mark_not_in_sync_path(&path).unwrap();
     assert_eq!(census_of(&path), (OnDisk::Wholly, false, true), "{name} poisoned as a failed fetch leaves it");
-    crate::windows_cf::poison::poison_stamp(&path)
+    crate::windows_cf::poison::content_key(&path)
 }
 
 /// The windows-latest red (desktop PR 224): between two of the empty step's calls the step's protected
@@ -549,7 +552,7 @@ fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
 /// ends, and the step completes.
 #[test]
 fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() {
-    use crate::windows_cf::poison::{Emptied, Step, empty_poisoned_with};
+    use crate::windows_cf::poison::{Check, Emptied, Step, empty_poisoned_with};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(refuse_every_fetch); // this process is the connected provider: only it may set IN_SYNC
     let mut seen = Vec::new();
@@ -561,7 +564,7 @@ fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() 
         let mut opener = None;
         let mut done_early = None;
         let started = Instant::now();
-        let outcome = empty_poisoned_with(&path, stamp, &mut |step, _| {
+        let outcome = empty_poisoned_with(&path, Check::Key(stamp), &mut |step, _| {
             if step == at {
                 let (path, tx) = (path.clone(), tx.clone());
                 opener = Some(std::thread::spawn(move || {
@@ -595,27 +598,28 @@ fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() 
     assert_eq!(seen, wanted, "(point, outcome, census, the other open returned during the step, its result)");
 }
 
-/// The failure path (spec S6 step 6), then the next sweep (review P1). A step that fails after the pin
-/// was cleared restores NOT_IN_SYNC and the pin before the handle is released. The failure is made, not
-/// hoped for: at `Step::InSync` the file is set not in sync again through the step's own handle, and a
-/// placeholder that is not in sync refuses to dehydrate (`0x80070179`, P1b). A disconnected provider is
-/// no such lever: the Legion refuses that dehydrate, the windows-latest runner allows it (CI run
-/// 42133463209: `Emptied`). Those restore writes move the file's stamp (asserted: the fact the review
-/// asked to settle), so the poison takes the new stamp and the next sweep empties the file.
+/// The failure path (spec S6 step 6), then the next sweep. A step that fails after the pin was cleared
+/// restores NOT_IN_SYNC and the pin before the handle is released. The failure is made, not hoped for:
+/// at `Step::InSync` the file is set not in sync again through the step's own handle, and a placeholder
+/// that is not in sync refuses to dehydrate (`0x80070179`, P1b). Contract Amendment 4's measurement:
+/// those restore writes (through the handle) leave the content key (`LastWriteTime` + size) as it was,
+/// so the poison needs no new stamp and the next sweep empties the file. (Their ChangeTime moves: the
+/// part-1 key, printed.)
 #[test]
 fn ld0105_s6_native_a_failed_step_restores_not_in_sync_and_the_pin() {
-    use crate::windows_cf::poison::{Emptied, Step, poison_stamp, sweep_poisoned, sweep_poisoned_with};
+    use crate::windows_cf::poison::{Emptied, Step, SweepKind, change_time, content_key, sweep_poisoned, sweep_poisoned_with};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(refuse_every_fetch);
     let path = qa.path("failed.bin");
-    let stamp = poisoned_whole_pinned(&qa, "failed.bin");
+    let key = poisoned_whole_pinned(&qa, "failed.bin");
+    let change = change_time(&path);
     let state = tempfile::tempdir().unwrap();
     let db = qa_db(state.path(), &[("qa-failed", "failed.bin")]);
-    db.record_poison("qa-failed", "corrupt", stamp, 1).unwrap();
-    // Time for a moved stamp to show (file times are not finer than the clock that sets them).
+    db.record_poison("qa-failed", "corrupt", key, 1).unwrap();
+    // Time for a moved file time to show (file times are not finer than the clock that sets them).
     std::thread::sleep(Duration::from_millis(50));
     let mut pin_when_it_failed = None;
-    let first = sweep_poisoned_with(&db, &qa.root, true, &mut |step, handle| {
+    let first = sweep_poisoned_with(&db, &qa.root, SweepKind::ProcessStart, None, &mut |step, handle| {
         if step == Step::InSync {
             // SAFETY: the step's own open handle, for the duration of this call.
             unsafe {
@@ -639,50 +643,147 @@ fn ld0105_s6_native_a_failed_step_restores_not_in_sync_and_the_pin() {
         }
     });
     let after = census_of(&path);
-    let stamp_after = poison_stamp(&path);
-    let row = db.poison("qa-failed").unwrap();
+    let (key_after, change_after) = (content_key(&path), change_time(&path));
     println!(
-        "ld0105-s6-native: failed step: {first:?}, pinned when it failed {pin_when_it_failed:?}, census {after:?}, stamp {stamp:?} -> {stamp_after:?}, the row's {:?}",
-        row.as_ref().map(|r| (r.change_ticks, r.file_index))
+        "ld0105-a4-native: failed step: {first:?}, pinned when it failed {pin_when_it_failed:?}, census {after:?}, key {key:?} -> {key_after:?}, ChangeTime {change:?} -> {change_after:?}"
     );
     assert_eq!(first, vec![("qa-failed".to_string(), Emptied::Failed("dehydrate"))], "a not-in-sync placeholder refuses to dehydrate");
     assert_eq!(pin_when_it_failed, Some(false), "the step had cleared the pin");
     assert_eq!(after, (OnDisk::Wholly, false, true), "untouched, not in sync, pinned again");
-    assert_ne!(stamp_after, stamp, "the fact: the restore's own writes move the stamp");
-    let row = row.expect("a failed step keeps the poison");
-    assert_eq!(row.change_ticks.zip(row.file_index), stamp_after, "the poison follows our own writes");
-    // The next tick: nothing changed since our own restore, so the file is emptied.
-    let second = sweep_poisoned(&db, &qa.root, false);
-    println!("ld0105-s6-native: the next sweep: {second:?}, census {:?}", census_of(&path));
+    assert_eq!(key_after, key, "Amendment 4: our own restore writes leave LastWriteTime and the size");
+    // The next tick: the key is unchanged, so the file is emptied.
+    let second = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    println!("ld0105-a4-native: the next sweep: {second:?}, census {:?}", census_of(&path));
     assert_eq!(second, vec![("qa-failed".to_string(), Emptied::Emptied)]);
     assert_eq!(census_of(&path), (OnDisk::Nothing, true, true));
     assert_eq!(db.poison("qa-failed").unwrap(), None);
 }
 
-/// Review P2 (lead decision 2026-11-06): a poison with no stamp is cleared, as a changed one is; a
-/// `Missing` row is kept until it was missing at an engine start and is missing again after it.
+/// Contract Amendment 4's measurement, by path: every restore write we make (not in sync, the pin set
+/// and cleared, in sync) and a hydration's own TRANSFER_DATA leave the content key; a content write
+/// of the same size moves it. If this ever fails, the key is not the content and Amendment 4's
+/// fallback applies (every key change needs attention): stop and report (honesty trigger 3).
 #[test]
-fn ld0105_s6_native_a_stampless_or_long_missing_poison_is_cleared() {
-    use crate::windows_cf::poison::{Emptied, sweep_poisoned};
+fn ld0105_a4_native_our_own_writes_leave_the_content_key_and_a_content_write_moves_it() {
+    use crate::windows_cf::poison::{change_time, content_key};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(serve_first_64k);
+    let path = qa.path("keyed.bin");
+    std::fs::write(&path, content(1 << 20)).unwrap();
+    placeholders::convert_to_in_sync_placeholder(&path, "qa-keyed").unwrap();
+    let key = content_key(&path);
+    let change = change_time(&path);
+    assert!(key.is_some_and(|k| k.1 == 1 << 20), "{key:?}");
+    let mut seen = Vec::new();
+    let mut step = |what: &'static str| {
+        std::thread::sleep(Duration::from_millis(30));
+        seen.push((what, content_key(&path), change_time(&path)));
+    };
+    placeholders::mark_not_in_sync_path(&path).unwrap();
+    step("not in sync, by path");
+    placeholders::set_pin_state(&path, true, false).unwrap();
+    step("pinned, by path");
+    placeholders::set_pin_state(&path, false, false).unwrap();
+    step("unpinned, by path");
+    {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: NUL-terminated, alive for the call.
+        unsafe { crate::windows_cf::callbacks::mark_in_sync(&wide) };
+    }
+    step("in sync, by path");
+    // A hydration's TRANSFER_DATA (the 64 KiB a read of the first byte brings) on a cloud-only one.
+    assert!(placeholders::create_placeholder(&qa.root, "qa-hydrated", "hydrated.bin", 1 << 20, 1_700_000_000, false).unwrap());
+    let hydrated = qa.path("hydrated.bin");
+    let before_transfer = content_key(&hydrated);
+    let mut one = [0u8; 1];
+    let _ = std::fs::File::open(&hydrated).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
+    let after_transfer = content_key(&hydrated);
+    // A content write of the same size.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"mine"))
+        .unwrap();
+    step("a content write");
+    println!("ld0105-a4-native: start key {key:?} ChangeTime {change:?}; steps {seen:?}; transfer {before_transfer:?} -> {after_transfer:?}");
+    for (what, k, _) in &seen[..4] {
+        assert_eq!(*k, key, "{what}: our own write leaves the content key");
+    }
+    assert!(seen[..4].iter().any(|(_, _, c)| *c != change), "ChangeTime moves on our own writes (why part 1's key was wrong)");
+    assert_eq!(after_transfer, before_transfer, "a hydration's TRANSFER_DATA leaves the content key");
+    assert_ne!(seen[4].1, key, "a content write moves the content key");
+}
+
+/// Amendment 4: a pin the step cannot put back through its handle is set again by path. Red on the
+/// mutant "no by-path retry" (the pin is lost).
+#[test]
+fn ld0105_a4_native_a_failed_pin_restore_through_the_handle_is_retried_by_path() {
+    use crate::windows_cf::poison::{Emptied, FAIL_PIN_RESTORE_BY_HANDLE, SweepKind, sweep_poisoned};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(refuse_every_fetch);
-    let _ = poisoned_whole_pinned(&qa, "stampless.bin");
+    let key = poisoned_whole_pinned(&qa, "pin.bin");
     let state = tempfile::tempdir().unwrap();
-    let db = qa_db(state.path(), &[("qa-stampless", "stampless.bin"), ("qa-missing", "missing.bin")]);
-    db.record_poison("qa-stampless", "identity_mismatch", None, 1).unwrap();
+    let db = qa_db(state.path(), &[("qa-pin", "pin.bin")]);
+    db.record_poison("qa-pin", "corrupt", key, 1).unwrap();
+    FAIL_PIN_RESTORE_BY_HANDLE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let outcome = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    FAIL_PIN_RESTORE_BY_HANDLE.store(false, std::sync::atomic::Ordering::SeqCst);
+    let after = census_of(&qa.path("pin.bin"));
+    println!("ld0105-a4-native: pin restore by handle refused: {outcome:?}, census {after:?}");
+    assert_eq!(outcome, vec![("qa-pin".to_string(), Emptied::Emptied)]);
+    assert_eq!(after, (OnDisk::Nothing, true, true), "emptied, and pinned again by path");
+}
+
+/// Amendment 4: "Discard and download again" empties a needs-attention file whatever was written to
+/// it, clears the poison, then fetches it. Red on the mutant "discard checks the key" (it is refused).
+#[test]
+fn ld0105_a4_native_discard_and_download_again_empties_then_fetches() {
+    use crate::windows_cf::poison::{Emptied, SweepKind, discard_now, sweep_poisoned};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let key = poisoned_whole_pinned(&qa, "edited.bin");
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-edited", "edited.bin")]);
+    db.record_poison("qa-edited", "corrupt", key, 1).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(qa.path("edited.bin"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"mine"))
+        .unwrap();
+    assert_eq!(sweep_poisoned(&db, &qa.root, SweepKind::Close), vec![("qa-edited".to_string(), Emptied::NeedsAttention)]);
+    assert_eq!(census_of(&qa.path("edited.bin")).0, OnDisk::Wholly, "kept as it is");
+    let mut fetched = None;
+    let result = discard_now(&db, &qa.root, "qa-edited", |path| fetched = Some(path));
+    println!("ld0105-a4-native: discard {result:?}, census {:?}", census_of(&qa.path("edited.bin")));
+    assert_eq!(result, Ok(()));
+    assert_eq!(census_of(&qa.path("edited.bin")), (OnDisk::Nothing, true, true), "emptied, its pin kept");
+    assert_eq!(db.poison("qa-edited").unwrap(), None, "the row ends");
+    assert_eq!(fetched, Some(qa.path("edited.bin")), "then it is fetched again");
+}
+
+/// Amendment 4: a poison with no key needs attention (never cleared); a `Missing` row is cleared only
+/// at the first sweep of a new process, never at a later tick.
+#[test]
+fn ld0105_s6_native_a_keyless_poison_needs_attention_and_missing_clears_only_at_process_start() {
+    use crate::windows_cf::poison::{Emptied, SweepKind, sweep_poisoned};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let _ = poisoned_whole_pinned(&qa, "keyless.bin");
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-keyless", "keyless.bin"), ("qa-missing", "missing.bin")]);
+    db.record_poison("qa-keyless", "identity_mismatch", None, 1).unwrap();
     db.record_poison("qa-missing", "corrupt", Some((1, 2)), 1).unwrap();
-    // A tick that is not the start: a missing file may be a rename the database does not know yet.
-    let tick = sweep_poisoned(&db, &qa.root, false);
-    let start = sweep_poisoned(&db, &qa.root, true);
-    let kept_at_start = db.poison("qa-missing").unwrap().is_some();
-    let later = sweep_poisoned(&db, &qa.root, false);
-    println!("ld0105-s6-native: tick {tick:?}, start {start:?}, later {later:?}");
-    assert!(tick.contains(&("qa-stampless".to_string(), Emptied::Changed)), "{tick:?}");
-    assert_eq!(db.poison("qa-stampless").unwrap(), None, "no stamp: cleared");
-    assert_eq!(census_of(&qa.path("stampless.bin")), (OnDisk::Wholly, false, true), "and the file left as it is");
-    assert!(tick.contains(&("qa-missing".to_string(), Emptied::Missing)) && kept_at_start, "kept through the tick and the start");
-    assert!(later.contains(&("qa-missing".to_string(), Emptied::Missing)), "{later:?}");
-    assert_eq!(db.poison("qa-missing").unwrap(), None, "missing at the start and after it: cleared");
+    let tick = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    let kept_on_tick = db.poison("qa-missing").unwrap().is_some();
+    let start = sweep_poisoned(&db, &qa.root, SweepKind::ProcessStart);
+    println!("ld0105-s6-native: tick {tick:?}, start {start:?}");
+    assert!(tick.contains(&("qa-keyless".to_string(), Emptied::NeedsAttention)), "{tick:?}");
+    assert!(db.poison("qa-keyless").unwrap().unwrap().needs_attention, "no key: needs attention, never cleared");
+    assert_eq!(census_of(&qa.path("keyless.bin")), (OnDisk::Wholly, false, true), "and the file left as it is");
+    assert!(tick.contains(&("qa-missing".to_string(), Emptied::Missing)) && kept_on_tick, "kept at a tick");
+    assert!(start.contains(&("qa-missing".to_string(), Emptied::Missing)), "{start:?}");
+    assert_eq!(db.poison("qa-missing").unwrap(), None, "missing at the first sweep of a process: cleared");
 }
 
 /// Self-review (desktop PR 224): a database error while the sweep reads a poisoned file's row is not
@@ -695,7 +796,7 @@ fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
     db.record_poison("qa-unreadable", "corrupt", Some((1, 2)), 1).unwrap();
     db.make_file_rows_unreadable_for_test();
     assert!(db.get_file("qa-unreadable").is_err(), "the row read fails");
-    let outcomes = sweep_poisoned(&db, state.path(), false);
+    let outcomes = sweep_poisoned(&db, state.path(), crate::windows_cf::poison::SweepKind::Tick);
     println!("ld0105-s6-native: unreadable row: outcomes {outcomes:?}");
     assert!(outcomes.is_empty(), "nothing is emptied or cleared: {outcomes:?}");
     assert!(db.poison("qa-unreadable").unwrap().is_some(), "the poison stays");

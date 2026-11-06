@@ -52,6 +52,8 @@ pub mod callbacks;
 pub mod placeholders;
 // LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
 pub(crate) mod poison;
+// LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
+pub(crate) mod streaming;
 // LD-0105 S0: a fetch's byte progress reported to Cloud Files.
 pub(crate) mod fetch_progress;
 // LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
@@ -983,6 +985,15 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_FETCH_DATA,
             Callback: Some(callbacks::fetch_data_callback),
+        },
+        // LD-0105 W2: a cancelled fetch ends its demand; an open arms W3's per-app decline.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+            Callback: Some(streaming::cancel_fetch_data_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+            Callback: Some(streaming::notify_file_open_completion_callback),
         },
         // Upload trigger: a handle that wrote a new/modified file has closed.
         CF_CALLBACK_REGISTRATION {
