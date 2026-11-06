@@ -91,6 +91,24 @@ when status is available; Rust resolves the visible File Provider location.
 Native verification must compare all three surfaces
 and Explorer against a non-default configured root, including after a root change.
 
+## Backups protection — 2026-11-06 (LD-0113 D1, D2)
+
+The Backups root is the folder the server flags `system_role = "backups_root"` (state.db
+`files.system_role`), never a folder found by its name. It is never deleted, trashed, renamed or
+moved from this device; its children and moving items into it stay ordinary. This device's own
+backup of each folder it backs up now (`Backups/<this device>/<Folder>/…`, and the device folder
+above them) is refused too, with "This is a backup of <original>. Change the original instead.";
+turned off, it is an ordinary archive. The rule and its words are `src-tauri/src/backup_protect.rs`
+over core's `beebeeb_core::backup` (`check_mutation`, `own_backup_refusal`).
+
+| Surface | How it refuses |
+|---|---|
+| Windows Explorer | `NOTIFY_DELETE` / `NOTIFY_RENAME` pre-operation callbacks answer `STATUS_CLOUD_FILE_ACCESS_DENIED` from the state DB (no network; this process's own changes are never refused). The Recycle Bin is a rename and is refused as a delete. The words show as a notification. |
+| Windows, after the fact | A delete or rename that got through (app closed, no live bridge) sends nothing; the item is moved back or its placeholder minted again. |
+| macOS Finder | The item payload marks it `protected`; it loses delete, trash, rename and reparent, and the extension refuses those as a second line with the daemon's words. |
+| Server refusal | A `409 protected_folder` drops the op (never retried or held) and puts the row back. |
+| Linux, in-app Files | The web UI's guard (LD-0113 part C). |
+
 ## U2 Windows surface checklist
 
 Status is **source reachability**, not a native pass. **Wired** means the action

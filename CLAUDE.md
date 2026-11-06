@@ -82,6 +82,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - A null `download_version` (legacy) keeps the unpinned download; never invent a pin. Windows Cloud Files roots are PROGRESSIVE (LD-0105 W1); a placeholder's bytes are trusted only for its recorded minted version (task 2180), else it is poisoned and emptied (S6), never written into.
 - Finder writes (`write_id`): record the completion first; the op is never abandoned/parked — it retries only local landing (one transaction).
 - A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `tests/noCityInCopy.test.ts` fails on a city name).
+- The Backups root is the row flagged `system_role = backups_root`, never a folder found by name; it and this device's enabled own backups are refused BEFORE a Windows delete/rename, answered from the state DB only (never the network, never this process's own change); `docs/CAPABILITIES.md` (LD-0113).
 
 ## How we work
 
