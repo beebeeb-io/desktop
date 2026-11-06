@@ -55,7 +55,8 @@ pub(crate) enum Emptied {
 }
 
 /// The points between the empty step's calls, for a native test that acts there (another process
-/// opening the file mid-step). Production passes a closure that does nothing.
+/// opening the file mid-step, or a state change through the step's own handle). Production passes a
+/// closure that does nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     /// Referenced, the stamp checked, the pin recorded; nothing changed yet.
@@ -135,11 +136,15 @@ fn standard_info(handle: HANDLE) -> Option<(CF_PIN_STATE, i64)> {
 
 /// Run the empty step on the poisoned placeholder at `path`, whose poison recorded `recorded`.
 pub(crate) fn empty_poisoned(path: &Path, recorded: Option<(i64, i64)>) -> Emptied {
-    empty_poisoned_with(path, recorded, &mut |_| {})
+    empty_poisoned_with(path, recorded, &mut |_, _| {})
 }
 
-/// [`empty_poisoned`], calling `between` at each [`Step`].
-pub(crate) fn empty_poisoned_with(path: &Path, recorded: Option<(i64, i64)>, between: &mut dyn FnMut(Step)) -> Emptied {
+/// [`empty_poisoned`], calling `between` at each [`Step`] with the Win32 handle every step uses.
+pub(crate) fn empty_poisoned_with(
+    path: &Path,
+    recorded: Option<(i64, i64)>,
+    between: &mut dyn FnMut(Step, HANDLE),
+) -> Emptied {
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -189,7 +194,7 @@ pub(crate) fn empty_poisoned_with(path: &Path, recorded: Option<(i64, i64)>, bet
 /// SAFETY: `handle` must be the Win32 handle of a protected handle from `CfOpenFileWithOplock` that
 /// stays referenced (`CfReferenceProtectedHandle`) for the whole call. Every step goes through it,
 /// never through the protected handle, whose calls fail once an oplock break is pending.
-unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>, between: &mut dyn FnMut(Step)) -> Emptied {
+unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>, between: &mut dyn FnMut(Step, HANDLE)) -> Emptied {
     // 2. Nothing written since the poison.
     match (recorded, stamp_of_handle(handle)) {
         (Some(recorded), Some(now)) if recorded == now => {}
@@ -198,7 +203,7 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>, between: &mu
     let Some((pin, _)) = standard_info(handle) else {
         return Emptied::Failed("info");
     };
-    between(Step::Checked);
+    between(Step::Checked, handle);
     // On any failure from here: NOT_IN_SYNC, then the pin, before the handle is released (step 6).
     let restore = |reason: &'static str| {
         // SAFETY: `handle` is still open; both calls only set state on it.
@@ -220,13 +225,13 @@ unsafe fn empty_under(handle: HANDLE, recorded: Option<(i64, i64)>, between: &mu
     if unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) }.is_err() {
         return restore("in_sync");
     }
-    between(Step::InSync);
+    between(Step::InSync, handle);
     // 5. Dehydrate the whole file, then check that nothing is left on disk.
     // SAFETY: `handle` is open; offset 0, length -1 is the whole file.
     if unsafe { CfDehydratePlaceholder(handle, 0, -1, CF_DEHYDRATE_FLAG_NONE, None) }.is_err() {
         return restore("dehydrate");
     }
-    between(Step::Dehydrated);
+    between(Step::Dehydrated, handle);
     match standard_info(handle) {
         Some((_, 0)) => {}
         Some(_) => return restore("still_on_disk"),

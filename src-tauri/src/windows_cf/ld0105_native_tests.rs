@@ -560,7 +560,7 @@ fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() 
         let mut opener = None;
         let mut done_early = None;
         let started = Instant::now();
-        let outcome = empty_poisoned_with(&path, stamp, &mut |step| {
+        let outcome = empty_poisoned_with(&path, stamp, &mut |step, _| {
             if step == at {
                 let (path, tx) = (path.clone(), tx.clone());
                 opener = Some(std::thread::spawn(move || {
@@ -595,25 +595,51 @@ fn ld0105_s6_native_an_open_between_two_steps_waits_until_the_empty_step_ends() 
 }
 
 /// The failure path (spec S6 step 6): a step that fails after the pin was cleared restores NOT_IN_SYNC
-/// and the pin before the handle is released. With no provider connected the dehydrate fails
-/// (measured on the Legion: `Failed("dehydrate")`, after the unpin and IN_SYNC succeeded).
+/// and the pin before the handle is released. The failure is made, not hoped for: at `Step::InSync`
+/// the file is set not in sync again through the step's own handle, and a placeholder that is not in
+/// sync refuses to dehydrate (`0x80070179`, P1b). A disconnected provider is no such lever: the Legion
+/// refuses that dehydrate, the windows-latest runner allows it (CI run 42133463209: `Emptied`).
 #[test]
 fn ld0105_s6_native_a_failed_step_restores_not_in_sync_and_the_pin() {
-    use crate::windows_cf::poison::{Emptied, empty_poisoned, poison_stamp};
+    use crate::windows_cf::poison::{Emptied, Step, empty_poisoned_with, poison_stamp};
     let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
     qa.connect(refuse_every_fetch);
+    let path = qa.path("failed.bin");
     let stamp = poisoned_whole_pinned(&qa, "failed.bin");
-    qa.disconnect();
-    let outcome = empty_poisoned(&qa.path("failed.bin"), stamp);
-    let after = census_of(&qa.path("failed.bin"));
+    let mut pin_when_it_failed = None;
+    let outcome = empty_poisoned_with(&path, stamp, &mut |step, handle| {
+        if step == Step::InSync {
+            // SAFETY: the step's own open handle, for the duration of this call.
+            unsafe {
+                CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None).unwrap();
+            }
+            // Read through the same handle: another open here would wait on the step's own oplock.
+            use windows::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx};
+            let mut basic = FILE_BASIC_INFO::default();
+            // SAFETY: as above; the call writes only into `basic`, whose size it is given.
+            unsafe {
+                GetFileInformationByHandleEx(
+                    handle,
+                    FileBasicInfo,
+                    (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+                .unwrap();
+            }
+            const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+            pin_when_it_failed = Some(basic.FileAttributes & FILE_ATTRIBUTE_PINNED != 0);
+        }
+    });
+    let after = census_of(&path);
     // Not asserted, a record: whether a failed attempt leaves the stamp the poison holds (if not, the
     // next sweep finds the file `Changed` and the poison stays).
-    let stamp_after = poison_stamp(&qa.path("failed.bin"));
+    let stamp_after = poison_stamp(&path);
     println!(
-        "ld0105-s6-native: failed step: outcome {outcome:?}, census {after:?}, stamp {stamp:?} -> {stamp_after:?}"
+        "ld0105-s6-native: failed step: outcome {outcome:?}, pinned when it failed {pin_when_it_failed:?}, census {after:?}, stamp {stamp:?} -> {stamp_after:?}"
     );
-    assert!(matches!(outcome, Emptied::Failed(_)), "IN_SYNC refused with no provider connected: {outcome:?}");
-    assert_eq!(after, (OnDisk::Wholly, false, true), "untouched, not in sync, still pinned");
+    assert_eq!(outcome, Emptied::Failed("dehydrate"), "a not-in-sync placeholder refuses to dehydrate");
+    assert_eq!(pin_when_it_failed, Some(false), "the step had cleared the pin");
+    assert_eq!(after, (OnDisk::Wholly, false, true), "untouched, not in sync, pinned again");
 }
 
 /// Self-review (desktop PR 224): a database error while the sweep reads a poisoned file's row is not
