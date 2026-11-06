@@ -470,3 +470,49 @@ use crate::state_db::BackupEnqueue;
             assert_eq!(bridge.db.backup_records("pictures").unwrap().len(), 1, "alice's record is hers again");
         }
     }
+
+    /// Spec Amendment 8: every request the backup pass makes carries `X-Beebeeb-Origin: backup`: the init, each
+    /// chunk, the complete and a photo's thumbnails of a completed upload, and the abandon of a changed one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backup_requests_carry_the_backup_origin_header() {
+        let mut seen: Vec<RecordedRequest> = Vec::new();
+
+        // A photo that uploads: init, chunk, complete, the two thumbnails.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let pictures = dir.path().join("Pictures");
+            std::fs::create_dir_all(&pictures).unwrap();
+            let source = pictures.join("beach.png");
+            write_test_png(&source);
+            let server = UploadMockServer::start(false);
+            let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+            let op_id = enqueue(&bridge, &source);
+            let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
+            assert_eq!(outcome.completed_op_ids, vec![op_id]);
+            assert!(outcome.post_complete_errors.is_empty(), "{:?}", outcome.post_complete_errors);
+            seen.extend(server.finish());
+        }
+        // A file that changes while it uploads: the abandon.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let source = person_file(dir.path(), "edited.txt", b"0123456789abcdefghij");
+            let server = ChangingSourceMock::start(source.clone());
+            let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+            enqueue(&bridge, &source);
+            bridge.process_due_operations(&sync_root, 200).await.unwrap();
+            seen.extend(server.finish());
+        }
+
+        let kinds = |pred: &dyn Fn(&RecordedRequest) -> bool| seen.iter().filter(|r| pred(r)).count();
+        assert_eq!(kinds(&|r| r.method == "POST" && r.path == "/api/v1/uploads/init"), 2);
+        assert!(kinds(&|r| r.method == "PUT" && r.path.contains("/chunks/")) >= 2);
+        assert_eq!(kinds(&|r| r.method == "POST" && r.path.ends_with("/complete")), 1);
+        assert_eq!(kinds(&|r| r.method == "PUT" && r.path.contains("/thumbnail")), 2, "medium and large");
+        assert_eq!(kinds(&|r| r.method == "POST" && r.path.ends_with("/upload/abandon")), 1);
+        let without: Vec<String> = seen
+            .iter()
+            .filter(|r| r.origin.as_deref() != Some(beebeeb_types::backup::ORIGIN_BACKUP))
+            .map(|r| format!("{} {} {:?}", r.method, r.path, r.origin))
+            .collect();
+        assert!(without.is_empty(), "{} of {} backup requests lack the origin header: {without:?}", without.len(), seen.len());
+    }

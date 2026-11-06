@@ -85,6 +85,9 @@ pub struct EngineBridge {
     /// bridge keeps a private one nobody moves. Off macOS, [`Self::process_due_operations`] sends nothing while a
     /// release waits for a pass ([`Self::a_pass_is_owed`]).
     resume: crate::runner::ResumeTicket,
+    /// LD-0113 (spec Amendment 8): `api` for the backup pass, built on first use; every request it makes carries
+    /// `X-Beebeeb-Origin: backup` ([`ApiClient::for_backup_pass`]).
+    backup_api: std::sync::OnceLock<Arc<ApiClient>>,
     #[cfg(test)]
     pub(crate) seams: Seams,
 }

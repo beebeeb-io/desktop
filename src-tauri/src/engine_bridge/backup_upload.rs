@@ -91,6 +91,12 @@ fn unix_millis_now() -> i64 {
 }
 
 impl EngineBridge {
+    /// The backup pass's client: this session's, with `X-Beebeeb-Origin: backup` on every request (spec Amendment 8).
+    /// Every request the backup pass makes goes through it, never through `self.api`.
+    pub(super) fn backup_api(&self) -> &ApiClient {
+        self.backup_api.get_or_init(|| Arc::new(self.api.for_backup_pass()))
+    }
+
     /// `BackupHost::enqueue_upload` (spec §4.3): queue one file of a backed-up folder for this account. The id of
     /// the new server file is minted here and the name sealed for it; the source path goes into the queue's
     /// `source_path` and nowhere else. Idempotent per (category, key).
@@ -190,7 +196,7 @@ impl EngineBridge {
                     before.size,
                     None,
                 );
-                let upload = self.api.init_upload(&init_request).await?;
+                let upload = self.backup_api().init_upload(&init_request).await?;
                 if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
                     return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
                 }
@@ -242,7 +248,7 @@ impl EngineBridge {
         if after != Ok(before) {
             return self.drop_backup(claimed, Some(&session), BackupDrop::SourceChanged).await;
         }
-        let completed = match self.api.complete_upload_session(&session.upload_session_id).await {
+        let completed = match self.backup_api().complete_upload_session(&session.upload_session_id).await {
             Ok(completed) => {
                 progress.finish();
                 completed
@@ -279,16 +285,7 @@ impl EngineBridge {
             "backup: uploaded from the source in place and recorded"
         );
         // Best effort, as for a sync-folder upload: the gallery's thumbnails, read from the source (read-only).
-        let file_key = owned_key_and_pin(&self.db, self.api.master_key(), &session.server_file_id)?.0;
-        if let Err(e) = self
-            .upload_thumbnails_for_plaintext_media(
-                ServerFileId::new(&session.server_file_id),
-                &op.source_path,
-                op.content_type.as_deref(),
-                &file_key,
-            )
-            .await
-        {
+        if let Err(e) = self.upload_backup_thumbnails(&session.server_file_id, &op).await {
             tracing::warn!(
                 file_id = %session.server_file_id,
                 reason = error_category(&e),
@@ -297,6 +294,20 @@ impl EngineBridge {
             post_complete_errors.push(format!("{op_id}: {e}"));
         }
         Ok(OpDone::Removed { release: None })
+    }
+
+    /// The gallery's thumbnails of a completed photo or video backup, read from the source (read-only), sent through
+    /// the backup client.
+    async fn upload_backup_thumbnails(&self, server_file_id: &str, op: &BackupUploadOp) -> Result<(), EngineError> {
+        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id)?;
+        let uploads = prepare_thumbnail_uploads_with_pin(&op.source_path, op.content_type.as_deref(), &file_key, pin)?;
+        for upload in uploads {
+            self.backup_api()
+                .upload_thumbnail(server_file_id, upload.variant.label(), &upload.encrypted, upload.blurhash.as_deref())
+                .await
+                .map_err(|e| anyhow::anyhow!("upload {} thumbnail: {e}", upload.variant.label()))?;
+        }
+        Ok(())
     }
 
     /// The chunk PUTs from the acknowledged watermark on, read from the source in place. Every acknowledgement is
@@ -343,7 +354,7 @@ impl EngineBridge {
             }
             let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();
-            self.api
+            self.backup_api()
                 .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted.data)
                 .await?;
             self.db
@@ -391,7 +402,7 @@ impl EngineBridge {
     /// `POST /api/v1/files/{id}/upload/abandon` for the session's never-completed create, then its row goes. A failed
     /// abandon is logged; the server's stale-upload sweep reaps the row.
     pub(super) async fn abandon_backup_session(&self, session: &BackupUploadResume) -> Result<(), EngineError> {
-        match self.api.abandon_upload(&session.server_file_id).await {
+        match self.backup_api().abandon_upload(&session.server_file_id).await {
             Ok(()) => tracing::info!(
                 op_id = %session.op_id,
                 file_id = %session.server_file_id,

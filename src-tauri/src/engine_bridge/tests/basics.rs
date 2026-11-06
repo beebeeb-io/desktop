@@ -264,6 +264,8 @@ use super::*;
         pub(super) method: String,
         pub(super) path: String,
         pub(super) body: Vec<u8>,
+        /// LD-0113: the `X-Beebeeb-Origin` header, when the request carried one.
+        pub(super) origin: Option<String>,
     }
 
     pub(super) struct UploadMockServer {
@@ -392,6 +394,7 @@ use super::*;
             method,
             path,
             body: Vec::new(),
+            origin: None,
         })
     }
 

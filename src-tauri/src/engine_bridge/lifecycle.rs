@@ -32,6 +32,7 @@ impl EngineBridge {
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
+            backup_api: std::sync::OnceLock::new(),
             #[cfg(test)]
             seams: Seams::default(),
         }

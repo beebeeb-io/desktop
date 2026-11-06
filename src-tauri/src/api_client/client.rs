@@ -88,6 +88,33 @@ impl ApiClient {
         self
     }
 
+    /// LD-0113 (spec Amendment 8): this session's client for the backup pass. Every request it makes carries
+    /// `X-Beebeeb-Origin: backup` (`beebeeb_types::backup::{ORIGIN_HEADER, ORIGIN_BACKUP}`), on top of the provenance
+    /// headers, so the server can tell the one writer of a device's backup from everything else (it ignores the
+    /// header until phase 2). Same session, keys, link monitor and timeout; its own HTTP client.
+    pub fn for_backup_pass(&self) -> Self {
+        let mut headers = provenance_headers();
+        headers.insert(
+            beebeeb_types::backup::ORIGIN_HEADER,
+            reqwest::header::HeaderValue::from_static(beebeeb_types::backup::ORIGIN_BACKUP),
+        );
+        Self {
+            #[cfg(target_os = "windows")]
+            credential_lifetime: self.credential_lifetime.clone(),
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            master_key: self.master_key,
+            client: Client::builder()
+                .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
+                .default_headers(headers)
+                .build()
+                .expect("reqwest client"),
+            link: self.link.clone(),
+            direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
+        }
+    }
+
     /// The shared record of whether the last requests reached the server.
     pub fn link(&self) -> std::sync::Arc<crate::link_health::LinkMonitor> {
         self.link.clone()
