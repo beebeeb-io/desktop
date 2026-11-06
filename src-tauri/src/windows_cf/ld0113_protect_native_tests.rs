@@ -17,7 +17,7 @@ use windows::core::PCWSTR;
 
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
-use crate::windows_cf::callbacks::{ack_pre_operation, delete_refusal, rename_refusal};
+use crate::windows_cf::callbacks::{ack_pre_operation, delete_refusal, rename_refusal, volume_relative_to_full};
 use crate::windows_cf::placeholders;
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000c1";
@@ -33,6 +33,8 @@ struct Fixture {
     gate: Mutex<crate::backup_protect::NoticeGate>,
     /// The notices the person would have been shown.
     shown: Mutex<Vec<String>>,
+    /// Each rename callback's target as Windows gave it (`TargetPath` joined with the volume).
+    targets: Mutex<Vec<String>>,
 }
 
 impl Fixture {
@@ -91,6 +93,9 @@ unsafe extern "system" fn test_rename(info: *const CF_CALLBACK_INFO, params: *co
     let refusal = rename_refusal(&fx.db, &fx.own, Some(&fx.root), info, params);
     unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
     fx.record(started, refusal);
+    // SAFETY: as `rename_refusal`'s read of the same arm.
+    let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
+    fx.targets.lock().unwrap().push(target.map_or_else(|| "<none>".into(), |t| t.display().to_string()));
 }
 
 /// A registered QA root with a flagged Backups root and the fixture its callbacks answer from;
@@ -107,6 +112,11 @@ impl QaRoot {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("qa-root");
         std::fs::create_dir(&root).unwrap();
+        // The root as Windows names it back in every callback: the final, long path (8.3 short names,
+        // junctions and the drive letter's case resolved), as the app's own root is. `TEMP` need not
+        // be. On the 906ac78 rung a move into Backups went through, and that is the first test that
+        // matches a callback's path against this root; `move_into_backups_refused` prints both.
+        let root = long_path(&root);
         crate::windows_cf::register_sync_root_with(&root, &crate::windows_cf::QA_PROVIDER, crate::windows_cf::HYDRATION_POLICY)
             .unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
@@ -117,6 +127,7 @@ impl QaRoot {
             answers: Mutex::new(Vec::new()),
             gate: Mutex::new(crate::backup_protect::NoticeGate::default()),
             shown: Mutex::new(Vec::new()),
+            targets: Mutex::new(Vec::new()),
         });
         let qa = QaRoot { _dir: dir, root, key: None, fx };
         qa.item(ROOT_ID, "Backups", true);
@@ -194,6 +205,12 @@ impl Drop for QaRoot {
         }
         let _ = crate::windows_cf::unregister_sync_root(&self.root);
     }
+}
+
+/// `path` as `GetFinalPathNameByHandle` gives it, without the `\\?\` verbatim prefix.
+fn long_path(path: &Path) -> PathBuf {
+    let full = std::fs::canonicalize(path).unwrap().display().to_string();
+    PathBuf::from(full.strip_prefix(r"\\?\").unwrap_or(&full))
 }
 
 /// Run `line` through `cmd.exe`, a process other than this one (as Explorer is).
@@ -368,7 +385,15 @@ fn move_into_backups_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000e7", "Documents", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e8", "Documents/report.txt", false);
     qa.connect();
-    cmd(&format!("move {} {}", quoted(&qa.path("Documents/report.txt")), quoted(&qa.path("Backups/OtherPC/report.txt"))));
+    let out = cmd(&format!("move {} {}", quoted(&qa.path("Documents/report.txt")), quoted(&qa.path("Backups/OtherPC/report.txt"))));
+    println!(
+        "ld0113 move_into: callbacks={} refusals={} targets={:?} root={:?} cmd_stderr={:?}",
+        qa.fx.answers.lock().unwrap().len(),
+        qa.fx.refusals().len(),
+        qa.fx.targets.lock().unwrap(),
+        qa.root.display().to_string(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     assert!(qa.path("Documents/report.txt").exists(), "the item stays where it was");
     assert!(!qa.path("Backups/OtherPC/report.txt").exists(), "nothing is moved into Backups");
     qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);

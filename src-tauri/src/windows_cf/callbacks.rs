@@ -897,7 +897,7 @@ fn notify_full_path(info: &CF_CALLBACK_INFO) -> Option<std::path::PathBuf> {
 /// with `info.VolumeDosName` (`C:`) into an absolute [`PathBuf`]. Shared by
 /// [`notify_full_path`] and the rename source-path decode. Returns `None` for a
 /// null/empty relative path.
-fn volume_relative_to_full(info: &CF_CALLBACK_INFO, rel_ptr: *const u16) -> Option<std::path::PathBuf> {
+pub(super) fn volume_relative_to_full(info: &CF_CALLBACK_INFO, rel_ptr: *const u16) -> Option<std::path::PathBuf> {
     let rel = wide_to_vec(rel_ptr)?;
     if rel.is_empty() {
         return None;
