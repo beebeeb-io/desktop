@@ -1243,8 +1243,8 @@ export function loadActiveTransfers(): Promise<CommandResult<ActiveTransferRow[]
 /**
  * Discard the poisoned partial download and schedule a fresh download.
  * Returns Ok on success, Err with one of `"not_poisoned" | "in_use" | "missing" | <step>`
- * when the action cannot be performed.
- * Wired from PR #225 (LD-0105 W2); the command exists once that PR is merged.
+ * when the action cannot be performed (`"not_supported"` off Windows). PR #225: the row's
+ * `attention` lasts as long as state.db's needs-attention poison row, which this command ends.
  */
 export function discardAndDownloadAgain(fileId: string): Promise<CommandResult<void>> {
   return command<void>('discard_and_download_again', { fileId })

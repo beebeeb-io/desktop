@@ -752,11 +752,21 @@ pub(super) async fn desktop_recent_files(
 /// Every file transfer currently in flight, as a lightweight snapshot for the tray's
 /// "In progress" card and the Activity › Timeline view (LD-0105 U1). The board is
 /// process-wide and needs no session gate: a not-signed-in tray sees an empty list.
+/// Desktop #225 (Amendment 4): plus a row for every file that needs the person (a failed download
+/// changed on this device since), read from state.db as the tray's recent list reads it; no readable
+/// config or no DB yet is the board alone.
 #[tauri::command]
-pub(super) fn get_active_transfers(
+pub(super) async fn get_active_transfers(
     runtime: State<'_, popover_data::PopoverRuntime>,
-) -> Vec<crate::transfer_progress::ActiveTransferDto> {
-    runtime.transfers.snapshot_dtos()
+) -> Result<Vec<crate::transfer_progress::ActiveTransferDto>, String> {
+    let board = runtime.transfers.clone();
+    tokio::task::spawn_blocking(move || {
+        let config = DesktopConfig::load().ok();
+        let db = config.as_ref().and_then(|c| state_db_for_config(c).ok().flatten());
+        board.snapshot_with_attention(db.as_ref())
+    })
+    .await
+    .map_err(|e| format!("active transfers task failed: {e}"))
 }
 
 /// Query the local desktop file-name search index.
