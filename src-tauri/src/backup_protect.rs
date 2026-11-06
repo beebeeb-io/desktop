@@ -307,17 +307,111 @@ pub(crate) fn reconcile_backups_tree(db: &StateDb, sync_root: &Path) -> usize {
 }
 
 /// [`reconcile_backups_tree`] off the start-up path (it stats every downloaded item of the tree), then
-/// a placeholder pass when anything came back.
+/// a placeholder pass when anything came back, then the read-only state of each tree (Amendment 7: the
+/// placeholders an older build minted take the attribute; Amendment 8a: the root's badge).
 #[cfg(target_os = "windows")]
 pub(crate) fn reconcile_backups_tree_soon(db: std::sync::Arc<StateDb>, sync_root: &Path) {
     let sync_root = sync_root.to_path_buf();
     let spawned = std::thread::Builder::new().name("backups-reconcile".into()).spawn(move || {
         if reconcile_backups_tree(&db, &sync_root) > 0 {
-            restore_placeholders_soon(db, &sync_root);
+            restore_placeholders_soon(db.clone(), &sync_root);
+        }
+        for (_, root) in db.backups_roots().unwrap_or_default() {
+            apply_tree_read_only(&db, &sync_root, &root, true);
         }
     });
     if let Err(error) = spawned {
         tracing::warn!(%error, "backup protection: the start-up reconcile could not start; the next start retries");
+    }
+}
+
+/// LD-0113: the server flagged (or cleared) a folder's system role, and `set_system_role` stored the
+/// change. On Windows the tree under it takes (or loses) its read-only state on disk
+/// ([`apply_tree_read_only`]), off the caller's thread: it changes every file of the tree. Finder needs
+/// nothing here: the change log names every row under the root, and the payload carries the state.
+pub(crate) fn system_role_changed(db: &StateDb, file_id: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let Some(sync_root) = crate::windows_cf::sync_root() else {
+            return;
+        };
+        let Ok(Some(row)) = db.get_file(file_id) else {
+            return;
+        };
+        let flagged = db.backups_roots().is_ok_and(|roots| roots.iter().any(|(id, _)| id == file_id));
+        let (root, files) = tree_on_disk(db, &sync_root, &row.path);
+        let spawned = std::thread::Builder::new()
+            .name("backups-read-only".into())
+            .spawn(move || {
+                apply_read_only(&root, &files, flagged);
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "backup protection: the read-only state could not be applied; the next start does");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (db, file_id);
+}
+
+/// LD-0113 Amendments 7 and 8a, Windows: the drive's read-only state of the Backups tree at `root_rel`
+/// (a state DB path): `FILE_ATTRIBUTE_READONLY` on every file at or under it and the badge on the root
+/// when `flagged`, both taken away when not (the role was cleared). Returns how many files changed.
+#[cfg(target_os = "windows")]
+pub(crate) fn apply_tree_read_only(db: &StateDb, sync_root: &Path, root_rel: &str, flagged: bool) -> usize {
+    let (root, files) = tree_on_disk(db, sync_root, root_rel);
+    apply_read_only(&root, &files, flagged)
+}
+
+/// The root folder of the tree at `root_rel` on disk, and where each row under it is on disk.
+#[cfg(target_os = "windows")]
+fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> (PathBuf, Vec<PathBuf>) {
+    let root_rel = root_rel.trim_matches('/');
+    let on_disk = |rel: &str| crate::engine_bridge::local_file_path_under_sync_root(sync_root, rel.trim_matches('/')).ok();
+    let root = on_disk(root_rel).unwrap_or_else(|| sync_root.join(root_rel));
+    let rows = db.paths_at_or_under(root_rel).unwrap_or_else(|error| {
+        tracing::warn!(%error, "backup protection: the Backups tree's rows could not be read");
+        Vec::new()
+    });
+    let files = rows.iter().filter(|rel| rel.trim_matches('/') != root_rel).filter_map(|rel| on_disk(rel)).collect();
+    (root, files)
+}
+
+/// [`apply_tree_read_only`] on paths already read. A folder, or a row with nothing on disk yet (the
+/// placeholder pass mints it read-only), changes nothing. Zero-knowledge: counts only.
+#[cfg(target_os = "windows")]
+fn apply_read_only(root: &Path, files: &[PathBuf], flagged: bool) -> usize {
+    let mut failed = 0usize;
+    let changed = files
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()))
+        .filter(|path| match crate::windows_cf::read_only::set_read_only(path, flagged) {
+            Ok(changed) => changed,
+            Err(error) => {
+                failed += 1;
+                tracing::debug!(%error, "backup protection: a file's read-only state could not be changed");
+                false
+            }
+        })
+        .count();
+    show_read_only_badge(root, flagged);
+    if changed > 0 || failed > 0 {
+        tracing::info!(changed, failed, flagged, "backup protection: the Backups tree's read-only state was applied");
+    }
+    changed
+}
+
+/// LD-0113 Amendment 8a, Windows: core's `MSG_BADGE` on the Backups root folder at `path` (`on`), or
+/// taken away, as a Cloud Files custom state. Only an Explorer registration made by this build or a
+/// later one has the state's definition (an existing registration is kept as it is, LD-0105 S7); on an
+/// older one Explorer shows nothing and this reports `false`. Zero-knowledge: never the path.
+#[cfg(target_os = "windows")]
+pub(crate) fn show_read_only_badge(path: &Path, on: bool) -> bool {
+    match crate::windows_cf::read_only::set_read_only_badge(path, beebeeb_core::backup::MSG_BADGE, on) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(%error, on, "backup protection: the Read-only badge could not be set");
+            false
+        }
     }
 }
 

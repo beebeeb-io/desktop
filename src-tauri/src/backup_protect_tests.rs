@@ -313,6 +313,22 @@ fn a_rename_is_a_trash_a_move_or_a_rename() {
     assert_eq!(rename_mutation(&root.join("Backups"), &root.join("Old backups")), Mutation::Rename);
 }
 
+/// Amendment 7 (Windows): the read-only state goes on every row of the tree, whatever its status, in
+/// both stored path forms, and on nothing beside it.
+#[test]
+fn paths_at_or_under_cover_the_whole_tree_only() {
+    let (_dir, db) = fixture();
+    folder(&db, "0b5ec0de-0000-4000-8000-0000000000e1", "Backups/OtherPC");
+    folder(&db, "0b5ec0de-0000-4000-8000-0000000000e2", "/Backups/OtherPC/Pictures");
+    folder(&db, "0b5ec0de-0000-4000-8000-0000000000e3", "BackupsX/a");
+    folder(&db, "0b5ec0de-0000-4000-8000-0000000000e4", "Backups0");
+    db.set_status("0b5ec0de-0000-4000-8000-0000000000e1", FileStatus::Local).unwrap();
+    assert_eq!(
+        db.paths_at_or_under("/Backups/").unwrap(),
+        vec!["Backups".to_string(), "Backups/OtherPC".to_string(), "/Backups/OtherPC/Pictures".to_string()]
+    );
+}
+
 /// LD-0113 (lead 2026-11-06 20:01; core's `is_hidden_backup_item`): quick search, the Files overview
 /// and the tray's recent list never offer a device folder's manifest, which each backup pass rewrites
 /// (it would lead every recent list). A file of the same name elsewhere is ordinary.

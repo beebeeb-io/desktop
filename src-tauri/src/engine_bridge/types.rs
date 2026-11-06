@@ -835,11 +835,17 @@ pub(crate) enum RemovedKind {
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(super) fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
+pub(crate) fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
     crate::watcher::suppress_engine_delete(path);
     let removed = match kind {
         RemovedKind::Dir => std::fs::remove_dir(path),
-        RemovedKind::File => std::fs::remove_file(path),
+        RemovedKind::File => {
+            // LD-0113 Amendment 7: a read-only Backups file the server removed goes too (`DeleteFile`
+            // refuses a read-only file); one whose remove fails is read-only again.
+            #[cfg(target_os = "windows")]
+            let _read_only = crate::windows_cf::read_only::Lifted::new(path);
+            std::fs::remove_file(path)
+        }
     };
     if removed.is_err() {
         crate::watcher::cancel_engine_delete_suppression(path);

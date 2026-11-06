@@ -809,6 +809,7 @@ pub(super) fn apply_sync_op(
             if bridge.db().set_system_role(id, role)? {
                 applied.push(id.to_string());
                 tracing::info!(file_id = %id, role = role.map_or("none", |r| r.as_str()), "system role of a folder changed");
+                crate::backup_protect::system_role_changed(bridge.db(), id);
             }
         }
         other => {

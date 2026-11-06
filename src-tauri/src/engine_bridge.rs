@@ -710,6 +710,9 @@ pub use types::{WireCounters, FpWrite, CachePolicy, PinUpdateOutcome, CacheClean
 #[cfg(windows)]
 pub use types::FetchedBytes;
 pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_SETTLE_SECS, OpDone, LocalEntry, PrunedEntry};
+// LD-0113 Amendment 7: the Windows-native rung removes a read-only Backups file the way the engine does.
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) use types::{RemovedKind, engine_remove};
 
 mod errors;
 use errors::*;

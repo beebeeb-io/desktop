@@ -32,7 +32,7 @@
 
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_PINNED,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED,
     FILE_BASIC_INFO, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
 };
@@ -69,6 +69,21 @@ pub fn create_placeholder(
     modified_at: i64,
     is_dir: bool,
 ) -> anyhow::Result<bool> {
+    create_placeholder_with(parent_dir, file_id, name, size_bytes, modified_at, is_dir, false)
+}
+
+/// [`create_placeholder`], a FILE minted with `FILE_ATTRIBUTE_READONLY` when `read_only` (LD-0113
+/// Amendment 7: a file at or under the Backups root), in the same call, so it is never writable in
+/// between. A folder ignores it.
+pub fn create_placeholder_with(
+    parent_dir: &std::path::Path,
+    file_id: &str,
+    name: &str,
+    size_bytes: i64,
+    modified_at: i64,
+    is_dir: bool,
+    read_only: bool,
+) -> anyhow::Result<bool> {
     let parent_wide: Vec<u16> = parent_dir
         .to_string_lossy()
         .encode_utf16()
@@ -91,6 +106,8 @@ pub fn create_placeholder(
     //  - FILE (NORMAL): a hydrate-on-open stub carrying the plaintext size.
     let file_attributes = if is_dir {
         FILE_ATTRIBUTE_DIRECTORY.0
+    } else if read_only {
+        FILE_ATTRIBUTE_READONLY.0
     } else {
         FILE_ATTRIBUTE_NORMAL.0
     };
@@ -666,6 +683,8 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
 /// SAFETY: opens a CF handle via `CfOpenFileWithOplock` and always closes it
 /// via `CfCloseHandle` before returning.
 pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
+    // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
+    let _read_only = super::read_only::Lifted::new(path);
     // Logical size = bytes currently materialised on disk for a fully-hydrated
     // placeholder. Read it before we dehydrate so we can report what we freed.
     let size_before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -747,6 +766,8 @@ pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
 /// (matching [`dehydrate_placeholder`]) and always closes it via `CfCloseHandle`
 /// before returning — on every exit path, no leak.
 pub fn hydrate_placeholder(path: &std::path::Path) -> anyhow::Result<()> {
+    // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
+    let _read_only = super::read_only::Lifted::new(path);
     let path_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -818,6 +839,8 @@ pub fn hydrate_placeholder(path: &std::path::Path) -> anyhow::Result<()> {
 /// (setting pin state mutates the placeholder's reparse data) and always closes
 /// it via `CfCloseHandle` before returning — on every exit path, no leak.
 pub fn set_pin_state(path: &std::path::Path, pinned: bool, recurse: bool) -> anyhow::Result<()> {
+    // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access).
+    let _read_only = super::read_only::Lifted::new(path);
     let path_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -1278,6 +1301,9 @@ pub fn list_dir_attributes(dir: &std::path::Path) -> std::io::Result<std::collec
 /// SAFETY: `path_wide` lives for the whole call; the handle is closed on every
 /// exit path.
 pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyhow::Result<()> {
+    // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access; the
+    // update writes FILE_ATTRIBUTE_NORMAL, so the attribute is set again after it).
+    let _read_only = super::read_only::Lifted::new(path);
     // Task 1640: marked in sync only when it already was. A placeholder out of sync may hold
     // local writes in ranges the failed fetch did not cover; marking it in sync would let the
     // platform free them.

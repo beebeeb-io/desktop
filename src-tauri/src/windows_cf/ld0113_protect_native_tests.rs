@@ -6,14 +6,18 @@
 //! needed it is a localhost listener that counts connections. `--nocapture` shows the numbers.
 
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_READ_ONLY, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MANIFEST_NAME, MSG_DELETE, MSG_MANAGED_IN_APP, MSG_READ_ONLY, MSG_RENAME, own_backup_refusal};
+use windows::Win32::Foundation::{HANDLE, STATUS_SUCCESS};
 use windows::Win32::Storage::CloudFilters::*;
+use windows::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES};
 use windows::core::PCWSTR;
 
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
@@ -38,6 +42,8 @@ struct Fixture {
     targets: Mutex<Vec<String>>,
     /// Callbacks that started (`answers` counts those that answered).
     entered: AtomicUsize,
+    /// FETCH_DATA callbacks (LD-0113 Amendment 7's rungs).
+    fetches: AtomicUsize,
 }
 
 impl Fixture {
@@ -117,6 +123,35 @@ unsafe extern "system" fn test_rename(info: *const CF_CALLBACK_INFO, params: *co
     fx.record(started, refusal);
 }
 
+/// The bytes the QA fetch callback serves (every fixture file is 5 bytes); past them, `x`.
+const CONTENT: &[u8] = b"hello";
+
+/// FETCH_DATA for the read-only rungs (Amendment 7): the required range, up to the placeholder's
+/// size, in one transfer.
+unsafe extern "system" fn test_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    // SAFETY: valid for the duration of the callback; the context is the live `Fixture` (see `connect`).
+    let info = unsafe { &*info };
+    let fx = unsafe { &*(info.CallbackContext as *const Fixture) };
+    fx.fetches.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: the FETCH_DATA arm, copied out while the callback is live.
+    let fetch = unsafe { (*params).Anonymous.FetchData };
+    let start = fetch.RequiredFileOffset.clamp(0, info.FileSize);
+    let end = fetch.RequiredFileOffset.saturating_add(fetch.RequiredLength).clamp(start, info.FileSize);
+    let bytes: Vec<u8> = (start..end).map(|at| CONTENT.get(at as usize).copied().unwrap_or(b'x')).collect();
+    // SAFETY: the keys of this live fetch; `bytes` outlives the call.
+    let _ = unsafe {
+        super::callbacks::transfer_one(
+            info.ConnectionKey,
+            info.TransferKey,
+            info.RequestKey,
+            bytes.as_ptr().cast(),
+            start,
+            end - start,
+            STATUS_SUCCESS,
+        )
+    };
+}
+
 /// A registered QA root with a flagged Backups root and the fixture its callbacks answer from;
 /// disconnected and unregistered on drop, whatever the test did.
 struct QaRoot {
@@ -148,6 +183,7 @@ impl QaRoot {
             shown: Mutex::new(Vec::new()),
             targets: Mutex::new(Vec::new()),
             entered: AtomicUsize::new(0),
+            fetches: AtomicUsize::new(0),
         });
         let qa = QaRoot { _dir: dir, root, key: None, fx };
         qa.item(ROOT_ID, "Backups", true);
@@ -157,6 +193,14 @@ impl QaRoot {
 
     /// A cloud-only row at `rel` and its placeholder, as the pull and `populate_placeholders` leave them.
     fn item(&self, id: &str, rel: &str, is_dir: bool) {
+        self.row(id, rel, is_dir);
+        let path = self.path(rel);
+        let (parent, name) = (path.parent().unwrap(), path.file_name().unwrap().to_string_lossy().into_owned());
+        assert!(placeholders::create_placeholder(parent, id, &name, if is_dir { 0 } else { 5 }, 1_700_000_000, is_dir).unwrap());
+    }
+
+    /// The cloud-only row alone, as the pull leaves it for the placeholder pass to mint.
+    fn row(&self, id: &str, rel: &str, is_dir: bool) {
         self.fx
             .db
             .upsert_file(&FileEntry {
@@ -177,9 +221,6 @@ impl QaRoot {
         let mut contract = self.fx.db.get_file_contract_state(id).unwrap().unwrap();
         contract.item_kind = if is_dir { ItemKind::Folder } else { ItemKind::File };
         self.fx.db.set_file_contract_state(&contract).unwrap();
-        let path = self.path(rel);
-        let (parent, name) = (path.parent().unwrap(), path.file_name().unwrap().to_string_lossy().into_owned());
-        assert!(placeholders::create_placeholder(parent, id, &name, if is_dir { 0 } else { 5 }, 1_700_000_000, is_dir).unwrap());
     }
 
     fn connect(&mut self) {
@@ -191,6 +232,11 @@ impl QaRoot {
             CF_CALLBACK_REGISTRATION {
                 Type: CF_CALLBACK_TYPE_NOTIFY_RENAME,
                 Callback: Some(test_rename),
+            },
+            // LD-0113 Amendment 7: the read-only rungs read and hydrate files.
+            CF_CALLBACK_REGISTRATION {
+                Type: CF_CALLBACK_TYPE_FETCH_DATA,
+                Callback: Some(test_fetch),
             },
             CF_CALLBACK_REGISTRATION {
                 Type: CF_CALLBACK_TYPE_NONE,
@@ -272,6 +318,30 @@ fn cmd(qa: &QaRoot, label: &str, line: &str) -> std::process::Output {
         std::thread::sleep(Duration::from_millis(20));
     };
     std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
+}
+
+/// Run `op`, an OS operation of this process, under a watchdog: past [`OS_OP_LIMIT`] the watchdog prints
+/// an `ld0113 <label> timeout` line saying what the callbacks saw and ends the test process (exit 101),
+/// so the rung FAILS instead of hanging (an operation in this process cannot be stopped from outside).
+fn bounded<T>(qa: &QaRoot, label: &'static str, op: impl FnOnce() -> T) -> T {
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (done, fx) = (done.clone(), qa.fx.clone());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            while !done.load(Ordering::SeqCst) {
+                if started.elapsed() >= OS_OP_LIMIT {
+                    println!("ld0113 {label} timeout: after_s={} {}", OS_OP_LIMIT.as_secs(), fx.diagnostics());
+                    std::process::exit(101);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+    let out = op();
+    done.store(true, Ordering::SeqCst);
+    let _ = watchdog.join();
+    out
 }
 
 fn quoted(path: &Path) -> String {
@@ -537,4 +607,221 @@ fn pre_operation_answer_p99_over_1000_deletes() {
         wall.as_millis()
     );
     assert!(p99 < Duration::from_millis(50), "p99 {p99:?}");
+}
+
+fn read_only(path: &Path) -> Option<bool> {
+    crate::windows_cf::read_only::is_read_only(path)
+}
+
+/// Amendment 7 (Guus, 2026-11-06 19:30): the placeholder pass (the pull's path) mints a file under
+/// Backups read-only and in sync; a file outside and a folder are not read-only. A placeholder an older
+/// build minted takes the attribute when the tree's state is applied (at start, or when the role is
+/// flagged later) and stays in sync; a cleared role takes the attribute away again.
+#[test]
+fn backups_file_is_read_only() {
+    let mut qa = QaRoot::new(OwnBackups::default());
+    qa.connect();
+    // An older build's placeholder, minted before files under Backups were read-only.
+    qa.item("0b5ec0de-0000-4000-8000-0000000000f1", "Backups/Old", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000f2", "Backups/Old/c.txt", false);
+    // What the pull leaves for the placeholder pass.
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f3", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f4", "Backups/OtherPC/a.txt", false);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f5", "Documents", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f6", "Documents/b.txt", false);
+    let created = bounded(&qa, "backups_file_is_read_only pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let (a, b, c) = (qa.path("Backups/OtherPC/a.txt"), qa.path("Documents/b.txt"), qa.path("Backups/Old/c.txt"));
+    println!(
+        "ld0113 read_only minted: created={created} a={:?} a_in_sync={:?} b={:?} folder={:?} old_c={:?}",
+        read_only(&a),
+        placeholders::placeholder_in_sync(&a),
+        read_only(&b),
+        read_only(&qa.path("Backups/OtherPC")),
+        read_only(&c)
+    );
+    assert_eq!(created, 4, "the folder and file under Backups, and the two outside");
+    assert_eq!(read_only(&a), Some(true), "a file minted under Backups is read-only");
+    assert_eq!(placeholders::placeholder_in_sync(&a), Some(true), "and in sync");
+    assert_eq!(read_only(&b), Some(false), "a file outside Backups is not");
+    assert_eq!(read_only(&qa.path("Backups/OtherPC")), Some(false), "a folder is left alone");
+    assert_eq!(read_only(&c), Some(false), "the older placeholder, until the tree's state is applied");
+
+    let changed = bounded(&qa, "backups_file_is_read_only apply", || {
+        crate::backup_protect::apply_tree_read_only(&qa.fx.db, &qa.root, "Backups", true)
+    });
+    println!("ld0113 read_only applied: changed={changed} old_c={:?} old_c_in_sync={:?}", read_only(&c), placeholders::placeholder_in_sync(&c));
+    assert_eq!(changed, 1, "only the older placeholder changed");
+    assert_eq!(read_only(&c), Some(true));
+    assert_eq!(placeholders::placeholder_in_sync(&c), Some(true), "still in sync after the attribute changed");
+
+    // An admin cleared a wrong flag (spec §5.5): the files are writable again.
+    assert!(qa.fx.db.set_system_role(ROOT_ID, None).unwrap());
+    let cleared = bounded(&qa, "backups_file_is_read_only clear", || {
+        crate::backup_protect::apply_tree_read_only(&qa.fx.db, &qa.root, "Backups", false)
+    });
+    println!("ld0113 read_only cleared: cleared={cleared} a={:?} old_c={:?}", read_only(&a), read_only(&c));
+    assert_eq!(cleared, 2);
+    assert_eq!((read_only(&a), read_only(&c)), (Some(false), Some(false)));
+}
+
+/// A read-only placeholder hydrates when another process reads it, and the engine's own hydrate
+/// ("Always keep on this device"), dehydrate ("Free up space") and hydrate again go through; the file is
+/// read-only after each.
+#[test]
+fn read_only_placeholder_hydrates() {
+    let mut qa = QaRoot::new(OwnBackups::default());
+    qa.connect();
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f7", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f8", "Backups/OtherPC/a.txt", false);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000f9", "Backups/OtherPC/b.txt", false);
+    bounded(&qa, "read_only_placeholder_hydrates pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let (a, b) = (qa.path("Backups/OtherPC/a.txt"), qa.path("Backups/OtherPC/b.txt"));
+    assert_eq!((read_only(&a), read_only(&b)), (Some(true), Some(true)));
+
+    // Another process opens it to read, as an editor does.
+    let out = cmd(&qa, "read_only_placeholder_hydrates", &format!("type {}", quoted(&a)));
+    let read = String::from_utf8_lossy(&out.stdout).into_owned();
+    let a_on_disk = placeholders::fully_on_disk(&a);
+    // The engine's own changes.
+    let hydrated = bounded(&qa, "read_only_placeholder_hydrates hydrate", || placeholders::hydrate_placeholder(&b).map_err(|e| e.to_string()));
+    let (b_on_disk, b_read_only_hydrated) = (placeholders::fully_on_disk(&b), read_only(&b));
+    let freed = bounded(&qa, "read_only_placeholder_hydrates dehydrate", || placeholders::dehydrate_placeholder(&b).map_err(|e| e.to_string()));
+    let (b_freed_on_disk, b_read_only_freed) = (placeholders::fully_on_disk(&b), read_only(&b));
+    let again = bounded(&qa, "read_only_placeholder_hydrates again", || placeholders::hydrate_placeholder(&b).map_err(|e| e.to_string()));
+    println!(
+        "ld0113 read_only_hydrates: type_ok={} type_stdout={read:?} a_on_disk={a_on_disk} a_ro={:?} hydrated={hydrated:?} b_on_disk={b_on_disk} \
+         b_ro={b_read_only_hydrated:?} freed={freed:?} b_freed_on_disk={b_freed_on_disk} b_ro_freed={b_read_only_freed:?} again={again:?} \
+         b_ro_end={:?} fetches={}",
+        out.status.success(),
+        read_only(&a),
+        read_only(&b),
+        qa.fx.fetches.load(Ordering::SeqCst)
+    );
+    assert!(out.status.success() && read == "hello", "another process reads the bytes: {read:?}");
+    assert!(a_on_disk, "the read hydrated it");
+    assert_eq!(read_only(&a), Some(true), "and it is still read-only");
+    assert!(hydrated.is_ok() && b_on_disk, "the engine's hydrate went through");
+    assert_eq!(b_read_only_hydrated, Some(true));
+    assert!(freed.is_ok() && !b_freed_on_disk, "the engine's dehydrate went through");
+    assert_eq!(b_read_only_freed, Some(true));
+    assert!(again.is_ok() && placeholders::fully_on_disk(&b), "and a hydrate again");
+    assert_eq!(read_only(&b), Some(true));
+    assert!(qa.fx.fetches.load(Ordering::SeqCst) >= 3, "three fetches through the provider");
+}
+
+/// A new version of a read-only file: the engine empties the old version's bytes (S6) and gives the
+/// placeholder the new size (`resize_placeholder`, which writes `FILE_ATTRIBUTE_NORMAL`); it is
+/// read-only after both.
+#[test]
+fn new_version_updates_read_only_placeholder() {
+    let mut qa = QaRoot::new(OwnBackups::default());
+    qa.connect();
+    qa.row("0b5ec0de-0000-4000-8000-0000000000fa", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000fb", "Backups/OtherPC/a.txt", false);
+    bounded(&qa, "new_version_updates_read_only_placeholder pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let a = qa.path("Backups/OtherPC/a.txt");
+    cmd(&qa, "new_version_updates_read_only_placeholder", &format!("type {}", quoted(&a)));
+    let hydrated = placeholders::fully_on_disk(&a);
+
+    let emptied = bounded(&qa, "new_version_updates_read_only_placeholder empty", || {
+        crate::windows_cf::poison::empty_poisoned(&a, crate::windows_cf::poison::Check::Discard)
+    });
+    let (emptied_on_disk, read_only_emptied) = (placeholders::fully_on_disk(&a), read_only(&a));
+    let resized = bounded(&qa, "new_version_updates_read_only_placeholder resize", || placeholders::resize_placeholder(&a, 11).map_err(|e| e.to_string()));
+    let size = std::fs::symlink_metadata(&a).map(|metadata| metadata.len()).ok();
+    println!(
+        "ld0113 new_version: hydrated={hydrated} emptied={emptied:?} on_disk_after={emptied_on_disk} ro_emptied={read_only_emptied:?} \
+         resized={resized:?} size={size:?} ro_end={:?}",
+        read_only(&a)
+    );
+    assert!(hydrated, "the old version's bytes were on disk");
+    assert_eq!(emptied, crate::windows_cf::poison::Emptied::Emptied, "the old bytes are emptied");
+    assert!(!emptied_on_disk);
+    assert_eq!(read_only_emptied, Some(true), "read-only after the emptying");
+    assert!(resized.is_ok(), "the new version's size is applied");
+    assert_eq!(size, Some(11));
+    assert_eq!(read_only(&a), Some(true), "read-only after the resize");
+}
+
+/// A write open of a file under Backups is refused by the file system, from another process and from
+/// this one, and nothing is fetched for it; the same append outside Backups works.
+#[test]
+fn write_open_of_backups_file_denied() {
+    let mut qa = QaRoot::new(OwnBackups::default());
+    qa.connect();
+    qa.row("0b5ec0de-0000-4000-8000-0000000000fc", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000fd", "Backups/OtherPC/a.txt", false);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000fe", "Documents", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000000ff", "Documents/b.txt", false);
+    bounded(&qa, "write_open_of_backups_file_denied pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let (a, b) = (qa.path("Backups/OtherPC/a.txt"), qa.path("Documents/b.txt"));
+
+    let refused = cmd(&qa, "write_open_of_backups_file_denied", &format!("echo changed>> {}", quoted(&a)));
+    let own_open = bounded(&qa, "write_open_of_backups_file_denied open", || {
+        std::fs::OpenOptions::new().write(true).open(&a).map(|_| ()).map_err(|e| e.raw_os_error())
+    });
+    let fetches_for_refused = qa.fx.fetches.load(Ordering::SeqCst);
+    let size_a = std::fs::symlink_metadata(&a).map(|metadata| metadata.len()).ok();
+    let outside = cmd(&qa, "write_open_of_backups_file_denied outside", &format!("echo changed>> {}", quoted(&b)));
+    let size_b = std::fs::symlink_metadata(&b).map(|metadata| metadata.len()).ok();
+    println!(
+        "ld0113 write_open: cmd_ok={} cmd_stderr={:?} own_open={own_open:?} fetches_for_refused={fetches_for_refused} size_a={size_a:?} \
+         outside_ok={} size_b={size_b:?}",
+        refused.status.success(),
+        String::from_utf8_lossy(&refused.stderr).trim(),
+        outside.status.success()
+    );
+    assert!(!refused.status.success(), "the append from another process is refused");
+    assert_eq!(own_open, Err(Some(5)), "an open for writing here is ERROR_ACCESS_DENIED");
+    assert_eq!(fetches_for_refused, 0, "nothing is fetched for a refused write");
+    assert_eq!(size_a, Some(5), "the backup is unchanged");
+    assert!(outside.status.success() && size_b.is_some_and(|size| size > 5), "a file outside Backups is still writable");
+}
+
+/// The manifest of a device folder (core's `is_hidden_backup_item`) is never minted in the drive; the
+/// rest of the tree is.
+#[test]
+fn backups_manifest_is_never_minted() {
+    let qa = QaRoot::new(OwnBackups::default());
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a1", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a2", &format!("Backups/OtherPC/{MANIFEST_NAME}"), false);
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a3", "Backups/OtherPC/Pictures", true);
+    let created = bounded(&qa, "backups_manifest_is_never_minted pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let manifest = qa.path(&format!("Backups/OtherPC/{MANIFEST_NAME}"));
+    println!("ld0113 manifest: created={created} manifest_on_disk={}", manifest.exists());
+    assert_eq!(created, 2, "the device folder and its category folder");
+    assert!(!manifest.exists(), "the manifest is not in the drive");
+    assert!(qa.path("Backups/OtherPC/Pictures").is_dir());
+}
+
+/// A read-only file under Backups is removed by the engine (a backup deleted in the app) and by the
+/// sign-out purge, each the way production removes it.
+#[test]
+fn engine_and_sign_out_remove_read_only_placeholders() {
+    let qa = QaRoot::new(OwnBackups::default());
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a4", "Backups/OtherPC", true);
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a5", "Backups/OtherPC/a.txt", false);
+    qa.row("0b5ec0de-0000-4000-8000-0000000001a6", "Backups/OtherPC/b.txt", false);
+    bounded(&qa, "engine_and_sign_out_remove pass", || crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root));
+    let (a, b) = (qa.path("Backups/OtherPC/a.txt"), qa.path("Backups/OtherPC/b.txt"));
+    assert_eq!((read_only(&a), read_only(&b)), (Some(true), Some(true)));
+
+    let removed = bounded(&qa, "engine_and_sign_out_remove engine", || {
+        crate::engine_bridge::engine_remove(&a, crate::engine_bridge::RemovedKind::File).map_err(|e| e.raw_os_error())
+    });
+    // The sign-out purge's handle: attributes and DELETE, the reparse point itself, exclusive.
+    let marked = bounded(&qa, "engine_and_sign_out_remove sign_out", || {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0 | DELETE.0)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(&b)
+            .map_err(|e| e.to_string())?;
+        crate::windows_cf::read_only::mark_for_deletion(HANDLE(file.as_raw_handle())).map_err(|e| e.to_string())
+    });
+    println!("ld0113 remove_read_only: engine={removed:?} a_left={} sign_out={marked:?} b_left={}", a.exists(), b.exists());
+    assert_eq!(removed, Ok(()), "the engine's own remove");
+    assert!(!a.exists());
+    assert_eq!(marked, Ok(()), "the sign-out purge's delete");
+    assert!(!b.exists());
 }

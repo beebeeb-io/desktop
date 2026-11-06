@@ -244,6 +244,9 @@ fn attempt_guarded(
     between: &mut dyn FnMut(Step, HANDLE),
     pin: Option<CF_PIN_STATE>,
 ) -> (Emptied, Option<CF_PIN_STATE>) {
+    // LD-0113 Amendment 7: a read-only Backups file whose bytes are of an older version is emptied by
+    // the engine too (its handle needs write access); the attribute is set again after.
+    let _read_only = super::read_only::Lifted::new(path);
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()

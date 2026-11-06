@@ -97,4 +97,22 @@ impl StateDb {
         let rows = stmt.query_map(params![path], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect()
     }
+
+    /// The path of every row at or under `path`, whatever its status, the item itself first: the
+    /// range of [`Self::local_rows_at_or_under`] without its status. The drive's read-only state of a
+    /// Backups tree goes on these (LD-0113 Amendment 7, Windows).
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub fn paths_at_or_under(&self, path: &str) -> Result<Vec<String>> {
+        let path = path.trim_matches('/');
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT path FROM files
+             WHERE path = ?1 OR path = '/' || ?1
+                OR (path >= ?1 || '/' AND path < ?1 || '0')
+                OR (path >= '/' || ?1 || '/' AND path < '/' || ?1 || '0')
+             ORDER BY length(path), path",
+        )?;
+        let rows = stmt.query_map(params![path], |r| r.get(0))?;
+        rows.collect()
+    }
 }

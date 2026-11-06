@@ -67,6 +67,8 @@ mod ld0105_native_tests;
 // LD-0113 D1: the pre-operation delete and rename callbacks on a QA sync root.
 #[cfg(test)]
 mod ld0113_protect_native_tests;
+// LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
+pub(crate) mod read_only;
 pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
@@ -648,6 +650,13 @@ pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider:
     props
         .Append(&status_def)
         .map_err(|e| anyhow::anyhow!("append Status property definition failed: {e}"))?;
+    // LD-0113 Amendment 8a: the "Read-only" custom state the Backups root carries (core's MSG_BADGE).
+    // Only a new registration declares it (an existing one is kept, above); a failure here costs the
+    // badge, never the registration.
+    match read_only::read_only_state_definition(beebeeb_core::backup::MSG_BADGE).and_then(|definition| props.Append(&definition)) {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "the Read-only custom state could not be declared; Backups shows no badge"),
+    }
 
     // Register. Swallow an "already registered" race as success (idempotent) —
     // the guard above usually catches it, but a concurrent register could still
@@ -1629,6 +1638,8 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
     // directory placeholder was wanted. Depth-ordering avoids that race.
     entries.sort_by_key(|e| e.path.trim_matches('/').split('/').count());
     let needs_identity = db.files_needing_identity().unwrap_or_default();
+    // LD-0113: the Backups tree, read once for the pass.
+    let backups = crate::backup_protect::BackupsTree::read(db);
 
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
@@ -1636,6 +1647,11 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
         // separators.
         let rel = entry.path.trim_matches('/');
         if rel.is_empty() {
+            stats.skipped += 1;
+            continue;
+        }
+        // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest is never in the drive.
+        if backups.is_hidden(rel) {
             stats.skipped += 1;
             continue;
         }
@@ -1666,16 +1682,24 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
         }
 
         stats.create_calls += 1;
-        match placeholders::create_placeholder(
+        // LD-0113 Amendment 7: a file at or under the Backups root is minted read-only.
+        let in_backups = backups.below_root(rel).is_some();
+        match placeholders::create_placeholder_with(
             &parent_dir,
             &entry.file_id,
             &name,
             entry.size_bytes,
             entry.modified_at,
             entry.is_dir(),
+            in_backups,
         ) {
             Ok(true) => {
                 stats.created += 1;
+                // LD-0113 Amendment 8a: a Backups root minted again (the after-the-fact restore) shows its
+                // badge again.
+                if entry.is_dir() && backups.position(rel) == beebeeb_core::backup::BackupPosition::Root {
+                    crate::backup_protect::show_read_only_badge(&parent_dir.join(&name), true);
+                }
                 // Task 1640 (review F1): created where nothing was, so no fetched bytes are on
                 // disk: a first fetch starts the file's candidate. Only a row never fetched into
                 // is marked (a fetch on the new placeholder records first), so none is forgotten.

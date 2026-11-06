@@ -538,6 +538,7 @@ pub(super) fn apply_system_role_field(db: &StateDb, file_id: &str, f: &serde_jso
         if db.set_system_role(file_id, role)? {
             // Zero-knowledge: the id and the role's wire string, never a name.
             tracing::info!(file_id = %file_id, role = role.map_or("none", |r| r.as_str()), "system role of a folder changed");
+            crate::backup_protect::system_role_changed(db, file_id);
         }
     }
     Ok(())
