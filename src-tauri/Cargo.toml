@@ -127,6 +127,8 @@ webpki-roots = "0.26"
 # connector code uses `rustls::crypto::ring::default_provider()`.
 rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# LD-0105 W2: the storage body the range session gets (`beebeeb_transfer::StorageReply`).
+bytes = "1"
 p256 = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -142,9 +144,11 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "3db0cc26f2866564f786ffa9cb0c403d2dad0e9c" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "3db0cc26f2866564f786ffa9cb0c403d2dad0e9c" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "3db0cc26f2866564f786ffa9cb0c403d2dad0e9c" }
+# LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "3db0cc26f2866564f786ffa9cb0c403d2dad0e9c" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -317,6 +321,9 @@ json-patch = { version = "3", default-features = false }
 # loaded machine cannot flake it. A feature only: `test-util` turns on tokio's own `rt`, `sync` and `time`, which
 # `[dependencies]` already has, so no crate is added and Cargo.lock is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+# LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
+# sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "3db0cc26f2866564f786ffa9cb0c403d2dad0e9c", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

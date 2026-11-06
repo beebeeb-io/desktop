@@ -52,6 +52,8 @@ pub mod callbacks;
 pub mod placeholders;
 // LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
 pub(crate) mod poison;
+// LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
+pub(crate) mod streaming;
 // LD-0105 S0: a fetch's byte progress reported to Cloud Files.
 pub(crate) mod fetch_progress;
 // LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
@@ -984,6 +986,15 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
             Type: CF_CALLBACK_TYPE_FETCH_DATA,
             Callback: Some(callbacks::fetch_data_callback),
         },
+        // LD-0105 W2: a cancelled fetch ends its demand; an open arms W3's per-app decline.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+            Callback: Some(streaming::cancel_fetch_data_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+            Callback: Some(streaming::notify_file_open_completion_callback),
+        },
         // Upload trigger: a handle that wrote a new/modified file has closed.
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
@@ -1066,6 +1077,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
     let read_back = hydration_policy_of(sync_root).ok();
     *HYDRATION_IN_EFFECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
+    streaming::read_switch_at_engine_start();
     match read_back {
         Some(policy) if hydration_policy_is_ours(Some(policy)) => {
             tracing::info!("Cloud Files hydration policy in effect: progressive")

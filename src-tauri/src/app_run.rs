@@ -184,6 +184,7 @@ pub fn run() {
             // WS1 — Windows UI aliases + tray commands
             desktop_config,
             tray_recent_activity,
+            discard_and_download_again,
             tray_pause_sync,
             tray_resume_sync,
             sync_activity_summary,

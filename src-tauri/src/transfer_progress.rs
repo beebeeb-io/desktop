@@ -72,6 +72,145 @@ impl SpeedWindow {
     }
 }
 
+/// `ActiveTransferDto::attention` of a failed download whose file changed on this device since (the
+/// names `src/desktopApi.ts` `ActiveTransferRow` uses).
+pub const ATTENTION_CHANGED: &str = "changed_on_this_device";
+/// `ActiveTransferDto::action` of such a row: the `discard_and_download_again` command.
+pub const ACTION_DISCARD: &str = "discard_and_download_again";
+
+/// One file state.db says needs the person (LD-0105 Amendment 4, desktop #225): a failed download whose
+/// file changed on this device since. It is kept as it is and refuses every fetch, so it is rarely on
+/// the board; its row lasts as long as the poison row, which `discard_and_download_again` ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeedsAttention {
+    pub file_id: String,
+    /// The vault path, for the row's name and folder.
+    pub path: String,
+    pub size: u64,
+}
+
+/// state.db's needs-attention rows whose file it still knows (review: a poison with no file row could
+/// not be discarded, `discard_now` answers `missing`, and it clears at the next process start).
+/// `None`: the DB could not be read.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<NeedsAttention>> {
+    let rows = db.poisoned().ok()?;
+    Some(
+        rows.into_iter()
+            .filter(|r| r.needs_attention)
+            .filter_map(|r| match db.get_file(&r.file_id) {
+                Ok(Some(entry)) => Some(Ok(NeedsAttention { file_id: r.file_id, path: entry.path, size: entry.size_bytes.max(0) as u64 })),
+                // No files row: no exit, no row (above).
+                Ok(None) => None,
+                // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?,
+    )
+}
+
+/// The needs-attention rows the last read returned, kept with the engine generation they were read
+/// under (delta review P2-2): served only to a poll under that same generation. A lock, a sign-out and
+/// an account switch each stop the engine, and the next one is a new generation (`NEXT_GENERATION`), so
+/// no other session ever sees them; a lock also clears them ([`attention_for_poll`]).
+#[derive(Debug, Default)]
+pub(crate) struct AttentionCache {
+    /// `(generation, read number, rows)` of the newest read stored.
+    read: Option<(u64, u64, Vec<NeedsAttention>)>,
+    /// Reads numbered below this started before a discard ended a row: never stored (review P3-6).
+    fence: u64,
+}
+
+impl AttentionCache {
+    pub(crate) const fn new() -> Self {
+        AttentionCache { read: None, fence: 0 }
+    }
+
+    /// Read number `seq` under `generation` returned `rows`. An older read (a smaller `seq`, or one
+    /// started before the fence) never replaces a newer one.
+    pub(crate) fn store(&mut self, generation: u64, seq: u64, rows: Vec<NeedsAttention>) {
+        if seq < self.fence || self.read.as_ref().is_some_and(|(g, s, _)| *g == generation && *s > seq) {
+            return;
+        }
+        self.read = Some((generation, seq, rows));
+    }
+
+    /// The rows last read under `generation`; nothing under any other.
+    pub(crate) fn rows_for(&self, generation: u64) -> Vec<NeedsAttention> {
+        match &self.read {
+            Some((g, _, rows)) if *g == generation => rows.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.read = None;
+    }
+
+    /// A discard ended `file_id`'s row: it is gone from the kept rows, and no read that started before
+    /// `next_seq` (the next read's number) may bring it back.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn forget(&mut self, file_id: &str, next_seq: u64) {
+        if let Some((_, _, rows)) = &mut self.read {
+            rows.retain(|r| r.file_id != file_id);
+        }
+        self.fence = self.fence.max(next_seq);
+    }
+}
+
+/// The process's kept needs-attention rows ([`AttentionCache`]), shared by `get_active_transfers` and
+/// `discard_and_download_again`.
+pub(crate) static ATTENTION_CACHE: Mutex<AttentionCache> = Mutex::new(AttentionCache::new());
+/// The next needs-attention read's number.
+pub(crate) static ATTENTION_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// What one poll shows of the needs-attention rows (delta review P2-2): nothing while the vault is
+/// locked or no engine is running (and the kept rows are cleared); a fresh read when it finished in
+/// time; else the rows kept for this same engine generation.
+pub(crate) fn attention_for_poll(
+    cache: &mut AttentionCache,
+    unlocked: bool,
+    generation: Option<u64>,
+    fresh: Option<Vec<NeedsAttention>>,
+) -> Vec<NeedsAttention> {
+    let Some(generation) = generation.filter(|_| unlocked) else {
+        cache.clear();
+        return Vec::new();
+    };
+    fresh.unwrap_or_else(|| cache.rows_for(generation))
+}
+
+/// The board's rows plus a row for each file that needs the person (a download, not failed, no
+/// progress), or the attention on that file's own download or stream row. An upload row keeps its own
+/// shape (review): offering "discard" on it would throw away the change being uploaded.
+pub(crate) fn with_attention(mut rows: Vec<ActiveTransferDto>, attention: &[NeedsAttention]) -> Vec<ActiveTransferDto> {
+    for file in attention {
+        if let Some(on_board) = rows.iter_mut().find(|r| r.file_id == file.file_id) {
+            if on_board.direction != Direction::Up {
+                on_board.attention = Some(ATTENTION_CHANGED);
+                on_board.action = Some(ACTION_DISCARD);
+            }
+            continue;
+        }
+        rows.push(ActiveTransferDto {
+            file_id: file.file_id.clone(),
+            name: display_name(&file.path),
+            folder: parent_folder(&file.path),
+            direction: Direction::Down,
+            done: 0,
+            total: file.size,
+            buffered: 0,
+            speed_bps: 0,
+            attention: Some(ATTENTION_CHANGED),
+            action: Some(ACTION_DISCARD),
+            failed: false,
+            failed_at_secs: None,
+        });
+    }
+    rows
+}
+
 /// A transfer's metadata serialised into the `get_active_transfers` IPC response.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +233,14 @@ pub struct ActiveTransferDto {
     pub buffered: u64,
     /// 2-second moving-window receive rate in bytes/s. `0` when not yet computed.
     pub speed_bps: u64,
+    /// LD-0105 Amendment 4 (desktop #225): [`ATTENTION_CHANGED`] when a download failed and the file
+    /// changed on this device since (state.db's needs-attention poison row); absent otherwise. Never
+    /// set by the board itself: [`TransferBoard::snapshot_with_attention`] adds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<&'static str>,
+    /// The one action that ends an `attention` row: [`ACTION_DISCARD`]; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<&'static str>,
     /// The transfer ended in an error (the guard dropped without `finish()`).
     pub failed: bool,
     /// Unix timestamp when the failure was recorded, for expiry logic in the UI.
@@ -157,6 +304,17 @@ impl ReceiveMeter {
     /// A whole attempt failed: progress goes back to `mark` (an earlier [`Self::kept`]) if it is past it.
     pub fn rollback_to(&self, mark: u64) {
         let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
+    }
+
+    /// LD-0105 W2: `wire_bytes` arrived but are not progress by themselves (a range session counts its
+    /// progress as the plaintext it handed over, [`Self::keep`]): liveness only.
+    pub fn read_only(&self, wire_bytes: u64) {
+        self.read.fetch_add(wire_bytes, Ordering::Relaxed);
+    }
+
+    /// LD-0105 W2: `bytes` of plaintext reached the placeholder: progress only.
+    pub fn keep(&self, bytes: u64) {
+        self.kept.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Every body byte read so far, failed attempts included: the keep-alive's liveness.
@@ -325,11 +483,21 @@ impl TransferBoard {
                     total: t.total,
                     buffered: t.buffered,
                     speed_bps: t.speed_bps,
+                    attention: None,
+                    action: None,
                     failed: t.failed,
                     failed_at_secs: t.failed_at_secs,
                 }
             }).collect()
         }).unwrap_or_default()
+    }
+
+    /// [`Self::snapshot_dtos`] merged with state.db's needs-attention rows ([`needs_attention`],
+    /// [`with_attention`]). No db, or a db that cannot be read: the board alone.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn snapshot_with_attention(&self, db: Option<&crate::state_db::StateDb>) -> Vec<ActiveTransferDto> {
+        let attention = db.and_then(needs_attention).unwrap_or_default();
+        with_attention(self.snapshot_dtos(), &attention)
     }
 
     /// Every transfer in flight.

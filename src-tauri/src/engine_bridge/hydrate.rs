@@ -736,7 +736,7 @@ impl EngineBridge {
 
     /// The download transport: `BB_TRANSPORT`, else `desktop.toml`'s `transport`, else `auto`
     /// (task 2173). A test bridge takes the one its test set, else `auto`.
-    fn download_transport(&self, configured: Option<&str>) -> crate::direct_download::Transport {
+    pub(super) fn download_transport(&self, configured: Option<&str>) -> crate::direct_download::Transport {
         #[cfg(test)]
         {
             let _ = configured;

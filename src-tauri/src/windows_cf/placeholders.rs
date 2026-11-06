@@ -398,7 +398,7 @@ fn read_identity(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<O
 
 /// The identity and the on-disk byte count (on disk + modified) read through `handle`, or `None` for a file that is
 /// not a placeholder.
-fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
+pub(super) fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
     use windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE;
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `handle` is open for the call (the caller's `File` outlives it); the buffer is 8-byte aligned and its
@@ -937,7 +937,7 @@ fn handle_fully_on_disk(file: &std::fs::File) -> bool {
 /// open, and none after these reads. On Guus's PC the 0.8.14 start-up guard's opens fetched
 /// 5,294 cloud-only files whole, one after another in the guard's own row order, ~42 GB in two
 /// hours, until C: was full. `CfGetPlaceholderInfo` needs no more than this handle.
-fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,

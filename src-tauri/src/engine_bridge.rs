@@ -100,6 +100,10 @@ mod local_classify;
 mod local_layout;
 mod operations;
 mod hydrate;
+// LD-0105 W2: a Windows range session's preparation and its "whole" record.
+mod range_fetch;
+#[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
+pub(crate) use range_fetch::{PrepEnd, RangePrep};
 mod conflicts;
 
 

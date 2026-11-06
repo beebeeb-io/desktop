@@ -12,11 +12,11 @@
 //! (no Windows call) and compiled on every platform, so the rules are tested everywhere; the Windows
 //! fetch callback feeds it the requester's `CF_PROCESS_INFO`.
 //!
-//! **Switched off** ([`STREAMING_ENABLED`] = `false`) until the streaming callback (plan W2) lands:
-//! before W2 every range fetch would still download the whole file, so a decline would only cost
-//! the player a second full download.
+//! **Switched on** ([`STREAMING_ENABLED`]) with the streaming callback (plan W2): a declined player's
+//! reads become range demands on the file's one range session (`windows_cf::streaming`).
 
-/// Off until W2 (plan W3: "The decline is switched on only with W2").
+/// OFF for 0.8.22 (lead ruling 2026-11-06, desktop #225: D2-2 failed natively, VLC's open was served
+/// whole and never declined; per Amendment 5 the per-app decline ships switched off). The code stays.
 pub(crate) const STREAMING_ENABLED: bool = false;
 
 /// How a player is recognised. Never by image name alone: a renamed `vlc.exe` in a temp folder must
@@ -159,14 +159,18 @@ pub(crate) struct Target<'a> {
 
 /// The whole rule (spec §6.4): decline this fetch? Only when streaming is `enabled`, the fetch is the
 /// first whole-remainder fetch after this requester's open (`first_after_open`, from [`OpenFetches`]),
-/// the requester is a listed player and not us nor an explicit hydration, and the file is a media
-/// file of no excluded origin.
+/// the requester is a listed player and not us nor an explicit hydration, the file is a media file of
+/// no excluded origin, and (desktop #225 review P1) the file can actually stream: `can_stream`,
+/// asked last and only then ([`crate::cf_range::file_streams`]: a recorded version to pin and the
+/// direct range route). A legacy or API-route file is never declined: declined, each of its later
+/// reads would download the whole file again.
 pub(crate) fn decline_open_fetch(
     enabled: bool,
     requester: &Requester<'_>,
     program_files: &[String],
     target: Target<'_>,
     first_after_open: bool,
+    can_stream: impl FnOnce() -> bool,
 ) -> bool {
     enabled
         && first_after_open
@@ -175,6 +179,7 @@ pub(crate) fn decline_open_fetch(
         && !target.excluded_origin
         && is_media(target.name, target.mime)
         && is_listed_player(requester, program_files)
+        && can_stream()
 }
 
 /// Is this fetch the open-time whole-file kind: it runs to the end of the file and offers no
@@ -202,8 +207,15 @@ pub(crate) struct OpenFetches {
 impl OpenFetches {
     /// `NOTIFY_FILE_OPEN_COMPLETION` from `pid` on `file_id`.
     pub(crate) fn opened(&mut self, pid: u32, file_id: &str) {
+        // Bounded (desktop #224 follow-up): forgetting an armed open only means that open gets the
+        // whole file, never a wrong decline.
+        if self.armed.len() >= Self::MAX_ARMED {
+            self.armed.clear();
+        }
         self.armed.insert((pid, file_id.to_string()));
     }
+
+    const MAX_ARMED: usize = 4096;
 
     /// A whole-remainder fetch from `pid` on `file_id`: `true` only for the first one after its open.
     pub(crate) fn first_after_open(&mut self, pid: u32, file_id: &str) -> bool {
@@ -239,28 +251,30 @@ mod tests {
         }
     }
 
+    /// Lead ruling 2026-11-06 (desktop #225): W3 ships off for 0.8.22. Red on the mutant "the switch
+    /// is on".
     #[test]
-    fn the_switch_is_off_until_the_streaming_callback_ships() {
-        assert!(!STREAMING_ENABLED, "W3 is built but switched off until W2");
+    fn the_switch_is_off_for_0822() {
+        assert!(!STREAMING_ENABLED, "W3 ships switched off");
         assert!(
-            !decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true),
-            "the shipped switch declines nothing"
+            !decline_open_fetch(STREAMING_ENABLED, &player(), &roots(), movie(), true, || true),
+            "the shipped switch declines nothing, not even a listed player's open of a media file"
         );
     }
 
     #[test]
     fn d2_2_a_listed_player_opening_a_media_file_is_declined_when_streaming_is_on() {
-        assert!(decline_open_fetch(true, &player(), &roots(), movie(), true));
+        assert!(decline_open_fetch(true, &player(), &roots(), movie(), true, || true));
         let vlc = Requester {
             image: Some(r"c:\program files\videolan\vlc\vlc.exe"),
             ..Requester::default()
         };
-        assert!(decline_open_fetch(true, &vlc, &roots(), movie(), true));
+        assert!(decline_open_fetch(true, &vlc, &roots(), movie(), true, || true));
         let wmp = Requester {
             image: Some(r"c:\program files (x86)\windows media player\wmplayer.exe"),
             ..Requester::default()
         };
-        assert!(decline_open_fetch(true, &wmp, &roots(), movie(), true));
+        assert!(decline_open_fetch(true, &wmp, &roots(), movie(), true, || true));
     }
 
     #[test]
@@ -276,10 +290,10 @@ mod tests {
                 image: Some(image),
                 ..Requester::default()
             };
-            assert!(!decline_open_fetch(true, &other, &roots(), movie(), true), "{image}");
+            assert!(!decline_open_fetch(true, &other, &roots(), movie(), true, || true), "{image}");
         }
         assert!(
-            !decline_open_fetch(true, &Requester::default(), &roots(), movie(), true),
+            !decline_open_fetch(true, &Requester::default(), &roots(), movie(), true, || true),
             "no process info at all"
         );
     }
@@ -297,26 +311,26 @@ mod tests {
                 image: normalized.as_deref(),
                 ..Requester::default()
             };
-            assert!(!decline_open_fetch(true, &renamed, &roots(), movie(), true), "{image}");
+            assert!(!decline_open_fetch(true, &renamed, &roots(), movie(), true, || true), "{image}");
         }
         // A package that only looks like Media Player's (another publisher id).
         let lookalike = Requester {
             package: Some("Microsoft.ZuneMusic_11.2609.11.0_x64__evilpublisher00"),
             ..Requester::default()
         };
-        assert!(!decline_open_fetch(true, &lookalike, &roots(), movie(), true));
+        assert!(!decline_open_fetch(true, &lookalike, &roots(), movie(), true, || true));
     }
 
     #[test]
     fn d2_5_our_own_process_and_an_explicit_hydration_are_never_declined() {
         let ours = Requester { ours: true, ..player() };
-        assert!(!decline_open_fetch(true, &ours, &roots(), movie(), true));
+        assert!(!decline_open_fetch(true, &ours, &roots(), movie(), true, || true));
         let pin = Requester {
             explicit_hydration: true,
             ..player()
         };
         assert!(
-            !decline_open_fetch(true, &pin, &roots(), movie(), true),
+            !decline_open_fetch(true, &pin, &roots(), movie(), true, || true),
             "Always keep on this device hydrates"
         );
     }
@@ -334,7 +348,7 @@ mod tests {
                 mime,
                 excluded_origin: false,
             };
-            assert!(!decline_open_fetch(true, &player(), &roots(), target, true), "{name}");
+            assert!(!decline_open_fetch(true, &player(), &roots(), target, true, || true), "{name}");
         }
         assert!(is_media("CLIP.MKV", None), "extensions are case-blind");
         assert!(
@@ -372,7 +386,32 @@ mod tests {
             excluded_origin: true,
             ..movie()
         };
-        assert!(!decline_open_fetch(true, &player(), &roots(), shared, true));
+        assert!(!decline_open_fetch(true, &player(), &roots(), shared, true, || true));
+    }
+
+    /// Desktop #225 review P1: a listed player opening a legacy file (no recorded version to pin) or an
+    /// API-route file (transport forced to the API, or the server offers no direct download) is NOT
+    /// declined, so its open-time fetch is served whole (one fetch, S2) instead of each read
+    /// downloading the whole file again. Red on the mutants "the decline ignores `can_stream`" and
+    /// "`file_streams` ignores the recorded version" / "... the route".
+    #[test]
+    fn ld0105_p1_a_listed_player_opening_a_legacy_or_api_route_file_is_not_declined() {
+        use crate::cf_range::file_streams;
+        let legacy = || file_streams(false, false, true);
+        let forced_api = || file_streams(true, true, true);
+        let not_offered = || file_streams(true, false, false);
+        for (what, can_stream) in [("legacy", legacy as fn() -> bool), ("forced api", forced_api), ("no direct route", not_offered)] {
+            assert!(!can_stream(), "{what}");
+            assert!(!decline_open_fetch(true, &player(), &roots(), movie(), true, can_stream), "{what}: never declined");
+        }
+        assert!(file_streams(true, false, true), "a pinned version on the direct route streams");
+        assert!(decline_open_fetch(true, &player(), &roots(), movie(), true, || file_streams(true, false, true)));
+        let mut asked = false;
+        assert!(!decline_open_fetch(true, &Requester::default(), &roots(), movie(), true, || {
+            asked = true;
+            true
+        }));
+        assert!(!asked, "asked only when everything else says decline (it may make a discovery call)");
     }
 
     #[test]

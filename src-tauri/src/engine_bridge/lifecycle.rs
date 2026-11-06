@@ -131,7 +131,8 @@ impl EngineBridge {
         self.resume.pass_wanted.load(Ordering::SeqCst) > self.resume.pass_served.load(Ordering::SeqCst)
     }
 
-    #[cfg(test)]
+    /// Tests, and a Windows range session's Activity row (LD-0105 W2).
+    #[cfg(any(test, target_os = "windows"))]
     pub fn transfers(&self) -> &Arc<crate::transfer_progress::TransferBoard> {
         &self.transfers
     }
@@ -169,6 +170,12 @@ impl EngineBridge {
     /// the bridge.
     pub fn db(&self) -> &StateDb {
         &self.db
+    }
+
+    /// LD-0105 W2: the database for a range session's identity recorder, which outlives one call.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn db_arc(&self) -> Arc<StateDb> {
+        self.db.clone()
     }
 
     /// Borrow the API client for the same reason.

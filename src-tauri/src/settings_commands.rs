@@ -348,6 +348,12 @@ pub(super) struct TrayActivityItem {
     pub(super) ok: Option<bool>,
     pub(super) active: Option<bool>,
     pub(super) progress: Option<u8>,
+    /// LD-0105 Amendment 4: why the row needs the person (`changed_on_this_device`); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) attention: Option<&'static str>,
+    /// The one action the row offers (`discard_and_download_again`); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) action: Option<&'static str>,
 }
 
 pub(super) const TRAY_RECENT_ACTIVITY_LIMIT: usize = 50;
@@ -366,6 +372,29 @@ pub(super) fn entry_basename(path: &str) -> String {
 
 pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayActivityItem> {
     let mut items: Vec<TrayActivityItem> = Vec::new();
+
+    // LD-0105 Amendment 4 first: a failed download whose file changed on this device since. It is kept
+    // as it is (never emptied), and only "Discard and download again" ends the row.
+    if let Ok(rows) = db.poisoned() {
+        for row in rows.into_iter().filter(|r| r.needs_attention) {
+            // Review of #225: a poison whose file row is gone has no exit (the discard answers `missing`
+            // until the next process start clears it): no row, here as on the board.
+            let Some(name) = db.get_file(&row.file_id).ok().flatten().map(|e| entry_basename(&e.path)) else {
+                continue;
+            };
+            items.push(TrayActivityItem {
+                id: row.file_id,
+                name,
+                status: "Couldn't finish downloading".to_string(),
+                icon: "file".to_string(),
+                ok: Some(false),
+                active: None,
+                progress: None,
+                attention: Some(crate::transfer_progress::ATTENTION_CHANGED),
+                action: Some(crate::transfer_progress::ACTION_DISCARD),
+            });
+        }
+    }
 
     // In-flight transfers first (downloading + uploading), newest first.
     for status in [state_db::FileStatus::Downloading, state_db::FileStatus::Uploading] {
@@ -388,6 +417,8 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
                 ok: None,
                 active: Some(true),
                 progress: None,
+                attention: None,
+                action: None,
             });
         }
     }
@@ -408,6 +439,8 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
                 ok: Some(true),
                 active: None,
                 progress: None,
+                attention: None,
+                action: None,
             });
         }
     }
@@ -425,6 +458,8 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
                 ok: Some(true),
                 active: None,
                 progress: None,
+                attention: None,
+                action: None,
             });
         }
     }
@@ -462,6 +497,44 @@ pub(super) fn tray_recent_activity() -> Vec<TrayActivityItem> {
     };
 
     tray_recent_activity_from_db(&db)
+}
+
+/// LD-0105 Amendment 4: "Discard and download again" on a needs-attention row. Empties the file under
+/// the exclusive handle (whatever was written to it), clears the poison, and fetches it again. The
+/// error is a status word: `not_poisoned`, `in_use` (close the file first), `missing`, or a step.
+#[tauri::command]
+pub(super) async fn discard_and_download_again(file_id: String, runtime: State<'_, popover_data::PopoverRuntime>) -> Result<(), String> {
+    // Delta review P2-1: an upload of the person's change is in flight; discarding would throw it away.
+    if runtime.transfers.get(&file_id).is_some_and(|t| t.direction == crate::transfer_progress::Direction::Up) {
+        return Err("uploading".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use crate::windows_cf::poison::DiscardRefused as R;
+        let id = file_id.clone();
+        // The exclusive open and the dehydrate block: off the main thread (review P2).
+        let done = tokio::task::spawn_blocking(move || crate::windows_cf::poison::discard_and_download_again(&file_id))
+            .await
+            .map_err(|_| "failed".to_string())?;
+        if done.is_ok() {
+            // Review P3-6: the row is gone from the kept rows, and no read already running brings it back.
+            let next = crate::transfer_progress::ATTENTION_READS.load(std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut cache) = crate::transfer_progress::ATTENTION_CACHE.lock() {
+                cache.forget(&id, next);
+            }
+        }
+        done.map_err(|e| match e {
+            R::NotPoisoned => "not_poisoned".to_string(),
+            R::InUse => "in_use".to_string(),
+            R::Missing => "missing".to_string(),
+            R::Failed(step) => step.to_string(),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = file_id;
+        Err("not_supported".to_string())
+    }
 }
 
 /// Pause the sync engine at runtime. Sets the shared `sync_paused` flag
@@ -1120,3 +1193,7 @@ pub(super) fn mark_menu_bar_hint_seen() -> Result<(), String> {
         (changed, ())
     })
 }
+
+#[cfg(test)]
+#[path = "settings_attention_tests.rs"]
+mod attention_tests;
