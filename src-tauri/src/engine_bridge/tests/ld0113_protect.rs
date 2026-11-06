@@ -400,14 +400,16 @@ async fn the_queueing_functions_refuse_drive_changes_of_the_tree() {
         result.err().and_then(|error| engine_cause::<DriveChangeRefused>(&error).map(|refused| refused.message.clone()))
     };
     let managed = Some(beebeeb_core::backup::MSG_MANAGED_IN_APP.to_string());
+    // A move into the tree is core's Create on the folder it goes into (v0.2.1): read-only.
+    let read_only = Some(beebeeb_core::backup::MSG_READ_ONLY.to_string());
 
     assert_eq!(refused(bridge.queue_finder_delete(photo, None)), managed, "a trash under Backups/OtherPC");
     assert_eq!(refused(bridge.queue_finder_delete(ROOT_ID, None)).as_deref(), Some(beebeeb_core::backup::MSG_DELETE), "the root");
     assert_eq!(refused(bridge.queue_finder_modify(target(photo, None, "b.jpg"))), managed, "a rename in the tree");
-    assert_eq!(refused(bridge.queue_finder_modify(target(report, Some(other), "report.pdf"))), managed, "a move into the tree");
+    assert_eq!(refused(bridge.queue_finder_modify(target(report, Some(other), "report.pdf"))), read_only, "a move into the tree");
     assert_eq!(
         refused(bridge.queue_local_rename(target(report, Some(other), "report.pdf"), "Backups/OtherPC/report.pdf")),
-        managed,
+        read_only,
         "the Windows re-keying rename into the tree"
     );
     let queued: usize = [ROOT_ID, other, photo, report].iter().map(|id| bridge.db.list_operations_for_file(id).unwrap().len()).sum();

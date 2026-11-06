@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_READ_ONLY, MSG_RENAME, own_backup_refusal};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::core::PCWSTR;
 
@@ -445,7 +445,7 @@ fn move_into_backups_refused() {
     println!("ld0113 move_into: {} cmd_stderr={:?}", qa.fx.diagnostics(), String::from_utf8_lossy(&out.stderr).trim());
     assert!(qa.path("Documents/report.txt").exists(), "the item stays where it was");
     assert!(!qa.path("Backups/OtherPC/report.txt").exists(), "nothing is moved into Backups");
-    qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
+    qa.fx.assert_refused_once(MSG_READ_ONLY); // core v0.2.1: Create on the folder it goes into
 }
 
 /// A move out of Backups is refused; the backup stays put.

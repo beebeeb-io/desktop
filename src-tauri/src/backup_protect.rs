@@ -1,18 +1,23 @@
-//! LD-0113 (spec §6.2, §6.3, Amendment 6): what this device refuses to delete, rename or move in its
-//! drive.
+//! LD-0113 (spec §6.2, §6.3, Amendments 6, 7 and 8): what this device refuses to change in its drive.
 //!
-//! Guus, 2026-11-06 17:49, "Protect the whole tree": in Explorer (and Finder) nothing at or under the
-//! Backups root (the row the server flagged `backups_root`, `files.system_role`) is trashed, deleted,
-//! renamed or moved, and nothing is moved into it from elsewhere in the drive. Backups are managed in
-//! the app; opening and downloading them stay. The rule and its words come from core
-//! (`beebeeb_core::backup::check_drive_mutation`), in this order:
+//! Guus, 2026-11-06 17:49, "Protect the whole tree", and 19:30, "Makes sense, do it" (read-only,
+//! contents included): in Explorer (and Finder) nothing at or under the Backups root (the row the
+//! server flagged `backups_root`, `files.system_role`) is trashed, deleted, renamed, moved or written,
+//! and nothing is moved into it from elsewhere in the drive. Backups are managed in the app; opening and
+//! downloading them stay. The rule and its words come from core
+//! (`beebeeb_core::backup::check_drive_mutation`, on the row's [`BackupPosition`]), in this order:
 //!
-//! - **The root** has its own words (`MSG_DELETE`, `MSG_RENAME`, `MSG_MOVE`).
+//! - **The root** has its own words for a delete, rename or move (`MSG_DELETE`, `MSG_RENAME`,
+//!   `MSG_MOVE`).
 //! - **This device's own backup of a folder it backs up now** (`Backups/<this device>/<Folder>` and
 //!   everything under it, while that folder is on) says where the original is (`own_backup_refusal`):
 //!   a change there would only come back on the next pass, because the original still has the file.
 //! - **Anything else under the root** (another device's backups, this device's folder itself, a folder
-//!   that is turned off) has `MSG_MANAGED_IN_APP`, and so does a move into the tree.
+//!   that is turned off) has `MSG_MANAGED_IN_APP` for a delete, rename or move, and `MSG_READ_ONLY` for
+//!   a content change. A device's manifest (`.device.json`, [`BackupPosition::Manifest`]) has
+//!   `MSG_READ_ONLY` for everything, and no drive or app surface lists it ([`BackupsTree::is_hidden`]).
+//! - **A move into the tree** is core's `Mutation::Create` on the folder it would go into
+//!   ([`protected_destination`]): `MSG_READ_ONLY`.
 //!
 //! [`protected_reason`] and [`protected_destination`] answer from the state DB and the in-memory
 //! [`OwnBackups`] only: no network, no config read, so the Windows delete and rename callbacks can ask
@@ -22,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use beebeeb_core::backup::{Mutation, Protected, check_drive_mutation};
+use beebeeb_core::backup::{BackupPosition, Mutation, Protected, check_drive_mutation, is_hidden_backup_item};
 
 use crate::state_db::StateDb;
 
@@ -121,19 +126,23 @@ pub(crate) fn protected_reasons<const N: usize>(
     rel_path: &str,
     mutations: [Mutation; N],
 ) -> [Option<String>; N] {
-    let Some(below_root) = below_a_root(db, rel_path.trim_matches('/')) else {
+    let tree = BackupsTree::read(db);
+    let Some(below_root) = tree.below_root(rel_path) else {
         return [const { None }; N];
     };
     let own_source = own_active_source(own, below_root);
-    mutations.map(|m| words(check_drive_mutation(below_root.is_empty(), !below_root.is_empty(), own_source.as_deref(), m)))
+    mutations.map(|m| words(check_drive_mutation(position_below(below_root), own_source.as_deref(), m)))
 }
 
 /// Why an item from outside the Backups tree must not be moved to `target_rel` (the state DB path it
-/// would have there); `None` when the target is not in the tree. The item itself is not protected, so
-/// the words are the tree's: core's for an item under the root that is not this device's own backup.
+/// would have there); `None` when the target is not in the tree. It is core's `Create` on the folder the
+/// item would go into (the root itself for `Backups/x`); the item is not a backup, so there are no
+/// own-backup words.
 pub(crate) fn protected_destination(db: &StateDb, target_rel: &str) -> Option<String> {
-    below_a_root(db, target_rel.trim_matches('/'))?;
-    words(check_drive_mutation(false, true, None, Mutation::Move))
+    let tree = BackupsTree::read(db);
+    let below_root = tree.below_root(target_rel)?;
+    let into = below_root.rsplit_once('/').map_or("", |(parent, _)| parent);
+    words(check_drive_mutation(position_below(into), None, Mutation::Create))
 }
 
 /// Why the item at `source_rel` must not be renamed or moved (`mutation`) to `target_rel` (`None`: a
@@ -181,21 +190,70 @@ fn words(rule: Result<(), Protected>) -> Option<String> {
     rule.err().map(|protected| protected.message.into_owned())
 }
 
-/// `rel` below the flagged Backups root it is at or under (`""` for the root itself), or `None` when it
-/// is in no Backups tree or the state DB cannot be read.
-fn below_a_root<'a>(db: &StateDb, rel: &'a str) -> Option<&'a str> {
-    if rel.is_empty() {
-        return None;
+/// The flagged Backups roots, read once for a caller that asks about many items (a listing, a
+/// placeholder pass). A state DB that cannot be read gives an empty tree: nothing is protected or
+/// hidden on an error, and Explorer is never held on one.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BackupsTree {
+    /// Each root's `/`-joined path, without leading or trailing slashes.
+    roots: Vec<String>,
+}
+
+impl BackupsTree {
+    pub(crate) fn read(db: &StateDb) -> Self {
+        match db.backups_roots() {
+            Ok(roots) => Self {
+                roots: roots
+                    .into_iter()
+                    .map(|(_, path)| path.trim_matches('/').to_string())
+                    .filter(|path| !path.is_empty())
+                    .collect(),
+            },
+            Err(error) => {
+                // Zero-knowledge: no path, only that the read failed.
+                tracing::warn!(%error, "backup protection: the Backups root could not be read");
+                Self::default()
+            }
+        }
     }
-    let roots = match db.backups_roots() {
-        Ok(roots) => roots,
-        Err(error) => {
-            // Zero-knowledge: no path, only that the read failed.
-            tracing::warn!(%error, "backup protection: the Backups root could not be read");
+
+    /// `rel` (a state DB path, with or without a leading slash) below the root it is at or under (`""`
+    /// for the root itself), or `None` outside every Backups tree.
+    pub(crate) fn below_root<'a>(&self, rel: &'a str) -> Option<&'a str> {
+        let rel = rel.trim_matches('/');
+        if rel.is_empty() {
             return None;
         }
-    };
-    roots.iter().find_map(|(_, root_path)| strip_segments(rel, root_path.trim_matches('/')))
+        self.roots.iter().find_map(|root| strip_segments(rel, root))
+    }
+
+    /// Core's position of the row at `rel`.
+    pub(crate) fn position(&self, rel: &str) -> BackupPosition {
+        self.below_root(rel).map_or(BackupPosition::Outside, position_below)
+    }
+
+    /// Whether no surface may list the row at `rel`: core's `is_hidden_backup_item` (a device folder's
+    /// manifest, `.device.json`).
+    pub(crate) fn is_hidden(&self, rel: &str) -> bool {
+        self.below_root(rel).is_some_and(|below| {
+            let (depth, name) = depth_and_name(below);
+            is_hidden_backup_item(Some(depth), name)
+        })
+    }
+}
+
+/// How deep `below_root` is under its root (0 for the root itself) and the row's own name.
+fn depth_and_name(below_root: &str) -> (usize, &str) {
+    if below_root.is_empty() {
+        return (0, "");
+    }
+    (below_root.split('/').count(), below_root.rsplit('/').next().unwrap_or(""))
+}
+
+/// Core's position of a row `below_root` (as [`BackupsTree::below_root`] gives it).
+fn position_below(below_root: &str) -> BackupPosition {
+    let (depth, name) = depth_and_name(below_root);
+    BackupPosition::at_depth(Some(depth), name)
 }
 
 /// The original of the item at `below_root` (`GLegion/Pictures/2024/a.jpg`) when it is this device's

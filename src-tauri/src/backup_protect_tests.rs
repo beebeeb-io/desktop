@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::state_db::{FileEntry, FileStatus, ItemKind};
-use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MANIFEST_NAME, MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_READ_ONLY, MSG_RENAME, own_backup_refusal};
 use beebeeb_types::backup::SystemRole;
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000b1";
@@ -57,7 +57,11 @@ fn the_words_are_the_contracts() {
     assert_eq!(MSG_MOVE, "Backups is a system folder and can't be moved.");
     assert_eq!(MSG_RENAME, "Backups is a system folder and can't be renamed.");
     assert_eq!(own_backup_refusal("C:\\x"), "This is a backup of C:\\x. Change the original instead.");
-    assert_eq!(MSG_MANAGED_IN_APP, "Backups are managed in the Beebeeb app. Open Beebeeb to delete or move a backup.");
+    assert_eq!(MSG_MANAGED_IN_APP, "Backups are managed in the Beebeeb app. Open Beebeeb to delete a backup.");
+    assert_eq!(
+        MSG_READ_ONLY,
+        "Backups are read-only: each device writes its own. Change the file on that device, or save a copy outside Backups."
+    );
 }
 
 #[test]
@@ -147,12 +151,13 @@ fn a_turned_off_backup_and_the_device_folder_are_managed_in_the_app() {
     assert_eq!(protected_reason(&db, &off, "Backups", Mutation::Trash).as_deref(), Some(MSG_DELETE));
 }
 
-/// Moving an item from elsewhere in the drive INTO the tree is refused too (Amendment 6).
+/// Moving an item from elsewhere in the drive INTO the tree is refused too (Amendment 6): core's
+/// `Create` on the folder it would go into, whose words are read-only (Amendment 8).
 #[test]
 fn a_move_into_the_tree_is_refused() {
     let (_dir, db) = fixture();
     for target in ["Backups/report.pdf", "Backups/OtherPC/report.pdf", "backups/GLegion/Pictures/a.jpg"] {
-        assert_eq!(protected_destination(&db, target).as_deref(), Some(MSG_MANAGED_IN_APP), "{target}");
+        assert_eq!(protected_destination(&db, target).as_deref(), Some(MSG_READ_ONLY), "{target}");
     }
     for target in ["Documents/report.pdf", "Old/Backups/report.pdf", "BackupsX/report.pdf", "report.pdf", ""] {
         assert_eq!(protected_destination(&db, target), None, "{target}");
@@ -166,8 +171,9 @@ fn a_move_is_refused_into_out_of_and_within_the_tree_only() {
     let own = OwnBackups::default();
     let refusal = |source: &str, target: Option<&str>| move_refusal(&db, &own, source, Mutation::Move, target);
     let managed = Some(MSG_MANAGED_IN_APP.to_string());
-    assert_eq!(refusal("Documents/report.pdf", Some("Backups/OtherPC/report.pdf")), managed, "into the tree");
-    assert_eq!(refusal("Documents/report.pdf", Some("Backups/report.pdf")), managed, "into the root itself");
+    let read_only = Some(MSG_READ_ONLY.to_string());
+    assert_eq!(refusal("Documents/report.pdf", Some("Backups/OtherPC/report.pdf")), read_only, "into the tree");
+    assert_eq!(refusal("Documents/report.pdf", Some("Backups/report.pdf")), read_only, "into the root itself");
     assert_eq!(refusal("Backups/OtherPC/a.txt", Some("Documents/a.txt")), managed, "out of the tree");
     assert_eq!(refusal("Backups/OtherPC/a.txt", Some("Backups/GLegion/a.txt")), managed, "within the tree");
     assert_eq!(refusal("Backups/OtherPC/a.txt", None), managed, "to the Recycle Bin, or an unread target");
@@ -175,6 +181,50 @@ fn a_move_is_refused_into_out_of_and_within_the_tree_only() {
     assert_eq!(refusal("Documents/report.pdf", Some("Old/Backups/report.pdf")), None, "a look-alike is ordinary");
     assert_eq!(refusal("Documents/report.pdf", Some("Documents/Sub/report.pdf")), None, "outside the tree");
     assert_eq!(refusal("Documents/report.pdf", None), None, "an ordinary item to the Recycle Bin");
+}
+
+/// Core v0.2.1's positions (spec Amendment 8): the depth below the flagged root and the name decide
+/// them, and a content change or a new item anywhere in the tree is read-only (Amendment 7). A
+/// device's manifest is refused everything, with the read-only words, and is hidden from every list.
+#[test]
+fn positions_follow_the_depth_below_the_root() {
+    let (_dir, db) = fixture();
+    let tree = BackupsTree::read(&db);
+    let manifest = format!("Backups/OtherPC/{MANIFEST_NAME}");
+    for (path, position) in [
+        ("Backups", BackupPosition::Root),
+        ("/Backups/", BackupPosition::Root),
+        ("Backups/OtherPC", BackupPosition::DeviceFolder),
+        (manifest.as_str(), BackupPosition::Manifest),
+        ("Backups/OtherPC/Pictures", BackupPosition::CategoryFolder),
+        ("Backups/OtherPC/Pictures/a.jpg", BackupPosition::Inside),
+        ("Backups/OtherPC/Pictures/2024/.device.json", BackupPosition::Inside),
+        ("Old/Backups/OtherPC", BackupPosition::Outside),
+        ("Documents", BackupPosition::Outside),
+    ] {
+        assert_eq!(tree.position(path), position, "{path}");
+    }
+    assert!(tree.is_hidden(&manifest));
+    assert!(tree.is_hidden(&format!("/{manifest}")), "the leading-slash form");
+    for path in ["Backups/OtherPC/Pictures/2024/.device.json", "Documents/OtherPC/.device.json", "Backups/.device.json", "Backups/OtherPC"] {
+        assert!(!tree.is_hidden(path), "{path}");
+    }
+    let own = pictures_on();
+    for m in Mutation::ALL {
+        assert_eq!(protected_reason(&db, &own, &manifest, m).as_deref(), Some(MSG_READ_ONLY), "the manifest, {m:?}");
+    }
+    for path in ["Backups/OtherPC", "Backups/OtherPC/Pictures", "Backups/OtherPC/Pictures/a.jpg"] {
+        for m in [Mutation::Create, Mutation::Write] {
+            assert_eq!(protected_reason(&db, &own, path, m).as_deref(), Some(MSG_READ_ONLY), "{path} {m:?}");
+        }
+    }
+    assert_eq!(protected_reason(&db, &own, "Backups", Mutation::Create).as_deref(), Some(MSG_READ_ONLY), "a new item in the root");
+    // This device's own active backup keeps naming its original, whatever the change.
+    let words = Some(own_backup_refusal(&source("Pictures").join("a.jpg").to_string_lossy()));
+    assert_eq!(protected_reason(&db, &own, "Backups/GLegion/Pictures/a.jpg", Mutation::Write), words);
+    for m in [Mutation::Create, Mutation::Write] {
+        assert_eq!(protected_reason(&db, &own, "Documents/a.txt", m), None, "outside, {m:?}");
+    }
 }
 
 /// Review #3 and #4: rows stored with a leading slash (`/Backups/…`, as `untrash_subtree` allows) are in
