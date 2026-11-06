@@ -112,6 +112,9 @@ impl EngineBridge {
 
     /// Report transfer progress to `board` (task 1683 slice 2).
     pub fn with_transfers(mut self, board: Arc<crate::transfer_progress::TransferBoard>) -> Self {
+        // LD-0105 U1: a new engine (a sign-in, an unlock, an account switch) never shows the failed
+        // rows, with their file names, that an earlier engine left on the shared board.
+        board.forget_failed();
         self.transfers = board;
         self
     }

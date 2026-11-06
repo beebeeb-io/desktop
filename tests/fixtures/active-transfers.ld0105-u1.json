@@ -1,0 +1,83 @@
+{
+  "desktop_recent_files": [
+    {
+      "modified_at": 0,
+      "path": "Documents/notes-draft.txt",
+      "pinned": false,
+      "size_bytes": 48000,
+      "status": "uploading"
+    },
+    {
+      "modified_at": 0,
+      "path": "Music/concert-live.flac",
+      "pinned": false,
+      "size_bytes": 437000000,
+      "status": "downloading"
+    },
+    {
+      "modified_at": 0,
+      "path": "Videos/holiday-2026.mp4",
+      "pinned": false,
+      "size_bytes": 349000000,
+      "status": "downloading"
+    },
+    {
+      "modified_at": 0,
+      "path": "Videos/lecture-03.mp4",
+      "pinned": false,
+      "size_bytes": 212000000,
+      "status": "error"
+    }
+  ],
+  "get_active_transfers": [
+    {
+      "buffered": 0,
+      "direction": "down",
+      "done": 118200000,
+      "failed": false,
+      "failedAtSecs": null,
+      "fileId": "a1050000-0000-4000-8000-000000000001",
+      "folder": "Videos",
+      "name": "holiday-2026.mp4",
+      "speedBps": 9600000,
+      "total": 349000000
+    },
+    {
+      "buffered": 0,
+      "direction": "down",
+      "done": 0,
+      "failed": true,
+      "failedAtSecs": 1793955536,
+      "fileId": "a1050000-0000-4000-8000-000000000002",
+      "folder": "Videos",
+      "name": "lecture-03.mp4",
+      "speedBps": 0,
+      "total": 212000000
+    },
+    {
+      "buffered": 0,
+      "direction": "up",
+      "done": 16384,
+      "failed": false,
+      "failedAtSecs": null,
+      "fileId": "a1050000-0000-4000-8000-000000000003",
+      "folder": "Documents",
+      "name": "notes-draft.txt",
+      "speedBps": 0,
+      "total": 48000
+    },
+    {
+      "buffered": 0,
+      "direction": "down",
+      "done": 0,
+      "failed": false,
+      "failedAtSecs": null,
+      "fileId": "a1050000-0000-4000-8000-000000000004",
+      "folder": "Music",
+      "name": "concert-live.flac",
+      "speedBps": 0,
+      "total": 437000000
+    }
+  ],
+  "source": "src-tauri/src/engine_bridge/tests/ld0105_u1_rows.rs ld0105_u1_the_ipc_rows_are_the_shared_fixture: the commands' own JSON"
+}

@@ -57,8 +57,27 @@ export interface ActiveTransferRowLike {
   action?: 'discard_and_download_again' | null
 }
 
-/** Classify a transfer into one of the UI states. `needs_attention` takes priority over `failed`. */
-export function transferUiState(row: ActiveTransferRowLike): TransferUiState {
+/** A board row the download surfaces show: a download or a stream. */
+export type DownloadRowLike = ActiveTransferRowLike & { direction: 'down' | 'stream' }
+
+/**
+ * Whether a board row belongs on the download surfaces (the tray's Recent line, the "In progress" card,
+ * "Files arriving on this PC."). The U0 design (LD-0105) gives an upload no state there, so an upload
+ * is never one: on desktop #226 an upload read "Downloading · N% … waits for the whole file".
+ */
+export function isDownloadRow<T extends ActiveTransferRowLike>(row: T): row is T & { direction: 'down' | 'stream' } {
+  return row.direction !== 'up'
+}
+
+/**
+ * Classify a transfer into one of the UI states; `null` for an upload, which has no state on these
+ * surfaces (`isDownloadRow`). `needs_attention` takes priority over `failed`.
+ */
+export function transferUiState(row: ActiveTransferRowLike): TransferUiState | null {
+  return isDownloadRow(row) ? downloadState(row) : null
+}
+
+function downloadState(row: DownloadRowLike): TransferUiState {
   if (row.attention === 'changed_on_this_device') return 'needs_attention'
   if (row.failed) return 'failed'
   if (row.direction === 'stream') {
@@ -76,8 +95,8 @@ export function transferUiState(row: ActiveTransferRowLike): TransferUiState {
  * The one-line sub-label shown beneath the filename in the tray's Recent list.
  * "Couldn't finish downloading" for failed; never includes "complete".
  */
-export function traySubline(row: ActiveTransferRowLike): string {
-  const state = transferUiState(row)
+export function traySubline(row: DownloadRowLike): string {
+  const state = downloadState(row)
   // "needs attention" uses the same short tray line as failed — the detail goes in Activity/tooltip.
   if (state === 'needs_attention') return TRAY_SUBLINE.failed
   if (state === 'failed') return TRAY_SUBLINE.failed
@@ -87,9 +106,9 @@ export function traySubline(row: ActiveTransferRowLike): string {
     const pct = formatPercent(row.buffered, row.total)
     return TRAY_SUBLINE.streaming(pct, speed)
   }
-  // downloading
+  // downloading: no speed segment while no byte arrived in the window (LD-0105 U1, lead 2026-11-06)
   const pct = formatPercent(row.done, row.total)
-  return TRAY_SUBLINE.downloading(pct, speed)
+  return TRAY_SUBLINE.downloading(pct, row.speedBps > 0 ? speed : null)
 }
 
 // ── Activity detail ───────────────────────────────────────────────────────────
@@ -98,8 +117,8 @@ export function traySubline(row: ActiveTransferRowLike): string {
  * The longer sentence shown in Activity › Timeline and in the tray tooltip.
  * Failed state never says "complete".
  */
-export function activityDetail(row: ActiveTransferRowLike): string {
-  const state = transferUiState(row)
+export function activityDetail(row: DownloadRowLike): string {
+  const state = downloadState(row)
   if (state === 'needs_attention') return NEEDS_ATTENTION_DETAIL
   if (state === 'failed') return ACTIVITY_DETAIL.failed
   const speed = formatSpeed(row.speedBps)
@@ -109,7 +128,7 @@ export function activityDetail(row: ActiveTransferRowLike): string {
     return ACTIVITY_DETAIL.streaming(pct, speed)
   }
   const pct = formatPercent(row.done, row.total)
-  return ACTIVITY_DETAIL.downloading(pct, speed)
+  return ACTIVITY_DETAIL.downloading(pct, row.speedBps > 0 ? speed : null)
 }
 
 // ── Progress bar fraction ─────────────────────────────────────────────────────
@@ -144,7 +163,7 @@ export function progressFraction(row: ActiveTransferRowLike): number | null {
  */
 export function trayHeaderOverride(rows: ActiveTransferRowLike[]): string | null {
   const count = rows.filter(
-    (r) => r.failed || r.attention === 'changed_on_this_device',
+    (r) => isDownloadRow(r) && (r.failed || r.attention === 'changed_on_this_device'),
   ).length
   if (count === 0) return null
   return count === 1
@@ -154,16 +173,17 @@ export function trayHeaderOverride(rows: ActiveTransferRowLike[]): string | null
 
 // ── Transfer lookup map ───────────────────────────────────────────────────────
 
-/** Build a lookup map keyed on the full relative vault path (`"folder/name"` or just
- *  `"name"` at the root) so two files with the same display name in different folders
- *  (`Photos/2024/IMG_0001.jpg` vs `Photos/2025/IMG_0001.jpg`) each get the right row.
+/** Build a lookup map of the download rows (`isDownloadRow`: an upload's tray line stays its own)
+ *  keyed on the full relative vault path (`"folder/name"` or just `"name"` at the root) so two files
+ *  with the same display name in different folders (`Photos/2024/IMG_0001.jpg` vs
+ *  `Photos/2025/IMG_0001.jpg`) each get the right row.
  *
  *  P1 fix (LD-0105 U1 review 2026-11-06): the previous `Map(transfers.map(r => [r.name, r]))`
  *  keyed on name alone and would silently return the wrong transfer for the second file. */
-export function buildTransferMap<T extends { name: string; folder: string }>(
+export function buildTransferMap<T extends ActiveTransferRowLike & { name: string; folder: string }>(
   transfers: T[],
-): Map<string, T> {
-  return new Map(transfers.map((r) => [(r.folder ? r.folder + '/' : '') + r.name, r]))
+): Map<string, T & { direction: 'down' | 'stream' }> {
+  return new Map(transfers.filter(isDownloadRow).map((r) => [(r.folder ? r.folder + '/' : '') + r.name, r]))
 }
 
 // ── "In progress" card visibility ────────────────────────────────────────────
@@ -172,19 +192,27 @@ export function buildTransferMap<T extends { name: string; folder: string }>(
 const FAILED_ROW_TTL_MS = 15 * 60 * 1_000
 
 /**
- * Whether the "In progress" card should be shown. `nowMs` defaults to `Date.now()`.
- * Visible when any transfer is active or needs attention, or when a failed transfer
- * happened within the last 15 minutes.
+ * The rows the "In progress" card lists ("Files arriving on this PC."), in board order. `nowMs`
+ * defaults to `Date.now()`. Only download rows (`isDownloadRow`; never an upload): each one active
+ * or needing attention, or failed within the last 15 minutes.
  */
-export function shouldShowInProgressCard(
-  rows: ActiveTransferRowLike[],
+export function inProgressCardRows<T extends ActiveTransferRowLike>(
+  rows: T[],
   nowMs = Date.now(),
-): boolean {
-  return rows.some((r) => {
+): Array<T & { direction: 'down' | 'stream' }> {
+  return rows.filter(isDownloadRow).filter((r) => {
     // "needs attention" rows are always shown until the user acts (action dismisses them).
     if (r.attention === 'changed_on_this_device') return true
     if (!r.failed) return true
     if (r.failedAtSecs == null) return true
     return nowMs - r.failedAtSecs * 1_000 < FAILED_ROW_TTL_MS
   })
+}
+
+/** Whether the "In progress" card is shown: it lists at least one row (`inProgressCardRows`). */
+export function shouldShowInProgressCard(
+  rows: ActiveTransferRowLike[],
+  nowMs = Date.now(),
+): boolean {
+  return inProgressCardRows(rows, nowMs).length > 0
 }

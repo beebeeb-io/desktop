@@ -8,7 +8,8 @@
 
 /** The tray's one-line sub-label for each transfer state. */
 export const TRAY_SUBLINE = {
-  downloading: (pct: string, speed: string) => `Downloading · ${pct} · ${speed}`,
+  /** `speed` null: no byte arrived in the speed window, so no speed is shown (never "0 B/s"). */
+  downloading: (pct: string, speed: string | null) => (speed ? `Downloading · ${pct} · ${speed}` : `Downloading · ${pct}`),
   streaming: (pct: string, speed: string) => `Streaming · ${pct} buffered · ${speed}`,
   /** Buffering: speed known, no meaningful percent yet (total unknown or zero). */
   buffering: (speed: string) => `Buffering · ${speed}`,
@@ -21,8 +22,8 @@ export const TRAY_SUBLINE = {
  * Each sentence ends with a period.
  */
 export const ACTIVITY_DETAIL = {
-  downloading: (pct: string, speed: string) =>
-    `Downloading · ${pct} · ${speed} · the program that opened it waits for the whole file`,
+  downloading: (pct: string, speed: string | null) =>
+    `Downloading · ${pct}${speed ? ` · ${speed}` : ''} · the program that opened it waits for the whole file`,
   streaming: (pct: string, speed: string) =>
     `Streaming · ${pct} buffered · ${speed} · playing while it arrives`,
   buffering: (speed: string) =>

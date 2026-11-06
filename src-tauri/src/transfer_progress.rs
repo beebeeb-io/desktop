@@ -51,11 +51,11 @@ impl SpeedWindow {
         Self { samples: VecDeque::new() }
     }
 
-    /// Push a new sample and return the current speed in bytes/s.
-    fn push(&mut self, now: Instant, cumulative_bytes: u64) -> u64 {
+    /// Push a new sample and return the current speed in bytes/s over the last `span`.
+    fn push(&mut self, now: Instant, cumulative_bytes: u64, span: Duration) -> u64 {
         self.samples.push_back((now, cumulative_bytes));
-        // Drop samples older than 2 seconds
-        let cutoff = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+        // Drop samples older than `span`
+        let cutoff = now.checked_sub(span).unwrap_or(now);
         while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
             self.samples.pop_front();
         }
@@ -69,6 +69,36 @@ impl SpeedWindow {
             return 0;
         }
         (newest_b.saturating_sub(oldest_b) as f64 / elapsed_secs) as u64
+    }
+}
+
+/// The streaming row's speed: a 2-second moving window (U0 design).
+const STREAM_SPEED_SPAN: Duration = Duration::from_secs(2);
+
+/// A whole-file download's speed: the bytes that arrived over the last 10 seconds (LD-0105 U1, lead
+/// decision 2026-11-06 09:53; a deviation from the U0 design's 2 s window). Under a download limit the
+/// direct route holds new requests back (`direct_download::paced_until_ms`), so bytes arrive in
+/// bursts 3 to 5 s apart: a 2 s window was empty in 13 of 21 native samples and read "0 B/s".
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const DOWNLOAD_SPEED_SPAN: Duration = Duration::from_secs(10);
+
+/// One fetch's speed over its own [`ReceiveMeter::received`] (every body byte read, a retried
+/// attempt's included: the wire's real rate), sampled by [`FetchRow::follow`] over
+/// [`DOWNLOAD_SPEED_SPAN`]; `0` when no byte arrived in that span (the UI then shows no speed).
+#[derive(Debug)]
+pub(crate) struct FetchSpeed {
+    window: SpeedWindow,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl FetchSpeed {
+    pub(crate) fn new() -> Self {
+        FetchSpeed { window: SpeedWindow::new() }
+    }
+
+    /// `meter` read at `now`: the speed in bytes/s of its received bytes.
+    pub(crate) fn sample(&mut self, now: Instant, meter: &ReceiveMeter) -> u64 {
+        self.window.push(now, meter.received(), DOWNLOAD_SPEED_SPAN)
     }
 }
 
@@ -360,8 +390,56 @@ struct Inner {
     /// Per-file speed windows; kept here (not in `Transfer`) so `Transfer` stays `Copy`.
     /// Pruned on `Drop` for all exits (the window is not used after the transfer ends).
     speeds: HashMap<String, SpeedWindow>,
+    /// How many guards hold each active row (LD-0105 U1): a download of a file already downloading
+    /// joins its row ([`TransferBoard::begin_download`]), and the row ends with the last guard.
+    holders: HashMap<String, u32>,
+    /// Active rows a holder finished ([`TransferGuard::finish`]): the file was delivered, so the row
+    /// ends as a success whoever ends it, and its bytes are counted once, when it ends.
+    delivered: std::collections::HashSet<String>,
     /// Plaintext bytes of files that completed since the batch last went quiet.
     finished_bytes: u64,
+}
+
+impl Inner {
+    /// Register `file_id`'s row. A new attempt ends the file's earlier failed row (one row per file).
+    /// `join`: a download row already active (never an upload's) is kept as it is (its progress, its
+    /// name) and gains a holder; otherwise the row starts over, as [`TransferBoard::begin`] always did,
+    /// and the guards of the row it replaces still count, so the row ends with the last guard.
+    fn start(&mut self, file_id: &str, path: Option<&str>, direction: Direction, total: u64, join: bool) {
+        self.recently_failed.remove(file_id);
+        let held = if self.active.contains_key(file_id) { self.holders.get(file_id).copied().unwrap_or(0) } else { 0 };
+        self.holders.insert(file_id.to_string(), held + 1);
+        if join && let Some(t) = self.active.get_mut(file_id).filter(|t| t.direction != Direction::Up) {
+            // A failure marked just before this download joined is not this download's outcome.
+            t.failed = false;
+            t.failed_at_secs = None;
+            if t.total == 0 {
+                t.total = total;
+            }
+            if let Some(path) = path {
+                self.paths.entry(file_id.to_string()).or_insert_with(|| path.to_string());
+            }
+            return;
+        }
+        self.active.insert(file_id.to_string(), Transfer { direction, total, ..Transfer::default() });
+        self.delivered.remove(file_id);
+        if let Some(path) = path {
+            self.paths.insert(file_id.to_string(), path.to_string());
+        }
+    }
+
+    /// Whether no other guard holds `file_id`'s row: the one ending it decides how it ends.
+    fn last_holder(&self, file_id: &str) -> bool {
+        self.holders.get(file_id).is_none_or(|n| *n <= 1)
+    }
+
+    fn mark_failed(&mut self, file_id: &str) {
+        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        if let Some(t) = self.active.get_mut(file_id) {
+            t.failed = true;
+            t.failed_at_secs = Some(now_secs);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -376,11 +454,25 @@ impl TransferBoard {
 
     /// Register a transfer. `total` is the plaintext size; progress starts at 0.
     pub fn begin(self: &Arc<Self>, file_id: &str, direction: Direction, total: u64) -> TransferGuard {
+        self.guard(file_id, None, direction, total, false)
+    }
+
+    /// Like [`Self::begin`] but also records the vault `path` (the `files` row's, the path the tray's
+    /// recent rows carry) so the IPC DTO can expose a display name and parent folder.
+    pub fn begin_named(self: &Arc<Self>, file_id: &str, path: &str, direction: Direction, total: u64) -> TransferGuard {
+        self.guard(file_id, Some(path), direction, total, false)
+    }
+
+    /// LD-0105 U1: a download of `file_id`, named by its vault `path` as [`Self::begin_named`]. A
+    /// download of the file already on the board is joined, never started over: still one row, its
+    /// progress kept, and the row ends with the last download that holds it.
+    pub fn begin_download(self: &Arc<Self>, file_id: &str, path: &str, total: u64) -> TransferGuard {
+        self.guard(file_id, Some(path), Direction::Down, total, true)
+    }
+
+    fn guard(self: &Arc<Self>, file_id: &str, path: Option<&str>, direction: Direction, total: u64, join: bool) -> TransferGuard {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.active.insert(
-                file_id.to_string(),
-                Transfer { direction, total, ..Transfer::default() },
-            );
+            inner.start(file_id, path, direction, total, join);
         }
         TransferGuard {
             board: self.clone(),
@@ -388,19 +480,16 @@ impl TransferBoard {
         }
     }
 
-    /// Like [`Self::begin`] but also records the vault `path` so the IPC DTO can
-    /// expose a display name and parent folder. W2 uses this for streaming opens.
-    pub fn begin_named(self: &Arc<Self>, file_id: &str, path: &str, direction: Direction, total: u64) -> TransferGuard {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.active.insert(
-                file_id.to_string(),
-                Transfer { direction, total, ..Transfer::default() },
-            );
-            inner.paths.insert(file_id.to_string(), path.to_string());
-        }
-        TransferGuard {
-            board: self.clone(),
-            file_id: file_id.to_string(),
+    /// LD-0105 U1: a download's kept body bytes ([`ReceiveMeter::kept`], counted per read, a failed
+    /// attempt's taken back) are its progress, never backwards and never past the total; `speed_bps`
+    /// is its fetch's [`FetchSpeed`]. A no-op for a file that is not registered.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn received_at(&self, file_id: &str, kept: u64, speed_bps: u64) {
+        if let Ok(mut inner) = self.inner.lock()
+            && let Some(t) = inner.active.get_mut(file_id)
+        {
+            t.done = kept.min(t.total).max(t.done);
+            t.speed_bps = speed_bps;
         }
     }
 
@@ -412,7 +501,7 @@ impl TransferBoard {
             let speed = inner.speeds
                 .entry(file_id.to_string())
                 .or_insert_with(SpeedWindow::new)
-                .push(now, buffered);
+                .push(now, buffered, STREAM_SPEED_SPAN);
             if let Some(t) = inner.active.get_mut(file_id) {
                 t.buffered = buffered;
                 t.speed_bps = speed;
@@ -428,15 +517,8 @@ impl TransferBoard {
     /// Note: failed transfers are still removed from `active` on `Drop` — the UI
     /// must hold onto the DTO it last received if it wants to show the error row.
     pub fn mark_failed(&self, file_id: &str) {
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         if let Ok(mut inner) = self.inner.lock() {
-            if let Some(t) = inner.active.get_mut(file_id) {
-                t.failed = true;
-                t.failed_at_secs = Some(now_secs);
-            }
+            inner.mark_failed(file_id);
         }
     }
 
@@ -490,6 +572,18 @@ impl TransferBoard {
                 }
             }).collect()
         }).unwrap_or_default()
+    }
+
+    /// A new engine starts on this board (`EngineBridge::with_transfers`): the failed rows an earlier
+    /// engine left, and their names, go (LD-0105 U1: never another session's file names).
+    pub fn forget_failed(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let inner = &mut *guard;
+            for id in inner.recently_failed.keys() {
+                inner.paths.remove(id);
+            }
+            inner.recently_failed.clear();
+        }
     }
 
     /// [`Self::snapshot_dtos`] merged with state.db's needs-attention rows ([`needs_attention`],
@@ -576,12 +670,24 @@ impl TransferGuard {
         }
     }
 
-    /// The transfer succeeded: its bytes join the batch's finished total.
+    /// The transfer succeeded: its bytes join the batch's finished total when the row ends (at once,
+    /// unless other downloads of the file still hold it); the row then ends as a success.
     pub fn finish(self) {
         if let Ok(mut inner) = self.board.inner.lock()
-            && let Some(t) = inner.active.get(&self.file_id).copied()
+            && inner.active.contains_key(&self.file_id)
         {
-            inner.finished_bytes = inner.finished_bytes.saturating_add(t.total);
+            inner.delivered.insert(self.file_id.clone());
+        }
+    }
+
+    /// The transfer did not finish (LD-0105 U1): its row is marked failed ([`TransferBoard::mark_failed`])
+    /// and kept for [`FAILED_ROW_TTL_SECS`], unless another download of the file still holds it (it
+    /// decides how the row ends). A row a holder delivered ends as a success all the same (`Drop`).
+    pub fn fail(self) {
+        if let Ok(mut inner) = self.board.inner.lock()
+            && inner.last_holder(&self.file_id)
+        {
+            inner.mark_failed(&self.file_id);
         }
     }
 }
@@ -589,8 +695,21 @@ impl TransferGuard {
 impl Drop for TransferGuard {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.board.inner.lock() {
+            let held = inner.holders.get_mut(&self.file_id).map(|n| {
+                *n = n.saturating_sub(1);
+                *n
+            });
+            if held.is_some_and(|n| n > 0) {
+                // Another download still holds the row (LD-0105 U1).
+                return;
+            }
+            inner.holders.remove(&self.file_id);
+            let delivered = inner.delivered.remove(&self.file_id);
             if let Some(t) = inner.active.remove(&self.file_id) {
-                if t.failed {
+                if delivered {
+                    inner.finished_bytes = inner.finished_bytes.saturating_add(t.total);
+                    inner.paths.remove(&self.file_id);
+                } else if t.failed {
                     // Keep the entry visible in snapshot_dtos for up to FAILED_ROW_TTL_SECS.
                     // The path is retained so the DTO can resolve name and folder.
                     inner.recently_failed.insert(self.file_id.clone(), t);
@@ -601,6 +720,74 @@ impl Drop for TransferGuard {
             }
             // Speed window is never needed after the transfer ends (regardless of outcome).
             inner.speeds.remove(&self.file_id);
+        }
+    }
+}
+
+/// How often [`FetchRow::follow`] reads its fetch's meter.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const FOLLOW_EVERY: Duration = Duration::from_secs(1);
+
+/// LD-0105 U1: one Windows Cloud Files whole-file fetch on the board, the "Downloading" row of the
+/// U0 design (`EngineBridge::whole_fetch_row` starts it). It follows the fetch's [`ReceiveMeter`]
+/// ([`Self::follow`]) and ends with [`Self::finished`]; dropped without it, the fetch did not finish
+/// and the row says so ([`TransferGuard::fail`]), unless the engine was stopping (a lock, a sign-out,
+/// an account switch, a quit): that ends the row with no failure, never another session's to see. No
+/// row (the file has no `files` row to name it by): every call is a no-op.
+pub struct FetchRow {
+    guard: Option<TransferGuard>,
+    stopping: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl FetchRow {
+    pub fn new(guard: TransferGuard) -> Self {
+        FetchRow { guard: Some(guard), stopping: None }
+    }
+
+    pub fn none() -> Self {
+        FetchRow { guard: None, stopping: None }
+    }
+
+    /// The engine's stop flag (`EngineBridge::is_stopping`): a fetch cut off by a stop is not failed.
+    pub fn stopped_by(mut self, stopping: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
+        self
+    }
+
+    /// Report `meter` to the row every [`FOLLOW_EVERY`] until the future is dropped (the caller
+    /// selects it against the fetch, so it ends with the fetch): its kept bytes as the progress, and
+    /// the speed of its received bytes ([`FetchSpeed`]).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub async fn follow(&self, meter: &ReceiveMeter) -> std::convert::Infallible {
+        let Some(guard) = &self.guard else {
+            return std::future::pending().await;
+        };
+        let mut tick = tokio::time::interval(FOLLOW_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut speed = FetchSpeed::new();
+        loop {
+            tick.tick().await;
+            let bps = speed.sample(tokio::time::Instant::now().into_std(), meter);
+            guard.board.received_at(&guard.file_id, meter.kept(), bps);
+        }
+    }
+
+    /// The fetch delivered the whole file: the row ends ([`TransferGuard::finish`]).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn finished(mut self) {
+        if let Some(guard) = self.guard.take() {
+            guard.finish();
+        }
+    }
+}
+
+impl Drop for FetchRow {
+    fn drop(&mut self) {
+        let stopped = self.stopping.as_ref().is_some_and(|s| s.load(Ordering::SeqCst));
+        if let Some(guard) = self.guard.take()
+            && !stopped
+        {
+            guard.fail();
         }
     }
 }
@@ -917,5 +1104,188 @@ mod tests {
             assert!(!inner.recently_failed.contains_key("fx"), "expired entry pruned from recently_failed");
             assert!(!inner.paths.contains_key("fx"), "path pruned alongside expired recently_failed entry");
         }
+    }
+
+    // --- LD-0105 U1 board wiring: begin_download, received_at, FetchSpeed, FetchRow ---
+
+    /// Brief U1.1: a second fetch of a file while one runs joins its row: no second row, progress
+    /// not back to 0, and the row ends with the last fetch, by that fetch's outcome. Red on the
+    /// mutant "`begin_download` starts the row over" (done 0 after the join, the row gone early).
+    #[test]
+    fn ld0105_u1_a_second_fetch_of_a_file_joins_its_row() {
+        let board = TransferBoard::new();
+        let first = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        board.received_at("f", 60, 0);
+        let second = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        let rows = board.snapshot_dtos();
+        assert_eq!(rows.len(), 1, "one row: {rows:?}");
+        assert_eq!((rows[0].done, rows[0].name.as_str()), (60, "clip.mp4"), "progress kept, never back to 0");
+        drop(first); // the first fetch failed while the second runs on
+        let rows = board.snapshot_dtos();
+        assert_eq!(rows.len(), 1, "the second fetch still holds the row");
+        assert!(!rows[0].failed, "the second fetch, still running, decides how the row ends");
+        board.received_at("f", 100, 0);
+        second.finished();
+        assert!(board.snapshot_dtos().is_empty(), "the last fetch delivered the file: no row left");
+        assert_eq!(board.finished_bytes(), 100, "counted once");
+    }
+
+    /// Brief U1.1: the row's progress is the meter's kept b    /// Brief U1.1: the row's progress is the meter's kept bytes, never backwards (a failed attempt's
+    /// bytes are taken back from the meter) and never past the total; the speed is the caller's.
+    #[test]
+    fn ld0105_u1_kept_bytes_are_the_progress_never_backwards_never_past_the_total() {
+        let board = TransferBoard::new();
+        let _row = board.begin_download("f", "a.bin", 10_000);
+        board.received_at("f", 4_000, 1_500);
+        let t = board.get("f").unwrap();
+        assert_eq!((t.done, t.speed_bps), (4_000, 1_500));
+        board.received_at("f", 3_000, 1_500);
+        assert_eq!(board.get("f").unwrap().done, 4_000, "a rolled-back attempt never moves the row backwards");
+        board.received_at("f", 10_028, 1_500);
+        assert_eq!(board.get("f").unwrap().done, 10_000, "wire bytes (28-byte tags) never pass the total");
+        board.received_at("not-registered", 5, 1);
+        assert_eq!(board.get("not-registered"), None);
+    }
+
+    /// The release lane's native 1 s samples of `done` during a 300 MB whole-file download at
+    /// 1e963bc (Windows, direct route, `download_kbps_limit` 12,500 KB/s, streaming OFF): the bytes
+    /// arrive in bursts while the pacer holds the next requests back. Kept = received on that run (no
+    /// discarded body), and these are per read: 118,159,856 is no multiple of 16 MiB.
+    const NATIVE_1E963BC: [u64; 23] = [
+        0, 33_554_432, 67_108_976, 67_108_976, 67_108_976, 67_108_976, 118_159_856, 134_217_952, 134_217_952,
+        134_217_952, 134_217_952, 170_967_324, 201_326_928, 201_326_928, 201_326_928, 201_326_928, 240_506_312,
+        267_741_438, 268_435_904, 268_435_904, 268_435_904, 268_435_904, 300_000_000,
+    ];
+
+    /// Lead decision 2026-11-06 09:53 (native: 13 of 21 mid-download samples read "0 B/s", the rest
+    /// 0.7 to 51.0 MB/s, at a real ≈12.3 MB/s): replayed second by second, the speed is non-zero at
+    /// every sample from the first byte to the last, and once its window is full it stays within a
+    /// third of the download's real average (the tail's bursts are smaller: 9.7 MB/s at 13.6). Red
+    /// on the mutant "2 s window" (kept = received on this trace, so the next test covers that one).
+    #[test]
+    fn ld0105_u1_the_native_bursts_read_as_a_steady_non_zero_speed() {
+        let t0 = Instant::now();
+        let meter = ReceiveMeter::default();
+        let mut speed = FetchSpeed::new();
+        let average = 300_000_000 / 22; // bytes per second, first byte to last
+        let mut seen = Vec::new();
+        for (s, received) in NATIVE_1E963BC.iter().enumerate() {
+            meter.add(received - meter.received());
+            let bps = speed.sample(t0 + Duration::from_secs(s as u64), &meter);
+            seen.push(bps / 100_000);
+            if s >= 1 {
+                assert!(bps > 0, "second {s}: a byte arrived in the window, so a speed shows");
+            }
+            if s >= 10 {
+                assert!(bps.abs_diff(average) * 3 <= average, "second {s}: {bps} B/s is within a third of {average}");
+            }
+        }
+        println!("ld0105-u1 native replay, 0.1 MB/s per second: {seen:?}");
+    }
+
+    /// Lead decision 2026-11-06 09:53: a fetch fed per-read bytes in chunk-sized bursts (16 MiB in
+    /// 64 KiB reads, then 4 s of nothing), with an attempt that fails and is taken back from the kept
+    /// progress, still reads a non-zero speed in every window after the first byte: the speed is the
+    /// meter's received bytes, the wire's real rate. Red on the mutant "speed of the kept progress".
+    #[test]
+    fn ld0105_u1_per_read_bursts_and_a_retry_keep_a_non_zero_speed() {
+        const CHUNK: u64 = 16 << 20;
+        let meter = ReceiveMeter::default();
+        let t0 = Instant::now();
+        let mut speed = FetchSpeed::new();
+        let mut seen = Vec::new();
+        for s in 0..30u64 {
+            if s % 5 == 1 {
+                let mark = meter.kept();
+                for _ in 0..(CHUNK / 65_536) {
+                    meter.add(65_536);
+                }
+                if s == 11 {
+                    meter.rollback_to(mark); // that body did not authenticate: fetched again
+                }
+            }
+            let bps = speed.sample(t0 + Duration::from_secs(s), &meter);
+            seen.push(bps);
+            if s >= 1 {
+                assert!(bps > 0, "second {s}: a speed shows");
+            }
+        }
+        let steady = &seen[10..];
+        let (low, high) = (steady.iter().min().unwrap(), steady.iter().max().unwrap());
+        assert!(high - low <= high / 4, "steady once the window is full: {steady:?}");
+    }
+
+    /// Brief U1.1: a fetch row dropped without `finished()` is a failed row, named, kept for the TTL;
+    /// one that finished is gone. A fetch with no `files` row puts nothing on the board.
+    #[test]
+    fn ld0105_u1_a_fetch_row_ends_failed_unless_it_finished() {
+        let board = TransferBoard::new();
+        drop(FetchRow::new(board.begin_download("bad", "Videos/lecture-03.mp4", 10)));
+        FetchRow::new(board.begin_download("good", "Videos/ok.mp4", 10)).finished();
+        let rows = board.snapshot_dtos();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].file_id.as_str(), rows[0].name.as_str(), rows[0].failed), ("bad", "lecture-03.mp4", true));
+        assert!(rows[0].failed_at_secs.is_some());
+        drop(FetchRow::none());
+        assert_eq!(board.snapshot_dtos().len(), 1, "no row, nothing marked");
+    }
+
+    /// Self-review F1: a start that replaces a row (`begin`, the range session's call) while a fetch
+    /// holds it keeps counting that fetch, so the fetch's failure is not the newer transfer's and its
+    /// drop does not end the newer row. Red on the mutant "a replacing start resets the count to 1".
+    #[test]
+    fn ld0105_u1_a_replacing_start_keeps_counting_the_live_guards() {
+        let board = TransferBoard::new();
+        let fetch = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        let session = board.begin("f", Direction::Down, 100);
+        drop(fetch);
+        let rows = board.snapshot_dtos();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(!rows[0].failed, "the session still runs: the fetch's failure is not its outcome");
+        session.update(50);
+        assert_eq!(board.get("f").unwrap().done, 50, "the session's progress still lands on its row");
+        drop(session);
+        assert!(board.snapshot_dtos().is_empty());
+    }
+
+    /// Self-review F2: a download never joins an upload's row (it would keep `up`, which the UI hides).
+    #[test]
+    fn ld0105_u1_a_download_never_joins_an_upload_row() {
+        let board = TransferBoard::new();
+        let _up = board.begin_named("f", "Documents/a.txt", Direction::Up, 10);
+        let _down = board.begin_download("f", "Documents/a.txt", 100);
+        let t = board.get("f").unwrap();
+        assert_eq!((t.direction, t.total), (Direction::Down, 100));
+    }
+
+    /// Self-review F4/F5: once any fetch delivered the file the row never ends as failed, and its bytes
+    /// count once; a fetch that knows the size fills a joined row's unknown total.
+    #[test]
+    fn ld0105_u1_a_delivered_file_never_ends_as_failed() {
+        let board = TransferBoard::new();
+        let no_size = board.begin_download("f", "Videos/clip.mp4", 0);
+        let first = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        assert_eq!(board.get("f").unwrap().total, 100, "the joiner's known size fills the unknown total");
+        let second = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        first.finished();
+        drop(no_size);
+        drop(second); // the last holder fails after the file was delivered
+        assert!(board.snapshot_dtos().is_empty(), "a delivered file is no failed row");
+        assert_eq!(board.finished_bytes(), 100, "counted once");
+    }
+
+    /// Self-review F3: a fetch cut off by an engine stop (lock, sign-out, switch, quit) ends with no
+    /// failed row; a new engine forgets the failed rows an earlier one left (their names included).
+    #[test]
+    fn ld0105_u1_a_stop_is_no_failure_and_a_new_engine_forgets_failed_rows() {
+        let board = TransferBoard::new();
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        drop(FetchRow::new(board.begin_download("cut", "Videos/a.mp4", 10)).stopped_by(stopping));
+        assert!(board.snapshot_dtos().is_empty(), "a stop is not the file's failure");
+        drop(FetchRow::new(board.begin_download("bad", "Videos/b.mp4", 10)));
+        assert_eq!(board.snapshot_dtos().len(), 1);
+        board.forget_failed();
+        assert!(board.snapshot_dtos().is_empty());
+        assert!(board.inner.lock().unwrap().paths.is_empty(), "the names go with the rows");
     }
 }

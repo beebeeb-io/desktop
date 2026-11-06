@@ -812,7 +812,11 @@ pub(super) fn shown_transfers(
     attention: &[crate::transfer_progress::NeedsAttention],
 ) -> Vec<crate::transfer_progress::ActiveTransferDto> {
     if !unlocked {
-        return rows;
+        // LD-0105 U1: the board's rows carry names now; a locked vault shows no name (lead 2026-11-06).
+        return rows
+            .into_iter()
+            .map(|row| crate::transfer_progress::ActiveTransferDto { name: String::new(), folder: String::new(), ..row })
+            .collect();
     }
     crate::transfer_progress::with_attention(rows, attention)
 }
