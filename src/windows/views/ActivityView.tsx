@@ -37,7 +37,7 @@ import {
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
 import { FileGlyph, getFileType, FILE_COLOR } from '../fileGlyph'
-import { activityDetail, progressFraction, shouldShowInProgressCard, transferUiState } from '../downloadProgressModel'
+import { activityDetail, inProgressCardRows, progressFraction, transferUiState, type DownloadRowLike } from '../downloadProgressModel'
 import {
   IN_PROGRESS_CARD_HEADER,
   NEEDS_ATTENTION_ACTION,
@@ -235,7 +235,7 @@ type DiscardRowState = null | 'confirm' | 'loading' | string
  * tint (Amber stays for encryption state). The action "Discard and download again"
  * triggers a one-step confirm before the IPC call.
  */
-function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
+function InProgressCard({ rows }: { rows: Array<ActiveTransferRow & DownloadRowLike> }) {
   // Tracks the discard flow per fileId (idle | confirm | loading | error message).
   const [discardState, setDiscardState] = useState<Record<string, DiscardRowState>>({})
 
@@ -681,8 +681,8 @@ export default function ActivityView() {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
   const allTransfers = useActiveTransfers()
-  // Keep only transfers that are active or failed within the last 15 min.
-  const liveTransfers = allTransfers.filter((r) => shouldShowInProgressCard([r]))
+  // Download rows active, needing attention, or failed within the last 15 min; never an upload (U0 design).
+  const liveTransfers = inProgressCardRows(allTransfers)
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>

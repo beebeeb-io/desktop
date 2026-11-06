@@ -243,12 +243,16 @@ pub unsafe extern "system" fn fetch_data_callback(
     // provider activity for 60 s and fetches the file again from its first byte; the reports reset that
     // timer. A minute without a new byte stops them, so a dead network still fails the open.
     let meter = crate::transfer_progress::ReceiveMeter::default();
+    // LD-0105 U1: the fetch's named "Downloading" row (tray, Activity), following the same meter; it
+    // ends with `finished()` once the whole file is transferred, and every other exit below marks it failed.
+    let row = bridge.whole_fetch_row(&file_id, u64::try_from(file_size).unwrap_or(0));
     let buf = handle.block_on(async {
         tokio::select! {
             biased;
             _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
             result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&meter)) => result,
             never = super::fetch_progress::keep_fetch_alive(connection_key, transfer_key, file_size, &meter) => match never {},
+            never = row.follow(&meter) => match never {},
         }
     });
     let crate::engine_bridge::FetchedBytes { bytes: buf, version: fetched, ticket } = match buf {
@@ -347,6 +351,7 @@ pub unsafe extern "system" fn fetch_data_callback(
 
     match transfer_ok {
         Ok(()) => {
+            row.finished();
             tracing::info!(file_id = %file_id, "hydrated and transferred Cloud Files range");
             // Best-effort: mark the placeholder IN_SYNC so Explorer flips
             // the overlay from "downloading" to the synced check — but

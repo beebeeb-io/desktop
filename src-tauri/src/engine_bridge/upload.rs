@@ -609,9 +609,21 @@ impl EngineBridge {
         // id (the `files` row the activity list reads); a resumed session starts at
         // its acknowledged watermark, not at 0.
         let payload_total = u64::try_from(session.payload_size).unwrap_or(0);
-        let progress = self
-            .transfers
-            .begin(local_file_id.as_str(), crate::transfer_progress::Direction::Up, payload_total);
+        // LD-0105 U1: named by the file's vault path (else the op's), never failing the upload.
+        let path = self
+            .db
+            .get_file(local_file_id.as_str())
+            .ok()
+            .flatten()
+            .map(|entry| entry.path)
+            .or_else(|| op.target_path.clone())
+            .unwrap_or_default();
+        let progress = self.transfers.begin_named(
+            local_file_id.as_str(),
+            &path,
+            crate::transfer_progress::Direction::Up,
+            payload_total,
+        );
         progress.update(crate::transfer_progress::uploaded_bytes(
             first_chunk,
             chunk_size as u64,

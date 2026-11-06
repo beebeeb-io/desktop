@@ -16,6 +16,8 @@ import {
   activityDetail,
   progressFraction,
   shouldShowInProgressCard,
+  inProgressCardRows,
+  isDownloadRow,
   trayHeaderOverride,
   buildTransferMap,
   type ActiveTransferRowLike,
@@ -304,5 +306,46 @@ describe('buildTransferMap', () => {
     const r = withPath('report.pdf', 'Documents/2026')
     const map = buildTransferMap([r])
     expect(map.get('Documents/2026/report.pdf')).toBe(r)
+  })
+})
+
+// ── Uploads stay off the download surfaces (LD-0105 U1 board wiring) ─────────
+// The U0 design gives an upload no state on the tray's download line or the "In progress" card
+// ("Files arriving on this PC."). On desktop #226 an upload read "Downloading · N% · … waits for the
+// whole file" (native rung, e93800c, 13 of 13 samples during a 300 MB upload).
+
+/** The native shape of that rung's upload row, now with the name the Rust side gives it. */
+function uploading(overrides: Partial<WithPath> = {}): WithPath {
+  return { direction: 'up', done: 33_554_432, total: 295_698_432, buffered: 0, speedBps: 0, failed: false,
+    failedAtSecs: null, name: 'r0822-upload-probe.bin', folder: '', ...overrides }
+}
+
+describe('uploads are not download rows', () => {
+  const NOW = 1_700_000_000_000
+
+  test('transferUiState of an upload is no download state', () => {
+    // mutant: `transferUiState` classifies every direction → "downloading"
+    expect(transferUiState(uploading())).toBeNull()
+    expect(transferUiState(uploading({ failed: true, failedAtSecs: Math.floor(NOW / 1000) }))).toBeNull()
+    expect(isDownloadRow(uploading())).toBe(false)
+    expect(isDownloadRow(downloading())).toBe(true)
+    expect(isDownloadRow(streaming())).toBe(true)
+  })
+
+  test('the In progress card never lists an upload as arriving', () => {
+    // mutant: `inProgressCardRows` without the `isDownloadRow` filter → the upload is listed
+    const down = withPath('holiday-2026.mp4', 'Videos')
+    expect(inProgressCardRows([uploading()], NOW)).toEqual([])
+    expect(shouldShowInProgressCard([uploading()], NOW)).toBe(false)
+    expect(inProgressCardRows([uploading(), down], NOW)).toEqual([down])
+  })
+
+  test("the tray's map never gives an upload's row a download line", () => {
+    const map = buildTransferMap([uploading({ name: 'notes-draft.txt', folder: 'Documents' })])
+    expect(map.get('Documents/notes-draft.txt')).toBeUndefined()
+  })
+
+  test('a failed upload never counts as "couldn\'t finish downloading"', () => {
+    expect(trayHeaderOverride([uploading({ failed: true, failedAtSecs: 1 })])).toBeNull()
   })
 })

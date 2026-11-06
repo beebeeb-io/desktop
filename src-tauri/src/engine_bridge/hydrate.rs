@@ -157,9 +157,9 @@ impl EngineBridge {
         }
         // Task 1683 slice 2: the popover's per-file bytes. The caller's own progress
         // callback (the IPC handler forwarding to Finder) still gets every report.
-        let transfer = self
-            .transfers
-            .begin(file_id, crate::transfer_progress::Direction::Down, 0);
+        // LD-0105 U1: named by the file's vault path, and joining a fetch of the file already running.
+        let path = self.db.get_file(file_id).ok().flatten().map(|entry| entry.path).unwrap_or_default();
+        let transfer = self.transfers.begin_download(file_id, &path, 0);
         let hydrated = self.do_hydrate_versioned(file_id, progress, None).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
@@ -329,6 +329,19 @@ impl EngineBridge {
     #[cfg(target_os = "windows")]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<FetchedBytes> {
         self.hydrate_file_to_memory_metered(file_id, None).await
+    }
+
+    /// LD-0105 U1: the Windows whole-file fetch's row on the transfer board, the "Downloading" row of the
+    /// U0 design, named by the file's vault path (the `files` row's, the path the tray's recent rows
+    /// carry), sized `size` until the download's metadata says otherwise. A fetch of the file already
+    /// running is joined ([`crate::transfer_progress::TransferBoard::begin_download`]). No `files` row
+    /// (or no readable one): no board row, since nothing could name it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn whole_fetch_row(&self, file_id: &str, size: u64) -> crate::transfer_progress::FetchRow {
+        match self.db.get_file(file_id) {
+            Ok(Some(entry)) => crate::transfer_progress::FetchRow::new(self.transfers.begin_download(file_id, &entry.path, size)),
+            _ => crate::transfer_progress::FetchRow::none(),
+        }
     }
 
     /// [`Self::hydrate_file_to_memory`], also counting every body byte into `meter` as it arrives,
