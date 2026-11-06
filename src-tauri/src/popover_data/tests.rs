@@ -152,6 +152,7 @@
                 direction: Direction::Up,
                 done: 1,
                 total: 9,
+                ..Transfer::default()
             },
         )];
         assert_eq!(phase_of(i.clone()), PopoverPhase::Syncing);
@@ -296,6 +297,7 @@
                 direction: Direction::Up,
                 done: 62,
                 total: 100,
+                ..Transfer::default()
             },
         )];
         i.failed = vec![entry("e1", "Notes/bad.bin", FileStatus::Error, 10, 20)];
@@ -929,6 +931,7 @@
                 direction: Direction::Up,
                 done: 62,
                 total: 100,
+                ..Transfer::default()
             },
         )];
         let snapshot = assemble(inputs);

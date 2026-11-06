@@ -139,6 +139,7 @@ pub fn run() {
             account_storage_breakdown,
             desktop_file_overview,
             desktop_recent_files,
+            get_active_transfers,
             desktop_search_files,
             app_activity_snapshot,
             // Task 0090 — selective sync

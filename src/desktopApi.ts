@@ -1198,6 +1198,37 @@ export function desktopRecentFiles(recentLimit?: number): Promise<CommandResult<
   return command<RecentFile[]>('desktop_recent_files', { recentLimit })
 }
 
+/**
+ * One transfer that is currently in flight (or recently failed) on this PC.
+ * Returned by the `get_active_transfers` Tauri command (LD-0105 U1).
+ */
+export interface ActiveTransferRow {
+  fileId: string
+  /** Last path component (display name). Empty when the caller did not register a path. */
+  name: string
+  /** Parent folder (everything before the last component). Empty at vault root. */
+  folder: string
+  direction: 'up' | 'down' | 'stream'
+  /** Bytes confirmed written to the destination (cumulative, monotonic). */
+  done: number
+  /** Declared total; `0` when unknown. */
+  total: number
+  /**
+   * For `direction === 'stream'`: bytes in the local buffer file (ONDISK).
+   * For other directions: `0`.
+   */
+  buffered: number
+  /** 2-second moving-window receive rate in bytes/s. */
+  speedBps: number
+  failed: boolean
+  failedAtSecs?: number | null
+}
+
+/** Snapshot of every transfer currently in flight (or recently failed). */
+export function loadActiveTransfers(): Promise<CommandResult<ActiveTransferRow[]>> {
+  return command<ActiveTransferRow[]>('get_active_transfers', {})
+}
+
 /** Query the local desktop file-name search index. Results are local mirror
  *  entries and are opened via the existing OS file-manager command. */
 export function desktopSearchFiles(

@@ -38,12 +38,15 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   command,
   desktopRecentFiles,
+  loadActiveTransfers,
   loadSyncStatus,
   openUrl,
   revealAndOpenFile,
+  type ActiveTransferRow,
   type RecentFile,
   type SyncStatus,
 } from './desktopApi'
+import { traySubline, progressFraction } from './windows/downloadProgressModel'
 import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
@@ -299,6 +302,7 @@ export default function WindowsTray() {
   const [recent, setRecent] = useState<RecentFile[]>([])
   const [loaded, setLoaded] = useState(false)
   const [signedOut, setSignedOut] = useState(false)
+  const [activeTransfers, setActiveTransfers] = useState<ActiveTransferRow[]>([])
 
   // Hide on blur (click-outside dismiss), like OneDrive. Set up once on mount.
   useEffect(() => {
@@ -322,6 +326,20 @@ export default function WindowsTray() {
     const refresh = async () => {
       const next = await loadSyncStatus()
       if (!cancelled) setStatus(next)
+    }
+    const stop = pollWhileVisible(refresh, 3000)
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [])
+
+  // Poll active transfers (~3s) for the progress overlay on downloading / streaming rows (LD-0105 U1).
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const result = await loadActiveTransfers()
+      if (!cancelled && result.ok) setActiveTransfers(result.value)
     }
     const stop = pollWhileVisible(refresh, 3000)
     return () => {
@@ -408,6 +426,8 @@ export default function WindowsTray() {
   }
 
   const showViewAll = recent.length > TRAY_VIEW_ALL_THRESHOLD
+  // Map file name → active transfer DTO so the row can overlay progress (LD-0105 U1).
+  const transferByName = new Map(activeTransfers.map((r) => [r.name, r]))
 
   return (
     <div
@@ -529,12 +549,20 @@ export default function WindowsTray() {
             const type = getFileType(name)
             const deleted = file.activity_type === 'moved_to_trash' || file.status === 'moved_to_trash'
             const warn = WARN_STATUSES.has(file.status)
+            // LD-0105 U1: overlay live progress from the transfer board.
+            const transfer = !deleted ? transferByName.get(name) : undefined
+            const subline = transfer
+              ? traySubline(transfer)
+              : statusSubline(file.status, folder)
+            const sublineWarn = transfer ? transfer.failed : warn
+            const fraction = transfer ? progressFraction(transfer) : null
             return (
               <button
                 key={`${file.status}:${file.path}:${file.modified_at}`}
                 title={deleted ? `${name} moved to trash` : `Open ${name}`}
                 onClick={() => void (deleted ? openRecycleBin() : revealAndOpenFile(file.path))}
                 style={{
+                  position: 'relative',
                   display: 'grid',
                   gridTemplateColumns: '30px 1fr auto',
                   alignItems: 'center',
@@ -593,7 +621,7 @@ export default function WindowsTray() {
                   <div
                     style={{
                       fontSize: 11,
-                      color: warn ? 'oklch(0.55 0.12 55)' : T.ink3,
+                      color: sublineWarn ? 'oklch(0.55 0.12 55)' : T.ink3,
                       marginTop: 2,
                       lineHeight: 1.2,
                       whiteSpace: 'nowrap',
@@ -601,7 +629,7 @@ export default function WindowsTray() {
                       textOverflow: 'ellipsis',
                     }}
                   >
-                    {statusSubline(file.status, folder)}
+                    {subline}
                   </div>
                 </div>
 
@@ -616,6 +644,32 @@ export default function WindowsTray() {
                 >
                   {relativeTime(file.modified_at)}
                 </div>
+
+                {/* Progress bar — 3px, sits on the bottom edge of the 48px row (LD-0105 U1).
+                    Amber is reserved for encryption state; use neutral ink-3 on paper-3. */}
+                {fraction != null && (
+                  <div
+                    aria-hidden
+                    style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: 3,
+                      background: T.paper3,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.round(fraction * 100)}%`,
+                        height: '100%',
+                        background: T.ink3,
+                        transition: 'width 0.5s linear',
+                      }}
+                    />
+                  </div>
+                )}
               </button>
             )
           })

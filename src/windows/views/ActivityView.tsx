@@ -28,11 +28,16 @@ import { useEffect, useState } from 'react'
 import {
   accountActivityFeed,
   accountNotifications,
+  loadActiveTransfers,
+  type ActiveTransferRow,
   type ActivityFeed,
   type ActivityFeedEvent,
   type NotificationList,
 } from '../../desktopApi'
 import { T, Card, PageHeader, Chip, Skeleton, NavIcon, PrimaryBtn } from '../ui'
+import { activityDetail, progressFraction, shouldShowInProgressCard } from '../downloadProgressModel'
+import { IN_PROGRESS_CARD_HEADER } from '../downloadProgressCopy'
+import { pollWhileVisible } from '../visiblePoll'
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 // All wire timestamps are RFC3339 strings; guard null/undefined + unparseable.
@@ -146,7 +151,7 @@ function ErrorBlock({ reason, unsupported, onRetry }: { reason: string; unsuppor
         <div>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink2 }}>Not available in this build</div>
           <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.5, marginTop: 2 }}>
-            This view binds to a command that isn’t wired into the current desktop build.
+            This view binds to a command that isn't wired into the current desktop build.
           </div>
         </div>
       </Card>
@@ -157,7 +162,7 @@ function ErrorBlock({ reason, unsupported, onRetry }: { reason: string; unsuppor
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
         <NavIcon name="external" size={16} color={RED} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Couldn’t load</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>Couldn't load</div>
           <div style={{ fontSize: 11.5, fontFamily: T.fontSans, color: T.ink3, lineHeight: 1.5, marginTop: 4, wordBreak: 'break-word' as const }}>
             {reason}
           </div>
@@ -178,6 +183,86 @@ function EmptyBlock({ icon, title, body }: { icon: string; title: string; body: 
       </div>
       <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{title}</div>
       <div style={{ fontSize: 11.5, color: T.ink3, lineHeight: 1.6, maxWidth: 360 }}>{body}</div>
+    </Card>
+  )
+}
+
+// ── In-progress card (LD-0105 U1) ────────────────────────────────────────────
+
+/** Poll the transfer board every 3 s while this component is visible (task 2243 pattern). */
+function useActiveTransfers(): ActiveTransferRow[] {
+  const [rows, setRows] = useState<ActiveTransferRow[]>([])
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const r = await loadActiveTransfers()
+      if (!cancelled && r.ok) setRows(r.value)
+    }
+    const stop = pollWhileVisible(refresh, 3000)
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [])
+  return rows
+}
+
+/** warn colour shared with WindowsTray.tsx — the WARN_STATUSES tint */
+const WARN_COLOR = 'var(--warn-text)'
+
+/**
+ * The "In progress" card: shown above the Timeline when at least one transfer is
+ * active or failed in the last 15 minutes (LD-0105 U1). One row per transfer.
+ */
+function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
+  if (rows.length === 0) return null
+  return (
+    <Card style={{ padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+      {/* Header */}
+      <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <NavIcon name="folder" size={14} color={T.ink2} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.ink }}>In progress</div>
+          <div style={{ fontSize: 11, color: T.ink3 }}>{IN_PROGRESS_CARD_HEADER}</div>
+        </div>
+      </div>
+      {/* One row per transfer */}
+      {rows.map((r, i) => {
+        const fraction = progressFraction(r)
+        const detail = activityDetail(r)
+        const isLast = i === rows.length - 1
+        return (
+          <div
+            key={r.fileId}
+            style={{ position: 'relative', padding: '11px 20px', display: 'flex', alignItems: 'flex-start', gap: 14, borderBottom: isLast ? 'none' : `1px solid ${T.line}` }}
+          >
+            {/* Icon */}
+            <div style={{ width: 28, height: 28, borderRadius: 6, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <NavIcon name="folder" size={13} color={r.failed ? WARN_COLOR : T.ink2} />
+            </div>
+            {/* Name + detail */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: T.fontMono }}>
+                {r.name || r.fileId}
+              </div>
+              {r.folder && (
+                <div style={{ fontSize: 11, color: T.ink4, fontFamily: T.fontMono, marginTop: 1 }}>{r.folder}</div>
+              )}
+              <div style={{ fontSize: 11, color: r.failed ? WARN_COLOR : T.ink3, marginTop: 3, lineHeight: 1.5 }}>
+                {detail}
+              </div>
+              {/* Progress bar — 3px, sits on row bottom; Amber reserved for encryption state */}
+              {fraction != null && (
+                <div style={{ marginTop: 7, height: 3, borderRadius: 999, background: T.paper3, overflow: 'hidden' }}>
+                  <div
+                    style={{ width: `${Math.round(fraction * 100)}%`, height: '100%', background: T.ink3, borderRadius: 999, transition: 'width 0.5s linear' }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      })}
     </Card>
   )
 }
@@ -502,12 +587,15 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 export default function ActivityView() {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
+  const allTransfers = useActiveTransfers()
+  // Keep only transfers that are active or failed within the last 15 min.
+  const liveTransfers = allTransfers.filter((r) => shouldShowInProgressCard([r]))
 
   return (
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Activity"
-        subtitle="Your account’s timeline and notifications. Notification preferences now live under Settings."
+        subtitle="Your account's timeline and notifications. Notification preferences now live under Settings."
         aside={
           <Chip tone="amber">
             <NavIcon name="shield" size={11} color={T.amberDeep} />
@@ -517,6 +605,11 @@ export default function ActivityView() {
       />
 
       <TabBar active={tab} onChange={setTab} />
+
+      {/* "In progress" card — shown above Timeline when files are arriving (LD-0105 U1). */}
+      {tab === 'timeline' && liveTransfers.length > 0 && (
+        <InProgressCard rows={liveTransfers} />
+      )}
 
       {/* Each section self-fetches on mount; remounting on tab change keeps the
           four-state handling self-contained and the data fresh on return. */}

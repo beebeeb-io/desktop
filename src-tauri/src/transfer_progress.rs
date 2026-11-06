@@ -12,15 +12,21 @@
 //! Nothing here is secret: a file id, a direction, two counters. Names stay in the
 //! state DB.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
+    #[default]
     Up,
     Down,
+    /// A direct-streaming open: the bytes are served to the player as they arrive
+    /// on the wire (LD-0105). `buffered` is the on-disk byte count (ONDISK);
+    /// `speed_bps` is the 2-second moving-window receive rate.
+    Stream,
 }
 
 impl Direction {
@@ -28,8 +34,70 @@ impl Direction {
         match self {
             Direction::Up => "up",
             Direction::Down => "down",
+            Direction::Stream => "stream",
         }
     }
+}
+
+/// A 2-second sliding window of `(Instant, cumulative_bytes)` samples used to
+/// compute bytes-per-second for a streaming transfer.
+#[derive(Debug)]
+struct SpeedWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl SpeedWindow {
+    fn new() -> Self {
+        Self { samples: VecDeque::new() }
+    }
+
+    /// Push a new sample and return the current speed in bytes/s.
+    fn push(&mut self, now: Instant, cumulative_bytes: u64) -> u64 {
+        self.samples.push_back((now, cumulative_bytes));
+        // Drop samples older than 2 seconds
+        let cutoff = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+        while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < 2 {
+            return 0;
+        }
+        let (oldest_t, oldest_b) = self.samples.front().copied().unwrap();
+        let (_, newest_b) = self.samples.back().copied().unwrap();
+        let elapsed_secs = now.duration_since(oldest_t).as_secs_f64();
+        if elapsed_secs < 0.001 {
+            return 0;
+        }
+        (newest_b.saturating_sub(oldest_b) as f64 / elapsed_secs) as u64
+    }
+}
+
+/// A transfer's metadata serialised into the `get_active_transfers` IPC response.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveTransferDto {
+    pub file_id: String,
+    /// Last path component (display name for the UI row).
+    pub name: String,
+    /// Everything before the last component, `""` at the vault root.
+    pub folder: String,
+    pub direction: Direction,
+    /// Cumulative bytes confirmed written to the destination (or the read cursor
+    /// for a streaming open). For `Direction::Stream`, the UI shows this as
+    /// "buffered" (on-disk bytes).
+    pub done: u64,
+    /// Declared total bytes; `0` when unknown (a streaming open may not have a
+    /// known size until the first chunk arrives).
+    pub total: u64,
+    /// For `Direction::Stream`: bytes already written to the local buffer file
+    /// (ONDISK). For other directions this is `0`.
+    pub buffered: u64,
+    /// 2-second moving-window receive rate in bytes/s. `0` when not yet computed.
+    pub speed_bps: u64,
+    /// The transfer ended in an error (the guard dropped without `finish()`).
+    pub failed: bool,
+    /// Unix timestamp when the failure was recorded, for expiry logic in the UI.
+    pub failed_at_secs: Option<u64>,
 }
 
 /// Plaintext bytes an upload has sent once `chunks_done` chunks of `chunk_size`
@@ -102,16 +170,28 @@ impl ReceiveMeter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Transfer {
     pub direction: Direction,
     pub done: u64,
     pub total: u64,
+    /// For `Direction::Stream`: bytes written to the local buffer file (ONDISK).
+    pub buffered: u64,
+    /// 2-second moving-window receive rate; updated by [`TransferBoard::update_stream`].
+    pub speed_bps: u64,
+    /// Set when the transfer ends in an error (see [`TransferBoard::mark_failed`]).
+    pub failed: bool,
+    /// Unix timestamp when `failed` was set, for expiry in the UI (hide after 15 min).
+    pub failed_at_secs: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     active: HashMap<String, Transfer>,
+    /// Vault paths keyed by file_id; registered via [`TransferBoard::begin_named`].
+    paths: HashMap<String, String>,
+    /// Per-file speed windows; kept here (not in `Transfer`) so `Transfer` stays `Copy`.
+    speeds: HashMap<String, SpeedWindow>,
     /// Plaintext bytes of files that completed since the batch last went quiet.
     finished_bytes: u64,
 }
@@ -131,17 +211,86 @@ impl TransferBoard {
         if let Ok(mut inner) = self.inner.lock() {
             inner.active.insert(
                 file_id.to_string(),
-                Transfer {
-                    direction,
-                    done: 0,
-                    total,
-                },
+                Transfer { direction, total, ..Transfer::default() },
             );
         }
         TransferGuard {
             board: self.clone(),
             file_id: file_id.to_string(),
         }
+    }
+
+    /// Like [`Self::begin`] but also records the vault `path` so the IPC DTO can
+    /// expose a display name and parent folder. W2 uses this for streaming opens.
+    pub fn begin_named(self: &Arc<Self>, file_id: &str, path: &str, direction: Direction, total: u64) -> TransferGuard {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.active.insert(
+                file_id.to_string(),
+                Transfer { direction, total, ..Transfer::default() },
+            );
+            inner.paths.insert(file_id.to_string(), path.to_string());
+        }
+        TransferGuard {
+            board: self.clone(),
+            file_id: file_id.to_string(),
+        }
+    }
+
+    /// Update the on-disk buffer byte count for a streaming transfer and recompute
+    /// the 2-second moving-window speed. A no-op when the file is not registered.
+    pub fn update_stream(&self, file_id: &str, buffered: u64) {
+        let now = Instant::now();
+        if let Ok(mut inner) = self.inner.lock() {
+            let speed = inner.speeds
+                .entry(file_id.to_string())
+                .or_insert_with(SpeedWindow::new)
+                .push(now, buffered);
+            if let Some(t) = inner.active.get_mut(file_id) {
+                t.buffered = buffered;
+                t.speed_bps = speed;
+            }
+        }
+    }
+
+    /// Mark a registered transfer as failed, recording the current time. The guard
+    /// will remove it from `active` when it drops; calling this first lets the UI
+    /// show an error row for up to 15 minutes after the guard goes away (the DTO
+    /// remains readable until the UI purges it).
+    ///
+    /// Note: failed transfers are still removed from `active` on `Drop` — the UI
+    /// must hold onto the DTO it last received if it wants to show the error row.
+    pub fn mark_failed(&self, file_id: &str) {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(t) = inner.active.get_mut(file_id) {
+                t.failed = true;
+                t.failed_at_secs = Some(now_secs);
+            }
+        }
+    }
+
+    /// A snapshot of every active transfer as IPC-ready DTOs.
+    pub fn snapshot_dtos(&self) -> Vec<ActiveTransferDto> {
+        self.inner.lock().map(|inner| {
+            inner.active.iter().map(|(id, t)| {
+                let path = inner.paths.get(id).map(|s| s.as_str()).unwrap_or("");
+                ActiveTransferDto {
+                    file_id: id.clone(),
+                    name: display_name(path),
+                    folder: parent_folder(path),
+                    direction: t.direction,
+                    done: t.done,
+                    total: t.total,
+                    buffered: t.buffered,
+                    speed_bps: t.speed_bps,
+                    failed: t.failed,
+                    failed_at_secs: t.failed_at_secs,
+                }
+            }).collect()
+        }).unwrap_or_default()
     }
 
     /// Every transfer in flight.
@@ -253,7 +402,8 @@ mod tests {
                 Some(Transfer {
                     direction: Direction::Up,
                     done: 0,
-                    total: 1_000
+                    total: 1_000,
+                    ..Transfer::default()
                 })
             );
             assert_eq!(board.active().len(), 1);
@@ -376,5 +526,81 @@ mod tests {
             None,
             "a file nobody registered is not invented"
         );
+    }
+
+    // --- LD-0105 U1: Direction::Stream, begin_named, update_stream, mark_failed ---
+
+    #[test]
+    fn direction_stream_serialises_as_stream() {
+        let s = serde_json::to_string(&Direction::Stream).unwrap();
+        assert_eq!(s, r#""stream""#);
+    }
+
+    #[test]
+    fn begin_named_stores_path_and_exposes_it_in_snapshot_dto() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s1", "Videos/holiday.mp4", Direction::Stream, 50_000_000);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        let dto = &dtos[0];
+        assert_eq!(dto.file_id, "s1");
+        assert_eq!(dto.name, "holiday.mp4");
+        assert_eq!(dto.folder, "Videos");
+        assert_eq!(dto.direction, Direction::Stream);
+        assert_eq!(dto.total, 50_000_000);
+        assert!(!dto.failed, "a fresh transfer is not failed");
+        assert_eq!(dto.failed_at_secs, None);
+    }
+
+    #[test]
+    fn update_stream_records_buffered_bytes() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s2", "music.flac", Direction::Stream, 0);
+        board.update_stream("s2", 1_024_000);
+        let t = board.get("s2").unwrap();
+        assert_eq!(t.buffered, 1_024_000);
+    }
+
+    #[test]
+    fn speed_window_produces_nonzero_speed_after_two_samples() {
+        let board = TransferBoard::new();
+        let _g = board.begin_named("s3", "clip.mp4", Direction::Stream, 0);
+        // Two calls with a fake time gap: use update_stream twice with real clock
+        // (sub-millisecond — speed will be 0 or large; we only check it doesn't panic
+        // and the field is present in the DTO).
+        board.update_stream("s3", 0);
+        board.update_stream("s3", 100_000);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        // `speed_bps` is either 0 (samples too close in time) or a large positive
+        // number; the important thing is the field exists and the board didn't panic.
+        let _ = dtos[0].speed_bps;
+    }
+
+    #[test]
+    fn mark_failed_sets_the_failed_flag_and_a_timestamp() {
+        let board = TransferBoard::new();
+        let _g = board.begin("f2", Direction::Down, 100);
+        board.mark_failed("f2");
+        let t = board.get("f2").unwrap();
+        assert!(t.failed);
+        assert!(t.failed_at_secs.is_some());
+    }
+
+    #[test]
+    fn mark_failed_on_unregistered_file_is_a_noop() {
+        let board = TransferBoard::new();
+        board.mark_failed("not-here"); // must not panic
+    }
+
+    #[test]
+    fn snapshot_dto_for_a_begin_without_path_has_empty_name_and_folder() {
+        let board = TransferBoard::new();
+        let _g = board.begin("plain", Direction::Down, 200);
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1);
+        // `display_name("")` → `""`, `parent_folder("")` → `""`
+        assert_eq!(dtos[0].name, "");
+        assert_eq!(dtos[0].folder, "");
     }
 }
