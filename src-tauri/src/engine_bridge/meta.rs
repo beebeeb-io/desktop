@@ -331,13 +331,25 @@ pub(super) struct HydrateReport<'a> {
     pub(super) progress: Option<&'a HydrateProgressFn>,
     /// This fetch's own count of body bytes, per read (LD-0105 S0), when the caller keeps one.
     pub(super) meter: Option<&'a crate::transfer_progress::ReceiveMeter>,
+    /// The bytes this report has put on the wire counter and not taken back, so a failed attempt
+    /// can take all of them back ([`Self::discard_attempt`]).
+    pub(super) counted: std::sync::atomic::AtomicU64,
 }
 
 impl crate::direct_download::Progress for HydrateReport<'_> {
     fn received(&self, wire_bytes: u64) {
         self.bridge.wire.download_bytes.fetch_add(wire_bytes, Ordering::Relaxed);
+        self.counted.fetch_add(wire_bytes, Ordering::Relaxed);
         if let Some(meter) = self.meter {
             meter.add(wire_bytes);
+        }
+    }
+
+    fn discarded(&self, wire_bytes: u64) {
+        let taken = take_back(&self.counted, wire_bytes);
+        take_back(&self.bridge.wire.download_bytes, taken);
+        if let Some(meter) = self.meter {
+            meter.discard(wire_bytes);
         }
     }
 
@@ -346,7 +358,23 @@ impl crate::direct_download::Progress for HydrateReport<'_> {
     }
 }
 
+/// Subtract at most `n` from `counter`, never below 0; returns what was subtracted.
+fn take_back(counter: &std::sync::atomic::AtomicU64, n: u64) -> u64 {
+    let before = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(n)))
+        .unwrap_or(0);
+    before.min(n)
+}
+
 impl HydrateReport<'_> {
+    /// The direct attempt is not used (the API path takes the file, or it failed): every byte it
+    /// put on the wire counter is taken back. The caller rolls the meter back to where the attempt
+    /// started.
+    pub(super) fn discard_attempt(&self) {
+        let all = self.counted.swap(0, Ordering::Relaxed);
+        take_back(&self.bridge.wire.download_bytes, all);
+    }
+
     pub(super) fn decrypted_bytes(&self, done: u64) {
         self.bridge.transfers.report(self.file_id, done, self.total);
         if let Some(report) = self.progress {

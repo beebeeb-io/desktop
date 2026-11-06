@@ -768,6 +768,38 @@ use super::*;
         }
 
         #[tokio::test]
+        async fn ld0105_review_a_failed_or_refetched_body_keeps_the_fetch_alive_but_is_not_progress() {
+            // Review P2 (lead decision 2026-11-06): a storage body that breaks off part way, and one
+            // that does not authenticate, are both fetched again. Their bytes kept the fetch alive
+            // (`received`), but progress (`kept`, what Cloud Files is shown) and the wire counter count
+            // the file once and never more.
+            use crate::direct_download::test_support::StorageScript;
+            for script in [StorageScript::BreakOff, StorageScript::Tamper] {
+                let dir = tempfile::tempdir().unwrap();
+                let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);
+                pair.knobs().storage.insert(0, std::collections::VecDeque::from([script.clone()]));
+                let bridge = bridge_for(dir.path(), &pair);
+                bridge.seams.use_transport(Transport::Auto);
+                let meta = bridge.api.get_file(TEST_FILE_ID).await.unwrap();
+                let meter = crate::transfer_progress::ReceiveMeter::default();
+                let wire_before = bridge.wire.download_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                let (plaintext, _) =
+                    bridge.hydrate_whole_file_metered(TEST_FILE_ID, &meta, None, Some(&meter)).await.unwrap();
+                let wire = bridge.wire.download_bytes.load(std::sync::atomic::Ordering::Relaxed) - wire_before;
+                let encrypted = pair.knobs().version.encrypted_size();
+                println!(
+                    "ld0105-review: {script:?}: read {} kept {} wire {wire} encrypted {encrypted}",
+                    meter.received(),
+                    meter.kept()
+                );
+                assert_eq!(plaintext.to_vec(), pair.plain(), "{script:?}");
+                assert!(meter.received() > encrypted, "{script:?}: the failed body was read, and kept the fetch alive");
+                assert_eq!(meter.kept(), encrypted, "{script:?}: progress counts the file once");
+                assert_eq!(wire, encrypted, "{script:?}: the wire counter counts the file once");
+            }
+        }
+
+        #[tokio::test]
         async fn forcing_the_api_transport_keeps_the_old_requests() {
             let dir = tempfile::tempdir().unwrap();
             let pair = Pair::start(KEY, TEST_FILE_ID, 1024, SIZE);

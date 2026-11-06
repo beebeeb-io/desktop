@@ -112,32 +112,49 @@ enum Exact {
     Broken,
 }
 
+/// One report about a chunk body's bytes (LD-0105 S0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyBytes {
+    /// This many more bytes of the body arrived: one report per read.
+    Read(u64),
+    /// The body that reported this many bytes is not used (it broke off, or is not the length it
+    /// must be). They kept the fetch alive, but they are not progress (lead decision 2026-11-06).
+    Discarded(u64),
+}
+
 /// Where a chunk body's bytes are reported as they arrive, one call per read (LD-0105 S0): a Cloud
 /// Files fetch must show Windows real progress at least every 10 s, and a chunk on a slow link can
-/// take longer than Windows' 60 s limit, so counting only finished chunks is not enough.
-pub(crate) type OnBody<'a> = &'a (dyn Fn(u64) + Sync);
+/// take longer than Windows' 60 s limit, so counting only finished chunks is not enough. A body that
+/// fails after some reads reports [`BodyBytes::Discarded`] with the sum of its reads.
+pub(crate) type OnBody<'a> = &'a (dyn Fn(BodyBytes) + Sync);
 
 /// Read a body that must be exactly `expected` bytes, never more than that into memory, reporting
 /// each piece to `on_body` as it arrives.
 async fn read_exact_len(resp: &mut reqwest::Response, expected: u64, on_body: OnBody<'_>) -> Exact {
     let mut body = Vec::new();
+    let failed = |body: &Vec<u8>, why: Exact| {
+        if !body.is_empty() {
+            on_body(BodyBytes::Discarded(body.len() as u64));
+        }
+        why
+    };
     loop {
         match resp.chunk().await {
             Ok(Some(piece)) => {
                 if body.len() as u64 + piece.len() as u64 > expected {
-                    return Exact::WrongLength;
+                    return failed(&body, Exact::WrongLength);
                 }
-                on_body(piece.len() as u64);
+                on_body(BodyBytes::Read(piece.len() as u64));
                 body.extend_from_slice(&piece);
             }
             Ok(None) => break,
-            Err(_) => return Exact::Broken,
+            Err(_) => return failed(&body, Exact::Broken),
         }
     }
     if body.len() as u64 == expected {
         Exact::Body(body)
     } else {
-        Exact::WrongLength
+        failed(&body, Exact::WrongLength)
     }
 }
 
@@ -502,7 +519,11 @@ mod tests {
                 .api_chunks
                 .insert(0, VecDeque::from([ApiScript::Trickle(frame_len.div_ceil(6), Duration::from_millis(400))]));
             let seen: Mutex<Vec<(Instant, u64)>> = Mutex::new(Vec::new());
-            let on_body = |n: u64| seen.lock().unwrap().push((Instant::now(), n));
+            use super::BodyBytes;
+            let on_body = |b: BodyBytes| match b {
+                BodyBytes::Read(n) => seen.lock().unwrap().push((Instant::now(), n)),
+                BodyBytes::Discarded(n) => panic!("pinned={pinned}: a whole body discarded {n} bytes"),
+            };
             let started = Instant::now();
             let body = if pinned {
                 client.download_chunk_pinned(FILE, 0, &version, frame_len as u64, &on_body).await.expect("pinned chunk")

@@ -408,6 +408,8 @@ pub(crate) mod test_support {
         HangUp,
         /// The real frame, sent this many bytes at a time with this pause between pieces.
         Trickle(usize, std::time::Duration),
+        /// About half the body arrives, then the connection closes (a hang-up part way).
+        BreakOff,
     }
 
     /// What one pinned API chunk GET gets (when the script is empty: served).
@@ -550,6 +552,11 @@ pub(crate) mod test_support {
                     Some(StorageScript::Tamper) => Reply::bytes(tamper(&frame)),
                     Some(StorageScript::HangUp) => Reply::hang_up(),
                     Some(StorageScript::Trickle(piece, pause)) => Reply::bytes(frame).trickling(piece, pause),
+                    // The head is under 300 bytes: what is sent past it is part of the body, not all.
+                    Some(StorageScript::BreakOff) => {
+                        let half = frame.len() / 2;
+                        Reply::bytes(frame).stalling(300 + half, std::time::Duration::from_millis(20))
+                    }
                 }
             }));
             let storage_authority = storage.authority.clone();

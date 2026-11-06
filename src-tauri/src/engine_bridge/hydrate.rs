@@ -660,6 +660,15 @@ impl EngineBridge {
             total: approx_size as u64,
             progress,
             meter,
+            counted: Default::default(),
+        };
+        // Where this attempt's progress starts: a failed attempt goes back here (lead decision
+        // 2026-11-06), so a retried or restarted download never shows more than the file.
+        let mark = meter.map(|m| m.kept());
+        let rollback = || {
+            if let (Some(meter), Some(mark)) = (meter, mark) {
+                meter.rollback_to(mark);
+            }
         };
         let direct = crate::direct_download::download(
             &self.api,
@@ -678,6 +687,8 @@ impl EngineBridge {
         )
         .await
         .map_err(|e| {
+            report.discard_attempt();
+            rollback();
             let error = match e {
                 crate::direct_download::DirectError::VersionChanged => anyhow::Error::new(crate::download_pin::VersionGone),
                 other => anyhow::Error::new(other),
@@ -687,7 +698,11 @@ impl EngineBridge {
         let (plaintext, transport) = match direct {
             crate::direct_download::Outcome::Done { plaintext, transport } => (plaintext, transport),
             crate::direct_download::Outcome::UseApi => (
-                self.download_and_decrypt_chunk_range(
+                {
+                    // The direct attempt's bytes are not this file's progress any more.
+                    report.discard_attempt();
+                    rollback();
+                    self.download_and_decrypt_chunk_range(
                     file_id,
                     &file_key,
                     0..chunk_count,
@@ -698,8 +713,10 @@ impl EngineBridge {
                     pin.as_ref(),
                     expected_format,
                     chunk_count,
-                )
-                .await?,
+                    )
+                    .await
+                    .inspect_err(|_| rollback())?
+                },
                 crate::direct_download::FileTransport::Api,
             ),
         };
@@ -759,9 +776,12 @@ impl EngineBridge {
         pin: Option<&crate::download_pin::PinnedVersion>,
         meter: Option<&crate::transfer_progress::ReceiveMeter>) -> Result<Vec<u8>, EngineError> {
         // LD-0105 S0: every piece of the body is counted as it arrives, not once the chunk is whole.
-        let on_body = |n: u64| {
+        let on_body = |b: crate::api_client::BodyBytes| {
             if let Some(meter) = meter {
-                meter.add(n);
+                match b {
+                    crate::api_client::BodyBytes::Read(n) => meter.add(n),
+                    crate::api_client::BodyBytes::Discarded(n) => meter.discard(n),
+                }
             }
         };
         Ok(match pin {

@@ -13,6 +13,7 @@
 //! state DB.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -58,22 +59,46 @@ pub fn parent_folder(path: &str) -> String {
 }
 
 /// One fetch's body bytes, counted per read as they arrive on the wire (LD-0105 S0), on the
-/// direct route and the API route alike. A Windows Cloud Files fetch reports this count to the
-/// platform (`CfReportProviderProgress`) while it downloads, which resets Windows' fixed 60 s
-/// callback timer; a chunk on a slow link can take longer than that on its own, so a count of
-/// finished chunks would leave the fetch silent. Nothing here is secret: one counter.
+/// direct route and the API route alike. A Windows Cloud Files fetch reports this to the platform
+/// (`CfReportProviderProgress`) while it downloads, which resets Windows' fixed 60 s callback timer;
+/// a chunk on a slow link can take longer than that on its own, so a count of finished chunks would
+/// leave the fetch silent. Nothing here is secret: two counters.
+///
+/// Liveness and progress are apart (lead decision 2026-11-06): [`Self::received`] counts every byte
+/// read, a failed or retried attempt's included, and only grows; [`Self::kept`] is the progress,
+/// from which a failed attempt's bytes are taken back ([`Self::discard`], [`Self::rollback_to`]).
 #[derive(Debug, Default)]
-pub struct ReceiveMeter(std::sync::atomic::AtomicU64);
+pub struct ReceiveMeter {
+    read: std::sync::atomic::AtomicU64,
+    kept: std::sync::atomic::AtomicU64,
+}
 
 impl ReceiveMeter {
     /// `wire_bytes` more arrived.
     pub fn add(&self, wire_bytes: u64) {
-        self.0.fetch_add(wire_bytes, std::sync::atomic::Ordering::Relaxed);
+        self.read.fetch_add(wire_bytes, Ordering::Relaxed);
+        self.kept.fetch_add(wire_bytes, Ordering::Relaxed);
     }
 
-    /// Every body byte counted so far.
+    /// `wire_bytes` that were added are not used after all (a body that broke off, a chunk that
+    /// did not authenticate): no longer progress. They stay in [`Self::received`].
+    pub fn discard(&self, wire_bytes: u64) {
+        let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.saturating_sub(wire_bytes)));
+    }
+
+    /// A whole attempt failed: progress goes back to `mark` (an earlier [`Self::kept`]) if it is past it.
+    pub fn rollback_to(&self, mark: u64) {
+        let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
+    }
+
+    /// Every body byte read so far, failed attempts included: the keep-alive's liveness.
     pub fn received(&self) -> u64 {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+        self.read.load(Ordering::Relaxed)
+    }
+
+    /// The bytes that count as progress: read, and not discarded.
+    pub fn kept(&self) -> u64 {
+        self.kept.load(Ordering::Relaxed)
     }
 }
 

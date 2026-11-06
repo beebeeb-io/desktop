@@ -81,7 +81,7 @@ pub(crate) async fn download(
                         tasks.push(Box::pin(async move {
                             Event::Storage {
                                 index,
-                                result: storage.fetch(grant, &|n| progress.received(n)).await,
+                                result: storage.fetch(grant, &|b| report_body(progress, b)).await,
                             }
                         }));
                     }
@@ -97,8 +97,8 @@ pub(crate) async fn download(
                             Event::Api {
                                 index,
                                 result: api
-                                    .download_chunk_pinned(file_id, index, &object_version_id, length, &|n| {
-                                        progress.received(n)
+                                    .download_chunk_pinned(file_id, index, &object_version_id, length, &|b| {
+                                        report_body(progress, b)
                                     })
                                     .await,
                             }
@@ -258,6 +258,8 @@ pub(crate) async fn download(
                 }
                 Err(_) => {
                     tracing::debug!(chunk = next, "direct download: chunk did not authenticate");
+                    // Its bytes were reported as they arrived; it is fetched again, so they are not progress.
+                    progress.discarded(frame.len() as u64);
                     if let Err(e) = planner.chunk_unauthentic(next) {
                         tracing::debug!(error = %e, "direct download: planner error");
                         return Ok(Outcome::UseApi);
@@ -266,6 +268,14 @@ pub(crate) async fn download(
                 }
             }
         }
+    }
+}
+
+/// One body report (LD-0105 S0) to `progress`.
+fn report_body(progress: &dyn super::Progress, bytes: crate::api_client::BodyBytes) {
+    match bytes {
+        crate::api_client::BodyBytes::Read(n) => progress.received(n),
+        crate::api_client::BodyBytes::Discarded(n) => progress.discarded(n),
     }
 }
 

@@ -31,6 +31,10 @@ pub(crate) trait Progress {
     /// chunk that takes minutes still reports (LD-0105 S0). The calls for one chunk add up to its
     /// wire length; a chunk that fails part way has reported the bytes that did arrive.
     fn received(&self, wire_bytes: u64);
+    /// Bytes reported by [`Progress::received`] that are not used after all: a body that broke off
+    /// or failed its length check, or a chunk that did not authenticate. They kept the fetch alive;
+    /// they are no longer progress, and no longer on the wire counter (lead decision 2026-11-06).
+    fn discarded(&self, wire_bytes: u64);
     /// A chunk was decrypted and appended, strictly in order: the plaintext length so far. Called
     /// with 0 once, when the direct attempt starts (the API path's first report).
     fn decrypted(&self, plaintext_bytes: u64);

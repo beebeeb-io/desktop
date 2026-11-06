@@ -20,10 +20,10 @@ pub(crate) async fn keep_fetch_alive(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let Some(received) = keep.tick(std::time::Instant::now(), meter.received()) else {
+        let Some(kept) = keep.tick(std::time::Instant::now(), meter.received(), meter.kept()) else {
             continue;
         };
-        let completed = crate::cf_keepalive::completed(received, total);
+        let completed = crate::cf_keepalive::completed(kept, total);
         // SAFETY: the keys of a live FETCH_DATA request; the callback that owns them is blocked on this
         // future, so the request is still pending while we report.
         if let Err(e) = unsafe { CfReportProviderProgress(connection_key, transfer_key, total, completed) } {

@@ -29,6 +29,9 @@
         fn received(&self, wire_bytes: u64) {
             self.wire.fetch_add(wire_bytes, Ordering::Relaxed);
         }
+        fn discarded(&self, wire_bytes: u64) {
+            self.wire.fetch_sub(wire_bytes, Ordering::Relaxed);
+        }
         fn decrypted(&self, plaintext_bytes: u64) {
             self.decrypted.lock().unwrap().push(plaintext_bytes);
         }
@@ -549,6 +552,7 @@
         fn received(&self, wire_bytes: u64) {
             self.events.lock().unwrap().push((std::time::Instant::now(), wire_bytes));
         }
+        fn discarded(&self, _wire_bytes: u64) {}
         fn decrypted(&self, _plaintext_bytes: u64) {}
     }
 

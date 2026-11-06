@@ -79,12 +79,26 @@ impl ApiClient {
             .send()
             .await?
             .error_for_status()?;
-        let mut body = Vec::new();
-        while let Some(piece) = resp.chunk().await? {
-            on_body(piece.len() as u64);
-            body.extend_from_slice(&piece);
+        // Sized from the length the server states, capped: a wrong header costs a reallocation, never
+        // a large allocation up front.
+        const RESERVE_AT_MOST: u64 = 64 << 20;
+        let mut body = Vec::with_capacity(resp.content_length().unwrap_or(0).min(RESERVE_AT_MOST) as usize);
+        loop {
+            match resp.chunk().await {
+                Ok(Some(piece)) => {
+                    on_body(super::BodyBytes::Read(piece.len() as u64));
+                    body.extend_from_slice(&piece);
+                }
+                Ok(None) => return Ok(body),
+                Err(e) => {
+                    // The bytes that arrived kept the fetch alive; the chunk is not used.
+                    if !body.is_empty() {
+                        on_body(super::BodyBytes::Discarded(body.len() as u64));
+                    }
+                    return Err(e.into());
+                }
+            }
         }
-        Ok(body)
     }
 
     /// `GET /api/v1/files/:id/thumbnail/{variant}` — returns the raw *encrypted*
