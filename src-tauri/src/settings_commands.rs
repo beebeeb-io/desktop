@@ -994,6 +994,9 @@ pub(super) struct KnownFolderStatus {
     /// Rough count of files in the source tree (top-level + nested, bounded), or
     /// `None` when the source can't be enumerated. Cheap-ish, best-effort.
     pub(super) item_count: Option<u64>,
+    /// LD-0113 Amendment 9: a folder OneDrive moved (`moved_path`, `source_choice`, `question`, `note`).
+    #[serde(flatten)]
+    pub(super) moved: crate::backup::kfm::MovedFolder,
 }
 
 /// List the backupable known folders with their resolved source paths + current
@@ -1008,24 +1011,19 @@ pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String
     let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
     for kf in known_folder::KNOWN_FOLDERS {
         let enabled = cfg.known_folder_enabled(kf.key);
-
-        #[cfg(target_os = "windows")]
-        let (source_path, item_count) = match known_folder::resolve_known_folder(kf.key) {
-            Some(p) => {
-                let count = count_items_bounded(&p);
-                (Some(p.to_string_lossy().into_owned()), count)
-            }
-            None => (None, None),
-        };
+        let view = crate::backup::kfm::folder_view(kf.key, kf.display_name, enabled, cfg.known_folder_source.get(kf.key).copied());
+        #[cfg(target_os = "windows")] // never counted inside OneDrive's folder (listing an online-only one can fetch it)
+        let item_count = view.source_path.as_deref().filter(|_| view.reads_default).and_then(count_items_bounded);
         #[cfg(not(target_os = "windows"))]
-        let (source_path, item_count): (Option<String>, Option<u64>) = (None, None);
+        let item_count: Option<u64> = None;
 
         out.push(KnownFolderStatus {
             key: kf.key.to_string(),
             display_name: kf.display_name.to_string(),
-            source_path,
+            source_path: view.source_path.map(|p| p.to_string_lossy().into_owned()),
             enabled,
             item_count,
+            moved: view.moved,
         });
     }
     Ok(out)

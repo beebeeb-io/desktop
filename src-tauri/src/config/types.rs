@@ -149,6 +149,12 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_backup: Vec<String>,
 
+    /// LD-0113 Amendment 9 (Guus, decision 2338, "Ask once"): for a known folder OneDrive's Known Folder Move has
+    /// moved, which folder the person chose to back up (`onedrive`: where the files are; `default`: the default
+    /// location). A moved folder with no answer here is not backed up until the person answers.
+    #[serde(default)]
+    pub known_folder_source: std::collections::BTreeMap<String, KnownFolderSource>,
+
     // ── Task 0804 — known-folder backup first-run onboarding prompt ────────
     //
     // The one-time "Back up these folders?" prompt (decision 0797's default-ON
@@ -383,6 +389,7 @@ impl Default for DesktopConfig {
             notify_quota_warnings: true,
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
+            known_folder_source: std::collections::BTreeMap::new(),
             known_folder_onboarding_seen: false,
             menu_bar_hint_seen: false,
             finder_install_status: None,
@@ -406,4 +413,15 @@ impl Default for DesktopConfig {
             finder_last_failure: None,
         }
     }
+}
+
+/// LD-0113 Amendment 9: which folder a moved known folder is backed up from (`known_folder_source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnownFolderSource {
+    /// OneDrive's folder, where Known Folder Move put the files. Only the files on this device are read.
+    #[serde(rename = "onedrive")]
+    OneDrive,
+    /// The folder's default location (`KF_FLAG_DEFAULT_PATH`), as before the move.
+    Default,
 }

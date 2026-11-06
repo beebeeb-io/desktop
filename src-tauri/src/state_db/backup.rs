@@ -634,4 +634,59 @@ impl StateDb {
         )?;
         Ok(())
     }
+
+    /// The current owner's flagged Backups root, once resolved.
+    pub fn backup_root(&self) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(None);
+        };
+        conn.query_row("SELECT root_id FROM backup_root WHERE account_owner = ?1", params![owner], |row| row.get(0))
+            .optional()
+    }
+
+    /// Cache the current owner's flagged root. `false`: no owner is recorded, nothing was written.
+    pub fn set_backup_root(&self, root_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(false);
+        };
+        conn.execute(
+            "INSERT INTO backup_root (account_owner, root_id) VALUES (?1, ?2)
+             ON CONFLICT(account_owner) DO UPDATE SET root_id = excluded.root_id",
+            params![owner, root_id],
+        )?;
+        Ok(true)
+    }
+
+    /// Amendment 9: ask about the moved folder `category` (its default and its moved location) once. `true` only
+    /// when the question is new: not asked before, or asked about other locations.
+    pub fn ask_backup_source_question(&self, category: &str, default_path: &str, moved_path: &str, at_ms: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let changed = conn.execute(
+            "INSERT INTO backup_source_questions (category, default_path, moved_path, asked_at_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(category) DO UPDATE SET default_path = excluded.default_path,
+                moved_path = excluded.moved_path, asked_at_ms = excluded.asked_at_ms
+             WHERE default_path != excluded.default_path OR moved_path != excluded.moved_path",
+            params![category, default_path, moved_path, at_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The open questions, by category, with the two locations each names.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn backup_source_questions(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT category, default_path, moved_path FROM backup_source_questions ORDER BY category")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// The question about `category` is settled (answered, the folder is no longer moved, or its backup is off).
+    pub fn settle_backup_source_question(&self, category: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute("DELETE FROM backup_source_questions WHERE category = ?1", params![category])?;
+        Ok(())
+    }
 }

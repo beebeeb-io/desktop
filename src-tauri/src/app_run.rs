@@ -148,6 +148,8 @@ pub fn run() {
             // Task 0797 — known-folder backup ("Manage backup")
             get_known_folder_backup,
             set_known_folder_backup,
+            // LD-0113 Amendment 9 — the answer for a folder OneDrive moved
+            crate::backup::commands::set_known_folder_source,
             // Task 0804 — known-folder backup first-run onboarding prompt
             get_known_folder_onboarding_seen,
             mark_known_folder_onboarding_seen,

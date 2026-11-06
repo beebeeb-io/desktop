@@ -50,4 +50,4 @@ pub(crate) use store::ConfigHost;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) use store::RealConfigFs;
 pub(crate) use types::ConfigMode;
-pub use types::{DesktopConfig, DesktopTheme, LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel};
+pub use types::{DesktopConfig, DesktopTheme, KnownFolderSource, LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel};

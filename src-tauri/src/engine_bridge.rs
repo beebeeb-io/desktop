@@ -99,6 +99,8 @@ mod upload;
 // LD-0113: the backup uploader (a file read in place from a backed-up folder).
 mod backup_upload;
 mod backup_tree;
+// LD-0113: the Backups root, the merge's moves and the device manifest.
+mod backup_root;
 mod shared_roots;
 mod finder_create;
 mod finder_edit;
@@ -522,6 +524,8 @@ mod uploads_4;
 // LD-0113 Task D3: the backup uploader leaves the source untouched.
 mod backup_uploads;
 mod backup_host;
+// LD-0113 PR 2: the Backups root, the merge and the device manifest.
+mod backup_layout;
 mod shared_2;
 mod sync;
 mod sync_2;

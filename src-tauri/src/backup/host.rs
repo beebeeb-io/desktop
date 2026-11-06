@@ -101,7 +101,7 @@ impl DesktopBackupHost {
             let (children, all) =
                 self.bridge.backup_list_children(&folder_id).await.map_err(host_error("listing"))?;
             complete &= all;
-            for BackupChild { id, name, is_folder, size, uploaded_at_ms } in children {
+            for BackupChild { id, name, is_folder, size, uploaded_at_ms, .. } in children {
                 let Some(remote_id) = parse_id(&id) else {
                     complete = false;
                     continue;
