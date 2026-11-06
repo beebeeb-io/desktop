@@ -160,7 +160,7 @@ impl EngineBridge {
         let transfer = self
             .transfers
             .begin(file_id, crate::transfer_progress::Direction::Down, 0);
-        let hydrated = self.do_hydrate_versioned(file_id, progress).await;
+        let hydrated = self.do_hydrate_versioned(file_id, progress, None).await;
         // Past the only cancellation point (the download await): every path
         // below sets the final status itself.
         if let Some(guard) = downloading_guard.as_mut() {
@@ -328,11 +328,23 @@ impl EngineBridge {
     /// the real on-disk path from `path` + sync root (see state_db comment).
     #[cfg(target_os = "windows")]
     pub async fn hydrate_file_to_memory(&self, file_id: &str) -> anyhow::Result<FetchedBytes> {
+        self.hydrate_file_to_memory_metered(file_id, None).await
+    }
+
+    /// [`Self::hydrate_file_to_memory`], also counting every body byte into `meter` as it arrives,
+    /// read by read (LD-0105 S0): the Windows fetch callback reports that count to Cloud Files so a
+    /// download that takes longer than Windows' 60 s callback limit is not failed and fetched again.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub async fn hydrate_file_to_memory_metered(
+        &self,
+        file_id: &str,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>,
+    ) -> anyhow::Result<FetchedBytes> {
         // Self-review #1: counted from before anything is recorded until the caller's transfer ended.
         let ticket = self.begin_fetch(file_id);
         let legacy_version = self.legacy_download_version(file_id)?;
         self.db.set_status(file_id, FileStatus::Downloading)?;
-        match self.do_hydrate_versioned(file_id, None).await {
+        match self.do_hydrate_versioned(file_id, None, meter).await {
             Ok((buf, downloaded_version)) => {
                 // Task 1640 (review N1, F1): every fetch, of a range or of the whole file, is
                 // recorded BEFORE its bytes are transferred: the version it serves and the hash of
@@ -511,7 +523,7 @@ impl EngineBridge {
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
     ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
-        self.do_hydrate_versioned(file_id, progress).await.map(|(plaintext, _)| plaintext)
+        self.do_hydrate_versioned(file_id, progress, None).await.map(|(plaintext, _)| plaintext)
     }
 
     /// [`Self::do_hydrate`], also saying which server version the bytes are: the download
@@ -521,6 +533,7 @@ impl EngineBridge {
         &self,
         file_id: &str,
         progress: Option<&HydrateProgressFn>,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>,
     ) -> Result<(Zeroizing<Vec<u8>>, Option<i64>), EngineError> {
         let _file_uuid: uuid::Uuid = file_id
             .parse()
@@ -533,9 +546,9 @@ impl EngineBridge {
         let meta = self.api.get_file(file_id).await?;
         self.with_one_restart(file_id, meta, |meta| async move {
             let version = meta["download_version"]["version_number"].as_i64();
-            self.do_hydrate_with_meta(file_id, &meta, progress)
+            self.hydrate_whole_file_metered(file_id, &meta, progress, meter)
                 .await
-                .map(|plaintext| (plaintext, version))
+                .map(|(plaintext, _)| (plaintext, version))
         })
         .await
     }
@@ -602,6 +615,18 @@ impl EngineBridge {
         meta: &serde_json::Value,
         progress: Option<&HydrateProgressFn>,
     ) -> Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport), EngineError> {
+        self.hydrate_whole_file_metered(file_id, meta, progress, None).await
+    }
+
+    /// [`Self::hydrate_whole_file`], also counting every body byte into `meter` per read, on the
+    /// direct route and the API route alike (LD-0105 S0).
+    pub(super) async fn hydrate_whole_file_metered(
+        &self,
+        file_id: &str,
+        meta: &serde_json::Value,
+        progress: Option<&HydrateProgressFn>,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>,
+    ) -> Result<(Zeroizing<Vec<u8>>, crate::direct_download::FileTransport), EngineError> {
         let pin = crate::download_pin::PinnedVersion::from_metadata(meta)?;
         let chunk_count = match &pin {
             Some(pin) => pin.chunk_count,
@@ -634,6 +659,16 @@ impl EngineBridge {
             file_id,
             total: approx_size as u64,
             progress,
+            meter,
+            counted: Default::default(),
+        };
+        // Where this attempt's progress starts: a failed attempt goes back here (lead decision
+        // 2026-11-06), so a retried or restarted download never shows more than the file.
+        let mark = meter.map(|m| m.kept());
+        let rollback = || {
+            if let (Some(meter), Some(mark)) = (meter, mark) {
+                meter.rollback_to(mark);
+            }
         };
         let direct = crate::direct_download::download(
             &self.api,
@@ -652,6 +687,8 @@ impl EngineBridge {
         )
         .await
         .map_err(|e| {
+            report.discard_attempt();
+            rollback();
             let error = match e {
                 crate::direct_download::DirectError::VersionChanged => anyhow::Error::new(crate::download_pin::VersionGone),
                 other => anyhow::Error::new(other),
@@ -661,18 +698,25 @@ impl EngineBridge {
         let (plaintext, transport) = match direct {
             crate::direct_download::Outcome::Done { plaintext, transport } => (plaintext, transport),
             crate::direct_download::Outcome::UseApi => (
-                self.download_and_decrypt_chunk_range(
+                {
+                    // The direct attempt's bytes are not this file's progress any more.
+                    report.discard_attempt();
+                    rollback();
+                    self.download_and_decrypt_chunk_range(
                     file_id,
                     &file_key,
                     0..chunk_count,
                     download_kbps_limit,
                     approx_size,
                     progress,
+                    meter,
                     pin.as_ref(),
                     expected_format,
                     chunk_count,
-                )
-                .await?,
+                    )
+                    .await
+                    .inspect_err(|_| rollback())?
+                },
                 crate::direct_download::FileTransport::Api,
             ),
         };
@@ -729,7 +773,17 @@ impl EngineBridge {
     /// wire size must be the manifest's; a 409 comes back as [`crate::download_pin::VersionGone`].
     /// Without one (a legacy file) the requests are today's unpinned ones.
     async fn download_content_frame(&self, file_id: &str, i: u32,
-        pin: Option<&crate::download_pin::PinnedVersion>) -> Result<Vec<u8>, EngineError> {
+        pin: Option<&crate::download_pin::PinnedVersion>,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>) -> Result<Vec<u8>, EngineError> {
+        // LD-0105 S0: every piece of the body is counted as it arrives, not once the chunk is whole.
+        let on_body = |b: crate::api_client::BodyBytes| {
+            if let Some(meter) = meter {
+                match b {
+                    crate::api_client::BodyBytes::Read(n) => meter.add(n),
+                    crate::api_client::BodyBytes::Discarded(n) => meter.discard(n),
+                }
+            }
+        };
         Ok(match pin {
                 // Task 1643: the pinned route (shared with the direct path's fallback): exactly the manifest's
                 // length, a transient failure tried again, a 409 = the version is gone, no URL in an error.
@@ -738,7 +792,7 @@ impl EngineBridge {
                         .wire_size(i)
                         .ok_or_else(|| anyhow::anyhow!("chunk {i} is outside the pinned version"))?;
                     self.api
-                        .download_chunk_pinned(file_id, i, &pin.object_version_id, expected)
+                        .download_chunk_pinned(file_id, i, &pin.object_version_id, expected, &on_body)
                         .await
                         .map_err(|e| match e {
                             crate::api_client::ChunkApiError::Restart => {
@@ -750,7 +804,7 @@ impl EngineBridge {
                             crate::api_client::ChunkApiError::Failed(message) => anyhow::anyhow!(message),
                         })?
                 }
-                None => self.api.download_chunk(file_id, i).await?,
+                None => self.api.download_chunk(file_id, i, &on_body).await?,
         })
 
     }
@@ -764,6 +818,7 @@ impl EngineBridge {
         download_kbps_limit: u64,
         approx_size_hint: usize,
         progress: Option<&HydrateProgressFn>,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>,
         pin: Option<&crate::download_pin::PinnedVersion>,
         expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
         chunk_count: u32,
@@ -788,14 +843,14 @@ impl EngineBridge {
         let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
             beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id, expected);
         let context = if whole { None } else {
-            let first = self.download_content_frame(file_id, 0, pin).await?;
+            let first = self.download_content_frame(file_id, 0, pin, meter).await?;
             let mut opened = reader.push_frame(&content_frame(&first)?)?;
             opened.data.zeroize();
             Some((reader.format().ok_or_else(|| anyhow::anyhow!("missing chunk format"))?, reader.version_id()))
         };
         for i in range {
             let chunk_start = std::time::Instant::now();
-            let chunk_bytes = self.download_content_frame(file_id, i, pin).await?;
+            let chunk_bytes = self.download_content_frame(file_id, i, pin, meter).await?;
             let wire_len = chunk_bytes.len() as u64;
             // Decrypt into a temporary buffer, copy into the accumulator,
             // then zeroize the temporary. This limits live plaintext to
@@ -959,6 +1014,7 @@ impl EngineBridge {
                 chunks.clone(),
                 download_kbps_limit,
                 plan.covering_span_hint,
+                None,
                 None,
                 pin.as_ref(),
                 expected_format,

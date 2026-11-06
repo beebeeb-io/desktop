@@ -29,6 +29,9 @@
         fn received(&self, wire_bytes: u64) {
             self.wire.fetch_add(wire_bytes, Ordering::Relaxed);
         }
+        fn discarded(&self, wire_bytes: u64) {
+            self.wire.fetch_sub(wire_bytes, Ordering::Relaxed);
+        }
         fn decrypted(&self, plaintext_bytes: u64) {
             self.decrypted.lock().unwrap().push(plaintext_bytes);
         }
@@ -537,4 +540,72 @@
         pin.ciphertext_size_bytes += 1;
         uses_api(run_pinned(&pair, &pin).await);
         assert_eq!(pair.storage_requests(), 0);
+    }
+
+    /// LD-0105 S0: when each body byte was reported, so a test can measure the longest silence.
+    #[derive(Default)]
+    struct Timeline {
+        events: Mutex<Vec<(std::time::Instant, u64)>>,
+    }
+
+    impl Progress for Timeline {
+        fn received(&self, wire_bytes: u64) {
+            self.events.lock().unwrap().push((std::time::Instant::now(), wire_bytes));
+        }
+        fn discarded(&self, _wire_bytes: u64) {}
+        fn decrypted(&self, _plaintext_bytes: u64) {}
+    }
+
+    #[tokio::test]
+    async fn ld0105_s0_a_chunk_slower_than_a_minute_reports_its_bytes_as_they_arrive() {
+        // One 8 MiB chunk at 128 KiB/s: ~65 s on the wire, longer than Windows' fixed 60 s callback limit
+        // (4 connections sharing a ~18 Mb/s link see this with 32 MiB chunks). Counted per finished chunk
+        // (0.8.21), nothing is reported until the chunk ends, so a Cloud Files fetch has no real progress
+        // to report and fails at 60 s. Counted per read, the silence between reports stays about a second.
+        const BIG: u64 = 8 << 20;
+        let pair = Pair::start(KEY, FILE_ID, BIG, BIG as usize);
+        pair.knobs()
+            .storage
+            .insert(0, std::collections::VecDeque::from([StorageScript::Trickle(128 * 1024, Duration::from_secs(1))]));
+        let key = file_key(KEY, FILE_ID);
+        let timeline = Timeline::default();
+        let started = std::time::Instant::now();
+        let outcome = download(
+            &client(&pair),
+            Request {
+                file_id: FILE_ID,
+                file_key: &key,
+                expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                chunk_count: 1,
+                download_kbps_limit: 0,
+                approx_size: BIG as usize,
+                pin: None,
+            },
+            Transport::Auto,
+            None,
+            &timeline,
+        )
+        .await;
+        let ended = std::time::Instant::now();
+        let (bytes, transport) = done(outcome);
+        assert_eq!(bytes, pair.plain(), "the right bytes");
+        assert_eq!(transport, FileTransport::Direct);
+        let took = ended - started;
+        assert!(took > Duration::from_secs(60), "the chunk must take longer than Windows' 60 s limit: {took:?}");
+        let events = timeline.events.lock().unwrap().clone();
+        let reported: u64 = events.iter().map(|(_, n)| n).sum();
+        assert_eq!(reported, pair.knobs().version.encrypted_size(), "every body byte reported once");
+        let mut last = started;
+        let mut longest = Duration::ZERO;
+        for (at, _) in &events {
+            longest = longest.max(at.duration_since(last));
+            last = *at;
+        }
+        longest = longest.max(ended.duration_since(last));
+        println!("ld0105-s0: chunk took {took:?}, {} byte reports, longest silence {longest:?}", events.len());
+        assert!(
+            longest < Duration::from_secs(10),
+            "S0 needs real bytes at least every 10 s; the longest silence was {longest:?} over {} reports",
+            events.len()
+        );
     }

@@ -36,7 +36,7 @@ use urlencoding::encode;
 use zeroize::Zeroize;
 
 mod direct;
-pub(crate) use direct::{ChunkApiError, GrantReply, fetch_from_storage, now_ms};
+pub(crate) use direct::{BodyBytes, ChunkApiError, GrantReply, OnBody, fetch_from_storage, now_ms};
 mod headers;
 use headers::*;
 pub(crate) use headers::{provenance_headers};

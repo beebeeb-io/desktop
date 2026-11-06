@@ -69,16 +69,36 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/files/:id/chunks/:idx` — returns the raw encrypted
-    /// chunk bytes. Decryption is the caller's job (`beebeeb_core`).
-    pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32) -> anyhow::Result<Vec<u8>> {
-        let resp = self
+    /// chunk bytes. Decryption is the caller's job (`beebeeb_core`). Each piece of the body is
+    /// reported to `on_body` as it arrives (LD-0105 S0), not once the chunk is whole.
+    pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32, on_body: super::OnBody<'_>) -> anyhow::Result<Vec<u8>> {
+        let mut resp = self
             .client
             .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?;
-        Ok(resp.bytes().await?.to_vec())
+        // Sized from the length the server states, capped: a wrong header costs a reallocation, never
+        // a large allocation up front.
+        const RESERVE_AT_MOST: u64 = 64 << 20;
+        let mut body = Vec::with_capacity(resp.content_length().unwrap_or(0).min(RESERVE_AT_MOST) as usize);
+        loop {
+            match resp.chunk().await {
+                Ok(Some(piece)) => {
+                    on_body(super::BodyBytes::Read(piece.len() as u64));
+                    body.extend_from_slice(&piece);
+                }
+                Ok(None) => return Ok(body),
+                Err(e) => {
+                    // The bytes that arrived kept the fetch alive; the chunk is not used.
+                    if !body.is_empty() {
+                        on_body(super::BodyBytes::Discarded(body.len() as u64));
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
     }
 
     /// `GET /api/v1/files/:id/thumbnail/{variant}` — returns the raw *encrypted*

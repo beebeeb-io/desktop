@@ -146,6 +146,16 @@ mod os_state_reconcile;
 mod upload_finalization_plan;
 // Task 2284: the no-fetch scope a finalization, stamp or promote holds around its data open.
 mod no_fetch_scope;
+// LD-0105 S0: when a Cloud Files fetch reports its byte progress to Windows. Decided on every platform
+// (tested everywhere); applied on Windows only (`windows_cf::callbacks::keep_fetch_alive`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod cf_keepalive;
+// LD-0105 D2 (W3): the ONE player allowlist and media types. It lives under `windows_cf/` (the contract's
+// path) but is pure and compiled everywhere, so its rules are tested on every platform. Switched off
+// (`STREAMING_ENABLED = false`) until the streaming callback (W2); nothing calls it yet.
+#[allow(dead_code)]
+#[path = "windows_cf/stream_players.rs"]
+mod stream_players;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.

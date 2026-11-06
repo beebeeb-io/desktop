@@ -79,7 +79,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - Sign-out server-revoke reports a status word, never the token or reqwest's text, and never changes the sign-out's result (task 1886).
 - R10: changes the engine cannot tie to an own account are held, never sent or deleted until the person decides in Settings › Sync.
 - `vault_unlock_route` fails closed when the Keychain cannot be read (nothing is written over a key that may be there); never part of the 1 Hz `sync_status`.
-- A null `download_version` (legacy) keeps the unpinned download; never invent a pin. Not covered: Windows Cloud Files PARTIAL hydration (task 2180).
+- A null `download_version` (legacy) keeps the unpinned download; never invent a pin. Windows Cloud Files roots are PROGRESSIVE (LD-0105 W1); a placeholder's bytes are trusted only for its recorded minted version (task 2180), else it is poisoned and emptied (S6), never written into.
 - Finder writes (`write_id`): record the completion first; the op is never abandoned/parked — it retries only local landing (one transaction).
 - A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `tests/noCityInCopy.test.ts` fails on a city name).
 

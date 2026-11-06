@@ -127,7 +127,7 @@ impl Root {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("root");
         std::fs::create_dir(&path).unwrap();
-        crate::windows_cf::register_sync_root(&path).unwrap();
+        crate::windows_cf::register_test_sync_root(&path).unwrap();
         let table = [
             CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_FETCH_DATA, Callback: Some(serving_fetch) },
             CF_CALLBACK_REGISTRATION { Type: CF_CALLBACK_TYPE_NONE, Callback: None },

@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 17] = [
+pub(super) const ACCOUNT_TABLES: [&str; 18] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -29,6 +29,8 @@ pub(super) const ACCOUNT_TABLES: [&str; 17] = [
     "unknown_orphans",
     // Task 2190: sync-folder edits held, not sent, because their base is unknown (file ids): the account's.
     "held_edits",
+    // LD-0105 S6: placeholders a failed fetch wrote into, until emptied (file ids): the account's.
+    "cf_poison",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no

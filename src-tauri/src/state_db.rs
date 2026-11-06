@@ -595,6 +595,8 @@ mod reconcile_tests {
 
 mod activity;
 mod cache;
+// LD-0105: a Windows placeholder's minted version (task 2180) and the poisoned placeholders (spec S6).
+mod cf_streaming;
 mod custody;
 mod files;
 mod landing;

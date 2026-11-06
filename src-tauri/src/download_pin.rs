@@ -144,6 +144,55 @@ impl PinnedVersion {
     }
 }
 
+/// LD-0105 S3 / I4 (task 2180): may a fetch session build on the bytes a Windows placeholder already
+/// holds? The session pins to the placeholder's minted version (`session_version`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) enum PlaceholderIdentity {
+    /// Nothing on disk: nothing to trust. The session records its identity and starts.
+    Fresh,
+    /// The bytes on disk are the minted version's: the session may keep them.
+    Match,
+    /// The bytes on disk are not provably this version's: an identity recorded for another version,
+    /// or NO identity at all (an upgrade from 0.8.21, a lost or reset state.db). Never written into:
+    /// the placeholder is poisoned and emptied first (spec S6).
+    Mismatch,
+}
+
+/// LD-0105 S3: the verdict for a placeholder holding `on_disk_bytes` bytes whose recorded identity is
+/// `minted`, for a session pinned to `session_version`. Versions compare as UUIDs (case and hyphen
+/// spelling do not matter); a value that is not a UUID never matches.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn placeholder_identity(minted: Option<&str>, session_version: &str, on_disk_bytes: u64) -> PlaceholderIdentity {
+    if on_disk_bytes == 0 {
+        return PlaceholderIdentity::Fresh;
+    }
+    let parse = |v: &str| uuid::Uuid::parse_str(v.trim()).ok();
+    match (minted.and_then(parse), parse(session_version)) {
+        (Some(minted), Some(session)) if minted == session => PlaceholderIdentity::Match,
+        _ => PlaceholderIdentity::Mismatch,
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::{PlaceholderIdentity::*, placeholder_identity};
+
+    const A: &str = "11111111-2222-4333-8444-555555555555";
+    const B: &str = "99999999-2222-4333-8444-555555555555";
+
+    #[test]
+    fn ld0105_s3_bytes_on_disk_are_trusted_only_for_the_recorded_version() {
+        assert_eq!(placeholder_identity(None, A, 0), Fresh, "nothing on disk, nothing recorded: record and start");
+        assert_eq!(placeholder_identity(Some(B), A, 0), Fresh, "nothing on disk: nothing to trust");
+        assert_eq!(placeholder_identity(Some(A), A, 4096), Match);
+        assert_eq!(placeholder_identity(Some(&A.to_uppercase()), A, 1), Match, "UUID spelling does not matter");
+        assert_eq!(placeholder_identity(Some(B), A, 4096), Mismatch, "another version's bytes");
+        assert_eq!(placeholder_identity(None, A, 1), Mismatch, "no record with bytes on disk is a mismatch");
+        assert_eq!(placeholder_identity(Some("not-a-uuid"), "not-a-uuid", 1), Mismatch, "never a match on garbage");
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

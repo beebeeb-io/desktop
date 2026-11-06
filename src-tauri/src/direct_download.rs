@@ -96,6 +96,8 @@ pub(crate) mod test_support {
         /// Send this many bytes of the response, then go silent for this long (a half-open
         /// connection), then close.
         stall: Option<(usize, std::time::Duration)>,
+        /// Send the body this many bytes at a time, with this pause between pieces (a slow link).
+        trickle: Option<(usize, std::time::Duration)>,
     }
 
     impl Reply {
@@ -106,6 +108,7 @@ pub(crate) mod test_support {
                 body: value.to_string().into_bytes(),
                 hang_up: false,
                 stall: None,
+                trickle: None,
             }
         }
         pub(crate) fn bytes(body: Vec<u8>) -> Self {
@@ -115,6 +118,7 @@ pub(crate) mod test_support {
                 body,
                 hang_up: false,
                 stall: None,
+                trickle: None,
             }
         }
         /// An empty body with no content type: axum's unknown-route answer.
@@ -125,6 +129,7 @@ pub(crate) mod test_support {
                 body: Vec::new(),
                 hang_up: false,
                 stall: None,
+                trickle: None,
             }
         }
         pub(crate) fn redirect(location: String) -> Self {
@@ -134,6 +139,7 @@ pub(crate) mod test_support {
                 body: Vec::new(),
                 hang_up: false,
                 stall: None,
+                trickle: None,
             }
         }
         /// Close the connection without an answer.
@@ -144,11 +150,17 @@ pub(crate) mod test_support {
                 body: Vec::new(),
                 hang_up: true,
                 stall: None,
+                trickle: None,
             }
         }
         /// `self`, but after `sent` bytes of it the connection goes silent for `silence`.
         pub(crate) fn stalling(mut self, sent: usize, silence: std::time::Duration) -> Self {
             self.stall = Some((sent, silence));
+            self
+        }
+        /// `self`, but its body is sent `piece` bytes at a time with `pause` between pieces.
+        pub(crate) fn trickling(mut self, piece: usize, pause: std::time::Duration) -> Self {
+            self.trickle = Some((piece.max(1), pause));
             self
         }
         pub(crate) fn with_header(mut self, name: &str, value: &str) -> Self {
@@ -269,6 +281,19 @@ pub(crate) mod test_support {
             std::thread::sleep(silence);
             return;
         }
+        if let Some((piece, pause)) = reply.trickle {
+            let head_len = out.len() - reply.body.len();
+            if stream.write_all(&out[..head_len]).is_err() {
+                return;
+            }
+            for part in reply.body.chunks(piece) {
+                std::thread::sleep(pause);
+                if stream.write_all(part).and_then(|()| stream.flush()).is_err() {
+                    return;
+                }
+            }
+            return;
+        }
         let _ = stream.write_all(&out);
         let _ = stream.flush();
     }
@@ -381,6 +406,10 @@ pub(crate) mod test_support {
         /// One bit flipped in the tag.
         Tamper,
         HangUp,
+        /// The real frame, sent this many bytes at a time with this pause between pieces.
+        Trickle(usize, std::time::Duration),
+        /// About half the body arrives, then the connection closes (a hang-up part way).
+        BreakOff,
     }
 
     /// What one pinned API chunk GET gets (when the script is empty: served).
@@ -393,6 +422,8 @@ pub(crate) mod test_support {
         Gone,
         /// 429 with this `Retry-After` (seconds).
         RateLimited(u64),
+        /// The real frame, sent this many bytes at a time with this pause between pieces.
+        Trickle(usize, std::time::Duration),
     }
 
     pub(crate) struct Knobs {
@@ -520,6 +551,12 @@ pub(crate) mod test_support {
                     Some(StorageScript::Short) => Reply::bytes(frame[..frame.len() - 1].to_vec()),
                     Some(StorageScript::Tamper) => Reply::bytes(tamper(&frame)),
                     Some(StorageScript::HangUp) => Reply::hang_up(),
+                    Some(StorageScript::Trickle(piece, pause)) => Reply::bytes(frame).trickling(piece, pause),
+                    // The head is under 300 bytes: what is sent past it is part of the body, not all.
+                    Some(StorageScript::BreakOff) => {
+                        let half = frame.len() / 2;
+                        Reply::bytes(frame).stalling(300 + half, std::time::Duration::from_millis(20))
+                    }
                 }
             }));
             let storage_authority = storage.authority.clone();
@@ -567,6 +604,7 @@ pub(crate) mod test_support {
                                 body: b"<html>gateway</html>".to_vec(),
                                 hang_up: false,
                                 stall: None,
+                                trickle: None,
                             };
                         }
                         Some(GrantScript::Replace) => {
@@ -607,6 +645,7 @@ pub(crate) mod test_support {
                         None => Reply::bytes(frame),
                         Some(ApiScript::Status(s)) => Reply::json(s, json!({"error": "scripted"})),
                         Some(ApiScript::Tamper) => Reply::bytes(tamper(&frame)),
+                        Some(ApiScript::Trickle(piece, pause)) => Reply::bytes(frame).trickling(piece, pause),
                         Some(ApiScript::HangUp) => Reply::hang_up(),
                         Some(ApiScript::Gone) => Reply::json(409, json!({"error": PINNED_GONE})),
                         Some(ApiScript::RateLimited(secs)) => {

@@ -625,6 +625,15 @@ async fn run(
                         tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
                     }
                 }
+                // LD-0105 S6: empty the placeholders a failed fetch wrote into, on every tick (so at engine
+                // start too: a poison outlives a restart, and no close event comes after one).
+                #[cfg(target_os = "windows")]
+                {
+                    let poison_root = sync_root.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::poison::sweep_poisoned_now(&poison_root)).await {
+                        tracing::warn!(error = %e, "poison sweep panicked; continuing");
+                    }
+                }
 
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
