@@ -52,8 +52,7 @@ fn source_fingerprint(path: &Path) -> Result<beebeeb_backup::Fingerprint, Backup
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(BackupDrop::SourceGone),
         Err(_) => return Err(BackupDrop::SourceUnreadable),
     };
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    let attrs = beebeeb_backup::attrs_of(&meta, name);
+    let attrs = beebeeb_backup::attrs_of(&meta);
     if attrs.not_local {
         return Err(BackupDrop::SourceNotLocal);
     }

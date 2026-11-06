@@ -55,6 +55,8 @@ use crate::state_db::BackupEnqueue;
             name: source.file_name().unwrap().to_string_lossy().into_owned(),
             fingerprint: beebeeb_backup::fingerprint(source).unwrap(),
             reason: beebeeb_core::backup::UploadReason::New,
+            record_key: None,
+            remote_id: None,
         }
     }
 
