@@ -312,3 +312,48 @@ fn a_rename_is_a_trash_a_move_or_a_rename() {
     assert_eq!(rename_mutation(&root.join("Backups"), &root.join("Docs").join("Backups")), Mutation::Move);
     assert_eq!(rename_mutation(&root.join("Backups"), &root.join("Old backups")), Mutation::Rename);
 }
+
+/// LD-0113 (lead 2026-11-06 20:01; core's `is_hidden_backup_item`): quick search, the Files overview
+/// and the tray's recent list never offer a device folder's manifest, which each backup pass rewrites
+/// (it would lead every recent list). A file of the same name elsewhere is ordinary.
+#[test]
+fn the_manifest_is_never_listed_in_the_app() {
+    let (_dir, db) = fixture();
+    let file = |file_id: &str, path: &str, modified_at: i64| {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 10,
+            modified_at,
+            content_hash: None,
+            remote_updated_at: modified_at,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    };
+    let manifest = "0b5ec0de-0000-4000-8000-0000000000f1";
+    file(manifest, &format!("Backups/OtherPC/{MANIFEST_NAME}"), 2_000_000_000);
+    file("0b5ec0de-0000-4000-8000-0000000000f2", "Backups/OtherPC/Pictures/a.jpg", 1_900_000_000);
+    file("0b5ec0de-0000-4000-8000-0000000000f3", "Documents/.device.json", 1_800_000_000);
+
+    let search = crate::desktop_search::build_local_index(&db).unwrap();
+    assert!(!search.records.contains_key(manifest), "quick search never offers the manifest");
+    for offered in ["0b5ec0de-0000-4000-8000-0000000000f2", "0b5ec0de-0000-4000-8000-0000000000f3"] {
+        assert!(search.records.contains_key(offered), "the backed-up photo and the ordinary file are offered");
+    }
+
+    let recent: Vec<String> = crate::account_commands::recent_files(&db, 2).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(
+        recent,
+        vec!["Backups/OtherPC/Pictures/a.jpg".to_string(), "Documents/.device.json".to_string()],
+        "the tray's list of 2 leaves the manifest out and still holds 2"
+    );
+    let overview: Vec<String> = crate::account_commands::listable_rows(&db, db.file_overview_rows().unwrap())
+        .into_iter()
+        .map(|(entry, _)| entry.path)
+        .collect();
+    assert!(!overview.iter().any(|path| path.ends_with(MANIFEST_NAME) && path.starts_with("Backups/")), "{overview:?}");
+    assert!(overview.iter().any(|path| path == "Documents/.device.json"), "the overview keeps the ordinary file");
+}

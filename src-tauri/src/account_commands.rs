@@ -631,15 +631,34 @@ pub(super) fn file_overview_inputs(rows: Vec<(state_db::FileEntry, bool)>) -> Ve
         .collect()
 }
 
-/// The newest `limit` local activity events, as the overview's recent list takes them.
+/// LD-0113 (core's `is_hidden_backup_item`): what the overview and the tray may list. A device folder's
+/// manifest in Backups never is; each backup pass rewrites it, so it would otherwise lead every recent
+/// list.
+pub(super) fn listable_rows(
+    db: &state_db::StateDb,
+    rows: Vec<(state_db::FileEntry, bool)>,
+) -> Vec<(state_db::FileEntry, bool)> {
+    let backups = crate::backup_protect::BackupsTree::read(db);
+    rows.into_iter().filter(|(entry, _)| !backups.is_hidden(&entry.path)).collect()
+}
+
+/// How many rows past `limit` a recent list reads, so the manifests [`listable_rows`] leaves out (one
+/// per device) do not shorten it.
+const HIDDEN_SLACK: usize = 16;
+
+/// The newest `limit` local activity events, as the overview's recent list takes them; none about a
+/// row [`listable_rows`] leaves out.
 pub(super) fn file_overview_activity(
     db: &state_db::StateDb,
     limit: usize,
 ) -> Result<Vec<account_dto::FileOverviewActivityInput>, String> {
+    let backups = crate::backup_protect::BackupsTree::read(db);
     Ok(db
-        .list_recent_local_activity(limit)
+        .list_recent_local_activity(limit.saturating_add(HIDDEN_SLACK))
         .map_err(|e| format!("list local activity: {e}"))?
         .into_iter()
+        .filter(|event| event.rel_path.as_deref().is_none_or(|rel| !backups.is_hidden(rel)))
+        .take(limit)
         .map(|event| account_dto::FileOverviewActivityInput {
             event_type: event.event_type.as_str().to_string(),
             file_name: event.file_name,
@@ -651,8 +670,10 @@ pub(super) fn file_overview_activity(
 
 /// The tray's recent list (task 2243): the overview's `recent`, without its totals.
 pub(super) fn recent_files(db: &state_db::StateDb, limit: usize) -> Result<Vec<account_dto::RecentFile>, String> {
-    // The newest `limit` files and the newest `limit` events are all a list of `limit` can hold.
-    let rows = db.newest_file_rows(limit).map_err(|e| format!("list files: {e}"))?;
+    // The newest `limit` files and the newest `limit` events are all a list of `limit` can hold (and the
+    // rows a recent list leaves out).
+    let rows = db.newest_file_rows(limit.saturating_add(HIDDEN_SLACK)).map_err(|e| format!("list files: {e}"))?;
+    let rows = listable_rows(db, rows);
     Ok(
         account_dto::compute_file_overview(&file_overview_inputs(rows), &file_overview_activity(db, limit)?, limit)
             .recent,
@@ -705,7 +726,7 @@ pub(super) async fn desktop_file_overview(
         // `account_storage_breakdown`).
         let overview = tokio::task::spawn_blocking(move || -> Result<_, String> {
             let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state db: {e}"))?;
-            let rows = db.file_overview_rows().map_err(|e| format!("list files: {e}"))?;
+            let rows = listable_rows(&db, db.file_overview_rows().map_err(|e| format!("list files: {e}"))?);
             Ok(account_dto::compute_file_overview(
                 &file_overview_inputs(rows),
                 &file_overview_activity(&db, limit)?,

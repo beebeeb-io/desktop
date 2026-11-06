@@ -12,6 +12,7 @@ pub(crate) fn file_provider_change_payloads(
     db: &crate::state_db::StateDb,
     changes: Vec<crate::state_db::FileChange>,
 ) -> Vec<FileProviderChangePayload> {
+    let backups = crate::backup_protect::BackupsTree::read(db);
     changes
         .into_iter()
         .map(|change| FileProviderChangePayload {
@@ -39,6 +40,9 @@ pub(crate) fn file_provider_change_payloads(
                             .map(|contract| contract.namespace != crate::state_db::Namespace::SharedWithMe)
                             .unwrap_or(true)
                     })
+                    // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest is never
+                    // listed, so its change carries no item either.
+                    .filter(|entry| !backups.is_hidden(&entry.path))
                     .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
             },
             file_id: change.file_id,
@@ -53,6 +57,9 @@ pub(crate) fn list_file_provider_items(
     db: &crate::state_db::StateDb,
     container_id: &str,
 ) -> Vec<FileProviderItemPayload> {
+    // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest is never listed, in a folder
+    // or in the trash.
+    let backups = crate::backup_protect::BackupsTree::read(db);
     // Task 1698: the SYSTEM trash container lists the trash view — the
     // Trashing rows that are TOP of trash (their parent row is not itself
     // Trashing; the children of a trashed folder enumerate INSIDE that
@@ -63,6 +70,7 @@ pub(crate) fn list_file_provider_items(
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry))
+            .filter(|entry| !backups.is_hidden(&entry.path))
             .map(|entry| file_entry_payload_for_db(db, &entry, FP_TRASH_APPLE))
             .collect();
     }
@@ -130,6 +138,7 @@ pub(crate) fn list_file_provider_items(
                 == Some(container_id)
         })
         .filter(move |entry| container_is_trashed || entry.status != crate::state_db::FileStatus::Trashing)
+        .filter(|entry| !backups.is_hidden(&entry.path))
         .map(|entry| file_entry_payload_for_db(db, &entry, container_id))
         .collect()
 }

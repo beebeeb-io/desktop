@@ -155,3 +155,40 @@ fn a_refused_drive_change_shows_the_words_and_logs_none() {
     assert_eq!(reply.category(), "backup_protected");
     assert_eq!(reply.message(), words);
 }
+
+/// LD-0113 (lead 2026-11-06 20:01; core's `is_hidden_backup_item`): a device folder's manifest is never
+/// listed in Finder, in its folder or in the change feed; a file of the same name deeper down is.
+#[test]
+fn the_manifest_is_never_listed_in_finder() {
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    let child = |file_id: &str, path: &str, parent: &str, kind: ItemKind| {
+        row(&db, file_id, path, kind);
+        let mut contract = db.get_file_contract_state(file_id).unwrap().unwrap();
+        contract.parent_id = Some(parent.into());
+        db.set_file_contract_state(&contract).unwrap();
+    };
+    row(&db, ROOT_ID, "Backups", ItemKind::Folder);
+    let device = "0b5ec0de-0000-4000-8000-0000000000da";
+    let manifest = "0b5ec0de-0000-4000-8000-0000000000db";
+    let category = "0b5ec0de-0000-4000-8000-0000000000dc";
+    let deeper = "0b5ec0de-0000-4000-8000-0000000000dd";
+    child(device, "Backups/OtherPC", ROOT_ID, ItemKind::Folder);
+    child(manifest, &format!("Backups/OtherPC/{}", beebeeb_core::backup::MANIFEST_NAME), device, ItemKind::File);
+    child(category, "Backups/OtherPC/Pictures", device, ItemKind::Folder);
+    child(deeper, "Backups/OtherPC/Pictures/.device.json", category, ItemKind::File);
+    // Flagging the root records a change for every row under it, the manifest's among them.
+    assert!(db.set_system_role(ROOT_ID, Some(beebeeb_types::backup::SystemRole::BackupsRoot)).unwrap());
+
+    let listed: Vec<String> = list_file_provider_items(&db, device).into_iter().map(|item| item.identifier).collect();
+    assert_eq!(listed, vec![category.to_string()], "the device folder lists its category folder, not its manifest");
+    let deeper_listed: Vec<String> = list_file_provider_items(&db, category).into_iter().map(|item| item.identifier).collect();
+    assert_eq!(deeper_listed, vec![deeper.to_string()], "a file of that name deeper down is ordinary");
+
+    let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+    let payloads = file_provider_change_payloads(&db, changes);
+    let item_of = |id: &str| payloads.iter().find(|change| change.file_id == id).map(|change| change.item.is_some());
+    assert_eq!(item_of(manifest), Some(false), "the manifest's change carries no item");
+    assert_eq!(item_of(category), Some(true));
+    assert_eq!(item_of(deeper), Some(true));
+}
