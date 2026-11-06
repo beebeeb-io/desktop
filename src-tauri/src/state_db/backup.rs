@@ -47,6 +47,8 @@ impl StateDb {
     /// Queue one backup upload for the current owner: an `upload_file` op with `origin = 'backup'`, the source in
     /// `source_path` and no payload. Idempotent per (owner, category, key): a key already queued is not queued twice.
     /// `backup_source_key` is the category, so turning the folder off purges it (`purge_backup_source_ops`).
+    // LD-0113 Task D4: `DesktopBackupHost` (`BackupHost::{enqueue_upload, records}`) is its production caller.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn enqueue_backup_upload(&self, up: &NewBackupUpload<'_>) -> Result<BackupEnqueue> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -101,7 +103,7 @@ impl StateDb {
             ],
         )?;
         tx.commit()?;
-        Ok(BackupEnqueue::Queued)
+        Ok(BackupEnqueue::Queued(up.op_id.to_string()))
     }
 
     /// The backup op `op_id` with its source, or `None` when it is gone or is not a backup op.
@@ -288,6 +290,8 @@ impl StateDb {
 
     /// The current owner's records for `category` (`BackupHost::records`). Another account's records are never
     /// returned, whatever is still on disk.
+    // LD-0113 Task D4: `DesktopBackupHost` (`BackupHost::{enqueue_upload, records}`) is its production caller.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn backup_records(&self, category: &str) -> Result<Vec<BackupRecord>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {

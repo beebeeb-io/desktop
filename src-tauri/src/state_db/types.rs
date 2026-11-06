@@ -616,7 +616,8 @@ pub struct NewBackupUpload<'a> {
 /// What [`StateDb::enqueue_backup_upload`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupEnqueue {
-    Queued,
+    /// Queued under this op id.
+    Queued(String),
     /// An op for this (account, category, key) is already queued; nothing was added (`BackupHost::enqueue_upload`
     /// is idempotent per key). Its id.
     AlreadyQueued(String),

@@ -93,6 +93,8 @@ pub struct EngineBridge {
 /// stay in this facade, and inherent impls may span modules.
 mod lifecycle;
 mod upload;
+// LD-0113: the backup uploader (a file read in place from a backed-up folder).
+mod backup_upload;
 mod shared_roots;
 mod finder_create;
 mod finder_edit;
@@ -512,6 +514,8 @@ mod uploads_2;
 mod conflicts;
 mod uploads_3;
 mod uploads_4;
+// LD-0113 Task D3: the backup uploader leaves the source untouched.
+mod backup_uploads;
 mod shared_2;
 mod sync;
 mod sync_2;
