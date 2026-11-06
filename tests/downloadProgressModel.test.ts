@@ -118,14 +118,23 @@ describe('transferUiState', () => {
 // ── needs_attention state ─────────────────────────────────────────────────────
 
 describe('needs_attention state (Amendment 4, PR #225 IPC shape)', () => {
-  test('traySubline returns the action label', () => {
-    // The tray shows the action as the subline so the user knows what to do.
-    expect(traySubline(needsAttention())).toBe('Discard and download again')
+  test('traySubline returns the same short line as failed (lead ruling 2026-11-06)', () => {
+    // Tray is kept short; the full explanation lives in Activity / tooltip.
+    // mutant: returned "Discard and download again" → would exceed design length budget
+    expect(traySubline(needsAttention())).toBe("Couldn't finish downloading")
   })
-  test('activityDetail returns the detail sentence', () => {
+  test('traySubline for needs_attention never contains "complete"', () => {
+    expect(traySubline(needsAttention()).toLowerCase()).not.toContain('complete')
+  })
+  test('activityDetail returns the corrected detail sentence (lead ruling 2026-11-06)', () => {
+    // The sentence explains what happened and what to do, in one breath.
+    // mutant: old copy "The file changed on disk…" → would not match corrected wording
     expect(activityDetail(needsAttention())).toBe(
-      'The file changed on disk while it was downloading. The original version was kept.'
+      "Couldn't finish downloading. The file changed on this device afterwards, so Beebeeb kept it as it is. Discard it to download the file again."
     )
+  })
+  test('activityDetail for needs_attention ends with a period', () => {
+    expect(activityDetail(needsAttention()).endsWith('.')).toBe(true)
   })
   test('progressFraction → null (no bar for needs_attention)', () => {
     expect(progressFraction(needsAttention())).toBeNull()

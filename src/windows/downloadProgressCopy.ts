@@ -33,9 +33,37 @@ export const ACTIVITY_DETAIL = {
 /** Header for the "In progress" card on Activity › Timeline. */
 export const IN_PROGRESS_CARD_HEADER = 'Files arriving on this PC.'
 
-/** The "needs attention" action label (Amendment 4). */
+/**
+ * "Needs attention" strings (Amendment 4, approved 2026-11-06).
+ *
+ * Story: a download failed; then something on this device changed the file
+ * afterwards. Beebeeb kept the local file exactly as it is, won't use it as
+ * the cloud file, and won't delete it without asking. The user must explicitly
+ * discard the local copy before Beebeeb will try downloading again.
+ */
+
+/** Tray subline for a "needs attention" row: same short line as the failed row. */
+export const NEEDS_ATTENTION_TRAY_SUBLINE = "Couldn't finish downloading"
+
+/**
+ * Activity detail / tooltip for a "needs attention" row.
+ * Uses the word "Beebeeb" deliberately — the product is acting, not the cloud.
+ */
+export const NEEDS_ATTENTION_DETAIL =
+  "Couldn't finish downloading. The file changed on this device afterwards, so Beebeeb kept it as it is. Discard it to download the file again."
+
+/** Label for the action button and confirm button. */
 export const NEEDS_ATTENTION_ACTION = 'Discard and download again'
 
-/** Detail sentence for a "needs attention" row (Amendment 4). */
-export const NEEDS_ATTENTION_DETAIL =
-  'The file changed on disk while it was downloading. The original version was kept.'
+/** Confirmation question before the discard. */
+export const NEEDS_ATTENTION_CONFIRM =
+  'Discard the copy on this device and download it again?'
+
+/** Error messages for `discard_and_download_again` command errors. */
+export const NEEDS_ATTENTION_ERRORS: Record<string, string> = {
+  not_poisoned: "The file is no longer in a needs-attention state.",
+  in_use: "Close the file in other apps, then try again.",
+  missing: "The file is no longer downloading.",
+}
+/** Fallback for unexpected error codes from `discard_and_download_again`. */
+export const NEEDS_ATTENTION_ERROR_FALLBACK = "Something went wrong. Try again."

@@ -554,7 +554,8 @@ export default function WindowsTray() {
             const subline = transfer
               ? traySubline(transfer)
               : statusSubline(file.status, folder)
-            const sublineWarn = transfer ? transfer.failed : warn
+            // needs_attention: failed=false but still shows the warn colour (Amendment 4)
+            const sublineWarn = transfer ? (transfer.failed || transfer.attention === 'changed_on_this_device') : warn
             const fraction = transfer ? progressFraction(transfer) : null
             return (
               <button

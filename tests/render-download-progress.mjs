@@ -1,6 +1,7 @@
 // LD-0105 U1 — browser evidence for the streaming / download progress row.
-// Renders four transfer states in the Windows tray popover's Recent list and
-// on the Activity › Timeline In-Progress card, using a synthetic Tauri IPC.
+// Renders five transfer states (downloading, streaming, buffering, failed,
+// needs_attention) in the Windows tray popover's Recent list and on the
+// Activity › Timeline In-Progress card, using a synthetic Tauri IPC.
 // No app, no account, no network.
 //
 //   bunx vite --port 5292 --strictPort &
@@ -8,8 +9,9 @@
 //     node tests/render-download-progress.mjs http://localhost:5292 OUT_DIR
 //
 // What it proves: the tray row shows the correct subline and progress bar for
-// each state; "failed" never says "complete"; the Activity In-Progress card
-// renders per-state detail; the failed state shows the error sentence.
+// each state; "failed" and "needs_attention" never say "complete"; the Activity
+// In-Progress card renders per-state detail and the action button for
+// needs_attention; light and dark screenshots captured for needs_attention.
 // What it does not: the native tray icon, WebView2, real speed measurements.
 
 import assert from 'node:assert/strict'
@@ -52,20 +54,32 @@ const TRANSFERS = {
       direction: 'down', done: 50_000_000, total: 100_000_000,
       buffered: 0, speedBps: 0, failed: true, failedAtSecs: NOW - 30 },
   ],
+  // Amendment 4: file changed on this device after a failed download.
+  // `failed` is false; the poison row's key is content (LastWriteTime + size).
+  needs_attention: [
+    { fileId: 'f-attn-1', name: 'Report draft.pdf', folder: 'Documents',
+      direction: 'down', done: 50_000_000, total: 100_000_000,
+      buffered: 0, speedBps: 0, failed: false, failedAtSecs: null,
+      attention: 'changed_on_this_device', action: 'discard_and_download_again' },
+  ],
 }
 
 const TRAY_ASSERTIONS = {
-  downloading: { subline: 'Downloading', absent: null },
-  streaming:   { subline: 'Streaming', absent: null },
-  buffering:   { subline: 'Buffering', absent: null },
-  failed:      { subline: "Couldn't finish downloading", absent: 'complete' },
+  downloading:    { subline: 'Downloading', absent: null },
+  streaming:      { subline: 'Streaming', absent: null },
+  buffering:      { subline: 'Buffering', absent: null },
+  failed:         { subline: "Couldn't finish downloading", absent: 'complete' },
+  // Amendment 4: same short line as failed; full sentence in Activity/tooltip.
+  needs_attention: { subline: "Couldn't finish downloading", absent: 'complete' },
 }
 
 const ACTIVITY_ASSERTIONS = {
-  downloading: { contains: 'Downloading', absent: null },
-  streaming:   { contains: 'Streaming', absent: null },
-  buffering:   { contains: 'Buffering', absent: null },
-  failed:      { contains: "Couldn't finish downloading", absent: 'complete' },
+  downloading:    { contains: 'Downloading', absent: null },
+  streaming:      { contains: 'Streaming', absent: null },
+  buffering:      { contains: 'Buffering', absent: null },
+  failed:         { contains: "Couldn't finish downloading", absent: 'complete' },
+  // Amendment 4: Activity shows the full corrected detail + action button.
+  needs_attention: { contains: 'The file changed on this device', absent: null },
 }
 
 // ── IPC shim factory ─────────────────────────────────────────────────────────
@@ -110,6 +124,7 @@ function makeShim() {
           case 'desktop_recent_files':
             return [{ path: recentPath, size_bytes: 24576, status: 'cloud_only', pinned: false, modified_at: Math.floor(Date.now() / 1000) - 60 }]
           case 'get_active_transfers': return window.__active_transfers__
+          case 'discard_and_download_again': return null  // void success (void → null)
           case 'account_activity': return { items: [], total: 0, page: 1, limit: 50 }
           case 'account_activity_feed': return { events: [], total: 0 }
           case 'account_region': return { preferred_region: null, regions: [], choices: [] }
@@ -152,7 +167,7 @@ function expectText(page, text) {
 try {
   const shim = makeShim()
 
-  // ── Tray: one screenshot per transfer state ──────────────────────────────────
+  // ── Tray: one screenshot per transfer state (4 original + needs_attention) ───
   for (const state of ['downloading', 'streaming', 'buffering', 'failed']) {
     const transfers = TRANSFERS[state]
     // recentPath basename must match transfer.name so the tray row gets the overlay
@@ -173,6 +188,28 @@ try {
     }
     const file = await shot(page, `tray-transfer-${state}`)
     results.push([`tray-transfer-${state}: "${subline}" visible`, file])
+    await page.close()
+  }
+
+  // ── Tray: needs_attention light + dark (Amendment 4) ────────────────────────
+  for (const scheme of ['light', 'dark']) {
+    const state = 'needs_attention'
+    const transfers = TRANSFERS[state]
+    const recentPath = `${transfers[0].folder}/${transfers[0].name}`
+    const { subline, absent } = TRAY_ASSERTIONS[state]
+    const page = await browser.newPage({ viewport: { width: 400, height: 560 } })
+    page.on('pageerror', (err) => console.error(`pageerror [tray-${state}-${scheme}]:`, err))
+    await page.emulateMedia({ colorScheme: scheme })
+    await page.addInitScript(makeShim(), { caps, surface: 'tray', transfers, summary: idleSummary, recentPath })
+    await page.goto(`${base}/?window=tray`)
+    await expectText(page, transfers[0].name)
+    await expectText(page, subline)
+    if (absent) {
+      const text = await page.locator('body').textContent()
+      assert.ok(!text.toLowerCase().includes(absent), `tray-${state}-${scheme}: must not contain "${absent}"`)
+    }
+    const file = await shot(page, `tray-transfer-${state}-${scheme}`)
+    results.push([`tray-transfer-${state}-${scheme}: "${subline}" visible`, file])
     await page.close()
   }
 
@@ -200,6 +237,31 @@ try {
     }
     const file = await shot(page, `activity-transfer-${state}`)
     results.push([`activity-transfer-${state}: "${contains}" visible`, file])
+    await page.close()
+  }
+  // ── Activity: needs_attention light + dark (Amendment 4) ────────────────────
+  for (const scheme of ['light', 'dark']) {
+    const state = 'needs_attention'
+    const transfers = TRANSFERS[state]
+    const recentPath = `${transfers[0].folder}/${transfers[0].name}`
+    const { contains, absent } = ACTIVITY_ASSERTIONS[state]
+    const page = await browser.newPage({ viewport: { width: 1200, height: 860 } })
+    page.on('pageerror', (err) => console.error(`pageerror [activity-${state}-${scheme}]:`, err))
+    await page.emulateMedia({ colorScheme: scheme })
+    await page.addInitScript(makeShim(), { caps, surface: 'main-app', transfers, summary: idleSummary, recentPath })
+    await page.goto(`${base}/?window=main-app&platform=windows`)
+    await page.getByRole('button', { name: 'Activity', exact: true }).click()
+    await expectText(page, 'Files arriving on this PC.')
+    await expectText(page, transfers[0].name)
+    await expectText(page, contains)
+    // The action button must be visible
+    await expectText(page, 'Discard and download again')
+    if (absent) {
+      const text = await page.locator('body').textContent()
+      assert.ok(!text.toLowerCase().includes(absent), `activity-${state}-${scheme}: must not contain "${absent}"`)
+    }
+    const file = await shot(page, `activity-transfer-${state}-${scheme}`)
+    results.push([`activity-transfer-${state}-${scheme}: "${contains}" + action button visible`, file])
     await page.close()
   }
 } finally {

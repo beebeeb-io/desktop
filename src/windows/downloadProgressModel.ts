@@ -6,7 +6,7 @@
  * The strings come from `downloadProgressCopy.ts`.
  */
 
-import { TRAY_SUBLINE, ACTIVITY_DETAIL, NEEDS_ATTENTION_ACTION, NEEDS_ATTENTION_DETAIL } from './downloadProgressCopy'
+import { TRAY_SUBLINE, ACTIVITY_DETAIL, NEEDS_ATTENTION_DETAIL } from './downloadProgressCopy'
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -78,7 +78,8 @@ export function transferUiState(row: ActiveTransferRowLike): TransferUiState {
  */
 export function traySubline(row: ActiveTransferRowLike): string {
   const state = transferUiState(row)
-  if (state === 'needs_attention') return NEEDS_ATTENTION_ACTION
+  // "needs attention" uses the same short tray line as failed — the detail goes in Activity/tooltip.
+  if (state === 'needs_attention') return TRAY_SUBLINE.failed
   if (state === 'failed') return TRAY_SUBLINE.failed
   const speed = formatSpeed(row.speedBps)
   if (state === 'buffering') return TRAY_SUBLINE.buffering(speed)
