@@ -204,8 +204,14 @@ impl StateDb {
         ensure_column(conn, "operation_queue", "base_pending", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "operation_queue", "claim_id", "TEXT")?;
         ensure_column(conn, "operation_queue", "claimed_at", "INTEGER")?;
+        // LD-0113 (spec §5.4): the server's `system_role` of a row (`backups_root` or NULL). Additive and
+        // nullable; only `set_system_role` writes it, from the listing's field or the `folder_system_role` op.
+        ensure_column(conn, "files", "system_role", "TEXT")?;
         conn.execute_batch(
             "
+            -- LD-0113: the Windows delete/rename callbacks ask for the Backups root on every delete; a
+            -- partial index keeps that a read of the flagged rows only.
+            CREATE INDEX IF NOT EXISTS idx_files_system_role ON files(system_role) WHERE system_role IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_files_namespace ON files(namespace);
             CREATE INDEX IF NOT EXISTS idx_files_shared_root ON files(shared_root_id);
             -- Task 2229: `FILE_BY_PATH_SQL`, once per file and folder on every enumeration pass.

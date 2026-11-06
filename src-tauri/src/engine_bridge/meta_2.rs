@@ -507,6 +507,7 @@ pub(super) fn apply_metadata_file_row(
         // version. 0 stays unknown; an edit on an unknown base is held, not sent (task 2229).
         contract.last_sync_at = now;
     })?;
+    apply_system_role_field(db, file_id, f)?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
     // new place: it becomes mixed, its version kept.
     if moved {
@@ -523,6 +524,23 @@ pub(super) fn apply_metadata_file_row(
         db.put_unknown_orphan(&entry.path, file_id, true)?;
     }
     Ok(Some(entry))
+}
+
+/// LD-0113 (spec §5.4): a server row's `system_role` (`"backups_root"` or `null`) into
+/// `files.system_role`. A row that does not carry the field leaves the stored role as it is: an older
+/// server never sends it (so a new row stays `None`), and the rows this desktop builds itself from a
+/// sync op or a parent's rename (`synthesize_op_row`, `rebase_folder_descendants`) carry only the
+/// fields that op changed. An explicit `null`, or a role this build does not know, clears it. The
+/// `folder_system_role` sync op sets it through [`super::syncflow`].
+pub(super) fn apply_system_role_field(db: &StateDb, file_id: &str, f: &serde_json::Value) -> Result<(), EngineError> {
+    if let Some(raw) = f.get("system_role") {
+        let role = raw.as_str().and_then(beebeeb_types::backup::SystemRole::parse);
+        if db.set_system_role(file_id, role)? {
+            // Zero-knowledge: the id and the role's wire string, never a name.
+            tracing::info!(file_id = %file_id, role = role.map_or("none", |r| r.as_str()), "system role of a folder changed");
+        }
+    }
+    Ok(())
 }
 
 /// Task 1640 (review F3): whether `dir` holds only what this PC keeps from a deletion elsewhere:
