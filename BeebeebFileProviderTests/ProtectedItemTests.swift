@@ -33,7 +33,8 @@ func runProtectedItemChecks() {
             "protected_rename_reason": renameWords,
             "protected_move_reason": moveWords,
         ])
-        try expect(item?.isProtected == true, "protected_reason marks the item protected")
+        try expect(item?.isProtected == true, "the daemon's `protected` flag marks the item protected")
+        try expect(decoded(["protected_reason": deleteWords])?.isProtected == false, "words alone are not the flag (one field for the fact)")
         try expect(item?.protectedRenameReason == renameWords, "the rename words decode")
         let capabilities = FileProviderItem(model: item!).capabilities
         for taken: NSFileProviderItemCapabilities in [.allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting] {

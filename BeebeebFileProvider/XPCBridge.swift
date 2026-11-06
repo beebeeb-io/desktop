@@ -690,6 +690,7 @@ final class XPCBridge {
             pinned: (dictionary["pinned"] as? NSNumber)?.boolValue ?? false,
             addedBySomeoneElse: (dictionary["added_by_someone_else"] as? NSNumber)?.boolValue ?? false,
             // LD-0113: present only on a protected item (an older daemon sends none).
+            isProtected: (dictionary["protected"] as? NSNumber)?.boolValue ?? false,
             protectedReason: dictionary["protected_reason"] as? String,
             protectedRenameReason: dictionary["protected_rename_reason"] as? String,
             protectedMoveReason: dictionary["protected_move_reason"] as? String

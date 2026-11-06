@@ -489,8 +489,17 @@ async fn delete_while_app_closed_restored_on_start_zero_server_calls() {
     // A transfer pass runs against an API that counts connections.
     let calls = server_calls_after_deletes(&qa, &["Backups"]).await;
     crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root);
+    // The watcher's own pass runs off its task (`spawn_blocking`, review #9): wait for whichever pass
+    // mints last, bounded.
     let fixture = ["Backups", "Backups/OtherPC", "Backups/OtherPC/a.txt"];
-    let restored = fixture.iter().filter(|rel| qa.path(rel).exists()).count();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let restored = loop {
+        let restored = fixture.iter().filter(|rel| qa.path(rel).exists()).count();
+        if restored == fixture.len() || Instant::now() >= deadline {
+            break restored;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     println!("ld0113 delete_while_closed: restored={restored} server_calls={calls}");
     assert_eq!(restored, 3, "the root, its folder and its downloaded file are back");
     assert_eq!(qa.fx.db.get_file("0b5ec0de-0000-4000-8000-0000000000cd").unwrap().unwrap().status, FileStatus::CloudOnly);

@@ -46,8 +46,9 @@ struct BeebeebProviderItem: Codable {
     let protectedRenameReason: String?
     let protectedMoveReason: String?
 
-    /// LD-0113: Finder offers no delete, trash, rename or move for it.
-    var isProtected: Bool { protectedReason != nil }
+    /// LD-0113: Finder offers no delete, trash, rename, move or New Folder for it. The daemon's
+    /// `protected` flag, the one field for the fact (review #10); the words above are what to show.
+    let isProtected: Bool
 
     static let read = 1 << 0
     static let write = 1 << 1
@@ -118,6 +119,7 @@ struct BeebeebProviderItem: Codable {
         metadataVersion: String? = nil,
         pinned: Bool = false,
         addedBySomeoneElse: Bool = false,
+        isProtected: Bool = false,
         protectedReason: String? = nil,
         protectedRenameReason: String? = nil,
         protectedMoveReason: String? = nil
@@ -138,6 +140,7 @@ struct BeebeebProviderItem: Codable {
         self.metadataVersion = metadataVersion
         self.pinned = pinned
         self.addedBySomeoneElse = addedBySomeoneElse
+        self.isProtected = isProtected
         self.protectedReason = protectedReason
         self.protectedRenameReason = protectedRenameReason
         self.protectedMoveReason = protectedMoveReason

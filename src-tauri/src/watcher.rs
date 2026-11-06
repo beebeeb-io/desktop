@@ -664,17 +664,7 @@ fn protected(bridge: &EngineBridge, rel: &str, mutation: beebeeb_core::backup::M
 /// folder) is cloud-only again, so its placeholder is minted again where it is missing, and nothing is
 /// queued for the server. The person sees the words.
 fn restore_protected(bridge: &EngineBridge, sync_root: &std::path::Path, rel: &str, words: &str) {
-    let rows = bridge.db().local_rows_at_or_under(rel).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "protected item: its rows could not be read; the placeholder pass mints what it can");
-        Vec::new()
-    });
-    for (file_id, path) in rows {
-        if crate::engine_bridge::local_file_path_under_sync_root(sync_root, &path).is_ok_and(|on_disk| !on_disk.exists())
-            && let Err(e) = bridge.db().set_status(&file_id, crate::state_db::FileStatus::CloudOnly)
-        {
-            tracing::warn!(error = %e, file_id = %file_id, "protected item: could not mark it cloud-only");
-        }
-    }
+    let flipped = crate::backup_protect::mark_missing_cloud_only(bridge.db(), sync_root, rel);
     #[cfg(target_os = "windows")]
     {
         // One placeholder pass per burst: a folder's events arrive one per item, and each pass walks
@@ -687,13 +677,15 @@ fn restore_protected(bridge: &EngineBridge, sync_root: &std::path::Path, rel: &s
             }
             due
         });
-        let restored = if due { crate::windows_cf::restore_placeholders(bridge.db(), sync_root) } else { 0 };
+        if due {
+            crate::backup_protect::restore_placeholders_soon(bridge.db_arc(), sync_root);
+        }
         crate::backup_protect::note_refusal(words);
-        // Zero-knowledge: a count, never the item or the words (they carry a path).
-        tracing::info!(restored, pass = due, "protected item: a local change was not sent; its placeholder comes back");
+        // Zero-knowledge: counts, never the item or the words (they carry a path).
+        tracing::info!(flipped, pass = due, "protected item: a local change was not sent; its placeholder comes back");
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = words;
+    let _ = (words, flipped);
 }
 
 #[cfg(test)]

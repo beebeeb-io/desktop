@@ -110,8 +110,13 @@ in the Beebeeb app. Open Beebeeb to delete or move a backup." The rule is
 | Windows Explorer | `NOTIFY_DELETE` / `NOTIFY_RENAME` pre-operation callbacks answer `STATUS_CLOUD_FILE_ACCESS_DENIED` from the state DB (no network; this process's own changes are never refused) for every placeholder in the tree, and for a move into it. The Recycle Bin is a rename and is refused as a delete. The words show as a notification. An item CREATED in the tree (New folder, a paste or copy, a Save As) is not a placeholder until it syncs and gets no callback, so it is not refused (accepted edge). |
 | Windows, after the fact | A delete, rename or move that got through (app closed, no live bridge) sends nothing; a moved item goes back, and every downloaded row under a deleted item is cloud-only again, so its placeholder is minted again. An item that cannot be moved back is sent as made, so the drive and the server agree. |
 | macOS Finder | The item payload marks everything in the tree `protected`; it loses delete, trash, rename, reparent and adding items (no New Folder, no drop into it), and the extension refuses a delete, rename or move OF a protected item as a second line with the daemon's words. A move or copy INTO the tree from outside Finder (Terminal `mv`, an app's Save) is not refused by the extension; whether the system enforces the dropped capability there is not verified. |
+| Shared queueing (every surface) | `queue_finder_delete`, `queue_finder_modify` and `queue_local_rename` never queue a trash, rename or move of an item in the tree, nor a move into it (core's words as the error); a content edit is queued as before. |
 | Server refusal | A `409 protected_folder` drops the op (never retried or held) and puts the row back. |
 | Linux, in-app Files | The web UI's guard (LD-0113 part C). |
+
+Accepted (Amendment 6): an application's safe-save of a file inside Backups (Word renames the
+original to a temporary name) fails on Windows, because the rename is refused. Backups are
+read-only for structure in the drive, and the original is the file to edit.
 
 ## U2 Windows surface checklist
 

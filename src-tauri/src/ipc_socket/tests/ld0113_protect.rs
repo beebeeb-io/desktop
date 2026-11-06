@@ -119,9 +119,11 @@ fn flagging_the_root_tells_finder_about_everything_under_it() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     row(&db, ROOT_ID, "Backups", ItemKind::Folder);
-    let under = ["0b5ec0de-0000-4000-8000-0000000000d7", "0b5ec0de-0000-4000-8000-0000000000d8"];
+    let under = ["0b5ec0de-0000-4000-8000-0000000000d7", "0b5ec0de-0000-4000-8000-0000000000d8", "0b5ec0de-0000-4000-8000-0000000000da"];
     row(&db, under[0], "Backups/iPhone", ItemKind::Folder);
     row(&db, under[1], "Backups/iPhone/Camera Roll/IMG_0001.HEIC", ItemKind::File);
+    // Review #2: a child stored with a leading slash, as `untrash_subtree` allows.
+    row(&db, under[2], "/Backups/iPhone/Camera Roll/IMG_0002.HEIC", ItemKind::File);
     row(&db, "0b5ec0de-0000-4000-8000-0000000000d9", "BackupsX/c.txt", ItemKind::File);
     let changed_by = |role| {
         let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
@@ -132,8 +134,12 @@ fn flagging_the_root_tells_finder_about_everything_under_it() {
         ids.sort();
         ids
     };
-    let mut want: Vec<String> = [ROOT_ID, under[0], under[1]].iter().map(|id| id.to_string()).collect();
+    let mut want: Vec<String> = [ROOT_ID, under[0], under[1], under[2]].iter().map(|id| id.to_string()).collect();
     want.sort();
     assert_eq!(changed_by(Some(beebeeb_types::backup::SystemRole::BackupsRoot)), want, "flagged: the root and all under it");
+    // Review #7: the same role again writes nothing and tells Finder nothing.
+    let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
+    assert!(!db.set_system_role(ROOT_ID, Some(beebeeb_types::backup::SystemRole::BackupsRoot)).unwrap());
+    assert!(db.list_file_changes(anchor.as_deref()).unwrap().unwrap().0.is_empty(), "an unchanged role records no change");
     assert_eq!(changed_by(None), want, "cleared: the same items, once each");
 }

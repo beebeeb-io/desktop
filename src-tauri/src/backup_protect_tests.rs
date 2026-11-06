@@ -177,6 +177,55 @@ fn a_move_is_refused_into_out_of_and_within_the_tree_only() {
     assert_eq!(refusal("Documents/report.pdf", None), None, "an ordinary item to the Recycle Bin");
 }
 
+/// Review #3 and #4: rows stored with a leading slash (`/Backups/…`, as `untrash_subtree` allows) are in
+/// the subtree, and at start-up every downloaded row of the tree whose file is gone is cloud-only
+/// again; a file still on disk, a look-alike folder's row and a row outside the tree are untouched.
+#[test]
+fn leading_slash_rows_are_found_and_put_back_at_start() {
+    let (dir, db) = fixture();
+    let sync_root = dir.path().join("root");
+    std::fs::create_dir_all(sync_root.join("Backups").join("OtherPC")).unwrap();
+    std::fs::write(sync_root.join("Backups").join("OtherPC").join("kept.jpg"), b"kept").unwrap();
+    let local = |id: &str, path: &str| {
+        db.upsert_file(&FileEntry {
+            file_id: id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: 4,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    };
+    let gone_in_tree = [
+        ("0b5ec0de-0000-4000-8000-0000000000f1", "/Backups/OtherPC/a.jpg"),
+        ("0b5ec0de-0000-4000-8000-0000000000f2", "Backups/OtherPC/b.jpg"),
+        ("0b5ec0de-0000-4000-8000-0000000000f3", "/Backups/OtherPCX/c.jpg"),
+    ];
+    for (id, path) in gone_in_tree {
+        local(id, path);
+    }
+    let kept = ("0b5ec0de-0000-4000-8000-0000000000f4", "Backups/OtherPC/kept.jpg");
+    let outside = ("0b5ec0de-0000-4000-8000-0000000000f5", "Docs/e.txt");
+    local(kept.0, kept.1);
+    local(outside.0, outside.1);
+
+    let mut under: Vec<String> = db.local_rows_at_or_under("Backups/OtherPC").unwrap().into_iter().map(|(id, _)| id).collect();
+    under.sort();
+    assert_eq!(under, vec![gone_in_tree[0].0, gone_in_tree[1].0, kept.0], "both path forms, not the look-alike OtherPCX");
+
+    reconcile_backups_tree(&db, &sync_root);
+    let status = |id: &str| db.get_file(id).unwrap().unwrap().status;
+    for (id, path) in gone_in_tree {
+        assert_eq!(status(id), FileStatus::CloudOnly, "{path} is put back");
+    }
+    assert_eq!(status(kept.0), FileStatus::Local, "a file still on disk is untouched");
+    assert_eq!(status(outside.0), FileStatus::Local, "a row outside the tree is untouched");
+}
+
 #[test]
 fn without_a_flagged_root_nothing_is_protected() {
     let dir = tempfile::tempdir().unwrap();

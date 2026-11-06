@@ -176,7 +176,40 @@ impl EngineBridge {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Finder modify callback did not include a file id"))?;
         let item_contract = self.ensure_item_allows_shared_write(&file_id, "modify")?;
+        self.refuse_protected_drive_change(&file_id, target)?;
         Ok(Some((file_id, item_contract)))
+    }
+
+    /// LD-0113 (Amendment 6): a drive surface never queues a rename or move of an item in the Backups
+    /// tree, nor a move into it; a content edit (same name, same parent) is queued as before (spec
+    /// §6.2). Rename or move is read as `metadata_update_payload` reads it: a different parent is a
+    /// move. A new parent this device does not know is checked for the item only.
+    fn refuse_protected_drive_change(&self, file_id: &str, target: &FinderWriteTarget) -> Result<(), EngineError> {
+        let Some(row) = self.db.get_file(file_id)? else {
+            return Ok(());
+        };
+        let moved = row.parent_id != target.parent_id;
+        let parent_path = if !moved {
+            Some(row.path.trim_matches('/').rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string()))
+        } else {
+            match target.parent_id.as_deref() {
+                None => Some(String::new()),
+                Some(parent_id) => self.db.get_file(parent_id)?.map(|parent| parent.path.trim_matches('/').to_string()),
+            }
+        };
+        let new_path = parent_path.map(|parent| match parent.as_str() {
+            "" => target.filename.clone(),
+            parent => format!("{parent}/{}", target.filename),
+        });
+        if new_path.as_deref() == Some(row.path.trim_matches('/')) {
+            return Ok(());
+        }
+        let mutation = if moved { beebeeb_core::backup::Mutation::Move } else { beebeeb_core::backup::Mutation::Rename };
+        let own = crate::backup_protect::own_backups();
+        match crate::backup_protect::move_refusal(&self.db, &own, &row.path, mutation, new_path.as_deref()) {
+            Some(message) => Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }).into()),
+            None => Ok(()),
+        }
     }
 
     /// A Finder content modify, staged and described: the daemon's own copy of the new
@@ -378,6 +411,17 @@ impl EngineBridge {
             }
             contract => contract,
         };
+        // LD-0113 (Amendment 6): a drive surface never queues a trash of an item in the Backups tree.
+        if let Some(row) = self.db.get_file(file_id)?
+            && let Some(message) = crate::backup_protect::protected_reason(
+                &self.db,
+                &crate::backup_protect::own_backups(),
+                &row.path,
+                beebeeb_core::backup::Mutation::Trash,
+            )
+        {
+            return Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }).into());
+        }
         let mut payload = serde_json::json!({
             "operation": Op::Trash.as_str(),
             "base_version_identifier": base_version_identifier,

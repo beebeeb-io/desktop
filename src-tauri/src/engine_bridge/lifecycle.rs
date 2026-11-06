@@ -582,7 +582,7 @@ impl EngineBridge {
         }
         #[cfg(target_os = "windows")]
         {
-            crate::windows_cf::restore_placeholders(&self.db, sync_root);
+            crate::backup_protect::restore_placeholders_soon(self.db.clone(), sync_root);
             crate::backup_protect::note_refusal(if words.is_empty() { beebeeb_core::backup::MSG_DELETE } else { words });
         }
         #[cfg(not(target_os = "windows"))]

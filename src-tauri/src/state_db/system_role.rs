@@ -17,6 +17,14 @@ impl StateDb {
     /// whether the stored role changed; an unknown `file_id` changes nothing.
     pub fn set_system_role(&self, file_id: &str, role: Option<SystemRole>) -> Result<bool> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        // Every listing row that carries the field lands here: read first, so an unchanged role (or an
+        // unknown id) opens no write transaction.
+        let stored: Option<Option<String>> = conn
+            .query_row("SELECT system_role FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))
+            .optional()?;
+        if stored.is_none_or(|stored| stored.as_deref() == role.map(SystemRole::as_str)) {
+            return Ok(false);
+        }
         let tx = conn.transaction()?;
         let changed = tx.execute(
             "UPDATE files SET system_role = ?2 WHERE file_id = ?1 AND system_role IS NOT ?2",
@@ -28,7 +36,8 @@ impl StateDb {
                 tx.query_row("SELECT trim(path, '/') FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))?;
             if !path.is_empty() {
                 let under: Vec<String> = tx
-                    .prepare("SELECT file_id FROM files WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'")?
+                    // A child may be stored with a leading slash (`/Backups/x`), as `untrash_subtree` allows.
+                    .prepare("SELECT file_id FROM files WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'")?
                     .query_map(params![path], |r| r.get(0))?
                     .collect::<Result<_>>()?;
                 for id in under {
@@ -71,7 +80,8 @@ impl StateDb {
     /// took away is put back from these (`crate::watcher`). Live rows leave `parent_id` empty, so the
     /// subtree is a path range: every path that starts with `path/` sorts between `path/` and `path0`
     /// (`'0'` follows `'/'`), which `idx_files_path` serves without reading the whole table, and no
-    /// metacharacter in a name can widen. The item itself may be stored with a leading slash. Names
+    /// metacharacter in a name can widen. Any row may be stored with a leading slash (`/Backups/x`, as
+    /// `untrash_subtree` allows), so both forms are ranged. Names
     /// compare exactly: Windows names each item back as its placeholder was minted, from these rows.
     pub fn local_rows_at_or_under(&self, path: &str) -> Result<Vec<(String, String)>> {
         let path = path.trim_matches('/');
@@ -79,7 +89,9 @@ impl StateDb {
         let mut stmt = conn.prepare(
             "SELECT file_id, path FROM files
              WHERE status = 'local'
-               AND (path = ?1 OR path = '/' || ?1 OR (path >= ?1 || '/' AND path < ?1 || '0'))
+               AND (path = ?1 OR path = '/' || ?1
+                    OR (path >= ?1 || '/' AND path < ?1 || '0')
+                    OR (path >= '/' || ?1 || '/' AND path < '/' || ?1 || '0'))
              ORDER BY length(path), path",
         )?;
         let rows = stmt.query_map(params![path], |r| Ok((r.get(0)?, r.get(1)?)))?;

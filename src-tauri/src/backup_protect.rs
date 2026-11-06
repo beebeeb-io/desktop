@@ -109,9 +109,23 @@ fn own_backups_for(_enabled_keys: &[String]) -> OwnBackups {
 /// cannot be read answers `None`: Explorer is never held on an error, and a delete that gets through
 /// is restored after the fact ([`crate::watcher::handle_delete`]).
 pub(crate) fn protected_reason(db: &StateDb, own: &OwnBackups, rel_path: &str, mutation: Mutation) -> Option<String> {
-    let below_root = below_a_root(db, rel_path.trim_matches('/'))?;
+    let [reason] = protected_reasons(db, own, rel_path, [mutation]);
+    reason
+}
+
+/// [`protected_reason`] for several mutations of one item, reading the roots once (a Finder listing
+/// asks for three per item). All `None` outside the tree.
+pub(crate) fn protected_reasons<const N: usize>(
+    db: &StateDb,
+    own: &OwnBackups,
+    rel_path: &str,
+    mutations: [Mutation; N],
+) -> [Option<String>; N] {
+    let Some(below_root) = below_a_root(db, rel_path.trim_matches('/')) else {
+        return [const { None }; N];
+    };
     let own_source = own_active_source(own, below_root);
-    words(check_drive_mutation(below_root.is_empty(), !below_root.is_empty(), own_source.as_deref(), mutation))
+    mutations.map(|m| words(check_drive_mutation(below_root.is_empty(), !below_root.is_empty(), own_source.as_deref(), m)))
 }
 
 /// Why an item from outside the Backups tree must not be moved to `target_rel` (the state DB path it
@@ -135,6 +149,22 @@ pub(crate) fn move_refusal(
 ) -> Option<String> {
     protected_reason(db, own, source_rel, mutation).or_else(|| protected_destination(db, target_rel?))
 }
+
+/// A drive surface's delete, rename or move that the app refuses before anything is queued (the
+/// shared queueing functions, behind the Windows callbacks and the Finder extension). Its text is
+/// core's words, which the File Provider reply carries to Finder.
+#[derive(Debug)]
+pub(crate) struct DriveChangeRefused {
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for DriveChangeRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DriveChangeRefused {}
 
 fn words(rule: Result<(), Protected>) -> Option<String> {
     rule.err().map(|protected| protected.message.into_owned())
@@ -168,6 +198,58 @@ fn own_active_source(own: &OwnBackups, below_root: &str) -> Option<String> {
     let (category, below_category) = below_device.split_once('/').unwrap_or((below_device, ""));
     let folder = own.folders.iter().find(|folder| same_name(&folder.display_name, category))?;
     Some(display(&original_of(&folder.source_path, below_category)))
+}
+
+/// Every `local` row at or under `rel` (the item and its subtree) whose file is gone from this device
+/// is cloud-only again, so the placeholder pass mints it again. Returns how many. Used by the
+/// after-the-fact restore of a protected item and, for each Backups root, at start-up (a downloaded
+/// file deleted while no callback could answer).
+pub(crate) fn mark_missing_cloud_only(db: &StateDb, sync_root: &Path, rel: &str) -> usize {
+    let rows = db.local_rows_at_or_under(rel).unwrap_or_else(|error| {
+        tracing::warn!(%error, "protected item: its rows could not be read; the placeholder pass mints what it can");
+        Vec::new()
+    });
+    rows.into_iter()
+        // A row may be stored `/Backups/…`; the on-disk lookup takes the slash-free form.
+        .filter(|(_, path)| {
+            crate::engine_bridge::local_file_path_under_sync_root(sync_root, path.trim_start_matches('/'))
+                .is_ok_and(|on_disk| !on_disk.exists())
+        })
+        .filter(|(file_id, _)| match db.set_status(file_id, crate::state_db::FileStatus::CloudOnly) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, %file_id, "protected item: could not mark it cloud-only");
+                false
+            }
+        })
+        .count()
+}
+
+/// Start-up (LD-0113 review #4): [`mark_missing_cloud_only`] for each Backups root, before the first
+/// placeholder pass. Zero-knowledge: a count only. Windows calls it (`windows_cf::seed_placeholders`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn reconcile_backups_tree(db: &StateDb, sync_root: &Path) {
+    let roots = db.backups_roots().unwrap_or_default();
+    let restored: usize = roots.iter().map(|(_, root)| mark_missing_cloud_only(db, sync_root, root)).sum();
+    if restored > 0 {
+        tracing::info!(restored, "backup protection: downloaded items missing from the Backups tree are put back");
+    }
+}
+
+/// A placeholder pass for what a refusal put back, off the async task that refused it: the pass walks
+/// every cloud-only row and calls Cloud Files per item.
+#[cfg(target_os = "windows")]
+pub(crate) fn restore_placeholders_soon(db: std::sync::Arc<StateDb>, sync_root: &Path) {
+    let sync_root = sync_root.to_path_buf();
+    let pass = move || {
+        let restored = crate::windows_cf::restore_placeholders(&db, &sync_root);
+        // Zero-knowledge: a count, never the item.
+        tracing::info!(restored, "protected item: placeholders put back");
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn_blocking(pass)),
+        Err(_) => pass(),
+    }
 }
 
 /// What a local rename from `source` to `target` (absolute paths) does to the item: Explorer's

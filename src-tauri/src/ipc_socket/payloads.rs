@@ -117,15 +117,16 @@ pub(super) fn apply_protection(
     payload: &mut FileProviderItemPayload,
 ) {
     use beebeeb_core::backup::Mutation;
-    let reason = |mutation| crate::backup_protect::protected_reason(db, own, &entry.path, mutation);
-    let Some(delete) = reason(Mutation::Trash) else {
+    let [Some(delete), rename, moved] =
+        crate::backup_protect::protected_reasons(db, own, &entry.path, [Mutation::Trash, Mutation::Rename, Mutation::Move])
+    else {
         return;
     };
     payload.protected = true;
     payload.capabilities &= !(CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS);
     payload.protected_reason = Some(delete);
-    payload.protected_rename_reason = reason(Mutation::Rename);
-    payload.protected_move_reason = reason(Mutation::Move);
+    payload.protected_rename_reason = rename;
+    payload.protected_move_reason = moved;
     if let Some(version) = payload.metadata_version.as_mut() {
         version.push_str(":protected");
     }

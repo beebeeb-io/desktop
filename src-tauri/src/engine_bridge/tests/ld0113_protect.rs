@@ -370,3 +370,53 @@ async fn a_move_into_the_tree_that_cannot_go_back_is_sent_as_made() {
     assert_eq!(bridge.db.get_file(report).unwrap().unwrap().status, FileStatus::Local, "nothing is minted at its old place");
     assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1, "the move is sent as made");
 }
+
+/// Review #1 (lead, 2026-11-06): the queueing functions every drive surface reaches (the Windows
+/// watcher, the File Provider replies) never queue a trash, rename or move of an item in the tree, nor
+/// a move into it, whatever the surface in front of them did; an ordinary rename queues as before.
+#[tokio::test]
+async fn the_queueing_functions_refuse_drive_changes_of_the_tree() {
+    use crate::backup_protect::DriveChangeRefused;
+    let dir = tempfile::tempdir().unwrap();
+    let (bridge, _listener) = counting_bridge(dir.path());
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    let other = "0b5ec0de-0000-4000-8000-0000000000b1";
+    let photo = "0b5ec0de-0000-4000-8000-0000000000b2";
+    let report = "0b5ec0de-0000-4000-8000-0000000000b3";
+    live_row(&bridge, other, "Backups/OtherPC", ItemKind::Folder);
+    live_row(&bridge, photo, "Backups/OtherPC/a.jpg", ItemKind::File);
+    live_row(&bridge, report, "Docs/report.pdf", ItemKind::File);
+    let target = |file_id: &str, parent_id: Option<&str>, filename: &str| FinderWriteTarget {
+        file_id: Some(file_id.into()),
+        parent_id: parent_id.map(Into::into),
+        filename: filename.into(),
+        rel_path: None,
+        kind: FinderWriteItemKind::File,
+        contents_path: None,
+        content_type: None,
+        base_version_identifier: None,
+    };
+    let refused = |result: anyhow::Result<FinderWriteOutcome>| {
+        result.err().and_then(|error| engine_cause::<DriveChangeRefused>(&error).map(|refused| refused.message.clone()))
+    };
+    let managed = Some(beebeeb_core::backup::MSG_MANAGED_IN_APP.to_string());
+
+    assert_eq!(refused(bridge.queue_finder_delete(photo, None)), managed, "a trash under Backups/OtherPC");
+    assert_eq!(refused(bridge.queue_finder_delete(ROOT_ID, None)).as_deref(), Some(beebeeb_core::backup::MSG_DELETE), "the root");
+    assert_eq!(refused(bridge.queue_finder_modify(target(photo, None, "b.jpg"))), managed, "a rename in the tree");
+    assert_eq!(refused(bridge.queue_finder_modify(target(report, Some(other), "report.pdf"))), managed, "a move into the tree");
+    assert_eq!(
+        refused(bridge.queue_local_rename(target(report, Some(other), "report.pdf"), "Backups/OtherPC/report.pdf")),
+        managed,
+        "the Windows re-keying rename into the tree"
+    );
+    let queued: usize = [ROOT_ID, other, photo, report].iter().map(|id| bridge.db.list_operations_for_file(id).unwrap().len()).sum();
+    assert_eq!(queued, 0, "0 ops queued");
+
+    assert!(
+        matches!(bridge.queue_finder_modify(target(report, None, "report-2.pdf")), Ok(FinderWriteOutcome::Queued { .. })),
+        "an ordinary rename is queued"
+    );
+    assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1);
+    assert_eq!(refused(bridge.queue_finder_modify(target(photo, None, "a.jpg"))), None, "no change of name or parent is not refused");
+}
