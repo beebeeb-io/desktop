@@ -64,6 +64,9 @@ mod reconcile_tests;
 // LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
 #[cfg(test)]
 mod ld0105_native_tests;
+// LD-0113 D1: the pre-operation delete and rename callbacks on a QA sync root.
+#[cfg(test)]
+mod ld0113_protect_native_tests;
 pub mod signout;
 pub mod status_ui;
 pub mod thumbnail_provider;
