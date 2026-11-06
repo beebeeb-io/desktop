@@ -5,6 +5,7 @@
  */
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, formatBytes, loadSyncStatus, desktopFileOverview, getKnownFolderBackup, setKnownFolderBackup, type KnownFolderStatus, type SyncStatus, type FileOverview, type StatusBucket, type RecentFile } from '../desktopApi'
+import { setKnownFolderSource, type KnownFolderSource } from '../knownFolderSource'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card, useToast } from '../windows/ui'
 import { usePlatformName } from '../platform'
 import { finderOpenFailedToast } from '../finderSetup'
@@ -525,6 +526,8 @@ export function BackupToggle({
 export function backupStatus(f: KnownFolderStatus, pending: boolean): { text: string; tone: 'on' | 'off' | 'busy' | 'na' } {
   if (f.source_path == null) return { text: 'Not available on this platform', tone: 'na' }
   if (pending) return { text: f.enabled ? 'Starting backup…' : 'Updating…', tone: 'busy' }
+  // LD-0113 Amendment 9: OneDrive moved this folder and the person has not chosen which one to back up yet.
+  if (f.enabled && f.question) return { text: 'Waiting for your answer: not backed up yet', tone: 'busy' }
   if (f.enabled) return { text: 'Backed up to your vault', tone: 'on' }
   return { text: 'Not backed up', tone: 'off' }
 }
@@ -596,6 +599,26 @@ export function ManageBackupCard() {
       return
     }
     // Refresh to pick up updated item counts after a mirror pass.
+    void load()
+  }
+
+  // LD-0113 Amendment 9: the one answer for a folder OneDrive moved.
+  const choose = async (f: KnownFolderStatus, choice: KnownFolderSource) => {
+    setPending((p) => new Set(p).add(f.key))
+    const res = await setKnownFolderSource(f.key, choice)
+    setPending((p) => {
+      const n = new Set(p)
+      n.delete(f.key)
+      return n
+    })
+    if (!res.ok) {
+      showToast({
+        variant: 'error',
+        title: 'Couldn’t save your choice',
+        message: res.unsupported ? commandUnavailableLabel('set_known_folder_source') : res.reason,
+      })
+      return
+    }
     void load()
   }
 
@@ -695,6 +718,30 @@ export function ManageBackupCard() {
                     </div>
                   )}
                   <div style={{ fontSize: 11, color: statusColor, marginTop: 2 }}>{status.text}</div>
+                  {f.enabled && f.question && (
+                    <div style={{ marginTop: 6 }}>
+                      <div style={{ fontSize: 11.5, color: T.ink2, lineHeight: 1.5, maxWidth: 520 }}>{f.question}</div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                        <button
+                          type="button"
+                          disabled={isPending}
+                          onClick={() => void choose(f, 'onedrive')}
+                          style={{ padding: '4px 10px', fontSize: 11.5, fontFamily: T.fontSans, fontWeight: 600, borderRadius: 6, border: `1px solid ${T.amberDeep}`, background: T.amber, color: T.ink, cursor: 'pointer' }}
+                        >
+                          Back up OneDrive’s folder
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isPending}
+                          onClick={() => void choose(f, 'default')}
+                          style={{ padding: '4px 10px', fontSize: 11.5, fontFamily: T.fontSans, fontWeight: 500, borderRadius: 6, border: `1px solid ${T.line}`, background: T.paper, color: T.ink, cursor: 'pointer' }}
+                        >
+                          Back up the default folder
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {f.note && <div style={{ fontSize: 11, color: T.ink3, marginTop: 2 }}>{f.note}</div>}
                 </div>
                 <BackupToggle
                   on={f.enabled}
