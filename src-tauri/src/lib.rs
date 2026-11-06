@@ -20,6 +20,8 @@ mod account;
 mod account_binding;
 mod account_dto;
 mod api_client;
+// LD-0113: what this device refuses to delete, rename or move (the Backups root, its own backups).
+mod backup_protect;
 mod browser_login;
 #[cfg(any(target_os = "windows", test))]
 mod callback_gate;
