@@ -688,7 +688,7 @@ pub unsafe extern "system" fn notify_delete_completion_callback(
     let Some(path) = notify_full_path(info) else {
         return;
     };
-    push_notify_event(crate::watcher::NotifyEvent::Delete(path));
+    push_notify_event(crate::watcher::NotifyEvent::Delete { path, by_this_process: from_this_process(info) });
 }
 
 /// `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move completes. The
@@ -725,7 +725,7 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
         return;
     };
 
-    push_notify_event(crate::watcher::NotifyEvent::Rename { source, target });
+    push_notify_event(crate::watcher::NotifyEvent::Rename { source, target, by_this_process: from_this_process(info) });
 }
 
 // ── LD-0113 §6.3: the pre-operation delete and rename callbacks ─────────────────

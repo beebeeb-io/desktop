@@ -13,11 +13,12 @@ pub enum NotifyEvent {
     CloseCompletion(PathBuf),
     /// A file/dir was deleted (`NOTIFY_DELETE_COMPLETION`). Point-in-time — the
     /// op already happened, so no debounce: dispatched immediately.
-    Delete(PathBuf),
+    /// `by_this_process`: the engine made it (LD-0113: never put back as a protected change).
+    Delete { path: PathBuf, by_this_process: bool },
     /// A file/dir was renamed or moved (`NOTIFY_RENAME_COMPLETION`). `source`
     /// is the old absolute path, `target` the new absolute path. Point-in-time,
     /// dispatched immediately.
-    Rename { source: PathBuf, target: PathBuf },
+    Rename { source: PathBuf, target: PathBuf, by_this_process: bool },
 }
 
 /// Owned handle to the running upload driver. Dropping it signals BOTH the
@@ -106,7 +107,7 @@ pub(super) async fn debounce_loop(
                         // Debounce: record/refresh the settle timer for this path.
                         pending.insert(path, Instant::now());
                     }
-                    Some(NotifyEvent::Delete(path)) => {
+                    Some(NotifyEvent::Delete { path, by_this_process }) => {
                         // The file is already gone — handle immediately. Drop any
                         // pending close-completion for the same path so a stale
                         // settle doesn't try to upload a now-deleted file.
@@ -119,15 +120,15 @@ pub(super) async fn debounce_loop(
                         if take_engine_delete_suppressed(&path) {
                             tracing::debug!("upload driver: dropping engine-originated delete (remote-deletion reconcile)");
                         } else {
-                            handle_delete(&bridge, &sync_root, &path).await;
+                            handle_delete_with(&bridge, &sync_root, &path, ProtectionCheck::unless(by_this_process)).await;
                         }
                     }
-                    Some(NotifyEvent::Rename { source, target }) => {
+                    Some(NotifyEvent::Rename { source, target, by_this_process }) => {
                         // A rename invalidates a pending close-completion for the
                         // OLD path; the NEW path's close (if any) will arrive on
                         // its own event.
                         pending.remove(&source);
-                        handle_rename(&bridge, &sync_root, &source, &target).await;
+                        handle_rename_with(&bridge, &sync_root, &source, &target, ProtectionCheck::unless(by_this_process)).await;
                     }
                     // Sender dropped (handle gone) — exit.
                     None => break,

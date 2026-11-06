@@ -568,11 +568,11 @@ impl EngineBridge {
         Ok(outcome)
     }
 
-    /// The hand-over committed (spec §8.4): one line, then the retired copy is unlinked,
-    /// after the commit (S6).
     /// LD-0113 §6.3: after the server refused `op` as a change of a protected folder. A trash put the
     /// row in `Trashing` (the local delete): it is live again, and on Windows its placeholder comes back
-    /// now. A rename or move left the row at the server's path, where the placeholder is minted again.
+    /// now. A rename or move of the root (always a folder) left its row at the server's path (a folder
+    /// row is re-keyed only by the pull), where the placeholder is minted again; on macOS the item's
+    /// signal makes Finder read the server's name back.
     fn restore_after_protected_refusal(&self, op: &PendingOperation, #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path, words: &str) {
         if op.kind == OperationKind::TrashFile
             && let Some(file_id) = op.file_id.as_deref()
@@ -596,6 +596,8 @@ impl EngineBridge {
         );
     }
 
+    /// The hand-over committed (spec §8.4): one line, then the retired copy is unlinked,
+    /// after the commit (S6).
     fn after_hand_over(&self, successor: &PendingOperation, took_over: &TookOver) {
         log_took_over(&successor.op_id, successor.file_id.as_deref(), &took_over.parked_op_id);
         if let Some(path) = took_over.released_payload.as_deref() {
@@ -776,8 +778,5 @@ impl EngineBridge {
 /// LD-0113: the server's words when `error` is its refusal of a change of a protected folder
 /// (`409 protected_folder`); `None` for any other error.
 fn protected_folder_refusal(error: &anyhow::Error) -> Option<String> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<crate::api_client::ProtectedFolderRefused>())
-        .map(|refused| refused.message.clone())
+    engine_cause::<crate::api_client::ProtectedFolderRefused>(error).map(|refused| refused.message.clone())
 }

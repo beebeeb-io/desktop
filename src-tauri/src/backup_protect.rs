@@ -60,6 +60,14 @@ pub(crate) fn own_backups() -> OwnBackups {
     OWN.read().map(|own| own.clone()).unwrap_or_default()
 }
 
+/// [`own_backups`] without the copy, for a caller that asks once per item of a listing.
+pub(crate) fn with_own_backups<T>(f: impl FnOnce(&OwnBackups) -> T) -> T {
+    match OWN.read() {
+        Ok(own) => f(&own),
+        Err(_) => f(&OwnBackups::default()),
+    }
+}
+
 /// Read what this device backs up now from `desktop.toml` and set it. Windows resolves each enabled
 /// known folder's original (`SHGetKnownFolderPath`, no network) under the device folder the backup
 /// writes today (`known_folder::sanitize_device_segment` of the computer name). The other systems

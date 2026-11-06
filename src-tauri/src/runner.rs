@@ -656,13 +656,16 @@ async fn run(
                 #[cfg(target_os = "windows")]
                 crate::windows_cf::upload_finalization::retry(&db, &sync_root);
 
+                // LD-0113 §6.2: a moved original (a Known Folder Move) changes what is protected; the folder
+                // switch refreshes at once (`set_known_folder_backup`). Windows only: nothing else has sources yet.
+                #[cfg(target_os = "windows")]
+                crate::backup_protect::refresh_own_backups();
+
                 // Known-folder backup mirror (task 0797). Run BEFORE the sync
                 // tick on the slow cadence so any files it copies into the sync
                 // root are present when the enumeration scan next walks the tree.
                 // Windows-only (SHGetKnownFolderPath); a no-op when the user has
                 // opted into nothing.
-                // LD-0113 §6.2: a folder turned on or off (or a renamed original) changes what is protected.
-                crate::backup_protect::refresh_own_backups();
                 #[cfg(target_os = "windows")]
                 {
                     if tick_count % KNOWN_FOLDER_MIRROR_EVERY_N_TICKS == 0 {

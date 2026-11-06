@@ -101,7 +101,7 @@ pub(crate) fn file_entry_payload_for_db(
     if entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry) {
         payload.parent_identifier = FP_TRASH_APPLE.to_string();
     }
-    apply_protection(db, &crate::backup_protect::own_backups(), entry, &mut payload);
+    crate::backup_protect::with_own_backups(|own| apply_protection(db, own, entry, &mut payload));
     payload
 }
 

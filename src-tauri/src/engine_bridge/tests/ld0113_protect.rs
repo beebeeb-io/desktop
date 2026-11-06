@@ -197,3 +197,39 @@ async fn a_delete_of_the_root_that_got_through_queues_nothing() {
         "an ordinary folder's delete still queues its trash"
     );
 }
+
+/// Self-review P1: the engine's own renames inside this device's backup (a kept copy's temp name
+/// becoming `a (this PC).jpg`, a conflict rename) are never put back as a protected change; the same
+/// rename by someone else is.
+#[tokio::test]
+async fn the_engines_own_rename_inside_an_own_backup_is_never_put_back() {
+    use crate::watcher::{ProtectionCheck, handle_rename_with};
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("root");
+    let pictures = sync_root.join("Backups").join("GLegion").join("Pictures");
+    std::fs::create_dir_all(&pictures).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    let before = crate::backup_protect::own_backups();
+    crate::backup_protect::set_own_backups(crate::backup_protect::OwnBackups {
+        device_folder: Some("GLegion".into()),
+        folders: vec![crate::backup_protect::OwnBackupFolder {
+            display_name: "Pictures".into(),
+            source_path: dir.path().join("src").join("Pictures"),
+        }],
+    });
+
+    let (temp, kept) = (pictures.join(".a.tmp"), pictures.join("a (this PC).jpg"));
+    std::fs::write(&kept, b"kept").unwrap();
+    handle_rename_with(&bridge, &sync_root, &temp, &kept, ProtectionCheck::Skip).await;
+    let engine_kept = kept.exists() && !temp.exists();
+
+    let (original, renamed) = (pictures.join("b.jpg"), pictures.join("b2.jpg"));
+    std::fs::write(&renamed, b"b").unwrap();
+    handle_rename_with(&bridge, &sync_root, &original, &renamed, ProtectionCheck::Check).await;
+    let person_put_back = original.exists() && !renamed.exists();
+
+    crate::backup_protect::set_own_backups(before);
+    assert!(engine_kept, "the engine's own rename stays where the engine put it");
+    assert!(person_put_back, "someone else's rename of a backed-up file goes back");
+}
