@@ -156,14 +156,22 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
         session.control.demand(id, offset, length);
         answer
     };
-    let (session, answer) = {
+    let mut waits = 0;
+    let (session, answer) = loop {
         let mut sessions = lock(&SESSIONS);
         if let Some(session) = sessions.get(&fetch.file_id) {
-            if session.ended.load(std::sync::atomic::Ordering::SeqCst) {
-                // Ending (its poison may not be recorded yet): this request fails, the next one starts afresh.
+            if !session.ended.load(std::sync::atomic::Ordering::SeqCst) {
+                return Start::Joined(session.clone(), demand(session));
+            }
+            // Ending (its poison may not be recorded yet): wait for it to leave, then start afresh
+            // (self-review: an idle or a withheld end must not fail the next read); 2 s at most.
+            drop(sessions);
+            waits += 1;
+            if waits > 100 {
                 return Start::Failed;
             }
-            return Start::Joined(session.clone(), demand(session));
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
         }
         if !matches!(bridge.db().poison(&fetch.file_id), Ok(None)) {
             return Start::Failed;
@@ -178,7 +186,7 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
         sessions.insert(fetch.file_id.clone(), session.clone());
         let answer = demand(&session);
         handle.spawn(watch(session.clone()));
-        (session, answer)
+        break (session, answer);
     };
     let Some(path) = super::callbacks::db_placeholder_path(bridge, &fetch.file_id) else {
         end(&session, &fetch.file_id);
@@ -293,7 +301,11 @@ impl PieceOut for CfOut {
                 STATUS_SUCCESS,
             )
         }
-        .map_err(|e| std::io::Error::other(format!("CfExecute 0x{:08X}", e.code().0 as u32)))
+        .map_err(|e| {
+            let code = e.code().0 as u32;
+            // A cancelled request or a key no longer valid ends that request, never the file (#225).
+            if crate::cf_range::request_gone(code) { crate::cf_range::gone_error() } else { std::io::Error::other(format!("CfExecute 0x{code:08X}")) }
+        })
     }
 }
 
@@ -328,10 +340,7 @@ async fn run_session(
             progress.1.keep(done.saturating_sub(progress.1.kept()));
         })
         .on_withheld(move || retire(&closing));
-    let io = crate::cf_range::GatedIo {
-        inner: crate::api_client::range_io::RangeIo::new(bridge.api(), &session.meter, kbps_limit),
-        book: session.book.clone(),
-    };
+    let io = crate::cf_range::GatedIo::new(crate::api_client::range_io::RangeIo::new(bridge.api(), &session.meter, kbps_limit), session.book.clone());
     let shared = beebeeb_transfer::DirectStore::global().entry(bridge.api().api_base(), "desktop");
     // Revocation (sign-out, lock): the session stops at once and its lease is released.
     let result = tokio::select! {
@@ -363,9 +372,16 @@ async fn run_session(
                     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
                     // SAFETY: NUL-terminated, alive for the call.
                     unsafe { super::callbacks::mark_in_sync(&wide) };
-                    bridge.finish_whole_range(&file_id, file_size, version_number, Some(hash), &ticket);
-                    if let Ok(board) = Arc::try_unwrap(board) {
-                        board.finish();
+                    // Self-review: a write that landed between the read-back and the mark is not ours.
+                    if super::poison::content_key(&path) == key_before {
+                        bridge.finish_whole_range(&file_id, file_size, version_number, Some(hash), &ticket);
+                        if let Ok(board) = Arc::try_unwrap(board) {
+                            board.finish();
+                        }
+                    } else {
+                        let _ = super::placeholders::mark_not_in_sync_path(&path);
+                        tracing::warn!(file_id = %file_id, "streamed whole, but the file changed while it was marked: not in sync");
+                        let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::Local);
                     }
                 }
                 Promotion::Changed => {
@@ -411,15 +427,8 @@ fn bytes_held(path: &std::path::Path) -> u64 {
 /// (nothing is fetched). Any error is "no": a session that ended whole is promoted only on what the
 /// platform holds, never on what was sent.
 pub(crate) fn on_disk_whole(path: &std::path::Path, size: u64) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    std::fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES.0)
-        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(path)
+    // The 0.8.15 open (`placeholders::open_for_state`), never one that could ask for the file.
+    super::placeholders::open_for_state(path)
         .ok()
         .and_then(|file| super::placeholders::on_disk_ranges(&file, size).ok())
         .is_some_and(|ranges| crate::cf_range::covers_whole(&ranges, size))
@@ -493,7 +502,16 @@ fn declined(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::E
         excluded_origin: shared || bridge.is_request_row(&fetch.file_id),
     };
     // Review P1: asked last, only when all else says decline (it may make the discovery call).
-    let can_stream = || handle.block_on(bridge.can_stream(&fetch.file_id));
+    // Bounded, and cut short by a sign-out (self-review): the open waits on it.
+    let can_stream = || {
+        handle.block_on(async {
+            tokio::select! {
+                biased;
+                _ = super::cancelled(bridge) => false,
+                streams = tokio::time::timeout(Duration::from_secs(5), bridge.can_stream(&fetch.file_id)) => streams.unwrap_or(false),
+            }
+        })
+    };
     sp::decline_open_fetch(sp::STREAMING_ENABLED, &requester, program_files(), target, first, can_stream)
 }
 

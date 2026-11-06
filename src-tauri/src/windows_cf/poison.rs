@@ -215,17 +215,21 @@ fn standard_info(handle: HANDLE) -> Option<(CF_PIN_STATE, i64)> {
 
 /// Run the empty step on the poisoned placeholder at `path`.
 pub(crate) fn empty_poisoned(path: &Path, check: Check) -> Emptied {
-    attempt(path, check, &mut |_, _| {}).0
+    attempt(path, check, &mut |_, _| {}, None).0
 }
 
 /// [`empty_poisoned`], calling `between` at each [`Step`] with the Win32 handle every step uses.
 pub(crate) fn empty_poisoned_with(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE)) -> Emptied {
-    attempt(path, check, between).0
+    attempt(path, check, between, None).0
 }
 
 /// The empty step; and the pin state that could be put back neither through the step's handle nor by
 /// path (Amendment 4: recorded in `cf_pin_restore` by the caller, retried at every sweep).
-fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE)) -> (Emptied, Option<CF_PIN_STATE>) {
+///
+/// `pin`: a pin recorded earlier that could not be put back (`cf_pin_restore`): the step restores that
+/// one instead of the pin it reads now, so a poisoned file is never pinned by path first (which would
+/// make Windows fetch it, and the poison refuse the fetch).
+fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE), pin: Option<CF_PIN_STATE>) -> (Emptied, Option<CF_PIN_STATE>) {
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -254,7 +258,7 @@ fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE)) -> 
         // SAFETY: referenced, so its Win32 handle stays open until the release below.
         let win32 = unsafe { CfGetWin32HandleFromProtectedHandle(handle) };
         // SAFETY: open for the whole call (the contract of `empty_under`).
-        let outcome = unsafe { empty_under(win32, check, between, &mut restore) };
+        let outcome = unsafe { empty_under(win32, check, between, &mut restore, pin) };
         // SAFETY: the reference taken above.
         unsafe { CfReleaseProtectedHandle(handle) };
         outcome
@@ -299,16 +303,17 @@ unsafe fn set_pin(handle: HANDLE, pin: CF_PIN_STATE) -> bool {
 /// SAFETY: `handle` must be the Win32 handle of a protected handle from `CfOpenFileWithOplock` that
 /// stays referenced (`CfReferenceProtectedHandle`) for the whole call. Every step goes through it,
 /// never through the protected handle, whose calls fail once an oplock break is pending.
-unsafe fn empty_under(handle: HANDLE, check: Check, between: &mut dyn FnMut(Step, HANDLE), restore: &mut Restore) -> Emptied {
+unsafe fn empty_under(handle: HANDLE, check: Check, between: &mut dyn FnMut(Step, HANDLE), restore: &mut Restore, recorded: Option<CF_PIN_STATE>) -> Emptied {
     // 2. Nothing written since the poison (Amendment 4: the content key), unless the person discards.
     if let Check::Key(recorded) = check
         && crate::cf_range::key_verdict(recorded, key_of_handle(handle)) == crate::cf_range::KeyVerdict::NeedsAttention
     {
         return Emptied::NeedsAttention;
     }
-    let Some((pin, _)) = standard_info(handle) else {
+    let Some((now, _)) = standard_info(handle) else {
         return Emptied::Failed("info");
     };
+    let pin = recorded.unwrap_or(now);
     between(Step::Checked, handle);
     // On any failure from here: NOT_IN_SYNC, then the pin, before the handle is released (step 6).
     let mut fail = |reason: &'static str| {
@@ -323,7 +328,7 @@ unsafe fn empty_under(handle: HANDLE, check: Check, between: &mut dyn FnMut(Step
     };
     // 3. The pin, recorded above, set to unspecified.
     // SAFETY: `handle` is open.
-    if pin != CF_PIN_STATE_UNSPECIFIED && !unsafe { set_pin(handle, CF_PIN_STATE_UNSPECIFIED) } {
+    if now != CF_PIN_STATE_UNSPECIFIED && !unsafe { set_pin(handle, CF_PIN_STATE_UNSPECIFIED) } {
         return fail("unpin");
     }
     // 4. IN_SYNC: only the connected provider may.
@@ -393,11 +398,10 @@ pub(crate) fn sweep_poisoned_with(
                     outcomes.push((row.file_id, Emptied::Gone));
                 }
                 Ok(Some(entry)) => {
+                    // Review P3 (poison.rs:373): a pin lost before the row needed attention stays recorded
+                    // (`cf_pin_restore`); "Discard and download again" puts it back. Nothing is pinned
+                    // here: that would make Windows fetch a file kept as it is.
                     let path = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path);
-                    // Review P3 (poison.rs:373): a pin lost before the row needed attention is retried too.
-                    if let Ok(path) = &path {
-                        restore_recorded_pin(db, &row.file_id, path);
-                    }
                     let missing = path.is_ok_and(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
                     if missing && crate::cf_range::clear_missing(kind) {
                         let _ = db.clear_poison(&row.file_id);
@@ -429,11 +433,14 @@ pub(crate) fn sweep_poisoned_with(
         let Ok(path) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path) else {
             continue;
         };
-        // A pin an earlier step could not put back: by path first, so the step records and restores it.
-        restore_recorded_pin(db, &row.file_id, &path);
-        let (outcome, pin_lost) = attempt(&path, Check::Key(row.key), between);
+        // A pin an earlier step could not put back: the step restores that one.
+        let recorded = db.pin_to_restore(&row.file_id).ok().flatten().map(CF_PIN_STATE);
+        let (outcome, pin_lost) = attempt(&path, Check::Key(row.key), between, recorded);
         // Review P2 (poison.rs:429): recorded BEFORE `settle` clears the poison row, in a table of its own.
         keep_lost_pin(db, &row.file_id, pin_lost);
+        if recorded.is_some() && pin_lost.is_none() && outcome == Emptied::Emptied {
+            let _ = db.clear_pin_to_restore(&row.file_id);
+        }
         settle(db, &row.file_id, &outcome, kind);
         outcomes.push((row.file_id, outcome));
     }
@@ -464,7 +471,12 @@ pub(crate) fn sweep_poisoned_with(
 /// yet) keeps it.
 fn restore_recorded_pin(db: &crate::state_db::StateDb, file_id: &str, path: &Path) {
     let Ok(Some(pin)) = db.pin_to_restore(file_id) else { return };
-    let gone = super::placeholders::platform_view(path) == crate::unknown_check::PlatformView::PlainFile;
+    let view = super::placeholders::platform_view(path);
+    // Self-review: nothing at the path is not retried by an open on every tick (one metadata read).
+    if view == crate::unknown_check::PlatformView::Missing {
+        return;
+    }
+    let gone = view == crate::unknown_check::PlatformView::PlainFile;
     if gone || set_pin_by_path(path, CF_PIN_STATE(pin)) {
         let _ = db.clear_pin_to_restore(file_id);
         tracing::info!(file_id = %file_id, gone, "poison sweep: a pin that could not be put back earlier is settled");
@@ -620,10 +632,13 @@ pub(crate) fn discard_now(
     }
     let entry = db.get_file(file_id).ok().flatten().ok_or(DiscardRefused::Missing)?;
     let path = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path).map_err(|_| DiscardRefused::Missing)?;
-    // A pin lost earlier (review P3, poison.rs:373) is put back first, so the step keeps it.
-    restore_recorded_pin(db, file_id, &path);
-    let (outcome, pin_lost) = attempt(&path, Check::Discard, &mut |_, _| {});
+    // A pin lost earlier (review P3, poison.rs:373): the step restores that one.
+    let recorded = db.pin_to_restore(file_id).ok().flatten().map(CF_PIN_STATE);
+    let (outcome, pin_lost) = attempt(&path, Check::Discard, &mut |_, _| {}, recorded);
     keep_lost_pin(db, file_id, pin_lost);
+    if recorded.is_some() && pin_lost.is_none() && matches!(outcome, Emptied::Emptied | Emptied::Gone) {
+        let _ = db.clear_pin_to_restore(file_id);
+    }
     match outcome {
         Emptied::Emptied => {
             settle(db, file_id, &outcome, SweepKind::Close);

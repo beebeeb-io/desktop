@@ -879,3 +879,72 @@ fn ld0105_p2_native_a_write_during_the_session_is_kept_as_needs_attention() {
     assert_eq!(outcome, vec![("qa-written".to_string(), Emptied::NeedsAttention)]);
     assert_eq!(census_of(&path).0, OnDisk::Wholly, "the person's write is kept");
 }
+
+/// The data-loss repro's provider: until it is told to serve everything, it leaves a partly hydrated
+/// placeholder (64 KiB of each request); then it serves every request whole, as a session serving the
+/// writer's fetch of the missing range does.
+static T10_SERVE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "system" fn t10_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if !T10_SERVE_ALL.load(std::sync::atomic::Ordering::SeqCst) {
+        // SAFETY: forwarded as received.
+        return unsafe { serve_first_64k(info, params) };
+    }
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: valid for the duration of the callback.
+    let r = unsafe { request_of(info, params) };
+    let data = content(r.file_size as usize);
+    // SAFETY: the keys of this live request.
+    unsafe {
+        let _ = transfer_range(r.connection, r.transfer, r.request, &data, || false, r.offset, r.length);
+    }
+}
+
+/// P1 #1 from the native QA rung (desktop #225, lead ruling 2026-11-06), the data-loss repro: a
+/// partly downloaded file; another process writes 21 B at offset 0 (a FileStream, share ReadWrite);
+/// Windows fetches the missing range first, the provider serves it, the write lands and moves
+/// LastWriteTime; then that session fails after a write. Its poison keeps the key the session read
+/// before ITS first transfer, so the sweep sees the write: needs attention, the person's bytes kept.
+/// Red on the mutant "the key read at the failure" (7188578's `poison_now`: the sweep empties the write).
+#[test]
+fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
+    use crate::windows_cf::poison::{Emptied, SweepKind, content_key, poison_now, sweep_poisoned};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(t10_fetch);
+    assert!(placeholders::create_placeholder(&qa.root, "qa-t10", "t10.bin", 1 << 20, 1_700_000_000, false).unwrap());
+    let path = qa.path("t10.bin");
+    let mut one = [0u8; 1];
+    let _ = std::fs::File::open(&path).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
+    let partial = census_of(&path);
+    assert_eq!(partial.0, OnDisk::Partly, "a partly downloaded file: {partial:?}");
+    // The session that later poisons: its key before its first transfer.
+    let key_before = content_key(&path);
+    T10_SERVE_ALL.store(true, std::sync::atomic::Ordering::SeqCst);
+    let script = format!(
+        "$f=[IO.File]::Open('{}','Open','ReadWrite','ReadWrite'); $f.Write([byte[]](1..21),0,21); $f.Close()",
+        path.display()
+    );
+    let wrote = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status();
+    let written = census_of(&path);
+    let key_after = content_key(&path);
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-t10", "t10.bin")]);
+    poison_now(&db, "qa-t10", &path, "transfer", key_before);
+    let recorded = db.poison("qa-t10").unwrap().unwrap().key;
+    let outcome = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    let mut head = [0u8; 21];
+    let read = std::fs::File::open(&path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head));
+    println!(
+        "ld0105-p1-native: write into a partial file: {wrote:?}, census {partial:?} -> {written:?}, key {key_before:?} -> {key_after:?}, recorded {recorded:?}, sweep {outcome:?}, census {:?}, head {read:?} {:?}",
+        census_of(&path),
+        &head[..4]
+    );
+    assert!(wrote.is_ok_and(|s| s.success()), "the other process wrote");
+    assert_ne!(key_after, key_before, "the write moved the content key");
+    assert_eq!(recorded, None, "the poison keeps no key: the bytes are not only the attempt's");
+    assert_eq!(outcome, vec![("qa-t10".to_string(), Emptied::NeedsAttention)]);
+    assert_ne!(census_of(&path).0, OnDisk::Nothing, "never emptied");
+    assert_eq!(head.to_vec(), (1u8..=21).collect::<Vec<_>>(), "the person's write is still there");
+}

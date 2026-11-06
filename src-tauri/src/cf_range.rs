@@ -128,6 +128,26 @@ impl DemandBook {
         }
     }
 
+    /// Every pending request's range `(offset, length)`.
+    pub(crate) fn pending_ranges(&self) -> Vec<(u64, u64)> {
+        self.live.values().map(|d| (d.offset, d.len)).collect()
+    }
+
+    /// The range demand `id` asked for, while it is pending.
+    pub(crate) fn range_of(&self, id: u64) -> Option<(u64, u64)> {
+        self.live.get(&id).map(|d| (d.offset, d.len))
+    }
+
+    /// The request answered with `keys` is gone (its transfer was refused as cancelled): its demands
+    /// end, as a `CANCEL_FETCH_DATA` would end them.
+    pub(crate) fn cancel_keys(&mut self, keys: RequestKeys) -> Vec<u64> {
+        let ids: Vec<u64> = self.live.iter().filter(|(_, d)| d.keys == keys).map(|(id, _)| *id).collect();
+        for id in &ids {
+            self.answer(*id, Answer::Cancelled);
+        }
+        ids
+    }
+
     /// No request pending, and none added or answered for `quiet`.
     pub(crate) fn idle_for(&self, quiet: std::time::Duration) -> bool {
         self.live.is_empty() && self.last_activity.is_none_or(|at| at.elapsed() >= quiet)
@@ -144,6 +164,10 @@ impl DemandBook {
     /// [`DemandBook::keys_for`]; with `default_key` on, a piece with no pending request goes out on
     /// the latest request's transfer key with `CF_REQUEST_KEY_DEFAULT` (unmeasured on Windows).
     fn keys_for_with(&self, offset: u64, len: u64, default_key: bool) -> Option<RequestKeys> {
+        // Nothing after a close, not even under a request that is still pending.
+        if self.closed {
+            return None;
+        }
         let end = offset.saturating_add(len);
         let overlapping = self
             .live
@@ -215,6 +239,25 @@ impl DemandBook {
     }
 }
 
+/// The `TRANSFER_DATA` refusals that mean "this request is gone", not "these bytes are bad": the
+/// request was cancelled (`ERROR_CLOUD_FILE_REQUEST_CANCELED`), aborted, timed out, or its key is no
+/// longer valid (`ERROR_CLOUD_FILE_INVALID_REQUEST`).
+pub(crate) const REQUEST_GONE: [u32; 4] = [0x8007_018E, 0x8007_0189, 0x8007_01AA, 0x8007_017C];
+
+/// Is `hresult` one of [`REQUEST_GONE`]?
+pub(crate) fn request_gone(hresult: u32) -> bool {
+    REQUEST_GONE.contains(&hresult)
+}
+
+/// The error a [`PieceOut`] returns for a request that is gone ([`request_gone`]).
+pub(crate) fn gone_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "request gone")
+}
+
+fn is_request_gone(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionAborted
+}
+
 /// Where a piece goes: `CfExecute(TRANSFER_DATA)` on Windows, a recorder in tests.
 pub(crate) trait PieceOut: Send {
     fn transfer(&mut self, keys: RequestKeys, offset: u64, plain: &[u8]) -> std::io::Result<()>;
@@ -234,13 +277,17 @@ pub(crate) struct StreamSink<P: PieceOut, R: IdentityRecords> {
     pub(crate) file_size: u64,
     /// Plaintext bytes handed to Windows by this session.
     pub(crate) transferred: u64,
-    /// A piece found no pending request and was NOT handed to Windows (desktop #225: no transfer on
-    /// `CF_REQUEST_KEY_DEFAULT`). Core counts it as out, so this session can no longer answer a demand
-    /// for it: it is closed ([`StreamSink::on_withheld`]), and it never promotes.
+    /// A piece was NOT handed to Windows: it found no pending request (desktop #225: no transfer on
+    /// `CF_REQUEST_KEY_DEFAULT`), or its request was gone ([`request_gone`]). Core counts it as out, so
+    /// the session never promotes, a later demand for its range is failed, never met without its
+    /// bytes, and with no request left it is closed ([`StreamSink::on_withheld`]).
     pub(crate) withheld: bool,
+    /// The ranges withheld, `(offset, length)`.
+    undelivered: Vec<(u64, u64)>,
     identity_recorded: bool,
     progress: Option<Box<dyn Fn(u64) + Send>>,
     on_withheld: Option<Box<dyn FnMut() + Send>>,
+    closing: bool,
 }
 
 impl<P: PieceOut, R: IdentityRecords> StreamSink<P, R> {
@@ -252,13 +299,16 @@ impl<P: PieceOut, R: IdentityRecords> StreamSink<P, R> {
             file_size,
             transferred: 0,
             withheld: false,
+            undelivered: Vec::new(),
             identity_recorded: false,
             progress: None,
             on_withheld: None,
+            closing: false,
         }
     }
 
-    /// Called once, when the first piece is withheld: the Windows glue closes the session there.
+    /// Called once, when a withheld piece leaves no request to serve: the Windows glue closes the
+    /// session there.
     pub(crate) fn on_withheld(mut self, close: impl FnMut() + Send + 'static) -> Self {
         self.on_withheld = Some(Box::new(close));
         self
@@ -272,6 +322,24 @@ impl<P: PieceOut, R: IdentityRecords> StreamSink<P, R> {
 
     fn book(&self) -> std::sync::MutexGuard<'_, DemandBook> {
         self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `[offset, offset + len)` was not handed over; with no request left the session closes.
+    fn withhold(&mut self, offset: u64, len: u64) {
+        self.withheld = true;
+        self.undelivered.push((offset, len));
+        if self.book().is_idle() {
+            self.close();
+        }
+    }
+
+    fn close(&mut self) {
+        if !self.closing {
+            self.closing = true;
+            if let Some(close) = self.on_withheld.as_mut() {
+                close();
+            }
+        }
     }
 }
 
@@ -291,19 +359,25 @@ impl<P: PieceOut, R: IdentityRecords> RangeSink for StreamSink<P, R> {
         if !piece_is_transferable(offset, len, self.file_size) {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         }
-        if self.withheld {
-            return Ok(());
-        }
         let Some(keys) = self.book().keys_for(offset, len) else {
-            // No request is pending (a cancel or an exit raced the chunk's release): the piece is
-            // not handed over, and the session ends, never "whole" (the promotion checks ONDISK too).
-            self.withheld = true;
-            if let Some(close) = self.on_withheld.as_mut() {
-                close();
-            }
+            // No request is pending (a cancel or an exit raced the chunk's release, or the session is
+            // closing): the piece is not handed over, never "whole" (the promotion checks ONDISK too).
+            self.withhold(offset, len);
             return Ok(());
         };
-        self.out.transfer(keys, offset, plain)?;
+        match self.out.transfer(keys, offset, plain) {
+            Ok(()) => {}
+            // Desktop #225 (lead ruling, 2026-11-06): a request that was cancelled, timed out or whose
+            // key is no longer valid is not corruption. It ends that request; the session leaves if no
+            // other request is live, and never poisons: the bytes on disk are authenticated bytes of
+            // the recorded version (I4).
+            Err(e) if is_request_gone(&e) => {
+                self.book().cancel_keys(keys);
+                self.withhold(offset, len);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
         self.transferred += len;
         if let Some(progress) = &self.progress {
             progress(self.transferred);
@@ -312,7 +386,16 @@ impl<P: PieceOut, R: IdentityRecords> RangeSink for StreamSink<P, R> {
     }
 
     fn demand_met(&mut self, id: u64) {
-        self.book().answer(id, Answer::Met);
+        // Core counts a withheld piece as out: a demand that needs one is failed (I7), never met
+        // without its bytes, and the session closes (the next request starts afresh).
+        let range = self.book().range_of(id);
+        let short = range.is_some_and(|(o, l)| self.undelivered.iter().any(|(uo, ul)| *uo < o.saturating_add(l) && o < uo.saturating_add(*ul)));
+        if short {
+            self.book().answer(id, Answer::Failed);
+            self.close();
+        } else {
+            self.book().answer(id, Answer::Met);
+        }
     }
 
     fn demand_failed(&mut self, id: u64) {
@@ -490,17 +573,96 @@ pub(crate) fn clear_missing(kind: SweepKind) -> bool {
     kind == SweepKind::ProcessStart
 }
 
-/// Desktop #225 (review P2, lead ruling 2026-11-06): the range session's transport, gated so a
-/// fetched chunk reaches the session (and so the sink) only while a request is pending. Core reads
+/// Desktop #225 (review P2, lead rulings 2026-11-06): the range session's transport. Two rules on top
+/// of the desktop's own transport:
+///
+/// - **Demand-first (S4):** a chunk a pending request needs is fetched at once; while one of those is
+///   not received yet, at most ONE read-ahead GET runs beside it (the rest wait to start), and
+///   read-ahead fills the window only while no demanded chunk is outstanding. Core's planner starts
+///   up to its window of GETs at once; they share the link (and the download limit), so without this
+///   the demanded chunk arrived ~15 chunk times late (robocopy, the native QA rung). The chunk index of
+///   a storage link is read from the grant replies this transport passes on.
+/// - **The gate:** a fetched chunk reaches the session (and so the sink) only while a request is
+///   pending. Core reads
 /// ahead with no request pending (between a player's reads, and after its close); with
 /// [`READ_AHEAD_ON_DEFAULT_KEY`] off its chunks wait here, booked against the process budget (S8),
 /// until the next `FETCH_DATA` of the file, and go out under that request's keys. A closing session's
 /// chunks are never released. Only chunk bodies wait (storage GETs and the pinned `/chunks/` route);
 /// discovery and grant requests go through at once.
 pub(crate) struct GatedIo<I> {
-    pub(crate) inner: I,
-    pub(crate) book: Arc<Mutex<DemandBook>>,
+    inner: I,
+    book: Arc<Mutex<DemandBook>>,
+    schedule: Mutex<Schedule>,
 }
+
+impl<I> GatedIo<I> {
+    pub(crate) fn new(inner: I, book: Arc<Mutex<DemandBook>>) -> Self {
+        GatedIo {
+            inner,
+            book,
+            schedule: Mutex::new(Schedule::default()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner(&self) -> &I {
+        &self.inner
+    }
+}
+
+/// What the transport knows of the session's chunks.
+#[derive(Default)]
+struct Schedule {
+    /// A storage link's chunk index, from the grant replies (never logged: the link is signed).
+    index_of: std::collections::HashMap<String, u32>,
+    chunk_size: u64,
+    file_size: u64,
+    received: std::collections::BTreeSet<u32>,
+    read_ahead_running: usize,
+}
+
+/// How a storage GET may start (demand-first, S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GetStart {
+    /// A pending request needs this chunk (or its index is not known): at once.
+    Demanded,
+    /// Read-ahead, started now (and counted while it runs).
+    ReadAhead,
+    /// Read-ahead while a demanded chunk is outstanding and one read-ahead GET already runs.
+    Wait,
+}
+
+/// The chunks the pending requests need (`[offset, offset + len)` each; chunk 0 too, I3: frame 0
+/// opens first), for a file of `file_size` bytes in `chunk_size` chunks.
+pub(crate) fn demanded_chunks(pending: &[(u64, u64)], chunk_size: u64, file_size: u64) -> std::collections::BTreeSet<u32> {
+    let mut out = std::collections::BTreeSet::new();
+    if chunk_size == 0 || file_size == 0 || pending.is_empty() {
+        return out;
+    }
+    let last = ((file_size - 1) / chunk_size) as u32;
+    out.insert(0);
+    for (offset, len) in pending {
+        if *len == 0 || *offset >= file_size {
+            continue;
+        }
+        let end = offset.saturating_add(*len).min(file_size) - 1;
+        out.extend(((offset / chunk_size) as u32).min(last)..=((end / chunk_size) as u32).min(last));
+    }
+    out
+}
+
+/// The demand-first rule for a GET of chunk `index` (`None`: not known, never held back).
+pub(crate) fn get_start(index: Option<u32>, demanded: &std::collections::BTreeSet<u32>, received: &std::collections::BTreeSet<u32>, read_ahead_running: usize) -> GetStart {
+    let Some(index) = index else { return GetStart::Demanded };
+    if demanded.contains(&index) {
+        return GetStart::Demanded;
+    }
+    let outstanding = demanded.iter().any(|i| !received.contains(i));
+    if !outstanding || read_ahead_running == 0 { GetStart::ReadAhead } else { GetStart::Wait }
+}
+
+/// A read-ahead GET waits at most this long for a demanded chunk (its signed link has a lifetime).
+const MAX_READ_AHEAD_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Wait until `book` has a pending request; never returns once the session is closing.
 pub(crate) async fn until_requested(book: &Mutex<DemandBook>) {
@@ -527,13 +689,83 @@ pub(crate) async fn until_requested(book: &Mutex<DemandBook>) {
     }
 }
 
+impl<I> GatedIo<I> {
+    fn schedule(&self) -> std::sync::MutexGuard<'_, Schedule> {
+        self.schedule.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Wait until the GET of chunk `index` may start (demand-first); `true`: it is read-ahead.
+    async fn start_get(&self, index: Option<u32>) -> bool {
+        let deadline = tokio::time::Instant::now() + MAX_READ_AHEAD_HOLD;
+        loop {
+            let changed = self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner).changed.clone();
+            let wake = changed.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            let decided = {
+                let pending = self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending_ranges();
+                let mut s = self.schedule();
+                let demanded = demanded_chunks(&pending, s.chunk_size, s.file_size);
+                let held_too_long = tokio::time::Instant::now() >= deadline;
+                match get_start(index, &demanded, &s.received, s.read_ahead_running) {
+                    GetStart::Demanded => Some(false),
+                    GetStart::ReadAhead => {
+                        s.read_ahead_running += 1;
+                        Some(true)
+                    }
+                    GetStart::Wait if held_too_long => {
+                        s.read_ahead_running += 1;
+                        Some(true)
+                    }
+                    GetStart::Wait => None,
+                }
+            };
+            if let Some(read_ahead) = decided {
+                return read_ahead;
+            }
+            let _ = tokio::time::timeout_at(deadline, wake).await;
+        }
+    }
+
+    /// The GET of chunk `index` ended: what was received, and room for the next read-ahead.
+    fn end_get(&self, index: Option<u32>, read_ahead: bool, received: bool) {
+        let changed = {
+            let mut s = self.schedule();
+            if read_ahead {
+                s.read_ahead_running = s.read_ahead_running.saturating_sub(1);
+            }
+            if let (Some(i), true) = (index, received) {
+                s.received.insert(i);
+            }
+            self.book.lock().unwrap_or_else(std::sync::PoisonError::into_inner).changed.clone()
+        };
+        changed.notify_waiters();
+    }
+
+    /// A grant reply: each storage link's chunk index, and the geometry.
+    fn learn(&self, body: &[u8]) {
+        if let Ok(reply) = serde_json::from_slice::<beebeeb_core::direct_transfer::DownloadGrantResponse>(body) {
+            let mut s = self.schedule();
+            s.chunk_size = reply.chunk_size;
+            s.file_size = reply.original_size;
+            for grant in reply.grants {
+                s.index_of.insert(grant.url, grant.index);
+            }
+        }
+    }
+}
+
 impl<I: beebeeb_transfer::DirectIo> beebeeb_transfer::DirectIo for GatedIo<I> {
     fn api(&self, call: beebeeb_transfer::ApiCall) -> impl Future<Output = beebeeb_transfer::ApiReply> + Send {
         let chunk = call.path.contains("/chunks/");
+        let grants = call.path.ends_with("/download-grants");
         let reply = self.inner.api(call);
         let book = self.book.clone();
         async move {
             let reply = reply.await;
+            if grants && reply.status == 200 {
+                self.learn(&reply.body);
+            }
             if chunk {
                 until_requested(&book).await;
             }
@@ -549,10 +781,12 @@ impl<I: beebeeb_transfer::DirectIo> beebeeb_transfer::DirectIo for GatedIo<I> {
         idle: std::time::Duration,
         connect: std::time::Duration,
     ) -> impl Future<Output = beebeeb_transfer::StorageReply> + Send {
-        let reply = self.inner.storage_get(url, expected_len, total, idle, connect);
         let book = self.book.clone();
         async move {
-            let reply = reply.await;
+            let index = self.schedule().index_of.get(url.expose()).copied();
+            let read_ahead = self.start_get(index).await;
+            let reply = self.inner.storage_get(url, expected_len, total, idle, connect).await;
+            self.end_get(index, read_ahead, reply.status == 200 && reply.body.is_some());
             until_requested(&book).await;
             reply
         }

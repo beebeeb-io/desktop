@@ -503,7 +503,7 @@ fn ld0105_p2_a_piece_with_no_pending_request_is_withheld_and_closes_the_session(
 }
 
 /// Review P2 (cf_range.rs:125 + streaming.rs:532) through core's real `range_session`: read-ahead
-/// fetched while no request is pending waits in `GatedIo` and goes out under the NEXT request's keys;
+/// fetched while no request is pending waits in `GatedIo` and goes out under the NEXT requests' keys;
 /// nothing goes out between the two reads, nothing on `CF_REQUEST_KEY_DEFAULT`, and the file still
 /// ends whole. Red on the mutants "`READ_AHEAD_ON_DEFAULT_KEY = true`" (3 default-key transfers
 /// between the reads) and "no gate" (the read-ahead is withheld, the session closes: not whole).
@@ -511,7 +511,7 @@ fn ld0105_p2_a_piece_with_no_pending_request_is_withheld_and_closes_the_session(
 async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its_keys() {
     let fx = fx(4 << 20, 1 << 20);
     let book = Arc::new(Mutex::new(DemandBook::default()));
-    let io = GatedIo { inner: server(fx.clone(), None), book: book.clone() };
+    let io = GatedIo::new(server(fx.clone(), None), book.clone());
     let log: KeyLog = Arc::default();
     let buf = Arc::new(Mutex::new(vec![0u8; fx.plain.len()]));
     let out = LiveRecorder { book: book.clone(), log: log.clone(), buf: buf.clone() };
@@ -519,6 +519,7 @@ async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its
     let control = RangeControl::new();
     let first = RequestKeys { transfer_key: 1, request_key: 10 };
     let second = RequestKeys { transfer_key: 2, request_key: 20 };
+    let third = RequestKeys { transfer_key: 3, request_key: 30 };
     let (id1, met1) = book.lock().unwrap().add(0, 4096, 1, first);
     control.demand(id1, 0, 4096);
     let shared = DirectShared::default();
@@ -532,6 +533,10 @@ async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its
         let (id2, met2) = book.lock().unwrap().add(2 << 20, 4096, 1, second);
         control.demand(id2, 2 << 20, 4096);
         assert_eq!(met2.await.ok(), Some(Answer::Met));
+        // What is left waits again; a whole-file request (a non-player's open, S2) takes the rest.
+        let (id3, met3) = book.lock().unwrap().add(0, 4 << 20, 1, third);
+        control.demand(id3, 0, 4 << 20);
+        assert_eq!(met3.await.ok(), Some(Answer::Met));
         between
     };
     // A mutant that ends the session early leaves the second read unanswered: red, never a hang.
@@ -544,8 +549,8 @@ async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its
     assert!(log.iter().all(|(k, _, live)| *live && k.request_key != REQUEST_KEY_DEFAULT), "{log:?}");
     assert!(between >= 1 && log[..between].iter().all(|(k, _, _)| *k == first), "first read: {log:?}");
     assert!(
-        log.len() > between && log[between..].iter().all(|(k, _, _)| *k == second),
-        "the read-ahead waited and went out under the second request's keys: {log:?}"
+        log.len() > between && log[between..].iter().all(|(k, _, _)| *k == second || *k == third),
+        "the read-ahead waited and went out under the later requests' keys: {log:?}"
     );
 }
 
@@ -649,4 +654,169 @@ fn ld0105_p2_promotion_needs_every_byte_on_disk_and_comes_after_the_read_back() 
     assert!(!covers_whole(&[(0, 4096), (8192, 4096 + 100)], size), "a hole");
     assert!(!covers_whole(&[(0, size - 1)], size), "one byte short");
     assert!(!covers_whole(&[], size));
+}
+
+// ── Desktop #225: the native QA rung's two P1s (lead rulings, 2026-11-06) ────────────────────────
+
+/// Core's scripted server with a slow storage link (each GET takes `delay`): it records, per chunk,
+/// how many GETs ran, and the most GETs that ran beside chunk 0's (the demanded one).
+struct SlowLink {
+    inner: ScriptedIo,
+    delay: std::time::Duration,
+    running: Mutex<std::collections::BTreeSet<u32>>,
+    beside_chunk_0: std::sync::atomic::AtomicUsize,
+    gets: Mutex<std::collections::BTreeMap<u32, usize>>,
+}
+
+impl SlowLink {
+    fn new(inner: ScriptedIo, delay: std::time::Duration) -> Self {
+        SlowLink { inner, delay, running: Mutex::default(), beside_chunk_0: 0.into(), gets: Mutex::default() }
+    }
+}
+
+impl beebeeb_transfer::DirectIo for SlowLink {
+    fn api(&self, call: beebeeb_transfer::ApiCall) -> impl std::future::Future<Output = ApiReply> + Send {
+        self.inner.api(call)
+    }
+    fn storage_get(
+        &self,
+        url: &beebeeb_transfer::SignedUrl,
+        expected_len: u64,
+        total: std::time::Duration,
+        idle: std::time::Duration,
+        connect: std::time::Duration,
+    ) -> impl std::future::Future<Output = StorageReply> + Send {
+        async move {
+            let i: u32 = url.expose().rsplit("i=").next().unwrap().parse().unwrap();
+            {
+                let mut running = self.running.lock().unwrap();
+                running.insert(i);
+                if running.contains(&0) {
+                    self.beside_chunk_0.fetch_max(running.len() - 1, std::sync::atomic::Ordering::SeqCst);
+                }
+                *self.gets.lock().unwrap().entry(i).or_default() += 1;
+            }
+            tokio::time::sleep(self.delay).await;
+            let reply = self.inner.storage_get(url, expected_len, total, idle, connect).await;
+            self.running.lock().unwrap().remove(&i);
+            reply
+        }
+    }
+    fn storage_put(&self, url: &beebeeb_transfer::SignedUrl, body: bytes::Bytes, headers: &[(&'static str, String)], total: std::time::Duration) -> impl std::future::Future<Output = u16> + Send {
+        self.inner.storage_put(url, body, headers, total)
+    }
+    fn sleep(&self, d: std::time::Duration) -> impl std::future::Future<Output = ()> + Send {
+        self.inner.sleep(d)
+    }
+    fn wall_ms(&self) -> i64 {
+        self.inner.wall_ms()
+    }
+    fn mono_ms(&self) -> i64 {
+        self.inner.mono_ms()
+    }
+}
+
+/// The demand-first rule itself: a demanded chunk starts at once; read-ahead runs one at a time while
+/// a demanded chunk is outstanding, and freely once none is.
+#[test]
+fn ld0105_p1_demand_first_rule() {
+    let mib = 1u64 << 20;
+    let demanded = demanded_chunks(&[(3 * mib + 5, 10)], mib, 16 * mib);
+    assert_eq!(demanded.into_iter().collect::<Vec<_>>(), vec![0, 3], "the demand's chunk, and chunk 0 (I3)");
+    let demanded = demanded_chunks(&[(0, 4096)], mib, 16 * mib);
+    let none = std::collections::BTreeSet::new();
+    assert_eq!(get_start(Some(0), &demanded, &none, 5), GetStart::Demanded);
+    assert_eq!(get_start(Some(9), &demanded, &none, 0), GetStart::ReadAhead, "one read-ahead beside it");
+    assert_eq!(get_start(Some(9), &demanded, &none, 1), GetStart::Wait, "not two");
+    let got_0 = std::collections::BTreeSet::from([0]);
+    assert_eq!(get_start(Some(9), &demanded, &got_0, 7), GetStart::ReadAhead, "chunk 0 received: the window fills");
+    assert_eq!(get_start(None, &demanded, &none, 1), GetStart::Demanded, "an unknown link is never held back");
+    assert!(demanded_chunks(&[], mib, 16 * mib).is_empty(), "no request: nothing demanded");
+}
+
+/// P1 #2 (a), through core's real session: robocopy's first 1 MiB read of a cloud-only file. Core
+/// starts its whole window of GETs at once; at most ONE read-ahead GET runs beside the demanded
+/// chunk's, so the demanded chunk gets the link instead of 1/16 of it. Red on the mutant "no
+/// demand-first" (`get_start` always `Demanded`: 15 GETs beside it).
+#[tokio::test]
+async fn ld0105_p1_demand_first_at_most_one_read_ahead_get_beside_the_demanded_chunk() {
+    let fx = fx(16 << 20, 1 << 20);
+    let book = Arc::new(Mutex::new(DemandBook::default()));
+    let io = GatedIo::new(SlowLink::new(server(fx.clone(), None), std::time::Duration::from_millis(40)), book.clone());
+    let log: KeyLog = Arc::default();
+    let out = LiveRecorder { book: book.clone(), log, buf: Arc::new(Mutex::new(vec![0u8; fx.plain.len()])) };
+    let mut sink = StreamSink::new(book.clone(), out, LogRecords(Arc::default()), fx.geometry.original_size);
+    let control = RangeControl::new();
+    let (id, met) = book.lock().unwrap().add(0, 1 << 20, 1, KEYS);
+    control.demand(id, 0, 1 << 20);
+    let (shared, lessor) = (DirectShared::default(), RangeLessor::new(1 << 30));
+    let session = range_session(&io, &shared, &lessor, request(&fx, 0, None), FileKey::from_bytes(KEY), &control, &mut sink, &Quiet);
+    let driver = async {
+        let answer = met.await.ok();
+        book.lock().unwrap().close();
+        control.close();
+        answer
+    };
+    let (out, answer) = tokio::time::timeout(std::time::Duration::from_secs(20), async { tokio::join!(session, driver) })
+        .await
+        .expect("the session ends");
+    assert_eq!(answer, Some(Answer::Met));
+    assert!(matches!(out, Ok(RangeOutcome::Closed(_))), "{out:?}");
+    let beside = io.inner().beside_chunk_0.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(beside <= 1, "{beside} GETs ran beside the demanded chunk");
+}
+
+/// Answers every piece, except those of `gone` keys: Windows refused them as a cancelled request.
+struct CancelledFor {
+    gone: RequestKeys,
+    log: KeyLog,
+}
+
+impl PieceOut for CancelledFor {
+    fn transfer(&mut self, keys: RequestKeys, offset: u64, _plain: &[u8]) -> std::io::Result<()> {
+        if keys == self.gone {
+            return Err(gone_error());
+        }
+        self.log.lock().unwrap().push((keys, offset, true));
+        Ok(())
+    }
+}
+
+/// P1 #2 (b): robocopy-like 1 MiB reads; the second request is cancelled under us (its TRANSFER_DATA
+/// refused, 0x8007018E). That ends the request, and with nothing else live the session leaves: never a
+/// poison, and no chunk fetched twice. Red on the mutant "a gone request is a sink error" (the session
+/// fails after a write: `Poison("transfer")`).
+#[tokio::test]
+async fn ld0105_p1_a_cancelled_request_ends_it_and_never_poisons() {
+    assert!(request_gone(0x8007_018E) && request_gone(0x8007_01AA) && !request_gone(0x8007_0005));
+    let fx = fx(4 << 20, 1 << 20);
+    let book = Arc::new(Mutex::new(DemandBook::default()));
+    let io = GatedIo::new(SlowLink::new(server(fx.clone(), None), std::time::Duration::from_millis(5)), book.clone());
+    let (first, second) = (RequestKeys { transfer_key: 1, request_key: 10 }, RequestKeys { transfer_key: 2, request_key: 20 });
+    let log: KeyLog = Arc::default();
+    let control = RangeControl::new();
+    let (b2, c2) = (book.clone(), control.clone());
+    let mut sink = StreamSink::new(book.clone(), CancelledFor { gone: second, log: log.clone() }, LogRecords(Arc::default()), fx.geometry.original_size)
+        .on_withheld(move || {
+            b2.lock().unwrap().close();
+            c2.close();
+        });
+    let (id1, met1) = book.lock().unwrap().add(0, 1 << 20, 1, first);
+    control.demand(id1, 0, 1 << 20);
+    let (shared, lessor) = (DirectShared::default(), RangeLessor::new(1 << 30));
+    let session = range_session(&io, &shared, &lessor, request(&fx, 0, None), FileKey::from_bytes(KEY), &control, &mut sink, &Quiet);
+    let driver = async {
+        let a1 = met1.await.ok();
+        let (id2, met2) = book.lock().unwrap().add(1 << 20, 1 << 20, 1, second);
+        control.demand(id2, 1 << 20, 1 << 20);
+        (a1, met2.await.ok())
+    };
+    let (out, (a1, a2)) = tokio::time::timeout(std::time::Duration::from_secs(20), async { tokio::join!(session, driver) })
+        .await
+        .expect("the session ends");
+    assert_eq!((a1, a2), (Some(Answer::Met), Some(Answer::Cancelled)), "the cancelled request just ends");
+    assert_eq!(after_session(&out), AfterSession::Leave, "never a poison: {out:?}");
+    let gets = io.inner().gets.lock().unwrap().clone();
+    assert!(gets.values().all(|n| *n == 1), "no chunk fetched twice: {gets:?}");
+    assert!(sink.withheld, "never promoted");
 }

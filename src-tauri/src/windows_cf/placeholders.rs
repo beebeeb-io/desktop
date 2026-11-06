@@ -937,7 +937,7 @@ fn handle_fully_on_disk(file: &std::fs::File) -> bool {
 /// open, and none after these reads. On Guus's PC the 0.8.14 start-up guard's opens fetched
 /// 5,294 cloud-only files whole, one after another in the guard's own row order, ~42 GB in two
 /// hours, until C: was full. `CfGetPlaceholderInfo` needs no more than this handle.
-fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
