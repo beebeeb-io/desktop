@@ -355,6 +355,24 @@ fn t16_populate_counts_created_and_already_existing() {
 }
 
 #[test]
+fn ld0105_review_a_placeholder_minted_without_an_identity_gains_it_at_the_next_refresh() {
+    // Review P2 (task 2180): every 0.8.21 placeholder has no recorded identity. Created ones get it at
+    // the mint; an existing one that holds nothing gets the listing's version at the next refresh.
+    const A: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    let r = Root::new();
+    r.track("old.bin", FileStatus::CloudOnly, PinState::Inherit);
+    r.db.set_versions_for_test("old.bin", Some(A), None);
+    let first = populate_placeholders(&r.db, &r.root);
+    assert_eq!(first.created, 1, "{first:?}");
+    assert_eq!(r.db.minted_version("old.bin").unwrap().as_deref(), Some(A), "recorded at the mint");
+    // As a 0.8.21 database holds it: the placeholder exists, no identity.
+    r.db.set_versions_for_test("old.bin", Some(A), None);
+    let second = populate_placeholders(&r.db, &r.root);
+    assert_eq!(second.already_existed, 1, "{second:?}");
+    assert_eq!(r.db.minted_version("old.bin").unwrap().as_deref(), Some(A), "recorded at the refresh");
+}
+
+#[test]
 fn task_2240_refresh_and_seed_log_no_path() {
     let source = include_str!("mod.rs").replace("\r\n", "\n");
     for name in ["refresh_placeholders", "seed_placeholders"] {

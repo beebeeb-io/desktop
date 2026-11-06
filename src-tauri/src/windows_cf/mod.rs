@@ -1603,6 +1603,7 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
     // would no-op on ERROR_ALREADY_EXISTS — leaving a plain dir where a CF
     // directory placeholder was wanted. Depth-ordering avoids that race.
     entries.sort_by_key(|e| e.path.trim_matches('/').split('/').count());
+    let needs_identity = db.files_needing_identity().unwrap_or_default();
 
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
@@ -1665,7 +1666,22 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
                     }
                 }
             }
-            Ok(false) => stats.already_existed += 1,
+            Ok(false) => {
+                stats.already_existed += 1;
+                // Review P2 (task 2180): a placeholder minted before identities were recorded (0.8.21), or
+                // kept across a version change, takes the listing's version when it holds nothing: as at a
+                // mint, its first fetch serves that version whole. One that holds bytes stays without.
+                if !entry.is_dir()
+                    && needs_identity.contains(&entry.file_id)
+                    && matches!(
+                        placeholders::platform_view(&parent_dir.join(&name)),
+                        crate::unknown_check::PlatformView::Placeholder { on_disk: crate::unknown_check::OnDisk::Nothing, .. }
+                    )
+                    && let Err(e) = db.record_minted_version(&entry.file_id, entry.size_bytes)
+                {
+                    tracing::debug!(error = %e, file_id = %entry.file_id, "could not record the placeholder's version");
+                }
+            }
             Err(e) => {
                 stats.create_errors += 1;
                 // Zero-knowledge: log the file_id only — never the decrypted

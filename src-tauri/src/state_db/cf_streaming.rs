@@ -49,6 +49,30 @@ impl StateDb {
         )? == 1)
     }
 
+    /// Review P2 (task 2180): the files whose placeholder identity is not the version the listing shows
+    /// now (none recorded, or another one), among those whose listing names a version.
+    pub fn files_needing_identity(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id FROM files WHERE current_object_version_id IS NOT NULL
+               AND minted_object_version_id IS NOT current_object_version_id",
+        )?;
+        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    /// Test only: the listing's version and the recorded identity of `file_id`, as a 0.8.21 database
+    /// holds them (a version, no identity). Its callers are Windows-native tests.
+    #[cfg(all(test, windows))]
+    pub(crate) fn set_versions_for_test(&self, file_id: &str, current: Option<&str>, minted: Option<&str>) {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE files SET current_object_version_id = ?2, minted_object_version_id = ?3 WHERE file_id = ?1",
+            params![file_id, current, minted],
+        )
+        .unwrap();
+    }
+
     /// Task 2180: the version `file_id`'s placeholder was minted from; `None` when nothing was recorded.
     pub fn minted_version(&self, file_id: &str) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -96,6 +120,16 @@ impl StateDb {
         )?;
         let rows = stmt.query_map([], poison_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Review P1: a failed empty step restored the file with our own writes, which move its stamp; the
+    /// poison takes the stamp they left, so the next sweep can empty the file. `Ok(true)`: it was there.
+    pub fn restamp_poison(&self, file_id: &str, stamp: (i64, i64)) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE cf_poison SET change_ticks = ?2, file_index = ?3 WHERE file_id = ?1",
+            params![file_id, stamp.0, stamp.1],
+        )? == 1)
     }
 
     /// Spec S6 step 7: the placeholder is verifiably empty; the poison goes. `Ok(true)`: it was there.
