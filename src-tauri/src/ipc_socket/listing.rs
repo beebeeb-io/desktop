@@ -15,8 +15,16 @@ pub(crate) fn file_provider_change_payloads(
     let backups = crate::backup_protect::BackupsTree::read(db);
     changes
         .into_iter()
-        .map(|change| FileProviderChangePayload {
+        .map(|change| {
+            // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest is never listed. Its
+            // change goes out as a delete, so a Finder that listed one before this build drops it.
+            let hidden = !matches!(change.kind, crate::state_db::FpChangeKind::Deleted)
+                && db.get_file(&change.file_id).ok().flatten().is_some_and(|entry| backups.is_hidden(&entry.path));
+            (change, hidden)
+        })
+        .map(|(change, hidden)| FileProviderChangePayload {
             item: match change.kind {
+                _ if hidden => None,
                 crate::state_db::FpChangeKind::Deleted => None,
                 _ => db
                     .get_file(&change.file_id)
@@ -40,13 +48,10 @@ pub(crate) fn file_provider_change_payloads(
                             .map(|contract| contract.namespace != crate::state_db::Namespace::SharedWithMe)
                             .unwrap_or(true)
                     })
-                    // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest is never
-                    // listed, so its change carries no item either.
-                    .filter(|entry| !backups.is_hidden(&entry.path))
                     .map(|entry| file_entry_payload_for_db(db, &entry, FP_ROOT_APPLE)),
             },
             file_id: change.file_id,
-            kind: change.kind.as_str().to_string(),
+            kind: if hidden { crate::state_db::FpChangeKind::Deleted.as_str() } else { change.kind.as_str() }.to_string(),
             old_parent_id: change.old_parent_id,
             new_parent_id: change.new_parent_id,
         })

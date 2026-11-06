@@ -381,9 +381,16 @@ fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> (PathBuf, Vec
 #[cfg(target_os = "windows")]
 fn apply_read_only(root: &Path, files: &[PathBuf], flagged: bool) -> usize {
     let mut failed = 0usize;
+    // One attribute read per row (`GetFileAttributesW`, nothing opened): only a file whose attribute is
+    // not as wanted is opened and changed, so the pass at every start costs one call per file.
+    const DIRECTORY: u32 = 0x10;
+    const READONLY: u32 = 0x1;
     let changed = files
         .iter()
-        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()))
+        .filter(|path| {
+            crate::windows_cf::placeholders::read_os_placeholder_state(path)
+                .is_some_and(|attributes| attributes & DIRECTORY == 0 && (attributes & READONLY != 0) != flagged)
+        })
         .filter(|path| match crate::windows_cf::read_only::set_read_only(path, flagged) {
             Ok(changed) => changed,
             Err(error) => {

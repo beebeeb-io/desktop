@@ -88,10 +88,14 @@ fn attributes(handle: HANDLE) -> windows::core::Result<u32> {
     Ok(basic.FileAttributes)
 }
 
-/// Whether the file at `path` carries `FILE_ATTRIBUTE_READONLY`; `None` when it cannot be read.
+/// Whether the item at `path` (a file or a folder) carries `FILE_ATTRIBUTE_READONLY`; `None` when it
+/// cannot be read. Its own attribute word (the reparse point's), nothing opened for data. The
+/// 5fdc168 CI rung read a folder through [`open_for_attributes`], which cannot open one (no backup
+/// semantics), and got `None`.
+#[cfg(test)]
 pub(crate) fn is_read_only(path: &Path) -> Option<bool> {
-    let file = open_for_attributes(path).ok()?;
-    attributes(HANDLE(file.as_raw_handle())).ok().map(|word| word & FILE_ATTRIBUTE_READONLY.0 != 0)
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_READONLY.0 != 0)
 }
 
 /// Set (`on`) or clear `FILE_ATTRIBUTE_READONLY` on the file at `path`, keeping its other attributes
@@ -138,10 +142,15 @@ pub(crate) fn set_read_only(path: &Path, on: bool) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// The paths the engine has lifted the attribute of now, each with how many [`Lifted`] guards hold it:
+/// operations on one file may overlap (a pin while a fetch's resize runs), and only the last one to
+/// end sets the attribute again.
+static LIFTED: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, usize>>> = std::sync::Mutex::new(None);
+
 /// The read-only attribute of one file, cleared for one operation of the engine's own and set again
-/// when this is dropped, if it was set before and the file is still there. A file without it (or a
-/// folder) is left as it is, and so is one whose attribute cannot be read: the operation then runs and
-/// fails or succeeds as it would have.
+/// when the last guard on that file is dropped, if it was set before and the file is still there. A
+/// file without it (or a folder) is left as it is, and so is one whose attribute cannot be read: the
+/// operation then runs and fails or succeeds as it would have.
 #[must_use = "the attribute is set again when the guard is dropped"]
 pub(crate) struct Lifted {
     path: Option<PathBuf>,
@@ -149,8 +158,20 @@ pub(crate) struct Lifted {
 
 impl Lifted {
     pub(crate) fn new(path: &Path) -> Self {
+        let Ok(mut lifted) = LIFTED.lock() else {
+            return Self { path: None };
+        };
+        let held = lifted.get_or_insert_with(Default::default);
+        if let Some(count) = held.get_mut(path) {
+            // Another operation lifted it and has not ended: this one holds it too.
+            *count += 1;
+            return Self { path: Some(path.to_path_buf()) };
+        }
         match set_read_only(path, false) {
-            Ok(true) => Self { path: Some(path.to_path_buf()) },
+            Ok(true) => {
+                held.insert(path.to_path_buf(), 1);
+                Self { path: Some(path.to_path_buf()) }
+            }
             Ok(false) => Self { path: None },
             Err(error) => {
                 // Zero-knowledge: never the path.
@@ -166,10 +187,24 @@ impl Drop for Lifted {
         let Some(path) = self.path.take() else {
             return;
         };
+        let Ok(mut lifted) = LIFTED.lock() else {
+            return;
+        };
+        let held = lifted.get_or_insert_with(Default::default);
+        match held.get_mut(&path) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                return;
+            }
+            _ => {
+                held.remove(&path);
+            }
+        }
         if std::fs::symlink_metadata(&path).is_err() {
             // The operation removed it (the engine's own delete).
             return;
         }
+        // Under the lock, so a new guard on this path waits until the attribute is back.
         if let Err(error) = set_read_only(&path, true) {
             tracing::warn!(%error, "read-only: the attribute could not be set again after the engine's own change");
         }

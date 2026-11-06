@@ -137,7 +137,8 @@ pub(super) fn apply_protection(
     payload.read_only_badge =
         crate::backup_protect::BackupsTree::read(db).position(&entry.path) == beebeeb_core::backup::BackupPosition::Root;
     if let Some(version) = payload.metadata_version.as_mut() {
-        version.push_str(":protected");
+        // `-ro` since Amendment 7: an item an Amendment 6 build listed changes version, so Finder re-reads it.
+        version.push_str(":protected-ro");
     }
 }
 

@@ -72,7 +72,7 @@ fn payload_marks_whole_backups_tree_protected() {
     assert_eq!(root_payload.protected_reason.as_deref(), Some(MSG_DELETE));
     assert_eq!(root_payload.protected_rename_reason.as_deref(), Some(MSG_RENAME));
     assert_eq!(root_payload.protected_move_reason.as_deref(), Some(MSG_MOVE));
-    assert!(root_payload.metadata_version.as_deref().unwrap().ends_with(":protected"));
+    assert!(root_payload.metadata_version.as_deref().unwrap().ends_with(":protected-ro"));
     // Amendments 7 and 8a: read-only, and the root alone carries the badge.
     assert_eq!(root_payload.protected_write_reason.as_deref(), Some(MSG_READ_ONLY));
     assert!(root_payload.read_only_badge, "the root carries the Read-only badge");
@@ -93,7 +93,7 @@ fn payload_marks_whole_backups_tree_protected() {
         }
         assert_eq!(payload.protected_write_reason.as_deref(), Some(MSG_READ_ONLY), "{}", entry.path);
         assert!(!payload.read_only_badge, "only the root is badged, not {}", entry.path);
-        assert!(payload.metadata_version.as_deref().unwrap().ends_with(":protected"), "{}", entry.path);
+        assert!(payload.metadata_version.as_deref().unwrap().ends_with(":protected-ro"), "{}", entry.path);
     }
 
     // This device's own backup of a folder it backs up now says where the original is.
@@ -195,6 +195,9 @@ fn the_manifest_is_never_listed_in_finder() {
     let payloads = file_provider_change_payloads(&db, changes);
     let item_of = |id: &str| payloads.iter().find(|change| change.file_id == id).map(|change| change.item.is_some());
     assert_eq!(item_of(manifest), Some(false), "the manifest's change carries no item");
+    let kind_of = |id: &str| payloads.iter().find(|change| change.file_id == id).map(|change| change.kind.clone());
+    assert_eq!(kind_of(manifest).as_deref(), Some("deleted"), "and is a delete, so a Finder that listed it drops it");
+    assert_ne!(kind_of(category).as_deref(), Some("deleted"), "an ordinary row keeps its own kind");
     assert_eq!(item_of(category), Some(true));
     assert_eq!(item_of(deeper), Some(true));
 }
