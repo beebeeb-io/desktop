@@ -604,7 +604,13 @@ pub struct NewBackupUpload<'a> {
     /// The `/`-joined path inside the backed-up folder (NFC).
     pub key: &'a str,
     pub source_path: &'a Path,
+    /// The new server file's minted id, or for a `Changed` upload the paired record's `remote_id`: the upload then
+    /// adds a version to that file (plan Amendment 1 item 11), never a second file.
     pub file_id: &'a str,
+    /// `true` for a `Changed` upload (a new version of `file_id`).
+    pub replace: bool,
+    /// The paired record's key, re-keyed or dropped when the upload completes (spec Amendment 5 item 4).
+    pub record_key: Option<&'a str>,
     pub parent_id: &'a str,
     pub name_encrypted: &'a str,
     pub content_type: Option<&'a str>,
@@ -623,6 +629,9 @@ pub enum BackupEnqueue {
     AlreadyQueued(String),
     /// No account owner is recorded (R10): nothing is queued for nobody.
     NoOwner,
+    /// The key already has a `BackedUp` record with this size and `modified_ms` (an upload that completed after the
+    /// pass read the records): nothing is queued (`BackupHost::enqueue_upload`).
+    AlreadyBackedUp,
 }
 
 /// LD-0113: one queued backup upload, as only the backup uploader reads it. Never a [`PendingOperation`]: the
@@ -635,6 +644,10 @@ pub struct BackupUploadOp {
     /// The person's own file. Opened read-only; never written, moved, renamed, truncated or deleted.
     pub source_path: std::path::PathBuf,
     pub file_id: String,
+    /// A new version of `file_id` (a `Changed` upload), not a new file.
+    pub replace: bool,
+    /// The paired record's key (see [`NewBackupUpload::record_key`]).
+    pub record_key: Option<String>,
     pub parent_id: String,
     pub name_encrypted: String,
     pub content_type: Option<String>,

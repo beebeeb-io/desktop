@@ -37,6 +37,28 @@ fn file_id_text(id: Option<u128>) -> Option<String> {
     id.map(|id| id.to_string())
 }
 
+const RESUME_COLUMNS: &str = "r.op_id, r.server_file_id, r.upload_session_id, r.object_version_id, \
+    r.chunk_size_bytes, r.chunk_count, r.acked_chunks, r.chunk_format, r.source_size, r.source_modified_ms, \
+    r.source_file_id";
+
+fn resume_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackupUploadResume> {
+    Ok(BackupUploadResume {
+        op_id: row.get(0)?,
+        server_file_id: row.get(1)?,
+        upload_session_id: row.get(2)?,
+        object_version_id: row.get(3)?,
+        chunk_size_bytes: row.get(4)?,
+        chunk_count: row.get(5)?,
+        acked_chunks: row.get(6)?,
+        chunk_format: row.get(7)?,
+        fingerprint: beebeeb_backup::Fingerprint {
+            size: u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0),
+            modified_ms: row.get(9)?,
+            file_id: row.get::<_, Option<String>>(10)?.and_then(|id| id.parse().ok()),
+        },
+    })
+}
+
 impl StateDb {
     /// The current owner's `backup_records.account_owner`, if an owner is recorded.
     pub fn backup_owner_key(&self) -> Result<Option<String>> {
@@ -45,8 +67,10 @@ impl StateDb {
     }
 
     /// Queue one backup upload for the current owner: an `upload_file` op with `origin = 'backup'`, the source in
-    /// `source_path` and no payload. Idempotent per (owner, category, key): a key already queued is not queued twice.
-    /// `backup_source_key` is the category, so turning the folder off purges it (`purge_backup_source_ops`).
+    /// `source_path` and no payload. Idempotent per (owner, category, key) (`BackupHost::enqueue_upload`): a key
+    /// already queued is not queued twice, and a key whose `BackedUp` record already has the queued size and
+    /// `modified_ms` (an upload that completed after the pass read the records) is not queued at all.
+    /// `backup_source_key` is the category, so turning the folder off takes it (`take_backup_category_ops`).
     // LD-0113 Task D4: `DesktopBackupHost` (`BackupHost::{enqueue_upload, records}`) is its production caller.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn enqueue_backup_upload(&self, up: &NewBackupUpload<'_>) -> Result<BackupEnqueue> {
@@ -69,8 +93,18 @@ impl StateDb {
         if let Some(op_id) = queued {
             return Ok(BackupEnqueue::AlreadyQueued(op_id));
         }
+        let backed_up: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM backup_records
+                            WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND state = 'backed_up'
+                              AND size = ?4 AND modified_ms = ?5)",
+            params![owner, up.category, up.key, i64::try_from(up.queued.size).unwrap_or(i64::MAX), up.queued.modified_ms],
+            |row| row.get(0),
+        )?;
+        if backed_up {
+            return Ok(BackupEnqueue::AlreadyBackedUp);
+        }
         let metadata = serde_json::json!({
-            "operation": "create_file",
+            "operation": if up.replace { "upload_version" } else { "create_file" },
             "name_encrypted": up.name_encrypted,
             "content_type": up.content_type,
             "backup": {
@@ -80,6 +114,8 @@ impl StateDb {
                 "queued_size": up.queued.size,
                 "queued_modified_ms": up.queued.modified_ms,
                 "queued_file_id": file_id_text(up.queued.file_id),
+                "replace": up.replace,
+                "record_key": up.record_key,
             },
         });
         tx.execute(
@@ -125,6 +161,8 @@ impl StateDb {
                     key: text("/backup/key").unwrap_or_default(),
                     source_path: std::path::PathBuf::from(row.get::<_, String>(4)?),
                     file_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    replace: metadata.pointer("/backup/replace").and_then(|v| v.as_bool()).unwrap_or(false),
+                    record_key: text("/backup/record_key"),
                     parent_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     name_encrypted: text("/name_encrypted").unwrap_or_default(),
                     content_type: text("/content_type"),
@@ -138,27 +176,9 @@ impl StateDb {
     pub fn backup_upload_resume(&self, op_id: &str) -> Result<Option<BackupUploadResume>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
-            "SELECT op_id, server_file_id, upload_session_id, object_version_id, chunk_size_bytes, chunk_count,
-                    acked_chunks, chunk_format, source_size, source_modified_ms, source_file_id
-             FROM backup_upload_resume WHERE op_id = ?1",
+            &format!("SELECT {RESUME_COLUMNS} FROM backup_upload_resume r WHERE r.op_id = ?1"),
             params![op_id],
-            |row| {
-                Ok(BackupUploadResume {
-                    op_id: row.get(0)?,
-                    server_file_id: row.get(1)?,
-                    upload_session_id: row.get(2)?,
-                    object_version_id: row.get(3)?,
-                    chunk_size_bytes: row.get(4)?,
-                    chunk_count: row.get(5)?,
-                    acked_chunks: row.get(6)?,
-                    chunk_format: row.get(7)?,
-                    fingerprint: beebeeb_backup::Fingerprint {
-                        size: u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0),
-                        modified_ms: row.get(9)?,
-                        file_id: row.get::<_, Option<String>>(10)?.and_then(|id| id.parse().ok()),
-                    },
-                })
-            },
+            resume_from_row,
         )
         .optional()
     }
@@ -222,8 +242,10 @@ impl StateDb {
     }
 
     /// The upload of the claimed backup op completed: in one transaction the op and its session go and the record is
-    /// written, for `account_owner` only while that is still this database's owner (R10). `false`: nothing was
-    /// written, because the op moved since the claim or the owner is no longer `account_owner`.
+    /// written, for `account_owner` only while that is still this database's owner (R10). The record is upserted by
+    /// key and any other record of the category naming the same remote file goes, so one remote file never has two
+    /// keys (`BackupHost::put_record`'s rule, spec Amendment 5 item 4). `false`: nothing was written, because the op
+    /// moved since the claim or the owner is no longer `account_owner`.
     pub fn complete_backup_upload_claimed(
         &self,
         op_id: &str,
@@ -247,6 +269,10 @@ impl StateDb {
         }
         tx.execute("DELETE FROM backup_upload_resume WHERE op_id = ?1", params![op_id])?;
         tx.execute(
+            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3 AND key != ?4",
+            params![account_owner, category, record.remote_id.to_string(), record.key],
+        )?;
+        tx.execute(
             "INSERT INTO backup_records (account_owner, category, key, size, modified_ms, remote_id, uploaded_at_ms, state)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(account_owner, category, key) DO UPDATE SET
@@ -268,6 +294,31 @@ impl StateDb {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Turning the backup of `category` off (`BackupHost::turn_off`, spec §4.2 rule 11): its queued ops and their
+    /// sessions go, in one transaction, and the sessions are returned so the caller abandons each on the server. The
+    /// records stay: "Back up again" pairs what is still there (rule 10) instead of uploading it twice. An upload in
+    /// flight loses its op, so its claim-guarded writes and its completion write nothing.
+    pub fn take_backup_category_ops(&self, category: &str) -> Result<(usize, Vec<BackupUploadResume>)> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Read and delete in one transaction, so no session opened in between is lost unabandoned.
+        let taken = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {RESUME_COLUMNS} FROM backup_upload_resume r JOIN operation_queue q ON q.op_id = r.op_id
+                 WHERE q.origin = 'backup' AND q.backup_source_key = ?1 ORDER BY r.op_id"
+            ))?;
+            let rows = stmt.query_map(params![category], resume_from_row)?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let deleted = tx.execute(
+            "DELETE FROM operation_queue WHERE origin = 'backup' AND backup_source_key = ?1",
+            params![category],
+        )?;
+        drop_orphaned_upload_resumes(&tx)?;
+        tx.commit()?;
+        Ok((deleted, taken))
     }
 
     /// Drop the claimed backup op and its session with no record (its source changed, vanished or cannot be read

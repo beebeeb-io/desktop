@@ -167,7 +167,7 @@ use crate::state_db::BackupEnqueue;
             checked.push("sign-out");
         }
 
-        // 5. Turning the folder off mid-upload: today's purge drops the folder's ops and their sessions.
+        // 5. Turning the folder off mid-upload: its ops and sessions go, the session is abandoned on the server.
         {
             let dir = tempfile::tempdir().unwrap();
             let source = person_file(dir.path(), "turn-off.txt", b"the folder is turned off meanwhile");
@@ -177,10 +177,11 @@ use crate::state_db::BackupEnqueue;
             let op_id = enqueue(&bridge, &source);
             bridge.process_due_operations(&sync_root, 200).await.unwrap();
             assert!(bridge.db.backup_upload_resume(&op_id).unwrap().is_some(), "precondition: a session is open");
-            assert_eq!(bridge.db.purge_backup_source_ops("pictures").unwrap(), 1, "the folder's op is purged");
+            assert_eq!(bridge.turn_off_backup_uploads("pictures").await.unwrap(), 1, "the folder's op is dropped");
             assert_eq!(backup_ops(&bridge), 0);
             assert_eq!(count_rows(&bridge, "backup_upload_resume"), 0, "with its session");
-            server.finish();
+            let requests = server.finish();
+            assert_eq!(requests.iter().filter(|r| r.path.ends_with("/upload/abandon")).count(), 1, "abandoned");
             assert_eq!(source_state(&source), before, "turn-off: the source changed");
             checked.push("turn-off");
         }
@@ -515,4 +516,122 @@ use crate::state_db::BackupEnqueue;
             .map(|r| format!("{} {} {:?}", r.method, r.path, r.origin))
             .collect();
         assert!(without.is_empty(), "{} of {} backup requests lack the origin header: {without:?}", without.len(), seen.len());
+    }
+
+    /// The first init's `file_id` in `requests`.
+    fn init_file_ids(requests: &[RecordedRequest]) -> Vec<String> {
+        requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["file_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Plan Amendment 1 item 11: a `Changed` file uploads as a new version of its record's `remote_id`, never as a
+    /// second file, and the completed record keeps one key per remote file (a record of the same remote file under
+    /// another key goes).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn changed_backup_uploads_a_new_version_of_the_remote_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = person_file(dir.path(), "notes.txt", b"version one");
+        let server = UploadMockServer::start(false);
+        let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+        let first = enqueue(&bridge, &source);
+        let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec![first]);
+        let recorded = bridge.db.backup_records("pictures").unwrap();
+        assert_eq!(recorded.len(), 1);
+        let remote_id = recorded[0].remote_id;
+
+        // The person edits the file; the pass pairs it with its record (here also under a new key: the remote file
+        // keeps one key).
+        std::fs::write(&source, b"version two, longer").unwrap();
+        let mut changed = pictures_request(&source);
+        changed.key = "Notes/notes.txt".to_string();
+        changed.reason = beebeeb_core::backup::UploadReason::Changed;
+        changed.record_key = Some("notes.txt".to_string());
+        changed.remote_id = Some(remote_id);
+        let BackupEnqueue::Queued(second) = bridge.enqueue_backup_upload(&changed).unwrap() else {
+            panic!("the changed file is queued");
+        };
+        let outcome = bridge.process_due_operations(&sync_root, 300).await.unwrap();
+        assert_eq!(outcome.completed_op_ids, vec![second]);
+
+        let requests = server.finish();
+        assert_eq!(init_file_ids(&requests), vec![remote_id.to_string(), remote_id.to_string()], "one remote file, two versions");
+        let records = bridge.db.backup_records("pictures").unwrap();
+        assert_eq!(records.len(), 1, "one key per remote file: {records:?}");
+        assert_eq!((records[0].key.as_str(), records[0].remote_id), ("Notes/notes.txt", remote_id));
+        assert_eq!(records[0].size, 19, "the record is the new version's fingerprint");
+
+        // `Changed` with no remote file is a contract violation, never a guess.
+        let mut orphan = pictures_request(&source);
+        orphan.reason = beebeeb_core::backup::UploadReason::Changed;
+        assert!(bridge.enqueue_backup_upload(&orphan).is_err());
+    }
+
+    /// `BackupHost::enqueue_upload`: a key already queued is not queued twice, and a key whose `BackedUp` record has
+    /// the request's size and `modified_ms` (an upload that completed after the pass read the records) is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backup_enqueue_drops_duplicates_and_keys_already_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = person_file(dir.path(), "dup.txt", b"queued once");
+        let server = UploadMockServer::start(false);
+        let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+        let op_id = enqueue(&bridge, &source);
+        assert_eq!(
+            bridge.enqueue_backup_upload(&pictures_request(&source)).unwrap(),
+            BackupEnqueue::AlreadyQueued(op_id.clone())
+        );
+        assert_eq!(backup_ops(&bridge), 1);
+        bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        assert_eq!(
+            bridge.enqueue_backup_upload(&pictures_request(&source)).unwrap(),
+            BackupEnqueue::AlreadyBackedUp,
+            "the plan read the records before this upload completed"
+        );
+        assert_eq!(backup_ops(&bridge), 0);
+        std::fs::write(&source, b"changed since, and longer").unwrap();
+        assert!(matches!(bridge.enqueue_backup_upload(&pictures_request(&source)).unwrap(), BackupEnqueue::Queued(_)));
+        server.finish();
+    }
+
+    /// `BackupHost::turn_off` (spec §4.2 rule 11): every queued upload of the category is dropped and each open
+    /// session abandoned on the server; another category's op and the backup's records stay, and no source changes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn turn_off_drops_pending_ops_abandons_sessions_keeps_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_flight = person_file(dir.path(), "in-flight.txt", b"chunk 0 fails, the session stays");
+        let waiting = person_file(dir.path(), "waiting.txt", b"queued, never started");
+        let before = (source_state(&in_flight), source_state(&waiting));
+        let server = UploadMockServer::start(true);
+        let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+        let owner = bridge.db.backup_owner_key().unwrap().unwrap();
+        bridge
+            .db
+            .hold_lock_for_test()
+            .execute(
+                "INSERT INTO backup_records (account_owner, category, key, size, modified_ms, remote_id, uploaded_at_ms)
+                 VALUES (?1, 'pictures', 'earlier.jpg', 3, 1, '0193b1a6-0000-7000-8000-000000000001', 1)",
+                [&owner],
+            )
+            .unwrap();
+        let in_flight_op = enqueue(&bridge, &in_flight);
+        bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        let session = bridge.db.backup_upload_resume(&in_flight_op).unwrap().expect("precondition: a session");
+        enqueue(&bridge, &waiting);
+        let mut documents = pictures_request(&waiting);
+        documents.category = beebeeb_types::backup::Category::Documents;
+        assert!(matches!(bridge.enqueue_backup_upload(&documents).unwrap(), BackupEnqueue::Queued(_)));
+        assert_eq!(backup_ops(&bridge), 3);
+
+        assert_eq!(bridge.turn_off_backup_uploads("pictures").await.unwrap(), 2);
+        let requests = server.finish();
+        let abandons: Vec<&str> =
+            requests.iter().filter(|r| r.path.ends_with("/upload/abandon")).map(|r| r.path.as_str()).collect();
+        assert_eq!(abandons, vec![format!("/api/v1/files/{}/upload/abandon", session.server_file_id).as_str()]);
+        assert_eq!(backup_ops(&bridge), 1, "the documents op stays");
+        assert_eq!(count_rows(&bridge, "backup_upload_resume"), 0);
+        assert_eq!(bridge.db.backup_records("pictures").unwrap().len(), 1, "the backup's records stay");
+        assert_eq!((source_state(&in_flight), source_state(&waiting)), before);
     }

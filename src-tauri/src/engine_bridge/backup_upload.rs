@@ -30,6 +30,9 @@ pub(crate) enum BackupDrop {
     /// A persisted session that core's `resume_policy` does not let this writer continue, or that the server
     /// no longer has.
     SessionNotResumable,
+    /// A `Changed` upload whose remote file the server refused a new version of (409: trashed, or an upload of it in
+    /// flight). The next pass reads the tree again and decides (a trashed copy is never given a version, ruling A).
+    RemoteRefused,
 }
 
 impl BackupDrop {
@@ -41,6 +44,7 @@ impl BackupDrop {
             BackupDrop::SourceNotLocal => "source_not_local",
             BackupDrop::OtherAccount => "other_account",
             BackupDrop::SessionNotResumable => "session_not_resumable",
+            BackupDrop::RemoteRefused => "remote_refused",
         }
     }
 }
@@ -97,17 +101,27 @@ impl EngineBridge {
         self.backup_api.get_or_init(|| Arc::new(self.api.for_backup_pass()))
     }
 
-    /// `BackupHost::enqueue_upload` (spec §4.3): queue one file of a backed-up folder for this account. The id of
-    /// the new server file is minted here and the name sealed for it; the source path goes into the queue's
-    /// `source_path` and nowhere else. Idempotent per (category, key).
+    /// `BackupHost::enqueue_upload` (spec §4.3): queue one file of a backed-up folder for this account. A `New` file
+    /// gets a server id minted here; a `Changed` one is a new version of its record's `remote_id` (plan Amendment 1
+    /// item 11), never a second file. The name is sealed for that id; the source path goes into the queue's
+    /// `source_path` and nowhere else. Idempotent per (category, key), and a key whose record already has this
+    /// fingerprint is not queued (`BackupEnqueue::AlreadyBackedUp`).
     // LD-0113 Task D4: `DesktopBackupHost` (`BackupHost::{enqueue_upload, records}`) is its production caller.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn enqueue_backup_upload(&self, req: &beebeeb_backup::UploadRequest) -> Result<BackupEnqueue, EngineError> {
         if self.is_stopping() {
             return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a backup upload").into());
         }
-        let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
-        let file_id = beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string();
+        let (file_id, replace) = match (req.reason, req.remote_id) {
+            (beebeeb_core::backup::UploadReason::Changed, Some(remote_id)) => (remote_id.to_string(), true),
+            (beebeeb_core::backup::UploadReason::Changed, None) => {
+                return Err(anyhow::anyhow!("a changed backup upload names no remote file").into());
+            }
+            (beebeeb_core::backup::UploadReason::New, _) => {
+                let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
+                (beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string(), false)
+            }
+        };
         let mime = beebeeb_core::media::guess_mime_type(&req.name);
         let name_encrypted = owned_metadata_for_name(&self.db, self.api.master_key(), &file_id, &req.name, mime)?;
         let op_id = uuid::Uuid::new_v4().to_string();
@@ -120,6 +134,8 @@ impl EngineBridge {
             key: &req.key,
             source_path,
             file_id: &file_id,
+            replace,
+            record_key: req.record_key.as_deref(),
             parent_id: &parent_id,
             name_encrypted: &name_encrypted,
             content_type: mime,
@@ -196,7 +212,14 @@ impl EngineBridge {
                     before.size,
                     None,
                 );
-                let upload = self.backup_api().init_upload(&init_request).await?;
+                let upload = match self.backup_api().init_upload(&init_request).await {
+                    Ok(upload) => upload,
+                    // A new version of a remote file the server will not add one to now: the next pass decides.
+                    Err(error) if op.replace && error_http_status(&error) == Some(409) => {
+                        return self.drop_backup(claimed, None, BackupDrop::RemoteRefused).await;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
                     return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
                 }
@@ -397,6 +420,21 @@ impl EngineBridge {
             "backup: op dropped with no record; the next pass plans the file again"
         );
         Ok(OpDone::Dropped)
+    }
+
+    /// `BackupHost::turn_off`'s queue half (spec §4.2 rule 11): drop every queued upload of `category` and abandon
+    /// each open session on the server. A failed abandon is logged; the server's stale-upload sweep reaps it. The
+    /// records stay (see `StateDb::take_backup_category_ops`). Answers how many ops were dropped.
+    // LD-0113 Task D4: `DesktopBackupHost::turn_off` and the settings' "turn off" are its production callers.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn turn_off_backup_uploads(&self, category: &str) -> Result<usize, EngineError> {
+        let (dropped, sessions) = self.db.take_backup_category_ops(category)?;
+        let abandoned = sessions.len();
+        for session in &sessions {
+            self.abandon_backup_session(session).await?;
+        }
+        tracing::info!(dropped, abandoned, "backup: turned off; queued uploads dropped and sessions abandoned");
+        Ok(dropped)
     }
 
     /// `POST /api/v1/files/{id}/upload/abandon` for the session's never-completed create, then its row goes. A failed
