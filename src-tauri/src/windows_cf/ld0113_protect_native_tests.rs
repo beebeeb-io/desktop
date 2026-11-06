@@ -1,8 +1,9 @@
-//! LD-0113 D1 (spec §6.3), the Windows-native rungs: the pre-operation delete and rename callbacks on a
-//! real Cloud Files root. Every test registers its OWN temporary sync root under the QA provider (never
-//! the app's provider, never the person's Beebeeb folder) with a scratch state DB, and unregisters it
-//! when it ends. Deletes and renames come from a CHILD process (`cmd.exe`), as Explorer's would: this
-//! process's own are never refused. Nothing here talks to a server. `--nocapture` shows the numbers.
+//! LD-0113 D1 (spec §6.3, Amendment 6), the Windows-native rungs: the pre-operation delete and rename
+//! callbacks on a real Cloud Files root. Every test registers its OWN temporary sync root under the QA
+//! provider (never the app's provider, never the person's Beebeeb folder) with a scratch state DB, and
+//! unregisters it when it ends. Deletes and renames come from a CHILD process (`cmd.exe`), as Explorer's
+//! would: this process's own are never refused. Nothing here talks to a server: where an API is
+//! needed it is a localhost listener that counts connections. `--nocapture` shows the numbers.
 
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use beebeeb_core::backup::{MSG_DELETE, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_RENAME, own_backup_refusal};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::core::PCWSTR;
 
@@ -226,22 +227,82 @@ fn recycle_bin_for(path: &Path) -> PathBuf {
     bin
 }
 
-#[test]
-fn explorer_delete_of_backups_refused() {
+/// The fixture's state DB behind a bridge whose API is a localhost listener that counts connections.
+fn counting_bridge(qa: &QaRoot) -> (crate::engine_bridge::EngineBridge, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let api = crate::api_client::ApiClient::new(format!("http://{}", listener.local_addr().unwrap()), "token".into(), [7u8; 32]);
+    let db = Arc::new(StateDb::open(qa._dir.path().join("state.db")).unwrap());
+    (crate::engine_bridge::EngineBridge::new(db, Arc::new(api)), listener)
+}
+
+/// What reaches the server after a change: each of `rels` gone from disk is handed to the watcher, as
+/// its delete completion would be, then a transfer pass runs. The connections the API saw.
+async fn server_calls_after_deletes(qa: &QaRoot, rels: &[&str]) -> usize {
+    let (bridge, listener) = counting_bridge(qa);
+    for rel in rels {
+        if !qa.path(rel).exists() {
+            crate::watcher::handle_delete(&bridge, &qa.root, &qa.path(rel)).await;
+        }
+    }
+    bridge.process_due_operations(&qa.root, i64::MAX / 2).await.unwrap();
+    std::iter::from_fn(|| match listener.accept() {
+        Ok(_) => Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(error) => panic!("{error}"),
+    })
+    .count()
+}
+
+/// A permanent delete of the whole folder (Shift+Delete, `rmdir /S`) goes bottom-up: Guus's ruling
+/// (2026-11-06 17:49, "Protect the whole tree") refuses each item under the root, so nothing goes, and
+/// nothing reaches the server. The 7a0def6 rung, which protected the root only, left 0 children.
+#[tokio::test]
+async fn explorer_delete_of_backups_refused() {
     let mut qa = QaRoot::new(OwnBackups::default());
+    let fixture = ["Backups/OtherPC", "Backups/OtherPC/a.txt", "Backups/GLegion"];
+    qa.item("0b5ec0de-0000-4000-8000-0000000000c2", fixture[0], true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e4", fixture[1], false);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e5", fixture[2], true);
     qa.connect();
-    // A permanent delete of the whole folder (Shift+Delete, `rmdir /S`): its children are ordinary
-    // (spec §4.2 rule 7), the root itself is refused.
-    qa.item("0b5ec0de-0000-4000-8000-0000000000c2", "Backups/OtherPC", true);
     let out = cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Backups"))));
-    assert!(qa.path("Backups").is_dir(), "the Backups root is still there");
-    assert!(qa.fx.refusals().contains(&MSG_DELETE.to_string()), "refused with core's words, got {:?}", qa.fx.refusals());
+    let children_left = std::fs::read_dir(qa.path("Backups")).unwrap().count();
+    let refusals = qa.fx.refusals();
+    let calls = server_calls_after_deletes(&qa, &fixture).await;
     println!(
-        "ld0113 explorer_delete: refusals={} children_left={} cmd_stderr={:?}",
-        qa.fx.refusals().len(),
-        std::fs::read_dir(qa.path("Backups")).unwrap().count(),
+        "ld0113 explorer_delete: refusals={} managed={} root={} notices={} children_left={children_left} server_calls={calls} cmd_stderr={:?}",
+        refusals.len(),
+        refusals.iter().filter(|w| *w == MSG_MANAGED_IN_APP).count(),
+        refusals.iter().filter(|w| *w == MSG_DELETE).count(),
+        qa.fx.shown().len(),
         String::from_utf8_lossy(&out.stderr).trim()
     );
+    assert_eq!(children_left, 2, "both device folders are still in Backups");
+    assert!(fixture.iter().all(|rel| qa.path(rel).exists()), "every item is still there");
+    assert!(
+        !refusals.is_empty() && refusals.iter().all(|w| w == MSG_MANAGED_IN_APP || w == MSG_DELETE),
+        "refused with core's words, got {refusals:?}"
+    );
+    assert_eq!(calls, 0, "zero server calls");
+}
+
+/// Shift+Delete of a device folder: everything in it is refused with the managed-in-the-app words, the
+/// person is told once, and nothing reaches the server.
+#[tokio::test]
+async fn shift_delete_of_a_device_folder_refused() {
+    let mut qa = QaRoot::new(pictures_on());
+    let fixture = ["Backups/OtherPC", "Backups/OtherPC/Pictures", "Backups/OtherPC/Pictures/a.jpg"];
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e1", fixture[0], true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e2", fixture[1], true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e3", fixture[2], false);
+    qa.connect();
+    cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Backups/OtherPC"))));
+    let left = fixture.iter().filter(|rel| qa.path(rel).exists()).count();
+    let calls = server_calls_after_deletes(&qa, &fixture).await;
+    println!("ld0113 shift_delete: items_left={left} server_calls={calls}");
+    assert_eq!(left, fixture.len(), "the device folder and everything in it stay");
+    qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
+    assert_eq!(calls, 0, "zero server calls");
 }
 
 #[test]
@@ -283,8 +344,9 @@ fn own_enabled_subtree_delete_refused() {
     qa.fx.assert_refused_once(&own_backup_refusal(r"C:\Users\qa\Pictures\a.jpg"));
 }
 
+/// A turned-off folder's backup is managed in the app too (Amendment 6; it was deletable before).
 #[test]
-fn own_disabled_subtree_delete_allowed() {
+fn own_disabled_subtree_delete_refused() {
     let mut qa = QaRoot::new(OwnBackups {
         device_folder: Some("GLegion".into()),
         folders: Vec::new(),
@@ -294,9 +356,36 @@ fn own_disabled_subtree_delete_allowed() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000c9", "Backups/GLegion/Pictures/a.jpg", false);
     qa.connect();
     cmd(&format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
-    assert!(!qa.path("Backups/GLegion/Pictures/a.jpg").exists(), "a turned-off backup is an ordinary archive");
-    assert!(qa.fx.refusals().is_empty());
-    assert_eq!(qa.fx.answers.lock().unwrap().len(), 1, "the callback answered the delete");
+    assert!(qa.path("Backups/GLegion/Pictures/a.jpg").exists(), "a turned-off backup stays in the drive");
+    qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
+}
+
+/// A move from elsewhere in the drive into Backups is refused (Amendment 6); the item stays put.
+#[test]
+fn move_into_backups_refused() {
+    let mut qa = QaRoot::new(pictures_on());
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e6", "Backups/OtherPC", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e7", "Documents", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e8", "Documents/report.txt", false);
+    qa.connect();
+    cmd(&format!("move {} {}", quoted(&qa.path("Documents/report.txt")), quoted(&qa.path("Backups/OtherPC/report.txt"))));
+    assert!(qa.path("Documents/report.txt").exists(), "the item stays where it was");
+    assert!(!qa.path("Backups/OtherPC/report.txt").exists(), "nothing is moved into Backups");
+    qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
+}
+
+/// A move out of Backups is refused; the backup stays put.
+#[test]
+fn move_out_of_backups_refused() {
+    let mut qa = QaRoot::new(pictures_on());
+    qa.item("0b5ec0de-0000-4000-8000-0000000000e9", "Backups/OtherPC", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000ea", "Backups/OtherPC/a.txt", false);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000eb", "Documents", true);
+    qa.connect();
+    cmd(&format!("move {} {}", quoted(&qa.path("Backups/OtherPC/a.txt")), quoted(&qa.path("Documents/a.txt"))));
+    assert!(qa.path("Backups/OtherPC/a.txt").exists(), "the backup stays in Backups");
+    assert!(!qa.path("Documents/a.txt").exists(), "nothing is moved out");
+    qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
 }
 
 #[test]
@@ -315,33 +404,26 @@ async fn delete_while_app_closed_restored_on_start_zero_server_calls() {
     let qa = QaRoot::new(pictures_on());
     qa.item("0b5ec0de-0000-4000-8000-0000000000cc", "Backups/OtherPC", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000cd", "Backups/OtherPC/a.txt", false);
+    // a.txt was downloaded: its row is `local`, which the placeholder pass alone never mints again.
+    qa.fx.db.set_status("0b5ec0de-0000-4000-8000-0000000000cd", FileStatus::Local).unwrap();
     // The app is not running: no connection, so Windows asks nobody and the delete goes through.
     std::fs::remove_dir_all(qa.path("Backups")).unwrap();
     assert!(!qa.path("Backups").exists());
 
-    // The next start: the placeholder pass mints what the DB says is there.
-    let restored = crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root);
-    assert_eq!(restored, 3, "the root, its folder and its file are back");
-    assert!(qa.path("Backups/OtherPC/a.txt").exists());
-
-    // A late delete completion for the root, then a transfer pass, against an API that counts
-    // connections: nothing is queued and nothing is sent.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let api = crate::api_client::ApiClient::new(format!("http://{}", listener.local_addr().unwrap()), "token".into(), [7u8; 32]);
-    let db = Arc::new(StateDb::open(qa._dir.path().join("state.db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(api));
-    crate::watcher::handle_delete(&bridge, &qa.root, &qa.path("Backups")).await;
-    assert!(db.list_operations_for_file(ROOT_ID).unwrap().is_empty(), "no trash is queued");
-    let outcome = bridge.process_due_operations(&qa.root, i64::MAX / 2).await.unwrap();
-    assert!(outcome.completed_op_ids.is_empty() && outcome.retried_op_ids.is_empty());
-    let calls = match listener.accept() {
-        Ok(_) => 1,
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 0,
-        Err(error) => panic!("{error}"),
-    };
-    assert_eq!(calls, 0, "zero server calls");
+    // The next start: the delete reaches the watcher, which queues nothing and makes every row under the
+    // root whose bytes went cloud-only again; the placeholder pass then mints what the DB says is there.
+    // A transfer pass runs against an API that counts connections.
+    let calls = server_calls_after_deletes(&qa, &["Backups"]).await;
+    crate::windows_cf::restore_placeholders(&qa.fx.db, &qa.root);
+    let fixture = ["Backups", "Backups/OtherPC", "Backups/OtherPC/a.txt"];
+    let restored = fixture.iter().filter(|rel| qa.path(rel).exists()).count();
     println!("ld0113 delete_while_closed: restored={restored} server_calls={calls}");
+    assert_eq!(restored, 3, "the root, its folder and its downloaded file are back");
+    assert_eq!(qa.fx.db.get_file("0b5ec0de-0000-4000-8000-0000000000cd").unwrap().unwrap().status, FileStatus::CloudOnly);
+    for id in [ROOT_ID, "0b5ec0de-0000-4000-8000-0000000000cc", "0b5ec0de-0000-4000-8000-0000000000cd"] {
+        assert!(qa.fx.db.list_operations_for_file(id).unwrap().is_empty(), "no trash is queued for {id}");
+    }
+    assert_eq!(calls, 0, "zero server calls");
 }
 
 /// Risk §15: every delete in the sync root now waits for this answer. 1,000 deletes from another

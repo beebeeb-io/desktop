@@ -803,7 +803,9 @@ pub(super) fn delete_refusal(
     crate::backup_protect::protected_reason(db, own, &rel, beebeeb_core::backup::Mutation::Trash)
 }
 
-/// The words a rename or move of `info`'s item is refused with; `None` allows it.
+/// The words a rename or move of `info`'s item is refused with; `None` allows it. An item in the Backups
+/// tree is refused whatever its target (the Recycle Bin, out of the tree, a new name); an item from
+/// elsewhere in the drive is refused a target in the tree (Amendment 6).
 pub(super) fn rename_refusal(
     db: &crate::state_db::StateDb,
     own: &crate::backup_protect::OwnBackups,
@@ -817,11 +819,14 @@ pub(super) fn rename_refusal(
     let rel = callback_rel_path(db, sync_root, info)?;
     // SAFETY: the rename arm is the union's live arm in a NOTIFY_RENAME callback.
     let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
-    let mutation = match (notify_full_path(info), target) {
-        (Some(source), Some(target)) => crate::backup_protect::rename_mutation(&source, &target),
+    let mutation = match (notify_full_path(info), target.as_deref()) {
+        (Some(source), Some(target)) => crate::backup_protect::rename_mutation(&source, target),
         _ => beebeeb_core::backup::Mutation::Move,
     };
-    crate::backup_protect::protected_reason(db, own, &rel, mutation)
+    crate::backup_protect::protected_reason(db, own, &rel, mutation).or_else(|| {
+        let target_rel = crate::engine_bridge::relative_db_path(sync_root?, target.as_deref()?)?;
+        crate::backup_protect::protected_destination(db, &target_rel)
+    })
 }
 
 /// Whether this process asked (the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`).

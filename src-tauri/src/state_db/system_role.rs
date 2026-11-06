@@ -2,7 +2,8 @@
 //!
 //! The Backups root is the row whose role is `backups_root`. It is never found by its path or its
 //! name: a folder called "Backups" without the role is an ordinary folder. The protection rule that
-//! reads it is `crate::backup_protect`.
+//! reads it is `crate::backup_protect`; the after-the-fact restore of its tree reads
+//! [`StateDb::local_rows_at_or_under`].
 
 use super::*;
 use beebeeb_types::backup::SystemRole;
@@ -47,6 +48,23 @@ impl StateDb {
             "SELECT file_id, path FROM files WHERE system_role = 'backups_root' ORDER BY file_id",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// The rows at or under `path` (the `/`-joined path, `Backups/OtherPC`) whose bytes are on this
+    /// device (`local`), as `(file_id, path)`, the item itself first. A protected item a local change
+    /// took away is put back from these (`crate::watcher`). Matched by path prefix, as
+    /// `cloud_only_file_descendants` is (live rows leave `parent_id` empty), with a prefix
+    /// equality that no metacharacter in a name can widen.
+    pub fn local_rows_at_or_under(&self, path: &str) -> Result<Vec<(String, String)>> {
+        let path = path.trim_matches('/');
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT file_id, path FROM files
+             WHERE status = 'local' AND (trim(path, '/') = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/')
+             ORDER BY length(path), path",
+        )?;
+        let rows = stmt.query_map(params![path], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect()
     }
 }

@@ -549,10 +549,14 @@ pub(crate) async fn handle_rename_with(
     let Some(source_rel) = crate::engine_bridge::relative_db_path(sync_root, source) else {
         return;
     };
-    // LD-0113 §6.3 (refused after the fact): a rename or move of a protected item that got through is
-    // not sent; the item goes back to where it was.
+    // LD-0113 §6.3, Amendment 6 (refused after the fact): a rename or move of an item in the Backups
+    // tree, or a move of an item into it, that got through is not sent; the item goes back.
     if check == ProtectionCheck::Check
-        && let Some(words) = protected(bridge, &source_rel, crate::backup_protect::rename_mutation(source, target))
+        && let Some(words) =
+            protected(bridge, &source_rel, crate::backup_protect::rename_mutation(source, target)).or_else(|| {
+                crate::engine_bridge::relative_db_path(sync_root, target)
+                    .and_then(|target_rel| crate::backup_protect::protected_destination(bridge.db(), &target_rel))
+            })
     {
         if !source.exists() && target.exists() {
             if let Err(error) = std::fs::rename(target, source) {
@@ -645,16 +649,21 @@ fn protected(bridge: &EngineBridge, rel: &str, mutation: beebeeb_core::backup::M
     crate::backup_protect::protected_reason(bridge.db(), &crate::backup_protect::own_backups(), rel, mutation)
 }
 
-/// LD-0113 §6.3: a protected item a local change took away comes back from the state DB. Its row stays
-/// (a file whose bytes went with it is cloud-only again), its placeholder is minted again where it is
-/// missing, and nothing is queued for the server. The person sees the words.
+/// LD-0113 §6.3, Amendment 6: a protected item a local change took away comes back from the state DB,
+/// with everything under it. Its rows stay; each one whose bytes went with it (a downloaded file, a
+/// folder) is cloud-only again, so its placeholder is minted again where it is missing, and nothing is
+/// queued for the server. The person sees the words.
 fn restore_protected(bridge: &EngineBridge, sync_root: &std::path::Path, rel: &str, words: &str) {
-    if let Ok(Some(row)) = bridge.db().get_file_by_path(rel)
-        && row.status == crate::state_db::FileStatus::Local
-        && crate::engine_bridge::local_file_path_under_sync_root(sync_root, rel).is_ok_and(|path| !path.exists())
-        && let Err(e) = bridge.db().set_status(&row.file_id, crate::state_db::FileStatus::CloudOnly)
-    {
-        tracing::warn!(error = %e, file_id = %row.file_id, "protected item: could not mark it cloud-only");
+    let rows = bridge.db().local_rows_at_or_under(rel).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "protected item: its rows could not be read; the placeholder pass mints what it can");
+        Vec::new()
+    });
+    for (file_id, path) in rows {
+        if crate::engine_bridge::local_file_path_under_sync_root(sync_root, &path).is_ok_and(|on_disk| !on_disk.exists())
+            && let Err(e) = bridge.db().set_status(&file_id, crate::state_db::FileStatus::CloudOnly)
+        {
+            tracing::warn!(error = %e, file_id = %file_id, "protected item: could not mark it cloud-only");
+        }
     }
     #[cfg(target_os = "windows")]
     {

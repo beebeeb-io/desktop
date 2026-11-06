@@ -233,3 +233,107 @@ async fn the_engines_own_rename_inside_an_own_backup_is_never_put_back() {
     assert!(engine_kept, "the engine's own rename stays where the engine put it");
     assert!(person_put_back, "someone else's rename of a backed-up file goes back");
 }
+
+fn live_row(bridge: &EngineBridge, file_id: &str, path: &str, kind: ItemKind) {
+    bridge
+        .db
+        .upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::Local,
+            size_bytes: if kind == ItemKind::Folder { 0 } else { 4 },
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: kind,
+        })
+        .unwrap();
+}
+
+/// A bridge whose API is a localhost listener that counts connections (never a real server).
+fn counting_bridge(dir: &std::path::Path) -> (EngineBridge, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    (test_bridge_with_api(&dir.join("state.db"), base, [7u8; 32]), listener)
+}
+
+/// A transfer pass, then how many connections the listener saw.
+async fn server_calls(bridge: &EngineBridge, sync_root: &std::path::Path, listener: &std::net::TcpListener) -> usize {
+    let outcome = bridge.process_due_operations(sync_root, i64::MAX / 2).await.unwrap();
+    assert!(outcome.completed_op_ids.is_empty() && outcome.retried_op_ids.is_empty(), "nothing was due");
+    std::iter::from_fn(|| match listener.accept() {
+        Ok(_) => Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(error) => panic!("{error}"),
+    })
+    .count()
+}
+
+/// Amendment 6 ("Protect the whole tree"): a delete under the root that got through (the app was not
+/// running) sends nothing, and every row of the deleted subtree whose bytes went with it, folders
+/// included, is cloud-only again, so its placeholder is minted again. A row outside it is untouched.
+#[tokio::test]
+async fn a_delete_under_the_root_that_got_through_puts_the_subtree_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("root");
+    std::fs::create_dir_all(sync_root.join("Docs")).unwrap();
+    std::fs::write(sync_root.join("Docs").join("kept.txt"), b"kept").unwrap();
+    let (bridge, listener) = counting_bridge(dir.path());
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    let subtree = [
+        ("0b5ec0de-0000-4000-8000-0000000000a5", "Backups/OtherPC", ItemKind::Folder),
+        ("0b5ec0de-0000-4000-8000-0000000000a6", "Backups/OtherPC/Pictures", ItemKind::Folder),
+        ("0b5ec0de-0000-4000-8000-0000000000a7", "Backups/OtherPC/Pictures/a.jpg", ItemKind::File),
+    ];
+    for (id, path, kind) in subtree.clone() {
+        live_row(&bridge, id, path, kind);
+    }
+    let elsewhere = ("0b5ec0de-0000-4000-8000-0000000000a8", "Backups/GLegion/b.jpg");
+    live_row(&bridge, elsewhere.0, elsewhere.1, ItemKind::File);
+    let outside = ("0b5ec0de-0000-4000-8000-0000000000a9", "Docs/kept.txt");
+    live_row(&bridge, outside.0, outside.1, ItemKind::File);
+
+    crate::watcher::handle_delete(&bridge, &sync_root, &sync_root.join("Backups").join("OtherPC")).await;
+
+    let status = |id: &str| bridge.db.get_file(id).unwrap().unwrap().status;
+    let restored = subtree.iter().filter(|(id, _, _)| status(id) == FileStatus::CloudOnly).count();
+    assert_eq!(restored, subtree.len(), "every row of the deleted subtree is cloud-only again");
+    for id in [ROOT_ID, subtree[0].0, subtree[1].0, subtree[2].0, elsewhere.0, outside.0] {
+        assert!(bridge.db.list_operations_for_file(id).unwrap().is_empty(), "nothing is queued for {id}");
+    }
+    assert_eq!(status(elsewhere.0), FileStatus::Local, "a row beside the deleted subtree is untouched");
+    assert_eq!(status(outside.0), FileStatus::Local, "a row outside the tree is untouched");
+    let calls = server_calls(&bridge, &sync_root, &listener).await;
+    assert_eq!(calls, 0, "zero server calls");
+    println!("ld0113 subtree_restore: restored={restored} server_calls={calls}");
+}
+
+/// Amendment 6: a move from elsewhere in the drive INTO the tree that got through is not sent; the item
+/// goes back. A rename outside the tree is sent as before.
+#[tokio::test]
+async fn a_move_into_the_tree_that_got_through_goes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("root");
+    std::fs::create_dir_all(sync_root.join("Docs")).unwrap();
+    std::fs::create_dir_all(sync_root.join("Backups").join("OtherPC")).unwrap();
+    let (bridge, listener) = counting_bridge(dir.path());
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    let report = "0b5ec0de-0000-4000-8000-0000000000aa";
+    live_row(&bridge, report, "Docs/report.pdf", ItemKind::File);
+    let (source, target) = (sync_root.join("Docs").join("report.pdf"), sync_root.join("Backups").join("OtherPC").join("report.pdf"));
+    std::fs::write(&target, b"pdf!").unwrap();
+
+    crate::watcher::handle_rename(&bridge, &sync_root, &source, &target).await;
+    assert!(source.exists() && !target.exists(), "the item is back where it was");
+    assert!(bridge.db.list_operations_for_file(report).unwrap().is_empty(), "no move is queued");
+    assert_eq!(bridge.db.get_file(report).unwrap().unwrap().path, "Docs/report.pdf");
+    let calls = server_calls(&bridge, &sync_root, &listener).await;
+    assert_eq!(calls, 0, "zero server calls");
+
+    let renamed = sync_root.join("Docs").join("report-2.pdf");
+    std::fs::rename(&source, &renamed).unwrap();
+    crate::watcher::handle_rename(&bridge, &sync_root, &source, &renamed).await;
+    assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1, "an ordinary rename is still queued");
+}
