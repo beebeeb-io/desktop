@@ -69,6 +69,7 @@ mod keychain;
 // Windows-only (gated inside the module). The runner calls
 // `mirror_enabled_known_folders` on Windows; non-Windows builds only use the
 // catalog for the IPC source-path listing.
+mod backup;
 mod known_folder;
 #[cfg(target_os = "linux")]
 mod linux_fuse;
