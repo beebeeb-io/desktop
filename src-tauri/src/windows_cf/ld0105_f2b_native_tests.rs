@@ -181,15 +181,26 @@ fn ld0105_f2b_native_robocopy_matrix() {
 }
 
 static FIX_SERVED: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
+static FIX_READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// A session's preparation before its first transfer (the QA logs: about 1.7 s).
+const FIX_PREP: Duration = Duration::from_millis(1700);
 
-/// A provider that answers each FETCH as a range session does: the 16 MiB chunk that covers it, sent
-/// through the session's own [`crate::windows_cf::streaming::transfer_piece`] (nothing twice).
+/// A provider that answers each FETCH as a range session does (review of #225): from a worker thread
+/// after the callback returned, nothing before [`FIX_PREP`] after the first FETCH, then the 16 MiB chunk
+/// that covers it, sent through the session's own [`crate::windows_cf::streaming::transfer_piece`]
+/// (nothing twice).
 unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
     if info.is_null() || params.is_null() {
         return;
     }
     // SAFETY: valid for the duration of the callback.
     let r = unsafe { request_of(info, params) };
+    let ready = *FIX_READY_AT.lock().unwrap().get_or_insert_with(|| Instant::now() + FIX_PREP);
+    std::thread::spawn(move || serve_session_piece(r, ready));
+}
+
+fn serve_session_piece(r: Request, ready: Instant) {
+    std::thread::sleep(ready.saturating_duration_since(Instant::now()));
     let data = F2B_DATA.get().expect("initialised before robocopy starts");
     let mut served = FIX_SERVED.lock().unwrap();
     if served.iter().any(|&(s, e)| s <= r.offset && r.offset + r.length <= e) {
@@ -199,14 +210,15 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
     let start = r.offset / CHUNK * CHUNK;
     let end = ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(data.len() as i64);
     let keys = crate::cf_range::RequestKeys { transfer_key: r.transfer, request_key: r.request };
-    // SAFETY: the keys of this live request.
+    // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal returns an error).
     if unsafe { crate::windows_cf::streaming::transfer_piece(r.connection, keys, start as u64, &data[start as usize..end as usize]) }.is_ok() {
         served.push((start, end));
     }
 }
 
 /// The fix's rung (desktop #225 F2b, lead 2026-11-06: "robocopy buffered x3 -> exit 0"): a provider that
-/// serves 16 MiB session pieces through the session's own `transfer_piece`; three buffered robocopies
+/// serves 16 MiB session pieces as a session does (a worker, after its preparation) through the
+/// session's own `transfer_piece`; three buffered robocopies
 /// of fresh placeholders of the QA clip's size each copy it, byte for byte. Red on the mutant
 /// `CF_TRANSFER_MAX = 16 MiB` (one CfExecute per piece, as at fa0c6fc): ERROR 379, exit 8.
 #[test]
@@ -217,14 +229,17 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
         qa.connect(session_piece_fetch);
         FIX_SERVED.lock().unwrap().clear();
+        *FIX_READY_AT.lock().unwrap() = None;
         let name = format!("robo-{i}.mp4");
         assert!(placeholders::create_placeholder(&qa.root, &format!("qa-robo-{i}"), &name, F2B_SIZE as i64, 1_700_000_000, false).unwrap());
         let dst = tempfile::tempdir().unwrap();
         let (exit, errors) = f2b_robocopy(&qa, &name, dst.path(), &[]);
         let whole = std::fs::read(dst.path().join(&name)).ok().as_deref() == Some(data.as_slice());
+        // A worker may still be returning: let it finish before the root goes.
+        std::thread::sleep(Duration::from_millis(300));
         runs.push((exit, errors, whole));
     }
-    println!("ld0105-f2b-native: buffered robocopy x3 of session pieces (CF_TRANSFER_MAX {}): {runs:?}", crate::windows_cf::streaming::CF_TRANSFER_MAX);
+    println!("ld0105-f2b-native: buffered robocopy x3 of session pieces (a worker, after {FIX_PREP:?}) (CF_TRANSFER_MAX {}): {runs:?}", crate::windows_cf::streaming::CF_TRANSFER_MAX);
     for (exit, errors, whole) in &runs {
         assert_eq!(*exit, Some(1), "robocopy copied the file (exit 1), errors: [{errors}]");
         assert!(*whole, "the copy is byte for byte the file");

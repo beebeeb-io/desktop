@@ -749,24 +749,66 @@ pub(super) async fn desktop_recent_files(
     })
 }
 
+/// The needs-attention rows the last read of state.db returned (review of #225: a read that waits
+/// behind the engine shows these, so a row never flickers out while the DB is busy).
+static LAST_ATTENTION: std::sync::Mutex<Vec<crate::transfer_progress::NeedsAttention>> = std::sync::Mutex::new(Vec::new());
+/// How long a poll waits for state.db's needs-attention rows before it shows the last ones it read.
+const ATTENTION_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Every file transfer currently in flight, as a lightweight snapshot for the tray's
 /// "In progress" card and the Activity › Timeline view (LD-0105 U1). The board is
 /// process-wide and needs no session gate: a not-signed-in tray sees an empty list.
 /// Desktop #225 (Amendment 4): plus a row for every file that needs the person (a failed download
-/// changed on this device since), read from state.db as the tray's recent list reads it; no readable
-/// config or no DB yet is the board alone.
+/// changed on this device since), only while the vault is unlocked (as `desktop_recent_files`). The
+/// board is read first and lock-free; the rows come through the engine's own state.db handle (no open,
+/// no migration lock), waited for at most [`ATTENTION_READ_WAIT`], else the last rows read.
 #[tauri::command]
 pub(super) async fn get_active_transfers(
+    state: State<'_, AppState>,
     runtime: State<'_, popover_data::PopoverRuntime>,
 ) -> Result<Vec<crate::transfer_progress::ActiveTransferDto>, String> {
-    let board = runtime.transfers.clone();
-    tokio::task::spawn_blocking(move || {
-        let config = DesktopConfig::load().ok();
-        let db = config.as_ref().and_then(|c| state_db_for_config(c).ok().flatten());
-        board.snapshot_with_attention(db.as_ref())
-    })
-    .await
-    .map_err(|e| format!("active transfers task failed: {e}"))
+    let rows = runtime.transfers.snapshot_dtos();
+    if !vault_unlocked(&state) {
+        // Nothing read while unlocked is kept past a lock (or into another account's session).
+        if let Ok(mut last) = LAST_ATTENTION.lock() {
+            last.clear();
+        }
+        return Ok(shown_transfers(rows, false, &[]));
+    }
+    let read = tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        let fresh = crate::windows_cf::bridge().and_then(|bridge| crate::transfer_progress::needs_attention(bridge.db()));
+        // Off Windows no file is ever poisoned (the Cloud Files provider is Windows-only).
+        #[cfg(not(target_os = "windows"))]
+        let fresh: Option<Vec<crate::transfer_progress::NeedsAttention>> = Some(Vec::new());
+        if let (Some(fresh), Ok(mut last)) = (&fresh, LAST_ATTENTION.lock()) {
+            *last = fresh.clone();
+        }
+        fresh
+    });
+    let attention = match tokio::time::timeout(ATTENTION_READ_WAIT, read).await {
+        Ok(Ok(Some(fresh))) => fresh,
+        _ => LAST_ATTENTION.lock().map(|last| last.clone()).unwrap_or_default(),
+    };
+    Ok(shown_transfers(rows, true, &attention))
+}
+
+/// Is the active account's vault unlocked (a session held)? No account, or a poisoned lock: no.
+pub(super) fn vault_unlocked(state: &AppState) -> bool {
+    state.active_account().ok().is_some_and(|acct| acct.session.lock().is_ok_and(|guard| guard.is_some()))
+}
+
+/// What `get_active_transfers` shows: the board, plus the needs-attention rows (each one names a file
+/// from state.db) only while the vault is unlocked, as `desktop_recent_files` hides names when locked.
+pub(super) fn shown_transfers(
+    rows: Vec<crate::transfer_progress::ActiveTransferDto>,
+    unlocked: bool,
+    attention: &[crate::transfer_progress::NeedsAttention],
+) -> Vec<crate::transfer_progress::ActiveTransferDto> {
+    if !unlocked {
+        return rows;
+    }
+    crate::transfer_progress::with_attention(rows, attention)
 }
 
 /// Query the local desktop file-name search index.

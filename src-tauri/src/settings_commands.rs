@@ -377,7 +377,11 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
     // as it is (never emptied), and only "Discard and download again" ends the row.
     if let Ok(rows) = db.poisoned() {
         for row in rows.into_iter().filter(|r| r.needs_attention) {
-            let name = db.get_file(&row.file_id).ok().flatten().map(|e| entry_basename(&e.path)).unwrap_or_default();
+            // Review of #225: a poison whose file row is gone has no exit (the discard answers `missing`
+            // until the next process start clears it): no row, here as on the board.
+            let Some(name) = db.get_file(&row.file_id).ok().flatten().map(|e| entry_basename(&e.path)) else {
+                continue;
+            };
             items.push(TrayActivityItem {
                 id: row.file_id,
                 name,
@@ -386,8 +390,8 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
                 ok: Some(false),
                 active: None,
                 progress: None,
-                attention: Some("changed_on_this_device"),
-                action: Some("discard_and_download_again"),
+                attention: Some(crate::transfer_progress::ATTENTION_CHANGED),
+                action: Some(crate::transfer_progress::ACTION_DISCARD),
             });
         }
     }

@@ -78,6 +78,64 @@ pub const ATTENTION_CHANGED: &str = "changed_on_this_device";
 /// `ActiveTransferDto::action` of such a row: the `discard_and_download_again` command.
 pub const ACTION_DISCARD: &str = "discard_and_download_again";
 
+/// One file state.db says needs the person (LD-0105 Amendment 4, desktop #225): a failed download whose
+/// file changed on this device since. It is kept as it is and refuses every fetch, so it is rarely on
+/// the board; its row lasts as long as the poison row, which `discard_and_download_again` ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeedsAttention {
+    pub file_id: String,
+    /// The vault path, for the row's name and folder.
+    pub path: String,
+    pub size: u64,
+}
+
+/// state.db's needs-attention rows whose file it still knows (review: a poison with no file row could
+/// not be discarded, `discard_now` answers `missing`, and it clears at the next process start).
+/// `None`: the DB could not be read.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<NeedsAttention>> {
+    let rows = db.poisoned().ok()?;
+    Some(
+        rows.into_iter()
+            .filter(|r| r.needs_attention)
+            .filter_map(|r| {
+                let entry = db.get_file(&r.file_id).ok().flatten()?;
+                Some(NeedsAttention { file_id: r.file_id, path: entry.path, size: entry.size_bytes.max(0) as u64 })
+            })
+            .collect(),
+    )
+}
+
+/// The board's rows plus a row for each file that needs the person (a download, not failed, no
+/// progress), or the attention on that file's own download or stream row. An upload row keeps its own
+/// shape (review): offering "discard" on it would throw away the change being uploaded.
+pub(crate) fn with_attention(mut rows: Vec<ActiveTransferDto>, attention: &[NeedsAttention]) -> Vec<ActiveTransferDto> {
+    for file in attention {
+        if let Some(on_board) = rows.iter_mut().find(|r| r.file_id == file.file_id) {
+            if on_board.direction != Direction::Up {
+                on_board.attention = Some(ATTENTION_CHANGED);
+                on_board.action = Some(ACTION_DISCARD);
+            }
+            continue;
+        }
+        rows.push(ActiveTransferDto {
+            file_id: file.file_id.clone(),
+            name: display_name(&file.path),
+            folder: parent_folder(&file.path),
+            direction: Direction::Down,
+            done: 0,
+            total: file.size,
+            buffered: 0,
+            speed_bps: 0,
+            attention: Some(ATTENTION_CHANGED),
+            action: Some(ACTION_DISCARD),
+            failed: false,
+            failed_at_secs: None,
+        });
+    }
+    rows
+}
+
 /// A transfer's metadata serialised into the `get_active_transfers` IPC response.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -359,39 +417,12 @@ impl TransferBoard {
         }).unwrap_or_default()
     }
 
-    /// [`Self::snapshot_dtos`] plus every file state.db says needs the person (LD-0105 Amendment 4,
-    /// desktop #225): a failed download whose file changed on this device since. Such a file is kept as
-    /// it is and refuses every fetch, so it is rarely on the board: it gets a row of its own (a download,
-    /// not failed, no progress), or its board row carries the attention. The row lasts as long as the
-    /// poison row: `discard_and_download_again` clears that, and with it this row. No db, no extra rows.
+    /// [`Self::snapshot_dtos`] merged with state.db's needs-attention rows ([`needs_attention`],
+    /// [`with_attention`]). No db, or a db that cannot be read: the board alone.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn snapshot_with_attention(&self, db: Option<&crate::state_db::StateDb>) -> Vec<ActiveTransferDto> {
-        let mut rows = self.snapshot_dtos();
-        let Some(db) = db else { return rows };
-        let Ok(poisoned) = db.poisoned() else { return rows };
-        for row in poisoned.into_iter().filter(|r| r.needs_attention) {
-            if let Some(on_board) = rows.iter_mut().find(|r| r.file_id == row.file_id) {
-                on_board.attention = Some(ATTENTION_CHANGED);
-                on_board.action = Some(ACTION_DISCARD);
-                continue;
-            }
-            let entry = db.get_file(&row.file_id).ok().flatten();
-            let path = entry.as_ref().map(|e| e.path.as_str()).unwrap_or("");
-            rows.push(ActiveTransferDto {
-                name: display_name(path),
-                folder: parent_folder(path),
-                total: entry.as_ref().map(|e| e.size_bytes.max(0) as u64).unwrap_or(0),
-                file_id: row.file_id,
-                direction: Direction::Down,
-                done: 0,
-                buffered: 0,
-                speed_bps: 0,
-                attention: Some(ATTENTION_CHANGED),
-                action: Some(ACTION_DISCARD),
-                failed: false,
-                failed_at_secs: None,
-            });
-        }
-        rows
+        let attention = db.and_then(needs_attention).unwrap_or_default();
+        with_attention(self.snapshot_dtos(), &attention)
     }
 
     /// Every transfer in flight.

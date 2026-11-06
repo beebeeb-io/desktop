@@ -51,7 +51,7 @@ fn ld0105_u1_the_board_carries_a_needs_attention_row_until_the_discard_ends_it()
     use crate::transfer_progress::{Direction, TransferBoard};
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
-    for (id, path) in [("changed", "Films/holiday.mp4"), ("emptying", "Films/other.mp4"), ("live", "clip.mp4")] {
+    for (id, path) in [("changed", "Films/holiday.mp4"), ("emptying", "Films/other.mp4"), ("live", "clip.mp4"), ("uploading", "notes.txt")] {
         db.upsert_file(&FileEntry {
             file_id: id.into(),
             path: path.into(),
@@ -65,17 +65,25 @@ fn ld0105_u1_the_board_carries_a_needs_attention_row_until_the_discard_ends_it()
         })
         .unwrap();
     }
-    for id in ["changed", "emptying"] {
+    // "orphan" has no files row: it could never be discarded (`missing`), so it is no row (review).
+    for id in ["changed", "emptying", "uploading", "orphan"] {
         db.record_poison(id, "corrupt", Some((1, 10)), 1).unwrap();
     }
-    db.mark_poison_needs_attention("changed").unwrap();
+    for id in ["changed", "uploading", "orphan"] {
+        db.mark_poison_needs_attention(id).unwrap();
+    }
     let board = TransferBoard::new();
     let _live = board.begin_named("live", "clip.mp4", Direction::Stream, 10);
+    // An upload of the person's change never offers "discard" (review).
+    let _up = board.begin_named("uploading", "notes.txt", Direction::Up, 10);
     let json = |db: Option<&StateDb>| serde_json::to_value(board.snapshot_with_attention(db)).unwrap();
 
     let rows = json(Some(&db));
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 2, "the live transfer and the changed file: {rows:?}");
+    assert_eq!(rows.len(), 3, "the live transfer, the upload and the changed file (no orphan row): {rows:?}");
+    assert!(rows.iter().all(|r| r["fileId"] != "orphan"), "a poison with no file row is no row");
+    let up = rows.iter().find(|r| r["fileId"] == "uploading").unwrap();
+    assert!(up.get("attention").is_none() && up.get("action").is_none(), "an upload row keeps its own shape: {up}");
     let changed = rows.iter().find(|r| r["fileId"] == "changed").expect("the changed file has a row");
     assert_eq!(
         *changed,
@@ -89,16 +97,42 @@ fn ld0105_u1_the_board_carries_a_needs_attention_row_until_the_discard_ends_it()
     // The discard's last step ends the poison row: the row goes with it.
     assert!(db.clear_poison("changed").unwrap());
     let rows = json(Some(&db));
-    assert_eq!(rows.as_array().unwrap().len(), 1, "only the live transfer: {rows}");
+    assert_eq!(rows.as_array().unwrap().len(), 2, "the live transfer and the upload: {rows}");
 
     // A file on the board that needs the person carries it on its own row (no second row).
     db.record_poison("live", "corrupt", Some((1, 10)), 1).unwrap();
     db.mark_poison_needs_attention("live").unwrap();
     let rows = json(Some(&db));
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0]["fileId"].as_str(), rows[0]["direction"].as_str(), rows[0]["attention"].as_str()), (Some("live"), Some("stream"), Some("changed_on_this_device")));
+    assert_eq!(rows.len(), 2);
+    let live = rows.iter().find(|r| r["fileId"] == "live").unwrap();
+    assert_eq!((live["direction"].as_str(), live["attention"].as_str()), (Some("stream"), Some("changed_on_this_device")));
+
+    // The tray's recent list shows no row for the orphan either: every needs-attention row has an exit.
+    let tray = super::tray_recent_activity_from_db(&db);
+    assert!(tray.iter().all(|i| i.id != "orphan"), "no tray row without a file row");
+    assert!(tray.iter().any(|i| i.id == "live" && i.attention.is_some()));
 
     // No DB: the board alone.
     assert!(json(None).as_array().unwrap().iter().all(|r| r.get("attention").is_none()));
+}
+
+/// Review of #225 (lead 2026-11-06: no file name while the vault is locked): `get_active_transfers`
+/// adds the needs-attention rows, each naming a file from state.db, only while the active account
+/// holds a session. Red on the mutants "`vault_unlocked` is always true" and "`shown_transfers`
+/// ignores the lock".
+#[test]
+fn ld0105_u1_a_locked_vault_shows_no_needs_attention_row() {
+    use crate::account_commands::{shown_transfers, vault_unlocked};
+    use crate::transfer_progress::{NeedsAttention, TransferBoard};
+    let state = crate::AppState::default();
+    crate::account::synthesize_single_account(&state, crate::account::AccountId("acct-locked".into()));
+    let attention = [NeedsAttention { file_id: "changed".into(), path: "Films/holiday.mp4".into(), size: 10 }];
+    let board = TransferBoard::new();
+    let locked = vault_unlocked(&state);
+    let shown = serde_json::to_string(&shown_transfers(board.snapshot_dtos(), locked, &attention)).unwrap();
+    let unlocked = serde_json::to_string(&shown_transfers(board.snapshot_dtos(), true, &attention)).unwrap();
+    assert!(!locked, "no session: the vault is locked");
+    assert!(!shown.contains("holiday.mp4") && !shown.contains("changed_on_this_device"), "locked: no name, no row: {shown}");
+    assert!(unlocked.contains("holiday.mp4"), "the control: unlocked, the row shows: {unlocked}");
 }

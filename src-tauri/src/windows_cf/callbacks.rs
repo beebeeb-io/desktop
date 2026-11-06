@@ -58,7 +58,7 @@ use windows::Win32::System::CorrelationVector::CORRELATION_VECTOR;
 /// the 4 KiB page size and keeps a single buffer in memory at a time for
 /// large files. The final chunk (the one that reaches the end of the
 /// requested range) may be shorter / unaligned.
-const TRANSFER_CHUNK: i64 = 1024 * 1024;
+pub(super) const TRANSFER_CHUNK: i64 = 1024 * 1024;
 
 /// What to do once the plaintext is in hand, given the placeholder's recorded
 /// size vs the AES-256-GCM-authenticated decrypted length. Extracted as a pure
