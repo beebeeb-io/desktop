@@ -199,7 +199,10 @@ fn join_sources(sources: &[String]) -> String {
 
 /// Where a refusal's words are shown on Windows: Explorer shows only its own "access denied" for a
 /// refused delete or rename, so the words reach the person as a notification. Set once by the runner.
-#[cfg(target_os = "windows")]
+/// Not in a test build: cloning and dropping an `AppHandle` where a test can reach it links the window
+/// runtime (comctl32, user32, dwmapi, gdi32) into the lib test binary, which then fails to load on
+/// Windows (STATUS_ENTRYPOINT_NOT_FOUND, measured on 115826a); no test has an app to show it through.
+#[cfg(all(target_os = "windows", not(test)))]
 static NOTIFIER: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 /// The words last shown, and when: one Explorer delete of a folder can refuse many items, and the
@@ -211,10 +214,13 @@ static LAST_NOTICE: std::sync::Mutex<Option<(String, std::time::Instant)>> = std
 const NOTICE_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The app the refusal notifications are shown through (the runner, once per process).
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 pub(crate) fn set_notifier(app: &tauri::AppHandle) {
     let _ = NOTIFIER.set(app.clone());
 }
+
+#[cfg(all(target_os = "windows", test))]
+pub(crate) fn set_notifier(_app: &tauri::AppHandle) {}
 
 /// Show a refusal's words to the person. Never blocks the caller (a Cloud Files callback calls it
 /// after it answered Windows): the notification is shown on its own thread. Returns whether the
@@ -233,18 +239,28 @@ pub(crate) fn note_refusal(message: &str) -> bool {
     }
     *last = Some((message.to_string(), now));
     drop(last);
-    if let Some(app) = NOTIFIER.get().cloned() {
-        let body = message.to_string();
-        std::thread::spawn(move || {
-            use tauri_plugin_notification::NotificationExt;
-            if let Err(error) = app.notification().builder().title("Beebeeb").body(body).show() {
-                // Zero-knowledge: the words carry a path; only the failure is logged.
-                tracing::debug!(%error, "backup protection: the refusal notification could not be shown");
-            }
-        });
-    }
+    show_notification(message);
     true
 }
+
+/// The toast itself, on its own thread (see [`NOTIFIER`] for why a test build has none).
+#[cfg(all(target_os = "windows", not(test)))]
+fn show_notification(message: &str) {
+    let Some(app) = NOTIFIER.get().cloned() else {
+        return;
+    };
+    let body = message.to_string();
+    std::thread::spawn(move || {
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(error) = app.notification().builder().title("Beebeeb").body(body).show() {
+            // Zero-knowledge: the words carry a path; only the failure is logged.
+            tracing::debug!(%error, "backup protection: the refusal notification could not be shown");
+        }
+    });
+}
+
+#[cfg(all(target_os = "windows", test))]
+fn show_notification(_message: &str) {}
 
 #[cfg(test)]
 #[path = "backup_protect_tests.rs"]
