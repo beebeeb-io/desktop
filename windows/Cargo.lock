@@ -223,7 +223,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d3b40e336acbbbbe34e0e793c840834fdb7f683b#d3b40e336acbbbbe34e0e793c840834fdb7f683b"
+source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -279,7 +279,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-sync"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d3b40e336acbbbbe34e0e793c840834fdb7f683b#d3b40e336acbbbbe34e0e793c840834fdb7f683b"
+source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -297,7 +297,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d3b40e336acbbbbe34e0e793c840834fdb7f683b#d3b40e336acbbbbe34e0e793c840834fdb7f683b"
+source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
 dependencies = [
  "serde",
 ]
@@ -2138,7 +2138,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2493,7 +2493,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

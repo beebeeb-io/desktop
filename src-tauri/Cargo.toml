@@ -127,6 +127,8 @@ webpki-roots = "0.26"
 # connector code uses `rustls::crypto::ring::default_provider()`.
 rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# LD-0105 W2: the storage body the range session gets (`beebeeb_transfer::StorageReply`).
+bytes = "1"
 p256 = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -142,9 +144,11 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "d3b40e336acbbbbe34e0e793c840834fdb7f683b" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "5e8e687a101563cdb25f458e163c3ac00aa15d81" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "5e8e687a101563cdb25f458e163c3ac00aa15d81" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "5e8e687a101563cdb25f458e163c3ac00aa15d81" }
+# LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5e8e687a101563cdb25f458e163c3ac00aa15d81" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
