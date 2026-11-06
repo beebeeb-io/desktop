@@ -363,28 +363,36 @@ struct Inner {
     /// How many guards hold each active row (LD-0105 U1): a download of a file already downloading
     /// joins its row ([`TransferBoard::begin_download`]), and the row ends with the last guard.
     holders: HashMap<String, u32>,
+    /// Active rows a holder finished ([`TransferGuard::finish`]): the file was delivered, so the row
+    /// ends as a success whoever ends it, and its bytes are counted once, when it ends.
+    delivered: std::collections::HashSet<String>,
     /// Plaintext bytes of files that completed since the batch last went quiet.
     finished_bytes: u64,
 }
 
 impl Inner {
     /// Register `file_id`'s row. A new attempt ends the file's earlier failed row (one row per file).
-    /// `join`: a row already active is kept as it is (its progress, its name) and gains a holder;
-    /// otherwise the row starts over, as [`TransferBoard::begin`] always did.
+    /// `join`: a download row already active (never an upload's) is kept as it is (its progress, its
+    /// name) and gains a holder; otherwise the row starts over, as [`TransferBoard::begin`] always did,
+    /// and the guards of the row it replaces still count, so the row ends with the last guard.
     fn start(&mut self, file_id: &str, path: Option<&str>, direction: Direction, total: u64, join: bool) {
         self.recently_failed.remove(file_id);
-        if join && let Some(t) = self.active.get_mut(file_id) {
+        let held = if self.active.contains_key(file_id) { self.holders.get(file_id).copied().unwrap_or(0) } else { 0 };
+        self.holders.insert(file_id.to_string(), held + 1);
+        if join && let Some(t) = self.active.get_mut(file_id).filter(|t| t.direction != Direction::Up) {
             // A failure marked just before this download joined is not this download's outcome.
             t.failed = false;
             t.failed_at_secs = None;
-            *self.holders.entry(file_id.to_string()).or_insert(0) += 1;
+            if t.total == 0 {
+                t.total = total;
+            }
             if let Some(path) = path {
                 self.paths.entry(file_id.to_string()).or_insert_with(|| path.to_string());
             }
             return;
         }
         self.active.insert(file_id.to_string(), Transfer { direction, total, ..Transfer::default() });
-        self.holders.insert(file_id.to_string(), 1);
+        self.delivered.remove(file_id);
         if let Some(path) = path {
             self.paths.insert(file_id.to_string(), path.to_string());
         }
@@ -537,6 +545,18 @@ impl TransferBoard {
         }).unwrap_or_default()
     }
 
+    /// A new engine starts on this board (`EngineBridge::with_transfers`): the failed rows an earlier
+    /// engine left, and their names, go (LD-0105 U1: never another session's file names).
+    pub fn forget_failed(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let inner = &mut *guard;
+            for id in inner.recently_failed.keys() {
+                inner.paths.remove(id);
+            }
+            inner.recently_failed.clear();
+        }
+    }
+
     /// [`Self::snapshot_dtos`] merged with state.db's needs-attention rows ([`needs_attention`],
     /// [`with_attention`]). No db, or a db that cannot be read: the board alone.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -621,20 +641,19 @@ impl TransferGuard {
         }
     }
 
-    /// The transfer succeeded: its bytes join the batch's finished total. A row other downloads
-    /// still hold goes on, and its bytes are counted when the last one finishes.
+    /// The transfer succeeded: its bytes join the batch's finished total when the row ends (at once,
+    /// unless other downloads of the file still hold it); the row then ends as a success.
     pub fn finish(self) {
         if let Ok(mut inner) = self.board.inner.lock()
-            && inner.last_holder(&self.file_id)
-            && let Some(t) = inner.active.get(&self.file_id).copied()
+            && inner.active.contains_key(&self.file_id)
         {
-            inner.finished_bytes = inner.finished_bytes.saturating_add(t.total);
+            inner.delivered.insert(self.file_id.clone());
         }
     }
 
     /// The transfer did not finish (LD-0105 U1): its row is marked failed ([`TransferBoard::mark_failed`])
-    /// and kept for [`FAILED_ROW_TTL_SECS`], unless another download of the file still holds it, which
-    /// then decides how the row ends.
+    /// and kept for [`FAILED_ROW_TTL_SECS`], unless another download of the file still holds it (it
+    /// decides how the row ends). A row a holder delivered ends as a success all the same (`Drop`).
     pub fn fail(self) {
         if let Ok(mut inner) = self.board.inner.lock()
             && inner.last_holder(&self.file_id)
@@ -656,8 +675,12 @@ impl Drop for TransferGuard {
                 return;
             }
             inner.holders.remove(&self.file_id);
+            let delivered = inner.delivered.remove(&self.file_id);
             if let Some(t) = inner.active.remove(&self.file_id) {
-                if t.failed {
+                if delivered {
+                    inner.finished_bytes = inner.finished_bytes.saturating_add(t.total);
+                    inner.paths.remove(&self.file_id);
+                } else if t.failed {
                     // Keep the entry visible in snapshot_dtos for up to FAILED_ROW_TTL_SECS.
                     // The path is retained so the DTO can resolve name and folder.
                     inner.recently_failed.insert(self.file_id.clone(), t);
@@ -679,19 +702,27 @@ const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 /// LD-0105 U1: one Windows Cloud Files whole-file fetch on the board, the "Downloading" row of the
 /// U0 design (`EngineBridge::whole_fetch_row` starts it). It follows the fetch's [`ReceiveMeter`]
 /// ([`Self::follow`]) and ends with [`Self::finished`]; dropped without it, the fetch did not finish
-/// and the row says so ([`TransferGuard::fail`]). No row (the file has no `files` row to name it by):
-/// every call is a no-op.
+/// and the row says so ([`TransferGuard::fail`]), unless the engine was stopping (a lock, a sign-out,
+/// an account switch, a quit): that ends the row with no failure, never another session's to see. No
+/// row (the file has no `files` row to name it by): every call is a no-op.
 pub struct FetchRow {
     guard: Option<TransferGuard>,
+    stopping: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl FetchRow {
     pub fn new(guard: TransferGuard) -> Self {
-        FetchRow { guard: Some(guard) }
+        FetchRow { guard: Some(guard), stopping: None }
     }
 
     pub fn none() -> Self {
-        FetchRow { guard: None }
+        FetchRow { guard: None, stopping: None }
+    }
+
+    /// The engine's stop flag (`EngineBridge::is_stopping`): a fetch cut off by a stop is not failed.
+    pub fn stopped_by(mut self, stopping: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stopping = Some(stopping);
+        self
     }
 
     /// Report `meter`'s kept bytes ([`ReceiveMeter::kept`]) to the row every [`FOLLOW_EVERY`] until
@@ -720,7 +751,10 @@ impl FetchRow {
 
 impl Drop for FetchRow {
     fn drop(&mut self) {
-        if let Some(guard) = self.guard.take() {
+        let stopped = self.stopping.as_ref().is_some_and(|s| s.load(Ordering::SeqCst));
+        if let Some(guard) = self.guard.take()
+            && !stopped
+        {
             guard.fail();
         }
     }
@@ -1098,5 +1132,64 @@ mod tests {
         assert!(rows[0].failed_at_secs.is_some());
         drop(FetchRow::none());
         assert_eq!(board.snapshot_dtos().len(), 1, "no row, nothing marked");
+    }
+
+    /// Self-review F1: a start that replaces a row (`begin`, the range session's call) while a fetch
+    /// holds it keeps counting that fetch, so the fetch's failure is not the newer transfer's and its
+    /// drop does not end the newer row. Red on the mutant "a replacing start resets the count to 1".
+    #[test]
+    fn ld0105_u1_a_replacing_start_keeps_counting_the_live_guards() {
+        let board = TransferBoard::new();
+        let fetch = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        let session = board.begin("f", Direction::Down, 100);
+        drop(fetch);
+        let rows = board.snapshot_dtos();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(!rows[0].failed, "the session still runs: the fetch's failure is not its outcome");
+        session.update(50);
+        assert_eq!(board.get("f").unwrap().done, 50, "the session's progress still lands on its row");
+        drop(session);
+        assert!(board.snapshot_dtos().is_empty());
+    }
+
+    /// Self-review F2: a download never joins an upload's row (it would keep `up`, which the UI hides).
+    #[test]
+    fn ld0105_u1_a_download_never_joins_an_upload_row() {
+        let board = TransferBoard::new();
+        let _up = board.begin_named("f", "Documents/a.txt", Direction::Up, 10);
+        let _down = board.begin_download("f", "Documents/a.txt", 100);
+        let t = board.get("f").unwrap();
+        assert_eq!((t.direction, t.total), (Direction::Down, 100));
+    }
+
+    /// Self-review F4/F5: once any fetch delivered the file the row never ends as failed, and its bytes
+    /// count once; a fetch that knows the size fills a joined row's unknown total.
+    #[test]
+    fn ld0105_u1_a_delivered_file_never_ends_as_failed() {
+        let board = TransferBoard::new();
+        let no_size = board.begin_download("f", "Videos/clip.mp4", 0);
+        let first = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        assert_eq!(board.get("f").unwrap().total, 100, "the joiner's known size fills the unknown total");
+        let second = FetchRow::new(board.begin_download("f", "Videos/clip.mp4", 100));
+        first.finished();
+        drop(no_size);
+        drop(second); // the last holder fails after the file was delivered
+        assert!(board.snapshot_dtos().is_empty(), "a delivered file is no failed row");
+        assert_eq!(board.finished_bytes(), 100, "counted once");
+    }
+
+    /// Self-review F3: a fetch cut off by an engine stop (lock, sign-out, switch, quit) ends with no
+    /// failed row; a new engine forgets the failed rows an earlier one left (their names included).
+    #[test]
+    fn ld0105_u1_a_stop_is_no_failure_and_a_new_engine_forgets_failed_rows() {
+        let board = TransferBoard::new();
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        drop(FetchRow::new(board.begin_download("cut", "Videos/a.mp4", 10)).stopped_by(stopping));
+        assert!(board.snapshot_dtos().is_empty(), "a stop is not the file's failure");
+        drop(FetchRow::new(board.begin_download("bad", "Videos/b.mp4", 10)));
+        assert_eq!(board.snapshot_dtos().len(), 1);
+        board.forget_failed();
+        assert!(board.snapshot_dtos().is_empty());
+        assert!(board.inner.lock().unwrap().paths.is_empty(), "the names go with the rows");
     }
 }

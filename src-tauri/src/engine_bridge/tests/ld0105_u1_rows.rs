@@ -49,7 +49,7 @@ async fn ld0105_u1_a_whole_file_fetch_is_one_named_download_row_that_moves_and_e
         // Each chunk's body trickles in, so the fetch takes over a second and the board is seen mid-way.
         pair.knobs()
             .storage
-            .insert(chunk, std::collections::VecDeque::from([StorageScript::Trickle(128, Duration::from_millis(40))]));
+            .insert(chunk, std::collections::VecDeque::from([StorageScript::Trickle(128, Duration::from_millis(80))]));
     }
     let bridge = bridge_at(dir.path(), &pair, "Videos/holiday-2026.mp4");
     bridge.seams.use_transport(Transport::Auto);
@@ -75,8 +75,9 @@ async fn ld0105_u1_a_whole_file_fetch_is_one_named_download_row_that_moves_and_e
         assert_eq!(s.len(), 1, "one row for the file, never two: {s:?}");
         s[0].clone()
     }).collect();
-    println!("ld0105-u1 whole fetch: {} samples, {} with the row, done {:?}", samples.len(), during.len(),
-        during.iter().map(|r| r.done).collect::<std::collections::BTreeSet<_>>());
+    println!("ld0105-u1 whole fetch: {} samples, {} with the row, done {:?}, speed {:?}", samples.len(), during.len(),
+        during.iter().map(|r| r.done).collect::<std::collections::BTreeSet<_>>(),
+        during.iter().map(|r| r.speed_bps).collect::<std::collections::BTreeSet<_>>());
     assert!(!during.is_empty(), "the fetch registered its row (mutant \"never begin\")");
     for r in &during {
         assert_eq!(
@@ -88,6 +89,10 @@ async fn ld0105_u1_a_whole_file_fetch_is_one_named_download_row_that_moves_and_e
     }
     let mid: std::collections::BTreeSet<u64> = during.iter().map(|r| r.done).filter(|d| *d > 0 && *d < SIZE as u64).collect();
     assert!(mid.len() >= 2, "the progress moves while the file arrives: {mid:?}");
+    // Self-review F7: the speed comes only from `follow` (the meter, every second); the per-chunk
+    // reports alone leave it 0 and the row would read "0 B/s".
+    let fastest = during.iter().map(|r| r.speed_bps).max().unwrap_or(0);
+    assert!(fastest > 0, "follow gave the row a speed (mutant \"no follow\")");
     row.finished();
     assert!(rows(&bridge).is_empty(), "the row ends once the whole file is transferred");
 }
@@ -147,6 +152,19 @@ async fn ld0105_u1_an_upload_row_is_named_by_its_vault_path() {
     let row = seen.expect("the upload showed on the board");
     assert_eq!((row.name.as_str(), row.folder.as_str(), row.direction), ("resume.bin", "Documents", Direction::Up));
     drop(server.finish());
+}
+
+/// Self-review F3: a new engine (sign-in, unlock, account switch) starts on the shared board without
+/// the failed rows, and file names, an earlier engine left. Red on the mutant "`with_transfers` keeps them".
+#[test]
+fn ld0105_u1_a_new_engine_never_shows_an_earlier_engines_failed_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = crate::transfer_progress::TransferBoard::new();
+    drop(crate::transfer_progress::FetchRow::new(board.begin_download(TEST_FILE_ID, "Private/payslip.pdf", 10)));
+    assert_eq!(board.snapshot_dtos().len(), 1, "precondition: the earlier engine's failed row");
+    let _next = test_bridge(&dir.path().join("state.db")).with_transfers(board.clone());
+    let rows = serde_json::to_string(&board.snapshot_dtos()).unwrap();
+    assert!(!rows.contains("payslip"), "the next session sees none of it: {rows}");
 }
 
 /// The board's rows carry names now: a locked vault's poll shows none (lead 2026-11-06, "no file

@@ -335,11 +335,13 @@ impl EngineBridge {
     /// U0 design, named by the file's vault path (the `files` row's, the path the tray's recent rows
     /// carry), sized `size` until the download's metadata says otherwise. A fetch of the file already
     /// running is joined ([`crate::transfer_progress::TransferBoard::begin_download`]). No `files` row
-    /// (or no readable one): no board row, since nothing could name it.
+    /// (or no readable one): no board row, since nothing could name it. A fetch cut off by an engine
+    /// stop (lock, sign-out, switch, quit) ends its row without a failure.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn whole_fetch_row(&self, file_id: &str, size: u64) -> crate::transfer_progress::FetchRow {
         match self.db.get_file(file_id) {
-            Ok(Some(entry)) => crate::transfer_progress::FetchRow::new(self.transfers.begin_download(file_id, &entry.path, size)),
+            Ok(Some(entry)) => crate::transfer_progress::FetchRow::new(self.transfers.begin_download(file_id, &entry.path, size))
+                .stopped_by(self.stopping.clone()),
             _ => crate::transfer_progress::FetchRow::none(),
         }
     }
