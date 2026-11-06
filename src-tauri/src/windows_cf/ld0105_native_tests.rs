@@ -17,6 +17,8 @@ use crate::windows_cf::callbacks::{fail_transfer, transfer_range};
 use crate::windows_cf::fetch_progress::keep_fetch_alive;
 use crate::windows_cf::placeholders;
 
+type Callback = unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CALLBACK_PARAMETERS);
+
 /// A registered (and optionally connected) QA root; unregistered on drop, whatever the test did.
 struct QaRoot {
     _dir: tempfile::TempDir,
@@ -37,16 +39,28 @@ impl QaRoot {
         }
     }
 
-    fn connect(&mut self, fetch: unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CALLBACK_PARAMETERS)) {
+    fn connect(&mut self, fetch: Callback) {
+        self.connect_with(fetch, None);
+    }
+
+    fn connect_with(&mut self, fetch: Callback, cancel: Option<Callback>) {
+        let none = || CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NONE,
+            Callback: None,
+        };
         let table = [
             CF_CALLBACK_REGISTRATION {
                 Type: CF_CALLBACK_TYPE_FETCH_DATA,
                 Callback: Some(fetch),
             },
-            CF_CALLBACK_REGISTRATION {
-                Type: CF_CALLBACK_TYPE_NONE,
-                Callback: None,
+            match cancel {
+                Some(cancel) => CF_CALLBACK_REGISTRATION {
+                    Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+                    Callback: Some(cancel),
+                },
+                None => none(),
             },
+            none(),
         ];
         let wide: Vec<u16> = self.root.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: the path and the table outlive the call; the callback is a static function.
@@ -947,4 +961,131 @@ fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
     assert_eq!(outcome, vec![("qa-t10".to_string(), Emptied::NeedsAttention)]);
     assert_ne!(census_of(&path).0, OnDisk::Nothing, "never emptied");
     assert_eq!(head.to_vec(), (1u8..=21).collect::<Vec<_>>(), "the person's write is still there");
+}
+
+/// F2b (desktop #225 QA rung, robocopy ERROR 379): what the provider does with a FETCH.
+/// 0: the 16 MiB chunk that covers it (as a range session transfers); 1: only the required range;
+/// 2: the whole file.
+static F2B_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static F2B_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static F2B_SERVED: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
+static F2B_T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static F2B_DATA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+const F2B_SIZE: usize = (40 << 20) + 12_345;
+
+fn f2b_note(line: String) {
+    let ms = F2B_T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    F2B_LOG.lock().unwrap().push(format!("{ms:10.1} ms {line}"));
+}
+
+unsafe extern "system" fn f2b_fetch(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: valid for the duration of the callback.
+    let r = unsafe { request_of(info, params) };
+    // SAFETY: the fetch arm of a FETCH_DATA callback.
+    let fetch = unsafe { (*params).Anonymous.FetchData };
+    // SAFETY: the info pointer is live; ProcessInfo is filled (REQUIRE_PROCESS_INFO).
+    let pid = unsafe { if (*info).ProcessInfo.is_null() { 0 } else { (*(*info).ProcessInfo).ProcessId } };
+    f2b_note(format!(
+        "FETCH req [{}, +{}) opt [{}, +{}) pid {pid} rkey {}",
+        r.offset, r.length, fetch.OptionalFileOffset, fetch.OptionalLength, r.request
+    ));
+    let data = F2B_DATA.get_or_init(|| content(F2B_SIZE));
+    let size = data.len() as i64;
+    let mut served = F2B_SERVED.lock().unwrap();
+    if served.iter().any(|&(s, e)| s <= r.offset && r.offset + r.length <= e) {
+        f2b_note(format!("  [{}, +{}) already served: no transfer", r.offset, r.length));
+        return;
+    }
+    const CHUNK: i64 = 16 << 20;
+    let (start, end) = match F2B_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => (r.offset / CHUNK * CHUNK, ((r.offset + r.length).div_ceil(CHUNK) * CHUNK).min(size)),
+        1 => (r.offset, r.offset + r.length),
+        _ => (0, size),
+    };
+    // SAFETY: the keys of this live request.
+    let result = unsafe { transfer_range(r.connection, r.transfer, r.request, data, || false, start, end - start) };
+    f2b_note(format!("  TRANSFER [{start}, {end}) -> {:?}", result.as_ref().map_err(|e| format!("0x{:08X}", e.code().0 as u32))));
+    if result.is_ok() {
+        served.push((start, end));
+    }
+}
+
+unsafe extern "system" fn f2b_cancel(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: the cancel arm of a CANCEL_FETCH_DATA callback.
+    let cancel = unsafe { (*params).Anonymous.Cancel.Anonymous.FetchData };
+    f2b_note(format!("CANCEL [{}, +{})", cancel.FileOffset, cancel.Length));
+}
+
+/// One robocopy of `name` from the QA root: its exit code and its ERROR lines.
+fn f2b_robocopy(qa: &QaRoot, name: &str, dst: &Path, flags: &[&str]) -> (Option<i32>, String) {
+    let out = std::process::Command::new("robocopy")
+        .arg(&qa.root)
+        .arg(dst)
+        .arg(name)
+        .args(flags)
+        .args(["/R:0", "/W:0", "/NP", "/NJH", "/NJS"])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let errors: Vec<&str> = text.lines().filter(|l| l.contains("ERROR")).map(str::trim).collect();
+            (o.status.code(), errors.join(" | "))
+        }
+        Err(e) => (None, format!("spawn failed: {e}")),
+    }
+}
+
+/// F2b diagnosis matrix (desktop #225, lead 2026-11-06): which provider behaviour and which robocopy
+/// option decide ERROR 379. Each case: a fresh 40 MiB placeholder, robocopy twice (the second run is
+/// robocopy's retry on whatever the first left on disk). A measurement: it prints, it asserts nothing
+/// about robocopy. Run alone: `cargo test --lib ld0105_f2b_native_robocopy_matrix -- --ignored --nocapture`.
+#[test]
+#[ignore = "F2b diagnosis matrix (about 40 robocopy runs): run alone with --ignored"]
+fn ld0105_f2b_native_robocopy_matrix() {
+    let progressive = crate::windows_cf::HYDRATION_POLICY;
+    let flag_sets: [&[&str]; 6] = [&[], &["/NOOFFLOAD"], &["/NOCLONE"], &["/SPARSE:N"], &["/J"], &["/NOOFFLOAD", "/NOCLONE", "/SPARSE:N"]];
+    let mut cases: Vec<(&str, CF_HYDRATION_POLICY_PRIMARY, u8, &[&str])> = Vec::new();
+    for mode in 0..3u8 {
+        for flags in flag_sets {
+            cases.push(("progressive", progressive, mode, flags));
+        }
+    }
+    cases.push(("partial", CF_HYDRATION_POLICY_PARTIAL, 0, &[]));
+    cases.push(("full", CF_HYDRATION_POLICY_FULL, 0, &[]));
+    let mut table = Vec::new();
+    for (i, (policy_name, policy, mode, flags)) in cases.into_iter().enumerate() {
+        let mut qa = QaRoot::new(policy);
+        qa.connect_with(f2b_fetch, Some(f2b_cancel));
+        F2B_MODE.store(mode, std::sync::atomic::Ordering::SeqCst);
+        F2B_SERVED.lock().unwrap().clear();
+        F2B_LOG.lock().unwrap().clear();
+        let name = format!("f2b-{i}.bin");
+        assert!(placeholders::create_placeholder(&qa.root, &format!("qa-f2b-{i}"), &name, F2B_SIZE as i64, 1_700_000_000, false).unwrap());
+        let dst = tempfile::tempdir().unwrap();
+        let first = f2b_robocopy(&qa, &name, dst.path(), flags);
+        let after_first = census_of(&qa.path(&name)).0;
+        let second = f2b_robocopy(&qa, &name, dst.path(), flags);
+        let copied = std::fs::read(dst.path().join(&name)).ok();
+        let whole = copied.as_deref() == Some(F2B_DATA.get_or_init(|| content(F2B_SIZE)).as_slice());
+        let row = format!(
+            "f2b case {i}: policy {policy_name} mode {mode} flags {flags:?}: run1 exit {:?} [{}] on disk {after_first:?}; run2 exit {:?} [{}]; copy byte-equal {whole}",
+            first.0, first.1, second.0, second.1
+        );
+        println!("{row}");
+        for line in F2B_LOG.lock().unwrap().iter() {
+            println!("    {line}");
+        }
+        table.push(row);
+        drop(qa);
+    }
+    println!("ld0105-f2b-native: {} cases", table.len());
+    for row in &table {
+        println!("{row}");
+    }
 }
