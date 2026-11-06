@@ -337,3 +337,36 @@ async fn a_move_into_the_tree_that_got_through_goes_back() {
     crate::watcher::handle_rename(&bridge, &sync_root, &source, &renamed).await;
     assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1, "an ordinary rename is still queued");
 }
+
+/// Self-review (2026-11-06): an item that cannot go back (its old folder refuses the write) is sent as
+/// made. Minting it again at its old place would leave the moved copy untracked, to upload as a new
+/// item into the tree.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_move_into_the_tree_that_cannot_go_back_is_sent_as_made() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("root");
+    let docs = sync_root.join("Docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::create_dir_all(sync_root.join("Backups").join("OtherPC")).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    live_row(&bridge, "0b5ec0de-0000-4000-8000-0000000000ab", "Backups/OtherPC", ItemKind::Folder);
+    let report = "0b5ec0de-0000-4000-8000-0000000000ac";
+    live_row(&bridge, report, "Docs/report.pdf", ItemKind::File);
+    let (source, target) = (docs.join("report.pdf"), sync_root.join("Backups").join("OtherPC").join("report.pdf"));
+    std::fs::write(&target, b"pdf!").unwrap();
+    std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(docs.join(".probe"), b"").is_ok() {
+        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        println!("ld0113 cannot_go_back: skipped, this user writes through a read-only folder (root)");
+        return;
+    }
+
+    crate::watcher::handle_rename(&bridge, &sync_root, &source, &target).await;
+    std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(target.exists() && !source.exists(), "the move back was refused");
+    assert_eq!(bridge.db.get_file(report).unwrap().unwrap().status, FileStatus::Local, "nothing is minted at its old place");
+    assert_eq!(bridge.db.list_operations_for_file(report).unwrap().len(), 1, "the move is sent as made");
+}

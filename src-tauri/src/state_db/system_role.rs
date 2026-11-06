@@ -10,18 +10,33 @@ use beebeeb_types::backup::SystemRole;
 
 impl StateDb {
     /// Store `role` for `file_id`. Only a change is written, and a change records a `Modified` entry
-    /// in the File Provider change log, so Finder reads the item again and drops (or regains) its
-    /// delete, rename and move capabilities. Returns whether the stored role changed; an unknown
-    /// `file_id` changes nothing.
+    /// in the File Provider change log for the row and for every row under it, so Finder reads them
+    /// again: the whole tree drops (or regains) its delete, rename, move and add capabilities with
+    /// the root's role (Amendment 6). A Backups folder that existed before the server flagged it (an
+    /// iOS backup) would otherwise keep offering Delete on what is in it. One transaction. Returns
+    /// whether the stored role changed; an unknown `file_id` changes nothing.
     pub fn set_system_role(&self, file_id: &str, role: Option<SystemRole>) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let changed = conn.execute(
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE files SET system_role = ?2 WHERE file_id = ?1 AND system_role IS NOT ?2",
             params![file_id, role.map(SystemRole::as_str)],
         )? > 0;
         if changed {
-            record_file_change_conn(&conn, file_id, FpChangeKind::Modified, None)?;
+            record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
+            let path: String =
+                tx.query_row("SELECT trim(path, '/') FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))?;
+            if !path.is_empty() {
+                let under: Vec<String> = tx
+                    .prepare("SELECT file_id FROM files WHERE substr(path, 1, length(?1) + 1) = ?1 || '/'")?
+                    .query_map(params![path], |r| r.get(0))?
+                    .collect::<Result<_>>()?;
+                for id in under {
+                    record_file_change_conn(&tx, &id, FpChangeKind::Modified, None)?;
+                }
+            }
         }
+        tx.commit()?;
         Ok(changed)
     }
 
@@ -53,15 +68,18 @@ impl StateDb {
 
     /// The rows at or under `path` (the `/`-joined path, `Backups/OtherPC`) whose bytes are on this
     /// device (`local`), as `(file_id, path)`, the item itself first. A protected item a local change
-    /// took away is put back from these (`crate::watcher`). Matched by path prefix, as
-    /// `cloud_only_file_descendants` is (live rows leave `parent_id` empty), with a prefix
-    /// equality that no metacharacter in a name can widen.
+    /// took away is put back from these (`crate::watcher`). Live rows leave `parent_id` empty, so the
+    /// subtree is a path range: every path that starts with `path/` sorts between `path/` and `path0`
+    /// (`'0'` follows `'/'`), which `idx_files_path` serves without reading the whole table, and no
+    /// metacharacter in a name can widen. The item itself may be stored with a leading slash. Names
+    /// compare exactly: Windows names each item back as its placeholder was minted, from these rows.
     pub fn local_rows_at_or_under(&self, path: &str) -> Result<Vec<(String, String)>> {
         let path = path.trim_matches('/');
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT file_id, path FROM files
-             WHERE status = 'local' AND (trim(path, '/') = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/')
+             WHERE status = 'local'
+               AND (path = ?1 OR path = '/' || ?1 OR (path >= ?1 || '/' AND path < ?1 || '0'))
              ORDER BY length(path), path",
         )?;
         let rows = stmt.query_map(params![path], |r| Ok((r.get(0)?, r.get(1)?)))?;

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
+use crate::state_db::FpChangeKind;
 use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_RENAME, own_backup_refusal};
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000d1";
@@ -108,4 +109,31 @@ fn payload_marks_whole_backups_tree_protected() {
     let wire = serde_json::to_value(&payload).unwrap();
     assert_eq!(wire["protected"], false);
     assert!(wire.get("protected_reason").is_none(), "no words on the wire for an ordinary item");
+}
+
+/// The protection of everything under the root starts (and ends) with the root's role, and Finder
+/// re-reads an item's capabilities only when the change log names it: a Backups folder that existed
+/// before the server flagged it (an iOS backup) must not keep offering Delete on what is in it.
+#[test]
+fn flagging_the_root_tells_finder_about_everything_under_it() {
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    row(&db, ROOT_ID, "Backups", ItemKind::Folder);
+    let under = ["0b5ec0de-0000-4000-8000-0000000000d7", "0b5ec0de-0000-4000-8000-0000000000d8"];
+    row(&db, under[0], "Backups/iPhone", ItemKind::Folder);
+    row(&db, under[1], "Backups/iPhone/Camera Roll/IMG_0001.HEIC", ItemKind::File);
+    row(&db, "0b5ec0de-0000-4000-8000-0000000000d9", "BackupsX/c.txt", ItemKind::File);
+    let changed_by = |role| {
+        let (_, anchor) = db.list_file_changes(None).unwrap().unwrap();
+        assert!(db.set_system_role(ROOT_ID, role).unwrap());
+        let (changes, _) = db.list_file_changes(anchor.as_deref()).unwrap().unwrap();
+        assert!(changes.iter().all(|change| change.kind == FpChangeKind::Modified), "{changes:?}");
+        let mut ids: Vec<String> = changes.into_iter().map(|change| change.file_id).collect();
+        ids.sort();
+        ids
+    };
+    let mut want: Vec<String> = [ROOT_ID, under[0], under[1]].iter().map(|id| id.to_string()).collect();
+    want.sort();
+    assert_eq!(changed_by(Some(beebeeb_types::backup::SystemRole::BackupsRoot)), want, "flagged: the root and all under it");
+    assert_eq!(changed_by(None), want, "cleared: the same items, once each");
 }

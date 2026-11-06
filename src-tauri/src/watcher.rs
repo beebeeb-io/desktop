@@ -558,14 +558,22 @@ pub(crate) async fn handle_rename_with(
                     .and_then(|target_rel| crate::backup_protect::protected_destination(bridge.db(), &target_rel))
             })
     {
-        if !source.exists() && target.exists() {
-            if let Err(error) = std::fs::rename(target, source) {
-                // Zero-knowledge: the error kind only, never a path.
-                tracing::warn!(kind = ?error.kind(), "protected item: could not move it back; its placeholder is minted again");
-            }
+        let moved_back = !source.exists()
+            && target.exists()
+            && std::fs::rename(target, source)
+                .inspect_err(|error| {
+                    // Zero-knowledge: the error kind only, never a path.
+                    tracing::warn!(kind = ?error.kind(), "protected item: could not move it back");
+                })
+                .is_ok();
+        if moved_back || !target.exists() {
+            restore_protected(bridge, sync_root, &source_rel, &words);
+            return;
         }
-        restore_protected(bridge, sync_root, &source_rel, &words);
-        return;
+        // The item, bytes and all, stays where it was put and cannot go back: it is sent as made, so the
+        // drive and the server agree. Minting it again at its old place would leave this copy untracked,
+        // to be uploaded as a new item (self-review, 2026-11-06).
+        tracing::warn!("protected item: it could not be put back; the change is sent as made");
     }
     let existing = match bridge.db().get_file_by_path(&source_rel) {
         Ok(Some(entry)) => entry,
