@@ -317,7 +317,7 @@ use super::*;
             "sync_tick_outcome(",
             "refresh_shared_roots(",
             "sweep_",
-            "run_known_folder_mirror(",
+            "backup_scheduler.tick(",
         ] {
             assert!(!arm.contains(denied), "{denied} in the arm");
         }

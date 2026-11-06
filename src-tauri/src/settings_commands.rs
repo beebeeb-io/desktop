@@ -1067,25 +1067,22 @@ pub(super) fn count_items_bounded(root: &std::path::Path) -> Option<u64> {
 
 /// Enable or disable known-folder backup for one folder key.
 ///
-/// **Returns immediately (task 0811).** This IPC only flips `desktop.toml` and,
-/// on disable, purges the folder's pending queue. It NEVER runs the mirror
-/// inline — the engine daemon (runner tick) mirrors enabled folders gradually on
-/// its own loop (`run_known_folder_mirror`), throttled so a first enable of a
-/// large folder (e.g. Music, 5,344 files) can't thunder. Previously this command
-/// `spawn_blocking`'d the WHOLE mirror and `await`ed it — once per checked key,
-/// each re-mirroring ALL enabled folders — which hung the "Setting up…" UI and
-/// crashed the app when the founder enabled five folders at once. Backup still
-/// starts on its own shortly after enable (the next daemon pass), with no IPC
-/// hang.
+/// **Returns immediately (task 0811).** This IPC only flips `desktop.toml`, and
+/// on disable purges the folder's pending queue. It NEVER runs a backup pass
+/// inline: the runner's backup scheduler (LD-0113, `backup::scheduler`) sees the
+/// new folder on its next tick and passes it (each pass queues a bounded batch,
+/// so a first enable of a large folder such as Music, 5,344 files, can't
+/// thunder). A pass reads the folder in place and uploads into
+/// `Backups/<device>/<category>`; nothing is copied into the sync root.
 ///
-/// One-way mirror (source → `<sync_root>\Backup\<device>\<DisplayName>`); the
-/// enumeration scan uploads what it copies in.
+/// **Enable is "Back up again"** for a backup that was turned off because its
+/// folder was deleted elsewhere (rule 11): the stop notice is cleared.
 ///
-/// **Disable purges the queue (founder design, task 0811).** Disabling stops
-/// FUTURE copies AND deletes every still-pending upload op tagged with this
-/// folder's origin key, so uploads stop immediately and nothing resumes on the
-/// next boot. It does NOT delete the already-backed-up vault copies (removing
-/// them would delete the user's cloud content, which we never do silently).
+/// **Disable purges the queue (founder design, task 0811).** Every still-pending
+/// upload op of this folder goes, so uploads stop immediately and nothing
+/// resumes on the next boot; an open server session of one is reaped by the
+/// server's lease sweep (task 1589). It does NOT delete what is already backed
+/// up (that would delete the user's cloud content, which we never do silently).
 ///
 /// Validates `key` against the catalog so a typo from the frontend can't write a
 /// junk entry into the config.
@@ -1100,14 +1097,19 @@ pub(super) async fn set_known_folder_backup(key: String, enabled: bool) -> Resul
         cfg.set_known_folder(&key, enabled);
         (true, cfg.clone())
     })?;
-    crate::backup_protect::refresh_own_backups(); // LD-0113 §6.2: protection follows the switch at once.
+    let db = state_db_for_config(&cfg);
+    // LD-0113 §6.2: protection follows the switch at once. With no state DB there is no drive to protect yet; the
+    // runner's start sets it.
+    if let Ok(Some(db)) = &db {
+        crate::backup_protect::refresh_own_backups(db);
+    }
 
     // On DISABLE, purge this folder's pending backup ops so they stop now and do
     // not resume on restart. Best-effort: a missing/unopenable state DB (no sync
     // root yet, or backup never ran) just means there is nothing to purge — the
     // persisted config flip already prevents future passes from re-enqueuing.
     if !enabled {
-        match state_db_for_config(&cfg) {
+        match &db {
             Ok(Some(db)) => match db.purge_backup_source_ops(&key) {
                 // Zero-knowledge: the key is a stable catalog identifier (not user
                 // content); logging the purged COUNT confirms the cancel worked.
@@ -1127,17 +1129,17 @@ pub(super) async fn set_known_folder_backup(key: String, enabled: bool) -> Resul
         }
     }
 
-    // On ENABLE there is intentionally NOTHING to do here — the daemon's next
-    // throttled mirror pass picks up the new key from `desktop.toml`. Returning
-    // immediately is the whole point of this rewrite.
-    //
-    // NOTE (pin / available-offline): decision 0797 wants backed-up folders kept
-    // available-offline (pinned). Pinning operates on Cloud Files PLACEHOLDERS,
-    // which only exist AFTER the mirrored plain file has been uploaded and
-    // converted to a placeholder — so there's nothing to pin at this point. The
-    // honest path is to pin the vault subtree once it materialises as
-    // placeholders (a follow-up that hooks the existing `set_recursive_pin` /
-    // reconcile flow), not a no-op pin call here. TODO(0797-pin).
+    // On ENABLE the runner's next backup tick picks the folder up from `desktop.toml`; returning immediately is
+    // the whole point of task 0811. LD-0113: a stop notice of this folder (rule 11) is cleared: "Back up again".
+    if enabled {
+        if let Ok(Some(db)) = &db {
+            if let Err(e) = db.clear_backup_stop(&key) {
+                tracing::warn!(folder = %key, error = %e, "known-folder backup enable: stop notice not cleared");
+            }
+        }
+    }
+    // (Decision 0797's pin of the mirrored vault copies, TODO(0797-pin), went with the mirror: LD-0113 copies nothing
+    // into the sync root.)
 
     Ok(())
 }

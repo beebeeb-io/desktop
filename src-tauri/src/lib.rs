@@ -63,12 +63,8 @@ mod ipc_socket;
 #[cfg(unix)]
 mod ipc_write_dedup;
 mod keychain;
-// Known-folder backup ("Manage backup", task 0797 / Model 2). The catalog +
-// pure copy-diff classifier compile everywhere (unit-tested cross-platform);
-// the `SHGetKnownFolderPath` resolver + the source→vault mirror loop are
-// Windows-only (gated inside the module). The runner calls
-// `mirror_enabled_known_folders` on Windows; non-Windows builds only use the
-// catalog for the IPC source-path listing.
+// LD-0113: backups from source (`backup`: the host for core's pass, the scheduler, sources, device identity) and
+// the known-folder catalog with the old mirror's legacy paths (`known_folder`; the mirror itself is gone).
 mod backup;
 mod known_folder;
 #[cfg(target_os = "linux")]

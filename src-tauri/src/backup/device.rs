@@ -78,7 +78,7 @@ fn windows_machine_guid() -> Option<String> {
 }
 
 /// The device's name for the identity rule: today's source, the one the old mirror named `Backups/<device>` from
-/// (`known_folder::mirror_enabled_known_folders` calls `runner::device_name` too).
+/// (the mirror, removed in LD-0113, called `runner::device_name` too).
 fn backup_device_name() -> Option<String> {
     crate::runner::device_name()
 }
@@ -107,7 +107,7 @@ mod tests {
     fn legacy_folder(name: &str) -> DeviceFolderCandidate {
         DeviceFolderCandidate {
             folder_id: uuid::Uuid::parse_str("0193b1a6-0000-7000-8000-00000000a001").unwrap(),
-            // Exactly what the old mirror named it (`known_folder::backup_dest_root`).
+            // Exactly what the old mirror named it (`<sync_root>/Backups/<sanitize_device_segment(name)>`).
             name: crate::known_folder::sanitize_device_segment(name),
             manifest: FolderManifest::Absent,
         }

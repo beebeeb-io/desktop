@@ -106,6 +106,31 @@ pub(crate) fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
     (!excludes.is_empty()).then_some(excludes)
 }
 
+/// The folders this device backs up now, from the settings' switched-on keys, each with where it is read from.
+/// Windows reads the known folder's default location (`known_folder::resolve_known_folder`, OneDrive's Known
+/// Folder Move set aside: Amendment 9 asks the person once per moved folder). The other systems have no sources
+/// before Task D5.
+pub(crate) fn backup_sources(_db: &crate::state_db::StateDb, enabled_keys: &[String]) -> Vec<super::scheduler::BackupSource> {
+    crate::known_folder::KNOWN_FOLDERS
+        .iter()
+        .filter(|folder| enabled_keys.iter().any(|key| key == folder.key))
+        .filter_map(|folder| {
+            let category = beebeeb_types::backup::Category::from_key(folder.key)?;
+            Some(super::scheduler::BackupSource { category, path: known_folder_path(folder.key)? })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn known_folder_path(key: &str) -> Option<PathBuf> {
+    crate::known_folder::resolve_known_folder(key)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn known_folder_path(_key: &str) -> Option<PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

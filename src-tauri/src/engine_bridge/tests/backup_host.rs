@@ -366,3 +366,97 @@ use beebeeb_types::backup::Category;
         assert!(db.put_backup_record_cas("pictures", &missing, &record("found.jpg", 5, other)).unwrap());
         assert_eq!(db.backup_records("pictures").unwrap().len(), 2);
     }
+
+    fn tree_bytes(root: &Path) -> (u64, usize) {
+        let (mut bytes, mut entries) = (0, 0);
+        for entry in walkdir_all(root) {
+            entries += 1;
+            bytes += std::fs::symlink_metadata(&entry).map_or(0, |m| if m.is_file() { m.len() } else { 0 });
+        }
+        (bytes, entries)
+    }
+
+    fn walkdir_all(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// Plan Task D4: a scheduler tick over a 50-file folder queues 50 uploads and adds 0 bytes (and 0 entries) under
+    /// the sync root, which the old mirror filled with copies. The sync root sits inside the backed-up folder here,
+    /// and nothing of it is queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_bytes_added_under_sync_root() {
+        let fx = Fixture::new();
+        fx.host(vec![Category::Documents]);
+        let source = tempfile::tempdir().unwrap();
+        let sync_root = source.path().join("Beebeeb");
+        std::fs::create_dir_all(sync_root.join("Backups").join("GLegion")).unwrap();
+        std::fs::write(sync_root.join("in-the-drive.txt"), b"already synced").unwrap();
+        for i in 0..50 {
+            std::fs::write(source.path().join(format!("doc-{i:02}.txt")), vec![b'x'; 1000 + i]).unwrap();
+        }
+        let before = tree_bytes(&sync_root);
+
+        let mut scheduler = crate::backup::scheduler::BackupScheduler::new();
+        let sources = vec![crate::backup::scheduler::BackupSource {
+            category: Category::Documents,
+            path: source.path().to_path_buf(),
+        }];
+        let report = scheduler.tick(&fx.bridge, &sync_root, sources, std::time::Instant::now()).await.expect("due");
+        fx.server.finish();
+        assert_eq!(report.passes.len(), 1);
+        let pass = report.passes[0].1.as_ref().expect("the pass ran");
+        assert_eq!(pass.queued, 50, "{pass:?}");
+        assert_eq!(count_backup_ops(&fx.bridge), 50, "nothing of the sync root is queued");
+        assert_eq!(tree_bytes(&sync_root), before, "bytes and entries under the sync root");
+    }
+
+    /// Plan Task D4: a file added to a backed-up folder is queued on the first tick once the folder has been quiet
+    /// for one debounce, not at the next 10-minute pass; a tick inside the debounce does not pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_source_file_queued_within_one_debounce() {
+        let fx = Fixture::new();
+        fx.host(vec![Category::Pictures]);
+        let source = tempfile::tempdir().unwrap();
+        let sync_root = tempfile::tempdir().unwrap();
+        let debounce = Duration::from_millis(400);
+        let mut scheduler = crate::backup::scheduler::BackupScheduler::with_debounce(debounce);
+        let sources = || {
+            vec![crate::backup::scheduler::BackupSource { category: Category::Pictures, path: source.path().to_path_buf() }]
+        };
+        assert!(scheduler.tick(&fx.bridge, sync_root.path(), sources(), std::time::Instant::now()).await.is_some());
+        assert_eq!(count_backup_ops(&fx.bridge), 0, "the folder was empty");
+
+        std::fs::write(source.path().join("new.jpg"), b"just taken").unwrap();
+        let written = std::time::Instant::now();
+        let mut early = false;
+        // The watcher reports the write; a tick before the folder is quiet for a debounce does not pass.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if scheduler.tick(&fx.bridge, sync_root.path(), sources(), std::time::Instant::now()).await.is_some() {
+            early = true;
+        }
+        let mut queued_at = None;
+        while written.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if scheduler.tick(&fx.bridge, sync_root.path(), sources(), std::time::Instant::now()).await.is_some() {
+                queued_at = Some(written.elapsed());
+                break;
+            }
+        }
+        fx.server.finish();
+        assert!(!early, "a tick inside the debounce ran a pass");
+        let queued_at = queued_at.expect("no pass within 5 s of the change (the 10-minute pass is far off)");
+        assert!(queued_at >= debounce, "{queued_at:?}");
+        assert!(queued_at < debounce * 4, "queued {queued_at:?} after the change");
+        assert_eq!(count_backup_ops(&fx.bridge), 1);
+    }
