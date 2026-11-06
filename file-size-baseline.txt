@@ -2,7 +2,7 @@
 # Limits: 1,200 lines per source file, 1,500 under tests/. Written by scripts/check-file-sizes.sh --init-baseline
 # (workspace) from 77ca403d7e49 on 2026-11-02. Entries only go down: `check-file-sizes.sh . --update-baseline`
 # lowers or drops them. Never add a path or raise a count here; split the file instead (token plan Phase 4).
-1236 BeebeebFileProvider/FileProviderExtension.swift
+1220 BeebeebFileProvider/FileProviderExtension.swift
 1990 BeebeebFileProviderTests/main.swift
 1641 src-tauri/src/account_dto.rs
 2427 src-tauri/src/api_client.rs

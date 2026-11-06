@@ -39,6 +39,15 @@ struct BeebeebProviderItem: Codable {
     /// surfaced as the "Added by someone else" badge when no sync-state badge
     /// takes the one slot Finder renders.
     let addedBySomeoneElse: Bool
+    /// LD-0113 §6.3: the daemon's words for refusing the delete or trash, the rename and the move of
+    /// a protected item (the Backups root, or this device's own backup of a folder it backs up now).
+    /// Present only on a protected item; core decides them, the daemon sends them.
+    let protectedReason: String?
+    let protectedRenameReason: String?
+    let protectedMoveReason: String?
+
+    /// LD-0113: Finder offers no delete, trash, rename or move for it.
+    var isProtected: Bool { protectedReason != nil }
 
     static let read = 1 << 0
     static let write = 1 << 1
@@ -108,7 +117,10 @@ struct BeebeebProviderItem: Codable {
         contentVersion: String? = nil,
         metadataVersion: String? = nil,
         pinned: Bool = false,
-        addedBySomeoneElse: Bool = false
+        addedBySomeoneElse: Bool = false,
+        protectedReason: String? = nil,
+        protectedRenameReason: String? = nil,
+        protectedMoveReason: String? = nil
     ) {
         self.identifier = identifier
         self.parentIdentifier = parentIdentifier
@@ -126,6 +138,9 @@ struct BeebeebProviderItem: Codable {
         self.metadataVersion = metadataVersion
         self.pinned = pinned
         self.addedBySomeoneElse = addedBySomeoneElse
+        self.protectedReason = protectedReason
+        self.protectedRenameReason = protectedRenameReason
+        self.protectedMoveReason = protectedMoveReason
     }
 
     /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
@@ -295,7 +310,45 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
             // SEMANTICS (trashContainer handling) are task 1698's decision.
             result.insert(.allowsTrashing)
         }
+        if model.isProtected {
+            // LD-0113 §6.3: whatever bits arrived, a protected item is never deleted, trashed, renamed
+            // or moved from Finder. Reading it and adding items into it stay.
+            result.subtract([.allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting])
+        }
         return result
+    }
+}
+
+extension BeebeebProviderItem {
+    /// LD-0113 §6.3, the extension's second line behind the capabilities: the error a delete (no
+    /// `changedFields`) or a modify of a protected item is refused with, carrying the daemon's words
+    /// for that change; `nil` when it may go ahead. `model` is read only when the change is a delete,
+    /// a trash, a rename or a move (a content edit is never intercepted, spec §6.2).
+    static func protectedRefusal(
+        changedFields: NSFileProviderItemFields? = nil,
+        newParent: NSFileProviderItemIdentifier? = nil,
+        model: () -> BeebeebProviderItem?
+    ) -> NSError? {
+        if let changedFields, !changedFields.contains(.filename), !changedFields.contains(.parentItemIdentifier) {
+            return nil
+        }
+        guard let item = model(), let deleteWords = item.protectedReason else {
+            return nil
+        }
+        guard let changedFields else {
+            return NSError(
+                domain: NSFileProviderErrorDomain,
+                code: NSFileProviderError.deletionRejected.rawValue,
+                userInfo: [NSLocalizedDescriptionKey: deleteWords]
+            )
+        }
+        let words: String
+        if changedFields.contains(.parentItemIdentifier) {
+            words = newParent == .trashContainer ? deleteWords : (item.protectedMoveReason ?? deleteWords)
+        } else {
+            words = item.protectedRenameReason ?? deleteWords
+        }
+        return NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [NSLocalizedDescriptionKey: words])
     }
 }
 

@@ -1277,7 +1277,7 @@ check("1698-C5: decodeItem reads the daemon's `pinned` field (absent = false, ol
     let pinned = decoder(base.merging(["pinned": true]) { _, new in new })
     try expect(pinned?.pinned == true, "pinned=true decodes")
 }
-runAddedBySomeoneElseChecks()
+runFeatureChecks()
 // MARK: - 1698 part 2: trash semantics (ruling: full sync)
 
 check("1698-T1: item(for: trashContainer) is answered locally as a system folder (no IPC)") {

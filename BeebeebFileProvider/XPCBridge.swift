@@ -688,7 +688,11 @@ final class XPCBridge {
             contentVersion: dictionary["content_version"] as? String,
             metadataVersion: dictionary["metadata_version"] as? String,
             pinned: (dictionary["pinned"] as? NSNumber)?.boolValue ?? false,
-            addedBySomeoneElse: (dictionary["added_by_someone_else"] as? NSNumber)?.boolValue ?? false
+            addedBySomeoneElse: (dictionary["added_by_someone_else"] as? NSNumber)?.boolValue ?? false,
+            // LD-0113: present only on a protected item (an older daemon sends none).
+            protectedReason: dictionary["protected_reason"] as? String,
+            protectedRenameReason: dictionary["protected_rename_reason"] as? String,
+            protectedMoveReason: dictionary["protected_move_reason"] as? String
         )
     }
 
