@@ -205,13 +205,40 @@ fn join_sources(sources: &[String]) -> String {
 #[cfg(all(target_os = "windows", not(test)))]
 static NOTIFIER: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
-/// The words last shown, and when: one Explorer delete of a folder can refuse many items, and the
-/// same words are not shown again within [`NOTICE_QUIET`].
-#[cfg(target_os = "windows")]
-static LAST_NOTICE: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+/// Which refusals the person is told about. Windows asks the delete callback several times for one
+/// delete (4 times for one `del` of one file on the LD-0113 native rung), and one folder delete can
+/// refuse many items, so: the same words at most once per [`NoticeGate::QUIET`], and no other words
+/// within [`NoticeGate::FLOOR`] of the last notice. Every callback is still answered; only the
+/// notice is held back.
+#[derive(Debug, Default)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) struct NoticeGate {
+    shown: std::collections::HashMap<String, std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl NoticeGate {
+    pub(crate) const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+    pub(crate) const FLOOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Whether `message` is to be shown at `now`; a notice that is due is recorded as shown.
+    pub(crate) fn due(&mut self, message: &str, now: std::time::Instant) -> bool {
+        let since = |at: std::time::Instant| now.saturating_duration_since(at);
+        if self.last.is_some_and(|at| since(at) < Self::FLOOR)
+            || self.shown.get(message).is_some_and(|at| since(*at) < Self::QUIET)
+        {
+            return false;
+        }
+        self.shown.retain(|_, at| since(*at) < Self::QUIET);
+        self.shown.insert(message.to_string(), now);
+        self.last = Some(now);
+        true
+    }
+}
 
 #[cfg(target_os = "windows")]
-const NOTICE_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+static NOTICES: std::sync::Mutex<Option<NoticeGate>> = std::sync::Mutex::new(None);
 
 /// The app the refusal notifications are shown through (the runner, once per process).
 #[cfg(all(target_os = "windows", not(test)))]
@@ -222,25 +249,18 @@ pub(crate) fn set_notifier(app: &tauri::AppHandle) {
 #[cfg(all(target_os = "windows", test))]
 pub(crate) fn set_notifier(_app: &tauri::AppHandle) {}
 
-/// Show a refusal's words to the person. Never blocks the caller (a Cloud Files callback calls it
-/// after it answered Windows): the notification is shown on its own thread. Returns whether the
-/// words are due (not shown within [`NOTICE_QUIET`]).
+/// Show a refusal's words to the person, when [`NoticeGate`] says they are due. Never blocks the
+/// caller (a Cloud Files callback calls it after it answered Windows): the notification is shown on
+/// its own thread. Returns whether the words were due.
 #[cfg(target_os = "windows")]
 pub(crate) fn note_refusal(message: &str) -> bool {
-    let now = std::time::Instant::now();
-    let Ok(mut last) = LAST_NOTICE.lock() else {
-        return false;
-    };
-    if last
-        .as_ref()
-        .is_some_and(|(shown, at)| shown == message && now.duration_since(*at) < NOTICE_QUIET)
-    {
-        return false;
+    let due = NOTICES
+        .lock()
+        .is_ok_and(|mut gate| gate.get_or_insert_with(NoticeGate::default).due(message, std::time::Instant::now()));
+    if due {
+        show_notification(message);
     }
-    *last = Some((message.to_string(), now));
-    drop(last);
-    show_notification(message);
-    true
+    due
 }
 
 /// The toast itself, on its own thread (see [`NOTIFIER`] for why a test build has none).

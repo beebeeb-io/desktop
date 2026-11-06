@@ -158,6 +158,22 @@ fn without_a_flagged_root_nothing_is_protected() {
     }
 }
 
+/// One delete that Windows asks about four times is one notice; other words wait out the floor; the
+/// same words come back once the quiet window has passed.
+#[test]
+fn one_refused_delete_is_one_notice() {
+    let mut gate = NoticeGate::default();
+    let t0 = std::time::Instant::now();
+    let a = own_backup_refusal("C:\\Users\\qa\\Pictures\\a.jpg");
+    let b = own_backup_refusal("C:\\Users\\qa\\Pictures\\b.jpg");
+    let shown: Vec<bool> = (0..4).map(|i| gate.due(&a, t0 + std::time::Duration::from_millis(i * 30))).collect();
+    assert_eq!(shown, vec![true, false, false, false], "four callbacks for one delete, one notice");
+    assert!(!gate.due(&b, t0 + std::time::Duration::from_millis(500)), "other words within the floor wait");
+    assert!(gate.due(&b, t0 + NoticeGate::FLOOR), "and are shown after it");
+    assert!(!gate.due(&a, t0 + NoticeGate::FLOOR * 3), "the same words within the quiet window are not shown again");
+    assert!(gate.due(&a, t0 + NoticeGate::QUIET + NoticeGate::FLOOR), "after it they are");
+}
+
 #[test]
 fn a_rename_is_a_trash_a_move_or_a_rename() {
     let root = std::env::temp_dir().join("ld0113-root");

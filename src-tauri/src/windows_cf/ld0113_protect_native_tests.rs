@@ -28,11 +28,44 @@ struct Fixture {
     own: OwnBackups,
     root: PathBuf,
     answers: Mutex<Vec<(Duration, Option<String>)>>,
+    /// The production gate, one per test (the process-wide one would mix tests that run at once).
+    gate: Mutex<crate::backup_protect::NoticeGate>,
+    /// The notices the person would have been shown.
+    shown: Mutex<Vec<String>>,
 }
 
 impl Fixture {
+    /// Every refused answer's words (Windows may ask several times for one delete).
     fn refusals(&self) -> Vec<String> {
         self.answers.lock().unwrap().iter().filter_map(|(_, words)| words.clone()).collect()
+    }
+
+    fn shown(&self) -> Vec<String> {
+        self.shown.lock().unwrap().clone()
+    }
+
+    /// Every callback Windows made for the change was answered with the refusal `words`, and the
+    /// person is told once (the a80dcd4 rung saw 4 callbacks for one `del`).
+    fn assert_refused_once(&self, words: &str) {
+        let answers: Vec<Option<String>> = self.answers.lock().unwrap().iter().map(|(_, w)| w.clone()).collect();
+        assert!(
+            !answers.is_empty() && answers.iter().all(|w| w.as_deref() == Some(words)),
+            "every answer refused with {words:?}, got {answers:?}"
+        );
+        assert_eq!(self.shown(), vec![words.to_string()], "one notice for one change");
+        println!("ld0113 refused: callbacks={} notices={}", answers.len(), self.shown().len());
+    }
+
+    /// After the answer, as `note_refusal` does after the production callbacks answer.
+    fn record(&self, started: Instant, refusal: Option<String>) {
+        // The answer time is measured up to the ACK, before the notice gate (Windows waits for the ACK only).
+        let answered = started.elapsed();
+        if let Some(words) = refusal.as_deref()
+            && self.gate.lock().unwrap().due(words, Instant::now())
+        {
+            self.shown.lock().unwrap().push(words.to_string());
+        }
+        self.answers.lock().unwrap().push((answered, refusal));
     }
 }
 
@@ -45,7 +78,7 @@ unsafe extern "system" fn test_delete(info: *const CF_CALLBACK_INFO, params: *co
     let params = (!params.is_null()).then(|| unsafe { &*params });
     let refusal = delete_refusal(&fx.db, &fx.own, Some(&fx.root), info, params);
     unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_DELETE, refusal.is_some()) };
-    fx.answers.lock().unwrap().push((started.elapsed(), refusal));
+    fx.record(started, refusal);
 }
 
 unsafe extern "system" fn test_rename(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
@@ -56,7 +89,7 @@ unsafe extern "system" fn test_rename(info: *const CF_CALLBACK_INFO, params: *co
     let params = (!params.is_null()).then(|| unsafe { &*params });
     let refusal = rename_refusal(&fx.db, &fx.own, Some(&fx.root), info, params);
     unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
-    fx.answers.lock().unwrap().push((started.elapsed(), refusal));
+    fx.record(started, refusal);
 }
 
 /// A registered QA root with a flagged Backups root and the fixture its callbacks answer from;
@@ -81,6 +114,8 @@ impl QaRoot {
             own,
             root: root.clone(),
             answers: Mutex::new(Vec::new()),
+            gate: Mutex::new(crate::backup_protect::NoticeGate::default()),
+            shown: Mutex::new(Vec::new()),
         });
         let qa = QaRoot { _dir: dir, root, key: None, fx };
         qa.item(ROOT_ID, "Backups", true);
@@ -104,6 +139,12 @@ impl QaRoot {
                 item_kind: if is_dir { ItemKind::Folder } else { ItemKind::File },
             })
             .unwrap();
+        // `upsert_file` never writes `item_kind` (the contract owns it); the pull writes it through the
+        // contract, so a folder row is a folder for `populate_placeholders`. Without this the a80dcd4 rung
+        // re-created `Backups` as a FILE placeholder and its children failed `ensure_directory` (1 of 3).
+        let mut contract = self.fx.db.get_file_contract_state(id).unwrap().unwrap();
+        contract.item_kind = if is_dir { ItemKind::Folder } else { ItemKind::File };
+        self.fx.db.set_file_contract_state(&contract).unwrap();
         let path = self.path(rel);
         let (parent, name) = (path.parent().unwrap(), path.file_name().unwrap().to_string_lossy().into_owned());
         assert!(placeholders::create_placeholder(parent, id, &name, if is_dir { 0 } else { 5 }, 1_700_000_000, is_dir).unwrap());
@@ -218,7 +259,7 @@ fn recycle_bin_move_of_backups_refused() {
     }
     assert!(!landed, "nothing reached the Recycle Bin");
     assert!(qa.path("Backups/OtherPC").is_dir(), "the root and what is in it stay");
-    assert_eq!(qa.fx.refusals(), vec![MSG_DELETE.to_string()], "a move into the Recycle Bin is a delete");
+    qa.fx.assert_refused_once(MSG_DELETE); // a move into the Recycle Bin is a delete
 }
 
 #[test]
@@ -227,7 +268,7 @@ fn rename_of_backups_refused() {
     qa.connect();
     cmd(&format!("ren {} \"Old backups\"", quoted(&qa.path("Backups"))));
     assert!(qa.path("Backups").is_dir() && !qa.path("Old backups").exists(), "the rename did not happen");
-    assert_eq!(qa.fx.refusals(), vec![MSG_RENAME.to_string()]);
+    qa.fx.assert_refused_once(MSG_RENAME);
 }
 
 #[test]
@@ -239,7 +280,7 @@ fn own_enabled_subtree_delete_refused() {
     qa.connect();
     cmd(&format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
     assert!(qa.path("Backups/GLegion/Pictures/a.jpg").exists(), "the backed-up file stays");
-    assert_eq!(qa.fx.refusals(), vec![own_backup_refusal(r"C:\Users\qa\Pictures\a.jpg")]);
+    qa.fx.assert_refused_once(&own_backup_refusal(r"C:\Users\qa\Pictures\a.jpg"));
 }
 
 #[test]
