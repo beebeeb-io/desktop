@@ -181,14 +181,15 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// LD-0113: a 409 `protected_folder` is a [`ProtectedFolderRefused`] (the Backups root).
     pub async fn trash_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client
             .delete(self.file_url(FileId::new(file_id)))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = protected_folder_response(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -227,8 +228,9 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", self.token))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        // LD-0113: a rename or move of the Backups root is a [`ProtectedFolderRefused`].
+        let resp = protected_folder_response(resp).await?;
         Ok(resp.json().await?)
     }
 

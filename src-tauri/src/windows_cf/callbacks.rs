@@ -728,6 +728,157 @@ pub unsafe extern "system" fn notify_rename_completion_callback(
     push_notify_event(crate::watcher::NotifyEvent::Rename { source, target });
 }
 
+// ── LD-0113 §6.3: the pre-operation delete and rename callbacks ─────────────────
+//
+// Windows waits for our answer before it deletes or renames a placeholder, so every path answers at
+// once, from the state DB alone (no network: Explorer must never wait on the server): STATUS_SUCCESS
+// for everything else, STATUS_CLOUD_FILE_ACCESS_DENIED for the Backups root and this device's own
+// backups (`crate::backup_protect`). This process's own deletes and renames (the engine removing what
+// the server removed, a restore moving a folder back) are never refused. Without a live bridge (a
+// start or a stop in progress) the answer is STATUS_SUCCESS: the completion is dropped then too, so
+// nothing reaches the server, and the next placeholder refresh mints the item again.
+
+/// `NOTIFY_DELETE` (pre-operation): refuse deleting a protected item.
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_delete_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let refusal = super::callback_bridge(info.CallbackContext).and_then(|lease| {
+        // SAFETY: valid for the duration of the callback, like `info`.
+        let params = (!callback_parameters.is_null()).then(|| unsafe { &*callback_parameters });
+        delete_refusal(lease.db(), &crate::backup_protect::own_backups(), super::sync_root().as_deref(), info, params)
+    });
+    // SAFETY: the keys come from this live callback.
+    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_DELETE, refusal.is_some()) };
+    if let Some(words) = refusal {
+        crate::backup_protect::note_refusal(&words);
+    }
+}
+
+/// `NOTIFY_RENAME` (pre-operation): refuse renaming or moving a protected item, the move into the
+/// Recycle Bin (Explorer's Delete) included.
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_rename_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let refusal = super::callback_bridge(info.CallbackContext).and_then(|lease| {
+        // SAFETY: valid for the duration of the callback, like `info`.
+        let params = (!callback_parameters.is_null()).then(|| unsafe { &*callback_parameters });
+        rename_refusal(lease.db(), &crate::backup_protect::own_backups(), super::sync_root().as_deref(), info, params)
+    });
+    // SAFETY: the keys come from this live callback.
+    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
+    if let Some(words) = refusal {
+        crate::backup_protect::note_refusal(&words);
+    }
+}
+
+/// The words a delete of `info`'s item is refused with; `None` allows it (an undelete, this process's
+/// own delete, an item that is not protected, or one the DB does not know).
+pub(super) fn delete_refusal(
+    db: &crate::state_db::StateDb,
+    own: &crate::backup_protect::OwnBackups,
+    sync_root: Option<&std::path::Path>,
+    info: &CF_CALLBACK_INFO,
+    params: Option<&CF_CALLBACK_PARAMETERS>,
+) -> Option<String> {
+    // SAFETY: the delete arm is the union's live arm in a NOTIFY_DELETE callback.
+    let undelete = params.is_some_and(|p| unsafe { p.Anonymous.Delete }.Flags & CF_CALLBACK_DELETE_FLAG_IS_UNDELETE == CF_CALLBACK_DELETE_FLAG_IS_UNDELETE);
+    if undelete || from_this_process(info) {
+        return None;
+    }
+    let rel = callback_rel_path(db, sync_root, info)?;
+    crate::backup_protect::protected_reason(db, own, &rel, beebeeb_core::backup::Mutation::Trash)
+}
+
+/// The words a rename or move of `info`'s item is refused with; `None` allows it.
+pub(super) fn rename_refusal(
+    db: &crate::state_db::StateDb,
+    own: &crate::backup_protect::OwnBackups,
+    sync_root: Option<&std::path::Path>,
+    info: &CF_CALLBACK_INFO,
+    params: Option<&CF_CALLBACK_PARAMETERS>,
+) -> Option<String> {
+    if from_this_process(info) {
+        return None;
+    }
+    let rel = callback_rel_path(db, sync_root, info)?;
+    // SAFETY: the rename arm is the union's live arm in a NOTIFY_RENAME callback.
+    let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
+    let mutation = match (notify_full_path(info), target) {
+        (Some(source), Some(target)) => crate::backup_protect::rename_mutation(&source, &target),
+        _ => beebeeb_core::backup::Mutation::Move,
+    };
+    crate::backup_protect::protected_reason(db, own, &rel, mutation)
+}
+
+/// Whether this process asked (the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`).
+fn from_this_process(info: &CF_CALLBACK_INFO) -> bool {
+    // SAFETY: valid for the duration of the callback, like `info` itself.
+    !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id()
+}
+
+/// The state DB path of the callback's item: through its placeholder identity (the file id it was
+/// minted with) first, so a folder renamed while the app was closed is still known; else its path
+/// under the sync root.
+fn callback_rel_path(db: &crate::state_db::StateDb, sync_root: Option<&std::path::Path>, info: &CF_CALLBACK_INFO) -> Option<String> {
+    if let Some(row) = file_id_of(info).and_then(|id| db.get_file(&id).ok().flatten()) {
+        return Some(row.path);
+    }
+    crate::engine_bridge::relative_db_path(sync_root?, &notify_full_path(info)?)
+}
+
+/// Answer a pre-operation delete or rename: `refused` answers `STATUS_CLOUD_FILE_ACCESS_DENIED`.
+///
+/// SAFETY: `info` must be the live callback's info.
+pub(super) unsafe fn ack_pre_operation(info: &CF_CALLBACK_INFO, op: CF_OPERATION_TYPE, refused: bool) {
+    let status = if refused { windows::Win32::Foundation::STATUS_CLOUD_FILE_ACCESS_DENIED } else { STATUS_SUCCESS };
+    let op_info = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: op,
+        ConnectionKey: info.ConnectionKey,
+        TransferKey: info.TransferKey,
+        CorrelationVector: std::ptr::null::<CORRELATION_VECTOR>(),
+        SyncStatus: std::ptr::null::<CF_SYNC_STATUS>(),
+        RequestKey: info.RequestKey,
+    };
+    // ParamSize is the size of the arm in use, as in `transfer_one`.
+    let arm = if op == CF_OPERATION_TYPE_ACK_DELETE {
+        std::mem::size_of::<CF_OPERATION_PARAMETERS_0_2>()
+    } else {
+        std::mem::size_of::<CF_OPERATION_PARAMETERS_0_3>()
+    };
+    let mut params = CF_OPERATION_PARAMETERS {
+        ParamSize: (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous) + arm) as u32,
+        Anonymous: if op == CF_OPERATION_TYPE_ACK_DELETE {
+            CF_OPERATION_PARAMETERS_0 {
+                AckDelete: CF_OPERATION_PARAMETERS_0_2 { Flags: CF_OPERATION_ACK_DELETE_FLAG_NONE, CompletionStatus: status },
+            }
+        } else {
+            CF_OPERATION_PARAMETERS_0 {
+                AckRename: CF_OPERATION_PARAMETERS_0_3 { Flags: CF_OPERATION_ACK_RENAME_FLAG_NONE, CompletionStatus: status },
+            }
+        },
+    };
+    // SAFETY: both structs live on this frame for the call; CfExecute copies what it needs.
+    if let Err(error) = unsafe { CfExecute(&op_info, &mut params) } {
+        // Zero-knowledge: the result only, never the item.
+        tracing::warn!(hresult = %format!("0x{:08X}", error.code().0 as u32), refused, "CfExecute(ACK) failed");
+    }
+}
+
 /// Join `CF_CALLBACK_INFO.NormalizedPath` with the volume DOS name into an
 /// absolute [`PathBuf`] (e.g. `C:\Users\...\file`). Mirrors [`normalized_path`]
 /// but yields a `PathBuf` (for the upload driver) instead of a NUL-terminated

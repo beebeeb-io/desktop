@@ -82,3 +82,118 @@ fn system_role_follows_the_listing_field_and_the_op() {
     apply_sync_op(&bridge, dir.path(), &op(serde_json::Value::Null), 100, &mut Vec::new()).unwrap();
     assert_eq!(db.system_role(ROOT_ID).unwrap(), None, "the op clears it");
 }
+
+fn flagged_root(bridge: &EngineBridge, status: FileStatus) {
+    bridge
+        .db
+        .upsert_file(&FileEntry {
+            file_id: ROOT_ID.into(),
+            path: "Backups".into(),
+            status,
+            size_bytes: 0,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .unwrap();
+    bridge
+        .db
+        .set_system_role(ROOT_ID, Some(beebeeb_types::backup::SystemRole::BackupsRoot))
+        .unwrap();
+}
+
+fn trash_op(op_id: &str) -> PendingOperation {
+    PendingOperation {
+        op_id: op_id.into(),
+        kind: OperationKind::TrashFile,
+        file_id: Some(ROOT_ID.into()),
+        parent_id: None,
+        target_path: None,
+        metadata_json: Some(serde_json::json!({ "operation": "trash" }).to_string()),
+        payload_path: None,
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 100,
+        updated_at: 100,
+    }
+}
+
+/// Spec §6.3: an op the server refuses with `protected_folder` (one an older client queued, or one
+/// queued before this device knew the flag) is dropped at once, never retried or held, and the row
+/// is live again. Any other 409 keeps today's retry.
+#[tokio::test]
+async fn a_protected_folder_refusal_drops_the_op_and_puts_the_row_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = SyncMockServer::start(vec![
+        (
+            "409 Conflict".into(),
+            serde_json::json!({ "error": "protected_folder", "message": beebeeb_core::backup::MSG_DELETE }),
+        ),
+        ("409 Conflict".into(), serde_json::json!({ "error": "conflict" })),
+    ]);
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [9u8; 32]);
+    flagged_root(&bridge, FileStatus::Trashing);
+    bridge.db.enqueue_operation(&trash_op("op-protected")).unwrap();
+
+    let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+    assert!(outcome.completed_op_ids.is_empty(), "a refusal is not a completion");
+    assert!(outcome.retried_op_ids.is_empty(), "a refusal is never retried");
+    assert!(outcome.paused_op_ids.is_empty(), "a refusal is never held");
+    assert!(bridge.db.get_operation("op-protected").unwrap().is_none(), "the op is dropped");
+    assert_eq!(bridge.db.get_file(ROOT_ID).unwrap().unwrap().status, FileStatus::CloudOnly, "the row is live again");
+
+    // The same 409 status with another body is not a protection refusal: the op stays and retries.
+    bridge.db.set_status(ROOT_ID, FileStatus::Trashing).unwrap();
+    bridge.db.enqueue_operation(&trash_op("op-other-conflict")).unwrap();
+    let outcome = bridge.process_due_operations(dir.path(), 300).await.unwrap();
+    assert_eq!(outcome.retried_op_ids, vec!["op-other-conflict".to_string()]);
+    assert!(bridge.db.get_operation("op-other-conflict").unwrap().is_some());
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2, "one trash request per op");
+}
+
+/// Spec §6.3 (refused after the fact): a local delete of the root that got through queues nothing for
+/// the server and leaves the row live; an ordinary folder's delete still queues its trash.
+#[tokio::test]
+async fn a_delete_of_the_root_that_got_through_queues_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("root");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    flagged_root(&bridge, FileStatus::CloudOnly);
+    bridge
+        .db
+        .upsert_file(&FileEntry {
+            file_id: "0b5ec0de-0000-4000-8000-0000000000a2".into(),
+            path: "Documents".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 0,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: None,
+            item_kind: ItemKind::Folder,
+        })
+        .unwrap();
+
+    crate::watcher::handle_delete(&bridge, &sync_root, &sync_root.join("Backups")).await;
+    assert!(bridge.db.list_operations_for_file(ROOT_ID).unwrap().is_empty(), "nothing is queued for the root");
+    assert_eq!(bridge.db.get_file(ROOT_ID).unwrap().unwrap().status, FileStatus::CloudOnly, "the root stays live");
+
+    crate::watcher::handle_rename(&bridge, &sync_root, &sync_root.join("Backups"), &sync_root.join("Old backups")).await;
+    assert!(bridge.db.list_operations_for_file(ROOT_ID).unwrap().is_empty(), "nor for its rename");
+
+    crate::watcher::handle_delete(&bridge, &sync_root, &sync_root.join("Documents")).await;
+    assert_eq!(
+        bridge.db.list_operations_for_file("0b5ec0de-0000-4000-8000-0000000000a2").unwrap().len(),
+        1,
+        "an ordinary folder's delete still queues its trash"
+    );
+}

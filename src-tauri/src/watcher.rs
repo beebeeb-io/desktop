@@ -432,6 +432,12 @@ pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::
     let Some(rel) = crate::engine_bridge::relative_db_path(sync_root, path) else {
         return;
     };
+    // LD-0113 §6.3 (refused after the fact): the delete of a protected item got through (the app was
+    // not running, or the callback could not answer). Nothing is sent; its placeholder comes back.
+    if let Some(words) = protected(bridge, &rel, beebeeb_core::backup::Mutation::Trash) {
+        restore_protected(bridge, sync_root, &rel, &words);
+        return;
+    }
     // Task 2204 S0.4: a safe save renamed the original away, put the new bytes at its name and
     // now deletes the renamed file. While that rename is unsent, it folds back: the row returns
     // to the vacated path and the new bytes there are an edit of the original. A file that was
@@ -506,6 +512,18 @@ pub(crate) async fn handle_rename(
     let Some(source_rel) = crate::engine_bridge::relative_db_path(sync_root, source) else {
         return;
     };
+    // LD-0113 §6.3 (refused after the fact): a rename or move of a protected item that got through is
+    // not sent; the item goes back to where it was.
+    if let Some(words) = protected(bridge, &source_rel, crate::backup_protect::rename_mutation(source, target)) {
+        if !source.exists() && target.exists() {
+            if let Err(error) = std::fs::rename(target, source) {
+                // Zero-knowledge: the error kind only, never a path.
+                tracing::warn!(kind = ?error.kind(), "protected item: could not move it back; its placeholder is minted again");
+            }
+        }
+        restore_protected(bridge, sync_root, &source_rel, &words);
+        return;
+    }
     let existing = match bridge.db().get_file_by_path(&source_rel) {
         Ok(Some(entry)) => entry,
         // Source not tracked. The rename may have brought an untracked local
@@ -580,6 +598,34 @@ pub(crate) async fn handle_rename(
             tracing::warn!(error = %e, "upload driver: failed to queue server rename/move");
         }
     }
+}
+
+/// LD-0113: the words `rel` is refused `mutation` with, from the state DB and what this device backs
+/// up now (`crate::backup_protect`); `None` when it is not protected.
+fn protected(bridge: &EngineBridge, rel: &str, mutation: beebeeb_core::backup::Mutation) -> Option<String> {
+    crate::backup_protect::protected_reason(bridge.db(), &crate::backup_protect::own_backups(), rel, mutation)
+}
+
+/// LD-0113 §6.3: a protected item a local change took away comes back from the state DB. Its row stays
+/// (a file whose bytes went with it is cloud-only again), its placeholder is minted again where it is
+/// missing, and nothing is queued for the server. The person sees the words.
+fn restore_protected(bridge: &EngineBridge, sync_root: &std::path::Path, rel: &str, words: &str) {
+    if let Ok(Some(row)) = bridge.db().get_file_by_path(rel)
+        && row.status == crate::state_db::FileStatus::Local
+        && crate::engine_bridge::local_file_path_under_sync_root(sync_root, rel).is_ok_and(|path| !path.exists())
+        && let Err(e) = bridge.db().set_status(&row.file_id, crate::state_db::FileStatus::CloudOnly)
+    {
+        tracing::warn!(error = %e, file_id = %row.file_id, "protected item: could not mark it cloud-only");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let restored = crate::windows_cf::restore_placeholders(bridge.db(), sync_root);
+        crate::backup_protect::note_refusal(words);
+        // Zero-knowledge: a count, never the item or the words (they carry a path).
+        tracing::info!(restored, "protected item: a local change was not sent; its placeholder is back");
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = words;
 }
 
 #[cfg(test)]

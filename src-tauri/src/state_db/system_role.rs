@@ -25,7 +25,9 @@ impl StateDb {
     }
 
     /// The stored role of `file_id`; `None` for an ordinary row, an unknown id, or a role string this
-    /// build does not know (it is never treated as a role it is not).
+    /// build does not know (it is never treated as a role it is not). The rule reads the roots through
+    /// [`Self::backups_roots`]; this read is the tests'.
+    #[cfg(test)]
     pub fn system_role(&self, file_id: &str) -> Result<Option<SystemRole>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let raw: Option<String> = conn

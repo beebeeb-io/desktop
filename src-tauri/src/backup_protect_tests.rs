@@ -157,3 +157,12 @@ fn without_a_flagged_root_nothing_is_protected() {
         assert_eq!(protected_reason(&db, &own, path, Mutation::Trash), None, "{path}: the name alone protects nothing");
     }
 }
+
+#[test]
+fn a_rename_is_a_trash_a_move_or_a_rename() {
+    let root = std::env::temp_dir().join("ld0113-root");
+    let recycle = std::env::temp_dir().join("$RECYCLE.BIN").join("S-1-5-21").join("$R1A2B3C");
+    assert_eq!(rename_mutation(&root.join("Backups"), &recycle), Mutation::Trash, "Explorer's Delete");
+    assert_eq!(rename_mutation(&root.join("Backups"), &root.join("Docs").join("Backups")), Mutation::Move);
+    assert_eq!(rename_mutation(&root.join("Backups"), &root.join("Old backups")), Mutation::Rename);
+}

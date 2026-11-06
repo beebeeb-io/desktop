@@ -201,6 +201,10 @@ async fn run(
         emit_status(&app, "error", Some(&sync_root), Some(&error));
         return;
     }
+    // LD-0113 §6.3: what this device backs up now, before the delete and rename callbacks can ask.
+    crate::backup_protect::refresh_own_backups();
+    #[cfg(target_os = "windows")]
+    crate::backup_protect::set_notifier(&app);
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
@@ -657,6 +661,8 @@ async fn run(
                 // root are present when the enumeration scan next walks the tree.
                 // Windows-only (SHGetKnownFolderPath); a no-op when the user has
                 // opted into nothing.
+                // LD-0113 §6.2: a folder turned on or off (or a renamed original) changes what is protected.
+                crate::backup_protect::refresh_own_backups();
                 #[cfg(target_os = "windows")]
                 {
                     if tick_count % KNOWN_FOLDER_MIRROR_EVERY_N_TICKS == 0 {

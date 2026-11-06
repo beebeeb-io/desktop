@@ -1000,6 +1000,16 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
             Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
             Callback: Some(callbacks::notify_file_close_completion_callback),
         },
+        // LD-0113 §6.3: BEFORE a delete or rename, refuse the Backups root and this device's own backups
+        // (answered from the state DB, never the network). Explorer's Delete arrives as a rename.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DELETE,
+            Callback: Some(callbacks::notify_delete_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_RENAME,
+            Callback: Some(callbacks::notify_rename_callback),
+        },
         // Delete trigger: a local delete completed.
         CF_CALLBACK_REGISTRATION {
             Type: CF_CALLBACK_TYPE_NOTIFY_DELETE_COMPLETION,
@@ -1708,6 +1718,11 @@ fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::P
     }
     stats.elapsed_ms = started.elapsed().as_millis() as u64;
     stats
+}
+
+/// LD-0113 §6.3: put back every placeholder a protected row lost (the after-the-fact restore), now.
+pub(crate) fn restore_placeholders(db: &crate::state_db::StateDb, sync_root: &std::path::Path) -> usize {
+    populate_placeholders(db, sync_root).created
 }
 
 pub(crate) mod upload_finalization;

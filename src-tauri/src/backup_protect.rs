@@ -139,6 +139,20 @@ fn own_backup_reason(own: &OwnBackups, below_root: &str) -> Option<String> {
     Some(own_backup_refusal(&display(&original_of(&folder.source_path, below_category))))
 }
 
+/// What a local rename from `source` to `target` (absolute paths) does to the item: Explorer's
+/// "Delete" is a move into the Recycle Bin (`<volume>\$Recycle.Bin\…`), so that is a trash; another
+/// folder is a move; the same folder is a rename.
+pub(crate) fn rename_mutation(source: &Path, target: &Path) -> Mutation {
+    let folder = |path: &Path| path.parent().map(|parent| parent.to_string_lossy().to_lowercase());
+    if target.components().any(|part| part.as_os_str().eq_ignore_ascii_case("$Recycle.Bin")) {
+        Mutation::Trash
+    } else if folder(source) != folder(target) {
+        Mutation::Move
+    } else {
+        Mutation::Rename
+    }
+}
+
 /// `path` with its leading segments equal to `prefix`'s removed (`""` when they are all of it), or
 /// `None` when `path` is not `prefix` or under it. Names compare case-insensitively: Explorer and
 /// Finder treat `Backups` and `backups` as one folder.
