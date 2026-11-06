@@ -105,10 +105,11 @@ pub(crate) fn file_entry_payload_for_db(
     payload
 }
 
-/// LD-0113 §6.3: the Backups root, and this device's own backup of a folder it backs up now, lose
-/// delete, trash, rename and move in Finder, and carry core's words for each, which the extension
-/// refuses with as a second line. Their metadata version says so, so Finder reads the capabilities
-/// again when protection starts or ends.
+/// LD-0113 §6.3, Amendment 6 ("Protect the whole tree"): every item at or under the Backups root loses
+/// delete, trash, rename and move in Finder, and adding items (no New Folder, no drop into the tree),
+/// and carries core's words for each, which the extension refuses with as a second line. Reading and
+/// downloading stay. Their metadata version says so, so Finder reads the capabilities again when
+/// protection starts or ends.
 pub(super) fn apply_protection(
     db: &crate::state_db::StateDb,
     own: &crate::backup_protect::OwnBackups,
@@ -121,7 +122,7 @@ pub(super) fn apply_protection(
         return;
     };
     payload.protected = true;
-    payload.capabilities &= !(CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT);
+    payload.capabilities &= !(CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS);
     payload.protected_reason = Some(delete);
     payload.protected_rename_reason = reason(Mutation::Rename);
     payload.protected_move_reason = reason(Mutation::Move);

@@ -1,11 +1,14 @@
-//! LD-0113 D2 (spec §6.3): the File Provider payload of a protected item (fixture rows only).
+//! LD-0113 D2 (spec §6.3, Amendment 6): the File Provider payload of a protected item (fixture rows
+//! only).
 
 use super::*;
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
-use beebeeb_core::backup::{MSG_DELETE, MSG_MOVE, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_RENAME, own_backup_refusal};
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000d1";
-const TAKEN_AWAY: u32 = CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT;
+/// What a protected item loses: delete, trash, rename and move, and (a folder) adding items, so Finder
+/// offers no New Folder and refuses a drop into it (Amendment 6).
+const TAKEN_AWAY: u32 = CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS;
 
 fn row(db: &StateDb, file_id: &str, path: &str, kind: ItemKind) -> FileEntry {
     let entry = FileEntry {
@@ -30,15 +33,19 @@ fn source() -> std::path::PathBuf {
     std::path::PathBuf::from("/Users/qa/Pictures")
 }
 
+/// Guus, 2026-11-06 17:49, "Protect the whole tree": every item at or under the root is protected in
+/// Finder, with core's words for what it is; an item outside the tree is unchanged.
 #[test]
-fn payload_marks_root_and_enabled_own_subtree_protected() {
+fn payload_marks_whole_backups_tree_protected() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let root = row(&db, ROOT_ID, "Backups", ItemKind::Folder);
     assert!(db.set_system_role(ROOT_ID, Some(beebeeb_types::backup::SystemRole::BackupsRoot)).unwrap());
+    let device_folder = row(&db, "0b5ec0de-0000-4000-8000-0000000000d5", "Backups/GLegion", ItemKind::Folder);
+    let category = row(&db, "0b5ec0de-0000-4000-8000-0000000000d6", "Backups/GLegion/Documents", ItemKind::Folder);
+    let other_device = row(&db, "0b5ec0de-0000-4000-8000-0000000000d3", "Backups/OtherPC/Pictures/b.jpg", ItemKind::File);
     let own_file = row(&db, "0b5ec0de-0000-4000-8000-0000000000d2", "Backups/GLegion/Pictures/a.jpg", ItemKind::File);
-    let off_file = row(&db, "0b5ec0de-0000-4000-8000-0000000000d3", "Backups/GLegion/Documents/b.txt", ItemKind::File);
-    let ordinary = row(&db, "0b5ec0de-0000-4000-8000-0000000000d4", "Docs/c.txt", ItemKind::File);
+    let outside = row(&db, "0b5ec0de-0000-4000-8000-0000000000d4", "Docs", ItemKind::Folder);
     let own = OwnBackups {
         device_folder: Some("GLegion".into()),
         folders: vec![OwnBackupFolder {
@@ -46,13 +53,21 @@ fn payload_marks_root_and_enabled_own_subtree_protected() {
             source_path: source(),
         }],
     };
+    // The item as the builder makes it, then protected with this test's own backups (the process-wide
+    // ones `file_entry_payload_for_db` reads are not this test's).
+    let unprotected = |entry: &FileEntry| file_entry_payload(entry, &db.get_file_contract_state(&entry.file_id).unwrap().unwrap(), "parent");
+    let built = |entry: &FileEntry| {
+        let mut payload = unprotected(entry);
+        apply_protection(&db, &own, entry, &mut payload);
+        payload
+    };
+    assert_ne!(unprotected(&device_folder).capabilities & CAP_ADD_SUBITEMS, 0, "a live folder offers New Folder until protected");
 
     // The root, through the builder Finder's enumeration uses (its protection needs no own backups).
     let root_payload = file_entry_payload_for_db(&db, &root, "NSFileProviderRootContainerItemIdentifier");
     assert!(root_payload.protected, "the Backups root is protected");
-    assert_eq!(root_payload.capabilities & TAKEN_AWAY, 0, "no delete, trash, rename or move");
+    assert_eq!(root_payload.capabilities & TAKEN_AWAY, 0, "no delete, trash, rename, move or New Folder");
     assert_ne!(root_payload.capabilities & CAP_READ, 0, "still readable");
-    assert_ne!(root_payload.capabilities & CAP_ADD_SUBITEMS, 0, "moving things INTO the root stays allowed");
     assert_eq!(root_payload.protected_reason.as_deref(), Some(MSG_DELETE));
     assert_eq!(root_payload.protected_rename_reason.as_deref(), Some(MSG_RENAME));
     assert_eq!(root_payload.protected_move_reason.as_deref(), Some(MSG_MOVE));
@@ -61,9 +76,20 @@ fn payload_marks_root_and_enabled_own_subtree_protected() {
     assert_eq!(wire["protected"], true);
     assert_eq!(wire["protected_reason"], MSG_DELETE);
 
-    // This device's own backup of a folder it backs up now.
-    let mut payload = file_entry_payload_without_contract(&own_file, "parent");
-    apply_protection(&db, &own, &own_file, &mut payload);
+    // A device folder, a category folder and a file under another device's folder: managed in the app.
+    for entry in [&device_folder, &category, &other_device] {
+        let payload = built(entry);
+        assert!(payload.protected, "{}", entry.path);
+        assert_eq!(payload.capabilities & TAKEN_AWAY, 0, "{}", entry.path);
+        assert_ne!(payload.capabilities & CAP_READ, 0, "{} stays readable", entry.path);
+        for reason in [&payload.protected_reason, &payload.protected_rename_reason, &payload.protected_move_reason] {
+            assert_eq!(reason.as_deref(), Some(MSG_MANAGED_IN_APP), "{}", entry.path);
+        }
+        assert!(payload.metadata_version.as_deref().unwrap().ends_with(":protected"), "{}", entry.path);
+    }
+
+    // This device's own backup of a folder it backs up now says where the original is.
+    let payload = built(&own_file);
     let words = own_backup_refusal(&source().join("a.jpg").to_string_lossy());
     assert!(payload.protected);
     assert_eq!(payload.capabilities & TAKEN_AWAY, 0);
@@ -72,17 +98,14 @@ fn payload_marks_root_and_enabled_own_subtree_protected() {
         assert_eq!(reason.as_deref(), Some(words.as_str()));
     }
 
-    // A folder that is not on, and an ordinary file, are unchanged.
-    for entry in [&off_file, &ordinary] {
-        let unprotected = file_entry_payload_without_contract(entry, "parent");
-        let mut payload = unprotected.clone();
-        apply_protection(&db, &own, entry, &mut payload);
-        assert!(!payload.protected, "{}", entry.path);
-        assert_eq!(payload.capabilities, unprotected.capabilities, "{}", entry.path);
-        assert_eq!(payload.metadata_version, unprotected.metadata_version, "{}", entry.path);
-        assert_eq!(payload.protected_reason, None);
-        let wire = serde_json::to_value(&payload).unwrap();
-        assert_eq!(wire["protected"], false);
-        assert!(wire.get("protected_reason").is_none(), "no words on the wire for an ordinary item");
-    }
+    // A folder outside the tree is unchanged, adding items into it included.
+    let payload = built(&outside);
+    assert!(!payload.protected);
+    assert_eq!(payload.capabilities, unprotected(&outside).capabilities);
+    assert_ne!(payload.capabilities & CAP_ADD_SUBITEMS, 0, "a drop into an ordinary folder stays allowed");
+    assert_eq!(payload.metadata_version, unprotected(&outside).metadata_version);
+    assert_eq!(payload.protected_reason, None);
+    let wire = serde_json::to_value(&payload).unwrap();
+    assert_eq!(wire["protected"], false);
+    assert!(wire.get("protected_reason").is_none(), "no words on the wire for an ordinary item");
 }

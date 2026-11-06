@@ -1,8 +1,10 @@
-//! LD-0113 (spec §4.2 rule 7, §6.2): the protection rule, on fixture rows in a scratch state DB.
+//! LD-0113 (spec §4.2 rule 7, §6.2, Amendment 6): the drive's protection rule, on fixture rows in a
+//! scratch state DB.
 
 use super::*;
 use crate::state_db::{FileEntry, FileStatus, ItemKind};
-use beebeeb_core::backup::{MSG_DELETE, MSG_MOVE, MSG_RENAME};
+use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_RENAME, own_backup_refusal};
+use beebeeb_types::backup::SystemRole;
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000b1";
 
@@ -55,6 +57,7 @@ fn the_words_are_the_contracts() {
     assert_eq!(MSG_MOVE, "Backups is a system folder and can't be moved.");
     assert_eq!(MSG_RENAME, "Backups is a system folder and can't be renamed.");
     assert_eq!(own_backup_refusal("C:\\x"), "This is a backup of C:\\x. Change the original instead.");
+    assert_eq!(MSG_MANAGED_IN_APP, "Backups are managed in the Beebeeb app. Open Beebeeb to delete or move a backup.");
 }
 
 #[test]
@@ -72,12 +75,32 @@ fn the_root_refuses_each_mutation_with_cores_words() {
 }
 
 #[test]
-fn children_look_alikes_and_other_folders_are_ordinary() {
+fn look_alikes_and_other_folders_are_ordinary() {
     let (_dir, db) = fixture();
     let own = pictures_on();
-    for path in ["Backups/OtherPC", "Backups/OtherPC/Pictures/a.jpg", "Old/Backups", "Documents", "BackupsX", ""] {
+    for path in ["Old/Backups", "Old/Backups/GLegion/Pictures/a.jpg", "Documents", "BackupsX", "BackupsX/a.txt", ""] {
         for m in ALL {
             assert_eq!(protected_reason(&db, &own, path, m), None, "{path} {m:?}");
+        }
+    }
+}
+
+/// Guus, 2026-11-06 17:49, "Protect the whole tree": in the drive nothing under the root is deleted,
+/// renamed or moved. What is not this device's own active backup has core's managed-in-the-app words.
+#[test]
+fn everything_under_the_root_is_managed_in_the_app() {
+    let (_dir, db) = fixture();
+    let own = pictures_on();
+    for path in [
+        "Backups/OtherPC",
+        "Backups/OtherPC/Pictures/a.jpg",
+        "Backups/GLegion",
+        "Backups/GLegion/Documents/a.txt",
+        "Backups/GLegion2/Pictures/a.jpg",
+        "backups/otherpc",
+    ] {
+        for m in ALL {
+            assert_eq!(protected_reason(&db, &own, path, m).as_deref(), Some(MSG_MANAGED_IN_APP), "{path} {m:?}");
         }
     }
 }
@@ -98,53 +121,42 @@ fn own_enabled_subtree_refuses_with_the_original_path() {
             words(source("Pictures").join("a.jpg")),
             "names compare as the file system does"
         );
-        // A folder that is not on, another device's backup, and a look-alike device folder are ordinary.
-        assert_eq!(protected_reason(&db, &own, "Backups/GLegion/Documents/a.txt", m), None);
-        assert_eq!(protected_reason(&db, &own, "Backups/GLegion2/Pictures/a.jpg", m), None);
-        assert_eq!(protected_reason(&db, &own, "Backups/OtherPC/Pictures/a.jpg", m), None);
     }
 }
 
+/// A turned-off folder's backup is no longer deletable in the drive either (it was an ordinary archive
+/// before Guus's 17:49 ruling); the device folder is not one backup, so it has the managed words too.
 #[test]
-fn own_disabled_subtree_is_an_ordinary_archive() {
+fn a_turned_off_backup_and_the_device_folder_are_managed_in_the_app() {
     let (_dir, db) = fixture();
     let off = OwnBackups {
         device_folder: Some("GLegion".into()),
         folders: Vec::new(),
     };
-    for path in ["Backups/GLegion", "Backups/GLegion/Pictures", "Backups/GLegion/Pictures/a.jpg"] {
+    for own in [&off, &pictures_on()] {
         for m in ALL {
-            assert_eq!(protected_reason(&db, &off, path, m), None, "{path} {m:?}");
+            assert_eq!(protected_reason(&db, own, "Backups/GLegion", m).as_deref(), Some(MSG_MANAGED_IN_APP), "{m:?}");
         }
     }
-    // The root itself stays protected.
+    for path in ["Backups/GLegion/Pictures", "Backups/GLegion/Pictures/a.jpg"] {
+        for m in ALL {
+            assert_eq!(protected_reason(&db, &off, path, m).as_deref(), Some(MSG_MANAGED_IN_APP), "{path} {m:?}");
+        }
+    }
+    // The root keeps its own words.
     assert_eq!(protected_reason(&db, &off, "Backups", Mutation::Trash).as_deref(), Some(MSG_DELETE));
 }
 
+/// Moving an item from elsewhere in the drive INTO the tree is refused too (Amendment 6).
 #[test]
-fn the_device_folder_names_every_folder_it_backs_up() {
+fn a_move_into_the_tree_is_refused() {
     let (_dir, db) = fixture();
-    let mut own = pictures_on();
-    assert_eq!(
-        protected_reason(&db, &own, "Backups/GLegion", Mutation::Trash),
-        Some(own_backup_refusal(&source("Pictures").to_string_lossy()))
-    );
-    own.folders.insert(
-        0,
-        OwnBackupFolder {
-            display_name: "Documents".into(),
-            source_path: source("Documents"),
-        },
-    );
-    assert_eq!(
-        protected_reason(&db, &own, "Backups/GLegion", Mutation::Move),
-        Some(own_backup_refusal(&format!(
-            "{} and {}",
-            source("Documents").to_string_lossy(),
-            source("Pictures").to_string_lossy()
-        )))
-    );
-    assert_eq!(join_sources(&["A".into(), "B".into(), "C".into()]), "A, B and C");
+    for target in ["Backups/report.pdf", "Backups/OtherPC/report.pdf", "backups/GLegion/Pictures/a.jpg"] {
+        assert_eq!(protected_destination(&db, target).as_deref(), Some(MSG_MANAGED_IN_APP), "{target}");
+    }
+    for target in ["Documents/report.pdf", "Old/Backups/report.pdf", "BackupsX/report.pdf", "report.pdf", ""] {
+        assert_eq!(protected_destination(&db, target), None, "{target}");
+    }
 }
 
 #[test]
@@ -155,6 +167,7 @@ fn without_a_flagged_root_nothing_is_protected() {
     let own = pictures_on();
     for path in ["Backups", "Backups/GLegion", "Backups/GLegion/Pictures/a.jpg"] {
         assert_eq!(protected_reason(&db, &own, path, Mutation::Trash), None, "{path}: the name alone protects nothing");
+        assert_eq!(protected_destination(&db, path), None, "{path}");
     }
 }
 

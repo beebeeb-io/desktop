@@ -1,27 +1,28 @@
-//! LD-0113 (spec §6.2, §6.3): what this device refuses to delete, rename or move in its drive.
+//! LD-0113 (spec §6.2, §6.3, Amendment 6): what this device refuses to delete, rename or move in its
+//! drive.
 //!
-//! Two things are protected, and the words for each come from core (`beebeeb_core::backup`):
+//! Guus, 2026-11-06 17:49, "Protect the whole tree": in Explorer (and Finder) nothing at or under the
+//! Backups root (the row the server flagged `backups_root`, `files.system_role`) is trashed, deleted,
+//! renamed or moved, and nothing is moved into it from elsewhere in the drive. Backups are managed in
+//! the app; opening and downloading them stay. The rule and its words come from core
+//! (`beebeeb_core::backup::check_drive_mutation`), in this order:
 //!
-//! - **The Backups root**, the row the server flagged `backups_root` (`files.system_role`). It is
-//!   never trashed, deleted, renamed or moved; its children are ordinary, and so is moving
-//!   something into it (`check_mutation`, spec §4.2 rule 7).
-//! - **This device's own backup of every folder it backs up now**: `Backups/<this device>/<Folder>`
-//!   and everything under it, while that folder is on. A delete there would only come back on the
-//!   next pass, because the original still has the file, so the device says where the original is
-//!   instead (`own_backup_refusal`). The device folder above them is refused too while any of its
-//!   folders is on: moving it to the Recycle Bin is one rename that would take them all along. Once
-//!   a folder is turned off its backup is an ordinary archive again.
+//! - **The root** has its own words (`MSG_DELETE`, `MSG_RENAME`, `MSG_MOVE`).
+//! - **This device's own backup of a folder it backs up now** (`Backups/<this device>/<Folder>` and
+//!   everything under it, while that folder is on) says where the original is (`own_backup_refusal`):
+//!   a change there would only come back on the next pass, because the original still has the file.
+//! - **Anything else under the root** (another device's backups, this device's folder itself, a folder
+//!   that is turned off) has `MSG_MANAGED_IN_APP`, and so does a move into the tree.
 //!
-//! [`protected_reason`] answers from the state DB and the in-memory [`OwnBackups`] only: no network,
-//! no config read, so the Windows delete and rename callbacks can ask it on every delete without
-//! making Explorer wait. The answer is shown to the person, never logged: the own-backup words carry
-//! a path on this device.
+//! [`protected_reason`] and [`protected_destination`] answer from the state DB and the in-memory
+//! [`OwnBackups`] only: no network, no config read, so the Windows delete and rename callbacks can ask
+//! them on every delete without making Explorer wait. The answer is shown to the person, never logged:
+//! the own-backup words carry a path on this device.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use beebeeb_core::backup::{Mutation, check_mutation, own_backup_refusal};
-use beebeeb_types::backup::SystemRole;
+use beebeeb_core::backup::{Mutation, Protected, check_drive_mutation};
 
 use crate::state_db::StateDb;
 
@@ -108,7 +109,26 @@ fn own_backups_for(_enabled_keys: &[String]) -> OwnBackups {
 /// cannot be read answers `None`: Explorer is never held on an error, and a delete that gets through
 /// is restored after the fact ([`crate::watcher::handle_delete`]).
 pub(crate) fn protected_reason(db: &StateDb, own: &OwnBackups, rel_path: &str, mutation: Mutation) -> Option<String> {
-    let rel = rel_path.trim_matches('/');
+    let below_root = below_a_root(db, rel_path.trim_matches('/'))?;
+    let own_source = own_active_source(own, below_root);
+    words(check_drive_mutation(below_root.is_empty(), !below_root.is_empty(), own_source.as_deref(), mutation))
+}
+
+/// Why an item from outside the Backups tree must not be moved to `target_rel` (the state DB path it
+/// would have there); `None` when the target is not in the tree. The item itself is not protected, so
+/// the words are the tree's: core's for an item under the root that is not this device's own backup.
+pub(crate) fn protected_destination(db: &StateDb, target_rel: &str) -> Option<String> {
+    below_a_root(db, target_rel.trim_matches('/'))?;
+    words(check_drive_mutation(false, true, None, Mutation::Move))
+}
+
+fn words(rule: Result<(), Protected>) -> Option<String> {
+    rule.err().map(|protected| protected.message.into_owned())
+}
+
+/// `rel` below the flagged Backups root it is at or under (`""` for the root itself), or `None` when it
+/// is in no Backups tree or the state DB cannot be read.
+fn below_a_root<'a>(db: &StateDb, rel: &'a str) -> Option<&'a str> {
     if rel.is_empty() {
         return None;
     }
@@ -120,31 +140,20 @@ pub(crate) fn protected_reason(db: &StateDb, own: &OwnBackups, rel_path: &str, m
             return None;
         }
     };
-    roots.iter().find_map(|(_, root_path)| {
-        let below_root = strip_segments(rel, root_path.trim_matches('/'))?;
-        if below_root.is_empty() {
-            return check_mutation(Some(SystemRole::BackupsRoot), mutation)
-                .err()
-                .map(|protected| protected.message.to_string());
-        }
-        own_backup_reason(own, below_root)
-    })
+    roots.iter().find_map(|(_, root_path)| strip_segments(rel, root_path.trim_matches('/')))
 }
 
-/// The own-backup words for a path below the root (`GLegion/Pictures/2024/a.jpg`), or `None`.
-fn own_backup_reason(own: &OwnBackups, below_root: &str) -> Option<String> {
-    let device = own.device_folder.as_deref()?;
-    if own.folders.is_empty() {
-        return None;
-    }
-    let below_device = strip_segments(below_root, device)?;
+/// The original of the item at `below_root` (`GLegion/Pictures/2024/a.jpg`) when it is this device's
+/// own backup of a folder it backs up now: that folder's backup and everything under it. The device
+/// folder itself holds several backups, not one, so it has none.
+fn own_active_source(own: &OwnBackups, below_root: &str) -> Option<String> {
+    let below_device = strip_segments(below_root, own.device_folder.as_deref()?)?;
     if below_device.is_empty() {
-        let sources: Vec<String> = own.folders.iter().map(|folder| display(&folder.source_path)).collect();
-        return Some(own_backup_refusal(&join_sources(&sources)));
+        return None;
     }
     let (category, below_category) = below_device.split_once('/').unwrap_or((below_device, ""));
     let folder = own.folders.iter().find(|folder| same_name(&folder.display_name, category))?;
-    Some(own_backup_refusal(&display(&original_of(&folder.source_path, below_category))))
+    Some(display(&original_of(&folder.source_path, below_category)))
 }
 
 /// What a local rename from `source` to `target` (absolute paths) does to the item: Explorer's
@@ -194,15 +203,6 @@ fn original_of(source: &Path, below_category: &str) -> PathBuf {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
-}
-
-/// `A`, `A and B`, `A, B and C`.
-fn join_sources(sources: &[String]) -> String {
-    match sources {
-        [] => String::new(),
-        [only] => only.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    }
 }
 
 /// Where a refusal's words are shown on Windows: Explorer shows only its own "access denied" for a

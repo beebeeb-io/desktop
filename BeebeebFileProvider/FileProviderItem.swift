@@ -40,7 +40,7 @@ struct BeebeebProviderItem: Codable {
     /// takes the one slot Finder renders.
     let addedBySomeoneElse: Bool
     /// LD-0113 §6.3: the daemon's words for refusing the delete or trash, the rename and the move of
-    /// a protected item (the Backups root, or this device's own backup of a folder it backs up now).
+    /// a protected item (anything at or under the Backups root, Amendment 6).
     /// Present only on a protected item; core decides them, the daemon sends them.
     let protectedReason: String?
     let protectedRenameReason: String?
@@ -311,9 +311,10 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
             result.insert(.allowsTrashing)
         }
         if model.isProtected {
-            // LD-0113 §6.3: whatever bits arrived, a protected item is never deleted, trashed, renamed
-            // or moved from Finder. Reading it and adding items into it stay.
-            result.subtract([.allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting])
+            // LD-0113 §6.3, Amendment 6 ("Protect the whole tree"): whatever bits arrived, nothing at or
+            // under Backups is deleted, trashed, renamed or moved from Finder, and nothing is added to
+            // it (no New Folder, no drop into it). Reading and downloading stay.
+            result.subtract([.allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting, .allowsAddingSubItems])
         }
         return result
     }

@@ -26,7 +26,7 @@ private func decoded(_ extra: [String: Any]) -> BeebeebProviderItem? {
 }
 
 func runProtectedItemChecks() {
-    check("LD-0113 D2: a protected item decodes its words and loses delete, trash, rename and move") {
+    check("LD-0113 D2: a protected item decodes its words and loses delete, trash, rename, move and adding items") {
         let item = decoded([
             "protected": true,
             "protected_reason": deleteWords,
@@ -40,7 +40,8 @@ func runProtectedItemChecks() {
             try expect(!capabilities.contains(taken), "a protected item never offers \(taken), got \(capabilities)")
         }
         try expect(capabilities.contains(.allowsReading), "it stays readable")
-        try expect(capabilities.contains(.allowsAddingSubItems), "moving things INTO it stays allowed")
+        // Amendment 6: no New Folder in the tree, and Finder refuses a drop into it.
+        try expect(!capabilities.contains(.allowsAddingSubItems), "nothing is added to a protected folder, got \(capabilities)")
     }
 
     check("LD-0113 D2: an item without the words (an older daemon, an ordinary item) keeps every capability") {
@@ -48,6 +49,7 @@ func runProtectedItemChecks() {
         try expect(item?.isProtected == false, "absent words: not protected")
         let capabilities = FileProviderItem(model: item!).capabilities
         try expect(capabilities.contains(.allowsDeleting) && capabilities.contains(.allowsRenaming), "unchanged, got \(capabilities)")
+        try expect(capabilities.contains(.allowsAddingSubItems), "an ordinary folder takes a drop, got \(capabilities)")
     }
 
     check("LD-0113 D2: the extension refuses a protected item's delete, trash, rename and move with the daemon's words") {
