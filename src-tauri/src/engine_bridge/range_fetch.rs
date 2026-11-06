@@ -33,6 +33,22 @@ pub(crate) enum PrepEnd {
 }
 
 impl EngineBridge {
+    /// Desktop #225 review P1: can `file_id` stream, so W3 may decline its open-time fetch? Only with
+    /// a recorded version to pin (state.db's minted version; a legacy file has none, and is answered
+    /// without a network call) and the direct range route (the transport not forced to the API, and
+    /// the server's discovery offering direct downloads: cached for its trust period, else one call).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) async fn can_stream(&self, file_id: &str) -> bool {
+        let recorded = matches!(self.db.minted_version(file_id), Ok(Some(_)));
+        if !recorded {
+            return false;
+        }
+        let config = crate::config::DesktopConfig::load().ok();
+        let forced_api = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref())) == crate::direct_download::Transport::Api;
+        let offered = !forced_api && self.api.direct_download_offer().await.is_some();
+        crate::cf_range::file_streams(recorded, forced_api, offered)
+    }
+
     /// Prepare a range session for `file_id`, whose placeholder Windows holds at `file_size` bytes
     /// with `on_disk_bytes` of them on disk. Nothing is fetched from storage here: one metadata call.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

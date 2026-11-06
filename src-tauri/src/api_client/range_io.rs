@@ -19,55 +19,59 @@ use beebeeb_transfer::{ApiCall, ApiMethod, ApiReply, DirectIo, SignedUrl, Storag
 use super::ApiClient;
 
 /// One range session's transport: the account's client, the session's meter, and the configured
-/// download limit (`desktop.toml` `download_kbps_limit`, 0 = none), shared by the session's GETs.
+/// download limit (`desktop.toml` `download_kbps_limit`, 0 = none), paced by the process's ONE range
+/// pacer (desktop #225 review P3: every range session together keeps the limit).
 pub(crate) struct RangeIo<'a> {
     api: &'a ApiClient,
     meter: &'a crate::transfer_progress::ReceiveMeter,
-    pace: Pace,
+    kbps_limit: u64,
 }
 
 impl<'a> RangeIo<'a> {
     pub(crate) fn new(api: &'a ApiClient, meter: &'a crate::transfer_progress::ReceiveMeter, kbps_limit: u64) -> Self {
-        RangeIo {
-            api,
-            meter,
-            pace: Pace::new(kbps_limit),
-        }
+        RangeIo { api, meter, kbps_limit }
     }
 
     /// Count `n` body bytes that just arrived, then wait as long as the download limit asks.
     async fn arrived(&self, n: u64) {
         self.meter.read_only(n);
-        if let Some(wait) = self.pace.after(n) {
+        static PACE: Pace = Pace::new();
+        if let Some(wait) = PACE.after(n, self.kbps_limit, Instant::now()) {
             tokio::time::sleep(wait).await;
         }
     }
 }
 
-/// The download limit over all of a session's GETs: after `bytes` in total, at least
-/// `bytes / (kbps × 1000)` seconds have passed since the first one.
+/// The download limit as a token bucket, in the whole-file path's unit (`paced_until_ms`: 1 KB =
+/// 1024 bytes). Desktop #225 review P3: unused credit is capped at [`Pace::BURST`], so a session
+/// that idled (a paused player) does not then download unthrottled until it has "caught up".
 struct Pace {
-    bytes_per_s: u64,
-    state: std::sync::Mutex<Option<(Instant, u64)>>,
+    /// The moment every byte paced so far is paid for.
+    paid_until: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Pace {
-    fn new(kbps: u64) -> Self {
+    /// At most this much unused time is credit.
+    const BURST: Duration = Duration::from_secs(1);
+
+    const fn new() -> Self {
         Pace {
-            bytes_per_s: kbps.saturating_mul(1000),
-            state: std::sync::Mutex::new(None),
+            paid_until: std::sync::Mutex::new(None),
         }
     }
 
-    fn after(&self, n: u64) -> Option<Duration> {
-        if self.bytes_per_s == 0 {
+    /// `n` bytes arrived at `now` under a limit of `kbps` (0: none): how long to wait.
+    fn after(&self, n: u64, kbps: u64, now: Instant) -> Option<Duration> {
+        if kbps == 0 {
             return None;
         }
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (start, total) = state.get_or_insert((Instant::now(), 0));
-        *total += n;
-        let due = Duration::from_secs_f64(*total as f64 / self.bytes_per_s as f64);
-        due.checked_sub(start.elapsed())
+        let cost = Duration::from_secs_f64(n as f64 / (kbps.saturating_mul(1024)) as f64);
+        let mut paid = self.paid_until.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let floor = now.checked_sub(Self::BURST).unwrap_or(now);
+        let from = paid.map_or(now, |at| at.max(floor));
+        let until = from + cost;
+        *paid = Some(until);
+        until.checked_duration_since(now).filter(|d| !d.is_zero())
     }
 }
 
@@ -206,13 +210,29 @@ impl DirectIo for RangeIo<'_> {
 mod tests {
     use super::Pace;
 
-    /// The download limit (`download_kbps_limit`) holds over a session's GETs: 1,000 KB/s means
-    /// 500,000 bytes are due after 0.5 s. Red on the mutant "no pacing" (`after` always `None`).
+    use std::time::{Duration, Instant};
+
+    /// The download limit (`download_kbps_limit`) holds over the range sessions' GETs: 1,000 KB/s
+    /// (1 KB = 1024 bytes, as `paced_until_ms`) means 512,000 bytes are due after 0.5 s. Red on the
+    /// mutant "no pacing" (`after` always `None`).
     #[test]
     fn ld0105_w2_the_download_limit_paces_the_session() {
-        let pace = Pace::new(1_000);
-        let wait = pace.after(500_000).expect("a wait");
-        assert!(wait > std::time::Duration::from_millis(400) && wait <= std::time::Duration::from_millis(500), "{wait:?}");
-        assert_eq!(Pace::new(0).after(1 << 30), None, "no limit, no wait");
+        let pace = Pace::new();
+        let t0 = Instant::now();
+        assert_eq!(pace.after(512_000, 1_000, t0), Some(Duration::from_millis(500)));
+        assert_eq!(Pace::new().after(1 << 30, 0, t0), None, "no limit, no wait");
+    }
+
+    /// Desktop #225 review P3 (range_io.rs:70): after 10 minutes idle the session gets at most one
+    /// second of credit, not ten minutes of it. Red on the mutant "no credit cap" (the window from the
+    /// first GET: the next ~600 MB unpaced).
+    #[test]
+    fn ld0105_p3_an_idle_pacer_keeps_at_most_one_second_of_credit() {
+        let pace = Pace::new();
+        let t0 = Instant::now();
+        let _ = pace.after(512_000, 1_000, t0);
+        let later = t0 + Duration::from_secs(600);
+        assert_eq!(pace.after(1_024_000, 1_000, later), None, "one second of credit");
+        assert_eq!(pace.after(1_024_000, 1_000, later), Some(Duration::from_secs(1)), "and then the limit again");
     }
 }

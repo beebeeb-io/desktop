@@ -366,8 +366,9 @@ fn ld0105_s5_a_requester_that_exits_fails_only_its_own_demands() {
     assert_eq!(book.requester_exited(11).1, false, "no live requester left: the session stops");
 }
 
-/// A piece goes out with a pending request it overlaps, else any pending one, else the latest transfer
-/// key with no request. Red on the mutant "always the latest demand's keys".
+/// A piece goes out with a pending request it overlaps, else any pending one; with none pending, no
+/// keys at all (desktop #225: no transfer on `CF_REQUEST_KEY_DEFAULT`). Red on the mutant "always the
+/// latest demand's keys".
 #[test]
 fn ld0105_w2_a_piece_takes_the_keys_of_the_request_it_serves() {
     let mut book = DemandBook::default();
@@ -383,7 +384,7 @@ fn ld0105_w2_a_piece_takes_the_keys_of_the_request_it_serves() {
     assert_eq!(book.keys_for(8192, 4096), Some(k(6, 60)), "over-served on a pending request");
     book.answer(a, Answer::Met);
     book.fail_all();
-    assert_eq!(book.keys_for(8192, 4096), Some(k(6, REQUEST_KEY_DEFAULT)), "read-ahead: no request");
+    assert_eq!(book.keys_for(8192, 4096), None, "no request pending: no keys");
 }
 
 #[test]
@@ -435,4 +436,214 @@ fn ld0105_a4_a_needs_attention_row_is_checked_at_start_and_on_close_only() {
     assert!(!sweep_opens(true, SweepKind::Tick));
     assert!(sweep_opens(true, SweepKind::ProcessStart) && sweep_opens(true, SweepKind::Close));
     assert!(sweep_opens(false, SweepKind::Tick), "an ordinary poison is emptied at the next tick");
+}
+
+// ── Desktop #225: the independent review's P2s ──────────────────────────────────────────────────
+
+/// Review P2 (cf_range.rs:125, streaming.rs:532), lead ruling: no transfer on
+/// `CF_REQUEST_KEY_DEFAULT`, so nothing between a player's reads or after its close. Red on the mutant
+/// `READ_AHEAD_ON_DEFAULT_KEY = true`.
+#[test]
+fn ld0105_p2_no_piece_goes_out_on_the_default_key() {
+    assert!(!READ_AHEAD_ON_DEFAULT_KEY, "off until a native rung measures it");
+    let mut book = DemandBook::default();
+    let (a, _ra) = book.add(0, 4096, 1, KEYS);
+    assert_eq!(book.keys_for(1 << 20, 4096), Some(KEYS), "over-served under the live request");
+    book.answer(a, Answer::Met);
+    assert_eq!(book.keys_for(1 << 20, 4096), None, "between two reads: no request, no keys");
+    assert_eq!(
+        book.keys_for_with(1 << 20, 4096, true),
+        Some(RequestKeys { transfer_key: 7, request_key: REQUEST_KEY_DEFAULT }),
+        "the off-by-default path is kept for the native rung"
+    );
+}
+
+/// What reached "Windows", with whether the keys belonged to a pending request at that moment.
+type KeyLog = Arc<Mutex<Vec<(RequestKeys, u64, bool)>>>;
+
+struct LiveRecorder {
+    book: Arc<Mutex<DemandBook>>,
+    log: KeyLog,
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl PieceOut for LiveRecorder {
+    fn transfer(&mut self, keys: RequestKeys, offset: u64, plain: &[u8]) -> std::io::Result<()> {
+        let live = self.book.lock().unwrap().is_pending(keys);
+        self.log.lock().unwrap().push((keys, offset, live));
+        self.buf.lock().unwrap()[offset as usize..offset as usize + plain.len()].copy_from_slice(plain);
+        Ok(())
+    }
+}
+
+/// A piece that finds no pending request is withheld: not handed over, the session closed (once),
+/// never promoted. Red on the mutant "transfer it on the default key".
+#[test]
+fn ld0105_p2_a_piece_with_no_pending_request_is_withheld_and_closes_the_session() {
+    let book = Arc::new(Mutex::new(DemandBook::default()));
+    let log: KeyLog = Arc::default();
+    let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = closed.clone();
+    let out = LiveRecorder { book: book.clone(), log: log.clone(), buf: Arc::new(Mutex::new(vec![0u8; 3 * 4096])) };
+    let mut sink = StreamSink::new(book.clone(), out, LogRecords(Arc::default()), 3 * 4096)
+        .on_withheld(move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+    let identity = RangeIdentity { object_version_id: VERSION.into(), format: ChunkFormat::V1Legacy, version_id: None };
+    sink.record_identity(&identity).unwrap();
+    let (a, _ra) = book.lock().unwrap().add(0, 4096, 1, KEYS);
+    sink.transfer(0, &[1u8; 4096]).unwrap();
+    sink.demand_met(a);
+    sink.transfer(4096, &[2u8; 4096]).unwrap();
+    sink.transfer(8192, &[3u8; 4096]).unwrap();
+    assert_eq!(log.lock().unwrap().len(), 1, "only the piece with a pending request went out");
+    assert!(sink.withheld);
+    assert_eq!(closed.load(std::sync::atomic::Ordering::SeqCst), 1, "the session is closed once");
+    assert_eq!(sink.transferred, 4096, "the withheld pieces are not counted as handed over");
+}
+
+/// Review P2 (cf_range.rs:125 + streaming.rs:532) through core's real `range_session`: read-ahead
+/// fetched while no request is pending waits in `GatedIo` and goes out under the NEXT request's keys;
+/// nothing goes out between the two reads, nothing on `CF_REQUEST_KEY_DEFAULT`, and the file still
+/// ends whole. Red on the mutants "`READ_AHEAD_ON_DEFAULT_KEY = true`" (3 default-key transfers
+/// between the reads) and "no gate" (the read-ahead is withheld, the session closes: not whole).
+#[tokio::test]
+async fn ld0105_p2_read_ahead_waits_for_a_pending_request_and_goes_out_under_its_keys() {
+    let fx = fx(4 << 20, 1 << 20);
+    let book = Arc::new(Mutex::new(DemandBook::default()));
+    let io = GatedIo { inner: server(fx.clone(), None), book: book.clone() };
+    let log: KeyLog = Arc::default();
+    let buf = Arc::new(Mutex::new(vec![0u8; fx.plain.len()]));
+    let out = LiveRecorder { book: book.clone(), log: log.clone(), buf: buf.clone() };
+    let mut sink = StreamSink::new(book.clone(), out, LogRecords(Arc::default()), fx.geometry.original_size);
+    let control = RangeControl::new();
+    let first = RequestKeys { transfer_key: 1, request_key: 10 };
+    let second = RequestKeys { transfer_key: 2, request_key: 20 };
+    let (id1, met1) = book.lock().unwrap().add(0, 4096, 1, first);
+    control.demand(id1, 0, 4096);
+    let shared = DirectShared::default();
+    let lessor = RangeLessor::new(1 << 30);
+    let session = range_session(&io, &shared, &lessor, request(&fx, 0, None), FileKey::from_bytes(KEY), &control, &mut sink, &Quiet);
+    let driver = async {
+        assert_eq!(met1.await.ok(), Some(Answer::Met));
+        // Core reads ahead to the whole file; give it time to (not) hand anything over.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let between = log.lock().unwrap().len();
+        let (id2, met2) = book.lock().unwrap().add(2 << 20, 4096, 1, second);
+        control.demand(id2, 2 << 20, 4096);
+        assert_eq!(met2.await.ok(), Some(Answer::Met));
+        between
+    };
+    let (out, between) = tokio::join!(session, driver);
+    let log = log.lock().unwrap().clone();
+    assert!(matches!(out, Ok(RangeOutcome::Whole(_))), "{out:?}");
+    assert_eq!(*buf.lock().unwrap(), fx.plain, "the bytes are the file's");
+    assert!(log.iter().all(|(k, _, live)| *live && k.request_key != REQUEST_KEY_DEFAULT), "{log:?}");
+    assert!(between >= 1 && log[..between].iter().all(|(k, _, _)| *k == first), "first read: {log:?}");
+    assert!(
+        log.len() > between && log[between..].iter().all(|(k, _, _)| *k == second),
+        "the read-ahead waited and went out under the second request's keys: {log:?}"
+    );
+}
+
+/// A closing session's fetched chunks are never released, even with a request pending; an open one's
+/// wait ends when a request is added. Red on the mutant "no closed check".
+#[tokio::test]
+async fn ld0105_p2_a_closing_session_releases_no_fetched_chunk() {
+    let book = Mutex::new(DemandBook::default());
+    let wait = tokio::time::timeout(std::time::Duration::from_millis(50), until_requested(&book)).await;
+    assert!(wait.is_err(), "no request pending: the chunk waits");
+    let book = Arc::new(book);
+    let waiter = {
+        let book = book.clone();
+        tokio::spawn(async move { until_requested(&book).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let _pending = book.lock().unwrap().add(0, 4096, 1, KEYS);
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiter).await.expect("a request wakes it").unwrap();
+    book.lock().unwrap().close();
+    let wait = tokio::time::timeout(std::time::Duration::from_millis(50), until_requested(&book)).await;
+    assert!(wait.is_err(), "closing: never released, even with a request pending");
+}
+
+struct FakeProcess(Arc<std::sync::atomic::AtomicBool>);
+
+impl Exits for FakeProcess {
+    fn exited(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Review P2 (streaming.rs:93), spec S5 / §9: a requester is watched for the session's whole life, so a
+/// player killed BETWEEN two reads (no request pending) still stops the session. Red on the mutant
+/// "only a requester with a pending request is watched".
+#[test]
+fn ld0105_p2_a_killed_requester_between_reads_stops_the_session() {
+    let long = std::time::Duration::from_secs(3600);
+    let (vlc, other) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let mut watched = vec![(10u32, FakeProcess(vlc.clone()))];
+    let mut book = DemandBook::default();
+    let (a, _ra) = book.add(0, 4096, 10, KEYS);
+    book.answer(a, Answer::Met);
+    assert_eq!(session_tick(&mut watched, &mut book, long), Tick::default(), "alive, between reads");
+    vlc.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(session_tick(&mut watched, &mut book, long).end, Some(SessionEnd::RequesterGone), "killed between reads");
+    // Two requesters: the one that exits loses its pending request; the other's keeps the session.
+    let mut watched = vec![(10u32, FakeProcess(Arc::new(true.into()))), (11u32, FakeProcess(other))];
+    let mut book = DemandBook::default();
+    let (mine, _rm) = book.add(0, 4096, 10, KEYS);
+    let (_theirs, _rt) = book.add(4096, 4096, 11, KEYS);
+    let tick = session_tick(&mut watched, &mut book, long);
+    assert_eq!(tick, Tick { cancel: vec![mine], end: None });
+    assert_eq!(watched.len(), 1, "the exited one is no longer watched");
+}
+
+/// Review P2 (streaming.rs:528): a session with no request pending ends after the idle limit
+/// (releasing its lease, ticket and row); one with a pending request never does. Red on the mutant
+/// "no idle end".
+#[test]
+fn ld0105_p2_an_idle_session_ends_after_the_idle_limit() {
+    let mut watched: Vec<(u32, FakeProcess)> = Vec::new();
+    let mut book = DemandBook::default();
+    let (a, _ra) = book.add(0, 4096, 10, KEYS);
+    assert_eq!(session_tick(&mut watched, &mut book, std::time::Duration::ZERO).end, None, "a request is pending");
+    book.answer(a, Answer::Met);
+    assert_eq!(session_tick(&mut watched, &mut book, IDLE_LIMIT).end, None, "just answered");
+    assert_eq!(session_tick(&mut watched, &mut book, std::time::Duration::ZERO).end, Some(SessionEnd::Idle));
+    assert_eq!(IDLE_LIMIT, std::time::Duration::from_secs(30));
+}
+
+/// Review P2 (poison.rs:538), Amendment 4: the poison keeps the key the session took before its first
+/// transfer, and only while the file still has it; a write during the session is needs attention,
+/// never emptied. Red on the mutant "the key read at the failure" (`poison_key` returning `now`).
+#[test]
+fn ld0105_p2_a_write_during_the_session_is_needs_attention_not_emptied() {
+    let (before, written) = (Some((100, 4096)), Some((200, 4096)));
+    let recorded = poison_key(before, written);
+    assert_eq!(recorded, None, "a write during the session: no key");
+    assert_eq!(key_verdict(recorded, written), KeyVerdict::NeedsAttention, "never emptied");
+    assert_eq!(poison_key(before, before), before);
+    assert_eq!(key_verdict(poison_key(before, before), before), KeyVerdict::Empty, "the attempt's own bytes");
+    assert_eq!(poison_key(None, before), None, "no key before the first transfer");
+}
+
+/// Review P2 (cf_range.rs:125) and P3 (streaming.rs:300), lead rulings: "whole" promotes only with
+/// every byte ON DISK (never "sent"), and IN_SYNC comes only after the read-back's hash, with the
+/// content key unchanged. Red on the mutants "trust sent" (no ONDISK check) and "in sync before the
+/// read-back" (`InSync` without a read).
+#[test]
+fn ld0105_p2_promotion_needs_every_byte_on_disk_and_comes_after_the_read_back() {
+    let k = Some((1, 2));
+    let read = |key| Some(("h".to_string(), key));
+    assert_eq!(promotion(false, false, k, read(k)), Promotion::NotWhole, "sent is not on disk");
+    assert_eq!(promotion(true, true, k, read(k)), Promotion::NotWhole, "a withheld piece");
+    assert_eq!(promotion(false, true, k, None), Promotion::NotWhole, "no read-back, no promotion");
+    assert_eq!(promotion(false, true, k, read(Some((3, 2)))), Promotion::Changed);
+    assert_eq!(promotion(false, true, None, read(k)), Promotion::Changed, "no key before: not ours to vouch for");
+    assert_eq!(promotion(false, true, k, read(k)), Promotion::InSync("h".into()));
+    let size = 3 * 4096 + 100;
+    assert!(covers_whole(&[(4096, 2 * 4096 + 100), (0, 4096)], size));
+    assert!(!covers_whole(&[(0, 4096), (8192, 4096 + 100)], size), "a hole");
+    assert!(!covers_whole(&[(0, size - 1)], size), "one byte short");
+    assert!(!covers_whole(&[], size));
 }

@@ -32,8 +32,8 @@
 //! `Ok(0)`. It runs outside any callback: on a close completion of that one file (spawned off the
 //! callback thread), on every engine tick (the sweep), and at the first sweep of the process for
 //! poisons that outlived a restart. A pin that cannot be put back through the handle is set again by
-//! path, and if that fails too it is kept on the row and retried ("Always keep on this device" is
-//! never silently lost).
+//! path, and if that fails too it is recorded in `cf_pin_restore` (its own table, so it outlives the
+//! poison it came from) and every sweep retries it ("Always keep on this device" is never silently lost).
 
 use std::path::Path;
 
@@ -169,8 +169,17 @@ pub(crate) fn change_time(path: &Path) -> Option<i64> {
 #[cfg(test)]
 pub(crate) static FAIL_PIN_RESTORE_BY_HANDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Test seam (desktop #225 review P2): make every pin restore by path fail too, so the pin is what the
+/// `cf_pin_restore` record keeps.
+#[cfg(test)]
+pub(crate) static FAIL_PIN_RESTORE_BY_PATH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `CfSetPinState(pin)` by path, with its own handle (the retry when the step's handle could not).
 fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
+    #[cfg(test)]
+    if FAIL_PIN_RESTORE_BY_PATH.load(std::sync::atomic::Ordering::SeqCst) && pin != CF_PIN_STATE_UNSPECIFIED {
+        return false;
+    }
     let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `wide` is NUL-terminated and outlives the calls; the handle is closed once.
     unsafe {
@@ -214,7 +223,7 @@ pub(crate) fn empty_poisoned_with(path: &Path, check: Check, between: &mut dyn F
 }
 
 /// The empty step; and the pin state that could be put back neither through the step's handle nor by
-/// path (Amendment 4: kept on the row, retried at the next sweep).
+/// path (Amendment 4: recorded in `cf_pin_restore` by the caller, retried at every sweep).
 fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE)) -> (Emptied, Option<CF_PIN_STATE>) {
     let wide: Vec<u16> = path
         .to_string_lossy()
@@ -260,7 +269,7 @@ fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE)) -> 
         let _ = super::placeholders::mark_not_in_sync_path(path);
     }
     // Amendment 4: a pin the handle could not put back is set by path; if that fails too, the caller
-    // keeps it on the row.
+    // records it before it touches the poison row.
     let lost = restore.pin_lost.filter(|pin| !set_pin_by_path(path, *pin));
     (outcome, lost)
 }
@@ -383,8 +392,12 @@ pub(crate) fn sweep_poisoned_with(
                     outcomes.push((row.file_id, Emptied::Gone));
                 }
                 Ok(Some(entry)) => {
-                    let missing = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path)
-                        .is_ok_and(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
+                    let path = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path);
+                    // Review P3 (poison.rs:373): a pin lost before the row needed attention is retried too.
+                    if let Ok(path) = &path {
+                        restore_recorded_pin(db, &row.file_id, path);
+                    }
+                    let missing = path.is_ok_and(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
                     if missing && crate::cf_range::clear_missing(kind) {
                         let _ = db.clear_poison(&row.file_id);
                         outcomes.push((row.file_id, Emptied::Missing));
@@ -415,21 +428,56 @@ pub(crate) fn sweep_poisoned_with(
         let Ok(path) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path) else {
             continue;
         };
-        // A pin an earlier step could not put back: by path first.
-        if let Some(pin) = row.pending_pin
-            && set_pin_by_path(&path, CF_PIN_STATE(pin))
-        {
-            let _ = db.set_poison_pending_pin(&row.file_id, None);
-        }
+        // A pin an earlier step could not put back: by path first, so the step records and restores it.
+        restore_recorded_pin(db, &row.file_id, &path);
         let (outcome, pin_lost) = attempt(&path, Check::Key(row.key), between);
-        if let Some(pin) = pin_lost {
-            tracing::warn!(file_id = %row.file_id, "poison sweep: the pin could not be put back yet; kept to retry");
-            let _ = db.set_poison_pending_pin(&row.file_id, Some(pin.0));
-        }
+        // Review P2 (poison.rs:429): recorded BEFORE `settle` clears the poison row, in a table of its own.
+        keep_lost_pin(db, &row.file_id, pin_lost);
         settle(db, &row.file_id, &outcome, kind);
         outcomes.push((row.file_id, outcome));
     }
+    // The pins of files whose poison has ended (emptied, or discarded) and could not be put back then.
+    if let Ok(pins) = db.pins_to_restore() {
+        for (file_id, _) in pins {
+            if only.is_some_and(|id| id != file_id) || !matches!(db.poison(&file_id), Ok(None)) {
+                continue;
+            }
+            match db.get_file(&file_id) {
+                Ok(Some(entry)) => {
+                    if let Ok(path) = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path) {
+                        restore_recorded_pin(db, &file_id, &path);
+                    }
+                }
+                Ok(None) => {
+                    let _ = db.clear_pin_to_restore(&file_id);
+                }
+                Err(_) => {}
+            }
+        }
+    }
     outcomes
+}
+
+/// A pin `cf_pin_restore` holds for `file_id`: set by path; the record goes once it holds, or once a
+/// plain file (no placeholder) is at `path`. Nothing at the path (a rename the database does not know
+/// yet) keeps it.
+fn restore_recorded_pin(db: &crate::state_db::StateDb, file_id: &str, path: &Path) {
+    let Ok(Some(pin)) = db.pin_to_restore(file_id) else { return };
+    let gone = super::placeholders::platform_view(path) == crate::unknown_check::PlatformView::PlainFile;
+    if gone || set_pin_by_path(path, CF_PIN_STATE(pin)) {
+        let _ = db.clear_pin_to_restore(file_id);
+        tracing::info!(file_id = %file_id, gone, "poison sweep: a pin that could not be put back earlier is settled");
+    }
+}
+
+/// A pin the empty step put back neither through its handle nor by path: recorded to retry.
+fn keep_lost_pin(db: &crate::state_db::StateDb, file_id: &str, pin_lost: Option<CF_PIN_STATE>) {
+    if let Some(pin) = pin_lost {
+        tracing::warn!(file_id = %file_id, "poison sweep: the pin could not be put back yet; kept to retry");
+        if let Err(e) = db.record_pin_to_restore(file_id, pin.0) {
+            tracing::error!(file_id = %file_id, error = %e, "poison sweep: the pin to restore could not be recorded");
+        }
+    }
 }
 
 /// What the database records for one outcome.
@@ -531,11 +579,15 @@ pub(super) fn after_close(file_id: &str) {
 /// identity's bytes there). Not in sync first, then the content key, then the durable record, then
 /// the row's Error status. Every later fetch is refused at once; the empty step runs at the next
 /// close, tick or process start.
-pub(crate) fn poison_now(db: &crate::state_db::StateDb, file_id: &str, path: &Path, reason: &'static str) {
+///
+/// `key_before` is the content key the session took before its first transfer (desktop #225 review
+/// P2): the poison records it only while the file still has it, so a write made during the session is
+/// "needs attention" (never emptied), not the baseline the sweep empties.
+pub(crate) fn poison_now(db: &crate::state_db::StateDb, file_id: &str, path: &Path, reason: &'static str, key_before: Option<(i64, i64)>) {
     if let Err(e) = super::placeholders::mark_not_in_sync_path(path) {
         tracing::warn!(file_id = %file_id, error = %e, "poison: could not mark the placeholder not in sync");
     }
-    let key = content_key(path);
+    let key = crate::cf_range::poison_key(key_before, content_key(path));
     if let Err(e) = db.record_poison(file_id, reason, key, chrono::Utc::now().timestamp()) {
         tracing::error!(file_id = %file_id, error = %e, "poison: could not record it; the fetch failed all the same");
     }
@@ -567,16 +619,23 @@ pub(crate) fn discard_now(
     }
     let entry = db.get_file(file_id).ok().flatten().ok_or(DiscardRefused::Missing)?;
     let path = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path).map_err(|_| DiscardRefused::Missing)?;
+    // A pin lost earlier (review P3, poison.rs:373) is put back first, so the step keeps it.
+    restore_recorded_pin(db, file_id, &path);
     let (outcome, pin_lost) = attempt(&path, Check::Discard, &mut |_, _| {});
-    if let Some(pin) = pin_lost {
-        let _ = db.set_poison_pending_pin(file_id, Some(pin.0));
-    }
+    keep_lost_pin(db, file_id, pin_lost);
     match outcome {
-        Emptied::Emptied | Emptied::Gone => {
+        Emptied::Emptied => {
             settle(db, file_id, &outcome, SweepKind::Close);
             forget_logged(file_id);
             fetch(path);
             Ok(())
+        }
+        // Review P3 (poison.rs:572): a plain file at the path is not ours to replace: the poison ends
+        // (nothing of the attempt is left to guard), nothing is fetched, and the caller is told.
+        Emptied::Gone => {
+            settle(db, file_id, &outcome, SweepKind::Close);
+            forget_logged(file_id);
+            Err(DiscardRefused::Failed("not_a_placeholder"))
         }
         Emptied::Busy => Err(DiscardRefused::InUse),
         Emptied::Missing => Err(DiscardRefused::Missing),

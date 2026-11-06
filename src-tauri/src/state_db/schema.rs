@@ -441,11 +441,18 @@ impl StateDb {
             );",
         )?;
         // LD-0105 Amendment 4: the poison's key is the file's content (`LastWriteTime` + size), not its
-        // metadata; a changed or missing key is "needs attention"; a pin the empty step could not put back.
+        // metadata; a changed or missing key is "needs attention".
         ensure_column(conn, "cf_poison", "write_ticks", "INTEGER")?;
         ensure_column(conn, "cf_poison", "key_size", "INTEGER")?;
         ensure_column(conn, "cf_poison", "needs_attention", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_column(conn, "cf_poison", "pending_pin", "INTEGER")?;
+        // Amendment 4 (desktop #225 review P2): a pin the empty step could put back neither through its
+        // handle nor by path. Its own table, so it outlives the poison row it came from; every sweep retries it.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cf_pin_restore (
+                file_id TEXT PRIMARY KEY,
+                pin INTEGER NOT NULL
+            );",
+        )?;
         // LD-0105 W2 (I3, I4): the rest of a placeholder's identity, recorded before its first transfer.
         ensure_column(conn, "files", "minted_format", "TEXT")?;
         ensure_column(conn, "files", "minted_version_id", "TEXT")?;

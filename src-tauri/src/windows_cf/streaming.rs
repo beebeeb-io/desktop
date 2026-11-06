@@ -5,9 +5,14 @@
 //!
 //! - the session registry, and each session's task (preparation, `range_session`, its end: IN_SYNC
 //!   and agreed content only on "whole" (I6), the S6 poison after a failure that wrote);
-//! - the blocked callback: its demand, the keep-alive, the requester's `OpenProcess(SYNCHRONIZE)`
-//!   handle (spec S5: a dead opener fails its requests and, when no live requester is left, stops
-//!   the session), revocation;
+//! - the blocked callback: its demand, the keep-alive, revocation;
+//! - each session's watch (every 250 ms, for the session's whole life): every requester's
+//!   `OpenProcess(SYNCHRONIZE)` handle (spec S5: a dead opener fails its requests and, when no live
+//!   requester has one left, stops the session, between two reads too), and the idle limit (desktop
+//!   #225: no request for 30 s ends the session, releasing its lease, ticket and row, "not whole");
+//! - the transport gate (`cf_range::GatedIo`): read-ahead reaches Windows only under a pending
+//!   request's own keys, never on `CF_REQUEST_KEY_DEFAULT` and never after a close (lead ruling,
+//!   2026-11-06);
 //! - `CANCEL_FETCH_DATA`, `NOTIFY_FILE_OPEN_COMPLETION` and W3's per-app decline (spec §6.4).
 //!
 //! Plaintext lives in core's `Zeroizing` buffers and goes straight to `CfExecute`; nothing is written
@@ -23,7 +28,7 @@ use windows::Win32::Foundation::{NTSTATUS, STATUS_SUCCESS, WAIT_OBJECT_0};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 
-use crate::cf_range::{AfterSession, Answer, DemandBook, DbRecords, PieceOut, RequestKeys, StreamSink, after_session};
+use crate::cf_range::{AfterSession, Answer, DemandBook, DbRecords, PieceOut, Promotion, RequestKeys, SessionEnd, StreamSink, after_session};
 
 /// The decline's status (spec §6.4, P1b spike (x2): the open returned in 4 ms, then reads were ranges).
 const STATUS_DECLINED: NTSTATUS = NTSTATUS(0xC000_CF1F_u32 as i32);
@@ -35,6 +40,18 @@ struct Session {
     meter: Arc<crate::transfer_progress::ReceiveMeter>,
     /// Set (under the registry lock) when the session ended: a demand can no longer join it.
     ended: std::sync::atomic::AtomicBool,
+    /// Every requester the session served, watched until the session ends (desktop #225 review P2).
+    requesters: Mutex<Vec<(u32, Requester)>>,
+}
+
+impl Session {
+    /// Watch `pid` for the rest of the session (opened once, at its first request).
+    fn watch(&self, pid: u32) {
+        let mut watched = lock(&self.requesters);
+        if !watched.iter().any(|(p, _)| *p == pid) {
+            watched.push((pid, Requester::open(pid)));
+        }
+    }
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<Session>>>> = LazyLock::new(Default::default);
@@ -75,7 +92,7 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
     if !super::registration::progressive_in_effect() || lock(&WHOLE_FILE_ONLY).contains(&fetch.file_id) {
         return Served::WholeFilePath;
     }
-    if declined(fetch, bridge) {
+    if declined(fetch, bridge, handle) {
         tracing::info!(file_id = %fetch.file_id, "open-time whole-file fetch of a listed player declined (W3)");
         // SAFETY: the keys of this live request; 0 bytes with a non-success status (spec §6.4).
         unsafe { decline(fetch) };
@@ -90,7 +107,8 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
             return Served::Done;
         }
     };
-    let process = Requester::open(fetch.requester);
+    // Spec S5: the session's watch fails this requester's demands when it exits (the answer below).
+    session.watch(fetch.requester);
     let met = handle.block_on(async {
         tokio::select! {
             biased;
@@ -99,18 +117,6 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
                 Answer::Failed
             }
             answer = answer => answer.unwrap_or(Answer::Failed),
-            () = process.exited() => {
-                // Spec S5: its requests fail; with no live requester left the session stops.
-                let (ids, others) = lock(&session.book).requester_exited(fetch.requester);
-                for id in ids {
-                    session.control.cancel(id);
-                }
-                if !others {
-                    session.control.requester_gone();
-                    retire(&session);
-                }
-                Answer::Failed
-            }
             never = super::fetch_progress::keep_fetch_alive(fetch.connection, fetch.keys.transfer_key, fetch.file_size, &session.meter) => match never {},
         }
     });
@@ -166,9 +172,11 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
             book: Arc::new(Mutex::new(DemandBook::default())),
             meter: Arc::new(crate::transfer_progress::ReceiveMeter::default()),
             ended: false.into(),
+            requesters: Mutex::new(Vec::new()),
         });
         sessions.insert(fetch.file_id.clone(), session.clone());
         let answer = demand(&session);
+        handle.spawn(watch(session.clone()));
         (session, answer)
     };
     let Some(path) = super::callbacks::db_placeholder_path(bridge, &fetch.file_id) else {
@@ -179,7 +187,15 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
     // Spec S3: no identity with bytes on disk is a mismatch (core checks it); an unreadable view counts
     // as bytes, so it is never trusted.
     let on_disk = bytes_held(&path).min(file_size);
-    match handle.block_on(bridge.range_prep(&fetch.file_id, file_size, on_disk)) {
+    // Review P3 (streaming.rs:182): a sign-out or lock during the preparation's metadata call ends it.
+    let prepared = handle.block_on(async {
+        tokio::select! {
+            biased;
+            _ = super::cancelled(bridge) => Err(crate::engine_bridge::PrepEnd::Failed(anyhow::anyhow!("signed out or locked"))),
+            prep = bridge.range_prep(&fetch.file_id, file_size, on_disk) => prep,
+        }
+    });
+    match prepared {
         Ok(prep) => {
             let (run, file_id, connection) = (session.clone(), fetch.file_id.clone(), fetch.connection);
             handle.spawn(async move { run_session(run, prep, file_id, path, connection, file_size).await });
@@ -216,8 +232,44 @@ fn retire(session: &Arc<Session>) {
     {
         let _sessions = lock(&SESSIONS);
         session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Nothing fetched is released to a closing session (`GatedIo`): no transfer after a close.
+        lock(&session.book).close();
     }
     session.control.close();
+}
+
+/// The session's watch, every 250 ms for its whole life: a requester that exited (spec S5, §9: a
+/// killed player stops the GETs within a chunk, between two reads too), and the idle limit.
+async fn watch(session: Arc<Session>) {
+    let mut every = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        every.tick().await;
+        if session.ended.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let tick = {
+            let mut watched = lock(&session.requesters);
+            let mut book = lock(&session.book);
+            crate::cf_range::session_tick(&mut watched, &mut book, crate::cf_range::IDLE_LIMIT)
+        };
+        for id in tick.cancel {
+            session.control.cancel(id);
+        }
+        match tick.end {
+            Some(SessionEnd::RequesterGone) => {
+                tracing::info!("range session: its requester exited; the session stops");
+                session.control.requester_gone();
+                retire(&session);
+                return;
+            }
+            Some(SessionEnd::Idle) => {
+                tracing::info!("range session: no request for the idle limit; the session ends, not whole");
+                retire(&session);
+                return;
+            }
+            None => {}
+        }
+    }
 }
 
 struct Quiet;
@@ -258,7 +310,8 @@ async fn run_session(
         return;
     };
     let crate::engine_bridge::RangePrep { request, file_key, version_number, kbps_limit, ticket } = prep;
-    // A key taken before the first transfer: the promotion hashes the file only while it is unchanged.
+    // A key taken before the first transfer: the promotion hashes the file only while it is unchanged,
+    // and a poison keeps it only while the file still has it (review P2, poison.rs:538).
     let key_before = super::poison::content_key(&path);
     let board = Arc::new(bridge.transfers().begin(&file_id, crate::transfer_progress::Direction::Down, file_size));
     let records = DbRecords {
@@ -267,50 +320,67 @@ async fn run_session(
         version_number,
     };
     let progress = (board.clone(), session.meter.clone());
-    let mut sink = StreamSink::new(session.book.clone(), CfOut(connection), records, file_size).with_progress(move |done| {
-        progress.0.update(done);
-        progress.1.keep(done.saturating_sub(progress.1.kept()));
-    });
-    let io = crate::api_client::range_io::RangeIo::new(bridge.api(), &session.meter, kbps_limit);
+    let closing = session.clone();
+    let mut sink = StreamSink::new(session.book.clone(), CfOut(connection), records, file_size)
+        .with_progress(move |done| {
+            progress.0.update(done);
+            progress.1.keep(done.saturating_sub(progress.1.kept()));
+        })
+        .on_withheld(move || retire(&closing));
+    let io = crate::cf_range::GatedIo {
+        inner: crate::api_client::range_io::RangeIo::new(bridge.api(), &session.meter, kbps_limit),
+        book: session.book.clone(),
+    };
     let shared = beebeeb_transfer::DirectStore::global().entry(bridge.api().api_base(), "desktop");
     // Revocation (sign-out, lock): the session stops at once and its lease is released.
     let result = tokio::select! {
         result = beebeeb_transfer::range_session(&io, &shared, beebeeb_transfer::RangeLessor::global(), request, file_key, &session.control, &mut sink, &Quiet) => result,
         () = super::cancelled(&bridge) => Ok(beebeeb_transfer::RangeOutcome::Closed(Default::default())),
     };
-    let transferred = sink.transferred;
+    let (transferred, withheld) = (sink.transferred, sink.withheld);
     drop(sink);
     // No demand joins a session that returned (review P1: one joining while the promotion hashes).
     {
         let _sessions = lock(&SESSIONS);
         session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    let unchanged = key_before.is_some() && super::poison::content_key(&path) == key_before;
     match after_session(&result) {
-        // Review P2: IN_SYNC and agreed content only while nothing else wrote to the file.
-        AfterSession::Promote if !unchanged => {
-            tracing::warn!(file_id = %file_id, "streamed whole, but the file changed meanwhile: not marked in sync");
-            let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::Local);
-        }
+        // I6 and the lead's rulings (desktop #225): every byte ON DISK (the range query, never "sent"),
+        // then the read-back's hash under the content-key guard, and only then IN_SYNC and agreed content.
         AfterSession::Promote => {
-            {
-                use std::os::windows::ffi::OsStrExt;
-                let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-                // SAFETY: NUL-terminated, alive for the call.
-                unsafe { super::callbacks::mark_in_sync(&wide) };
-            }
-            let (hash_path, hash_id) = (path.clone(), file_id.clone());
-            // A whole-file read: off the runtime's workers.
-            let hash = tokio::task::spawn_blocking(move || hash_if_unchanged(&hash_path, &hash_id, key_before)).await.ok().flatten();
-            bridge.finish_whole_range(&file_id, file_size, version_number, hash, &ticket);
-            if let Ok(board) = Arc::try_unwrap(board) {
-                board.finish();
+            let (check_path, check_id) = (path.clone(), file_id.clone());
+            // The range query and a whole-file read: off the runtime's workers.
+            let (on_disk_whole, read_back) = tokio::task::spawn_blocking(move || {
+                let whole = !withheld && super::placeholders::on_disk_whole(&check_path, file_size);
+                (whole, whole.then(|| read_back(&check_path, &check_id)).flatten())
+            })
+            .await
+            .unwrap_or((false, None));
+            match crate::cf_range::promotion(withheld, on_disk_whole, key_before, read_back) {
+                Promotion::InSync(hash) => {
+                    use std::os::windows::ffi::OsStrExt;
+                    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+                    // SAFETY: NUL-terminated, alive for the call.
+                    unsafe { super::callbacks::mark_in_sync(&wide) };
+                    bridge.finish_whole_range(&file_id, file_size, version_number, Some(hash), &ticket);
+                    if let Ok(board) = Arc::try_unwrap(board) {
+                        board.finish();
+                    }
+                }
+                Promotion::Changed => {
+                    tracing::warn!(file_id = %file_id, "streamed whole, but the file changed meanwhile: not marked in sync");
+                    let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::Local);
+                }
+                Promotion::NotWhole => {
+                    tracing::warn!(file_id = %file_id, withheld, on_disk_whole, "streamed whole, but not every byte is on disk: not promoted");
+                    let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::CloudOnly);
+                }
             }
         }
         AfterSession::Leave => {
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::CloudOnly);
         }
-        AfterSession::Poison(reason) => super::poison::poison_now(bridge.db(), &file_id, &path, reason),
+        AfterSession::Poison(reason) => super::poison::poison_now(bridge.db(), &file_id, &path, reason, key_before),
         // Nothing written: the whole-file path serves it (and resolves a size, task 0783, from the
         // authenticated length: review P2).
         AfterSession::WholeFilePath | AfterSession::ResolveSize => {
@@ -339,19 +409,24 @@ fn bytes_held(path: &std::path::Path) -> u64 {
 fn end(session: &Arc<Session>, file_id: &str) {
     let mut sessions = lock(&SESSIONS);
     session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
-    lock(&session.book).fail_all();
+    {
+        let mut book = lock(&session.book);
+        book.close();
+        book.fail_all();
+    }
     if sessions.get(file_id).is_some_and(|s| Arc::ptr_eq(s, session)) {
         sessions.remove(file_id);
     }
 }
 
-/// Task 1640 after "whole": the sha256 of the file as it is on disk, read under a no-fetch scope,
-/// and only while its content key is the one it had before the first transfer (a write since, or
-/// during the read, means the bytes are not only ours: no agreed content, the candidate stays).
-fn hash_if_unchanged(path: &std::path::Path, file_id: &str, before: Option<(i64, i64)>) -> Option<String> {
+/// Task 1640 after "whole" (contract Amendment 5: the read-back replaces S9's incremental hash): the
+/// sha256 of the file as it is on disk, read under a no-fetch scope (a hole is a read error, never our
+/// own fetch), and the content key right after the read. `None`: the read failed. The promotion keeps
+/// the hash only while that key is the one taken before the first transfer (a write since, or during
+/// the read, means the bytes are not only ours: no agreed content, no IN_SYNC, the candidate stays).
+fn read_back(path: &std::path::Path, file_id: &str) -> Option<(String, Option<(i64, i64)>)> {
     use sha2::Digest;
     use std::io::Read;
-    let before = before?;
     let _scope = crate::no_fetch_scope::enter(&[file_id]);
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = sha2::Sha256::new();
@@ -364,12 +439,12 @@ fn hash_if_unchanged(path: &std::path::Path, file_id: &str, before: Option<(i64,
         hasher.update(&buf[..n]);
     }
     drop(file);
-    (super::poison::content_key(path) == Some(before)).then(|| hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Some((hasher.finalize().iter().map(|b| format!("{b:02x}")).collect(), super::poison::content_key(path)))
 }
 
 /// W3 (spec §6.4): decline this fetch? Only the first whole-remainder fetch after a listed player's
 /// open of a media file of no excluded origin; never ours, never an explicit hydration.
-fn declined(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>) -> bool {
+fn declined(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>, handle: &tokio::runtime::Handle) -> bool {
     use crate::stream_players as sp;
     if !sp::is_whole_remainder(fetch.offset, fetch.length, fetch.optional_length, fetch.file_size) {
         return false;
@@ -378,12 +453,12 @@ fn declined(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::E
     let Ok(Some(entry)) = bridge.db().get_file(&fetch.file_id) else {
         return false;
     };
-    let shared = bridge
-        .db()
-        .get_file_contract_state(&fetch.file_id)
-        .ok()
-        .flatten()
-        .is_some_and(|c| c.namespace == crate::state_db::Namespace::SharedWithMe);
+    // Review P3 (streaming.rs:384): a database error counts as excluded, as the poison check counts one
+    // as poisoned (a wrong decline costs availability, so it fails toward the whole file).
+    let shared = match bridge.db().get_file_contract_state(&fetch.file_id) {
+        Ok(state) => state.is_some_and(|c| c.namespace == crate::state_db::Namespace::SharedWithMe),
+        Err(_) => true,
+    };
     let image = fetch.image.as_deref().and_then(|nt| sp::dos_image_path(nt, devices()));
     let requester = sp::Requester {
         ours: fetch.requester == std::process::id(),
@@ -397,7 +472,9 @@ fn declined(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::E
         mime: None,
         excluded_origin: shared || bridge.is_request_row(&fetch.file_id),
     };
-    sp::decline_open_fetch(sp::STREAMING_ENABLED, &requester, program_files(), target, first)
+    // Review P1: asked last, only when all else says decline (it may make the discovery call).
+    let can_stream = || handle.block_on(bridge.can_stream(&fetch.file_id));
+    sp::decline_open_fetch(sp::STREAMING_ENABLED, &requester, program_files(), target, first, can_stream)
 }
 
 /// `%ProgramFiles%` and `%ProgramFiles(x86)%`, lower case.
@@ -431,27 +508,23 @@ fn devices() -> &'static [(String, String)] {
     &DEVICES
 }
 
-/// `OpenProcess(SYNCHRONIZE)` on the requester (spec S5), so a reused PID cannot fool the wait.
-struct Requester(Option<windows::Win32::Foundation::HANDLE>);
+/// `OpenProcess(SYNCHRONIZE)` on the requester (spec S5), so a reused PID cannot fool the wait. The
+/// handle's value is kept as a number, so the session (and its watch task) can hold it.
+struct Requester(Option<isize>);
 
 impl Requester {
     fn open(pid: u32) -> Self {
         // SAFETY: a plain open; the handle is closed in Drop.
-        Requester((pid != std::process::id() && pid != 0).then(|| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok()).flatten())
+        let handle = (pid != std::process::id() && pid != 0).then(|| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok()).flatten();
+        Requester(handle.map(|h| h.0 as isize))
     }
+}
 
-    /// Resolves when the process exited; never for our own process or one that could not be opened.
-    async fn exited(&self) {
-        let Some(handle) = self.0 else {
-            return std::future::pending().await;
-        };
-        loop {
-            // SAFETY: the handle is open until Drop.
-            if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
+impl crate::cf_range::Exits for Requester {
+    /// Never for our own process or one that could not be opened.
+    fn exited(&self) -> bool {
+        // SAFETY: the handle is open until Drop.
+        self.0.is_some_and(|h| unsafe { WaitForSingleObject(windows::Win32::Foundation::HANDLE(h as *mut _), 0) } == WAIT_OBJECT_0)
     }
 }
 
@@ -459,7 +532,7 @@ impl Drop for Requester {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
             // SAFETY: opened in `open`, closed once.
-            let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(handle as *mut _)) };
         }
     }
 }
@@ -527,9 +600,10 @@ pub unsafe extern "system" fn notify_file_open_completion_callback(info: *const 
 /// A close completion: a session with no request left (the opener closed its handle) ends.
 pub(super) fn after_close(file_id: &str) {
     let session = lock(&SESSIONS).get(file_id).cloned();
-    // Review P2: never one in preparation or between a player's reads, only one quiet for a while.
+    // Review P2: never one in preparation or between a player's reads, only one quiet for a while
+    // (the watch ends it at the same limit without a close).
     if let Some(session) = session
-        && lock(&session.book).idle_for(Duration::from_secs(30))
+        && lock(&session.book).idle_for(crate::cf_range::IDLE_LIMIT)
     {
         retire(&session);
     }

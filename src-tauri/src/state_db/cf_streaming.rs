@@ -31,9 +31,6 @@ pub struct PoisonRow {
     /// Amendment 4: the key changed (something wrote to the file) or was never read. The file is never
     /// emptied and never cleared silently; only "Discard and download again" ends the row.
     pub needs_attention: bool,
-    /// A pin state (`CF_PIN_STATE` value) the empty step could not put back, by handle or by path: the
-    /// next sweep sets it by path first ("Always keep on this device" is never silently lost).
-    pub pending_pin: Option<i32>,
 }
 
 /// The rest of a placeholder's identity (I3, I4), recorded before its first transfer: the chunk
@@ -106,12 +103,12 @@ impl StateDb {
     pub fn record_poison(&self, file_id: &str, reason: &str, key: Option<(i64, i64)>, now: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "INSERT INTO cf_poison(file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL)
+            "INSERT INTO cf_poison(file_id, poisoned_at, reason, write_ticks, key_size, needs_attention)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)
              ON CONFLICT(file_id) DO UPDATE SET
                poisoned_at = excluded.poisoned_at, reason = excluded.reason,
                write_ticks = excluded.write_ticks, key_size = excluded.key_size,
-               needs_attention = 0, pending_pin = NULL",
+               needs_attention = 0",
             params![file_id, now, reason, key.map(|k| k.0), key.map(|k| k.1)],
         )?;
         Ok(())
@@ -124,10 +121,40 @@ impl StateDb {
         Ok(conn.execute("UPDATE cf_poison SET needs_attention = 1 WHERE file_id = ?1", params![file_id])? == 1)
     }
 
-    /// Amendment 4: a pin the empty step could not put back (`Some`), or one put back since (`None`).
-    pub fn set_poison_pending_pin(&self, file_id: &str, pin: Option<i32>) -> Result<bool> {
+    /// Amendment 4 (desktop #225 review P2): a pin state (`CF_PIN_STATE` value) the empty step could put
+    /// back neither through its handle nor by path. Kept in its own table, so it outlives the poison
+    /// (an empty that succeeded clears the poison right after); every sweep retries it by path until
+    /// it holds ("Always keep on this device" is never silently lost).
+    pub fn record_pin_to_restore(&self, file_id: &str, pin: i32) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.execute("UPDATE cf_poison SET pending_pin = ?2 WHERE file_id = ?1", params![file_id, pin])? == 1)
+        conn.execute(
+            "INSERT INTO cf_pin_restore(file_id, pin) VALUES (?1, ?2)
+             ON CONFLICT(file_id) DO UPDATE SET pin = excluded.pin",
+            params![file_id, pin],
+        )?;
+        Ok(())
+    }
+
+    /// The pin to restore for `file_id`, if one is waiting.
+    pub fn pin_to_restore(&self, file_id: &str) -> Result<Option<i32>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row("SELECT pin FROM cf_pin_restore WHERE file_id = ?1", params![file_id], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// Every pin waiting to be restored, `(file_id, pin)`.
+    pub fn pins_to_restore(&self) -> Result<Vec<(String, i32)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT file_id, pin FROM cf_pin_restore ORDER BY file_id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The pin of `file_id` holds again (or there is no placeholder left to pin). `Ok(true)`: one was waiting.
+    pub fn clear_pin_to_restore(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("DELETE FROM cf_pin_restore WHERE file_id = ?1", params![file_id])? == 1)
     }
 
     /// LD-0105 W2 (I3, I4, task 2180): a range session is about to transfer its first byte into the
@@ -188,7 +215,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn
             .query_row(
-                "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin FROM cf_poison WHERE file_id = ?1",
+                "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention FROM cf_poison WHERE file_id = ?1",
                 params![file_id],
                 poison_row,
             )
@@ -199,7 +226,7 @@ impl StateDb {
     pub fn poisoned(&self) -> Result<Vec<PoisonRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin FROM cf_poison ORDER BY poisoned_at, file_id",
+            "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention FROM cf_poison ORDER BY poisoned_at, file_id",
         )?;
         let rows = stmt.query_map([], poison_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
@@ -229,7 +256,6 @@ fn poison_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PoisonRow> {
         reason: row.get(2)?,
         key: ticks.zip(size),
         needs_attention: row.get::<_, i64>(5)? != 0,
-        pending_pin: row.get(6)?,
     })
 }
 
@@ -349,8 +375,8 @@ mod tests {
         let db = StateDb::open(&path).unwrap();
         let f = db.poison("f").unwrap().expect("still poisoned after a restart");
         assert_eq!(
-            (f.reason.as_str(), f.key, f.needs_attention, f.pending_pin),
-            ("corrupt", Some((133_000_000_000_000_000, 42)), false, None)
+            (f.reason.as_str(), f.key, f.needs_attention),
+            ("corrupt", Some((133_000_000_000_000_000, 42)), false)
         );
         assert_eq!(
             db.poisoned()
@@ -370,18 +396,40 @@ mod tests {
     }
 
     #[test]
-    fn ld0105_a4_needs_attention_and_a_pending_pin_are_durable_and_a_new_poison_starts_clean() {
+    fn ld0105_a4_needs_attention_is_durable_and_a_new_poison_starts_clean() {
         let (_dir, db) = db_with("f", Some(A));
         db.record_poison("f", "corrupt", Some((1, 2)), 1).unwrap();
         assert!(db.mark_poison_needs_attention("f").unwrap());
-        assert!(db.set_poison_pending_pin("f", Some(1)).unwrap());
-        let row = db.poison("f").unwrap().unwrap();
-        assert_eq!((row.needs_attention, row.pending_pin), (true, Some(1)));
+        assert!(db.poison("f").unwrap().unwrap().needs_attention);
         // A new failure of the same file is a new attempt's bytes: the sweep may empty it again.
         db.record_poison("f", "identity_mismatch", Some((3, 4)), 2).unwrap();
         let row = db.poison("f").unwrap().unwrap();
-        assert_eq!((row.key, row.needs_attention, row.pending_pin), (Some((3, 4)), false, None));
+        assert_eq!((row.key, row.needs_attention), (Some((3, 4)), false));
         assert!(!db.mark_poison_needs_attention("nobody").unwrap());
+    }
+
+    /// Desktop #225 review P2 (poison.rs:429): a pin the empty step could not put back is kept after
+    /// the empty succeeded and its poison was cleared, across a restart, until it holds. Red on the
+    /// mutant "clearing the poison clears the pin with it" (the old `pending_pin` on the poison row).
+    #[test]
+    fn ld0105_p2_a_pin_to_restore_outlives_the_poison_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let db = StateDb::open(&path).unwrap();
+            db.record_poison("f", "corrupt", Some((1, 2)), 1).unwrap();
+            db.record_pin_to_restore("f", 1).unwrap();
+            assert!(db.clear_poison("f").unwrap(), "the empty step succeeded");
+        }
+        let db = StateDb::open(&path).unwrap();
+        assert_eq!(db.poison("f").unwrap(), None);
+        assert_eq!(db.pin_to_restore("f").unwrap(), Some(1), "the pin is still to restore");
+        assert_eq!(db.pins_to_restore().unwrap(), vec![("f".to_string(), 1)]);
+        db.record_poison("f", "corrupt", Some((3, 4)), 2).unwrap();
+        assert_eq!(db.pin_to_restore("f").unwrap(), Some(1), "a new poison does not drop it either");
+        assert!(db.clear_pin_to_restore("f").unwrap());
+        assert!(!db.clear_pin_to_restore("f").unwrap());
+        assert_eq!(db.pins_to_restore().unwrap(), Vec::<(String, i32)>::new());
     }
 
     #[test]

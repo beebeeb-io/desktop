@@ -1479,6 +1479,17 @@ fn mark_not_in_sync_without_data_access(path: &std::path::Path) -> anyhow::Resul
     Ok(())
 }
 
+/// LD-0105 (desktop #225 review P2): is every byte of the placeholder at `path` on disk (ONDISK covers
+/// `[0, size)`)? The on-disk range query, through an attribute-only handle opened as the reparse point
+/// (nothing is fetched). Any error is "no": a range session that ended whole is promoted only on what
+/// the platform holds, never on what was sent.
+pub fn on_disk_whole(path: &std::path::Path, size: u64) -> bool {
+    open_for_state(path)
+        .ok()
+        .and_then(|file| on_disk_ranges(&file, size).ok())
+        .is_some_and(|ranges| crate::cf_range::covers_whole(&ranges, size))
+}
+
 /// Task 2191 (D11): the byte ranges of `file` that are on this PC, `(offset, length)`, for a
 /// sign-out copy of a partly downloaded placeholder (nothing else can be read: the engine is
 /// stopped, so nothing is fetched).

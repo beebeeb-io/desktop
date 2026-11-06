@@ -409,7 +409,8 @@ fn qa_db(dir: &Path, rows: &[(&str, &str)]) -> crate::state_db::StateDb {
 /// Poison `name` as the W2 fetch path does (`poison_now`): not in sync, then the content key, then the
 /// record.
 fn poison(db: &crate::state_db::StateDb, qa: &QaRoot, id: &str, name: &str) {
-    crate::windows_cf::poison::poison_now(db, id, &qa.path(name), "corrupt");
+    let key_before = crate::windows_cf::poison::content_key(&qa.path(name));
+    crate::windows_cf::poison::poison_now(db, id, &qa.path(name), "corrupt", key_before);
     assert!(db.poison(id).unwrap().unwrap().key.is_some(), "the key of {name} is readable");
 }
 
@@ -800,4 +801,82 @@ fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
     println!("ld0105-s6-native: unreadable row: outcomes {outcomes:?}");
     assert!(outcomes.is_empty(), "nothing is emptied or cleared: {outcomes:?}");
     assert!(db.poison("qa-unreadable").unwrap().is_some(), "the poison stays");
+}
+
+// ── Desktop #225: the independent review's P2s, natively ────────────────────────────────────────
+
+/// Review P2 (poison.rs:429): a pin the empty step can put back neither through its handle nor by path
+/// is recorded apart from the poison, so the successful empty that clears the poison does not drop it,
+/// and the next sweep puts it back. Red on the mutant "the lost pin is not recorded" (the pin is gone).
+#[test]
+fn ld0105_p2_native_a_pin_lost_both_ways_outlives_the_empty_and_the_next_sweep_restores_it() {
+    use crate::windows_cf::poison::{Emptied, FAIL_PIN_RESTORE_BY_HANDLE, FAIL_PIN_RESTORE_BY_PATH, SweepKind, sweep_poisoned};
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let key = poisoned_whole_pinned(&qa, "lost-pin.bin");
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-lost-pin", "lost-pin.bin")]);
+    db.record_poison("qa-lost-pin", "corrupt", key, 1).unwrap();
+    FAIL_PIN_RESTORE_BY_HANDLE.store(true, SeqCst);
+    FAIL_PIN_RESTORE_BY_PATH.store(true, SeqCst);
+    let first = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    FAIL_PIN_RESTORE_BY_HANDLE.store(false, SeqCst);
+    FAIL_PIN_RESTORE_BY_PATH.store(false, SeqCst);
+    let lost = (census_of(&qa.path("lost-pin.bin")), db.poison("qa-lost-pin").unwrap(), db.pin_to_restore("qa-lost-pin").unwrap());
+    let second = sweep_poisoned(&db, &qa.root, SweepKind::Tick);
+    let restored = census_of(&qa.path("lost-pin.bin"));
+    println!("ld0105-p2-native: lost pin: first {first:?} then {lost:?}; second {second:?}, census {restored:?}");
+    assert_eq!(first, vec![("qa-lost-pin".to_string(), Emptied::Emptied)]);
+    assert_eq!(lost.0, (OnDisk::Nothing, true, false), "emptied, the pin not back yet");
+    assert_eq!(lost.1, None, "the poison is cleared");
+    assert_eq!(lost.2, Some(CF_PIN_STATE_PINNED.0), "but the pin is kept to restore");
+    assert_eq!(restored.2, true, "the next sweep pinned it again");
+    assert_eq!(db.pin_to_restore("qa-lost-pin").unwrap(), None, "and the record ends");
+}
+
+/// Review P2 (cf_range.rs:125): the promotion's ONDISK check is the on-disk range query through an
+/// attribute-only handle (nothing fetched). Whole on disk: yes; partly or cloud-only: no. Red on the
+/// mutant "trust sent" (`on_disk_whole` returning `true`).
+#[test]
+fn ld0105_p2_native_the_promotion_reads_ondisk_through_an_attribute_handle() {
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(serve_first_64k);
+    let names = mint_five(&qa);
+    let size = 1u64 << 20;
+    let seen: Vec<(String, bool)> = names.iter().map(|n| (n.to_string(), placeholders::on_disk_whole(&qa.path(n), size))).collect();
+    println!("ld0105-p2-native: on_disk_whole {seen:?}, census {:?}", census(&qa, &names));
+    let whole = |n: &str| seen.iter().find(|(name, _)| name == n).unwrap().1;
+    assert!(whole("local.bin") && whole("local-pinned.bin"), "wholly on disk: {seen:?}");
+    assert!(!whole("partial.bin"), "64 KiB of 1 MiB: {seen:?}");
+    assert!(!whole("cloud.bin"), "nothing on disk: {seen:?}");
+    assert_eq!(census_of(&qa.path("cloud.bin")).0, OnDisk::Nothing, "and the query fetched nothing");
+}
+
+/// Review P2 (poison.rs:538): a write made during the session (after the session's key, before the
+/// failure) is "needs attention": the poison records no key, and the sweep keeps the file as it is.
+/// Red on the mutant "the key read at the failure" (the sweep empties the person's write).
+#[test]
+fn ld0105_p2_native_a_write_during_the_session_is_kept_as_needs_attention() {
+    use crate::windows_cf::poison::{Emptied, SweepKind, content_key, poison_now, sweep_poisoned};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let _ = poisoned_whole_pinned(&qa, "written.bin");
+    let path = qa.path("written.bin");
+    let key_before = content_key(&path);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"mine"))
+        .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-written", "written.bin")]);
+    poison_now(&db, "qa-written", &path, "corrupt", key_before);
+    let recorded = db.poison("qa-written").unwrap().unwrap().key;
+    let outcome = sweep_poisoned(&db, &qa.root, SweepKind::Close);
+    println!("ld0105-p2-native: write during the session: key {key_before:?} -> recorded {recorded:?}, sweep {outcome:?}");
+    assert_eq!(recorded, None, "the key moved during the session: none recorded");
+    assert_eq!(outcome, vec![("qa-written".to_string(), Emptied::NeedsAttention)]);
+    assert_eq!(census_of(&path).0, OnDisk::Wholly, "the person's write is kept");
 }
