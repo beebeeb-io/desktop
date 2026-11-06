@@ -152,6 +152,20 @@ export function trayHeaderOverride(rows: ActiveTransferRowLike[]): string | null
     : `${count} files couldn't finish downloading`
 }
 
+// ── Transfer lookup map ───────────────────────────────────────────────────────
+
+/** Build a lookup map keyed on the full relative vault path (`"folder/name"` or just
+ *  `"name"` at the root) so two files with the same display name in different folders
+ *  (`Photos/2024/IMG_0001.jpg` vs `Photos/2025/IMG_0001.jpg`) each get the right row.
+ *
+ *  P1 fix (LD-0105 U1 review 2026-11-06): the previous `Map(transfers.map(r => [r.name, r]))`
+ *  keyed on name alone and would silently return the wrong transfer for the second file. */
+export function buildTransferMap<T extends { name: string; folder: string }>(
+  transfers: T[],
+): Map<string, T> {
+  return new Map(transfers.map((r) => [(r.folder ? r.folder + '/' : '') + r.name, r]))
+}
+
 // ── "In progress" card visibility ────────────────────────────────────────────
 
 /** How long (ms) a failed transfer's card stays visible after failure. */

@@ -278,6 +278,9 @@ function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
         const ds = discardState[r.fileId] ?? null
         // An error message is any string other than the two sentinel values.
         const errorMsg = (typeof ds === 'string' && ds !== 'confirm' && ds !== 'loading') ? ds : null
+        // Compute once and reuse for both the `type` prop and the `color` lookup
+        // (P3 fix, LD-0105 U1 review 2026-11-06).
+        const fileType = getFileType(r.name)
 
         return (
           <div
@@ -287,7 +290,7 @@ function InProgressCard({ rows }: { rows: ActiveTransferRow[] }) {
             {/* File-type icon from the shared palette — keeps its colour (brand exception,
                 task 2320). No warning triangle; warn-text line carries the state. */}
             <div style={{ width: 28, height: 28, borderRadius: 6, background: T.paper2, border: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-              <FileGlyph type={getFileType(r.name)} size={13} color={FILE_COLOR[getFileType(r.name)]} />
+              <FileGlyph type={fileType} size={13} color={FILE_COLOR[fileType]} />
             </div>
             {/* Name + detail */}
             <div style={{ flex: 1, minWidth: 0 }}>

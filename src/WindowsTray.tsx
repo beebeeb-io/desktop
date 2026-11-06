@@ -46,7 +46,7 @@ import {
   type RecentFile,
   type SyncStatus,
 } from './desktopApi'
-import { traySubline, progressFraction, trayHeaderOverride } from './windows/downloadProgressModel'
+import { traySubline, progressFraction, trayHeaderOverride, buildTransferMap } from './windows/downloadProgressModel'
 import { FileGlyph, getFileType, FILE_COLOR } from './windows/fileGlyph'
 import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
@@ -328,8 +328,9 @@ export default function WindowsTray() {
   }
 
   const showViewAll = recent.length > TRAY_VIEW_ALL_THRESHOLD
-  // Map file name → active transfer DTO so the row can overlay progress (LD-0105 U1).
-  const transferByName = new Map(activeTransfers.map((r) => [r.name, r]))
+  // Map full vault path → active transfer DTO so two files with the same name in
+  // different folders each get the right row (P1 fix, LD-0105 U1 review 2026-11-06).
+  const transferByPath = buildTransferMap(activeTransfers)
   // When any transfer is in a terminal error state, suppress the "synced" headline
   // so the header doesn't contradict the visible warn row (LD-0105 U1, lead ruling 2026-11-06).
   const headerWarn = trayHeaderOverride(activeTransfers)
@@ -467,7 +468,9 @@ export default function WindowsTray() {
             const deleted = file.activity_type === 'moved_to_trash' || file.status === 'moved_to_trash'
             const warn = WARN_STATUSES.has(file.status)
             // LD-0105 U1: overlay live progress from the transfer board.
-            const transfer = !deleted ? transferByName.get(name) : undefined
+            // Strip any leading slash before lookup (vault paths are always slash-free on
+            // the DTO side after parent_folder strips them in Rust).
+            const transfer = !deleted ? transferByPath.get(file.path.replace(/^\/+/, '')) : undefined
             const subline = transfer
               ? traySubline(transfer)
               : statusSubline(file.status, folder)

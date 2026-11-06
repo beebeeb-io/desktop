@@ -43,7 +43,7 @@ export const FILE_COLOR: Record<FileType, string> = {
   audio:   '#db2777',
   code:    '#0f766e',
   archive: '#92400e',
-  default: 'var(--ink3)',
+  default: 'var(--ink-3)',
 }
 
 export function FileGlyph({ type, size = 13, color }: { type: FileType; size?: number; color: string }) {

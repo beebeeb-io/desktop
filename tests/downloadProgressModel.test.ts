@@ -17,6 +17,7 @@ import {
   progressFraction,
   shouldShowInProgressCard,
   trayHeaderOverride,
+  buildTransferMap,
   type ActiveTransferRowLike,
 } from '../src/windows/downloadProgressModel'
 
@@ -269,5 +270,39 @@ describe('shouldShowInProgressCard', () => {
   })
   test('failed with no timestamp → show card (conservative)', () => {
     expect(shouldShowInProgressCard([failed({ failedAtSecs: null })], NOW)).toBe(true)
+  })
+})
+
+// ── buildTransferMap ─────────────────────────────────────────────────────────
+// P1 fix: keying by name alone collides when two files share the same name in
+// different folders (e.g. two "IMG_0001.jpg"). Key on the full relative path.
+
+type WithPath = ActiveTransferRowLike & { name: string; folder: string }
+
+function withPath(name: string, folder: string, overrides: Partial<ActiveTransferRowLike> = {}): WithPath {
+  return { direction: 'down', done: 0, total: 100, buffered: 0, speedBps: 0, failed: false, name, folder, ...overrides }
+}
+
+describe('buildTransferMap', () => {
+  test('two files with the same name but different folders are distinct entries', () => {
+    const a = withPath('IMG_0001.jpg', 'Photos/2024')
+    const b = withPath('IMG_0001.jpg', 'Photos/2025')
+    const map = buildTransferMap([a, b])
+    expect(map.size).toBe(2)
+    expect(map.get('Photos/2024/IMG_0001.jpg')).toBe(a)
+    expect(map.get('Photos/2025/IMG_0001.jpg')).toBe(b)
+  })
+
+  test('a root-level file (empty folder) is keyed by name alone', () => {
+    const r = withPath('backup.zip', '')
+    const map = buildTransferMap([r])
+    expect(map.get('backup.zip')).toBe(r)
+    expect(map.size).toBe(1)
+  })
+
+  test('a nested file key matches its full vault path', () => {
+    const r = withPath('report.pdf', 'Documents/2026')
+    const map = buildTransferMap([r])
+    expect(map.get('Documents/2026/report.pdf')).toBe(r)
   })
 })

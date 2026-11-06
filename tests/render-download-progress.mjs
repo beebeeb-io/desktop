@@ -62,6 +62,13 @@ const TRANSFERS = {
       buffered: 0, speedBps: 0, failed: false, failedAtSecs: null,
       attention: 'changed_on_this_device', action: 'discard_and_download_again' },
   ],
+  // P2 fix (review 2026-11-06): default file-type glyph uses var(--ink-3) token;
+  // a .txt file verifies the default case renders without a broken stroke.
+  default_type: [
+    { fileId: 'f-txt-1', name: 'Meeting notes.txt', folder: 'Notes',
+      direction: 'down', done: 10_000, total: 50_000,
+      buffered: 0, speedBps: 1_200_000, failed: false, failedAtSecs: null },
+  ],
 }
 
 const TRAY_ASSERTIONS = {
@@ -262,6 +269,21 @@ try {
     }
     const file = await shot(page, `activity-transfer-${state}-${scheme}`)
     results.push([`activity-transfer-${state}-${scheme}: "${contains}" + action button visible`, file])
+    await page.close()
+  }
+  // ── Default-type glyph (.txt): verifies var(--ink-3) renders correctly ───────
+  {
+    const state = 'default_type'
+    const transfers = TRANSFERS[state]
+    const recentPath = `${transfers[0].folder}/${transfers[0].name}`
+    const page = await browser.newPage({ viewport: { width: 400, height: 560 } })
+    page.on('pageerror', (err) => console.error(`pageerror [tray-${state}]:`, err))
+    await page.addInitScript(makeShim(), { caps, surface: 'tray', transfers, summary: idleSummary, recentPath })
+    await page.goto(`${base}/?window=tray`)
+    await expectText(page, transfers[0].name)
+    await expectText(page, 'Downloading')
+    const file = await shot(page, `tray-transfer-${state}`)
+    results.push([`tray-transfer-${state}: default glyph (var(--ink-3)) visible`, file])
     await page.close()
   }
 } finally {

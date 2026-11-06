@@ -185,12 +185,22 @@ pub struct Transfer {
     pub failed_at_secs: Option<u64>,
 }
 
+/// 15-minute visibility window for a failed transfer after its guard drops.
+/// The UI reads `snapshot_dtos()` and shows the failed row until the entry ages out.
+pub const FAILED_ROW_TTL_SECS: u64 = 15 * 60;
+
 #[derive(Debug, Default)]
 struct Inner {
     active: HashMap<String, Transfer>,
+    /// Transfers that ended in an error and are within [`FAILED_ROW_TTL_SECS`] of their
+    /// `failed_at_secs`. Populated by `Drop` when the entry has `failed == true`;
+    /// pruned lazily in `snapshot_dtos`.
+    recently_failed: HashMap<String, Transfer>,
     /// Vault paths keyed by file_id; registered via [`TransferBoard::begin_named`].
+    /// Retained for failed entries until they expire from `recently_failed`.
     paths: HashMap<String, String>,
     /// Per-file speed windows; kept here (not in `Transfer`) so `Transfer` stays `Copy`.
+    /// Pruned on `Drop` for all exits (the window is not used after the transfer ends).
     speeds: HashMap<String, SpeedWindow>,
     /// Plaintext bytes of files that completed since the batch last went quiet.
     finished_bytes: u64,
@@ -272,13 +282,42 @@ impl TransferBoard {
         }
     }
 
-    /// A snapshot of every active transfer as IPC-ready DTOs.
+    /// A snapshot of every active transfer and every recently-failed transfer (within
+    /// [`FAILED_ROW_TTL_SECS`]) as IPC-ready DTOs. Expired entries are pruned lazily.
     pub fn snapshot_dtos(&self) -> Vec<ActiveTransferDto> {
-        self.inner.lock().map(|inner| {
-            inner.active.iter().map(|(id, t)| {
-                let path = inner.paths.get(id).map(|s| s.as_str()).unwrap_or("");
+        self.inner.lock().map(|mut inner| {
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Prune expired recently-failed entries and their path records.
+            let expired: Vec<String> = inner.recently_failed.iter()
+                .filter_map(|(id, t)| {
+                    // No timestamp → keep (conservative); timestamp too old → prune.
+                    if t.failed_at_secs.map_or(false, |s| s + FAILED_ROW_TTL_SECS < now_secs) {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for id in &expired {
+                inner.recently_failed.remove(id);
+                inner.paths.remove(id);
+            }
+
+            // Collect (id, Transfer) pairs from active + recently_failed in one pass,
+            // then look up paths separately to avoid simultaneous field borrows.
+            let pairs: Vec<(String, Transfer)> = inner.active.iter()
+                .chain(inner.recently_failed.iter())
+                .map(|(id, t)| (id.clone(), *t))
+                .collect();
+
+            pairs.into_iter().map(|(id, t)| {
+                let path = inner.paths.get(&id).map(|s| s.as_str()).unwrap_or("");
                 ActiveTransferDto {
-                    file_id: id.clone(),
+                    file_id: id,
                     name: display_name(path),
                     folder: parent_folder(path),
                     direction: t.direction,
@@ -382,7 +421,18 @@ impl TransferGuard {
 impl Drop for TransferGuard {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.board.inner.lock() {
-            inner.active.remove(&self.file_id);
+            if let Some(t) = inner.active.remove(&self.file_id) {
+                if t.failed {
+                    // Keep the entry visible in snapshot_dtos for up to FAILED_ROW_TTL_SECS.
+                    // The path is retained so the DTO can resolve name and folder.
+                    inner.recently_failed.insert(self.file_id.clone(), t);
+                } else {
+                    // Success or cancellation: path is no longer needed.
+                    inner.paths.remove(&self.file_id);
+                }
+            }
+            // Speed window is never needed after the transfer ends (regardless of outcome).
+            inner.speeds.remove(&self.file_id);
         }
     }
 }
@@ -602,5 +652,102 @@ mod tests {
         // `display_name("")` → `""`, `parent_folder("")` → `""`
         assert_eq!(dtos[0].name, "");
         assert_eq!(dtos[0].folder, "");
+    }
+
+    // --- P1 fix: failed transfers must linger in snapshot_dtos after the guard drops ---
+
+    #[test]
+    fn a_failed_transfer_lingers_in_snapshot_after_the_guard_drops() {
+        // Before the fix: snapshot_dtos only reads inner.active, so a dropped
+        // (failed) guard left nothing visible. This test must be RED on the unfixed
+        // code and GREEN once recently_failed is introduced.
+        let board = TransferBoard::new();
+        {
+            let g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
+            board.mark_failed("f_fail");
+        } // guard drops here — before fix, entry is gone; after fix it's in recently_failed
+        let dtos = board.snapshot_dtos();
+        assert_eq!(dtos.len(), 1, "failed row must still appear in snapshot after guard drops");
+        assert!(dtos[0].failed);
+        assert_eq!(dtos[0].file_id, "f_fail");
+        assert_eq!(dtos[0].name, "report.pdf");
+    }
+
+    #[test]
+    fn an_expired_failed_entry_is_pruned_from_the_snapshot() {
+        // Inject an already-expired entry directly into recently_failed (failed_at_secs = 0
+        // is 1970-01-01, far beyond any TTL). snapshot_dtos must prune and exclude it.
+        let board = TransferBoard::new();
+        if let Ok(mut inner) = board.inner.lock() {
+            inner.recently_failed.insert(
+                "expired".to_string(),
+                Transfer { failed: true, failed_at_secs: Some(0), ..Transfer::default() },
+            );
+            inner.paths.insert("expired".to_string(), "docs/old.pdf".to_string());
+        }
+        let dtos = board.snapshot_dtos();
+        assert!(dtos.is_empty(), "an expired failed entry must not appear in snapshot");
+    }
+
+    #[test]
+    fn a_non_failed_drop_does_not_populate_recently_failed() {
+        let board = TransferBoard::new();
+        {
+            let g = board.begin("ok", Direction::Down, 100);
+            g.update(100);
+            g.finish();
+        }
+        // Finished transfer (not failed): nothing in recently_failed
+        let inner = board.inner.lock().unwrap();
+        assert!(inner.recently_failed.is_empty(), "a successful finish must not populate recently_failed");
+    }
+
+    // --- P2 fix: paths and speeds must be pruned when transfers end ---
+
+    #[test]
+    fn paths_and_speeds_are_pruned_when_non_failed_transfers_end() {
+        // Before the fix: inner.paths and inner.speeds were only ever inserted into,
+        // never removed. This test must be RED on the unfixed code (maps are non-empty).
+        let board = TransferBoard::new();
+        for i in 0u32..3 {
+            let id = format!("file{i}");
+            let path = format!("dir/file{i}.txt");
+            let g = board.begin_named(&id, &path, Direction::Stream, 100);
+            board.update_stream(&id, 50);
+            g.update(100);
+            g.finish();
+        }
+        let inner = board.inner.lock().unwrap();
+        assert!(inner.speeds.is_empty(), "speeds must be pruned after transfers end");
+        assert!(inner.paths.is_empty(), "paths must be pruned after non-failed transfers end");
+    }
+
+    #[test]
+    fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
+        // A failed transfer's path must stay (so snapshot_dtos can resolve the name),
+        // but must be gone once the entry expires.
+        let board = TransferBoard::new();
+        {
+            let g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
+            board.mark_failed("fx");
+        }
+        {
+            let inner = board.inner.lock().unwrap();
+            assert!(inner.paths.contains_key("fx"), "path must be kept while entry is in recently_failed");
+        }
+        // Expire the entry by setting its timestamp to 0 and calling snapshot_dtos
+        {
+            if let Ok(mut inner) = board.inner.lock() {
+                if let Some(t) = inner.recently_failed.get_mut("fx") {
+                    t.failed_at_secs = Some(0);
+                }
+            }
+        }
+        board.snapshot_dtos(); // triggers pruning
+        {
+            let inner = board.inner.lock().unwrap();
+            assert!(!inner.recently_failed.contains_key("fx"), "expired entry pruned from recently_failed");
+            assert!(!inner.paths.contains_key("fx"), "path pruned alongside expired recently_failed entry");
+        }
     }
 }
