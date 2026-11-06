@@ -36,6 +36,9 @@ use urlencoding::encode;
 use zeroize::Zeroize;
 
 mod direct;
+// LD-0105 W2: the range session's transport (`beebeeb_transfer::DirectIo`).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) mod range_io;
 pub(crate) use direct::{BodyBytes, ChunkApiError, GrantReply, OnBody, fetch_from_storage, now_ms};
 mod headers;
 use headers::*;

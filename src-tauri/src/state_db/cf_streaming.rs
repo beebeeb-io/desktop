@@ -23,11 +23,26 @@ pub struct PoisonRow {
     pub poisoned_at: i64,
     /// A status word (`corrupt`, `version_gone`, `identity_mismatch`, …): never error text.
     pub reason: String,
-    /// The placeholder's change stamp right after it was marked not in sync (`ChangeTime` in 100 ns
-    /// ticks and the file index): the empty step dehydrates only while it is unchanged, so a write the
-    /// person made since is never thrown away. `None`: not read; the empty step then refuses.
-    pub change_ticks: Option<i64>,
-    pub file_index: Option<i64>,
+    /// The file's content key right after it was marked not in sync (contract Amendment 4):
+    /// `(LastWriteTime in 100 ns ticks since 1970, size)`. Our own restore writes (not in sync, the pin,
+    /// in sync; by handle or by path) change metadata only, so an unchanged key means the bytes are the
+    /// failed attempt's own and the empty step may run. `None`: not read; the row then needs attention.
+    pub key: Option<(i64, i64)>,
+    /// Amendment 4: the key changed (something wrote to the file) or was never read. The file is never
+    /// emptied and never cleared silently; only "Discard and download again" ends the row.
+    pub needs_attention: bool,
+    /// A pin state (`CF_PIN_STATE` value) the empty step could not put back, by handle or by path: the
+    /// next sweep sets it by path first ("Always keep on this device" is never silently lost).
+    pub pending_pin: Option<i32>,
+}
+
+/// The rest of a placeholder's identity (I3, I4), recorded before its first transfer: the chunk
+/// format word (`v1` / `v2`) and a v2 file's version id (frame 0's nonce, hex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedIdentity {
+    pub object_version_id: String,
+    pub format: String,
+    pub version_id_hex: Option<String>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -86,17 +101,85 @@ impl StateDb {
             .flatten())
     }
 
-    /// Spec S6: record `file_id` as poisoned (a later record for the same file replaces the earlier one).
-    pub fn record_poison(&self, file_id: &str, reason: &str, stamp: Option<(i64, i64)>, now: i64) -> Result<()> {
+    /// Spec S6: record `file_id` as poisoned with its content `key` (Amendment 4). A later record for the
+    /// same file replaces the earlier one, and starts it again as a row the sweep may empty.
+    pub fn record_poison(&self, file_id: &str, reason: &str, key: Option<(i64, i64)>, now: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "INSERT INTO cf_poison(file_id, poisoned_at, reason, change_ticks, file_index)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO cf_poison(file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL)
              ON CONFLICT(file_id) DO UPDATE SET
                poisoned_at = excluded.poisoned_at, reason = excluded.reason,
-               change_ticks = excluded.change_ticks, file_index = excluded.file_index",
-            params![file_id, now, reason, stamp.map(|s| s.0), stamp.map(|s| s.1)],
+               write_ticks = excluded.write_ticks, key_size = excluded.key_size,
+               needs_attention = 0, pending_pin = NULL",
+            params![file_id, now, reason, key.map(|k| k.0), key.map(|k| k.1)],
         )?;
+        Ok(())
+    }
+
+    /// Amendment 4: the poisoned file changed, or its key was never read. It stays fetch-refused and is
+    /// shown as needing attention until the person discards it. `Ok(true)`: the row was there.
+    pub fn mark_poison_needs_attention(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("UPDATE cf_poison SET needs_attention = 1 WHERE file_id = ?1", params![file_id])? == 1)
+    }
+
+    /// Amendment 4: a pin the empty step could not put back (`Some`), or one put back since (`None`).
+    pub fn set_poison_pending_pin(&self, file_id: &str, pin: Option<i32>) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute("UPDATE cf_poison SET pending_pin = ?2 WHERE file_id = ?1", params![file_id, pin])? == 1)
+    }
+
+    /// LD-0105 W2 (I3, I4, task 2180): a range session is about to transfer its first byte into the
+    /// placeholder of `file_id`; its identity is recorded first. The minted version is the one the
+    /// session pins (it equals the recorded one, or none was recorded and nothing was on disk).
+    pub fn record_range_identity(&self, file_id: &str, identity: &RecordedIdentity) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE files SET minted_object_version_id = ?2, minted_format = ?3, minted_version_id = ?4 WHERE file_id = ?1",
+            params![file_id, identity.object_version_id, identity.format, identity.version_id_hex],
+        )? == 1)
+    }
+
+    /// The identity a range session recorded for `file_id`'s placeholder; `None` when no session ever
+    /// recorded one (only a minted version, or nothing).
+    pub fn range_identity(&self, file_id: &str) -> Result<Option<RecordedIdentity>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT minted_object_version_id, minted_format, minted_version_id FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+            )
+            .optional()?
+            .and_then(|(version, format, id)| {
+                Some(RecordedIdentity {
+                    object_version_id: version?,
+                    format: format?,
+                    version_id_hex: id,
+                })
+            }))
+    }
+
+    /// Spec S9 (task 1640): a range session records its candidate `(version, NULL hash)` before its
+    /// first transfer. A NULL hash is never promotable: only [`StateDb::record_local_baseline`], after
+    /// the session's one "whole" verdict, makes the bytes agreed content. Like `record_fetched_version`,
+    /// the candidate only moves down or becomes mixed.
+    pub fn record_fetch_candidate(&self, file_id: &str, version: i64) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        super::sql::fold_agreed_into_candidate_conn(&tx, file_id)?;
+        tx.execute(
+            "UPDATE files SET
+                 fetched_hash = NULL,
+                 fetched_min_version = CASE
+                     WHEN fetched_min_version = 0 THEN ?2
+                     WHEN fetched_min_version < 0 THEN -2
+                     ELSE MIN(fetched_min_version, ?2) END
+             WHERE file_id = ?1",
+            params![file_id, version],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -105,7 +188,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn
             .query_row(
-                "SELECT file_id, poisoned_at, reason, change_ticks, file_index FROM cf_poison WHERE file_id = ?1",
+                "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin FROM cf_poison WHERE file_id = ?1",
                 params![file_id],
                 poison_row,
             )
@@ -116,20 +199,10 @@ impl StateDb {
     pub fn poisoned(&self) -> Result<Vec<PoisonRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT file_id, poisoned_at, reason, change_ticks, file_index FROM cf_poison ORDER BY poisoned_at, file_id",
+            "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention, pending_pin FROM cf_poison ORDER BY poisoned_at, file_id",
         )?;
         let rows = stmt.query_map([], poison_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
-    }
-
-    /// Review P1: a failed empty step restored the file with our own writes, which move its stamp; the
-    /// poison takes the stamp they left, so the next sweep can empty the file. `Ok(true)`: it was there.
-    pub fn restamp_poison(&self, file_id: &str, stamp: (i64, i64)) -> Result<bool> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.execute(
-            "UPDATE cf_poison SET change_ticks = ?2, file_index = ?3 WHERE file_id = ?1",
-            params![file_id, stamp.0, stamp.1],
-        )? == 1)
     }
 
     /// Spec S6 step 7: the placeholder is verifiably empty; the poison goes. `Ok(true)`: it was there.
@@ -148,12 +221,15 @@ impl StateDb {
 }
 
 fn poison_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PoisonRow> {
+    let ticks: Option<i64> = row.get(3)?;
+    let size: Option<i64> = row.get(4)?;
     Ok(PoisonRow {
         file_id: row.get(0)?,
         poisoned_at: row.get(1)?,
         reason: row.get(2)?,
-        change_ticks: row.get(3)?,
-        file_index: row.get(4)?,
+        key: ticks.zip(size),
+        needs_attention: row.get::<_, i64>(5)? != 0,
+        pending_pin: row.get(6)?,
     })
 }
 
@@ -273,8 +349,8 @@ mod tests {
         let db = StateDb::open(&path).unwrap();
         let f = db.poison("f").unwrap().expect("still poisoned after a restart");
         assert_eq!(
-            (f.reason.as_str(), f.change_ticks, f.file_index),
-            ("corrupt", Some(133_000_000_000_000_000), Some(42))
+            (f.reason.as_str(), f.key, f.needs_attention, f.pending_pin),
+            ("corrupt", Some((133_000_000_000_000_000, 42)), false, None)
         );
         assert_eq!(
             db.poisoned()
@@ -287,9 +363,54 @@ mod tests {
         );
         // A second failure of the same file replaces the record.
         db.record_poison("f", "version_gone", None, 200).unwrap();
-        assert_eq!(db.poison("f").unwrap().unwrap().change_ticks, None);
+        assert_eq!(db.poison("f").unwrap().unwrap().key, None);
         assert!(db.clear_poison("f").unwrap());
         assert!(!db.clear_poison("f").unwrap());
         assert_eq!(db.poison("f").unwrap(), None);
+    }
+
+    #[test]
+    fn ld0105_a4_needs_attention_and_a_pending_pin_are_durable_and_a_new_poison_starts_clean() {
+        let (_dir, db) = db_with("f", Some(A));
+        db.record_poison("f", "corrupt", Some((1, 2)), 1).unwrap();
+        assert!(db.mark_poison_needs_attention("f").unwrap());
+        assert!(db.set_poison_pending_pin("f", Some(1)).unwrap());
+        let row = db.poison("f").unwrap().unwrap();
+        assert_eq!((row.needs_attention, row.pending_pin), (true, Some(1)));
+        // A new failure of the same file is a new attempt's bytes: the sweep may empty it again.
+        db.record_poison("f", "identity_mismatch", Some((3, 4)), 2).unwrap();
+        let row = db.poison("f").unwrap().unwrap();
+        assert_eq!((row.key, row.needs_attention, row.pending_pin), (Some((3, 4)), false, None));
+        assert!(!db.mark_poison_needs_attention("nobody").unwrap());
+    }
+
+    #[test]
+    fn ld0105_w2_a_range_identity_is_recorded_whole_or_read_as_none() {
+        let (_dir, db) = db_with("f", Some(A));
+        assert_eq!(db.range_identity("f").unwrap(), None, "nothing recorded");
+        assert!(db.record_minted_version("f", 10).unwrap());
+        assert_eq!(db.range_identity("f").unwrap(), None, "a minted version alone is no session identity");
+        let id = RecordedIdentity {
+            object_version_id: A.into(),
+            format: "v2".into(),
+            version_id_hex: Some("00ff".into()),
+        };
+        assert!(db.record_range_identity("f", &id).unwrap());
+        assert_eq!(db.range_identity("f").unwrap(), Some(id));
+        assert_eq!(db.minted_version("f").unwrap().as_deref(), Some(A));
+    }
+
+    /// Spec S9 (task 1640): the session's candidate carries no hash, so it can never be promoted by the
+    /// stamp pass; only `record_local_baseline` after "whole" makes agreed content.
+    #[test]
+    fn ld0105_s9_the_range_candidate_has_no_hash_and_only_moves_down() {
+        let (_dir, db) = db_with("f", Some(A));
+        db.mark_no_fetched_content("f").unwrap();
+        db.record_fetch_candidate("f", 7).unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((7, None)));
+        db.record_fetch_candidate("f", 9).unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), Some((7, None)), "only moves down");
+        db.record_local_baseline("f", 9, "h").unwrap();
+        assert_eq!(db.fetched_content("f").unwrap(), None, "a whole write replaces it");
     }
 }

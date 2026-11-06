@@ -321,6 +321,9 @@ json-patch = { version = "3", default-features = false }
 # loaded machine cannot flake it. A feature only: `test-util` turns on tokio's own `rt`, `sync` and `time`, which
 # `[dependencies]` already has, so no crate is added and Cargo.lock is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+# LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
+# sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "5e8e687a101563cdb25f458e163c3ac00aa15d81", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

@@ -150,6 +150,10 @@ mod no_fetch_scope;
 // (tested everywhere); applied on Windows only (`windows_cf::callbacks::keep_fetch_alive`).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod cf_keepalive;
+// LD-0105 W2: the streaming fetch's rules (demands, the sink, a session's end, the poison key). Pure and tested
+// everywhere; the Windows glue is `windows_cf::streaming`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod cf_range;
 // LD-0105 D2 (W3): the ONE player allowlist and media types. It lives under `windows_cf/` (the contract's
 // path) but is pure and compiled everywhere, so its rules are tested on every platform. Switched off
 // (`STREAMING_ENABLED = false`) until the streaming callback (W2); nothing calls it yet.

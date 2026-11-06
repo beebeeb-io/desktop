@@ -91,6 +91,17 @@ impl ReceiveMeter {
         let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
     }
 
+    /// LD-0105 W2: `wire_bytes` arrived but are not progress by themselves (a range session counts its
+    /// progress as the plaintext it handed over, [`Self::keep`]): liveness only.
+    pub fn read_only(&self, wire_bytes: u64) {
+        self.read.fetch_add(wire_bytes, Ordering::Relaxed);
+    }
+
+    /// LD-0105 W2: `bytes` of plaintext reached the placeholder: progress only.
+    pub fn keep(&self, bytes: u64) {
+        self.kept.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// Every body byte read so far, failed attempts included: the keep-alive's liveness.
     pub fn received(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
