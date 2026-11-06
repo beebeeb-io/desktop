@@ -91,21 +91,25 @@ when status is available; Rust resolves the visible File Provider location.
 Native verification must compare all three surfaces
 and Explorer against a non-default configured root, including after a root change.
 
-## Backups protection — 2026-11-06 (LD-0113 D1, D2)
+## Backups protection — 2026-11-06 (LD-0113 D1, D2, Amendment 6)
 
 The Backups root is the folder the server flags `system_role = "backups_root"` (state.db
-`files.system_role`), never a folder found by its name. It is never deleted, trashed, renamed or
-moved from this device; its children and moving items into it stay ordinary. This device's own
-backup of each folder it backs up now (`Backups/<this device>/<Folder>/…`, and the device folder
-above them) is refused too, with "This is a backup of <original>. Change the original instead.";
-turned off, it is an ordinary archive. The rule and its words are `src-tauri/src/backup_protect.rs`
-over core's `beebeeb_core::backup` (`check_mutation`, `own_backup_refusal`).
+`files.system_role`), never a folder found by its name. Guus, 2026-11-06: "Protect the whole
+tree". In the drive (Explorer, Finder) nothing at or under the root is deleted, trashed, renamed
+or moved, and nothing is moved into it; backups are managed in the app, and opening and
+downloading them stay. The words come from core's `beebeeb_core::backup::check_drive_mutation`,
+in this order: the root's own ("Backups is a system folder and can't be deleted."); this
+device's own backup of a folder it backs up now (`Backups/<this device>/<Folder>/…`), "This is
+a backup of <original>. Change the original instead."; anything else under the root (another
+device, the device folder itself, a turned-off folder) and a move into it, "Backups are managed
+in the Beebeeb app. Open Beebeeb to delete or move a backup." The rule is
+`src-tauri/src/backup_protect.rs`.
 
 | Surface | How it refuses |
 |---|---|
-| Windows Explorer | `NOTIFY_DELETE` / `NOTIFY_RENAME` pre-operation callbacks answer `STATUS_CLOUD_FILE_ACCESS_DENIED` from the state DB (no network; this process's own changes are never refused). The Recycle Bin is a rename and is refused as a delete. The words show as a notification. |
-| Windows, after the fact | A delete or rename that got through (app closed, no live bridge) sends nothing; the item is moved back or its placeholder minted again. |
-| macOS Finder | The item payload marks it `protected`; it loses delete, trash, rename and reparent, and the extension refuses those as a second line with the daemon's words. |
+| Windows Explorer | `NOTIFY_DELETE` / `NOTIFY_RENAME` pre-operation callbacks answer `STATUS_CLOUD_FILE_ACCESS_DENIED` from the state DB (no network; this process's own changes are never refused) for every placeholder in the tree, and for a move into it. The Recycle Bin is a rename and is refused as a delete. The words show as a notification. A folder made with "New folder" is not a placeholder until it syncs and gets no callback (accepted edge). |
+| Windows, after the fact | A delete, rename or move that got through (app closed, no live bridge) sends nothing; a moved item goes back, and every downloaded row under a deleted item is cloud-only again, so its placeholder is minted again. |
+| macOS Finder | The item payload marks everything in the tree `protected`; it loses delete, trash, rename, reparent and adding items (no New Folder, no drop into it), and the extension refuses a delete, rename or move as a second line with the daemon's words. |
 | Server refusal | A `409 protected_folder` drops the op (never retried or held) and puts the row back. |
 | Linux, in-app Files | The web UI's guard (LD-0113 part C). |
 
