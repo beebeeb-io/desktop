@@ -218,6 +218,14 @@ pub struct FileProviderItemPayload {
     /// The words for a move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_move_reason: Option<String>,
+    /// LD-0113 Amendment 7: the words for a content change (a protected item is read-only; the
+    /// daemon also drops `CAP_WRITE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_write_reason: Option<String>,
+    /// LD-0113 Amendment 8a: this is the Backups root, which Finder badges "Read-only" (core's
+    /// `MSG_BADGE`, the decoration's label in the extension's Info.plist).
+    #[serde(default)]
+    pub read_only_badge: bool,
 }
 
 /// One change-log row crossing the IPC bridge (task 1697).

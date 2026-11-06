@@ -525,7 +525,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             )
         }
         let progress = Progress(totalUnitCount: 1)
-        // LD-0113 §6.3: a rename, move or trash of a protected item is refused here too (Finder offers none).
+        // LD-0113 §6.3, Amendment 7: a rename, move, trash or content edit of a protected item is refused here too.
         if let refusal = BeebeebProviderItem.protectedRefusal(
             changedFields: changedFields, newParent: item.parentItemIdentifier, model: { try? ipc.item(identifier: item.itemIdentifier) }
         ) {

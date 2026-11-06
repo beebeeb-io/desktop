@@ -4,12 +4,12 @@
 use super::*;
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::FpChangeKind;
-use beebeeb_core::backup::{MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_RENAME, own_backup_refusal};
+use beebeeb_core::backup::{MSG_BADGE, MSG_DELETE, MSG_MANAGED_IN_APP, MSG_MOVE, MSG_READ_ONLY, MSG_RENAME, own_backup_refusal};
 
 const ROOT_ID: &str = "0b5ec0de-0000-4000-8000-0000000000d1";
 /// What a protected item loses: delete, trash, rename and move, and (a folder) adding items, so Finder
-/// offers no New Folder and refuses a drop into it (Amendment 6).
-const TAKEN_AWAY: u32 = CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS;
+/// offers no New Folder and refuses a drop into it (Amendment 6); and writing (Amendment 7).
+const TAKEN_AWAY: u32 = CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS | CAP_WRITE;
 
 fn row(db: &StateDb, file_id: &str, path: &str, kind: ItemKind) -> FileEntry {
     let entry = FileEntry {
@@ -73,9 +73,14 @@ fn payload_marks_whole_backups_tree_protected() {
     assert_eq!(root_payload.protected_rename_reason.as_deref(), Some(MSG_RENAME));
     assert_eq!(root_payload.protected_move_reason.as_deref(), Some(MSG_MOVE));
     assert!(root_payload.metadata_version.as_deref().unwrap().ends_with(":protected"));
+    // Amendments 7 and 8a: read-only, and the root alone carries the badge.
+    assert_eq!(root_payload.protected_write_reason.as_deref(), Some(MSG_READ_ONLY));
+    assert!(root_payload.read_only_badge, "the root carries the Read-only badge");
     let wire = serde_json::to_value(&root_payload).unwrap();
     assert_eq!(wire["protected"], true);
     assert_eq!(wire["protected_reason"], MSG_DELETE);
+    assert_eq!(wire["protected_write_reason"], MSG_READ_ONLY);
+    assert_eq!(wire["read_only_badge"], true);
 
     // A device folder, a category folder and a file under another device's folder: managed in the app.
     for entry in [&device_folder, &category, &other_device] {
@@ -86,6 +91,8 @@ fn payload_marks_whole_backups_tree_protected() {
         for reason in [&payload.protected_reason, &payload.protected_rename_reason, &payload.protected_move_reason] {
             assert_eq!(reason.as_deref(), Some(MSG_MANAGED_IN_APP), "{}", entry.path);
         }
+        assert_eq!(payload.protected_write_reason.as_deref(), Some(MSG_READ_ONLY), "{}", entry.path);
+        assert!(!payload.read_only_badge, "only the root is badged, not {}", entry.path);
         assert!(payload.metadata_version.as_deref().unwrap().ends_with(":protected"), "{}", entry.path);
     }
 
@@ -93,9 +100,8 @@ fn payload_marks_whole_backups_tree_protected() {
     let payload = built(&own_file);
     let words = own_backup_refusal(&source().join("a.jpg").to_string_lossy());
     assert!(payload.protected);
-    assert_eq!(payload.capabilities & TAKEN_AWAY, 0);
-    assert_ne!(payload.capabilities & CAP_WRITE, 0, "a content edit is not intercepted (spec §6.2)");
-    for reason in [&payload.protected_reason, &payload.protected_rename_reason, &payload.protected_move_reason] {
+    assert_eq!(payload.capabilities & TAKEN_AWAY, 0, "read-only too, CAP_WRITE included (Amendment 7)");
+    for reason in [&payload.protected_reason, &payload.protected_rename_reason, &payload.protected_move_reason, &payload.protected_write_reason] {
         assert_eq!(reason.as_deref(), Some(words.as_str()));
     }
 
@@ -191,4 +197,20 @@ fn the_manifest_is_never_listed_in_finder() {
     assert_eq!(item_of(manifest), Some(false), "the manifest's change carries no item");
     assert_eq!(item_of(category), Some(true));
     assert_eq!(item_of(deeper), Some(true));
+}
+
+/// Amendment 8a: Finder shows the badge's label from the extension's Info.plist, which the daemon cannot
+/// send; it is core's `MSG_BADGE`, word for word, and the decoration has its own badge image.
+#[test]
+fn the_finder_badge_label_is_cores_words() {
+    let plist = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../BeebeebFileProvider/Info.plist")).unwrap();
+    let decoration = plist
+        .split("<dict>")
+        .find(|block| block.contains("<string>io.beebeeb.app.decoration.read-only</string>"))
+        .expect("the read-only decoration is declared");
+    assert!(decoration.contains(&format!("<key>Label</key>\n\t\t\t\t<string>{MSG_BADGE}</string>")), "{decoration}");
+    assert!(decoration.contains("<string>io.beebeeb.app.badge.read-only</string>"));
+    assert!(plist.contains("<string>badge-read-only</string>"), "the badge type names its image");
+    let image = concat!(env!("CARGO_MANIFEST_DIR"), "/../BeebeebFileProvider/Resources/badge-read-only.png");
+    assert!(std::fs::metadata(image).is_ok_and(|m| m.len() > 0), "the image ships in the bundle's resources");
 }

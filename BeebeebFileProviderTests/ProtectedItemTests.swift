@@ -10,6 +10,7 @@ import Foundation
 private let deleteWords = "Backups is a system folder and can't be deleted."
 private let renameWords = "Backups is a system folder and can't be renamed."
 private let moveWords = "Backups is a system folder and can't be moved."
+private let writeWords = "Backups are read-only: each device writes its own. Change the file on that device, or save a copy outside Backups."
 
 private func decoded(_ extra: [String: Any]) -> BeebeebProviderItem? {
     let bridge = XPCBridge()
@@ -64,12 +65,31 @@ func runProtectedItemChecks() {
         try expect(trash?.localizedDescription == deleteWords, "a move into the Trash is a delete")
         let move = BeebeebProviderItem.protectedRefusal(changedFields: .parentItemIdentifier, newParent: .rootContainer, model: { item })
         try expect(move?.localizedDescription == moveWords, "a move has the move words")
+        // Amendment 7: a content edit is refused too (Backups are read-only); other metadata alone is not.
+        let edit = BeebeebProviderItem.protectedRefusal(changedFields: .contents, newParent: nil, model: { item })
+        try expect(edit?.code == NSFileWriteNoPermissionError, "a content edit is refused, got \(String(describing: edit))")
         var asked = false
-        let edit = BeebeebProviderItem.protectedRefusal(changedFields: .contents, newParent: nil, model: { asked = true; return item })
-        try expect(edit == nil && !asked, "a content edit is never intercepted, and asks the daemon nothing")
+        let tagged = BeebeebProviderItem.protectedRefusal(changedFields: .tagData, newParent: nil, model: { asked = true; return item })
+        try expect(tagged == nil && !asked, "a tag change is never intercepted, and asks the daemon nothing")
         let ordinary = decoded([:])!
         try expect(BeebeebProviderItem.protectedRefusal(model: { ordinary }) == nil, "an ordinary delete goes ahead")
         let wordsOnly = decoded(["protected_reason": deleteWords])!
         try expect(BeebeebProviderItem.protectedRefusal(model: { wordsOnly }) == nil, "words without the flag refuse nothing (one fact)")
+    }
+
+    check("LD-0113 Amendments 7 and 8a: a protected item is read-only with the daemon's words; the root carries the Read-only badge") {
+        let root = decoded(["protected": true, "protected_reason": deleteWords, "protected_write_reason": writeWords, "read_only_badge": true])!
+        try expect(root.protectedWriteReason == writeWords, "the write words decode")
+        try expect(!FileProviderItem(model: root).capabilities.contains(.allowsWriting), "a protected item is never written")
+        let edit = BeebeebProviderItem.protectedRefusal(changedFields: .contents, newParent: nil, model: { root })
+        try expect(edit?.localizedDescription == writeWords, "a content edit has the write words, got \(String(describing: edit))")
+        let badge = FileProviderItem(model: root).decorations?.map(\.rawValue)
+        try expect(badge == [BeebeebProviderItem.decorationReadOnly], "the root's badge, got \(String(describing: badge))")
+        let failing = decoded(["status": "error", "read_only_badge": true])!
+        let errorFirst = FileProviderItem(model: failing).decorations?.map(\.rawValue)
+        try expect(errorFirst == [BeebeebProviderItem.decorationError], "a sync problem takes the one slot first")
+        let ordinary = decoded([:])!
+        try expect(FileProviderItem(model: ordinary).decorations == nil, "an ordinary item has no badge")
+        try expect(FileProviderItem(model: ordinary).capabilities.contains(.allowsWriting), "and is writable")
     }
 }
