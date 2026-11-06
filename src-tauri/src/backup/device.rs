@@ -165,6 +165,18 @@ mod tests {
         }
     }
 
+    /// Native rung: the registry read gives this PC's `MachineGuid`, a UUID, and the id derived from it is stable.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn machine_guid_is_read_on_windows() {
+        let id = machine_id().expect("HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid is readable");
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "MachineGuid is a UUID (got {} chars)", id.len());
+        assert_eq!(machine_id().as_deref(), Some(id.as_str()), "the same id every time");
+        let me = device_self().expect("a name and a machine id");
+        assert_eq!(me.device_id, beebeeb_core::backup::device_id_from_machine_id(&id));
+        assert_eq!(me.platform, Platform::Windows);
+    }
+
     #[test]
     fn machine_id_reads_the_first_line_trimmed() {
         let dir = tempfile::tempdir().unwrap();
