@@ -33,6 +33,11 @@ function buffering(overrides: Partial<ActiveTransferRowLike> = {}): ActiveTransf
 function failed(overrides: Partial<ActiveTransferRowLike> = {}): ActiveTransferRowLike {
   return { direction: 'down', done: 50, total: 100, buffered: 0, speedBps: 0, failed: true, failedAtSecs: 1_000_000, ...overrides }
 }
+/** "needs attention": file changed on disk while downloading (LD-0105 W2, PR #225 shape). */
+function needsAttention(overrides: Partial<ActiveTransferRowLike> = {}): ActiveTransferRowLike {
+  return { direction: 'down', done: 50, total: 100, buffered: 0, speedBps: 0, failed: false,
+    attention: 'changed_on_this_device', action: 'discard_and_download_again', ...overrides }
+}
 
 // ── formatSpeed ───────────────────────────────────────────────────────────────
 
@@ -102,6 +107,33 @@ describe('transferUiState', () => {
   })
   test('down direction → "downloading"', () => {
     expect(transferUiState(downloading())).toBe('downloading')
+  })
+  test('attention === "changed_on_this_device" → "needs_attention" (priority over failed)', () => {
+    // mutant: removed attention check → would return "failed" or "downloading"
+    expect(transferUiState(needsAttention())).toBe('needs_attention')
+    expect(transferUiState({ ...needsAttention(), failed: true })).toBe('needs_attention')
+  })
+})
+
+// ── needs_attention state ─────────────────────────────────────────────────────
+
+describe('needs_attention state (Amendment 4, PR #225 IPC shape)', () => {
+  test('traySubline returns the action label', () => {
+    // The tray shows the action as the subline so the user knows what to do.
+    expect(traySubline(needsAttention())).toBe('Discard and download again')
+  })
+  test('activityDetail returns the detail sentence', () => {
+    expect(activityDetail(needsAttention())).toBe(
+      'The file changed on disk while it was downloading. The original version was kept.'
+    )
+  })
+  test('progressFraction → null (no bar for needs_attention)', () => {
+    expect(progressFraction(needsAttention())).toBeNull()
+  })
+  test('shouldShowInProgressCard → always true for needs_attention (no TTL)', () => {
+    // mutant: treated attention row like failed → would hide after 15 min
+    const veryOld = needsAttention({ failedAtSecs: 1 }) // epoch 1 — ancient
+    expect(shouldShowInProgressCard([veryOld], Date.now())).toBe(true)
   })
 })
 
