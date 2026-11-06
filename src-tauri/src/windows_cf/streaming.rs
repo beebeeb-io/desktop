@@ -301,21 +301,34 @@ impl beebeeb_transfer::Observer for Quiet {}
 /// `CfExecute(TRANSFER_DATA)` for one authenticated piece; the last refusal's HRESULT, for the log.
 struct CfOut(CF_CONNECTION_KEY, Option<u32>);
 
+/// F2b (desktop #225 QA rung, measured by `ld0105_f2b_native_robocopy_matrix`): ONE TRANSFER_DATA of a
+/// whole 16 MiB piece makes a buffered robocopy fail with ERROR 379 (its next read, one page past the
+/// piece, is refused), whatever the delay, the policy or how that read is served; the same bytes in
+/// 1 MiB calls copy. So a piece goes out in calls of at most this, the whole-file path's call size.
+pub(crate) const CF_TRANSFER_MAX: usize = 1 << 20;
+
+/// `CfExecute(TRANSFER_DATA)` of one piece at `offset`, in calls of at most [`CF_TRANSFER_MAX`]. A piece
+/// starts 4 KiB-aligned and 1 MiB is a multiple of 4 KiB, so every call's offset is aligned and only the
+/// last call's length may be short (the piece's own end). The first refusal ends it.
+///
+/// SAFETY: `transfer_key`/`request_key` are a live request's on `connection`.
+pub(crate) unsafe fn transfer_piece(connection: CF_CONNECTION_KEY, keys: RequestKeys, offset: u64, plain: &[u8]) -> windows::core::Result<()> {
+    if plain.is_empty() {
+        // SAFETY: as the caller's; a zero-length transfer reads no buffer.
+        return unsafe { super::callbacks::transfer_one(connection, keys.transfer_key, keys.request_key, plain.as_ptr().cast(), offset as i64, 0, STATUS_SUCCESS) };
+    }
+    for (i, part) in plain.chunks(CF_TRANSFER_MAX).enumerate() {
+        let at = offset + (i * CF_TRANSFER_MAX) as u64;
+        // SAFETY: `part` outlives the call, and CfExecute copies it before it returns.
+        unsafe { super::callbacks::transfer_one(connection, keys.transfer_key, keys.request_key, part.as_ptr().cast(), at as i64, part.len() as i64, STATUS_SUCCESS) }?;
+    }
+    Ok(())
+}
+
 impl PieceOut for CfOut {
     fn transfer(&mut self, keys: RequestKeys, offset: u64, plain: &[u8]) -> std::io::Result<()> {
-        // SAFETY: `plain` outlives the call, and CfExecute copies it before it returns.
-        unsafe {
-            super::callbacks::transfer_one(
-                self.0,
-                keys.transfer_key,
-                keys.request_key,
-                plain.as_ptr().cast(),
-                offset as i64,
-                plain.len() as i64,
-                STATUS_SUCCESS,
-            )
-        }
-        .map_err(|e| {
+        // SAFETY: the keys of the live request the sink chose for this piece.
+        unsafe { transfer_piece(self.0, keys, offset, plain) }.map_err(|e| {
             let code = e.code().0 as u32;
             self.1 = Some(code);
             // QA logging gap (desktop #225): every refusal names its status.
