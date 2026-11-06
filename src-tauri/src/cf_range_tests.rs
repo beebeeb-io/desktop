@@ -158,7 +158,7 @@ async fn whole_file<R: IdentityRecords>(
     tamper: Option<usize>,
     records: R,
     log: Log,
-) -> (Result<RangeOutcome, RangeSessionError>, Vec<u8>, Option<bool>, u64) {
+) -> (Result<RangeOutcome, RangeSessionError>, Vec<u8>, Option<Answer>, u64) {
     let io = server(fx.clone(), tamper);
     let book = Arc::new(Mutex::new(DemandBook::default()));
     let (id, answer) = book.lock().unwrap().add(0, fx.geometry.original_size, 1, KEYS);
@@ -210,7 +210,7 @@ async fn ld0105_w2_every_piece_of_a_real_session_is_aligned_with_carry_and_the_b
         let (out, plain, met, transferred) = whole_file(&fx, None, LogRecords(log.clone()), log.clone()).await;
         assert!(matches!(out, Ok(RangeOutcome::Whole(_))), "stride {stride}: {out:?}");
         assert_eq!(plain, fx.plain, "stride {stride}: the bytes are the file's");
-        assert_eq!((met, transferred), (Some(true), len as u64));
+        assert_eq!((met, transferred), (Some(Answer::Met), len as u64));
         let mut pieces: Vec<(u64, u64)> = log.lock().unwrap().iter().filter(|e| e.0 == "transfer").map(|e| (e.1, e.2)).collect();
         pieces.sort();
         let mut end = 0;
@@ -316,7 +316,7 @@ async fn ld0105_s6_corrupt_at_chunk_k_fails_the_demand_and_poisons() {
     let log: Log = Arc::default();
     let (out, plain, met, transferred) = whole_file(&fx, Some(3), LogRecords(log.clone()), log).await;
     assert_eq!(after_session(&out), AfterSession::Poison("corrupt"), "{out:?}");
-    assert_eq!(met, Some(false), "the request fails, no filler (I7)");
+    assert_eq!(met, Some(Answer::Failed), "the request fails, no filler (I7)");
     assert!(transferred < 5 * 4096 && plain[3 * 4096..4 * 4096].iter().all(|b| *b == 0), "chunk 3 never reached Windows");
 }
 
@@ -339,7 +339,7 @@ fn ld0105_w2_a_cancel_maps_to_the_demands_it_names() {
         transfer_key: 1,
         request_key: r,
     };
-    let (a, _ra) = book.add(0, 65_536, 10, k(100));
+    let (a, mut ra) = book.add(0, 65_536, 10, k(100));
     let (b, _rb) = book.add(65_536, 65_536, 10, k(101));
     let (c, _rc) = book.add(4096, 8192, 11, k(102));
     let (d, _rd) = book.add(61_440, 8192, 12, k(103));
@@ -347,6 +347,7 @@ fn ld0105_w2_a_cancel_maps_to_the_demands_it_names() {
     assert_eq!(book.cancel(0, 1 << 30, 101), vec![b]);
     // Without one: the demands inside the range, not one that only overlaps it.
     assert_eq!(book.cancel(0, 65_536, REQUEST_KEY_DEFAULT), vec![a, c]);
+    assert_eq!(ra.try_recv().ok(), Some(Answer::Cancelled), "a cancelled request gets no transfer, not a failure");
     assert!(!book.is_idle(), "d only overlapped the cancelled range");
     assert_eq!(book.cancel(61_440, 8192, REQUEST_KEY_DEFAULT), vec![d]);
     assert!(book.is_idle());
@@ -360,7 +361,7 @@ fn ld0105_s5_a_requester_that_exits_fails_only_its_own_demands() {
     let (_b, mut rb) = book.add(4096, 4096, 11, KEYS);
     let (gone, others) = book.requester_exited(10);
     assert_eq!((gone, others), (vec![a], true));
-    assert_eq!(ra.try_recv().ok(), Some(false), "its request fails");
+    assert_eq!(ra.try_recv().ok(), Some(Answer::Failed), "its request fails");
     assert!(rb.try_recv().is_err(), "the other one still waits");
     assert_eq!(book.requester_exited(11).1, false, "no live requester left: the session stops");
 }
@@ -380,7 +381,7 @@ fn ld0105_w2_a_piece_takes_the_keys_of_the_request_it_serves() {
     assert_eq!(book.keys_for(0, 4096), Some(k(5, 50)));
     assert_eq!(book.keys_for(1 << 20, 4096), Some(k(6, 60)));
     assert_eq!(book.keys_for(8192, 4096), Some(k(6, 60)), "over-served on a pending request");
-    book.answer(a, true);
+    book.answer(a, Answer::Met);
     book.fail_all();
     assert_eq!(book.keys_for(8192, 4096), Some(k(6, REQUEST_KEY_DEFAULT)), "read-ahead: no request");
 }

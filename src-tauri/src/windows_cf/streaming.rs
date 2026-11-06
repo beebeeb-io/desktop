@@ -23,7 +23,7 @@ use windows::Win32::Foundation::{NTSTATUS, STATUS_SUCCESS, WAIT_OBJECT_0};
 use windows::Win32::Storage::CloudFilters::*;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 
-use crate::cf_range::{AfterSession, DemandBook, DbRecords, PieceOut, RequestKeys, StreamSink, after_session};
+use crate::cf_range::{AfterSession, Answer, DemandBook, DbRecords, PieceOut, RequestKeys, StreamSink, after_session};
 
 /// The decline's status (spec §6.4, P1b spike (x2): the open returned in 4 ms, then reads were ranges).
 const STATUS_DECLINED: NTSTATUS = NTSTATUS(0xC000_CF1F_u32 as i32);
@@ -81,9 +81,8 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
         unsafe { decline(fetch) };
         return Served::Done;
     }
-    let (offset, length) = (fetch.offset.max(0) as u64, fetch.length.max(0) as u64);
-    let session = match join_or_start(fetch, bridge, handle) {
-        Start::Joined(session) => session,
+    let (session, answer) = match join_or_start(fetch, bridge, handle) {
+        Start::Joined(session, answer) => (session, answer),
         Start::WholeFilePath => return Served::WholeFilePath,
         Start::Answered => return Served::Done,
         Start::Failed => {
@@ -91,17 +90,15 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
             return Served::Done;
         }
     };
-    let (id, answer) = lock(&session.book).add(offset, length, fetch.requester, fetch.keys);
-    session.control.demand(id, offset, length);
     let process = Requester::open(fetch.requester);
     let met = handle.block_on(async {
         tokio::select! {
             biased;
             _ = super::cancelled(bridge) => {
                 session.control.close();
-                false
+                Answer::Failed
             }
-            answer = answer => answer.unwrap_or(false),
+            answer = answer => answer.unwrap_or(Answer::Failed),
             () = process.exited() => {
                 // Spec S5: its requests fail; with no live requester left the session stops.
                 let (ids, others) = lock(&session.book).requester_exited(fetch.requester);
@@ -110,22 +107,28 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
                 }
                 if !others {
                     session.control.requester_gone();
-                    retire(&session, &fetch.file_id);
+                    retire(&session);
                 }
-                false
+                Answer::Failed
             }
             never = super::fetch_progress::keep_fetch_alive(fetch.connection, fetch.keys.transfer_key, fetch.file_size, &session.meter) => match never {},
         }
     });
-    if !met {
-        fail(fetch);
+    match met {
+        Answer::Met | Answer::Cancelled => Served::Done,
+        // Review P2: a session that gave the file to the whole-file path (`UseApi`, a legacy file found
+        // by its preparation) hands this still-pending request over instead of failing it.
+        Answer::Failed if lock(&WHOLE_FILE_ONLY).contains(&fetch.file_id) => Served::WholeFilePath,
+        Answer::Failed => {
+            fail(fetch);
+            Served::Done
+        }
     }
-    Served::Done
 }
 
 /// How a fetch reached its session.
 enum Start {
-    Joined(Arc<Session>),
+    Joined(Arc<Session>, tokio::sync::oneshot::Receiver<Answer>),
     WholeFilePath,
     /// The fetch was answered already (failed, and for 0783 resolved).
     Answered,
@@ -137,12 +140,23 @@ enum Start {
 /// is never held across the preparation's network call. The poison is checked again under the lock:
 /// a session that failed records its poison before it leaves the registry.
 fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>, handle: &tokio::runtime::Handle) -> Start {
-    let session = {
+    // The demand joins under the registry lock, which `end` also takes: it is in the book before the
+    // session can end, so `end`'s `fail_all` answers it (review P1: a demand added after `end` waited
+    // for ever).
+    let demand = |session: &Arc<Session>| {
+        let (offset, length) = (fetch.offset.max(0) as u64, fetch.length.max(0) as u64);
+        let (id, answer) = lock(&session.book).add(offset, length, fetch.requester, fetch.keys);
+        session.control.demand(id, offset, length);
+        answer
+    };
+    let (session, answer) = {
         let mut sessions = lock(&SESSIONS);
-        if let Some(session) = sessions.get(&fetch.file_id)
-            && !session.ended.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Start::Joined(session.clone());
+        if let Some(session) = sessions.get(&fetch.file_id) {
+            if session.ended.load(std::sync::atomic::Ordering::SeqCst) {
+                // Ending (its poison may not be recorded yet): this request fails, the next one starts afresh.
+                return Start::Failed;
+            }
+            return Start::Joined(session.clone(), demand(session));
         }
         if !matches!(bridge.db().poison(&fetch.file_id), Ok(None)) {
             return Start::Failed;
@@ -154,7 +168,8 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
             ended: false.into(),
         });
         sessions.insert(fetch.file_id.clone(), session.clone());
-        session
+        let answer = demand(&session);
+        (session, answer)
     };
     let Some(path) = super::callbacks::db_placeholder_path(bridge, &fetch.file_id) else {
         end(&session, &fetch.file_id);
@@ -168,9 +183,14 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
         Ok(prep) => {
             let (run, file_id, connection) = (session.clone(), fetch.file_id.clone(), fetch.connection);
             handle.spawn(async move { run_session(run, prep, file_id, path, connection, file_size).await });
-            Start::Joined(session)
+            Start::Joined(session, answer)
         }
         Err(end_why) => {
+            if matches!(end_why, crate::engine_bridge::PrepEnd::WholeFilePath) {
+                // Review P3: a legacy file is remembered, so its later fetches skip the preparation; the
+                // fetches that joined meanwhile take the whole-file path too.
+                lock(&WHOLE_FILE_ONLY).insert(fetch.file_id.clone());
+            }
             end(&session, &fetch.file_id);
             match end_why {
                 crate::engine_bridge::PrepEnd::WholeFilePath => Start::WholeFilePath,
@@ -189,15 +209,13 @@ fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<sup
     }
 }
 
-/// Take `session` out of the registry and close it: a later fetch starts a new session (it trusts the
-/// bytes this one transferred: one recorded identity) instead of joining one that is ending.
-fn retire(session: &Arc<Session>, file_id: &str) {
+/// Close `session`: no fetch joins it any more. It stays in the registry until `end` (after any
+/// poison is recorded, review P2), and the next fetch after that starts a new session, which trusts
+/// the bytes this one transferred (one recorded identity).
+fn retire(session: &Arc<Session>) {
     {
-        let mut sessions = lock(&SESSIONS);
+        let _sessions = lock(&SESSIONS);
         session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
-        if sessions.get(file_id).is_some_and(|s| Arc::ptr_eq(s, session)) {
-            sessions.remove(file_id);
-        }
     }
     session.control.close();
 }
@@ -262,7 +280,18 @@ async fn run_session(
     };
     let transferred = sink.transferred;
     drop(sink);
+    // No demand joins a session that returned (review P1: one joining while the promotion hashes).
+    {
+        let _sessions = lock(&SESSIONS);
+        session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let unchanged = key_before.is_some() && super::poison::content_key(&path) == key_before;
     match after_session(&result) {
+        // Review P2: IN_SYNC and agreed content only while nothing else wrote to the file.
+        AfterSession::Promote if !unchanged => {
+            tracing::warn!(file_id = %file_id, "streamed whole, but the file changed meanwhile: not marked in sync");
+            let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::Local);
+        }
         AfterSession::Promote => {
             {
                 use std::os::windows::ffi::OsStrExt;
@@ -282,11 +311,13 @@ async fn run_session(
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::CloudOnly);
         }
         AfterSession::Poison(reason) => super::poison::poison_now(bridge.db(), &file_id, &path, reason),
-        AfterSession::WholeFilePath => {
+        // Nothing written: the whole-file path serves it (and resolves a size, task 0783, from the
+        // authenticated length: review P2).
+        AfterSession::WholeFilePath | AfterSession::ResolveSize => {
             lock(&WHOLE_FILE_ONLY).insert(file_id.clone());
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::CloudOnly);
         }
-        AfterSession::ResolveSize | AfterSession::Fail => {
+        AfterSession::Fail => {
             let _ = bridge.db().set_status_if(&file_id, crate::state_db::FileStatus::Downloading, crate::state_db::FileStatus::Error);
         }
     }
@@ -478,16 +509,28 @@ pub unsafe extern "system" fn notify_file_open_completion_callback(info: *const 
     }
     let Some(file_id) = super::callbacks::file_id_of(info) else { return };
     // SAFETY: as above.
-    let pid = unsafe { (*info.ProcessInfo).ProcessId };
-    lock(&OPENS).opened(pid, &file_id);
+    let process = unsafe { &*info.ProcessInfo };
+    // Review P2: only an open by a listed player is armed, so other openers never crowd it out.
+    // SAFETY: NUL-terminated wide strings valid for the callback.
+    let image = unsafe { process.ImagePath.to_string() }.ok().and_then(|nt| crate::stream_players::dos_image_path(&nt, devices()));
+    let package = unsafe { process.PackageName.to_string() }.ok().filter(|p| !p.is_empty());
+    let requester = crate::stream_players::Requester {
+        package: package.as_deref(),
+        image: image.as_deref(),
+        ..Default::default()
+    };
+    if crate::stream_players::is_listed_player(&requester, program_files()) {
+        lock(&OPENS).opened(process.ProcessId, &file_id);
+    }
 }
 
 /// A close completion: a session with no request left (the opener closed its handle) ends.
 pub(super) fn after_close(file_id: &str) {
     let session = lock(&SESSIONS).get(file_id).cloned();
+    // Review P2: never one in preparation or between a player's reads, only one quiet for a while.
     if let Some(session) = session
-        && lock(&session.book).is_idle()
+        && lock(&session.book).idle_for(Duration::from_secs(30))
     {
-        retire(&session, file_id);
+        retire(&session);
     }
 }

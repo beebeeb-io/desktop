@@ -371,8 +371,28 @@ pub(crate) fn sweep_poisoned_with(
         // Amendment 4: a needs-attention row is never opened on a tick, and never emptied or cleared by
         // a sweep: only "Discard and download again" ends it.
         if row.needs_attention {
-            if crate::cf_range::sweep_opens(true, kind) && logged_once(&row.file_id, "needs_attention") {
-                tracing::warn!(file_id = %row.file_id, "poison sweep: changed on this device; kept as it is until discarded");
+            // Checked at the process start and on close only: a row whose file is gone ends (its row
+            // removed, or nothing at its path at the first sweep of the process); the file itself is
+            // never opened, emptied or cleared here.
+            if !crate::cf_range::sweep_opens(true, kind) {
+                continue;
+            }
+            match db.get_file(&row.file_id) {
+                Ok(None) => {
+                    let _ = db.clear_poison(&row.file_id);
+                    outcomes.push((row.file_id, Emptied::Gone));
+                }
+                Ok(Some(entry)) => {
+                    let missing = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path)
+                        .is_ok_and(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
+                    if missing && crate::cf_range::clear_missing(kind) {
+                        let _ = db.clear_poison(&row.file_id);
+                        outcomes.push((row.file_id, Emptied::Missing));
+                    } else if logged_once(&row.file_id, "needs_attention") {
+                        tracing::warn!(file_id = %row.file_id, "poison sweep: changed on this device; kept as it is until discarded");
+                    }
+                }
+                Err(_) => {}
             }
             continue;
         }

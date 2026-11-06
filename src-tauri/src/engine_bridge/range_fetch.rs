@@ -85,7 +85,9 @@ impl EngineBridge {
                 jitter_seed: now_secs() as u64,
             },
             file_key,
-            version_number: meta["download_version"]["version_number"].as_i64(),
+            // Review P1: bytes of an older minted version are never recorded as the current version's
+            // candidate or baseline (a lost update); with no number the content stays not known.
+            version_number: if continues_minted { None } else { meta["download_version"]["version_number"].as_i64() },
             kbps_limit,
             ticket,
         })

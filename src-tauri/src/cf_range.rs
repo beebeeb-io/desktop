@@ -44,12 +44,23 @@ pub(crate) struct RequestKeys {
 /// request is pending), on the file's latest transfer key.
 pub(crate) const REQUEST_KEY_DEFAULT: i64 = 0;
 
+/// How a demand was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answer {
+    /// Every byte it asked for was transferred.
+    Met,
+    /// Fail its remaining range (I7: never filler).
+    Failed,
+    /// Windows cancelled the request: return without any transfer (the request is gone).
+    Cancelled,
+}
+
 struct Demand {
     offset: u64,
     len: u64,
     requester: u32,
     keys: RequestKeys,
-    answer: Option<tokio::sync::oneshot::Sender<bool>>,
+    answer: Option<tokio::sync::oneshot::Sender<Answer>>,
 }
 
 /// The pending requests of one placeholder's session.
@@ -58,12 +69,14 @@ pub(crate) struct DemandBook {
     next: u64,
     live: BTreeMap<u64, Demand>,
     last_keys: Option<RequestKeys>,
+    /// When a demand was last added or answered: an idle session is retired only after a while.
+    last_activity: Option<std::time::Instant>,
 }
 
 impl DemandBook {
     /// A `FETCH_DATA` for `[offset, offset + len)` from process `requester`: its demand id, and where
     /// its answer arrives (`true`: every byte transferred; `false`: fail its remaining range, I7).
-    pub(crate) fn add(&mut self, offset: u64, len: u64, requester: u32, keys: RequestKeys) -> (u64, tokio::sync::oneshot::Receiver<bool>) {
+    pub(crate) fn add(&mut self, offset: u64, len: u64, requester: u32, keys: RequestKeys) -> (u64, tokio::sync::oneshot::Receiver<Answer>) {
         self.next += 1;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.live.insert(
@@ -77,16 +90,23 @@ impl DemandBook {
             },
         );
         self.last_keys = Some(keys);
+        self.last_activity = Some(std::time::Instant::now());
         (self.next, rx)
     }
 
     /// Answer demand `id` (no-op when it was answered already, or cancelled).
-    pub(crate) fn answer(&mut self, id: u64, ok: bool) {
+    pub(crate) fn answer(&mut self, id: u64, answer: Answer) {
+        self.last_activity = Some(std::time::Instant::now());
         if let Some(mut demand) = self.live.remove(&id)
             && let Some(tx) = demand.answer.take()
         {
-            let _ = tx.send(ok);
+            let _ = tx.send(answer);
         }
+    }
+
+    /// No request pending, and none added or answered for `quiet`.
+    pub(crate) fn idle_for(&self, quiet: std::time::Duration) -> bool {
+        self.live.is_empty() && self.last_activity.is_none_or(|at| at.elapsed() >= quiet)
     }
 
     /// The keys a piece at `[offset, offset + len)` goes out with: a pending request it overlaps,
@@ -128,7 +148,7 @@ impl DemandBook {
             .map(|(id, _)| *id)
             .collect();
         for id in &ids {
-            self.answer(*id, false);
+            self.answer(*id, Answer::Cancelled);
         }
         ids
     }
@@ -138,7 +158,7 @@ impl DemandBook {
     pub(crate) fn requester_exited(&mut self, pid: u32) -> (Vec<u64>, bool) {
         let ids: Vec<u64> = self.live.iter().filter(|(_, d)| d.requester == pid).map(|(id, _)| *id).collect();
         for id in &ids {
-            self.answer(*id, false);
+            self.answer(*id, Answer::Failed);
         }
         (ids, !self.live.is_empty())
     }
@@ -152,7 +172,7 @@ impl DemandBook {
     pub(crate) fn fail_all(&mut self) -> Vec<u64> {
         let ids: Vec<u64> = self.live.keys().copied().collect();
         for id in &ids {
-            self.answer(*id, false);
+            self.answer(*id, Answer::Failed);
         }
         ids
     }
@@ -234,11 +254,11 @@ impl<P: PieceOut, R: IdentityRecords> RangeSink for StreamSink<P, R> {
     }
 
     fn demand_met(&mut self, id: u64) {
-        self.book().answer(id, true);
+        self.book().answer(id, Answer::Met);
     }
 
     fn demand_failed(&mut self, id: u64) {
-        self.book().answer(id, false);
+        self.book().answer(id, Answer::Failed);
     }
 }
 

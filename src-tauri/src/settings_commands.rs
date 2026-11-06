@@ -499,11 +499,15 @@ pub(super) fn tray_recent_activity() -> Vec<TrayActivityItem> {
 /// the exclusive handle (whatever was written to it), clears the poison, and fetches it again. The
 /// error is a status word: `not_poisoned`, `in_use` (close the file first), `missing`, or a step.
 #[tauri::command]
-pub(super) fn discard_and_download_again(file_id: String) -> Result<(), String> {
+pub(super) async fn discard_and_download_again(file_id: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use crate::windows_cf::poison::DiscardRefused as R;
-        crate::windows_cf::poison::discard_and_download_again(&file_id).map_err(|e| match e {
+        // The exclusive open and the dehydrate block: off the main thread (review P2).
+        let done = tokio::task::spawn_blocking(move || crate::windows_cf::poison::discard_and_download_again(&file_id))
+            .await
+            .map_err(|_| "failed".to_string())?;
+        done.map_err(|e| match e {
             R::NotPoisoned => "not_poisoned".to_string(),
             R::InUse => "in_use".to_string(),
             R::Missing => "missing".to_string(),
