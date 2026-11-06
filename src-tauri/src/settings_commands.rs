@@ -1173,3 +1173,7 @@ pub(super) fn mark_menu_bar_hint_seen() -> Result<(), String> {
         (changed, ())
     })
 }
+
+#[cfg(test)]
+#[path = "settings_attention_tests.rs"]
+mod attention_tests;

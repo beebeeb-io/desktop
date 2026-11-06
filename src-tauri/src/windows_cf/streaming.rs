@@ -83,9 +83,10 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
     }
     let (offset, length) = (fetch.offset.max(0) as u64, fetch.length.max(0) as u64);
     let session = match join_or_start(fetch, bridge, handle) {
-        Ok(session) => session,
-        Err(Served::WholeFilePath) => return Served::WholeFilePath,
-        Err(Served::Done) => {
+        Start::Joined(session) => session,
+        Start::WholeFilePath => return Served::WholeFilePath,
+        Start::Answered => return Served::Done,
+        Start::Failed => {
             fail(fetch);
             return Served::Done;
         }
@@ -109,7 +110,7 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
                 }
                 if !others {
                     session.control.requester_gone();
-                    session.control.close();
+                    retire(&session, &fetch.file_id);
                 }
                 false
             }
@@ -122,49 +123,83 @@ pub(super) fn serve(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<
     Served::Done
 }
 
-/// The file's live session, or a new one: started under the registry lock, after the poison was
-/// checked again there (a session that failed records its poison before it leaves the registry).
-fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>, handle: &tokio::runtime::Handle) -> Result<Arc<Session>, Served> {
-    let mut sessions = lock(&SESSIONS);
-    if let Some(session) = sessions.get(&fetch.file_id)
-        && !session.ended.load(std::sync::atomic::Ordering::SeqCst)
-    {
-        return Ok(session.clone());
-    }
-    if !matches!(bridge.db().poison(&fetch.file_id), Ok(None)) {
-        return Err(Served::Done);
-    }
-    let path = super::callbacks::db_placeholder_path(bridge, &fetch.file_id).ok_or(Served::Done)?;
-    let on_disk = bytes_held(&path);
-    // Spec S3: no identity with bytes on disk is a mismatch; core checks it, and an unreadable count
-    // counts as bytes (`u64::MAX`): never trusted.
-    let prep = handle.block_on(bridge.range_prep(&fetch.file_id, fetch.file_size.max(0) as u64, on_disk.min(fetch.file_size.max(0) as u64)));
-    let prep = match prep {
-        Ok(prep) => prep,
-        Err(crate::engine_bridge::PrepEnd::WholeFilePath) => return Err(Served::WholeFilePath),
-        Err(crate::engine_bridge::PrepEnd::ResolveSize(size)) => {
-            drop(sessions);
-            fail(fetch);
-            super::callbacks::resolve_size_mismatch_by_id(bridge, &fetch.file_id, size as i64);
-            return Err(Served::Done);
+/// How a fetch reached its session.
+enum Start {
+    Joined(Arc<Session>),
+    WholeFilePath,
+    /// The fetch was answered already (failed, and for 0783 resolved).
+    Answered,
+    Failed,
+}
+
+/// The file's live session, or a new one. The new one is in the registry before its preparation (so
+/// a concurrent fetch joins it, and its demand waits in the session's mailbox), and the registry lock
+/// is never held across the preparation's network call. The poison is checked again under the lock:
+/// a session that failed records its poison before it leaves the registry.
+fn join_or_start(fetch: &Fetch, bridge: &crate::callback_gate::CallbackLease<super::EngineBridge>, handle: &tokio::runtime::Handle) -> Start {
+    let session = {
+        let mut sessions = lock(&SESSIONS);
+        if let Some(session) = sessions.get(&fetch.file_id)
+            && !session.ended.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Start::Joined(session.clone());
         }
-        Err(crate::engine_bridge::PrepEnd::Failed(e)) => {
-            tracing::warn!(file_id = %fetch.file_id, error = %e.root_cause(), "range session could not start");
-            return Err(Served::Done);
+        if !matches!(bridge.db().poison(&fetch.file_id), Ok(None)) {
+            return Start::Failed;
         }
+        let session = Arc::new(Session {
+            control: beebeeb_transfer::RangeControl::new(),
+            book: Arc::new(Mutex::new(DemandBook::default())),
+            meter: Arc::new(crate::transfer_progress::ReceiveMeter::default()),
+            ended: false.into(),
+        });
+        sessions.insert(fetch.file_id.clone(), session.clone());
+        session
     };
-    let session = Arc::new(Session {
-        control: beebeeb_transfer::RangeControl::new(),
-        book: Arc::new(Mutex::new(DemandBook::default())),
-        meter: Arc::new(crate::transfer_progress::ReceiveMeter::default()),
-        ended: false.into(),
-    });
-    sessions.insert(fetch.file_id.clone(), session.clone());
-    drop(sessions);
-    let (file_id, connection, file_size) = (fetch.file_id.clone(), fetch.connection, fetch.file_size.max(0) as u64);
-    let run = session.clone();
-    handle.spawn(async move { run_session(run, prep, file_id, path, connection, file_size).await });
-    Ok(session)
+    let Some(path) = super::callbacks::db_placeholder_path(bridge, &fetch.file_id) else {
+        end(&session, &fetch.file_id);
+        return Start::Failed;
+    };
+    let file_size = fetch.file_size.max(0) as u64;
+    // Spec S3: no identity with bytes on disk is a mismatch (core checks it); an unreadable view counts
+    // as bytes, so it is never trusted.
+    let on_disk = bytes_held(&path).min(file_size);
+    match handle.block_on(bridge.range_prep(&fetch.file_id, file_size, on_disk)) {
+        Ok(prep) => {
+            let (run, file_id, connection) = (session.clone(), fetch.file_id.clone(), fetch.connection);
+            handle.spawn(async move { run_session(run, prep, file_id, path, connection, file_size).await });
+            Start::Joined(session)
+        }
+        Err(end_why) => {
+            end(&session, &fetch.file_id);
+            match end_why {
+                crate::engine_bridge::PrepEnd::WholeFilePath => Start::WholeFilePath,
+                crate::engine_bridge::PrepEnd::ResolveSize(size) => {
+                    // Task 0783: fail this fetch first (the placeholder cannot be resized mid-fetch).
+                    fail(fetch);
+                    super::callbacks::resolve_size_mismatch_by_id(bridge, &fetch.file_id, size as i64);
+                    Start::Answered
+                }
+                crate::engine_bridge::PrepEnd::Failed(e) => {
+                    tracing::warn!(file_id = %fetch.file_id, error = %e.root_cause(), "range session could not start");
+                    Start::Failed
+                }
+            }
+        }
+    }
+}
+
+/// Take `session` out of the registry and close it: a later fetch starts a new session (it trusts the
+/// bytes this one transferred: one recorded identity) instead of joining one that is ending.
+fn retire(session: &Arc<Session>, file_id: &str) {
+    {
+        let mut sessions = lock(&SESSIONS);
+        session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        if sessions.get(file_id).is_some_and(|s| Arc::ptr_eq(s, session)) {
+            sessions.remove(file_id);
+        }
+    }
+    session.control.close();
 }
 
 struct Quiet;
@@ -235,7 +270,9 @@ async fn run_session(
                 // SAFETY: NUL-terminated, alive for the call.
                 unsafe { super::callbacks::mark_in_sync(&wide) };
             }
-            let hash = hash_if_unchanged(&path, &file_id, key_before);
+            let (hash_path, hash_id) = (path.clone(), file_id.clone());
+            // A whole-file read: off the runtime's workers.
+            let hash = tokio::task::spawn_blocking(move || hash_if_unchanged(&hash_path, &hash_id, key_before)).await.ok().flatten();
             bridge.finish_whole_range(&file_id, file_size, version_number, hash, &ticket);
             if let Ok(board) = Arc::try_unwrap(board) {
                 board.finish();
@@ -447,9 +484,10 @@ pub unsafe extern "system" fn notify_file_open_completion_callback(info: *const 
 
 /// A close completion: a session with no request left (the opener closed its handle) ends.
 pub(super) fn after_close(file_id: &str) {
-    if let Some(session) = lock(&SESSIONS).get(file_id).cloned()
+    let session = lock(&SESSIONS).get(file_id).cloned();
+    if let Some(session) = session
         && lock(&session.book).is_idle()
     {
-        session.control.close();
+        retire(&session, file_id);
     }
 }
