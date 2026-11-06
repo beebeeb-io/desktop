@@ -826,6 +826,7 @@ async fn ld0105_p1_a_cancelled_request_ends_it_and_never_poisons() {
 /// Switch ON (dev builds): a pinned file on a PROGRESSIVE root streams through its range session;
 /// a non-progressive root or a file an earlier session handed back still takes the whole-file path.
 #[test]
+#[cfg(debug_assertions)]
 fn ld0105_switch_on_streams_a_pinned_file_through_its_range_session() {
     assert!(W2_STREAMING, "ON in dev builds (this test build is one)");
     assert_eq!(fetch_route(true, true, false), FetchRoute::RangeSession);

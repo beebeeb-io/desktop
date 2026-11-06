@@ -307,6 +307,8 @@ struct CfOut(CF_CONNECTION_KEY, Option<u32>);
 /// 1 MiB calls copy. So a piece goes out in calls of at most this: the whole-file path's call size,
 /// the one constant both paths use.
 pub(crate) const CF_TRANSFER_MAX: usize = super::callbacks::TRANSFER_CHUNK as usize;
+// Delta review P3-3: every call but a piece's last starts and ends on a page.
+const _: () = assert!(CF_TRANSFER_MAX > 0 && CF_TRANSFER_MAX as u64 % crate::cf_range::PAGE == 0);
 
 /// `CfExecute(TRANSFER_DATA)` of one piece at `offset`, in calls of at most [`CF_TRANSFER_MAX`]. A piece
 /// starts 4 KiB-aligned and 1 MiB is a multiple of 4 KiB, so every call's offset is aligned and only the
@@ -336,7 +338,10 @@ impl PieceOut for CfOut {
         // SAFETY: the keys of the live request the sink chose for this piece.
         unsafe { transfer_piece(self.0, keys, offset, plain) }.map_err(|(refused_at, e)| {
             let code = e.code().0 as u32;
-            self.1 = Some(code);
+            // Delta review P3-9: a cancel is not the refusal a later poison should name.
+            if !crate::cf_range::request_gone(code) {
+                self.1 = Some(code);
+            }
             // QA logging gap (desktop #225): every refusal names its status.
             tracing::warn!(hresult = %format!("0x{code:08X}"), offset, len = plain.len(), refused_at, request_key = keys.request_key, gone = crate::cf_range::request_gone(code), "TRANSFER_DATA refused");
             // A cancelled request or a key no longer valid ends that request, never the file (#225).

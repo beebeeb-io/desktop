@@ -58,6 +58,8 @@ pub(crate) enum Emptied {
     Missing,
     /// A step failed: NOT_IN_SYNC and the pin state were restored first. The status word only.
     Failed(&'static str),
+    /// The discard's own check under the exclusive handle refused (delta review P2-1): nothing changed.
+    Refused(&'static str),
 }
 
 /// What step 2 checks.
@@ -230,6 +232,18 @@ pub(crate) fn empty_poisoned_with(path: &Path, check: Check, between: &mut dyn F
 /// one instead of the pin it reads now, so a poisoned file is never pinned by path first (which would
 /// make Windows fetch it, and the poison refuse the fetch).
 fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE), pin: Option<CF_PIN_STATE>) -> (Emptied, Option<CF_PIN_STATE>) {
+    attempt_guarded(path, check, &mut |_| None, between, pin)
+}
+
+/// [`attempt`], with `guard` asked first under the referenced exclusive handle, before anything
+/// changes: a refusal word ends it as [`Emptied::Refused`].
+fn attempt_guarded(
+    path: &Path,
+    check: Check,
+    guard: &mut dyn FnMut(HANDLE) -> Option<&'static str>,
+    between: &mut dyn FnMut(Step, HANDLE),
+    pin: Option<CF_PIN_STATE>,
+) -> (Emptied, Option<CF_PIN_STATE>) {
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -257,8 +271,12 @@ fn attempt(path: &Path, check: Check, between: &mut dyn FnMut(Step, HANDLE), pin
     let outcome = if unsafe { CfReferenceProtectedHandle(handle) }.as_bool() {
         // SAFETY: referenced, so its Win32 handle stays open until the release below.
         let win32 = unsafe { CfGetWin32HandleFromProtectedHandle(handle) };
-        // SAFETY: open for the whole call (the contract of `empty_under`).
-        let outcome = unsafe { empty_under(win32, check, between, &mut restore, pin) };
+        // The guard reads through the referenced handle; nothing has changed yet.
+        let outcome = match guard(win32) {
+            Some(word) => Emptied::Refused(word),
+            // SAFETY: open for the whole call (the contract of `empty_under`).
+            None => unsafe { empty_under(win32, check, between, &mut restore, pin) },
+        };
         // SAFETY: the reference taken above.
         unsafe { CfReleaseProtectedHandle(handle) };
         outcome
@@ -525,6 +543,8 @@ fn settle(db: &crate::state_db::StateDb, file_id: &str, outcome: &Emptied, kind:
                 tracing::warn!(file_id = %file_id, step, "poison sweep: a step failed; restored");
             }
         }
+        // Only a discard's guard refuses, and it changed nothing: the row stays as it is.
+        Emptied::Refused(_) => {}
     }
     if !matches!(outcome, Emptied::Failed(_) | Emptied::NeedsAttention) {
         forget_logged(file_id);
@@ -608,6 +628,28 @@ pub(crate) fn poison_now(db: &crate::state_db::StateDb, file_id: &str, path: &Pa
     tracing::warn!(file_id = %file_id, reason, "placeholder poisoned after a failed download");
 }
 
+/// The FileIdentity (the UTF-8 file id, `placeholders.rs`) of the placeholder `handle` holds; none for a
+/// plain file or one that cannot be read.
+fn identity_of_handle(handle: HANDLE) -> Option<Vec<u8>> {
+    super::placeholders::read_standard_info(handle).ok().flatten().map(|(identity, _)| identity)
+}
+
+/// The discard's refusal words under the handle (IPC: `identity_mismatch`; `not_poisoned`).
+pub(crate) const IDENTITY_MISMATCH: &str = "identity_mismatch";
+const NOT_POISONED: &str = "not_poisoned";
+
+/// Delta review P2-1: may the discard empty the placeholder it holds? Only if its FileIdentity is
+/// `file_id` (none: not this file) and, asked last, the poison row is still there.
+pub(crate) fn discard_guard(identity: Option<&[u8]>, file_id: &str, still_poisoned: impl FnOnce() -> bool) -> Option<&'static str> {
+    if identity != Some(file_id.as_bytes()) {
+        return Some(IDENTITY_MISMATCH);
+    }
+    if !still_poisoned() {
+        return Some(NOT_POISONED);
+    }
+    None
+}
+
 /// Why "Discard and download again" did not empty the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiscardRefused {
@@ -634,9 +676,14 @@ pub(crate) fn discard_now(
     let path = crate::engine_bridge::local_file_path_under_sync_root(sync_root, &entry.path).map_err(|_| DiscardRefused::Missing)?;
     // A pin lost earlier (review P3, poison.rs:373): the step restores that one.
     let recorded = db.pin_to_restore(file_id).ok().flatten().map(CF_PIN_STATE);
-    let (outcome, pin_lost) = attempt(&path, Check::Discard, &mut |_, _| {}, recorded);
+    // Delta review P2-1 (lead ruling 2026-11-06): under the exclusive handle, before anything changes,
+    // the placeholder at the row's path must be this file (its FileIdentity, the UTF-8 file id) and the
+    // poison row must still be there. A stale path (a folder rename the database has not caught up
+    // with) or a second discard in flight then empties nothing and clears nothing.
+    let mut guard = |handle: HANDLE| discard_guard(identity_of_handle(handle).as_deref(), file_id, || matches!(db.poison(file_id), Ok(Some(_))));
+    let (outcome, pin_lost) = attempt_guarded(&path, Check::Discard, &mut guard, &mut |_, _| {}, recorded);
     keep_lost_pin(db, file_id, pin_lost);
-    if recorded.is_some() && pin_lost.is_none() && matches!(outcome, Emptied::Emptied | Emptied::Gone) {
+    if recorded.is_some() && pin_lost.is_none() && outcome == Emptied::Emptied {
         let _ = db.clear_pin_to_restore(file_id);
     }
     match outcome {
@@ -646,13 +693,12 @@ pub(crate) fn discard_now(
             fetch(path);
             Ok(())
         }
-        // Review P3 (poison.rs:572): a plain file at the path is not ours to replace: the poison ends
-        // (nothing of the attempt is left to guard), nothing is fetched, and the caller is told.
-        Emptied::Gone => {
-            settle(db, file_id, &outcome, SweepKind::Close);
-            forget_logged(file_id);
-            Err(DiscardRefused::Failed("not_a_placeholder"))
-        }
+        // A plain file at the path is not ours to replace (review P3, poison.rs:572), and it carries no
+        // identity to prove it is this file: nothing is emptied, the poison stays (lead ruling
+        // 2026-11-06: the flag is never cleared without emptying), nothing is fetched.
+        Emptied::Gone => Err(DiscardRefused::Failed("not_a_placeholder")),
+        Emptied::Refused(word) if word == NOT_POISONED => Err(DiscardRefused::NotPoisoned),
+        Emptied::Refused(word) => Err(DiscardRefused::Failed(word)),
         Emptied::Busy => Err(DiscardRefused::InUse),
         Emptied::Missing => Err(DiscardRefused::Missing),
         Emptied::Failed(step) => Err(DiscardRefused::Failed(step)),

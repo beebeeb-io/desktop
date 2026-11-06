@@ -58,6 +58,9 @@ pub(crate) const READ_AHEAD_ON_DEFAULT_KEY: bool = false;
 /// fetch takes the whole-file path (S0/S2 on the PROGRESSIVE root), as before W2. ON in dev builds;
 /// release builds ship it OFF until the robocopy failure (QA F2b) is fixed and natively verified.
 pub(crate) const W2_STREAMING: bool = cfg!(debug_assertions);
+// Delta review P3-4: a release build with streaming ON does not compile (0.8.22 ships it OFF).
+#[cfg(not(debug_assertions))]
+const _: () = assert!(!W2_STREAMING, "0.8.22 ships streaming OFF");
 
 /// Where one `FETCH_DATA` goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

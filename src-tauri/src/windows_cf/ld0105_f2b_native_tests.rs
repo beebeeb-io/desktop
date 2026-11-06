@@ -182,6 +182,10 @@ fn ld0105_f2b_native_robocopy_matrix() {
 
 static FIX_SERVED: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
 static FIX_READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// The workers serving a run, joined before its root goes (delta review P3-3).
+static FIX_WORKERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+/// `transfer_piece` calls Windows refused in a run (delta review P3-3: the rung asserts none).
+static FIX_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// A session's preparation before its first transfer (the QA logs: about 1.7 s).
 const FIX_PREP: Duration = Duration::from_millis(1700);
 
@@ -196,7 +200,8 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
     // SAFETY: valid for the duration of the callback.
     let r = unsafe { request_of(info, params) };
     let ready = *FIX_READY_AT.lock().unwrap().get_or_insert_with(|| Instant::now() + FIX_PREP);
-    std::thread::spawn(move || serve_session_piece(r, ready));
+    let worker = std::thread::spawn(move || serve_session_piece(r, ready));
+    FIX_WORKERS.lock().unwrap().push(worker);
 }
 
 fn serve_session_piece(r: Request, ready: Instant) {
@@ -211,8 +216,11 @@ fn serve_session_piece(r: Request, ready: Instant) {
     let end = ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(data.len() as i64);
     let keys = crate::cf_range::RequestKeys { transfer_key: r.transfer, request_key: r.request };
     // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal returns an error).
-    if unsafe { crate::windows_cf::streaming::transfer_piece(r.connection, keys, start as u64, &data[start as usize..end as usize]) }.is_ok() {
-        served.push((start, end));
+    match unsafe { crate::windows_cf::streaming::transfer_piece(r.connection, keys, start as u64, &data[start as usize..end as usize]) } {
+        Ok(()) => served.push((start, end)),
+        Err(_) => {
+            FIX_REFUSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -230,18 +238,23 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         qa.connect(session_piece_fetch);
         FIX_SERVED.lock().unwrap().clear();
         *FIX_READY_AT.lock().unwrap() = None;
+        FIX_REFUSED.store(0, std::sync::atomic::Ordering::SeqCst);
         let name = format!("robo-{i}.mp4");
         assert!(placeholders::create_placeholder(&qa.root, &format!("qa-robo-{i}"), &name, F2B_SIZE as i64, 1_700_000_000, false).unwrap());
         let dst = tempfile::tempdir().unwrap();
         let (exit, errors) = f2b_robocopy(&qa, &name, dst.path(), &[]);
         let whole = std::fs::read(dst.path().join(&name)).ok().as_deref() == Some(data.as_slice());
-        // A worker may still be returning: let it finish before the root goes.
-        std::thread::sleep(Duration::from_millis(300));
-        runs.push((exit, errors, whole));
+        // Every worker of this run finishes before its root goes.
+        let workers: Vec<_> = FIX_WORKERS.lock().unwrap().drain(..).collect();
+        for worker in workers {
+            let _ = worker.join();
+        }
+        runs.push((exit, errors, whole, FIX_REFUSED.load(std::sync::atomic::Ordering::SeqCst)));
     }
     println!("ld0105-f2b-native: buffered robocopy x3 of session pieces (a worker, after {FIX_PREP:?}) (CF_TRANSFER_MAX {}): {runs:?}", crate::windows_cf::streaming::CF_TRANSFER_MAX);
-    for (exit, errors, whole) in &runs {
+    for (exit, errors, whole, refused) in &runs {
         assert_eq!(*exit, Some(1), "robocopy copied the file (exit 1), errors: [{errors}]");
         assert!(*whole, "the copy is byte for byte the file");
+        assert_eq!(*refused, 0, "no TRANSFER_DATA call was refused");
     }
 }

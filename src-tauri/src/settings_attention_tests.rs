@@ -136,3 +136,34 @@ fn ld0105_u1_a_locked_vault_shows_no_needs_attention_row() {
     assert!(!shown.contains("holiday.mp4") && !shown.contains("changed_on_this_device"), "locked: no name, no row: {shown}");
     assert!(unlocked.contains("holiday.mp4"), "the control: unlocked, the row shows: {unlocked}");
 }
+
+/// Delta review P2-2 (lead 2026-11-06: blocks the merge): the needs-attention rows kept for a slow read
+/// never reach another session. A's rows are kept under engine generation 1. A sign-out or an account
+/// switch starts a new engine (generation 2): B's poll whose read times out shows nothing of A's. No
+/// engine, or a lock, clears them. A discarded row never comes back from an older read. Red on the
+/// mutants "the kept rows ignore the generation", "a lock or no engine keeps the rows", "no fence".
+#[test]
+fn ld0105_u1_kept_needs_attention_rows_never_reach_another_session() {
+    use crate::transfer_progress::{AttentionCache, NeedsAttention, attention_for_poll};
+    let a = vec![NeedsAttention { file_id: "a-file".into(), path: "A/holiday.mp4".into(), size: 1 }];
+    let mut cache = AttentionCache::new();
+    cache.store(1, 1, a.clone());
+    assert_eq!(attention_for_poll(&mut cache, true, Some(1), Some(a.clone())), a, "a fresh read");
+    assert_eq!(attention_for_poll(&mut cache, true, Some(1), None), a, "a slow read: the rows kept for this engine");
+    assert!(attention_for_poll(&mut cache, true, Some(2), None).is_empty(), "B (a new engine) never sees A's rows");
+
+    cache.store(1, 2, a.clone());
+    assert!(attention_for_poll(&mut cache, true, None, None).is_empty(), "no engine: nothing");
+    assert!(attention_for_poll(&mut cache, true, Some(1), None).is_empty(), "no engine cleared the kept rows");
+
+    cache.store(1, 3, a.clone());
+    assert!(attention_for_poll(&mut cache, false, Some(1), None).is_empty(), "locked: nothing");
+    assert!(attention_for_poll(&mut cache, true, Some(1), None).is_empty(), "a lock cleared the kept rows");
+
+    cache.store(1, 10, a.clone());
+    cache.forget("a-file", 11);
+    cache.store(1, 10, a.clone());
+    assert!(attention_for_poll(&mut cache, true, Some(1), None).is_empty(), "a read started before the discard does not bring the row back");
+    cache.store(1, 11, a.clone());
+    assert_eq!(attention_for_poll(&mut cache, true, Some(1), None), a, "a later read is kept");
+}

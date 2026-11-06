@@ -749,48 +749,54 @@ pub(super) async fn desktop_recent_files(
     })
 }
 
-/// The needs-attention rows the last read of state.db returned (review of #225: a read that waits
-/// behind the engine shows these, so a row never flickers out while the DB is busy).
-static LAST_ATTENTION: std::sync::Mutex<Vec<crate::transfer_progress::NeedsAttention>> = std::sync::Mutex::new(Vec::new());
-/// How long a poll waits for state.db's needs-attention rows before it shows the last ones it read.
+/// How long a poll waits for state.db's needs-attention rows before it shows the rows kept for the
+/// same engine generation.
 const ATTENTION_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Every file transfer currently in flight, as a lightweight snapshot for the tray's
 /// "In progress" card and the Activity › Timeline view (LD-0105 U1). The board is
 /// process-wide and needs no session gate: a not-signed-in tray sees an empty list.
 /// Desktop #225 (Amendment 4): plus a row for every file that needs the person (a failed download
-/// changed on this device since), only while the vault is unlocked (as `desktop_recent_files`). The
-/// board is read first and lock-free; the rows come through the engine's own state.db handle (no open,
-/// no migration lock), waited for at most [`ATTENTION_READ_WAIT`], else the last rows read.
+/// changed on this device since), only while the vault is unlocked (as `desktop_recent_files`), asked
+/// again after the wait. The board is read first and lock-free. The rows come through the running
+/// engine's state.db (its lease dropped before the query: no open, no migration lock, no lease held
+/// across the DB mutex), waited for at most [`ATTENTION_READ_WAIT`], else the rows kept for this same
+/// engine generation (delta review P2-2: never another session's).
 #[tauri::command]
 pub(super) async fn get_active_transfers(
     state: State<'_, AppState>,
     runtime: State<'_, popover_data::PopoverRuntime>,
 ) -> Result<Vec<crate::transfer_progress::ActiveTransferDto>, String> {
+    use crate::transfer_progress::{ATTENTION_CACHE, ATTENTION_READS, attention_for_poll};
     let rows = runtime.transfers.snapshot_dtos();
-    if !vault_unlocked(&state) {
-        // Nothing read while unlocked is kept past a lock (or into another account's session).
-        if let Ok(mut last) = LAST_ATTENTION.lock() {
-            last.clear();
-        }
-        return Ok(shown_transfers(rows, false, &[]));
-    }
-    let read = tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "windows")]
-        let fresh = crate::windows_cf::bridge().and_then(|bridge| crate::transfer_progress::needs_attention(bridge.db()));
-        // Off Windows no file is ever poisoned (the Cloud Files provider is Windows-only).
-        #[cfg(not(target_os = "windows"))]
-        let fresh: Option<Vec<crate::transfer_progress::NeedsAttention>> = Some(Vec::new());
-        if let (Some(fresh), Ok(mut last)) = (&fresh, LAST_ATTENTION.lock()) {
-            *last = fresh.clone();
+    let poll = |unlocked: bool, generation: Option<u64>, fresh| {
+        ATTENTION_CACHE.lock().map(|mut cache| attention_for_poll(&mut cache, unlocked, generation, fresh)).unwrap_or_default()
+    };
+    // The running engine's generation and its DB, the lease dropped at once (review P3-5).
+    #[cfg(target_os = "windows")]
+    let engine = crate::windows_cf::bridge().map(|bridge| (bridge.generation_id(), bridge.db_arc()));
+    // Off Windows no file is ever poisoned (the Cloud Files provider is Windows-only).
+    #[cfg(not(target_os = "windows"))]
+    let engine: Option<(u64, std::sync::Arc<crate::state_db::StateDb>)> = None;
+    let Some((generation, db)) = engine.filter(|_| vault_unlocked(&state)) else {
+        return Ok(shown_transfers(rows, false, &poll(false, None, None)));
+    };
+    let seq = ATTENTION_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let read = tokio::task::spawn_blocking(move || {
+        let fresh = crate::transfer_progress::needs_attention(&db);
+        if let (Some(fresh), Ok(mut cache)) = (&fresh, ATTENTION_CACHE.lock()) {
+            cache.store(generation, seq, fresh.clone());
         }
         fresh
     });
-    let attention = match tokio::time::timeout(ATTENTION_READ_WAIT, read).await {
-        Ok(Ok(Some(fresh))) => fresh,
-        _ => LAST_ATTENTION.lock().map(|last| last.clone()).unwrap_or_default(),
+    let fresh = match tokio::time::timeout(ATTENTION_READ_WAIT, read).await {
+        Ok(Ok(fresh)) => fresh,
+        _ => None,
     };
-    Ok(shown_transfers(rows, true, &attention))
+    // A lock that landed during the wait shows no name (delta review P2-2).
+    let unlocked = vault_unlocked(&state);
+    let attention = poll(unlocked, Some(generation), fresh);
+    Ok(shown_transfers(rows, unlocked, &attention))
 }
 
 /// Is the active account's vault unlocked (a session held)? No account, or a poisoned lock: no.

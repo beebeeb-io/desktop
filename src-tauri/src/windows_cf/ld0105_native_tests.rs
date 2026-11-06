@@ -551,7 +551,10 @@ unsafe extern "system" fn refuse_every_fetch(info: *const CF_CALLBACK_INFO, para
 fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
     let path = qa.path(name);
     std::fs::write(&path, content(1 << 20)).unwrap();
-    placeholders::convert_to_in_sync_placeholder(&path, name).unwrap();
+    // Its FileIdentity is its row's file id, `qa-<stem>`, as a real placeholder's is (delta review P2-1:
+    // the discard checks it).
+    let stem = name.split('.').next().unwrap_or(name);
+    placeholders::convert_to_in_sync_placeholder(&path, &format!("qa-{stem}")).unwrap();
     placeholders::set_pin_state(&path, true, false).unwrap();
     placeholders::mark_not_in_sync_path(&path).unwrap();
     assert_eq!(census_of(&path), (OnDisk::Wholly, false, true), "{name} poisoned as a failed fetch leaves it");
@@ -995,6 +998,47 @@ fn ld0105_u1_native_a_changed_file_is_a_board_row_until_discard_and_download_aga
     assert_eq!((before[0].attention, before[0].action), (Some(ATTENTION_CHANGED), Some(ACTION_DISCARD)));
     assert_eq!(result, Ok(()));
     assert!(after.is_empty(), "the discard ends the row: {after:?}");
+}
+
+/// Delta review P2-1 (lead 2026-11-06: blocks the merge): "Discard and download again" empties only the
+/// poisoned file. The row's path holds ANOTHER placeholder (a stale path after a folder rename): refused
+/// `identity_mismatch` under the exclusive handle, that file kept as it is, the poison kept, nothing
+/// fetched. A plain file at the path: refused, the poison kept (never cleared without emptying). Red on
+/// the mutants "skip the identity check" (the other file is emptied) and "a plain file ends the poison".
+#[test]
+fn ld0105_p2_native_discard_empties_only_the_poisoned_file() {
+    use crate::windows_cf::poison::{DiscardRefused, IDENTITY_MISMATCH, discard_now};
+    let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
+    qa.connect(refuse_every_fetch);
+    let other = qa.path("stale.bin");
+    std::fs::write(&other, content(1 << 20)).unwrap();
+    placeholders::convert_to_in_sync_placeholder(&other, "qa-other").unwrap();
+    let plain = qa.path("plain.bin");
+    std::fs::write(&plain, b"plain").unwrap();
+    let before = census_of(&other);
+    let state = tempfile::tempdir().unwrap();
+    let db = qa_db(state.path(), &[("qa-mine", "stale.bin"), ("qa-plain", "plain.bin")]);
+    for id in ["qa-mine", "qa-plain"] {
+        db.record_poison(id, "corrupt", None, 1).unwrap();
+        db.mark_poison_needs_attention(id).unwrap();
+    }
+    let mut fetched = None;
+    let stale = discard_now(&db, &qa.root, "qa-mine", |path| fetched = Some(path));
+    let on_plain = discard_now(&db, &qa.root, "qa-plain", |_| {});
+    println!(
+        "ld0105-p2-native: discard at a stale path {stale:?}, the other file {before:?} -> {:?}, poison kept {}; at a plain file {on_plain:?}, poison kept {}",
+        census_of(&other),
+        db.poison("qa-mine").unwrap().is_some(),
+        db.poison("qa-plain").unwrap().is_some()
+    );
+    assert_eq!(stale, Err(DiscardRefused::Failed(IDENTITY_MISMATCH)));
+    assert_eq!(census_of(&other), before, "the other file is kept as it is");
+    assert_eq!(std::fs::read(&other).unwrap(), content(1 << 20), "its bytes too");
+    assert!(db.poison("qa-mine").unwrap().is_some(), "the poison stays");
+    assert_eq!(fetched, None, "nothing fetched");
+    assert_eq!(on_plain, Err(DiscardRefused::Failed("not_a_placeholder")));
+    assert!(db.poison("qa-plain").unwrap().is_some(), "never cleared without emptying");
+    assert_eq!(std::fs::read(&plain).unwrap(), b"plain");
 }
 
 /// F2b (desktop #225 QA rung, robocopy ERROR 379): the diagnosis matrix and the fix's rung.

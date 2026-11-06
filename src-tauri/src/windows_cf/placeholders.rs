@@ -398,7 +398,7 @@ fn read_identity(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<O
 
 /// The identity and the on-disk byte count (on disk + modified) read through `handle`, or `None` for a file that is
 /// not a placeholder.
-fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
+pub(super) fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<Option<(Vec<u8>, i64)>> {
     use windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE;
     let mut buffer = vec![0u64; 1024];
     // SAFETY: `handle` is open for the call (the caller's `File` outlives it); the buffer is 8-byte aligned and its

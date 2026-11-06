@@ -98,12 +98,87 @@ pub(crate) fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<Needs
     Some(
         rows.into_iter()
             .filter(|r| r.needs_attention)
-            .filter_map(|r| {
-                let entry = db.get_file(&r.file_id).ok().flatten()?;
-                Some(NeedsAttention { file_id: r.file_id, path: entry.path, size: entry.size_bytes.max(0) as u64 })
+            .filter_map(|r| match db.get_file(&r.file_id) {
+                Ok(Some(entry)) => Some(Ok(NeedsAttention { file_id: r.file_id, path: entry.path, size: entry.size_bytes.max(0) as u64 })),
+                // No files row: no exit, no row (above).
+                Ok(None) => None,
+                // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
+                Err(e) => Some(Err(e)),
             })
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?,
     )
+}
+
+/// The needs-attention rows the last read returned, kept with the engine generation they were read
+/// under (delta review P2-2): served only to a poll under that same generation. A lock, a sign-out and
+/// an account switch each stop the engine, and the next one is a new generation (`NEXT_GENERATION`), so
+/// no other session ever sees them; a lock also clears them ([`attention_for_poll`]).
+#[derive(Debug, Default)]
+pub(crate) struct AttentionCache {
+    /// `(generation, read number, rows)` of the newest read stored.
+    read: Option<(u64, u64, Vec<NeedsAttention>)>,
+    /// Reads numbered below this started before a discard ended a row: never stored (review P3-6).
+    fence: u64,
+}
+
+impl AttentionCache {
+    pub(crate) const fn new() -> Self {
+        AttentionCache { read: None, fence: 0 }
+    }
+
+    /// Read number `seq` under `generation` returned `rows`. An older read (a smaller `seq`, or one
+    /// started before the fence) never replaces a newer one.
+    pub(crate) fn store(&mut self, generation: u64, seq: u64, rows: Vec<NeedsAttention>) {
+        if seq < self.fence || self.read.as_ref().is_some_and(|(g, s, _)| *g == generation && *s > seq) {
+            return;
+        }
+        self.read = Some((generation, seq, rows));
+    }
+
+    /// The rows last read under `generation`; nothing under any other.
+    pub(crate) fn rows_for(&self, generation: u64) -> Vec<NeedsAttention> {
+        match &self.read {
+            Some((g, _, rows)) if *g == generation => rows.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.read = None;
+    }
+
+    /// A discard ended `file_id`'s row: it is gone from the kept rows, and no read that started before
+    /// `next_seq` (the next read's number) may bring it back.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn forget(&mut self, file_id: &str, next_seq: u64) {
+        if let Some((_, _, rows)) = &mut self.read {
+            rows.retain(|r| r.file_id != file_id);
+        }
+        self.fence = self.fence.max(next_seq);
+    }
+}
+
+/// The process's kept needs-attention rows ([`AttentionCache`]), shared by `get_active_transfers` and
+/// `discard_and_download_again`.
+pub(crate) static ATTENTION_CACHE: Mutex<AttentionCache> = Mutex::new(AttentionCache::new());
+/// The next needs-attention read's number.
+pub(crate) static ATTENTION_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// What one poll shows of the needs-attention rows (delta review P2-2): nothing while the vault is
+/// locked or no engine is running (and the kept rows are cleared); a fresh read when it finished in
+/// time; else the rows kept for this same engine generation.
+pub(crate) fn attention_for_poll(
+    cache: &mut AttentionCache,
+    unlocked: bool,
+    generation: Option<u64>,
+    fresh: Option<Vec<NeedsAttention>>,
+) -> Vec<NeedsAttention> {
+    let Some(generation) = generation.filter(|_| unlocked) else {
+        cache.clear();
+        return Vec::new();
+    };
+    fresh.unwrap_or_else(|| cache.rows_for(generation))
 }
 
 /// The board's rows plus a row for each file that needs the person (a download, not failed, no
