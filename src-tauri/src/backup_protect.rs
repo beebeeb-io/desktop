@@ -122,6 +122,20 @@ pub(crate) fn protected_destination(db: &StateDb, target_rel: &str) -> Option<St
     words(check_drive_mutation(false, true, None, Mutation::Move))
 }
 
+/// Why the item at `source_rel` must not be renamed or moved (`mutation`) to `target_rel` (`None`: a
+/// target outside this drive, such as the Recycle Bin, or one that could not be read): the item is in
+/// the Backups tree (its own words), or the target is (a move into the tree). The Windows rename
+/// callback and the watcher's after-the-fact check both ask this.
+pub(crate) fn move_refusal(
+    db: &StateDb,
+    own: &OwnBackups,
+    source_rel: &str,
+    mutation: Mutation,
+    target_rel: Option<&str>,
+) -> Option<String> {
+    protected_reason(db, own, source_rel, mutation).or_else(|| protected_destination(db, target_rel?))
+}
+
 fn words(rule: Result<(), Protected>) -> Option<String> {
     rule.err().map(|protected| protected.message.into_owned())
 }

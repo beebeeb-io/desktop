@@ -552,11 +552,13 @@ pub(crate) async fn handle_rename_with(
     // LD-0113 §6.3, Amendment 6 (refused after the fact): a rename or move of an item in the Backups
     // tree, or a move of an item into it, that got through is not sent; the item goes back.
     if check == ProtectionCheck::Check
-        && let Some(words) =
-            protected(bridge, &source_rel, crate::backup_protect::rename_mutation(source, target)).or_else(|| {
-                crate::engine_bridge::relative_db_path(sync_root, target)
-                    .and_then(|target_rel| crate::backup_protect::protected_destination(bridge.db(), &target_rel))
-            })
+        && let Some(words) = crate::backup_protect::move_refusal(
+            bridge.db(),
+            &crate::backup_protect::own_backups(),
+            &source_rel,
+            crate::backup_protect::rename_mutation(source, target),
+            crate::engine_bridge::relative_db_path(sync_root, target).as_deref(),
+        )
     {
         let moved_back = !source.exists()
             && target.exists()

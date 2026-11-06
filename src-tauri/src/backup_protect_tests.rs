@@ -159,6 +159,24 @@ fn a_move_into_the_tree_is_refused() {
     }
 }
 
+/// The rename and move decision the Windows callback and the watcher share, on every side of the tree.
+#[test]
+fn a_move_is_refused_into_out_of_and_within_the_tree_only() {
+    let (_dir, db) = fixture();
+    let own = OwnBackups::default();
+    let refusal = |source: &str, target: Option<&str>| move_refusal(&db, &own, source, Mutation::Move, target);
+    let managed = Some(MSG_MANAGED_IN_APP.to_string());
+    assert_eq!(refusal("Documents/report.pdf", Some("Backups/OtherPC/report.pdf")), managed, "into the tree");
+    assert_eq!(refusal("Documents/report.pdf", Some("Backups/report.pdf")), managed, "into the root itself");
+    assert_eq!(refusal("Backups/OtherPC/a.txt", Some("Documents/a.txt")), managed, "out of the tree");
+    assert_eq!(refusal("Backups/OtherPC/a.txt", Some("Backups/GLegion/a.txt")), managed, "within the tree");
+    assert_eq!(refusal("Backups/OtherPC/a.txt", None), managed, "to the Recycle Bin, or an unread target");
+    assert_eq!(refusal("Backups", Some("Documents/Backups")).as_deref(), Some(MSG_MOVE), "the root has its own words");
+    assert_eq!(refusal("Documents/report.pdf", Some("Old/Backups/report.pdf")), None, "a look-alike is ordinary");
+    assert_eq!(refusal("Documents/report.pdf", Some("Documents/Sub/report.pdf")), None, "outside the tree");
+    assert_eq!(refusal("Documents/report.pdf", None), None, "an ordinary item to the Recycle Bin");
+}
+
 #[test]
 fn without_a_flagged_root_nothing_is_protected() {
     let dir = tempfile::tempdir().unwrap();

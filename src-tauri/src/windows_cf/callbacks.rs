@@ -823,10 +823,8 @@ pub(super) fn rename_refusal(
         (Some(source), Some(target)) => crate::backup_protect::rename_mutation(&source, target),
         _ => beebeeb_core::backup::Mutation::Move,
     };
-    crate::backup_protect::protected_reason(db, own, &rel, mutation).or_else(|| {
-        let target_rel = crate::engine_bridge::relative_db_path(sync_root?, target.as_deref()?)?;
-        crate::backup_protect::protected_destination(db, &target_rel)
-    })
+    let target_rel = sync_root.zip(target.as_deref()).and_then(|(root, t)| crate::engine_bridge::relative_db_path(root, t));
+    crate::backup_protect::move_refusal(db, own, &rel, mutation, target_rel.as_deref())
 }
 
 /// Whether this process asked (the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`).

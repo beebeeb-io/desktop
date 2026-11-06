@@ -8,6 +8,7 @@
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,8 @@ struct Fixture {
     shown: Mutex<Vec<String>>,
     /// Each rename callback's target as Windows gave it (`TargetPath` joined with the volume).
     targets: Mutex<Vec<String>>,
+    /// Callbacks that started (`answers` counts those that answered).
+    entered: AtomicUsize,
 }
 
 impl Fixture {
@@ -45,6 +48,20 @@ impl Fixture {
 
     fn shown(&self) -> Vec<String> {
         self.shown.lock().unwrap().clone()
+    }
+
+    /// What the callbacks saw, for an `ld0113` line. Each lock is taken and dropped on its own: the e100f78
+    /// rung hung on a print that held `answers` while `refusals()` locked it again.
+    fn diagnostics(&self) -> String {
+        let entered = self.entered.load(Ordering::SeqCst);
+        let answered = self.answers.lock().unwrap().len();
+        let refusals = self.refusals().len();
+        let notices = self.shown().len();
+        let targets = self.targets.lock().unwrap().clone();
+        format!(
+            "callbacks_entered={entered} answered={answered} refusals={refusals} notices={notices} targets={targets:?} root={:?}",
+            self.root.display().to_string()
+        )
     }
 
     /// Every callback Windows made for the change was answered with the refusal `words`, and the
@@ -78,6 +95,7 @@ unsafe extern "system" fn test_delete(info: *const CF_CALLBACK_INFO, params: *co
     // SAFETY: valid for the duration of the callback; the context is the live `Fixture` (see `connect`).
     let info = unsafe { &*info };
     let fx = unsafe { &*(info.CallbackContext as *const Fixture) };
+    fx.entered.fetch_add(1, Ordering::SeqCst);
     let params = (!params.is_null()).then(|| unsafe { &*params });
     let refusal = delete_refusal(&fx.db, &fx.own, Some(&fx.root), info, params);
     unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_DELETE, refusal.is_some()) };
@@ -89,13 +107,14 @@ unsafe extern "system" fn test_rename(info: *const CF_CALLBACK_INFO, params: *co
     // SAFETY: as `test_delete`.
     let info = unsafe { &*info };
     let fx = unsafe { &*(info.CallbackContext as *const Fixture) };
+    fx.entered.fetch_add(1, Ordering::SeqCst);
     let params = (!params.is_null()).then(|| unsafe { &*params });
+    // SAFETY: the rename arm, read while the callback is live (before the answer).
+    let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
+    fx.targets.lock().unwrap().push(target.map_or_else(|| "<none>".into(), |t| t.display().to_string()));
     let refusal = rename_refusal(&fx.db, &fx.own, Some(&fx.root), info, params);
     unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
     fx.record(started, refusal);
-    // SAFETY: as `rename_refusal`'s read of the same arm.
-    let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
-    fx.targets.lock().unwrap().push(target.map_or_else(|| "<none>".into(), |t| t.display().to_string()));
 }
 
 /// A registered QA root with a flagged Backups root and the fixture its callbacks answer from;
@@ -128,6 +147,7 @@ impl QaRoot {
             gate: Mutex::new(crate::backup_protect::NoticeGate::default()),
             shown: Mutex::new(Vec::new()),
             targets: Mutex::new(Vec::new()),
+            entered: AtomicUsize::new(0),
         });
         let qa = QaRoot { _dir: dir, root, key: None, fx };
         qa.item(ROOT_ID, "Backups", true);
@@ -213,9 +233,45 @@ fn long_path(path: &Path) -> PathBuf {
     PathBuf::from(full.strip_prefix(r"\\?\").unwrap_or(&full))
 }
 
-/// Run `line` through `cmd.exe`, a process other than this one (as Explorer is).
-fn cmd(line: &str) -> std::process::Output {
-    std::process::Command::new("cmd").args(["/D", "/C"]).raw_arg(line).output().unwrap()
+/// How long one delete, rename or move may take before the test stops it and fails.
+const OS_OP_LIMIT: Duration = Duration::from_secs(30);
+
+/// Run `line` through `cmd.exe`, a process other than this one (as Explorer is), bounded: past
+/// [`OS_OP_LIMIT`] the child is stopped through its own handle and the test FAILS with an
+/// `ld0113 <label> timeout` line saying what the callbacks saw. Never a hang (the e100f78 rung hung 33 min).
+fn cmd(qa: &QaRoot, label: &str, line: &str) -> std::process::Output {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new("cmd")
+        .args(["/D", "/C"])
+        .raw_arg(line)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let (stdout, stderr) = (drain(Box::new(child.stdout.take().unwrap())), drain(Box::new(child.stderr.take().unwrap())));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() >= OS_OP_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            println!("ld0113 {label} timeout: after_s={} {}", OS_OP_LIMIT.as_secs(), qa.fx.diagnostics());
+            panic!("{label}: `{line}` did not finish within {OS_OP_LIMIT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    std::process::Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() }
 }
 
 fn quoted(path: &Path) -> String {
@@ -282,7 +338,7 @@ async fn explorer_delete_of_backups_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000e4", fixture[1], false);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e5", fixture[2], true);
     qa.connect();
-    let out = cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Backups"))));
+    let out = cmd(&qa, "explorer_delete_of_backups_refused", &format!("rmdir /S /Q {}", quoted(&qa.path("Backups"))));
     let children_left = std::fs::read_dir(qa.path("Backups")).unwrap().count();
     let refusals = qa.fx.refusals();
     let calls = server_calls_after_deletes(&qa, &fixture).await;
@@ -313,7 +369,7 @@ async fn shift_delete_of_a_device_folder_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000e2", fixture[1], true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e3", fixture[2], false);
     qa.connect();
-    cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Backups/OtherPC"))));
+    cmd(&qa, "shift_delete_of_a_device_folder_refused", &format!("rmdir /S /Q {}", quoted(&qa.path("Backups/OtherPC"))));
     let left = fixture.iter().filter(|rel| qa.path(rel).exists()).count();
     let calls = server_calls_after_deletes(&qa, &fixture).await;
     println!("ld0113 shift_delete: items_left={left} server_calls={calls}");
@@ -329,7 +385,7 @@ fn recycle_bin_move_of_backups_refused() {
     qa.connect();
     // Explorer's Delete: a rename of the folder into this user's Recycle Bin on the same volume.
     let target = recycle_bin_for(&qa.root).join(format!("$RLD0113{}", std::process::id()));
-    cmd(&format!("move {} {}", quoted(&qa.path("Backups")), quoted(&target)));
+    cmd(&qa, "recycle_bin_move_of_backups_refused", &format!("move {} {}", quoted(&qa.path("Backups")), quoted(&target)));
     let landed = target.exists();
     if landed {
         // A red run must not leave the folder in the person's Recycle Bin.
@@ -344,7 +400,7 @@ fn recycle_bin_move_of_backups_refused() {
 fn rename_of_backups_refused() {
     let mut qa = QaRoot::new(OwnBackups::default());
     qa.connect();
-    cmd(&format!("ren {} \"Old backups\"", quoted(&qa.path("Backups"))));
+    cmd(&qa, "rename_of_backups_refused", &format!("ren {} \"Old backups\"", quoted(&qa.path("Backups"))));
     assert!(qa.path("Backups").is_dir() && !qa.path("Old backups").exists(), "the rename did not happen");
     qa.fx.assert_refused_once(MSG_RENAME);
 }
@@ -356,7 +412,7 @@ fn own_enabled_subtree_delete_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000c5", "Backups/GLegion/Pictures", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000c6", "Backups/GLegion/Pictures/a.jpg", false);
     qa.connect();
-    cmd(&format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
+    cmd(&qa, "own_enabled_subtree_delete_refused", &format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
     assert!(qa.path("Backups/GLegion/Pictures/a.jpg").exists(), "the backed-up file stays");
     qa.fx.assert_refused_once(&own_backup_refusal(r"C:\Users\qa\Pictures\a.jpg"));
 }
@@ -372,7 +428,7 @@ fn own_disabled_subtree_delete_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000c8", "Backups/GLegion/Pictures", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000c9", "Backups/GLegion/Pictures/a.jpg", false);
     qa.connect();
-    cmd(&format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
+    cmd(&qa, "own_disabled_subtree_delete_refused", &format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))));
     assert!(qa.path("Backups/GLegion/Pictures/a.jpg").exists(), "a turned-off backup stays in the drive");
     qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
 }
@@ -385,15 +441,8 @@ fn move_into_backups_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000e7", "Documents", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e8", "Documents/report.txt", false);
     qa.connect();
-    let out = cmd(&format!("move {} {}", quoted(&qa.path("Documents/report.txt")), quoted(&qa.path("Backups/OtherPC/report.txt"))));
-    println!(
-        "ld0113 move_into: callbacks={} refusals={} targets={:?} root={:?} cmd_stderr={:?}",
-        qa.fx.answers.lock().unwrap().len(),
-        qa.fx.refusals().len(),
-        qa.fx.targets.lock().unwrap(),
-        qa.root.display().to_string(),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
+    let out = cmd(&qa, "move_into_backups_refused", &format!("move {} {}", quoted(&qa.path("Documents/report.txt")), quoted(&qa.path("Backups/OtherPC/report.txt"))));
+    println!("ld0113 move_into: {} cmd_stderr={:?}", qa.fx.diagnostics(), String::from_utf8_lossy(&out.stderr).trim());
     assert!(qa.path("Documents/report.txt").exists(), "the item stays where it was");
     assert!(!qa.path("Backups/OtherPC/report.txt").exists(), "nothing is moved into Backups");
     qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
@@ -407,7 +456,7 @@ fn move_out_of_backups_refused() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000ea", "Backups/OtherPC/a.txt", false);
     qa.item("0b5ec0de-0000-4000-8000-0000000000eb", "Documents", true);
     qa.connect();
-    cmd(&format!("move {} {}", quoted(&qa.path("Backups/OtherPC/a.txt")), quoted(&qa.path("Documents/a.txt"))));
+    cmd(&qa, "move_out_of_backups_refused", &format!("move {} {}", quoted(&qa.path("Backups/OtherPC/a.txt")), quoted(&qa.path("Documents/a.txt"))));
     assert!(qa.path("Backups/OtherPC/a.txt").exists(), "the backup stays in Backups");
     assert!(!qa.path("Documents/a.txt").exists(), "nothing is moved out");
     qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
@@ -419,7 +468,7 @@ fn ordinary_folder_delete_unchanged() {
     qa.item("0b5ec0de-0000-4000-8000-0000000000ca", "Documents", true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000cb", "Documents/notes.txt", false);
     qa.connect();
-    cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Documents"))));
+    cmd(&qa, "ordinary_folder_delete_unchanged", &format!("rmdir /S /Q {}", quoted(&qa.path("Documents"))));
     assert!(!qa.path("Documents").exists(), "an ordinary folder deletes as before");
     assert!(qa.fx.refusals().is_empty());
 }
@@ -462,7 +511,7 @@ fn pre_operation_answer_p99_over_1000_deletes() {
     }
     qa.connect();
     let started = Instant::now();
-    cmd(&format!("rmdir /S /Q {}", quoted(&qa.path("Documents"))));
+    cmd(&qa, "pre_operation_answer_p99_over_1000_deletes", &format!("rmdir /S /Q {}", quoted(&qa.path("Documents"))));
     let wall = started.elapsed();
     assert!(!qa.path("Documents").exists(), "every ordinary delete went through");
     let mut times: Vec<Duration> = qa.fx.answers.lock().unwrap().iter().map(|(time, _)| *time).collect();
