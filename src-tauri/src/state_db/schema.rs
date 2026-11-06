@@ -466,7 +466,9 @@ impl StateDb {
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
-            "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
+            // LD-0113: never a queued backup source (the `staged_payloads` trigger would abort the open itself).
+            "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume
+             WHERE payload_path NOT IN (SELECT source_path FROM operation_queue WHERE source_path IS NOT NULL)",
             [],
         )?;
         Ok(())

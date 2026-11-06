@@ -103,3 +103,35 @@ use super::*;
         );
         assert!(db.backup_upload_op("op-sync").unwrap().is_none(), "a sync op is never read as a backup op");
     }
+
+    /// The open-time inventory (`staged_payloads` from every `upload_resume` row, `schema.rs`) never names a queued
+    /// backup source: the `staged_payloads` trigger would abort the open itself, and a database that cannot open stops
+    /// the app. Here a sync session's payload and a backup op's source are one path, a state no writer makes, so only
+    /// the open is under test.
+    #[test]
+    fn an_open_never_fails_on_a_session_naming_a_backup_source() {
+        let (dir, db) = backup_db();
+        for sql in [
+            "INSERT INTO operation_queue (op_id, kind, payload_path) VALUES ('op-sync', 'upload_file', '/shared/a.jpg')",
+            "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
+                 server_file_id, object_version_id, chunk_size_bytes, chunk_count)
+             VALUES ('op-sync', '/shared/a.jpg', 1, 1, 's', 'f', 'o', 1, 1)",
+            "INSERT INTO operation_queue (op_id, kind, origin, source_path)
+             VALUES ('op-backup', 'upload_file', 'backup', '/shared/a.jpg')",
+        ] {
+            assert_eq!(raw(&db, sql).unwrap(), 1, "{sql}");
+        }
+        drop(db);
+        let reopened = StateDb::open(dir.path().join("state.db"));
+        let reopened = match reopened {
+            Ok(db) => db,
+            Err(error) => panic!("the open failed: {error}"),
+        };
+        let journalled: i64 = reopened
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM staged_payloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journalled, 0, "the backup source was not journalled as a staged copy");
+    }
