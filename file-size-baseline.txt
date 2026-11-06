@@ -28,8 +28,8 @@
 17015 src-tauri/src/state_db.rs
 1358 src-tauri/src/watcher.rs
 1243 src-tauri/src/windows_cf/callbacks.rs
-1734 src-tauri/src/windows_cf/mod.rs
-1550 src-tauri/src/windows_cf/placeholders.rs
+1593 src-tauri/src/windows_cf/mod.rs
+1407 src-tauri/src/windows_cf/placeholders.rs
 1217 src/MacSettings.tsx
 1935 src/WindowsApp.tsx
 1587 src/desktopApi.ts
