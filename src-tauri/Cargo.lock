@@ -367,8 +367,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beebeeb-core"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -460,8 +460,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-sync"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -478,8 +478,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-transfer"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "beebeeb-core",
  "bytes",
@@ -490,8 +490,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-types"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "serde",
 ]
@@ -1250,7 +1250,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1512,7 +1512,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2374,7 +2374,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3167,7 +3167,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3999,7 +3999,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4406,7 +4406,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4464,7 +4464,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5607,7 +5607,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6578,7 +6578,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

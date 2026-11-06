@@ -222,8 +222,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beebeeb-core"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -278,8 +278,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-sync"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -296,8 +296,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-types"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=5e8e687a101563cdb25f458e163c3ac00aa15d81#5e8e687a101563cdb25f458e163c3ac00aa15d81"
+version = "0.2.0"
+source = "git+https://github.com/beebeeb-io/core?rev=3db0cc26f2866564f786ffa9cb0c403d2dad0e9c#3db0cc26f2866564f786ffa9cb0c403d2dad0e9c"
 dependencies = [
  "serde",
 ]
