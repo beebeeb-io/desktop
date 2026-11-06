@@ -98,6 +98,7 @@ mod lifecycle;
 mod upload;
 // LD-0113: the backup uploader (a file read in place from a backed-up folder).
 mod backup_upload;
+mod backup_tree;
 mod shared_roots;
 mod finder_create;
 mod finder_edit;
@@ -109,6 +110,7 @@ mod hydrate;
 mod range_fetch;
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub(crate) use range_fetch::{PrepEnd, RangePrep};
+pub(crate) use backup_tree::{BackupChild, BackupFolderState};
 mod conflicts;
 
 
@@ -519,6 +521,7 @@ mod uploads_3;
 mod uploads_4;
 // LD-0113 Task D3: the backup uploader leaves the source untouched.
 mod backup_uploads;
+mod backup_host;
 mod shared_2;
 mod sync;
 mod sync_2;

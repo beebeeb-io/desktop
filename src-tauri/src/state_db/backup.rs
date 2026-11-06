@@ -6,7 +6,7 @@
 //! (`schema.rs`, `migrate_backup_schema`).
 
 use super::*;
-use beebeeb_core::backup::{BackupRecord, RecordState};
+use beebeeb_core::backup::{BackupRecord, RecordRef, RecordState};
 
 /// `backup_records.account_owner` for an owner record: the user id when it is known, else the canonical email.
 fn backup_owner_key(owner: &crate::account_binding::Identity) -> Option<String> {
@@ -384,5 +384,229 @@ impl StateDb {
             });
         }
         Ok(records)
+    }
+
+    /// The current owner's backup layout, if one was resolved.
+    pub fn backup_layout(&self) -> Result<Option<BackupLayout>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(None);
+        };
+        conn.query_row(
+            "SELECT root_id, device_folder_id, device_folder_name FROM backup_layout WHERE account_owner = ?1",
+            params![owner],
+            |row| {
+                Ok(BackupLayout {
+                    root_id: row.get(0)?,
+                    device_folder_id: row.get(1)?,
+                    device_folder_name: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Cache the resolved layout for the current owner. `false`: no owner is recorded, nothing was written.
+    pub fn set_backup_layout(&self, layout: &BackupLayout) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(false);
+        };
+        conn.execute(
+            "INSERT INTO backup_layout (account_owner, root_id, device_folder_id, device_folder_name, updated_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))
+             ON CONFLICT(account_owner) DO UPDATE SET root_id = excluded.root_id,
+                device_folder_id = excluded.device_folder_id, device_folder_name = excluded.device_folder_name,
+                updated_at = excluded.updated_at",
+            params![owner, layout.root_id, layout.device_folder_id, layout.device_folder_name],
+        )?;
+        Ok(true)
+    }
+
+    /// Forget the layout (its device folder was deleted elsewhere): "Back up again" resolves it anew.
+    pub fn clear_backup_layout(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute("DELETE FROM backup_layout WHERE account_owner = ?1", params![owner])?;
+        Ok(())
+    }
+
+    /// The folder id of `category` under this device's folder, once created or adopted.
+    pub fn backup_category_folder(&self, category: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(None);
+        };
+        conn.query_row(
+            "SELECT folder_id FROM backup_category_folders WHERE account_owner = ?1 AND category = ?2",
+            params![owner, category],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Remember (`Some`) or forget (`None`, a turned-off backup) the folder of `category`.
+    pub fn set_backup_category_folder(&self, category: &str, folder_id: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        match folder_id {
+            Some(id) => conn.execute(
+                "INSERT INTO backup_category_folders (account_owner, category, folder_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account_owner, category) DO UPDATE SET folder_id = excluded.folder_id",
+                params![owner, category, id],
+            )?,
+            None => conn.execute(
+                "DELETE FROM backup_category_folders WHERE account_owner = ?1 AND category = ?2",
+                params![owner, category],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// `BackupHost::put_record`, compare-and-set on the record the pass read (`expected`):
+    /// - the record at `expected.key` still names `expected.remote_id`: only its key and state change, its size,
+    ///   `modified_ms` and `uploaded_at_ms` stay as stored (a finishing upload may have written newer ones);
+    /// - no record names `expected.remote_id`: `record` is stored;
+    /// - otherwise nothing changes.
+    ///
+    /// Storing upserts by key and removes any other record of the category naming the same remote file. `true`
+    /// when it stored.
+    pub fn put_backup_record_cas(&self, category: &str, expected: &RecordRef, record: &BackupRecord) -> Result<bool> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(owner) = owner_key_conn(&tx)? else {
+            return Ok(false);
+        };
+        let expected_remote = expected.remote_id.to_string();
+        let at_expected: Option<(i64, i64, i64)> = tx
+            .query_row(
+                "SELECT size, modified_ms, uploaded_at_ms FROM backup_records
+                 WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND remote_id = ?4",
+                params![owner, category, expected.key, expected_remote],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (size, modified_ms, uploaded_at_ms) = match at_expected {
+            Some(stored) => stored,
+            None => {
+                let named: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM backup_records
+                                    WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3)",
+                    params![owner, category, expected_remote],
+                    |row| row.get(0),
+                )?;
+                if named {
+                    return Ok(false);
+                }
+                (i64::try_from(record.size).unwrap_or(i64::MAX), record.modified_ms, record.uploaded_at_ms)
+            }
+        };
+        tx.execute(
+            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3 AND key != ?4",
+            params![owner, category, record.remote_id.to_string(), record.key],
+        )?;
+        if record.remote_id != expected.remote_id {
+            tx.execute(
+                "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3",
+                params![owner, category, expected_remote],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO backup_records (account_owner, category, key, size, modified_ms, remote_id, uploaded_at_ms, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'backed_up')
+             ON CONFLICT(account_owner, category, key) DO UPDATE SET size = excluded.size,
+                modified_ms = excluded.modified_ms, remote_id = excluded.remote_id,
+                uploaded_at_ms = excluded.uploaded_at_ms, state = excluded.state",
+            params![owner, category, record.key, size, modified_ms, record.remote_id.to_string(), uploaded_at_ms],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// `BackupHost::mark_removed_elsewhere`: each record still at its key, naming its remote id and `BackedUp`, becomes
+    /// `RemovedElsewhere`. A record a finishing upload rewrote meanwhile is left alone.
+    pub fn mark_backup_records_removed_elsewhere(&self, category: &str, records: &[RecordRef]) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        let Some(owner) = owner_key_conn(&tx)? else {
+            return Ok(0);
+        };
+        let mut marked = 0;
+        for record in records {
+            marked += tx.execute(
+                "UPDATE backup_records SET state = 'removed_elsewhere'
+                 WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND remote_id = ?4 AND state = 'backed_up'",
+                params![owner, category, record.key, record.remote_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// `BackupHost::held_keys`: the keys of `category` with a backup op in the queue for the current owner (queued,
+    /// in flight, or parked after its retries). The pass skips them; the op itself reads the file again when it
+    /// runs, so a held key never uploads stale bytes.
+    pub fn backup_held_keys(&self, category: &str) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT json_extract(metadata_json, '$.backup.key') FROM operation_queue
+             WHERE origin = 'backup' AND backup_source_key = ?1
+               AND json_extract(metadata_json, '$.backup.account_owner') = ?2
+             ORDER BY 1",
+        )?;
+        let keys = stmt.query_map(params![category, owner], |row| row.get::<_, Option<String>>(0))?;
+        Ok(keys.filter_map(|key| key.transpose()).collect::<Result<Vec<_>>>()?)
+    }
+
+    /// Record that the backup of `category` was turned off, and why.
+    pub fn record_backup_stop(&self, stop: &BackupStop) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute(
+            "INSERT INTO backup_stops (account_owner, category, reason, at_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_owner, category) DO UPDATE SET reason = excluded.reason, at_ms = excluded.at_ms",
+            params![owner, stop.category, stop.reason, stop.at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The current owner's turned-off backups, by category.
+    pub fn backup_stops(&self) -> Result<Vec<BackupStop>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt =
+            conn.prepare("SELECT category, reason, at_ms FROM backup_stops WHERE account_owner = ?1 ORDER BY category")?;
+        let rows = stmt.query_map(params![owner], |row| {
+            Ok(BackupStop {
+                category: row.get(0)?,
+                reason: row.get(1)?,
+                at_ms: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// "Back up again": the stop of `category` is cleared.
+    pub fn clear_backup_stop(&self, category: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute(
+            "DELETE FROM backup_stops WHERE account_owner = ?1 AND category = ?2",
+            params![owner, category],
+        )?;
+        Ok(())
     }
 }

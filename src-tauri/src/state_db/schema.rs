@@ -553,6 +553,30 @@ impl StateDb {
                  updated_at INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // LD-0113 Task D4: where this account's backup lives on the server (resolved once, then cached), the
+        // category folders it created or adopted, and the backups that were turned off with why (rule 11).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_layout (
+                 account_owner TEXT PRIMARY KEY,
+                 root_id TEXT NOT NULL,
+                 device_folder_id TEXT NOT NULL,
+                 device_folder_name TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS backup_category_folders (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 folder_id TEXT NOT NULL,
+                 PRIMARY KEY (account_owner, category)
+             );
+             CREATE TABLE IF NOT EXISTS backup_stops (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 reason TEXT NOT NULL,
+                 at_ms INTEGER NOT NULL,
+                 PRIMARY KEY (account_owner, category)
+             );",
+        )?;
         Ok(())
     }
 }

@@ -619,6 +619,25 @@ pub struct NewBackupUpload<'a> {
     pub now: i64,
 }
 
+/// LD-0113 Task D4: where this account's backup lives on the server, resolved once and cached: the Backups root and
+/// this device's folder under it (core's `find_device_folder`), with the folder's name as the server has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupLayout {
+    pub root_id: String,
+    pub device_folder_id: String,
+    pub device_folder_name: String,
+}
+
+/// LD-0113: a backup that was turned off on this device, and why (spec §4.2 rule 11; Amendment 12's reasons come
+/// with LD-0121). The Backups screen shows it with "Back up again".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupStop {
+    pub category: String,
+    /// `device_deleted` or `category_deleted` today.
+    pub reason: String,
+    pub at_ms: i64,
+}
+
 /// What [`StateDb::enqueue_backup_upload`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupEnqueue {
