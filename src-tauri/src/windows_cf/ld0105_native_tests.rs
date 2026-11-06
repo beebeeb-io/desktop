@@ -1003,8 +1003,9 @@ fn ld0105_u1_native_a_changed_file_is_a_board_row_until_discard_and_download_aga
 /// Delta review P2-1 (lead 2026-11-06: blocks the merge): "Discard and download again" empties only the
 /// poisoned file. The row's path holds ANOTHER placeholder (a stale path after a folder rename): refused
 /// `identity_mismatch` under the exclusive handle, that file kept as it is, the poison kept, nothing
-/// fetched. A plain file at the path: refused, the poison kept (never cleared without emptying). Red on
-/// the mutants "skip the identity check" (the other file is emptied) and "a plain file ends the poison".
+/// fetched. A plain file at the path carries no identity: refused the same way, the poison kept (never
+/// cleared without emptying). Red on the mutant "skip the identity check": the other file is emptied
+/// and the poison cleared (measured: `(Wholly, true, false) -> (Nothing, true, false)`).
 #[test]
 fn ld0105_p2_native_discard_empties_only_the_poisoned_file() {
     use crate::windows_cf::poison::{DiscardRefused, IDENTITY_MISMATCH, discard_now};
@@ -1036,7 +1037,7 @@ fn ld0105_p2_native_discard_empties_only_the_poisoned_file() {
     assert_eq!(std::fs::read(&other).unwrap(), content(1 << 20), "its bytes too");
     assert!(db.poison("qa-mine").unwrap().is_some(), "the poison stays");
     assert_eq!(fetched, None, "nothing fetched");
-    assert_eq!(on_plain, Err(DiscardRefused::Failed("not_a_placeholder")));
+    assert_eq!(on_plain, Err(DiscardRefused::Failed(IDENTITY_MISMATCH)), "a plain file is not provably this file");
     assert!(db.poison("qa-plain").unwrap().is_some(), "never cleared without emptying");
     assert_eq!(std::fs::read(&plain).unwrap(), b"plain");
 }
