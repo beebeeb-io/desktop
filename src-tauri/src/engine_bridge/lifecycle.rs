@@ -475,6 +475,16 @@ impl EngineBridge {
                 // LD-0113 §6.3: the server refused a change of a protected folder (the Backups root).
                 // It never becomes allowed, so the op is dropped, never retried or held, and the local
                 // state is put back.
+                // Review (2026-11-07): a backup op is the backup's own write, not a drive change: nothing in the sync
+                // root to put back and nothing to tell the person. It is dropped and the next pass decides again.
+                Err(error) if !completed && claimed.origin == crate::state_db::OpOrigin::Backup && protected_folder_refusal(&error).is_some() => {
+                    if !self.db.drop_backup_op_claimed(&op.op_id, &claimed.claim_id)? {
+                        log_queue_state_moved(&op.op_id, "backup_protected");
+                        continue;
+                    }
+                    tracing::warn!(op_id = %op.op_id, "backup: the server refused a backup write as protected; dropped");
+                    outcome.retried_op_ids.push(op.op_id);
+                }
                 Err(error) if !completed && protected_folder_refusal(&error).is_some() => {
                     if !self.db.finish_claimed(&op.op_id, &claimed.claim_id, None)? {
                         log_queue_state_moved(&op.op_id, "protected");

@@ -98,12 +98,17 @@ impl EngineBridge {
     /// `BackupHost::ensure_folder`: the live folder `name` under `parent`, else a new one with a minted id and the
     /// name sealed for it. The listing match is exact (the pass folds names itself where the platform does).
     pub(crate) async fn backup_ensure_folder(&self, parent: &str, name: &str) -> Result<String, EngineError> {
-        let (children, _) = self.backup_list_children(parent).await?;
+        let (children, complete) = self.backup_list_children(parent).await?;
         let mut existing: Vec<&BackupChild> =
             children.iter().filter(|c| c.is_folder && c.name.as_deref() == Some(name)).collect();
         existing.sort_by(|a, b| a.id.cmp(&b.id));
         if let Some(found) = existing.first() {
             return Ok(found.id.clone());
+        }
+        // Review (2026-11-07): a folder missing from a partial listing may be there (the old mirror's
+        // `GLegion/Pictures`); creating one would start a second folder of that name and upload it all again.
+        if !complete {
+            return Err(anyhow::anyhow!("backup_listing_incomplete: the folder is not created from a partial listing").into());
         }
         let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
         let id = beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string();

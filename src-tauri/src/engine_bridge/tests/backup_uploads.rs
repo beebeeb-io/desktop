@@ -635,3 +635,43 @@ use crate::state_db::BackupEnqueue;
         assert_eq!(bridge.db.backup_records("pictures").unwrap().len(), 1, "the backup's records stay");
         assert_eq!((source_state(&in_flight), source_state(&waiting)), before);
     }
+
+    /// Review 2026-11-07, findings 1 and 2: a backup op that used up its retries holds its key for nothing (the pass
+    /// does not skip it and the next enqueue replaces it), and a session whose op the Settings switch purged is
+    /// abandoned on the server by the runner, not left open until the lease sweep.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_parked_backup_op_never_holds_its_key_and_a_purged_session_is_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = person_file(dir.path(), "outlook.pst", b"held open elsewhere");
+        let server = UploadMockServer::start(true);
+        let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+        let parked = enqueue(&bridge, &source);
+        bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        let session = bridge.db.backup_upload_resume(&parked).unwrap().expect("precondition: a session");
+        bridge
+            .db
+            .hold_lock_for_test()
+            .execute("UPDATE operation_queue SET attempts = max_attempts WHERE op_id = ?1", [&parked])
+            .unwrap();
+        assert!(bridge.db.backup_held_keys("pictures").unwrap().is_empty(), "a parked op holds no key");
+        let fresh = match bridge.enqueue_backup_upload(&pictures_request(&source)).unwrap() {
+            BackupEnqueue::Queued(op_id) => op_id,
+            other => panic!("the parked op replaced, got {other:?}"),
+        };
+        assert_ne!(fresh, parked);
+        assert_eq!(backup_ops(&bridge), 1);
+
+        // The Settings switch purges the queue (no API client there); the runner abandons the session.
+        bridge.process_due_operations(&sync_root, 200).await.unwrap();
+        let open = bridge.db.backup_upload_resume(&fresh).unwrap().expect("precondition: the new op's session");
+        assert_eq!(bridge.db.purge_backup_source_ops("pictures").unwrap(), 1);
+        bridge.abandon_orphaned_backup_sessions().await;
+        let requests = server.finish();
+        let abandoned: Vec<&str> = requests.iter().filter(|r| r.path.ends_with("/upload/abandon")).map(|r| r.path.as_str()).collect();
+        assert!(
+            abandoned.contains(&format!("/api/v1/files/{}/upload/abandon", open.server_file_id).as_str()),
+            "the purged op's session is abandoned: {abandoned:?} (the parked one was {})",
+            session.server_file_id
+        );
+        assert_eq!(count_rows(&bridge, "backup_upload_resume"), 0);
+    }

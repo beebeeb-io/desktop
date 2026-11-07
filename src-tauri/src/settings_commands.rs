@@ -1080,8 +1080,8 @@ pub(super) fn count_items_bounded(root: &std::path::Path) -> Option<u64> {
 ///
 /// **Disable purges the queue (founder design, task 0811).** Every still-pending
 /// upload op of this folder goes, so uploads stop immediately and nothing
-/// resumes on the next boot; an open server session of one is reaped by the
-/// server's lease sweep (task 1589). It does NOT delete what is already backed
+/// resumes on the next boot; an open server session of one is abandoned by the
+/// runner (`abandon_orphaned_backup_sessions`). It does NOT delete what is already backed
 /// up (that would delete the user's cloud content, which we never do silently).
 ///
 /// Validates `key` against the catalog so a typo from the frontend can't write a

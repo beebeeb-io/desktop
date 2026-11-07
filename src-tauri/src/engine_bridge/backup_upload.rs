@@ -170,6 +170,12 @@ impl EngineBridge {
             Ok(fingerprint) => fingerprint,
             Err(reason) => return self.drop_backup(claimed, previous.as_ref(), reason).await,
         };
+        // Review (2026-11-07): a file another program holds open without read sharing (an Outlook .pst, a running
+        // VM disk) is dropped as unreadable and planned again next pass, never retried in the queue until it parks.
+        let source = match open_source_read_only(&op.source_path) {
+            Ok(file) => file,
+            Err(_) => return self.drop_backup(claimed, previous.as_ref(), BackupDrop::SourceUnreadable).await,
+        };
         let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &op.file_id)?;
         let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(pin);
 
@@ -250,7 +256,7 @@ impl EngineBridge {
             }
         };
 
-        let progress = match self.send_backup_chunks(&op, &session, file_key, pin).await {
+        let progress = match self.send_backup_chunks(&op, &session, file_key, pin, source).await {
             Ok(progress) => progress,
             Err(error) => {
                 let error = land_error_to_anyhow(error);
@@ -341,11 +347,8 @@ impl EngineBridge {
         session: &BackupUploadResume,
         file_key: beebeeb_core::kdf::FileKey,
         pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        file: std::fs::File,
     ) -> Result<crate::transfer_progress::TransferGuard, EngineError> {
-        let file = match open_source_read_only(&op.source_path) {
-            Ok(file) => file,
-            Err(_) => return Err(anyhow::anyhow!("backup source could not be opened").into()),
-        };
         let chunk_size = u64::try_from(session.chunk_size_bytes).unwrap_or(0);
         let chunk_count = u64::try_from(session.chunk_count).unwrap_or(0);
         let first_chunk = u64::try_from(session.acked_chunks).unwrap_or(0);
@@ -435,6 +438,30 @@ impl EngineBridge {
         }
         tracing::info!(dropped, abandoned, "backup: turned off; queued uploads dropped and sessions abandoned");
         Ok(dropped)
+    }
+
+    /// Abandon every backup session whose op is gone (review 2026-11-07: the Settings switch purges the queue but
+    /// has no API client). A failed abandon keeps the row for the next tick.
+    pub(crate) async fn abandon_orphaned_backup_sessions(&self) {
+        let sessions = match self.db.orphaned_backup_sessions() {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::warn!(error = %e, "backup: orphaned sessions not read");
+                return;
+            }
+        };
+        for session in &sessions {
+            if let Err(e) = self.backup_api().abandon_upload(&session.server_file_id).await {
+                tracing::warn!(file_id = %session.server_file_id, reason = error_category(e.as_ref()), "backup: orphaned session not abandoned yet");
+                continue;
+            }
+            if let Err(e) = self.db.clear_backup_upload_resume(&session.op_id) {
+                tracing::warn!(op_id = %session.op_id, error = %e, "backup: abandoned session row not cleared");
+            }
+        }
+        if !sessions.is_empty() {
+            tracing::info!(sessions = sessions.len(), "backup: orphaned upload sessions abandoned");
+        }
     }
 
     /// `POST /api/v1/files/{id}/upload/abandon` for the session's never-completed create, then its row goes. A failed

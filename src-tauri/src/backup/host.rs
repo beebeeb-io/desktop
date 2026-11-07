@@ -213,8 +213,17 @@ impl BackupHost for DesktopBackupHost {
                 // Every backup still on; one already off keeps the reason it stopped for.
                 let stopped: Vec<String> =
                     db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();
-                let mut all: Vec<Category> =
-                    self.enabled.iter().filter(|e| !stopped.contains(&e.key())).cloned().collect();
+                // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
+                // waiting for the OneDrive answer), so none keeps a category folder inside the deleted device folder.
+                let mut on: Vec<Category> = self.enabled.clone();
+                if let Ok(cfg) = crate::config::DesktopConfig::load() {
+                    for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
+                        if !on.contains(&category) {
+                            on.push(category);
+                        }
+                    }
+                }
+                let mut all: Vec<Category> = on.into_iter().filter(|e| !stopped.contains(&e.key())).collect();
                 if !all.contains(c) {
                     all.push(c.clone());
                 }

@@ -79,6 +79,19 @@ impl StateDb {
         let Some(owner) = owner_key_conn(&tx)? else {
             return Ok(BackupEnqueue::NoOwner);
         };
+        // Review (2026-11-07): an op that used up its retries has parked, and nothing retries a parked op. A backup's
+        // retry is the next pass, so the parked op goes (its session, if any, is reaped by the server's lease
+        // sweep) and the file is queued afresh; it never holds the key for good.
+        let parked = tx.execute(
+            "DELETE FROM operation_queue
+             WHERE origin = 'backup' AND backup_source_key = ?1 AND attempts >= max_attempts AND claim_id IS NULL
+               AND json_extract(metadata_json, '$.backup.key') = ?2
+               AND json_extract(metadata_json, '$.backup.account_owner') = ?3",
+            params![up.category, up.key, owner],
+        )?;
+        if parked > 0 {
+            super::reconcile::drop_orphaned_upload_resumes(&tx)?;
+        }
         let queued: Option<String> = tx
             .query_row(
                 "SELECT op_id FROM operation_queue
@@ -321,6 +334,18 @@ impl StateDb {
         Ok((deleted, taken))
     }
 
+    /// Backup sessions whose op is gone (the folder was switched off in Settings, a bulk purge): the runner abandons
+    /// each on the server, which clears its row.
+    pub fn orphaned_backup_sessions(&self) -> Result<Vec<BackupUploadResume>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RESUME_COLUMNS} FROM backup_upload_resume r
+             WHERE r.op_id NOT IN (SELECT op_id FROM operation_queue) ORDER BY r.op_id"
+        ))?;
+        let rows = stmt.query_map([], resume_from_row)?;
+        rows.collect()
+    }
+
     /// Drop the claimed backup op and its session with no record (its source changed, vanished or cannot be read
     /// now, or it was queued for another account): the next pass plans the file again. `false`: the op moved since
     /// the claim and nothing was written.
@@ -547,9 +572,9 @@ impl StateDb {
         Ok(marked)
     }
 
-    /// `BackupHost::held_keys`: the keys of `category` with a backup op in the queue for the current owner (queued,
-    /// in flight, or parked after its retries). The pass skips them; the op itself reads the file again when it
-    /// runs, so a held key never uploads stale bytes.
+    /// `BackupHost::held_keys`: the keys of `category` with a live backup op in the queue for the current owner
+    /// (queued or in flight; one parked after its retries holds nothing, and the next enqueue replaces it). The pass
+    /// skips them; the op itself reads the file again when it runs, so a held key never uploads stale bytes.
     pub fn backup_held_keys(&self, category: &str) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
@@ -557,7 +582,7 @@ impl StateDb {
         };
         let mut stmt = conn.prepare(
             "SELECT DISTINCT json_extract(metadata_json, '$.backup.key') FROM operation_queue
-             WHERE origin = 'backup' AND backup_source_key = ?1
+             WHERE origin = 'backup' AND backup_source_key = ?1 AND attempts < max_attempts
                AND json_extract(metadata_json, '$.backup.account_owner') = ?2
              ORDER BY 1",
         )?;

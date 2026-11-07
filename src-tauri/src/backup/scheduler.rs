@@ -117,6 +117,7 @@ impl BackupScheduler {
         now: Instant,
     ) -> Option<TickReport> {
         self.watch(&sources);
+        bridge.abandon_orphaned_backup_sessions().await;
         if sources.is_empty() || !self.due(now) {
             return None;
         }
