@@ -1523,6 +1523,7 @@ export interface KnownFolderStatus {
   /** LD-0113 Amendment 9 (`knownFolderSource.ts`): OneDrive's location when it moved the folder, the answer, the
    *  question while unanswered (not backed up until then), and the online-only note after a pass of OneDrive's. */
   moved_path?: string | null
+  moved_by_onedrive?: boolean
   source_choice?: 'onedrive' | 'default' | null
   question?: string | null
   note?: string | null

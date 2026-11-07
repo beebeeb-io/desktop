@@ -65,11 +65,23 @@ pub(crate) struct DesktopBackupHost {
     layout: BackupLayout,
     /// Every category this device backs up now: a deleted device folder turns all of them off at once.
     enabled: Vec<Category>,
+    /// A tree the records' rebuild just listed, handed to the pass that follows it instead of listing again
+    /// (review 2026-11-07): taken once.
+    listed: std::sync::Mutex<HashMap<String, DeviceTree>>,
 }
 
 impl DesktopBackupHost {
     pub(crate) fn new(bridge: Arc<EngineBridge>, layout: BackupLayout, enabled: Vec<Category>) -> Self {
-        Self { bridge, layout, enabled }
+        Self { bridge, layout, enabled, listed: std::sync::Mutex::default() }
+    }
+
+    /// [`BackupHost::device_tree`] for the records' rebuild; the pass that follows takes the same listing.
+    pub(crate) async fn device_tree_for_rebuild(&self, c: &Category) -> Result<DeviceTree, HostError> {
+        let tree = self.device_tree(c).await?;
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.insert(c.key(), tree.clone());
+        }
+        Ok(tree)
     }
 
     /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of
@@ -126,6 +138,9 @@ impl DesktopBackupHost {
 
 impl BackupHost for DesktopBackupHost {
     async fn device_tree(&self, c: &Category) -> Result<DeviceTree, HostError> {
+        if let Some(tree) = self.listed.lock().ok().and_then(|mut listed| listed.remove(&c.key())) {
+            return Ok(tree);
+        }
         let device = self
             .bridge
             .backup_folder_state(&self.layout.device_folder_id)

@@ -89,8 +89,10 @@ pub(crate) struct FolderView {
 /// The card's fields for a folder OneDrive moved (all `None` for one it did not).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct MovedFolder {
-    /// OneDrive's location.
+    /// Where the folder is now.
     pub(crate) moved_path: Option<String>,
+    /// It is under one of OneDrive's folders (Known Folder Move); else the person or a policy moved it.
+    pub(crate) moved_by_onedrive: bool,
     pub(crate) source_choice: Option<KnownFolderSource>,
     /// While the folder is on and unanswered: it is not backed up until then.
     pub(crate) question: Option<String>,
@@ -102,9 +104,12 @@ pub(crate) struct MovedFolder {
 pub(crate) fn folder_view(key: &str, display_name: &str, enabled: bool, choice: Option<KnownFolderSource>) -> FolderView {
     let paths = known_folder_paths(key);
     let moved = is_moved(&paths);
+    let by_onedrive = paths.current.as_deref().is_some_and(moved_by_onedrive);
     let (source_path, question) = match resolve(&paths, choice) {
         SourceResolution::Read(path) => (Some(path), None),
-        SourceResolution::Waiting { default, moved } => (Some(default.clone()), enabled.then(|| question(display_name, &default, &moved))),
+        SourceResolution::Waiting { default, moved } => {
+            (Some(default.clone()), enabled.then(|| question(display_name, &default, &moved, by_onedrive)))
+        }
         SourceResolution::Unavailable => (None, None),
     };
     let note = (moved && choice == Some(KnownFolderSource::OneDrive))
@@ -117,6 +122,7 @@ pub(crate) fn folder_view(key: &str, display_name: &str, enabled: bool, choice: 
         source_path,
         moved: MovedFolder {
             moved_path: moved.then(|| paths.current.as_ref().map(|p| p.to_string_lossy().into_owned())).flatten(),
+            moved_by_onedrive: moved && by_onedrive,
             source_choice: moved.then_some(choice).flatten(),
             question,
             note,
@@ -124,13 +130,33 @@ pub(crate) fn folder_view(key: &str, display_name: &str, enabled: bool, choice: 
     }
 }
 
+/// Whether `current` lies in one of OneDrive's folders (`%OneDrive%`, `%OneDriveConsumer%`, `%OneDriveCommercial%`):
+/// Known Folder Move. A folder moved anywhere else was moved by the person or a policy, and the words say so (review
+/// 2026-11-07); the question is the same.
+pub(crate) fn moved_by_onedrive(current: &Path) -> bool {
+    ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .any(|root| super::sources::check_source(current, &root) == Err(super::sources::SourceRefusal::InsideSyncRoot))
+}
+
 /// The question, naming the folder and both locations.
-pub(crate) fn question(display_name: &str, default: &Path, moved: &Path) -> String {
-    format!(
-        "OneDrive has moved your {display_name} folder. Back up OneDrive's folder ({}), where your files are, or the default one ({})?",
-        moved.display(),
-        default.display()
-    )
+pub(crate) fn question(display_name: &str, default: &Path, moved: &Path, by_onedrive: bool) -> String {
+    if by_onedrive {
+        format!(
+            "OneDrive has moved your {display_name} folder. Back up OneDrive's folder ({}), where your files are, or the default one ({})?",
+            moved.display(),
+            default.display()
+        )
+    } else {
+        format!(
+            "Your {display_name} folder has moved. Back up the folder where your files are now ({}), or the default one ({})?",
+            moved.display(),
+            default.display()
+        )
+    }
 }
 
 /// The follow-up note once OneDrive's folder is backed up and some of it is only in OneDrive.
@@ -181,8 +207,8 @@ mod tests {
         };
         let mut choices = BTreeMap::new();
 
-        let first = backup_sources_with(&db, &pictures_on(), &choices, paths);
-        let second = backup_sources_with(&db, &pictures_on(), &choices, paths);
+        let first = backup_sources_with(Some(&db), &pictures_on(), &choices, paths);
+        let second = backup_sources_with(Some(&db), &pictures_on(), &choices, paths);
         assert!(first.sources.is_empty() && second.sources.is_empty(), "not backed up until answered");
         assert_eq!(first.newly_asked, ["pictures"], "asked on the first pass");
         assert!(second.newly_asked.is_empty(), "two passes, one question");
@@ -190,11 +216,13 @@ mod tests {
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].1, default.to_string_lossy());
         assert_eq!(open[0].2, onedrive.to_string_lossy());
-        assert!(question("Pictures", &default, &onedrive).contains(&*onedrive.to_string_lossy()));
+        assert!(question("Pictures", &default, &onedrive, true).starts_with("OneDrive has moved your Pictures folder."));
+        assert!(question("Pictures", &default, &onedrive, false).starts_with("Your Pictures folder has moved."));
+        assert!(question("Pictures", &default, &onedrive, false).contains(&*onedrive.to_string_lossy()));
 
         choices.insert("pictures".to_string(), KnownFolderSource::OneDrive);
         for pass in 0..2 {
-            let read = backup_sources_with(&db, &pictures_on(), &choices, paths);
+            let read = backup_sources_with(Some(&db), &pictures_on(), &choices, paths);
             assert_eq!(read.sources.len(), 1, "pass {pass}");
             assert_eq!(read.sources[0].path, onedrive, "the answer is remembered");
             assert!(read.newly_asked.is_empty(), "never asked again");
@@ -217,17 +245,17 @@ mod tests {
         let onedrive_chosen = BTreeMap::from([("pictures".to_string(), KnownFolderSource::OneDrive)]);
 
         for (label, read) in [
-            ("not moved", backup_sources_with(&db, &pictures_on(), &none, not_moved)),
-            ("not moved, an old answer", backup_sources_with(&db, &pictures_on(), &onedrive_chosen, not_moved)),
-            ("no current location", backup_sources_with(&db, &pictures_on(), &none, unknown_current)),
-            ("moved, the default chosen", backup_sources_with(&db, &pictures_on(), &default_chosen, moved)),
+            ("not moved", backup_sources_with(Some(&db), &pictures_on(), &none, not_moved)),
+            ("not moved, an old answer", backup_sources_with(Some(&db), &pictures_on(), &onedrive_chosen, not_moved)),
+            ("no current location", backup_sources_with(Some(&db), &pictures_on(), &none, unknown_current)),
+            ("moved, the default chosen", backup_sources_with(Some(&db), &pictures_on(), &default_chosen, moved)),
         ] {
             let paths: Vec<&Path> = read.sources.iter().map(|s| s.path.as_path()).collect();
             assert_eq!(paths, [default.as_path()], "{label}");
             assert!(read.newly_asked.is_empty(), "{label}: nothing asked");
         }
         assert!(db.backup_source_questions().unwrap().is_empty());
-        let off = backup_sources_with(&db, &[], &none, moved);
+        let off = backup_sources_with(Some(&db), &[], &none, moved);
         assert!(off.sources.is_empty() && off.newly_asked.is_empty(), "a folder that is off is never asked about");
     }
 }

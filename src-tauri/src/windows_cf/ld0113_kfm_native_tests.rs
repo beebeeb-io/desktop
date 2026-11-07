@@ -111,7 +111,7 @@ async fn kfm_onedrive_choice_backs_up_local_files_only() {
     let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
     let choices = std::collections::BTreeMap::from([("pictures".to_string(), KnownFolderSource::OneDrive)]);
     let paths = |_: &str| KnownFolderPaths { default: Some(default.clone()), current: Some(onedrive.clone()) };
-    let read = crate::backup::sources::backup_sources_with(&db, &["pictures".to_string()], &choices, paths);
+    let read = crate::backup::sources::backup_sources_with(Some(&db), &["pictures".to_string()], &choices, paths);
     assert_eq!(read.sources.len(), 1);
     assert_eq!(read.sources[0].path, onedrive, "OneDrive's folder is read");
 

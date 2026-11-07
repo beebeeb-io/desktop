@@ -722,14 +722,9 @@ export function ManageBackupCard() {
                     <div style={{ marginTop: 6 }}>
                       <div style={{ fontSize: 11.5, color: T.ink2, lineHeight: 1.5, maxWidth: 520 }}>{f.question}</div>
                       <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-                        <button
-                          type="button"
-                          disabled={isPending}
-                          onClick={() => void choose(f, 'onedrive')}
-                          style={{ padding: '4px 10px', fontSize: 11.5, fontFamily: T.fontSans, fontWeight: 600, borderRadius: 6, border: `1px solid ${T.amberDeep}`, background: T.amber, color: T.ink, cursor: 'pointer' }}
-                        >
-                          Back up OneDrive’s folder
-                        </button>
+                        <PrimaryBtn disabled={isPending} onClick={() => void choose(f, 'onedrive')}>
+                          {f.moved_by_onedrive ? 'Back up OneDrive’s folder' : 'Back up the moved folder'}
+                        </PrimaryBtn>
                         <button
                           type="button"
                           disabled={isPending}

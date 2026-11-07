@@ -228,7 +228,7 @@ pub(crate) async fn rebuild_records_if_empty(
     if !host.records(category).await?.is_empty() {
         return Ok(0);
     }
-    let tree = host.device_tree(category).await?;
+    let tree = host.device_tree_for_rebuild(category).await?;
     if !tree.device_folder_live || tree.category_folder_live == Some(false) || tree.files.is_empty() {
         return Ok(0);
     }

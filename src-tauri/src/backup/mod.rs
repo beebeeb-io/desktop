@@ -28,7 +28,7 @@ use crate::state_db::StateDb;
 /// resolved the device folder is `None`.
 pub(crate) fn own_backups(db: &StateDb) -> Option<OwnBackups> {
     let cfg = crate::config::DesktopConfig::load().ok()?;
-    Some(own_backups_for(db, &sources::backup_sources(db, &cfg.known_folder_backup, &cfg.known_folder_source)))
+    Some(own_backups_for(db, &sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source)))
 }
 
 pub(crate) fn own_backups_for(db: &StateDb, sources: &[scheduler::BackupSource]) -> OwnBackups {

@@ -132,12 +132,21 @@ pub(crate) fn backup_sources(
     enabled_keys: &[String],
     choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
 ) -> Vec<super::scheduler::BackupSource> {
-    backup_sources_with(db, enabled_keys, choices, super::kfm::known_folder_paths).sources
+    backup_sources_with(Some(db), enabled_keys, choices, super::kfm::known_folder_paths).sources
 }
 
-/// [`backup_sources`] with the known folders' locations from `paths` (the tests' folder pairs).
+/// [`backup_sources`] without asking or settling any question: a read only (the drive protection's).
+pub(crate) fn backup_sources_quiet(
+    enabled_keys: &[String],
+    choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
+) -> Vec<super::scheduler::BackupSource> {
+    backup_sources_with(None, enabled_keys, choices, super::kfm::known_folder_paths).sources
+}
+
+/// [`backup_sources`] with the known folders' locations from `paths` (the tests' folder pairs). `questions`: where
+/// the questions are asked and settled; `None` reads only.
 pub(crate) fn backup_sources_with(
-    db: &crate::state_db::StateDb,
+    questions: Option<&crate::state_db::StateDb>,
     enabled_keys: &[String],
     choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
     paths: impl Fn(&str) -> super::kfm::KnownFolderPaths,
@@ -156,10 +165,13 @@ pub(crate) fn backup_sources_with(
         };
         match resolution {
             SourceResolution::Read(path) => {
-                settle_question(db, folder.key);
+                settle_question(questions, folder.key);
                 read.sources.push(super::scheduler::BackupSource { category, path });
             }
             SourceResolution::Waiting { default, moved } => {
+                let Some(db) = questions else {
+                    continue;
+                };
                 let at_ms = chrono::Utc::now().timestamp_millis();
                 match db.ask_backup_source_question(
                     folder.key,
@@ -175,13 +187,16 @@ pub(crate) fn backup_sources_with(
                     Err(error) => tracing::warn!(category = folder.key, %error, "backup: the question was not recorded"),
                 }
             }
-            SourceResolution::Unavailable => settle_question(db, folder.key),
+            SourceResolution::Unavailable => settle_question(questions, folder.key),
         }
     }
     read
 }
 
-fn settle_question(db: &crate::state_db::StateDb, key: &str) {
+fn settle_question(questions: Option<&crate::state_db::StateDb>, key: &str) {
+    let Some(db) = questions else {
+        return;
+    };
     if let Err(error) = db.settle_backup_source_question(key) {
         tracing::warn!(category = key, %error, "backup: a settled question was not cleared");
     }
