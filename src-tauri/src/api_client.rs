@@ -62,6 +62,8 @@ pub(crate) use types::{UpgradeRequired, upgrade_required, custody_unavailable};
 mod client;
 pub use client::{ApiClient};
 mod auth;
+// LD-0113: the Backups root endpoints.
+mod backups;
 mod files;
 mod search;
 mod shares;

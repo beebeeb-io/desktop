@@ -6,9 +6,15 @@
 //!   old mirror.
 //! - `device`: this device for core's identity rule (its name from today's source, its machine-derived id).
 //! - `sources`: what a backup may read from (never the sync root) and what its walk leaves out.
+//! - `kfm`: a known folder OneDrive's Known Folder Move has moved, asked about once (Amendment 9).
+//! - `layout`: where the backup lives on the server: the Backups root (found, claimed or created, legacy duplicates
+//!   merged) and this device's folder (core's identity rule, the device manifest written on adoption and creation).
 
+pub(crate) mod commands;
 pub(crate) mod device;
 pub(crate) mod host;
+pub(crate) mod kfm;
+pub(crate) mod layout;
 pub(crate) mod scheduler;
 pub(crate) mod sources;
 
@@ -21,8 +27,8 @@ use crate::state_db::StateDb;
 /// cannot be read: the caller keeps its last answer (a read error never lifts a protection). Before the layout is
 /// resolved the device folder is `None`.
 pub(crate) fn own_backups(db: &StateDb) -> Option<OwnBackups> {
-    let enabled = crate::config::DesktopConfig::load().ok()?.known_folder_backup;
-    Some(own_backups_for(db, &sources::backup_sources(db, &enabled)))
+    let cfg = crate::config::DesktopConfig::load().ok()?;
+    Some(own_backups_for(db, &sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source)))
 }
 
 pub(crate) fn own_backups_for(db: &StateDb, sources: &[scheduler::BackupSource]) -> OwnBackups {

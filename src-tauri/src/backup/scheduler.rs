@@ -25,6 +25,15 @@ pub(crate) const DEBOUNCE: Duration = Duration::from_secs(5);
 /// What one pass of one folder may queue (core plans a prefix in key order; the next pass takes the rest).
 pub(crate) const PASS_BUDGET: PassBudget = PassBudget { max_uploads: 500, max_bytes: 4 << 30 };
 
+/// The last pass's count of items whose bytes are not on this device (`NotLocal`), per category: the follow-up note
+/// of a folder backed up from OneDrive (Amendment 9). In memory: the next pass after a restart sets it again.
+static NOT_LOCAL: Mutex<std::collections::BTreeMap<String, u64>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// The last pass's `NotLocal` count of the category `key`, if a pass ran since the app started.
+pub(crate) fn not_local_count(key: &str) -> Option<u64> {
+    NOT_LOCAL.lock().ok().and_then(|counts| counts.get(key).copied())
+}
+
 /// One folder this device backs up now and where it is read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BackupSource {
@@ -121,21 +130,33 @@ impl BackupScheduler {
         if sources.is_empty() || !self.due(now) {
             return None;
         }
+        if let Ok(mut at) = self.changed.lock() {
+            *at = None;
+        }
+        // A layout that cannot be resolved now is tried again at the next 10-minute pass or after the next change,
+        // never on every tick.
+        self.last_full = Some(now);
         let layout = match bridge.db().backup_layout() {
             Ok(Some(layout)) => layout,
             Ok(None) => {
-                tracing::info!("backup: no Backups layout resolved yet; no pass");
-                return None;
+                let Some(me) = super::device::device_self() else {
+                    tracing::warn!("backup: this device has no usable name or machine id; no pass");
+                    return None;
+                };
+                let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
+                match super::layout::ensure_layout(bridge, &me, &enabled).await {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        tracing::warn!(%error, "backup: the Backups layout could not be resolved; no pass");
+                        return None;
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!(%error, "backup: the layout could not be read; no pass");
                 return None;
             }
         };
-        if let Ok(mut at) = self.changed.lock() {
-            *at = None;
-        }
-        self.last_full = Some(now);
         Some(run_passes(bridge, layout, sync_root, &sources).await)
     }
 }
@@ -162,6 +183,9 @@ pub(crate) async fn run_passes(
             report.passes.push((category, Err(format!("source refused: {refusal:?}"))));
             continue;
         }
+        if let Err(error) = rebuild_records_if_empty(&host, &source.path, &exclude, &category).await {
+            tracing::warn!(category = %category.key(), %error, "backup: records not rebuilt; the pass plans without them");
+        }
         let pass = beebeeb_backup::run_pass(&host, &source.path, &exclude, &category, PASS_BUDGET).await;
         match &pass {
             Ok(done) => tracing::info!(
@@ -175,6 +199,12 @@ pub(crate) async fn run_passes(
             ),
             Err(error) => tracing::warn!(category = %category.key(), %error, "backup: pass failed"),
         }
+        if let Ok(done) = &pass {
+            let not_local = done.skipped.get(&beebeeb_core::backup::SkipReason::NotLocal).copied().unwrap_or(0);
+            if let Ok(mut counts) = NOT_LOCAL.lock() {
+                counts.insert(category.key(), not_local as u64);
+            }
+        }
         report.passes.push((category, pass.map_err(|e| e.to_string())));
         if bridge.db().backup_layout().ok().flatten().is_none() {
             // The device folder was deleted elsewhere: every backup turned off, nothing more to pass.
@@ -182,4 +212,39 @@ pub(crate) async fn run_passes(
         }
     }
     report
+}
+
+/// Spec §4.2 rule 10: a folder with no records yet (a first backup into an adopted folder, the old mirror's
+/// `GLegion/Pictures`, or a reinstall) gets its records rebuilt from what the server already holds, so a copy made
+/// after the file last changed is not uploaded a second time. Core's `records_from_remote` decides; nothing is
+/// uploaded or changed on the server here. LD-0123 seam: the measured clock offset goes into that rule.
+pub(crate) async fn rebuild_records_if_empty(
+    host: &super::host::DesktopBackupHost,
+    source: &Path,
+    exclude: &[PathBuf],
+    category: &Category,
+) -> Result<usize, beebeeb_backup::HostError> {
+    use beebeeb_backup::BackupHost;
+    if !host.records(category).await?.is_empty() {
+        return Ok(0);
+    }
+    let tree = host.device_tree_for_rebuild(category).await?;
+    if !tree.device_folder_live || tree.category_folder_live == Some(false) || tree.files.is_empty() {
+        return Ok(0);
+    }
+    let (root, exclude) = (source.to_path_buf(), exclude.to_vec());
+    let walk = tokio::task::spawn_blocking(move || beebeeb_backup::walk_source(&root, &exclude))
+        .await
+        .map_err(|_| beebeeb_backup::HostError("the rebuild walk stopped before it finished".into()))?
+        .map_err(|e| beebeeb_backup::HostError(format!("cannot read the backed-up folder ({:?})", e.kind())))?;
+    let records = beebeeb_core::backup::records_from_remote(&tree.files, &walk.entries);
+    let mut stored = 0;
+    for record in records {
+        let expected = beebeeb_core::backup::RecordRef { key: record.key.clone(), remote_id: record.remote_id };
+        if host.put_record(category, &expected, record).await? {
+            stored += 1;
+        }
+    }
+    tracing::info!(category = %category.key(), stored, remote = tree.files.len(), "backup: records rebuilt from the server");
+    Ok(stored)
 }

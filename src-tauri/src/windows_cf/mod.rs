@@ -67,6 +67,7 @@ mod ld0105_native_tests;
 // LD-0113 D1: the pre-operation delete and rename callbacks on a QA sync root.
 #[cfg(test)]
 mod ld0113_protect_native_tests;
+#[cfg(test)] mod ld0113_kfm_native_tests; // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub(crate) mod read_only;
 pub mod signout;

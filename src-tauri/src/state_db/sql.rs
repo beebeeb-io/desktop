@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 24] = [
+pub(super) const ACCOUNT_TABLES: [&str; 25] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -41,6 +41,8 @@ pub(super) const ACCOUNT_TABLES: [&str; 24] = [
     "backup_layout",
     "backup_category_folders",
     "backup_stops",
+    // LD-0113: the account's flagged Backups root (a folder id): the account's.
+    "backup_root",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no
@@ -66,7 +68,11 @@ pub(super) fn guarded_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GuardedRo
 }
 
 /// Per-device tables: not counted as account data, emptied by a reset anyway.
-pub(super) const DEVICE_TABLES: [&str; 1] = ["bandwidth_samples"];
+pub(super) const DEVICE_TABLES: [&str; 2] = [
+    "bandwidth_samples",
+    // LD-0113 Amendment 9: which of this device's folders OneDrive moved and the question about each (paths).
+    "backup_source_questions",
+];
 
 pub(super) const OWNER_USER_ID_KEY: &str = "owner_user_id";
 

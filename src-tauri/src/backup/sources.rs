@@ -106,29 +106,100 @@ pub(crate) fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
     (!excludes.is_empty()).then_some(excludes)
 }
 
+/// Whether `a` and `b` name the same folder: compared as [`check_source`] compares (component by component, without
+/// case on Windows and macOS, as given and as resolved).
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
+    match (spellings(a), spellings(b)) {
+        (Some(a), Some(b)) => a.iter().any(|spelling| b.contains(spelling)),
+        _ => a == b,
+    }
+}
+
+/// What reading the sources found: the folders to pass now, and the folders whose question was asked just now
+/// (Amendment 9: once per moved folder).
+#[derive(Debug, Default)]
+pub(crate) struct SourcesRead {
+    pub(crate) sources: Vec<super::scheduler::BackupSource>,
+    pub(crate) newly_asked: Vec<String>,
+}
+
 /// The folders this device backs up now, from the settings' switched-on keys, each with where it is read from.
-/// Windows reads the known folder's default location (`known_folder::resolve_known_folder`, OneDrive's Known
-/// Folder Move set aside: Amendment 9 asks the person once per moved folder). The other systems have no sources
-/// before Task D5.
-pub(crate) fn backup_sources(_db: &crate::state_db::StateDb, enabled_keys: &[String]) -> Vec<super::scheduler::BackupSource> {
-    crate::known_folder::KNOWN_FOLDERS
-        .iter()
-        .filter(|folder| enabled_keys.iter().any(|key| key == folder.key))
-        .filter_map(|folder| {
-            let category = beebeeb_types::backup::Category::from_key(folder.key)?;
-            Some(super::scheduler::BackupSource { category, path: known_folder_path(folder.key)? })
-        })
-        .collect()
+/// Windows reads the known folder's default location (`known_folder::resolve_known_folder`), or, for a folder
+/// OneDrive's Known Folder Move has moved, the one the person chose (Amendment 9): a moved folder with no answer is
+/// not passed and its question is asked once. The other systems have no sources before Task D5.
+pub(crate) fn backup_sources(
+    db: &crate::state_db::StateDb,
+    enabled_keys: &[String],
+    choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
+) -> Vec<super::scheduler::BackupSource> {
+    backup_sources_with(Some(db), enabled_keys, choices, super::kfm::known_folder_paths).sources
 }
 
-#[cfg(target_os = "windows")]
-fn known_folder_path(key: &str) -> Option<PathBuf> {
-    crate::known_folder::resolve_known_folder(key)
+/// [`backup_sources`] without asking or settling any question: a read only (the drive protection's).
+pub(crate) fn backup_sources_quiet(
+    enabled_keys: &[String],
+    choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
+) -> Vec<super::scheduler::BackupSource> {
+    backup_sources_with(None, enabled_keys, choices, super::kfm::known_folder_paths).sources
 }
 
-#[cfg(not(target_os = "windows"))]
-fn known_folder_path(_key: &str) -> Option<PathBuf> {
-    None
+/// [`backup_sources`] with the known folders' locations from `paths` (the tests' folder pairs). `questions`: where
+/// the questions are asked and settled; `None` reads only.
+pub(crate) fn backup_sources_with(
+    questions: Option<&crate::state_db::StateDb>,
+    enabled_keys: &[String],
+    choices: &std::collections::BTreeMap<String, crate::config::KnownFolderSource>,
+    paths: impl Fn(&str) -> super::kfm::KnownFolderPaths,
+) -> SourcesRead {
+    use super::kfm::SourceResolution;
+    let mut read = SourcesRead::default();
+    for folder in crate::known_folder::KNOWN_FOLDERS {
+        let Some(category) = beebeeb_types::backup::Category::from_key(folder.key) else {
+            continue;
+        };
+        let enabled = enabled_keys.iter().any(|key| key == folder.key);
+        let resolution = if enabled {
+            super::kfm::resolve(&paths(folder.key), choices.get(folder.key).copied())
+        } else {
+            SourceResolution::Unavailable
+        };
+        match resolution {
+            SourceResolution::Read(path) => {
+                settle_question(questions, folder.key);
+                read.sources.push(super::scheduler::BackupSource { category, path });
+            }
+            SourceResolution::Waiting { default, moved } => {
+                let Some(db) = questions else {
+                    continue;
+                };
+                let at_ms = chrono::Utc::now().timestamp_millis();
+                match db.ask_backup_source_question(
+                    folder.key,
+                    &default.to_string_lossy(),
+                    &moved.to_string_lossy(),
+                    at_ms,
+                ) {
+                    Ok(true) => {
+                        tracing::info!(category = folder.key, "backup: OneDrive moved this folder; asking which to back up");
+                        read.newly_asked.push(folder.key.to_string());
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(category = folder.key, %error, "backup: the question was not recorded"),
+                }
+            }
+            SourceResolution::Unavailable => settle_question(questions, folder.key),
+        }
+    }
+    read
+}
+
+fn settle_question(questions: Option<&crate::state_db::StateDb>, key: &str) {
+    let Some(db) = questions else {
+        return;
+    };
+    if let Err(error) = db.settle_backup_source_question(key) {
+        tracing::warn!(category = key, %error, "backup: a settled question was not cleared");
+    }
 }
 
 #[cfg(test)]

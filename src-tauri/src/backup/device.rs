@@ -23,8 +23,6 @@ pub(crate) const PLATFORM: Platform = if cfg!(target_os = "windows") {
 /// The OS's stable machine id: Windows `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`, Linux
 /// `/etc/machine-id` (else `/var/lib/dbus/machine-id`). `None` when there is none: then this device has no
 /// backup id and no pass runs. macOS (`IOPlatformUUID`) comes with Task D5.
-// LD-0113 Task D4: `DesktopBackupHost` (device folder resolution) is its production caller.
-#[allow(dead_code)]
 pub(crate) fn machine_id() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
@@ -85,8 +83,6 @@ fn backup_device_name() -> Option<String> {
 
 /// This device for `find_device_folder`, or `None` when the OS gives no usable name or machine id (then no device
 /// folder is chosen and no pass runs, as the old mirror made nothing for a lossy name).
-// LD-0113 Task D4: `DesktopBackupHost` (device folder resolution) is its production caller.
-#[allow(dead_code)]
 pub(crate) fn device_self() -> Option<DeviceSelf> {
     device_self_from(backup_device_name()?, &machine_id()?)
 }

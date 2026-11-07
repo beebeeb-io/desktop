@@ -577,6 +577,21 @@ impl StateDb {
                  PRIMARY KEY (account_owner, category)
              );",
         )?;
+        // LD-0113 (spec §4.2 rule 5, §5.2): the account's flagged Backups root, once resolved (it lives as long as the
+        // account, so it is never looked up again). Amendment 9: the question asked once per folder OneDrive's Known
+        // Folder Move has moved, until the person answers it (a device's folders, not the account's).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_root (
+                 account_owner TEXT PRIMARY KEY,
+                 root_id TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS backup_source_questions (
+                 category TEXT PRIMARY KEY,
+                 default_path TEXT NOT NULL,
+                 moved_path TEXT NOT NULL,
+                 asked_at_ms INTEGER NOT NULL
+             );",
+        )?;
         Ok(())
     }
 }

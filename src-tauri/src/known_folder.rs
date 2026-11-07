@@ -210,6 +210,17 @@ mod windows_impl {
     /// `CoTaskMemAlloc`; we copy it into a Rust `String` and then `CoTaskMemFree`
     /// the original, so nothing leaks.
     pub fn resolve_known_folder(key: &str) -> Option<PathBuf> {
+        resolve_with(key, KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY)
+    }
+
+    /// LD-0113 Amendment 9: the known folder's CURRENT location, OneDrive's Known Folder Move redirection included
+    /// (`KF_FLAG_DEFAULT`, with `KF_FLAG_DONT_VERIFY`). Where it differs from [`resolve_known_folder`] the folder was
+    /// moved, and the person is asked once which one to back up.
+    pub fn resolve_known_folder_current(key: &str) -> Option<PathBuf> {
+        resolve_with(key, KF_FLAG_DONT_VERIFY)
+    }
+
+    fn resolve_with(key: &str, flags: windows::Win32::UI::Shell::KNOWN_FOLDER_FLAG) -> Option<PathBuf> {
         let rfid = folder_id_for(key)?;
         // SAFETY: `rfid` is a valid &GUID; `KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY`
         // is a valid `KNOWN_FOLDER_FLAG` bitset (`BitOr` is implemented), and the
@@ -219,9 +230,7 @@ mod windows_impl {
         // with CoTaskMemFree. (We pass an explicit `HANDLE::default()` rather
         // than a bare `None` so the `P0: Param<HANDLE>` type is unambiguous.)
         unsafe {
-            let pwstr =
-                SHGetKnownFolderPath(&rfid, KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY, HANDLE::default())
-                    .ok()?;
+            let pwstr = SHGetKnownFolderPath(&rfid, flags, HANDLE::default()).ok()?;
             if pwstr.is_null() {
                 return None;
             }
@@ -233,7 +242,7 @@ mod windows_impl {
 }
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::resolve_known_folder;
+pub use windows_impl::{resolve_known_folder, resolve_known_folder_current};
 
 // ── Tests (catalog, legacy paths, sanitizer — every platform) ───────────────
 

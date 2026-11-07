@@ -21,6 +21,8 @@ pub(crate) struct BackupChild {
     pub(crate) size: u64,
     /// The server's `uploaded_at` (else `updated_at`), in Unix ms.
     pub(crate) uploaded_at_ms: i64,
+    /// How many chunks the file's current version has (a small file's read, the device manifest's).
+    pub(crate) chunk_count: u32,
 }
 
 /// A folder the backup knows by id, as the server has it now.
@@ -31,7 +33,7 @@ pub(crate) enum BackupFolderState {
     Gone,
 }
 
-fn timestamp_ms(entry: &serde_json::Value) -> i64 {
+pub(super) fn timestamp_ms(entry: &serde_json::Value) -> i64 {
     ["uploaded_at", "updated_at"]
         .iter()
         .find_map(|field| entry[*field].as_str())
@@ -40,7 +42,7 @@ fn timestamp_ms(entry: &serde_json::Value) -> i64 {
 }
 
 impl EngineBridge {
-    fn open_backup_name(&self, id: &str, name_encrypted: Option<&str>) -> Option<String> {
+    pub(super) fn open_backup_name(&self, id: &str, name_encrypted: Option<&str>) -> Option<String> {
         let (key, _) = owned_key_and_pin(&self.db, self.api.master_key(), id).ok()?;
         beebeeb_core::encrypt::decrypt_name_with_key(&key, name_encrypted?)
     }
@@ -69,6 +71,7 @@ impl EngineBridge {
                     is_folder: entry["is_folder"].as_bool() == Some(true),
                     size: entry["size_bytes"].as_u64().unwrap_or(0),
                     uploaded_at_ms: timestamp_ms(entry),
+                    chunk_count: entry["chunk_count"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
                 });
             }
             if children.len() >= BACKUP_LISTING_CAP {
@@ -110,6 +113,12 @@ impl EngineBridge {
         if !complete {
             return Err(anyhow::anyhow!("backup_listing_incomplete: the folder is not created from a partial listing").into());
         }
+        self.backup_create_folder(parent, name).await
+    }
+
+    /// A new folder `name` under `parent`, with an id minted here and its name sealed for it. Never adopts an existing
+    /// folder of that name: a device folder named like another device's is that device's (core's identity rule).
+    pub(crate) async fn backup_create_folder(&self, parent: &str, name: &str) -> Result<String, EngineError> {
         let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key());
         let id = beebeeb_core::item_id::NewItemId::owner(&master)?.as_str().to_string();
         let sealed = owned_metadata_for_name(&self.db, self.api.master_key(), &id, name, None)?;

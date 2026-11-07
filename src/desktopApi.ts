@@ -1520,6 +1520,13 @@ export interface KnownFolderStatus {
   enabled: boolean
   /** Rough (bounded) count of files in the source tree, or null if unknown. */
   item_count: number | null
+  /** LD-0113 Amendment 9 (`knownFolderSource.ts`): OneDrive's location when it moved the folder, the answer, the
+   *  question while unanswered (not backed up until then), and the online-only note after a pass of OneDrive's. */
+  moved_path?: string | null
+  moved_by_onedrive?: boolean
+  source_choice?: 'onedrive' | 'default' | null
+  question?: string | null
+  note?: string | null
 }
 
 /** List the backupable known folders with resolved source paths + enabled state. */
