@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use beebeeb_backup::{BackupHost, DeviceTree, HostError, UploadRequest};
 use beebeeb_core::backup::{BackupRecord, FolderPresence, RebuildClock, RecordRef, RemoteEntry};
-use beebeeb_types::backup::Category;
+use beebeeb_types::backup::{BackupStopReason, Category};
 use uuid::Uuid;
 
 use crate::engine_bridge::{BackupChild, BackupFolderState, EngineBridge};
@@ -34,17 +34,6 @@ fn db_error(kind: &str) -> impl Fn(rusqlite::Error) -> HostError + '_ {
 
 fn parse_id(id: &str) -> Option<Uuid> {
     Uuid::parse_str(id).ok()
-}
-
-/// LD-0121 seam (spec Amendment 12): why a backup stops. Today the pass knows only rule 11's two reasons; core's
-/// `backup_stop(notices, last_pass_at, listing)` (core v0.2.2) replaces this with the notice-based reason and its
-/// words (`files_removed`, `backup_deleted`, `unknown`).
-pub(crate) fn backup_stop_reason(why: FolderPresence) -> &'static str {
-    match why {
-        FolderPresence::DeviceDeleted => "device_deleted",
-        FolderPresence::CategoryDeleted => "category_deleted",
-        FolderPresence::Present => "present",
-    }
 }
 
 /// Turn the backup of these categories off in the settings (the same switch the person uses). `Ok(false)`: the
@@ -227,47 +216,61 @@ impl BackupHost for DesktopBackupHost {
         Ok(())
     }
 
-    /// Rule 11: the folder was deleted elsewhere, so this backup turns off on this device, says why (the stop
-    /// notice the Backups screen shows with "Back up again") and never uploads again by itself (Amendment 12). A
-    /// deleted device folder turns every backup of this device off and forgets the layout.
+    /// Rule 11 in core's pass: the folder was deleted elsewhere after this pass's notice check found nothing (a race;
+    /// the check before the pass catches the usual case), so it stops as `unknown`: a folder gone with no notice.
     async fn turn_off(&self, c: &Category, why: FolderPresence) -> Result<(), HostError> {
+        self.stop_backups(c, BackupStopReason::Unknown, why == FolderPresence::DeviceDeleted)
+            .await
+    }
+}
+
+impl DesktopBackupHost {
+    /// A backup turns off on this device with core's reason (spec Amendment 12): it says why (the stop row the card
+    /// shows with "Back up again") and never uploads again by itself. A removal of the account's files
+    /// (`files_removed`) or a deleted device folder turns every backup of this device off at once; a deleted device
+    /// folder also forgets the layout.
+    pub(crate) async fn stop_backups(
+        &self,
+        c: &Category,
+        reason: BackupStopReason,
+        device_gone: bool,
+    ) -> Result<(), HostError> {
         let db = self.bridge.db();
-        let categories: Vec<Category> = match why {
-            FolderPresence::DeviceDeleted => {
-                // Every backup still on; one already off keeps the reason it stopped for.
-                let stopped: Vec<String> =
-                    db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();
-                // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
-                // waiting for the OneDrive answer), so none keeps a category folder inside the deleted device folder.
-                let mut on: Vec<Category> = self.enabled.clone();
-                if let Ok(cfg) = crate::config::DesktopConfig::load() {
-                    for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
-                        if !on.contains(&category) {
-                            on.push(category);
-                        }
+        let categories: Vec<Category> = if device_gone || reason.files_removed() {
+            // Every backup still on; one already off keeps the reason it stopped for.
+            let stopped: Vec<String> =
+                db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();
+            // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
+            // waiting for the OneDrive answer), so none keeps going after its backup was removed.
+            let mut on: Vec<Category> = self.enabled.clone();
+            if let Ok(cfg) = crate::config::DesktopConfig::load() {
+                for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
+                    if !on.contains(&category) {
+                        on.push(category);
                     }
                 }
-                let mut all: Vec<Category> = on.into_iter().filter(|e| !stopped.contains(&e.key())).collect();
-                if !all.contains(c) {
-                    all.push(c.clone());
-                }
-                all
             }
-            _ => vec![c.clone()],
+            let mut all: Vec<Category> = on.into_iter().filter(|e| !stopped.contains(&e.key())).collect();
+            if !all.contains(c) {
+                all.push(c.clone());
+            }
+            all
+        } else {
+            vec![c.clone()]
         };
         let at_ms = chrono::Utc::now().timestamp_millis();
         let keys: Vec<String> = categories.iter().map(Category::key).collect();
         for key in &keys {
             self.bridge.turn_off_backup_uploads(key).await.map_err(host_error("turn_off"))?;
             db.set_backup_category_folder(key, None).map_err(db_error("turn_off"))?;
-            db.record_backup_stop(&BackupStop { category: key.clone(), reason: backup_stop_reason(why).into(), at_ms })
+            db.record_backup_stop(&BackupStop { category: key.clone(), reason: reason.as_str().into(), at_ms })
                 .map_err(db_error("turn_off"))?;
         }
-        if why == FolderPresence::DeviceDeleted {
+        if device_gone {
             db.clear_backup_layout().map_err(db_error("turn_off"))?;
         }
         let switched = switch_off_in_settings(&keys);
-        tracing::info!(turned_off = keys.len(), switched, reason = backup_stop_reason(why), "backup: turned off");
+        tracing::info!(turned_off = keys.len(), switched, reason = reason.as_str(), "backup: turned off");
         Ok(())
     }
 }

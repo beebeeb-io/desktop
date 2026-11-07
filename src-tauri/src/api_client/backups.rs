@@ -1,7 +1,8 @@
 //! The Backups root endpoints (LD-0113 spec §5.2, server `42a05fac`): `GET` and `PUT /api/v1/backups/root`, and the
 //! root-level listing the root resolution reads (`GET /api/v1/files` with no parent).
 //!
-//! Owns: those three requests. Must not: decide which folder is the root (core's `resolve_root`) or seal a name.
+//! Owns: those three requests, and the notices read each backup pass starts with (LD-0139). Must not: decide which
+//! folder is the root (core's `resolve_root`), seal a name, or decide what a notice means (core's `backup_stop`).
 
 use super::*;
 
@@ -50,6 +51,29 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    /// `GET /api/v1/notifications?limit=100` for a backup pass's notice check (LD-0139): the newest rows (the server
+    /// has no type filter), the clock of the request (`measured_clock`: no `Date`, or a clock that moved, is
+    /// unknown) and the answer's `Date` in milliseconds (server clock).
+    pub async fn list_notifications_clocked(
+        &self,
+    ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock, Option<i64>)> {
+        let url = self.url("/api/v1/notifications?limit=100");
+        let sent_at_ms = chrono::Utc::now().timestamp_millis();
+        let started = std::time::Instant::now();
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let received_wall_ms = chrono::Utc::now().timestamp_millis();
+        let date = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok());
+        let clock = super::shares::measured_clock(date, sent_at_ms, elapsed_ms, received_wall_ms);
+        let server_now_ms = date
+            .and_then(|date| chrono::DateTime::parse_from_rfc2822(date.trim()).ok())
+            .map(|date| date.timestamp_millis());
+        Ok((response.json().await?, clock, server_now_ms))
     }
 
     /// One page of the account's root-level items (`GET /api/v1/files`, no parent), for the root resolution.

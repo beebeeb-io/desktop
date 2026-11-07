@@ -46,6 +46,8 @@ pub(crate) struct BackupSource {
 pub(crate) struct TickReport {
     /// The categories passed, with what each pass reported (or why it could not run).
     pub(crate) passes: Vec<(Category, Result<PassReport, String>)>,
+    /// LD-0139: the notice check failed, so no pass ran (the card says "Couldn't check — will retry.").
+    pub(crate) check_failed: bool,
 }
 
 pub(crate) struct BackupScheduler {
@@ -157,12 +159,19 @@ impl BackupScheduler {
                 return None;
             }
         };
-        Some(run_passes(bridge, layout, sync_root, &sources).await)
+        let report = run_passes(bridge, layout, sync_root, &sources).await;
+        super::stop::set_check_failed(report.check_failed);
+        Some(report)
     }
 }
 
 /// One pass of each source, in order. A source at or under the sync root is refused (and reported), and every pass
 /// excludes the sync root; a sync root with no clean spelling runs no pass at all.
+///
+/// LD-0139 (spec Amendments 12 and 12c): the tick first reads the account's notices once. A check that fails runs no
+/// pass (nothing is uploaded; the next pass retries; the card says core's "Couldn't check — will retry."). Each
+/// source's listing then goes to core's `backup_stop` before anything is planned: a backup it turns off is stopped
+/// with core's reason, and one that stays on records the check's `Date` as its `last_pass_at`.
 pub(crate) async fn run_passes(
     bridge: &Arc<EngineBridge>,
     layout: crate::state_db::BackupLayout,
@@ -174,6 +183,20 @@ pub(crate) async fn run_passes(
         tracing::warn!("backup: the sync root has no clean absolute spelling; no pass");
         return report;
     };
+    let check = match bridge.backup_notice_check().await {
+        Ok(check) => check,
+        Err(error) => {
+            report.check_failed = true;
+            tracing::warn!(%error, "backup: the notices could not be checked; no pass (the next pass retries)");
+            for source in sources {
+                report
+                    .passes
+                    .push((source.category.clone(), Err("notices not checked".into())));
+            }
+            return report;
+        }
+    };
+    let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
     let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
     let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
     for source in sources {
@@ -183,7 +206,45 @@ pub(crate) async fn run_passes(
             report.passes.push((category, Err(format!("source refused: {refusal:?}"))));
             continue;
         }
-        if let Err(error) = rebuild_records_if_empty(&host, &source.path, &exclude, &category).await {
+        // One listing per pass: the stop decision, the records' rebuild and (cached) the pass all read it.
+        let (tree, clock) = match host.device_tree_for_rebuild(&category).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                tracing::warn!(category = %category.key(), %error, "backup: not listed; no pass");
+                report.passes.push((category, Err(error.to_string())));
+                continue;
+            }
+        };
+        let category_folder_id = bridge
+            .db()
+            .backup_category_folder(&category.key())
+            .ok()
+            .flatten()
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok());
+        let listed = super::stop::ListedBackup {
+            category: &category,
+            device_folder_id,
+            device_folder_live: tree.device_folder_live,
+            category_folder_id,
+            category_folder_live: tree.category_folder_live,
+        };
+        let last_pass_at = super::stop::last_pass_at(bridge.db(), &category, &check);
+        if let Some(reason) = super::stop::decide(&check, last_pass_at, &listed) {
+            let stopped = host.stop_backups(&category, reason, !tree.device_folder_live).await;
+            let ok = stopped.is_ok();
+            tracing::info!(category = %category.key(), reason = reason.as_str(), ok, "backup: stopped");
+            report
+                .passes
+                .push((category, Err(format!("turned off: {}", reason.as_str()))));
+            if reason.files_removed() || !tree.device_folder_live {
+                break; // every backup of this device is off now
+            }
+            continue;
+        }
+        if let Err(error) = bridge.db().set_backup_last_pass(&category.key(), check.server_now_ms) {
+            tracing::warn!(category = %category.key(), %error, "backup: last_pass_at not recorded");
+        }
+        if let Err(error) = rebuild_records_if_empty(&host, &source.path, &exclude, &category, &tree, clock).await {
             tracing::warn!(category = %category.key(), %error, "backup: records not rebuilt; the pass plans without them");
         }
         let pass = beebeeb_backup::run_pass(&host, &source.path, &exclude, &category, PASS_BUDGET).await;
@@ -227,12 +288,13 @@ pub(crate) async fn rebuild_records_if_empty(
     source: &Path,
     exclude: &[PathBuf],
     category: &Category,
+    tree: &beebeeb_backup::DeviceTree,
+    clock: beebeeb_core::backup::RebuildClock,
 ) -> Result<usize, beebeeb_backup::HostError> {
     use beebeeb_backup::BackupHost;
     if !host.records(category).await?.is_empty() {
         return Ok(0);
     }
-    let (tree, clock) = host.device_tree_for_rebuild(category).await?;
     if !tree.device_folder_live || tree.category_folder_live == Some(false) || tree.files.is_empty() {
         return Ok(0);
     }

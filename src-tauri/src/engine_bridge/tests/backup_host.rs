@@ -29,6 +29,8 @@ use beebeeb_types::backup::Category;
         /// LD-0123: when set, every listing answers with a `Date` header this many seconds ahead of the device's
         /// clock (a device clock that runs behind the server's).
         date_ahead_s: Arc<Mutex<Option<i64>>>,
+        /// LD-0139: the rows `GET /api/v1/notifications` answers with (always with a `Date`); `None` answers 500.
+        notices: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     }
 
     const PAGE: usize = 2;
@@ -55,8 +57,9 @@ use beebeeb_types::backup::Category;
             let requests = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
             let date_ahead_s: Arc<Mutex<Option<i64>>> = Arc::default();
+            let notices: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(Some(Vec::new())));
             let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
-            let ahead = Arc::clone(&date_ahead_s);
+            let (ahead, rows) = (Arc::clone(&date_ahead_s), Arc::clone(&notices));
             let handle = thread::spawn(move || {
                 let started = std::time::Instant::now();
                 while !halt.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(30) {
@@ -73,7 +76,15 @@ use beebeeb_types::backup::Category;
                     log.lock().unwrap().push(request.clone());
                     let mut tree = tree.lock().unwrap();
                     let (method, path) = (request.method.as_str(), request.path.as_str());
-                    let response = if method == "GET" && path.starts_with("/api/v1/files?") {
+                    let response = if method == "GET" && path.starts_with("/api/v1/notifications") {
+                        let ahead_s = ahead.lock().unwrap().unwrap_or(0);
+                        match rows.lock().unwrap().clone() {
+                            Some(rows) => {
+                                http_json_dated("200 OK", serde_json::json!({ "notifications": rows }), ahead_s)
+                            }
+                            None => http_json("500 Internal Server Error", serde_json::json!({ "error": "down" })),
+                        }
+                    } else if method == "GET" && path.starts_with("/api/v1/files?") {
                         let parent = query_param(path, "parent_id").unwrap_or_default().to_string();
                         let offset: usize =
                             query_param(path, "cursor").and_then(|c| c.strip_prefix('c')).map_or(0, |n| n.parse().unwrap());
@@ -85,14 +96,10 @@ use beebeeb_types::backup::Category;
                             .collect();
                         let page: Vec<_> = children.iter().skip(offset).take(PAGE).cloned().collect();
                         let next = (offset + PAGE < children.len()).then(|| format!("c{}", offset + PAGE));
-                        let listing = http_json("200 OK", serde_json::json!({ "files": page, "next_cursor": next }));
+                        let listing = serde_json::json!({ "files": page, "next_cursor": next });
                         match *ahead.lock().unwrap() {
-                            Some(seconds) => {
-                                let server_now = chrono::Utc::now() + chrono::Duration::seconds(seconds);
-                                let date = server_now.format("%a, %d %b %Y %H:%M:%S GMT");
-                                listing.replacen("\r\n", &format!("\r\nDate: {date}\r\n"), 1)
-                            }
-                            None => listing,
+                            Some(seconds) => http_json_dated("200 OK", listing, seconds),
+                            None => http_json("200 OK", listing),
                         }
                     } else if method == "GET" && path.starts_with("/api/v1/files/") {
                         let id = path.trim_start_matches("/api/v1/files/");
@@ -136,7 +143,7 @@ use beebeeb_types::backup::Category;
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
-            Self { base_url, nodes, requests, stop, handle, date_ahead_s }
+            Self { base_url, nodes, requests, stop, handle, date_ahead_s, notices }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
@@ -193,14 +200,18 @@ use beebeeb_types::backup::Category;
             self.server.nodes.lock().unwrap().get_mut(id).unwrap().trashed = true;
         }
 
-        fn host(&self, enabled: Vec<Category>) -> DesktopBackupHost {
+        fn layout(&self) -> BackupLayout {
             let layout = BackupLayout {
                 root_id: self.root.clone(),
                 device_folder_id: self.device.clone(),
                 device_folder_name: "GLegion".into(),
             };
             self.bridge.db.set_backup_layout(&layout).unwrap();
-            DesktopBackupHost::new(Arc::clone(&self.bridge), layout, enabled)
+            layout
+        }
+
+        fn host(&self, enabled: Vec<Category>) -> DesktopBackupHost {
+            DesktopBackupHost::new(Arc::clone(&self.bridge), self.layout(), enabled)
         }
 
         fn creates(requests: &[RecordedRequest]) -> usize {
@@ -270,9 +281,10 @@ use beebeeb_types::backup::Category;
         assert_eq!(documents.folders[""], uuid(&made));
     }
 
-    /// Rule 11: a category folder deleted elsewhere turns that backup off (settings, stop notice, folder forgotten,
-    /// queued uploads dropped) and nothing is queued; a deleted device folder turns every backup off and forgets the
-    /// layout. Nothing is uploaded again by itself (Amendment 12).
+    /// Rule 11 inside core's pass (a folder deleted after the pass's notice check): a category folder deleted elsewhere
+    /// turns that backup off as core's `unknown` (settings, stop notice, folder forgotten, queued uploads dropped) and
+    /// nothing is queued; a deleted device folder turns every backup off and forgets the layout. Nothing is uploaded
+    /// again by itself (Amendment 12).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_turns_off_when_the_folder_was_deleted_elsewhere() {
         let config_dir = tempfile::tempdir().unwrap();
@@ -303,7 +315,8 @@ use beebeeb_types::backup::Category;
                 assert_eq!(report.turned_off, Some(FolderPresence::CategoryDeleted));
                 assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing is queued");
                 let stops = fx.bridge.db.backup_stops().unwrap();
-                assert_eq!(stops.iter().map(|s| (s.category.as_str(), s.reason.as_str())).collect::<Vec<_>>(), [("pictures", "category_deleted")]);
+                let reasons: Vec<(&str, &str)> = stops.iter().map(|s| (s.category.as_str(), s.reason.as_str())).collect();
+                assert_eq!(reasons, [("pictures", "unknown")]);
                 assert_eq!(fx.bridge.db.backup_category_folder("pictures").unwrap(), None);
                 let cfg = crate::config::DesktopConfig::load().unwrap();
                 assert_eq!(cfg.known_folder_backup, ["documents", "music"], "only Pictures is switched off");
@@ -322,7 +335,7 @@ use beebeeb_types::backup::Category;
                     fx.bridge.db.backup_stops().unwrap().into_iter().map(|s| (s.category, s.reason)).collect();
                 assert_eq!(
                     stops,
-                    [("documents", "device_deleted"), ("music", "device_deleted"), ("pictures", "category_deleted")]
+                    [("documents", "unknown"), ("music", "unknown"), ("pictures", "unknown")]
                         .map(|(c, r)| (c.to_string(), r.to_string()))
                 );
                 assert_eq!(fx.bridge.db.backup_category_folder("music").unwrap(), None);
@@ -390,7 +403,9 @@ use beebeeb_types::backup::Category;
         fx.add_stamped(Some(&pictures), "early.jpg", false, 7, stamp(120_000));
         let host = fx.host(vec![Category::Pictures]);
 
-        let stored = crate::backup::scheduler::rebuild_records_if_empty(&host, source.path(), &[], &Category::Pictures)
+        let (tree, clock) = host.device_tree_for_rebuild(&Category::Pictures).await.unwrap();
+        let (pictures, src) = (Category::Pictures, source.path());
+        let stored = crate::backup::scheduler::rebuild_records_if_empty(&host, src, &[], &pictures, &tree, clock)
             .await
             .unwrap();
         let records: Vec<(String, uuid::Uuid)> =
@@ -553,4 +568,240 @@ use beebeeb_types::backup::Category;
         assert!(queued_at >= debounce, "{queued_at:?}");
         assert!(queued_at < debounce * 4, "queued {queued_at:?} after the change");
         assert_eq!(count_backup_ops(&fx.bridge), 1);
+    }
+
+    // ── LD-0139: the notice check and core's `backup_stop` (spec Amendments 12 and 12c) ─────────────────────────────
+
+    use crate::backup::scheduler;
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    /// A `notifications` row as the server lists it.
+    fn notice_row(kind: &str, data: serde_json::Value, created_at_ms: i64) -> serde_json::Value {
+        let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap();
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "type": kind, "title": "Backups", "body": null, "data": data, "read": false,
+            "created_at": created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })
+    }
+
+    /// A source folder with `files` files of 5 bytes.
+    fn source_with(files: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..files {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), b"bytes").unwrap();
+        }
+        dir
+    }
+
+    fn switch_on(keys: &[&str]) {
+        crate::config::DesktopConfig::update(|cfg| {
+            for key in keys {
+                cfg.set_known_folder(key, true);
+            }
+            (true, ())
+        })
+        .unwrap();
+    }
+
+    fn stops(bridge: &EngineBridge) -> Vec<(String, String)> {
+        bridge.db.backup_stops().unwrap().into_iter().map(|s| (s.category, s.reason)).collect()
+    }
+
+    async fn run(fx: &Fixture, sources: &[(Category, &Path)], sync_root: &Path) -> scheduler::TickReport {
+        let sources: Vec<scheduler::BackupSource> = sources
+            .iter()
+            .map(|(category, path)| scheduler::BackupSource { category: category.clone(), path: path.to_path_buf() })
+            .collect();
+        scheduler::run_passes(&fx.bridge, fx.layout(), sync_root, &sources).await
+    }
+
+    /// Amendment 12 step 1: a `files_removed` notice newer than the last pass turns EVERY backup off with its reason,
+    /// the folders still there; nothing is queued, and the card says core's words with "Back up again".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_files_removed_notice_turns_every_backup_off_with_cores_words() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents"]);
+                let fx = Fixture::new();
+                let (pictures, documents, sync_root) = (source_with(2), source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                fx.bridge.db.set_backup_last_pass("documents", last).unwrap();
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, last + 60_000);
+                *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+
+                let report = run(
+                    &fx,
+                    &[(Category::Pictures, pictures.path()), (Category::Documents, documents.path())],
+                    sync_root.path(),
+                )
+                .await;
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing is queued: {:?}", report.passes);
+                assert_eq!(
+                    stops(&fx.bridge),
+                    [("documents", "erase_request"), ("pictures", "erase_request")]
+                        .map(|(c, r)| (c.to_string(), r.to_string()))
+                );
+                assert!(crate::config::DesktopConfig::load().unwrap().known_folder_backup.is_empty());
+                let view = crate::backup::stop::stop_view(Some(&fx.bridge.db), "documents", "Documents", false);
+                assert_eq!(view.stop_words.as_deref(), Some(beebeeb_core::backup::MSG_STOP_ERASE_REQUEST));
+                assert_eq!(view.stop_action, Some("Back up again"));
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// A notice older than the backup's last pass counts for nothing: the pass runs, and its `last_pass_at` moves to
+    /// the check's `Date` (server clock, here 3 minutes ahead of this machine).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notice_older_than_the_last_pass_changes_nothing_and_the_pass_moves_its_mark() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(3), tempfile::tempdir().unwrap());
+                let last = now_ms() - 60_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let old = notice_row("files_removed", serde_json::json!({ "reason": "account_lapsed" }), last - 1);
+                *fx.server.notices.lock().unwrap() = Some(vec![old]);
+                *fx.server.date_ahead_s.lock().unwrap() = Some(180);
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert_eq!(count_backup_ops(&fx.bridge), 3, "{:?}", report.passes);
+                assert!(stops(&fx.bridge).is_empty());
+                let mark = fx.bridge.db.backup_pass_mark("pictures").unwrap().last_pass_at_ms.unwrap();
+                let ahead = mark - now_ms();
+                assert!((170_000..=181_000).contains(&ahead), "the mark is the server's Date: {ahead} ms ahead");
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Amendment 12c: a notice check that fails runs no pass (nothing queued, nothing turned off) and the report says
+    /// so; the next pass with a working check runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_notice_check_runs_no_pass_and_the_next_one_retries() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                *fx.server.notices.lock().unwrap() = None;
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(report.check_failed);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing is uploaded unchecked");
+                assert!(stops(&fx.bridge).is_empty());
+                assert_eq!(fx.bridge.db.backup_pass_mark("pictures").unwrap().last_pass_at_ms, None);
+
+                *fx.server.notices.lock().unwrap() = Some(Vec::new());
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!report.check_failed);
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Amendment 12 steps 2 and 3, per backup: a `backup_deleted` notice naming this device's Pictures folder stops it
+    /// as `backup_deleted`; Documents, gone with no notice, stops as `unknown`; each in core's words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backup_deleted_notice_and_a_folder_gone_without_one_say_different_words() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents"]);
+                let fx = Fixture::new();
+                let (pictures, documents, sync_root) = (source_with(1), source_with(1), tempfile::tempdir().unwrap());
+                let pictures_folder = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
+                let documents_folder = fx.add(Some(&fx.device.clone()), "Documents", true, 0);
+                fx.bridge.db.set_backup_category_folder("pictures", Some(&pictures_folder)).unwrap();
+                fx.bridge.db.set_backup_category_folder("documents", Some(&documents_folder)).unwrap();
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                fx.bridge.db.set_backup_last_pass("documents", last).unwrap();
+                fx.trash(&pictures_folder);
+                fx.trash(&documents_folder);
+                let data = serde_json::json!({ "device_folder_id": fx.device, "category_folder_id": pictures_folder });
+                *fx.server.notices.lock().unwrap() = Some(vec![notice_row("backup_deleted", data, last + 60_000)]);
+
+                run(
+                    &fx,
+                    &[(Category::Pictures, pictures.path()), (Category::Documents, documents.path())],
+                    sync_root.path(),
+                )
+                .await;
+                assert_eq!(
+                    stops(&fx.bridge),
+                    [("documents", "unknown"), ("pictures", "backup_deleted")]
+                        .map(|(c, r)| (c.to_string(), r.to_string()))
+                );
+                let words = |key, folder| {
+                    crate::backup::stop::stop_view(Some(&fx.bridge.db), key, folder, false).stop_words.unwrap()
+                };
+                let pictures_words = words("pictures", "Pictures");
+                let from_another = "'s backup of Pictures was deleted from another device.";
+                assert!(pictures_words.ends_with(from_another), "{pictures_words}");
+                let documents_words = words("documents", "Documents");
+                let gone = "'s backup of Documents was deleted, so it is off.";
+                assert!(documents_words.ends_with(gone), "{documents_words}");
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// "Back up again" (the folder switch's `restart`) starts the backup over from that moment: the notice that
+    /// stopped it is older than its new baseline, and the records of the files the reset removed are forgotten, so the
+    /// next pass rebuilds them from the server (which holds none) and uploads both files again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn back_up_again_starts_over_past_the_notice_that_stopped_it() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                // Both files were backed up before the reset removed them: records with their exact fingerprints.
+                let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                let mtime_s = now_s - 600;
+                for name in ["f0.txt", "f1.txt"] {
+                    let path = pictures.path().join(name);
+                    let file = std::fs::File::options().write(true).open(&path).unwrap();
+                    file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime_s)).unwrap();
+                    let record = BackupRecord {
+                        key: name.into(),
+                        size: 5,
+                        modified_ms: i64::try_from(mtime_s * 1000).unwrap(),
+                        remote_id: uuid::Uuid::new_v4(),
+                        uploaded_at_ms: 1,
+                        state: RecordState::BackedUp,
+                    };
+                    let expected = RecordRef { key: record.key.clone(), remote_id: record.remote_id };
+                    assert!(fx.bridge.db.put_backup_record_cas("pictures", &expected, &record).unwrap());
+                }
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let reset_data = serde_json::json!({ "reason": "account_reset" });
+                let reset = notice_row("files_removed", reset_data, last + 60_000);
+                *fx.server.notices.lock().unwrap() = Some(vec![reset]);
+                run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "account_reset".to_string())]);
+
+                // The card's "Back up again" is `set_known_folder_backup(key, true)`: the switch on, then `restart`.
+                switch_on(&["pictures"]);
+                crate::backup::stop::restart(&fx.bridge.db, "pictures").unwrap();
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(stops(&fx.bridge).is_empty(), "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                fx.server.finish();
+            })
+            .await;
     }

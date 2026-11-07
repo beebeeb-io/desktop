@@ -587,7 +587,7 @@ use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
 use sync::{SyncMockServer, enc_name, snap_node};
 use sync_5::{landed_create, rule3_setup, thumbnail_blob};
 use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
-use uploads::{HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, hydration_test_key, read_http_request, upload_mock_response};
+use uploads::{HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, http_json_dated, hydration_test_key, read_http_request, upload_mock_response};
 #[cfg(unix)]
 use uploads::{MockResponse, hydration_mock_response};
 use uploads_3::{ResumableUploadMock, ResumeMockMode, count_requests, init_item_id, resumable_create_op};

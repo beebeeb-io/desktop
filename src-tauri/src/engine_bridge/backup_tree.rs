@@ -111,6 +111,16 @@ impl EngineBridge {
         }
     }
 
+    /// LD-0139: the notice check a backup pass starts with (`crate::backup::stop::check_from`). Any failure is the
+    /// failed check (no pass runs), in words with no server text.
+    pub(crate) async fn backup_notice_check(&self) -> Result<crate::backup::stop::NoticeCheck, String> {
+        let (body, clock, server_now_ms) = self.backup_api().list_notifications_clocked().await.map_err(|error| {
+            let error = EngineError::from(error);
+            format!("the notices request failed ({})", error_category(&error))
+        })?;
+        crate::backup::stop::check_from(&body, clock, server_now_ms)
+    }
+
     /// Whether the folder `id` is live: `GET /files/{id}`, trashed or 404/410 is gone. Any other failure is an error,
     /// never "gone" (a turn-off from a network error would be a silent loss of the backup).
     pub(crate) async fn backup_folder_state(&self, id: &str) -> Result<BackupFolderState, EngineError> {

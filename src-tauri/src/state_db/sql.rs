@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 25] = [
+pub(super) const ACCOUNT_TABLES: [&str; 26] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -41,6 +41,8 @@ pub(super) const ACCOUNT_TABLES: [&str; 25] = [
     "backup_layout",
     "backup_category_folders",
     "backup_stops",
+    // LD-0139: when each backup last checked the account's notices, and when it was turned on: the account's.
+    "backup_pass_marks",
     // LD-0113: the account's flagged Backups root (a folder id): the account's.
     "backup_root",
 ];
