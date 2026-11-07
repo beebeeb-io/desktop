@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, formatBytes, loadSyncStatus, desktopFileOverview, getKnownFolderBackup, setKnownFolderBackup, type KnownFolderStatus, type SyncStatus, type FileOverview, type StatusBucket, type RecentFile } from '../desktopApi'
 import { setKnownFolderSource, type KnownFolderSource } from '../knownFolderSource'
 import { backUpAgainLabel, type BackupStopFields } from '../backupStop'
+import { pollWhileVisible } from '../windows/visiblePoll'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card, useToast } from '../windows/ui'
 import { usePlatformName } from '../platform'
 import { finderOpenFailedToast } from '../finderSetup'
@@ -581,16 +582,9 @@ export function ManageBackupCard() {
   }, [])
 
   // LD-0139: a pass can turn a backup off (core's words, "Back up again") or fail its notice check while the card is
-  // open, so it reads again every minute and when the window comes back to the front.
-  useEffect(() => {
-    const again = () => { void load() }
-    const timer = window.setInterval(again, 60_000)
-    window.addEventListener('focus', again)
-    return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('focus', again)
-    }
-  }, [])
+  // open, so it reads again every minute while the window is on screen, and at once when it is shown again after a
+  // skipped read (task 2243's poll; the effect above does the first load).
+  useEffect(() => pollWhileVisible(() => load(), 60_000, { leading: false }), [])
 
   const toggle = async (f: KnownFolderStatus) => {
     if (f.source_path == null) return
