@@ -216,8 +216,10 @@ pub(crate) async fn run_passes(
 
 /// Spec §4.2 rule 10: a folder with no records yet (a first backup into an adopted folder, the old mirror's
 /// `GLegion/Pictures`, or a reinstall) gets its records rebuilt from what the server already holds, so a copy made
-/// after the file last changed is not uploaded a second time. Core's `records_from_remote` decides; nothing is
-/// uploaded or changed on the server here. LD-0123 seam: the measured clock offset goes into that rule.
+/// after the file last changed is not uploaded a second time. Core's `records_from_remote_with_clock` decides, with
+/// the clock the listing measured from the server's `Date` header (LD-0123): a copy counts when the server stamped it
+/// later than the file's last change plus the device's offset and the measurement's margin. With no clock measured
+/// core applies its 10-minute floor. Nothing is uploaded or changed on the server here.
 pub(crate) async fn rebuild_records_if_empty(
     host: &super::host::DesktopBackupHost,
     source: &Path,
@@ -228,7 +230,7 @@ pub(crate) async fn rebuild_records_if_empty(
     if !host.records(category).await?.is_empty() {
         return Ok(0);
     }
-    let tree = host.device_tree_for_rebuild(category).await?;
+    let (tree, clock) = host.device_tree_for_rebuild(category).await?;
     if !tree.device_folder_live || tree.category_folder_live == Some(false) || tree.files.is_empty() {
         return Ok(0);
     }
@@ -237,7 +239,7 @@ pub(crate) async fn rebuild_records_if_empty(
         .await
         .map_err(|_| beebeeb_backup::HostError("the rebuild walk stopped before it finished".into()))?
         .map_err(|e| beebeeb_backup::HostError(format!("cannot read the backed-up folder ({:?})", e.kind())))?;
-    let records = beebeeb_core::backup::records_from_remote(&tree.files, &walk.entries);
+    let records = beebeeb_core::backup::records_from_remote_with_clock(&tree.files, &walk.entries, clock);
     let mut stored = 0;
     for record in records {
         let expected = beebeeb_core::backup::RecordRef { key: record.key.clone(), remote_id: record.remote_id };
@@ -245,6 +247,13 @@ pub(crate) async fn rebuild_records_if_empty(
             stored += 1;
         }
     }
-    tracing::info!(category = %category.key(), stored, remote = tree.files.len(), "backup: records rebuilt from the server");
+    tracing::info!(
+        category = %category.key(),
+        stored,
+        remote = tree.files.len(),
+        clock_offset_ms = ?clock.offset_ms,
+        clock_margin_ms = clock.margin_ms,
+        "backup: records rebuilt from the server"
+    );
     Ok(stored)
 }

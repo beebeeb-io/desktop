@@ -67,8 +67,34 @@ impl ApiClient {
     /// Paginated listing for a bounded shared-index rebuild; ordinary sync
     /// retains its snapshot/delta transport.
     pub async fn list_owned_folder_page(&self, parent: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
-        let url=self.list_files_url(ListFilesScope {parent_id:Some(FolderId::new(parent)),cursor,..Default::default()});
-        Ok(self.send_with_retry(||self.client.get(&url)).await?.json().await?)
+        Ok(self.list_owned_folder_page_clocked(parent, cursor).await?.0)
+    }
+
+    /// [`Self::list_owned_folder_page`] with the clock of its request (LD-0123): the response's `Date` header and this
+    /// device's wall clock when the request went out and when the answer came back, measured by core's
+    /// `rebuild_clock_from_date` for the backup records' rebuild. A 429 retry inside `send_with_retry` lengthens the
+    /// measured round trip, which only widens the margin (more is uploaded again, never less); no `Date` header, or
+    /// one that does not parse, gives `RebuildClock::UNKNOWN` and core's 10-minute floor.
+    pub async fn list_owned_folder_page_clocked(
+        &self,
+        parent: &str,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock)> {
+        let url = self.list_files_url(ListFilesScope {
+            parent_id: Some(FolderId::new(parent)),
+            cursor,
+            ..Default::default()
+        });
+        let sent_at_ms = chrono::Utc::now().timestamp_millis();
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
+        let received_at_ms = chrono::Utc::now().timestamp_millis();
+        let date = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let clock = beebeeb_core::backup::rebuild_clock_from_date(date.as_deref(), sent_at_ms, received_at_ms);
+        Ok((response.json().await?, clock))
     }
 
     pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
