@@ -120,8 +120,13 @@ pub(crate) fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex
         .into_iter()
         .map(|contract| contract.file_id)
         .collect();
+    // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest in Backups is never offered.
+    let backups = crate::backup_protect::BackupsTree::read(db);
     for entry in db.list_files()? {
-        if entry.is_dir() || db.get_owned_key_record(&entry.file_id)?.is_some_and(|record|record.blocked_fingerprint.is_some()) {
+        if entry.is_dir()
+            || backups.is_hidden(&entry.path)
+            || db.get_owned_key_record(&entry.file_id)?.is_some_and(|record|record.blocked_fingerprint.is_some())
+        {
             continue;
         }
         let name = leaf_name(&entry.path);

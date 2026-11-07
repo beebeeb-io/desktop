@@ -461,6 +461,18 @@ impl EngineBridge {
                     outcome.invalidated_item_ids.extend(op.file_id.clone());
                     outcome.retried_op_ids.push(op.op_id);
                 }
+                // LD-0113 §6.3: the server refused a change of a protected folder (the Backups root).
+                // It never becomes allowed, so the op is dropped, never retried or held, and the local
+                // state is put back.
+                Err(error) if !completed && protected_folder_refusal(&error).is_some() => {
+                    if !self.db.finish_claimed(&op.op_id, &claimed.claim_id, None)? {
+                        log_queue_state_moved(&op.op_id, "protected");
+                        continue;
+                    }
+                    let words = protected_folder_refusal(&error).unwrap_or_default();
+                    self.restore_after_protected_refusal(&op, sync_root, &words);
+                    outcome.invalidated_item_ids.extend(op.file_id.clone());
+                }
                 Err(error) => {
                     let finder_write = claimed.write.is_some()
                         && matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile);
@@ -554,6 +566,34 @@ impl EngineBridge {
         }
 
         Ok(outcome)
+    }
+
+    /// LD-0113 §6.3: after the server refused `op` as a change of a protected folder. A trash put the
+    /// row in `Trashing` (the local delete): it is live again, and on Windows its placeholder comes back
+    /// now. A rename or move of the root (always a folder) left its row at the server's path (a folder
+    /// row is re-keyed only by the pull), where the placeholder is minted again; on macOS the item's
+    /// signal makes Finder read the server's name back.
+    fn restore_after_protected_refusal(&self, op: &PendingOperation, #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path, words: &str) {
+        if op.kind == OperationKind::TrashFile
+            && let Some(file_id) = op.file_id.as_deref()
+            && let Err(e) = self.db.untrash_subtree(file_id)
+        {
+            tracing::warn!(error = %e, file_id = %file_id, "protected folder: could not put the row back");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::backup_protect::restore_placeholders_soon(self.db.clone(), sync_root);
+            crate::backup_protect::note_refusal(if words.is_empty() { beebeeb_core::backup::MSG_DELETE } else { words });
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = words;
+        // Zero-knowledge: the op and the item by id only.
+        tracing::warn!(
+            op_id = %op.op_id,
+            file_id = op.file_id.as_deref().unwrap_or_default(),
+            kind = ?op.kind,
+            "the server refused a change of a protected folder; the op is dropped and the item put back"
+        );
     }
 
     /// The hand-over committed (spec §8.4): one line, then the retired copy is unlinked,
@@ -733,4 +773,10 @@ impl EngineBridge {
             }
         }
     }
+}
+
+/// LD-0113: the server's words when `error` is its refusal of a change of a protected folder
+/// (`409 protected_folder`); `None` for any other error.
+fn protected_folder_refusal(error: &anyhow::Error) -> Option<String> {
+    engine_cause::<crate::api_client::ProtectedFolderRefused>(error).map(|refused| refused.message.clone())
 }

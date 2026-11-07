@@ -607,6 +607,8 @@ mod removals;
 mod schema;
 mod signout;
 mod sync;
+// LD-0113: the server's `system_role` of a row (the Backups root).
+mod system_role;
 mod test_hooks;
 
 mod types;

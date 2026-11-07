@@ -799,6 +799,19 @@ pub(super) fn apply_sync_op(
                 }
             }
         }
+        // LD-0113 (spec §5.4): the server flagged (or an admin cleared) a folder's system role. The
+        // op carries `{id, system_role}` only, so the row's other fields stay as they are; a row this
+        // device has not listed yet takes the role from its listing's own field.
+        "folder_system_role" => {
+            let role = payload["system_role"]
+                .as_str()
+                .and_then(beebeeb_types::backup::SystemRole::parse);
+            if bridge.db().set_system_role(id, role)? {
+                applied.push(id.to_string());
+                tracing::info!(file_id = %id, role = role.map_or("none", |r| r.as_str()), "system role of a folder changed");
+                crate::backup_protect::system_role_changed(bridge.db(), id);
+            }
+        }
         other => {
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }

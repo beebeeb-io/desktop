@@ -56,11 +56,13 @@ use super::*;
     #[test]
     fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
         use crate::finder_setup_command_tests::macos_compiled;
-        const SHARED: [&str; 4] = [
+        const SHARED: [&str; 5] = [
             "queue_finder_create_from",
             "queue_finder_modify_from",
             "queue_finder_create",
             "queue_finder_modify",
+            // LD-0113: the Windows watcher's, which applied the drive rule itself.
+            "queue_finder_modify_decided",
         ];
         // (file, the call, the function it is in, lines between that function's start and the
         // call, why it queues no content on a Mac)
@@ -116,8 +118,9 @@ use super::*;
             ),
             (
                 "watcher.rs",
-                "None => bridge.queue_finder_modify(modify),",
-                "pub(crate) async fn handle_rename(",
+                "None => bridge.queue_finder_modify_decided(modify),",
+                // LD-0113: `handle_rename` is `handle_rename_with(.., ProtectionCheck::Check)`.
+                "pub(crate) async fn handle_rename_with(",
                 &[],
                 "the upload driver, which a Mac never starts (asserted below)",
             ),

@@ -507,34 +507,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return progress
     }
 
-    /// The fields a modify reports as still pending (spec 2026-10-09 §7.2): a filename or
-    /// parent the person changed that the item the app returned does not describe. Apple:
-    /// "If a field in the returned item does not match the itemTemplate, and is not in the
-    /// list of stillPendingFields, the value from the item will be propagated to the disk"
-    /// (NSFileProviderReplicatedExtension.h, modifyItem). The app applies a save's name and
-    /// parent in the save's accept, so with the app this extension ships in, this is empty.
-    /// An app from another build (one still running across an update) may not, and its old
-    /// name would undo the rename on disk; pending, the system sends the field again instead.
-    /// A modify without contents reports nothing pending, as before: its reply describes the
-    /// item as it was until the server's change arrives, and a pending field would be sent
-    /// again until then.
-    static func modifyStillPendingFields(
-        changedFields: NSFileProviderItemFields,
-        hasContents: Bool,
-        template: NSFileProviderItem,
-        returned: NSFileProviderItem?
-    ) -> NSFileProviderItemFields {
-        guard hasContents, let returned else { return [] }
-        var pending: NSFileProviderItemFields = []
-        if changedFields.contains(.filename), returned.filename != template.filename {
-            pending.insert(.filename)
-        }
-        if changedFields.contains(.parentItemIdentifier),
-           returned.parentItemIdentifier != template.parentItemIdentifier {
-            pending.insert(.parentItemIdentifier)
-        }
-        return pending
-    }
+    // `modifyStillPendingFields` lives in ModifyFields.swift (LD-0113: this file's size ratchet).
 
     func modifyItem(
         _ item: NSFileProviderItem,
@@ -552,6 +525,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             )
         }
         let progress = Progress(totalUnitCount: 1)
+        // LD-0113 §6.3, Amendment 7: a rename, move, trash or content edit of a protected item is refused here too.
+        if let refusal = BeebeebProviderItem.protectedRefusal(
+            changedFields: changedFields, newParent: item.parentItemIdentifier, model: { try? ipc.item(identifier: item.itemIdentifier) }
+        ) {
+            completionHandler(nil, [], false, refusal)
+            progress.completedUnitCount = 1
+            return progress
+        }
         do {
             // Task 1698 (trash ruling): a reparent INTO the trash container
             // is the Finder-side TRASH — map it to the server's existing
@@ -627,12 +608,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             // success), a known item queues the server trash op (an
             // in-trash item's re-trash is an idempotent server no-op — the
             // "delete forever" gap is recorded as task 1698's deviation 2).
-            var childItemCount: Int64?
-            var isFolder = false
-            if let model = try? ipc.item(identifier: identifier) {
-                isFolder = model.kind == .folder
-                childItemCount = model.childItemCount
+            let model = try? ipc.item(identifier: identifier)
+            // LD-0113 §6.3: a protected item is refused here too, not only by its capabilities.
+            if let refusal = BeebeebProviderItem.protectedRefusal(model: { model }) {
+                completionHandler(refusal)
+                progress.completedUnitCount = 1
+                return
             }
+            let isFolder = model?.kind == .folder
+            let childItemCount = model?.childItemCount
             guard Self.deleteDisposition(
                 isFolder: isFolder,
                 childItemCount: childItemCount,

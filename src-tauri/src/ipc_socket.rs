@@ -769,6 +769,8 @@ mod tests {
     mod root_payloads;
     mod macos_socket_cache;
     mod payload_contracts;
+    // LD-0113 D2: the payload of a protected item.
+    mod ld0113_protect;
     mod upload_staging;
     mod presentation_write;
 }

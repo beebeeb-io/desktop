@@ -28,6 +28,12 @@ BADGES = {
     "added": (0x7C, 0x5C, 0xE0),
 }
 
+# LD-0113 Amendment 8a: the Backups root's "Read-only" badge, a padlock in a neutral grey (Amber is
+# for the encryption state only). name -> (R, G, B)
+LOCKS = {
+    "read-only": (0x6B, 0x6B, 0x70),
+}
+
 
 def chunk(tag: bytes, data: bytes) -> bytes:
     return (
@@ -66,6 +72,41 @@ def circle_png(rgb) -> bytes:
     )
 
 
+def in_lock(x: int, y: int) -> bool:
+    """A padlock on the 128x128 grid: a rounded body, a shackle ring over it, a keyhole cut out."""
+    # Body: x 30..98, y 58..108, corner radius 8.
+    if 30 <= x <= 98 and 58 <= y <= 108:
+        cx = min(max(x, 38), 90)
+        cy = min(max(y, 66), 100)
+        if (x - cx) ** 2 + (y - cy) ** 2 > 64:
+            return False
+        # Keyhole: a circle at (64, 78) with radius 7 and a slot below it.
+        if (x - 64) ** 2 + (y - 78) ** 2 <= 49 or (61 <= x <= 67 and 78 <= y <= 94):
+            return False
+        return True
+    # Shackle: the upper half of a ring centred on (64, 58), radii 16..26.
+    if y <= 58:
+        d2 = (x - 64) ** 2 + (y - 58) ** 2
+        return 256 <= d2 <= 676
+    return False
+
+
+def lock_png(rgb) -> bytes:
+    r, g, b = rgb
+    ihdr = struct.pack(">IIBBBBB", SIZE, SIZE, 8, 6, 0, 0, 0)
+    raw = bytearray()
+    for y in range(SIZE):
+        raw.append(0)  # filter type 0 per scanline
+        for x in range(SIZE):
+            raw += bytes((r, g, b, 255 if in_lock(x, y) else 0))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+
+
 def main() -> int:
     outdir = sys.argv[1] if len(sys.argv) > 1 else "BeebeebFileProvider/Resources"
     import os
@@ -75,6 +116,11 @@ def main() -> int:
         path = os.path.join(outdir, f"badge-{name}.png")
         with open(path, "wb") as fh:
             fh.write(circle_png(rgb))
+        print(f"wrote {path}")
+    for name, rgb in LOCKS.items():
+        path = os.path.join(outdir, f"badge-{name}.png")
+        with open(path, "wb") as fh:
+            fh.write(lock_png(rgb))
         print(f"wrote {path}")
     return 0
 

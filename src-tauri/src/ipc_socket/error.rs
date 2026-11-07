@@ -66,6 +66,13 @@ impl IpcError {
                 message: "the disk or Beebeeb's local database is full".into(),
             };
         }
+        // LD-0113: core's words go to Finder in the reply; the log keeps the category only.
+        if let Some(refused) = crate::engine_bridge::engine_cause::<crate::backup_protect::DriveChangeRefused>(&error) {
+            return Self::Failed {
+                category: "backup_protected",
+                message: refused.message.clone(),
+            };
+        }
         match crate::engine_bridge::engine_cause::<crate::engine_bridge::UnknownItem>(&error) {
             Some(unknown) => Self::UnknownItem {
                 requested_id: unknown.requested_id.clone(),

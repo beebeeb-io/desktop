@@ -39,6 +39,20 @@ struct BeebeebProviderItem: Codable {
     /// surfaced as the "Added by someone else" badge when no sync-state badge
     /// takes the one slot Finder renders.
     let addedBySomeoneElse: Bool
+    /// LD-0113 §6.3: the daemon's words for refusing the delete or trash, the rename and the move of
+    /// a protected item (anything at or under the Backups root, Amendment 6).
+    /// Present only on a protected item; core decides them, the daemon sends them.
+    let protectedReason: String?
+    let protectedRenameReason: String?
+    let protectedMoveReason: String?
+    /// LD-0113 Amendment 7: the words for a content change (a protected item is read-only).
+    let protectedWriteReason: String?
+    /// LD-0113 Amendment 8a: the Backups root, which carries the "Read-only" badge.
+    let readOnlyBadge: Bool
+
+    /// LD-0113: Finder offers no delete, trash, rename, move or New Folder for it. The daemon's
+    /// `protected` flag, the one field for the fact (review #10); the words above are what to show.
+    let isProtected: Bool
 
     static let read = 1 << 0
     static let write = 1 << 1
@@ -66,6 +80,8 @@ struct BeebeebProviderItem: Codable {
     static let decorationUploading = "io.beebeeb.app.decoration.uploading"
     static let decorationDownloading = "io.beebeeb.app.decoration.downloading"
     static let decorationAddedBySomeoneElse = "io.beebeeb.app.decoration.added-by-someone"
+    /// LD-0113 Amendment 8a: the Backups root's badge; its Info.plist label is core's `MSG_BADGE`.
+    static let decorationReadOnly = "io.beebeeb.app.decoration.read-only"
 
     /// The sync-state badge for a daemon `status` string — at most ONE
     /// identifier per item: macOS renders only the FIRST decoration in the
@@ -108,7 +124,13 @@ struct BeebeebProviderItem: Codable {
         contentVersion: String? = nil,
         metadataVersion: String? = nil,
         pinned: Bool = false,
-        addedBySomeoneElse: Bool = false
+        addedBySomeoneElse: Bool = false,
+        isProtected: Bool = false,
+        protectedReason: String? = nil,
+        protectedRenameReason: String? = nil,
+        protectedMoveReason: String? = nil,
+        protectedWriteReason: String? = nil,
+        readOnlyBadge: Bool = false
     ) {
         self.identifier = identifier
         self.parentIdentifier = parentIdentifier
@@ -126,6 +148,12 @@ struct BeebeebProviderItem: Codable {
         self.metadataVersion = metadataVersion
         self.pinned = pinned
         self.addedBySomeoneElse = addedBySomeoneElse
+        self.isProtected = isProtected
+        self.protectedReason = protectedReason
+        self.protectedRenameReason = protectedRenameReason
+        self.protectedMoveReason = protectedMoveReason
+        self.protectedWriteReason = protectedWriteReason
+        self.readOnlyBadge = readOnlyBadge
     }
 
     /// Task 1701 (ruling: one root, no synthetic split): the SINGLE root
@@ -295,7 +323,56 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
             // SEMANTICS (trashContainer handling) are task 1698's decision.
             result.insert(.allowsTrashing)
         }
+        if model.isProtected {
+            // LD-0113 §6.3, Amendment 6 ("Protect the whole tree"): whatever bits arrived, nothing at or
+            // under Backups is deleted, trashed, renamed or moved from Finder, and nothing is added to
+            // it (no New Folder, no drop into it). Amendment 7: nor written (read-only, contents
+            // included). Reading and downloading stay.
+            result.subtract([.allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting, .allowsAddingSubItems, .allowsWriting])
+        }
         return result
+    }
+}
+
+extension BeebeebProviderItem {
+    /// LD-0113 §6.3, the extension's second line behind the capabilities: the error a delete (no
+    /// `changedFields`) or a modify of a protected item is refused with, carrying the daemon's words
+    /// for that change; `nil` when it may go ahead. `model` is read only when the change is a delete,
+    /// a trash, a rename, a move or (Amendment 7: Backups are read-only) a content change; a change of
+    /// other metadata alone (a tag, the last-used date) goes ahead.
+    static func protectedRefusal(
+        changedFields: NSFileProviderItemFields? = nil,
+        newParent: NSFileProviderItemIdentifier? = nil,
+        model: () -> BeebeebProviderItem?
+    ) -> NSError? {
+        if let changedFields, !changedFields.contains(.filename), !changedFields.contains(.parentItemIdentifier),
+            !changedFields.contains(.contents)
+        {
+            return nil
+        }
+        // One fact (review #10): the daemon's `protected` flag; the words are only what to show, and
+        // without them the system's own text is shown.
+        guard let item = model(), item.isProtected else {
+            return nil
+        }
+        let deleteWords = item.protectedReason
+        let shown = { (words: String?) in words.map { [NSLocalizedDescriptionKey: $0] } ?? [:] }
+        guard let changedFields else {
+            return NSError(
+                domain: NSFileProviderErrorDomain,
+                code: NSFileProviderError.deletionRejected.rawValue,
+                userInfo: shown(deleteWords)
+            )
+        }
+        let words: String?
+        if changedFields.contains(.parentItemIdentifier) {
+            words = newParent == .trashContainer ? deleteWords : (item.protectedMoveReason ?? deleteWords)
+        } else if changedFields.contains(.filename) {
+            words = item.protectedRenameReason ?? deleteWords
+        } else {
+            words = item.protectedWriteReason ?? deleteWords
+        }
+        return NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: shown(words))
     }
 }
 
@@ -306,9 +383,10 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
 // copied by scripts/build-fileprovider-extension.sh).
 extension FileProviderItem: NSFileProviderItemDecorating {
     var decorations: [NSFileProviderItemDecorationIdentifier]? {
-        // One badge slot: a sync-state badge wins; otherwise an F item the user
-        // did not add says so (task 2275 L15).
+        // One badge slot: a sync-state badge wins; then the Backups root's "Read-only" (LD-0113
+        // Amendment 8a); otherwise an F item the user did not add says so (task 2275 L15).
         let identifier = BeebeebProviderItem.decorationIdentifier(forStatus: model.status)
+            ?? (model.readOnlyBadge ? BeebeebProviderItem.decorationReadOnly : nil)
             ?? (model.addedBySomeoneElse ? BeebeebProviderItem.decorationAddedBySomeoneElse : nil)
         guard let identifier else {
             return nil

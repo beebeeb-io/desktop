@@ -91,6 +91,42 @@ when status is available; Rust resolves the visible File Provider location.
 Native verification must compare all three surfaces
 and Explorer against a non-default configured root, including after a root change.
 
+## Backups protection — 2026-11-06 (LD-0113 D1, D2, Amendments 6, 7, 8a)
+
+The Backups root is the folder the server flags `system_role = "backups_root"` (state.db
+`files.system_role`), never a folder found by its name. Guus, 2026-11-06: "Protect the whole
+tree", and (19:30) Backups are read-only, contents included. In the drive (Explorer, Finder)
+nothing at or under the root is deleted, trashed, renamed, moved or written, and nothing is moved
+into it; backups are managed in the app, and opening and downloading them stay. The rule and its
+words come from core v0.2.1's `beebeeb_core::backup::check_drive_mutation` on the row's
+`BackupPosition` (its depth below the root and its name), in this order: the root's own for a
+delete, rename or move ("Backups is a system folder and can't be deleted."); this device's own
+backup of a folder it backs up now (`Backups/<this device>/<Folder>/…`), "This is a backup of
+<original>. Change the original instead."; anything else under the root (another device, the
+device folder itself, a turned-off folder), "Backups are managed in the Beebeeb app. Open Beebeeb
+to delete a backup." for a delete, rename or move, and "Backups are read-only: each device writes
+its own. Change the file on that device, or save a copy outside Backups." for a content change,
+a new item, a move into the tree (core's `Create` on the folder it goes into), and anything on a
+device's manifest. A device folder's manifest (`.device.json`) is never listed: not minted in
+Explorer, not listed in Finder, quick search or the app's recent lists (core's
+`is_hidden_backup_item`). The root carries core's `MSG_BADGE`, "Read-only". The rule is
+`src-tauri/src/backup_protect.rs`.
+
+| Surface | How it refuses |
+|---|---|
+| Windows Explorer | `NOTIFY_DELETE` / `NOTIFY_RENAME` pre-operation callbacks answer `STATUS_CLOUD_FILE_ACCESS_DENIED` from the state DB (no network; this process's own changes are never refused) for every placeholder in the tree, and for a move into it. The Recycle Bin is a rename and is refused as a delete. The words show as a notification. An item CREATED in the tree (New folder, a paste or copy, a Save As) is not a placeholder until it syncs and gets no callback, so it is not refused (accepted edge). |
+| Windows, after the fact | A delete, rename or move that got through (app closed, no live bridge) sends nothing; a moved item goes back, and every downloaded row under a deleted item is cloud-only again, so its placeholder is minted again. An item that cannot be moved back is sent as made, so the drive and the server agree. |
+| macOS Finder | The item payload marks everything in the tree `protected`; it loses delete, trash, rename, reparent and adding items (no New Folder, no drop into it), and the extension refuses a delete, rename or move OF a protected item as a second line with the daemon's words. A move or copy INTO the tree from outside Finder (Terminal `mv`, an app's Save) is not refused by the extension; whether the system enforces the dropped capability there is not verified. |
+| Windows, read-only (Amendment 7) | Every file placeholder at or under the root carries `FILE_ATTRIBUTE_READONLY` (folders are left alone): minted so by the placeholder pass, applied to the whole tree when the server flags the role and at every start (and taken away when the role is cleared). An editor opens such a file read-only; a write open is refused by the file system. The engine's own changes (hydrate, dehydrate, pin, resize, emptying an old version, its own remove) lift the attribute for the one operation and set it again; sign-out deletes read-only files too. A person who clears the attribute by hand can write the file; that edit is not refused. |
+| Windows Explorer badge (Amendment 8a) | A Cloud Files custom state, core's `MSG_BADGE` ("Read-only"), on the root. Only an Explorer registration made by this build or later declares it: an existing registration is kept as it is (LD-0105 S7; `Register` answers ALREADY_EXISTS, `Unregister` deletes cloud-only placeholders), so it shows after the next sign-out and sign-in. |
+| macOS Finder, read-only and badge | Everything in the tree also loses `allowsWriting`, and the extension refuses a content change with core's words (a change of tags or other metadata alone goes ahead). The root carries the "Read-only" decoration (Info.plist label = core's `MSG_BADGE`). |
+| Shared queueing (every surface) | `queue_finder_delete`, `queue_finder_modify` and `queue_local_rename` never queue a trash, rename or move of an item in the tree, nor a move into it (core's words as the error); a content edit is queued as before (the extension refuses it first on macOS; the attribute refuses it on Windows). |
+| Server refusal | A `409 protected_folder` drops the op (never retried or held) and puts the row back. |
+| Linux, in-app Files | The web UI's guard (LD-0113 part C). Desktop's own windows offer no file actions, folder shares, folder links or file requests, so Amendment 10 has nothing to hide here. |
+
+Amendment 7 replaces the Amendment 6 note on safe-saves: a file inside Backups is read-only, so an
+editor offers Save As instead of saving in place; the original is the file to edit.
+
 ## U2 Windows surface checklist
 
 Status is **source reachability**, not a native pass. **Wired** means the action

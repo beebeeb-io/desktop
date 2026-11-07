@@ -204,6 +204,28 @@ pub struct FileProviderItemPayload {
     /// ignore it (`serde(default)` on the way back in).
     #[serde(default)]
     pub added_by_someone_else: bool,
+    /// LD-0113 §6.3: the Backups root, or this device's own backup of a folder it backs up now.
+    /// Finder offers no delete, trash, rename or move for it (the daemon also drops those capability
+    /// bits), and the extension refuses them as a second line. Older Swift decoders ignore it.
+    #[serde(default)]
+    pub protected: bool,
+    /// The words the extension refuses a protected item's delete or trash with (core's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_reason: Option<String>,
+    /// The words for a rename (the root's differ from its delete words).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_rename_reason: Option<String>,
+    /// The words for a move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_move_reason: Option<String>,
+    /// LD-0113 Amendment 7: the words for a content change (a protected item is read-only; the
+    /// daemon also drops `CAP_WRITE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_write_reason: Option<String>,
+    /// LD-0113 Amendment 8a: this is the Backups root, which Finder badges "Read-only" (core's
+    /// `MSG_BADGE`, the decoration's label in the extension's Info.plist).
+    #[serde(default)]
+    pub read_only_badge: bool,
 }
 
 /// One change-log row crossing the IPC bridge (task 1697).

@@ -201,6 +201,10 @@ async fn run(
         emit_status(&app, "error", Some(&sync_root), Some(&error));
         return;
     }
+    // LD-0113 §6.3: what this device backs up now, before the delete and rename callbacks can ask.
+    crate::backup_protect::refresh_own_backups();
+    #[cfg(target_os = "windows")]
+    crate::backup_protect::set_notifier(&app);
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
@@ -651,6 +655,11 @@ async fn run(
                 // Native completion is local work: retry even if the API is offline.
                 #[cfg(target_os = "windows")]
                 crate::windows_cf::upload_finalization::retry(&db, &sync_root);
+
+                // LD-0113 §6.2: a moved original (a Known Folder Move) changes what is protected; the folder
+                // switch refreshes at once (`set_known_folder_backup`). Windows only: nothing else has sources yet.
+                #[cfg(target_os = "windows")]
+                crate::backup_protect::refresh_own_backups();
 
                 // Known-folder backup mirror (task 0797). Run BEFORE the sync
                 // tick on the slow cadence so any files it copies into the sync

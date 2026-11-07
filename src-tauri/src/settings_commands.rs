@@ -1100,6 +1100,7 @@ pub(super) async fn set_known_folder_backup(key: String, enabled: bool) -> Resul
         cfg.set_known_folder(&key, enabled);
         (true, cfg.clone())
     })?;
+    crate::backup_protect::refresh_own_backups(); // LD-0113 §6.2: protection follows the switch at once.
 
     // On DISABLE, purge this folder's pending backup ops so they stop now and do
     // not resume on restart. Best-effort: a missing/unopenable state DB (no sync

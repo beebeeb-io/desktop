@@ -101,7 +101,45 @@ pub(crate) fn file_entry_payload_for_db(
     if entry.status == crate::state_db::FileStatus::Trashing && !parent_row_is_trashing(db, entry) {
         payload.parent_identifier = FP_TRASH_APPLE.to_string();
     }
+    crate::backup_protect::with_own_backups(|own| apply_protection(db, own, entry, &mut payload));
     payload
+}
+
+/// LD-0113 §6.3, Amendment 6 ("Protect the whole tree"): every item at or under the Backups root loses
+/// delete, trash, rename and move in Finder, and adding items (no New Folder, no drop into the tree),
+/// and carries core's words for each, which the extension refuses with as a second line. Reading and
+/// downloading stay. Their metadata version says so, so Finder reads the capabilities again when
+/// protection starts or ends.
+///
+/// Amendment 7 (Guus, 19:30): a protected item is read-only too: it loses `CAP_WRITE` and carries the
+/// words for a content change. Amendment 8a (20:04): the root carries the "Read-only" badge.
+pub(super) fn apply_protection(
+    db: &crate::state_db::StateDb,
+    own: &crate::backup_protect::OwnBackups,
+    entry: &crate::state_db::FileEntry,
+    payload: &mut FileProviderItemPayload,
+) {
+    use beebeeb_core::backup::Mutation;
+    let [Some(delete), rename, moved, written] = crate::backup_protect::protected_reasons(
+        db,
+        own,
+        &entry.path,
+        [Mutation::Trash, Mutation::Rename, Mutation::Move, Mutation::Write],
+    ) else {
+        return;
+    };
+    payload.protected = true;
+    payload.capabilities &= !(CAP_DELETE | CAP_TRASH | CAP_RENAME | CAP_REPARENT | CAP_ADD_SUBITEMS | CAP_WRITE);
+    payload.protected_reason = Some(delete);
+    payload.protected_rename_reason = rename;
+    payload.protected_move_reason = moved;
+    payload.protected_write_reason = written;
+    payload.read_only_badge =
+        crate::backup_protect::BackupsTree::read(db).position(&entry.path) == beebeeb_core::backup::BackupPosition::Root;
+    if let Some(version) = payload.metadata_version.as_mut() {
+        // `-ro` since Amendment 7: an item an Amendment 6 build listed changes version, so Finder re-reads it.
+        version.push_str(":protected-ro");
+    }
 }
 
 pub(super) fn file_entry_payload(
@@ -179,6 +217,13 @@ pub(super) fn file_entry_payload(
         pinned: matches!(contract.effective_pin_state(), crate::state_db::PinState::Pinned),
         // L12: the mark comes from the id's class, never from a server field.
         added_by_someone_else: beebeeb_core::item_id::is_foreign_item_id(&entry.file_id).unwrap_or(false),
+        // LD-0113: `file_entry_payload_for_db` decides protection, where the DB is at hand.
+        protected: false,
+        protected_reason: None,
+        protected_rename_reason: None,
+        protected_move_reason: None,
+        protected_write_reason: None,
+        read_only_badge: false,
     }
 }
 
@@ -235,6 +280,13 @@ pub(super) fn file_entry_payload_without_contract(
         pinned: false,
         // L12: the mark comes from the id's class, never from a server field.
         added_by_someone_else: beebeeb_core::item_id::is_foreign_item_id(&entry.file_id).unwrap_or(false),
+        // LD-0113: `file_entry_payload_for_db` decides protection, where the DB is at hand.
+        protected: false,
+        protected_reason: None,
+        protected_rename_reason: None,
+        protected_move_reason: None,
+        protected_write_reason: None,
+        read_only_badge: false,
     }
 }
 

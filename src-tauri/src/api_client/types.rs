@@ -228,6 +228,46 @@ pub(super) async fn upload_response(resp: reqwest::Response) -> ApiResult<reqwes
     Err(DesktopApiError::UploadRefused(UploadRefused { code, status_error }))
 }
 
+/// LD-0113 (spec §5.3): a change the server refused because its item is a protected folder (the
+/// Backups root): `409 {"error": "protected_folder", "message": "<core's words>"}`. Like
+/// [`UploadRefused`] it shows, and has as its source, the `reqwest` status error (the status and the
+/// URL, never the body), so every reading of the error's text and status stays as it was.
+#[derive(Debug)]
+pub struct ProtectedFolderRefused {
+    /// The server's words for the person (core's `MSG_*`); empty when the body had none.
+    pub message: String,
+    pub(super) status_error: reqwest::Error,
+}
+
+impl std::fmt::Display for ProtectedFolderRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.status_error.fmt(f)
+    }
+}
+
+impl std::error::Error for ProtectedFolderRefused {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.status_error)
+    }
+}
+
+/// `resp` when it is a 2xx; a 409 whose body names `protected_folder` is a
+/// [`ProtectedFolderRefused`]; any other status is `error_for_status`'s error, as before.
+pub(super) async fn protected_folder_response(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let Some(status_error) = resp.error_for_status_ref().err() else {
+        return Ok(resp);
+    };
+    if resp.status() != reqwest::StatusCode::CONFLICT {
+        return Err(status_error.into());
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if body.get("error").and_then(|value| value.as_str()) == Some(beebeeb_types::backup::PROTECTED_FOLDER_ERROR) {
+        let message = body.get("message").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+        return Err(ProtectedFolderRefused { message, status_error }.into());
+    }
+    Err(status_error.into())
+}
+
 impl std::fmt::Display for InitConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "upload init refused with 409 Conflict ({})", self.class.as_str())

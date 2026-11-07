@@ -12,7 +12,7 @@ use std::os::windows::{
     io::AsRawHandle,
 };
 use std::path::Path;
-use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::{CloudFilters::*, FileSystem::*};
 
 /// Task 2191 (spec D11; Decision (lead, 2026-10-26)): what sign-out does with files of unknown
@@ -283,16 +283,9 @@ fn prepare_unknown(
 
 // Directory deletion through this same handle is non-recursive. A child that
 // arrives after prepare makes this fail without erasing that child's bytes.
+// LD-0113 Amendment 7: a read-only Backups file is deleted too (the plain disposition refuses one).
 fn mark_for_deletion(file: &std::fs::File) -> anyhow::Result<()> {
-    let info = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
-    unsafe {
-        SetFileInformationByHandle(
-            HANDLE(file.as_raw_handle()),
-            FileDispositionInfo,
-            &info as *const _ as *const std::ffi::c_void,
-            std::mem::size_of_val(&info) as u32,
-        )?;
-    }
+    super::read_only::mark_for_deletion(HANDLE(file.as_raw_handle()))?;
     Ok(())
 }
 
