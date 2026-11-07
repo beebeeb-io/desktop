@@ -505,6 +505,9 @@ pub(crate) enum OpDone {
     Remove { release: Option<String> },
     /// The landing transaction already removed it; only unlink the released copy.
     Removed { release: Option<String> },
+    /// LD-0113: a backup op removed with no record (its source changed or cannot be read now): the next pass
+    /// queues the file again. Counted as retried, never as completed.
+    Dropped,
 }
 
 /// The `"operation"` tag a queued op's `metadata_json` carries. The stored JSON is a

@@ -74,39 +74,15 @@ pub(crate) fn with_own_backups<T>(f: impl FnOnce(&OwnBackups) -> T) -> T {
     }
 }
 
-/// Read what this device backs up now from `desktop.toml` and set it. Windows resolves each enabled
-/// known folder's original (`SHGetKnownFolderPath`, no network) under the device folder the backup
-/// writes today (`known_folder::sanitize_device_segment` of the computer name). The other systems
-/// have no backup sources yet (macOS's arrive with LD-0113 D5), so only the root is protected there.
-/// A config that cannot be read keeps the last answer: a read error never lifts a protection.
-pub(crate) fn refresh_own_backups() {
-    match crate::config::DesktopConfig::load() {
-        Ok(cfg) => set_own_backups(own_backups_for(&cfg.known_folder_backup)),
-        Err(error) => tracing::debug!(%error, "backup protection: config unreadable; keeping the last answer"),
+/// Read what this device backs up now and set it: the folders that are on (`desktop.toml`), each with where its
+/// original is read from, under the device folder the backup layout resolved (core's `find_device_folder`, so
+/// `GLegion (a3f2)` after a name collision; never re-derived from the hostname). No network. A config that cannot
+/// be read keeps the last answer: a read error never lifts a protection. See [`crate::backup::own_backups`].
+pub(crate) fn refresh_own_backups(db: &StateDb) {
+    match crate::backup::own_backups(db) {
+        Some(own) => set_own_backups(own),
+        None => tracing::debug!("backup protection: config unreadable; keeping the last answer"),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn own_backups_for(enabled_keys: &[String]) -> OwnBackups {
-    let folders = crate::known_folder::KNOWN_FOLDERS
-        .iter()
-        .filter(|folder| enabled_keys.iter().any(|key| key == folder.key))
-        .filter_map(|folder| {
-            Some(OwnBackupFolder {
-                display_name: folder.display_name.to_string(),
-                source_path: crate::known_folder::resolve_known_folder(folder.key)?,
-            })
-        })
-        .collect();
-    OwnBackups {
-        device_folder: crate::runner::device_name().map(|name| crate::known_folder::sanitize_device_segment(&name)),
-        folders,
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn own_backups_for(_enabled_keys: &[String]) -> OwnBackups {
-    OwnBackups::default()
 }
 
 /// Why the item at `rel_path` (the state DB's `/`-joined path) must not be changed by `mutation`, in

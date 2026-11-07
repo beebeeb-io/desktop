@@ -201,8 +201,6 @@ async fn run(
         emit_status(&app, "error", Some(&sync_root), Some(&error));
         return;
     }
-    // LD-0113 §6.3: what this device backs up now, before the delete and rename callbacks can ask.
-    crate::backup_protect::refresh_own_backups();
     #[cfg(target_os = "windows")]
     crate::backup_protect::set_notifier(&app);
     // Windows Cloud Files: connect the sync root before any placeholder work.
@@ -249,6 +247,9 @@ async fn run(
             return;
         }
     };
+    // LD-0113 §6.3: what this device backs up now (the device folder from the state DB's resolved layout), before
+    // the engine bridge is registered for the delete and rename callbacks to ask.
+    crate::backup_protect::refresh_own_backups(&db);
     // No runner survives a restart: clear every queue claim. On macOS, also remove
     // the staged copies the queue released and nothing references any more
     // (spec §8.7 S3, S6).
@@ -535,18 +536,11 @@ async fn run(
     let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
     let mut last_search_index_signature: Option<u64> = None;
 
-    // Known-folder backup (task 0797, Windows): run the source→vault mirror on a
-    // SLOW cadence relative to the 30s sync tick — every `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS`
-    // ticks. The mirror only copies NEW/CHANGED files (mtime+size diff), so an
-    // idle pass is cheap, but it still reads the whole known-folder tree, so we
-    // don't want it on every tick. `0` runs the first mirror on the first tick.
-    // Windows-only: on other platforms there are no Windows known folders to
-    // mirror, so the counter would be unused.
-    #[cfg(target_os = "windows")]
-    let mut tick_count: u64 = 0;
+    // LD-0113: the backup passes (they replaced the known-folder mirror of task 0797). The scheduler keeps its own
+    // cadence (a full pass every 10 minutes, a debounced one after a change in a backed-up folder).
+    let mut backup_scheduler = crate::backup::scheduler::BackupScheduler::new();
 
-    // Task 1670 round 3: separate counter (not `tick_count` above, which is
-    // Windows-only and used for a different-purpose slow cadence) for the
+    // Task 1670 round 3: a separate counter (the known-folder mirror's slow cadence had its own) for the
     // macOS hydrate-cache TTL sweep — see `MACOS_HYDRATE_SWEEP_EVERY_N_TICKS`
     // for why this exists.
     #[cfg(target_os = "macos")]
@@ -656,22 +650,18 @@ async fn run(
                 #[cfg(target_os = "windows")]
                 crate::windows_cf::upload_finalization::retry(&db, &sync_root);
 
-                // LD-0113 §6.2: a moved original (a Known Folder Move) changes what is protected; the folder
-                // switch refreshes at once (`set_known_folder_backup`). Windows only: nothing else has sources yet.
-                #[cfg(target_os = "windows")]
-                crate::backup_protect::refresh_own_backups();
-
-                // Known-folder backup mirror (task 0797). Run BEFORE the sync
-                // tick on the slow cadence so any files it copies into the sync
-                // root are present when the enumeration scan next walks the tree.
-                // Windows-only (SHGetKnownFolderPath); a no-op when the user has
-                // opted into nothing.
-                #[cfg(target_os = "windows")]
-                {
-                    if tick_count % KNOWN_FOLDER_MIRROR_EVERY_N_TICKS == 0 {
-                        run_known_folder_mirror(&sync_root).await;
+                // LD-0113: the backup passes. Each reads a backed-up folder in place and queues its uploads
+                // (`origin = 'backup'`), which this tick's queue sends; nothing is written under the sync root.
+                // An unreadable config runs no pass, as the mirror did.
+                match crate::config::DesktopConfig::load() {
+                    Ok(cfg) => {
+                        let sources = crate::backup::sources::backup_sources(&db, &cfg.known_folder_backup);
+                        // LD-0113 §6.2: a moved original (a Known Folder Move) or a newly resolved device folder
+                        // changes what is protected; the folder switch refreshes at once (`set_known_folder_backup`).
+                        crate::backup_protect::set_own_backups(crate::backup::own_backups_for(&db, &sources));
+                        backup_scheduler.tick(&bridge, &sync_root, sources, std::time::Instant::now()).await;
                     }
-                    tick_count = tick_count.wrapping_add(1);
+                    Err(error) => tracing::debug!(%error, "backup: config unreadable; no pass this tick"),
                 }
 
                 let syncing_before_tick = sync_in_flight_count(&db);

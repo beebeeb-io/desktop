@@ -109,6 +109,8 @@ impl EngineBridge {
             .await
         {
             Ok(OpDone::Remove { release } | OpDone::Removed { release }) => release,
+            // Only a backup op is dropped; Keep Mine's op is a sync-folder upload.
+            Ok(OpDone::Dropped) => return Err(anyhow::anyhow!("Keep Mine upload was dropped").into()),
             Err(e) => {
                 // One-shot op (never queued): nothing will resume its session.
                 self.abandon_upload_after_give_up(&op).await;

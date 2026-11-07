@@ -34,31 +34,11 @@ pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_NUMERATOR: i128 = 9;
 
 pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
 
-/// Known-folder backup (task 0797): run the source→vault mirror every Nth sync
-/// tick. With a 30s `TICK_INTERVAL` that is ~60s. Lowered from 10 (~5 min) to 2
-/// for task 0811: the enable IPC no longer mirrors inline (it returned to the
-/// daemon to stop the "Setting up…" hang), so backup must START on its own
-/// SHORTLY after enable — a ~60s cadence does that without a 5-minute wait. This
-/// is safe because BOTH ends are now bounded PER PASS:
-/// - the disk-copy side caps the NUMBER OF FILES it copies per pass across all
-///   enabled folders (`known_folder::MAX_MIRROR_FILES_PER_PASS`) — so a first
-///   enable of a 5,000-file folder copies in batches across ticks, never the
-///   whole set at once (the disk flood that pinned the founder's machine). The
-///   per-file 4 GiB cap and depth-64 guard are separate, narrower bounds; the
-///   per-pass FILE budget is what bounds total copy VOLUME.
-/// - the upload scan caps NEW enqueues per pass
-///   (`watcher::MAX_NEW_UPLOADS_PER_SCAN`).
-/// Both caps are matched, so disk-copy and enqueue ramp up in step and a frequent
-/// pass can no longer thunder even on a first enable of a 5,000-file folder.
-/// Windows-only.
-#[cfg(target_os = "windows")]
-pub(super) const KNOWN_FOLDER_MIRROR_EVERY_N_TICKS: u64 = 2;
 
 /// Task 1670 round 3 (lead review of round 2): cadence for the macOS
 /// hydrate-cache TTL sweep. With `TICK_INTERVAL` at 30s, every 2 ticks is
-/// ~60s — same "every Nth tick of the daemon's one already-running loop"
-/// idiom as `KNOWN_FOLDER_MIRROR_EVERY_N_TICKS` above, reusing the existing
-/// runtime rather than spawning a second timer task.
+/// ~60s — the "every Nth tick of the daemon's one already-running loop" idiom,
+/// reusing the existing runtime rather than spawning a second timer task.
 ///
 /// Why a periodic sweep exists at all: round 3 made `FileProviderExtension
 /// .fetchContents` (Swift) stop deleting its staged file on the success
@@ -201,34 +181,6 @@ pub(super) fn refresh_status_ui_snapshot(db: &StateDb, mode: RunMode, engine_err
     let syncing = sync_in_flight_count(db);
     let conflicts = file_status_count(db, FileStatus::Conflict);
     crate::windows_cf::status_ui::set_engine_state(mode.is_paused(), syncing, conflicts, engine_error);
-}
-
-/// Run one known-folder backup mirror pass (task 0797, Windows). Reads the
-/// enabled-key list from `desktop.toml`, then mirrors each enabled known folder
-/// (`SHGetKnownFolderPath` source) into `<sync_root>\<DisplayName>`. The whole
-/// thing is blocking `std::fs` + Win32, so it runs on a blocking thread to keep
-/// the async runtime free. Best-effort: a config-load failure or an empty set is
-/// a quiet no-op; per-file errors are counted inside the mirror, not surfaced.
-#[cfg(target_os = "windows")]
-pub(super) async fn run_known_folder_mirror(sync_root: &Path) {
-    let enabled = match crate::config::DesktopConfig::load() {
-        Ok(cfg) => cfg.known_folder_backup,
-        Err(e) => {
-            tracing::debug!(error = %e, "known-folder backup: config load failed; skipping pass");
-            return;
-        }
-    };
-    if enabled.is_empty() {
-        return;
-    }
-    let root = sync_root.to_path_buf();
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::known_folder::mirror_enabled_known_folders(&root, &enabled);
-    })
-    .await
-    {
-        tracing::warn!(error = %e, "known-folder backup mirror task panicked");
-    }
 }
 
 pub(super) fn now_secs() -> i64 {

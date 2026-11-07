@@ -3287,9 +3287,9 @@
             fx.db()
                 .set_owner(&Identity::new(Some("u-1"), Some("sam@beebeeb.io")))
                 .unwrap();
-            raw_state_db(&fx)
-                .execute("ALTER TABLE operation_queue DROP COLUMN payload_path", [])
-                .unwrap();
+            // LD-0113: the triggers that name the column go with it (SQLite refuses the drop otherwise); the open
+            // below re-creates them.
+            state_db::StateDb::drop_column_for_test(&raw_state_db(&fx), "operation_queue", "payload_path").unwrap();
             assert!(local_data_owner(&fx.sources()).is_ok(), "the premise: the owner reads");
             assert!(
                 fx.db().pending_changes_count().is_err(),

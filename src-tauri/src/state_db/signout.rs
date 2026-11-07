@@ -295,6 +295,10 @@ impl StateDb {
                                WHERE r.op_id = q.op_id AND r.completed_version IS NOT NULL)
                  FROM operation_queue q LEFT JOIN files f ON f.file_id = q.file_id
                  WHERE q.kind NOT IN ('hydrate_file', 'pin_tree')
+                   -- LD-0113 (spec §6.1 point 4): the keep step and the purge guard skip backup ops. There is nothing
+                   -- to keep (the source is the person's own file and stays where it is), and a backup op has no
+                   -- staged copy, so it would read as a waiting write whose copy is missing.
+                   AND q.origin != 'backup'
                  ORDER BY q.rowid",
             )?;
             let mapped = stmt.query_map([], |row| {
@@ -809,6 +813,9 @@ impl StateDb {
         // Flow 7: the leaving account's persisted upload sessions (session id,
         // server file id, staged path) go with its queue.
         tx.execute("DELETE FROM upload_resume", [])?;
+        // LD-0113: a backup op's session goes with it. The op held no payload path (the schema refuses one), so the
+        // list above names no backup source: a sign-out never deletes the person's own file.
+        tx.execute("DELETE FROM backup_upload_resume", [])?;
         // Task 1683 slice 2: the leaving account's recent-transfer names go too, so the
         // next account's popover never lists them.
         tx.execute("DELETE FROM transfer_activity", [])?;

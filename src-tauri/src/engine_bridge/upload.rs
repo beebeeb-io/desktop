@@ -15,6 +15,11 @@ impl EngineBridge {
         sync_root: &Path,
         post_complete_errors: &mut Vec<String>,
     ) -> Result<OpDone, EngineError> {
+        // LD-0113: a backup op never takes the sync-root upload: no `files` row, no landing, no staged-copy cleanup,
+        // no finalization. `execute_operation` sends it to `upload_backup`; this refusal keeps every other caller out.
+        if claim.is_some_and(|claim| claim.origin == crate::state_db::OpOrigin::Backup) {
+            return Err(anyhow::anyhow!("a backup op never takes the sync-root upload path").into());
+        }
         let local_file_id = op
             .file_id
             .as_deref()
@@ -410,7 +415,13 @@ impl EngineBridge {
             sync_root,
         } = request;
         self.seam("landing:after_complete");
-        let payload_path = op.payload_path.clone();
+        // LD-0113: every cleanup below acts on this path (the release, the Windows finalization journal,
+        // `finish_completed_upload`'s unlink). A backup claim never gets here (`upload_version` refuses it); if one
+        // did, it would carry no path to remove.
+        let payload_path = match claim.map(|claim| claim.origin) {
+            Some(crate::state_db::OpOrigin::Backup) => None,
+            _ => op.payload_path.clone(),
+        };
         // macOS only: `release` says only what the caller unlinks after the commit (S6).
         // Elsewhere `finish_completed_upload` unlinks the copy, as before.
         let release = if cfg!(target_os = "macos") {
@@ -848,6 +859,17 @@ impl EngineBridge {
         if !matches!(op.kind, OperationKind::UploadVersion | OperationKind::UploadFile) {
             return;
         }
+        // LD-0113: a backup op's session lives in its own table.
+        match self.db.backup_upload_resume(&op.op_id) {
+            Ok(Some(session)) => {
+                if let Err(e) = self.abandon_backup_session(&session).await {
+                    tracing::warn!(op_id = %op.op_id, error = %e, "backup: failed to abandon given-up session");
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "backup: failed to read resume state"),
+        }
         match self.db.get_upload_resume(&op.op_id) {
             Ok(Some(session)) => {
                 if let Err(e) = self.abandon_upload_session(&session).await {
@@ -859,7 +881,7 @@ impl EngineBridge {
         }
     }
 
-    async fn upload_thumbnails_for_plaintext_media(
+    pub(super) async fn upload_thumbnails_for_plaintext_media(
         &self,
         server_file_id: ServerFileId<'_>,
         payload_path: &Path,

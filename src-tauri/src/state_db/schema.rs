@@ -462,11 +462,120 @@ impl StateDb {
         // LD-0105 W2 (I3, I4): the rest of a placeholder's identity, recorded before its first transfer.
         ensure_column(conn, "files", "minted_format", "TEXT")?;
         ensure_column(conn, "files", "minted_version_id", "TEXT")?;
+        Self::migrate_backup_schema(conn)?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
-            "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume",
+            // LD-0113: never a queued backup source (the `staged_payloads` trigger would abort the open itself).
+            "INSERT OR IGNORE INTO staged_payloads(path, completed) SELECT payload_path, 0 FROM upload_resume
+             WHERE payload_path NOT IN (SELECT source_path FROM operation_queue WHERE source_path IS NOT NULL)",
             [],
+        )?;
+        Ok(())
+    }
+
+    /// LD-0113 (spec 2026-11-06 §6.1 point 4): a backup uploads a file from the person's own folder, where it is. Its
+    /// op says so (`origin = 'backup'`) and names the file in `source_path`; `payload_path` stays NULL, because desktop
+    /// treats a payload as a staged copy it owns and deletes it once the upload is done (`staged_payload::remove`, which
+    /// has no gate). The triggers make that a property of the tables rather than of each writer:
+    ///
+    /// - a backup op never has a `payload_path`, and only a backup op has a `source_path`;
+    /// - no backup op ever gets an `upload_resume` row (its `payload_path` is copied into the staged-copy journal at
+    ///   every open, above) or an `upload_finalizations` row (finalization unlinks its `payload_path`);
+    /// - the staged-copy journal never names the source of a queued backup op.
+    ///
+    /// A backup session persists in `backup_upload_resume`, which has no path column at all. `backup_records` is what
+    /// this device backed up, per account (R10): `account_owner` is part of the key, so another account's records are
+    /// never read even before the R10 reset clears them.
+    fn migrate_backup_schema(conn: &Connection) -> Result<()> {
+        ensure_column(conn, "operation_queue", "origin", "TEXT NOT NULL DEFAULT 'sync'")?;
+        ensure_column(conn, "operation_queue", "source_path", "TEXT")?;
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS operation_queue_backup_source_insert
+             BEFORE INSERT ON operation_queue
+             WHEN NEW.origin NOT IN ('sync', 'backup')
+               OR (NEW.origin = 'backup' AND (NEW.payload_path IS NOT NULL OR NEW.source_path IS NULL))
+               OR (NEW.origin = 'sync' AND NEW.source_path IS NOT NULL)
+             BEGIN
+                 SELECT RAISE(ABORT, 'ld0113: a backup op keeps its source in source_path, never in payload_path');
+             END;
+             CREATE TRIGGER IF NOT EXISTS operation_queue_backup_source_update
+             BEFORE UPDATE OF origin, payload_path, source_path ON operation_queue
+             WHEN NEW.origin NOT IN ('sync', 'backup')
+               OR (NEW.origin = 'backup' AND (NEW.payload_path IS NOT NULL OR NEW.source_path IS NULL))
+               OR (NEW.origin = 'sync' AND NEW.source_path IS NOT NULL)
+             BEGIN
+                 SELECT RAISE(ABORT, 'ld0113: a backup op keeps its source in source_path, never in payload_path');
+             END;
+             CREATE TRIGGER IF NOT EXISTS upload_resume_never_for_a_backup_op
+             BEFORE INSERT ON upload_resume
+             WHEN EXISTS (SELECT 1 FROM operation_queue WHERE op_id = NEW.op_id AND origin = 'backup')
+             BEGIN
+                 SELECT RAISE(ABORT, 'ld0113: a backup session persists in backup_upload_resume');
+             END;
+             CREATE TRIGGER IF NOT EXISTS upload_finalizations_never_for_a_backup_op
+             BEFORE INSERT ON upload_finalizations
+             WHEN EXISTS (SELECT 1 FROM operation_queue WHERE op_id = NEW.op_id AND origin = 'backup')
+             BEGIN
+                 SELECT RAISE(ABORT, 'ld0113: a backup op is never finalized in the sync root');
+             END;
+             CREATE INDEX IF NOT EXISTS idx_operation_queue_source_path
+                 ON operation_queue(source_path) WHERE source_path IS NOT NULL;
+             CREATE TRIGGER IF NOT EXISTS staged_payloads_never_a_backup_source
+             BEFORE INSERT ON staged_payloads
+             WHEN EXISTS (SELECT 1 FROM operation_queue WHERE source_path = NEW.path)
+             BEGIN
+                 SELECT RAISE(ABORT, 'ld0113: a backup source is the person''s own file, never a staged copy');
+             END;
+             CREATE TABLE IF NOT EXISTS backup_records (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 size INTEGER NOT NULL,
+                 modified_ms INTEGER NOT NULL,
+                 remote_id TEXT NOT NULL,
+                 uploaded_at_ms INTEGER NOT NULL,
+                 state TEXT NOT NULL DEFAULT 'backed_up',
+                 PRIMARY KEY (account_owner, category, key)
+             );
+             CREATE TABLE IF NOT EXISTS backup_upload_resume (
+                 op_id TEXT PRIMARY KEY,
+                 server_file_id TEXT NOT NULL,
+                 upload_session_id TEXT NOT NULL,
+                 object_version_id TEXT NOT NULL,
+                 chunk_size_bytes INTEGER NOT NULL,
+                 chunk_count INTEGER NOT NULL,
+                 acked_chunks INTEGER NOT NULL DEFAULT 0,
+                 chunk_format INTEGER NOT NULL,
+                 source_size INTEGER NOT NULL,
+                 source_modified_ms INTEGER NOT NULL,
+                 source_file_id TEXT,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );",
+        )?;
+        // LD-0113 Task D4: where this account's backup lives on the server (resolved once, then cached), the
+        // category folders it created or adopted, and the backups that were turned off with why (rule 11).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_layout (
+                 account_owner TEXT PRIMARY KEY,
+                 root_id TEXT NOT NULL,
+                 device_folder_id TEXT NOT NULL,
+                 device_folder_name TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS backup_category_folders (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 folder_id TEXT NOT NULL,
+                 PRIMARY KEY (account_owner, category)
+             );
+             CREATE TABLE IF NOT EXISTS backup_stops (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 reason TEXT NOT NULL,
+                 at_ms INTEGER NOT NULL,
+                 PRIMARY KEY (account_owner, category)
+             );",
         )?;
         Ok(())
     }

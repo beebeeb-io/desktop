@@ -32,6 +32,7 @@ impl EngineBridge {
             failed_snapshots: std::sync::atomic::AtomicU32::new(0),
             newly_held: Default::default(),
             resume: crate::runner::ResumeTicket::default(),
+            backup_api: std::sync::OnceLock::new(),
             #[cfg(test)]
             seams: Seams::default(),
         }
@@ -410,6 +411,16 @@ impl EngineBridge {
                         }
                         // The landing transaction removed the op.
                         OpDone::Removed { release } => release,
+                        // LD-0113: a backup op dropped with no record; the next pass queues the file again.
+                        OpDone::Dropped => {
+                            outcome.retried_op_ids.push(op.op_id);
+                            continue;
+                        }
+                    };
+                    // LD-0113: a backup claim never releases a path to unlink (its source is the person's own file).
+                    let release = match claimed.origin {
+                        crate::state_db::OpOrigin::Backup => None,
+                        crate::state_db::OpOrigin::Sync => release,
                     };
                     if let Some(path) = release.as_deref() {
                         crate::staged_payload::remove_or_log(&self.db, Path::new(path));
@@ -464,6 +475,16 @@ impl EngineBridge {
                 // LD-0113 §6.3: the server refused a change of a protected folder (the Backups root).
                 // It never becomes allowed, so the op is dropped, never retried or held, and the local
                 // state is put back.
+                // Review (2026-11-07): a backup op is the backup's own write, not a drive change: nothing in the sync
+                // root to put back and nothing to tell the person. It is dropped and the next pass decides again.
+                Err(error) if !completed && claimed.origin == crate::state_db::OpOrigin::Backup && protected_folder_refusal(&error).is_some() => {
+                    if !self.db.drop_backup_op_claimed(&op.op_id, &claimed.claim_id)? {
+                        log_queue_state_moved(&op.op_id, "backup_protected");
+                        continue;
+                    }
+                    tracing::warn!(op_id = %op.op_id, "backup: the server refused a backup write as protected; dropped");
+                    outcome.retried_op_ids.push(op.op_id);
+                }
                 Err(error) if !completed && protected_folder_refusal(&error).is_some() => {
                     if !self.db.finish_claimed(&op.op_id, &claimed.claim_id, None)? {
                         log_queue_state_moved(&op.op_id, "protected");
@@ -598,6 +619,8 @@ impl EngineBridge {
 
     /// The hand-over committed (spec §8.4): one line, then the retired copy is unlinked,
     /// after the commit (S6).
+    /// LD-0113: a backup op is never a Finder write, so the claim never hands a predecessor over to one
+    /// (`claim_operation` skips the hand-over for `origin = 'backup'`) and this never unlinks for one.
     fn after_hand_over(&self, successor: &PendingOperation, took_over: &TookOver) {
         log_took_over(&successor.op_id, successor.file_id.as_deref(), &took_over.parked_op_id);
         if let Some(path) = took_over.released_payload.as_deref() {
@@ -614,6 +637,10 @@ impl EngineBridge {
         post_complete_errors: &mut Vec<String>,
     ) -> Result<OpDone, EngineError> {
         let op = &claimed.op;
+        // LD-0113: a backup op runs the backup uploader only (`backup_upload.rs`).
+        if claimed.origin == crate::state_db::OpOrigin::Backup {
+            return self.upload_backup(claimed, post_complete_errors).await;
+        }
         match op.kind {
             OperationKind::PinTree => Ok(OpDone::Remove { release: None }),
             OperationKind::HydrateFile => {

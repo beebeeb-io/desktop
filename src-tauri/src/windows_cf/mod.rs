@@ -1341,8 +1341,7 @@ pub(crate) fn reconcile_placeholder_state_with(
 
 /// Maximum number of `CfSetInSyncState` calls issued in a single
 /// [`stamp_local_files_in_sync`] pass. Mirrors the style of
-/// `watcher::MAX_NEW_UPLOADS_PER_SCAN` (256) and the runner comment for
-/// `known_folder::MAX_MIRROR_FILES_PER_PASS` — bounded so a vault with many
+/// `watcher::MAX_NEW_UPLOADS_PER_SCAN` (256): bounded so a vault with many
 /// Local files doesn't block the tick loop. Remaining files are stamped on
 /// the next tick (the call is idempotent: `CfSetInSyncState` on an already-
 /// in-sync placeholder is a Windows no-op).

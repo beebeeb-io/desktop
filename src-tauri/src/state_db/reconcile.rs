@@ -170,6 +170,9 @@ pub(super) fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_qu
 /// Called by the bulk `operation_queue` purges so a session never outlives
 /// its op (`finish_claimed` already clears its own row).
 pub(super) fn drop_orphaned_upload_resumes(conn: &Connection) -> Result<usize> {
+    // LD-0113 (review 2026-11-07): a backup op's session (its own table, no path) outlives its op until the runner
+    // abandons it on the server (`EngineBridge::abandon_orphaned_backup_sessions`): a session dropped here unabandoned
+    // keeps the server file "uploading" and refuses its next version until the lease sweep.
     conn.execute(
         "DELETE FROM upload_resume WHERE op_id NOT IN (SELECT op_id FROM operation_queue)",
         [],

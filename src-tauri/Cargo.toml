@@ -149,6 +149,8 @@ beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "a5413d2049f5
 beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "a5413d2049f5a27f9392b3d323cd279643e8d24e" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
 beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "a5413d2049f5a27f9392b3d323cd279643e8d24e" }
+# LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "a5413d2049f5a27f9392b3d323cd279643e8d24e" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.

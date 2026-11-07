@@ -37,8 +37,14 @@ use super::*;
             body.extend_from_slice(&temp[..read]);
         }
         body.truncate(content_length);
+        let origin = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case(beebeeb_types::backup::ORIGIN_HEADER)
+                .then(|| value.trim().to_string())
+        });
 
-        RecordedRequest { method, path, body }
+        RecordedRequest { method, path, body, origin }
     }
 
     pub(super) fn http_json(status: &str, body: serde_json::Value) -> String {

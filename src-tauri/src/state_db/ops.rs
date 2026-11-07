@@ -398,7 +398,17 @@ impl StateDb {
             |row| row.get(0),
         )?;
         let mut op = op;
-        let mut write = finder_write_conn(&tx, op_id)?;
+        // LD-0113: a backup op is never a Finder write, so it never waits on, parks for or takes over a predecessor;
+        // the hand-over below (which releases the predecessor's payload for unlinking) never runs for it.
+        let origin: OpOrigin = tx.query_row(
+            "SELECT origin FROM operation_queue WHERE op_id = ?1",
+            params![op_id],
+            |row| row.get::<_, String>(0).map(|value| OpOrigin::from_db(&value)),
+        )?;
+        let mut write = match origin {
+            OpOrigin::Backup => None,
+            OpOrigin::Sync => finder_write_conn(&tx, op_id)?,
+        };
         let mut took_over: Option<TookOver> = None;
         while let Some(current) = write.clone().filter(|_| !completed) {
             if current.base_pending > 0 {
@@ -450,6 +460,7 @@ impl StateDb {
         tx.commit()?;
         Ok(ClaimOutcome::Claimed(Box::new(ClaimedOp {
             op,
+            origin,
             claim_id,
             write,
             took_over,

@@ -34,7 +34,7 @@ Modules 1–37, sorted by path.
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
 | `ipc_write_dedup_tests.rs` | Unit tests for the write-queue idempotency table (task 1684). | — |
 | `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthStoreError (4), AuthResult, VaultLockState (2), SessionToken, AuthSecretStore (12), holds_session_token, holds_account_email, holds_vault_key, AuthVault, platform_keychain_store_for, legacy_platform_keychain_store, migrate_legacy_keychain_to_account, … (+1 more) |
-| `known_folder.rs` | Known-folder backup — OneDrive-style "Manage backup" (task 0797, Model 2). | mirror_enabled_known_folders, resolve_known_folder |
+| `known_folder.rs` | The known-folder catalog and the old mirror's legacy paths (the mirror is gone, LD-0113). | KNOWN_FOLDERS, resolve_known_folder, sanitize_device_segment |
 | `lib.rs` | (no //! header) | — |
 | `lifecycle_log.rs` | The lifecycle log (spec 2026-10-06 §8). | — |
 | `link_health.rs` | Can Beebeeb reach its server, and when did it last get an answer? | — |
