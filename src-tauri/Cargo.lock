@@ -373,8 +373,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beebeeb-backup"
-version = "0.2.1"
-source = "git+https://github.com/beebeeb-io/core?rev=e60fbb4ac1a767fb1ba929e8eb9641b378187e30#e60fbb4ac1a767fb1ba929e8eb9641b378187e30"
+version = "0.2.2"
+source = "git+https://github.com/beebeeb-io/core?rev=2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3#2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -385,8 +385,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-core"
-version = "0.2.1"
-source = "git+https://github.com/beebeeb-io/core?rev=e60fbb4ac1a767fb1ba929e8eb9641b378187e30#e60fbb4ac1a767fb1ba929e8eb9641b378187e30"
+version = "0.2.2"
+source = "git+https://github.com/beebeeb-io/core?rev=2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3#2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -477,8 +477,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-sync"
-version = "0.2.1"
-source = "git+https://github.com/beebeeb-io/core?rev=e60fbb4ac1a767fb1ba929e8eb9641b378187e30#e60fbb4ac1a767fb1ba929e8eb9641b378187e30"
+version = "0.2.2"
+source = "git+https://github.com/beebeeb-io/core?rev=2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3#2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -495,8 +495,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-transfer"
-version = "0.2.1"
-source = "git+https://github.com/beebeeb-io/core?rev=e60fbb4ac1a767fb1ba929e8eb9641b378187e30#e60fbb4ac1a767fb1ba929e8eb9641b378187e30"
+version = "0.2.2"
+source = "git+https://github.com/beebeeb-io/core?rev=2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3#2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3"
 dependencies = [
  "beebeeb-core",
  "bytes",
@@ -507,8 +507,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-types"
-version = "0.2.1"
-source = "git+https://github.com/beebeeb-io/core?rev=e60fbb4ac1a767fb1ba929e8eb9641b378187e30#e60fbb4ac1a767fb1ba929e8eb9641b378187e30"
+version = "0.2.2"
+source = "git+https://github.com/beebeeb-io/core?rev=2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3#2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3"
 dependencies = [
  "serde",
 ]
