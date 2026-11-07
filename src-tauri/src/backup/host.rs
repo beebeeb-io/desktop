@@ -60,6 +60,17 @@ fn switch_off_in_settings(keys: &[String]) -> bool {
     .is_ok()
 }
 
+/// The tree of a backup whose device or category folder is gone: nothing listed, and complete (there is nothing more).
+fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> DeviceTree {
+    DeviceTree {
+        device_folder_live,
+        category_folder_live,
+        folders: HashMap::new(),
+        files: Vec::new(),
+        complete: true,
+    }
+}
+
 pub(crate) struct DesktopBackupHost {
     bridge: Arc<EngineBridge>,
     layout: BackupLayout,
@@ -94,25 +105,11 @@ impl DesktopBackupHost {
             .await
             .map_err(host_error("device_folder_state"))?;
         if device == BackupFolderState::Gone {
-            let tree = DeviceTree {
-                device_folder_live: false,
-                category_folder_live: None,
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            };
-            return Ok((tree, RebuildClock::UNKNOWN));
+            return Ok((gone_tree(false, None), RebuildClock::UNKNOWN));
         }
         let (folder_id, live) = self.category_folder(c).await?;
         if live == Some(false) {
-            let tree = DeviceTree {
-                device_folder_live: true,
-                category_folder_live: Some(false),
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            };
-            return Ok((tree, RebuildClock::UNKNOWN));
+            return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
         }
         let (mut tree, clock) = self.list_category(&folder_id).await?;
         tree.category_folder_live = live;

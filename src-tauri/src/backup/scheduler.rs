@@ -219,7 +219,9 @@ pub(crate) async fn run_passes(
 /// after the file last changed is not uploaded a second time. Core's `records_from_remote_with_clock` decides, with
 /// the clock the listing measured from the server's `Date` header (LD-0123): a copy counts when the server stamped it
 /// later than the file's last change plus the device's offset and the measurement's margin. With no clock measured
-/// core applies its 10-minute floor. Nothing is uploaded or changed on the server here.
+/// core applies its 10-minute floor. The offset is measured now: a clock that was behind when a file changed and has
+/// been corrected since is not covered (core's documented limit; a sealed source mtime, decision LD-0122, would be).
+/// Nothing is uploaded or changed on the server here.
 pub(crate) async fn rebuild_records_if_empty(
     host: &super::host::DesktopBackupHost,
     source: &Path,
