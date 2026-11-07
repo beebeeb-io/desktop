@@ -670,11 +670,11 @@ impl StateDb {
         Ok(())
     }
 
-    /// LD-0139: the person turned `category`'s backup on, or chose "Back up again", at `setup_at_ms` (this device's
-    /// clock): it starts over, with no pass yet, so its first pass takes its baseline from this moment. With
-    /// `forget_records` ("Back up again" after a stop) its records go too, in the same transaction, so its first pass
-    /// rebuilds them from what the server holds (spec rule 10) instead of taking removed files as deleted elsewhere.
-    pub fn restart_backup_pass(&self, category: &str, setup_at_ms: i64, forget_records: bool) -> Result<()> {
+    /// LD-0139: "Back up again" on `category`'s stopped backup at `setup_at_ms` (this device's clock): it starts over,
+    /// with no pass yet (its first pass takes its baseline from this moment), and its records go in the same
+    /// transaction, so that pass rebuilds them from what the server holds (spec rule 10) instead of taking the files
+    /// the removal took as deleted elsewhere.
+    pub fn restart_backup_pass(&self, category: &str, setup_at_ms: i64) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
             return Ok(());
@@ -685,13 +685,27 @@ impl StateDb {
              ON CONFLICT(account_owner, category) DO UPDATE SET last_pass_at_ms = NULL, setup_at_ms = excluded.setup_at_ms",
             params![owner, category, setup_at_ms],
         )?;
-        if forget_records {
-            tx.execute(
-                "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2",
-                params![owner, category],
-            )?;
-        }
+        tx.execute(
+            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2",
+            params![owner, category],
+        )?;
         tx.commit()
+    }
+
+    /// LD-0139: `category`'s backup was switched on at `setup_at_ms` (this device's clock). Kept only where no setup
+    /// time is known: the first switch-on is when backups were set up (spec Amendment 12c). The last pass is untouched.
+    pub fn note_backup_setup(&self, category: &str, setup_at_ms: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute(
+            "INSERT INTO backup_pass_marks (account_owner, category, setup_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_owner, category) DO UPDATE
+                 SET setup_at_ms = COALESCE(backup_pass_marks.setup_at_ms, excluded.setup_at_ms)",
+            params![owner, category, setup_at_ms],
+        )?;
+        Ok(())
     }
 
     /// The current owner's flagged Backups root, once resolved.

@@ -65,6 +65,8 @@ impl BackupScheduler {
     }
 
     pub(crate) fn with_debounce(debounce: Duration) -> Self {
+        // LD-0139: a new session starts with no failed notice check to show.
+        super::stop::set_check_failed(false);
         Self { debounce, last_full: None, changed: Arc::default(), watcher: None, watched: Vec::new() }
     }
 
@@ -138,6 +140,8 @@ impl BackupScheduler {
         // A layout that cannot be resolved now is tried again at the next 10-minute pass or after the next change,
         // never on every tick.
         self.last_full = Some(now);
+        // LD-0139: a pass that cannot start (no layout, no device name) attempts no check, so none is shown as failed.
+        super::stop::set_check_failed(false);
         let layout = match bridge.db().backup_layout() {
             Ok(Some(layout)) => layout,
             Ok(None) => {
@@ -197,50 +201,85 @@ pub(crate) async fn run_passes(
         }
     };
     let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
+    // Review (2026-11-07): a backup with a stop row is off until "Back up again", even when its switch could not be
+    // turned off; it is never passed.
+    let stopped: Vec<String> = bridge
+        .db()
+        .backup_stops()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.category)
+        .collect();
     let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
     let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
     for source in sources {
         let category = source.category.clone();
+        if stopped.contains(&category.key()) {
+            report
+                .passes
+                .push((category, Err("stopped: waiting for Back up again".into())));
+            continue;
+        }
         if let Err(refusal) = super::sources::check_source(&source.path, sync_root) {
             tracing::warn!(category = %category.key(), ?refusal, "backup: source refused");
             report.passes.push((category, Err(format!("source refused: {refusal:?}"))));
             continue;
         }
-        // One listing per pass: the stop decision, the records' rebuild and (cached) the pass all read it.
-        let (tree, clock) = match host.device_tree_for_rebuild(&category).await {
-            Ok(listed) => listed,
-            Err(error) => {
-                tracing::warn!(category = %category.key(), %error, "backup: not listed; no pass");
-                report.passes.push((category, Err(error.to_string())));
-                continue;
-            }
+        let last_pass_at = super::stop::last_pass_at(bridge.db(), &category, &check);
+        let folder_id = || {
+            let id = bridge.db().backup_category_folder(&category.key()).ok().flatten();
+            id.and_then(|id| uuid::Uuid::parse_str(&id).ok())
         };
-        let category_folder_id = bridge
-            .db()
-            .backup_category_folder(&category.key())
-            .ok()
-            .flatten()
-            .and_then(|id| uuid::Uuid::parse_str(&id).ok());
-        let listed = super::stop::ListedBackup {
+        // Decided twice: from the notices alone before the listing (which can create the category folder, a server
+        // write), then with the folders as the listing found them (step 3).
+        let mut listed = super::stop::ListedBackup {
             category: &category,
             device_folder_id,
-            device_folder_live: tree.device_folder_live,
-            category_folder_id,
-            category_folder_live: tree.category_folder_live,
+            device_folder_live: true,
+            category_folder_id: folder_id(),
+            category_folder_live: None,
         };
-        let last_pass_at = super::stop::last_pass_at(bridge.db(), &category, &check);
-        if let Some(reason) = super::stop::decide(&check, last_pass_at, &listed) {
-            let stopped = host.stop_backups(&category, reason, !tree.device_folder_live).await;
-            let ok = stopped.is_ok();
-            tracing::info!(category = %category.key(), reason = reason.as_str(), ok, "backup: stopped");
-            report
-                .passes
-                .push((category, Err(format!("turned off: {}", reason.as_str()))));
-            if reason.files_removed() || !tree.device_folder_live {
-                break; // every backup of this device is off now
-            }
-            continue;
+        let mut decision = super::stop::decide(&check, last_pass_at, &listed);
+        let mut tree_and_clock = None;
+        if decision == super::stop::PassDecision::Run {
+            // One listing per pass: the stop decision, the records' rebuild and (cached) the pass all read it.
+            let (tree, clock) = match host.device_tree_for_rebuild(&category).await {
+                Ok(listed) => listed,
+                Err(error) => {
+                    tracing::warn!(category = %category.key(), %error, "backup: not listed; no pass");
+                    report.passes.push((category, Err(error.to_string())));
+                    continue;
+                }
+            };
+            listed.device_folder_live = tree.device_folder_live;
+            listed.category_folder_id = folder_id();
+            listed.category_folder_live = tree.category_folder_live;
+            decision = super::stop::decide(&check, last_pass_at, &listed);
+            tree_and_clock = Some((tree, clock));
         }
+        let (tree, clock) = match (decision, tree_and_clock) {
+            (super::stop::PassDecision::CheckFailed, _) => {
+                report.check_failed = true;
+                tracing::warn!(category = %category.key(), "backup: the notices may be incomplete; no pass");
+                report.passes.push((category, Err("notices not checked".into())));
+                continue;
+            }
+            (super::stop::PassDecision::Stop { reason, every_backup }, _) => {
+                let device_gone = !listed.device_folder_live;
+                let stopped = host.stop_backups(&category, reason, device_gone, every_backup).await;
+                let ok = stopped.is_ok();
+                tracing::info!(category = %category.key(), reason = reason.as_str(), every_backup, ok, "backup: stopped");
+                report
+                    .passes
+                    .push((category, Err(format!("turned off: {}", reason.as_str()))));
+                if every_backup {
+                    break; // every backup of this device is off now
+                }
+                continue;
+            }
+            (super::stop::PassDecision::Run, Some(pair)) => pair,
+            (super::stop::PassDecision::Run, None) => continue, // not reached: a run is decided after the listing
+        };
         if let Err(error) = bridge.db().set_backup_last_pass(&category.key(), check.server_now_ms) {
             tracing::warn!(category = %category.key(), %error, "backup: last_pass_at not recorded");
         }

@@ -1011,7 +1011,7 @@ pub(super) struct KnownFolderStatus {
 #[tauri::command]
 pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String> {
     let cfg = DesktopConfig::load()?;
-    let db = state_db_for_config(&cfg).ok().flatten();
+    let stops = crate::backup::stop::stopped_backups(&cfg);
     let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
     for kf in known_folder::KNOWN_FOLDERS {
         let enabled = cfg.known_folder_enabled(kf.key);
@@ -1032,7 +1032,7 @@ pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String
             enabled,
             item_count,
             moved: view.moved,
-            stop: crate::backup::stop::stop_view(db.as_ref(), kf.key, kf.display_name, enabled),
+            stop: crate::backup::stop::stop_view(&stops, kf.key, kf.display_name, enabled),
         });
     }
     Ok(out)

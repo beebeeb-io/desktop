@@ -59,7 +59,10 @@ impl ApiClient {
     pub async fn list_notifications_clocked(
         &self,
     ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock, Option<i64>)> {
-        let url = self.url("/api/v1/notifications?limit=100");
+        let url = self.url(&format!(
+            "/api/v1/notifications?limit={}",
+            crate::backup::stop::NOTICE_PAGE
+        ));
         let sent_at_ms = chrono::Utc::now().timestamp_millis();
         let started = std::time::Instant::now();
         let response = self.send_with_retry(|| self.client.get(&url)).await?;

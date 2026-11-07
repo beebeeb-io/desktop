@@ -141,13 +141,13 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -326,7 +326,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "df930110b048ab8bdca6c408a37e142f26f460bd", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

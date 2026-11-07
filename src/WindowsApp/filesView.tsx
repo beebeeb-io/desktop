@@ -580,6 +580,18 @@ export function ManageBackupCard() {
     return () => window.removeEventListener(KF_BACKUP_CHANGED_EVENT, onChanged)
   }, [])
 
+  // LD-0139: a pass can turn a backup off (core's words, "Back up again") or fail its notice check while the card is
+  // open, so it reads again every minute and when the window comes back to the front.
+  useEffect(() => {
+    const again = () => { void load() }
+    const timer = window.setInterval(again, 60_000)
+    window.addEventListener('focus', again)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', again)
+    }
+  }, [])
+
   const toggle = async (f: KnownFolderStatus) => {
     if (f.source_path == null) return
     const next = !f.enabled

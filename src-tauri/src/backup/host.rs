@@ -219,24 +219,26 @@ impl BackupHost for DesktopBackupHost {
     /// Rule 11 in core's pass: the folder was deleted elsewhere after this pass's notice check found nothing (a race;
     /// the check before the pass catches the usual case), so it stops as `unknown`: a folder gone with no notice.
     async fn turn_off(&self, c: &Category, why: FolderPresence) -> Result<(), HostError> {
-        self.stop_backups(c, BackupStopReason::Unknown, why == FolderPresence::DeviceDeleted)
+        let device_gone = why == FolderPresence::DeviceDeleted;
+        self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone)
             .await
     }
 }
 
 impl DesktopBackupHost {
     /// A backup turns off on this device with core's reason (spec Amendment 12): it says why (the stop row the card
-    /// shows with "Back up again") and never uploads again by itself. A removal of the account's files
-    /// (`files_removed`) or a deleted device folder turns every backup of this device off at once; a deleted device
-    /// folder also forgets the layout.
+    /// shows with "Back up again") and never uploads again by itself. With `every_backup` (a removal of the account's
+    /// files, a device folder that is gone, or a notice naming it) every backup of this device turns off at once; a
+    /// device folder that is gone also forgets the layout.
     pub(crate) async fn stop_backups(
         &self,
         c: &Category,
         reason: BackupStopReason,
         device_gone: bool,
+        every_backup: bool,
     ) -> Result<(), HostError> {
         let db = self.bridge.db();
-        let categories: Vec<Category> = if device_gone || reason.files_removed() {
+        let categories: Vec<Category> = if every_backup || device_gone || reason.files_removed() {
             // Every backup still on; one already off keeps the reason it stopped for.
             let stopped: Vec<String> =
                 db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();

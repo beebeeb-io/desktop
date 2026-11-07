@@ -648,10 +648,12 @@ use beebeeb_types::backup::Category;
                         .map(|(c, r)| (c.to_string(), r.to_string()))
                 );
                 assert!(crate::config::DesktopConfig::load().unwrap().known_folder_backup.is_empty());
-                let view = crate::backup::stop::stop_view(Some(&fx.bridge.db), "documents", "Documents", false);
+                let all_stops = fx.bridge.db.backup_stops().unwrap();
+                let view = crate::backup::stop::stop_view(&all_stops, "documents", "Documents", false);
                 assert_eq!(view.stop_words.as_deref(), Some(beebeeb_core::backup::MSG_STOP_ERASE_REQUEST));
                 assert_eq!(view.stop_action, Some("Back up again"));
-                fx.server.finish();
+                let requests = fx.server.finish();
+                assert_eq!(Fixture::creates(&requests), 0, "decided before the listing could create a category folder");
             })
             .await;
     }
@@ -744,7 +746,8 @@ use beebeeb_types::backup::Category;
                         .map(|(c, r)| (c.to_string(), r.to_string()))
                 );
                 let words = |key, folder| {
-                    crate::backup::stop::stop_view(Some(&fx.bridge.db), key, folder, false).stop_words.unwrap()
+                    let all_stops = fx.bridge.db.backup_stops().unwrap();
+                    crate::backup::stop::stop_view(&all_stops, key, folder, false).stop_words.unwrap()
                 };
                 let pictures_words = words("pictures", "Pictures");
                 let from_another = "'s backup of Pictures was deleted from another device.";
@@ -801,6 +804,88 @@ use beebeeb_types::backup::Category;
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
                 assert!(stops(&fx.bridge).is_empty(), "{:?}", report.passes);
                 assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (2026-11-07): switching a backup back on is not a fresh setup when it has passed before: a removal of
+    /// the account's files while it was off still stops it at its next pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_while_switched_off_still_stops_the_backup_when_it_is_switched_on() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                *fx.server.notices.lock().unwrap() = Some(vec![notice_row("files_removed", erase_data, last + 60_000)]);
+
+                // Switched on again after the erase (`set_known_folder_backup(key, true)`).
+                switch_on(&["pictures"]);
+                crate::backup::stop::restart(&fx.bridge.db, "pictures").unwrap();
+                run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (2026-11-07): a backup with a stop row is never passed, even when its switch is still on (the settings
+    /// write failed): nothing is listed, created or queued for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_backup_whose_switch_stayed_on_is_not_passed() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let stop = crate::state_db::BackupStop { category: "pictures".into(), reason: "unknown".into(), at_ms: 1 };
+                fx.bridge.db.record_backup_stop(&stop).unwrap();
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "{:?}", report.passes);
+                let requests = fx.server.finish();
+                assert_eq!(Fixture::creates(&requests), 0);
+                assert!(!requests.iter().any(|r| r.path.starts_with("/api/v1/files?")), "nothing is listed for it");
+            })
+            .await;
+    }
+
+    /// Amendment 12 step 2: a `backup_deleted` notice naming this device's folder (no category) turns every backup of
+    /// the device off, even when the folder was restored from Trash before the pass; the layout stays (the folder is
+    /// there), and "Back up again" finds it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notice_naming_this_devices_folder_turns_every_backup_off() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents"]);
+                let fx = Fixture::new();
+                let (pictures, documents, sync_root) = (source_with(1), source_with(1), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                fx.bridge.db.set_backup_last_pass("documents", last).unwrap();
+                let data = serde_json::json!({ "device_folder_id": fx.device });
+                *fx.server.notices.lock().unwrap() = Some(vec![notice_row("backup_deleted", data, last + 60_000)]);
+
+                run(
+                    &fx,
+                    &[(Category::Pictures, pictures.path()), (Category::Documents, documents.path())],
+                    sync_root.path(),
+                )
+                .await;
+                assert_eq!(
+                    stops(&fx.bridge),
+                    [("documents", "backup_deleted"), ("pictures", "backup_deleted")]
+                        .map(|(c, r)| (c.to_string(), r.to_string()))
+                );
+                assert!(fx.bridge.db.backup_layout().unwrap().is_some(), "the device folder is there: the layout stays");
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
                 fx.server.finish();
             })
             .await;
