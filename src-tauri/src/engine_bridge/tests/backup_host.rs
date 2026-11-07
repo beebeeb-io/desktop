@@ -15,6 +15,8 @@ use beebeeb_types::backup::Category;
         is_folder: bool,
         trashed: bool,
         size: u64,
+        /// The server's `uploaded_at` (RFC 3339); `None` lists the fixture's fixed time.
+        uploaded_at: Option<String>,
     }
 
     /// The server's tree as the backup sees it. Listings are paged two entries at a time.
@@ -24,15 +26,19 @@ use beebeeb_types::backup::Category;
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
         stop: Arc<AtomicBool>,
         handle: thread::JoinHandle<()>,
+        /// LD-0123: when set, every listing answers with a `Date` header this many seconds ahead of the device's
+        /// clock (a device clock that runs behind the server's).
+        date_ahead_s: Arc<Mutex<Option<i64>>>,
     }
 
     const PAGE: usize = 2;
 
     fn node_json(id: &str, node: &Node) -> serde_json::Value {
+        let uploaded_at = node.uploaded_at.as_deref().unwrap_or("2026-11-06T10:00:00Z");
         serde_json::json!({
             "id": id, "name_encrypted": node.name_encrypted, "is_folder": node.is_folder,
             "is_trashed": node.trashed, "size_bytes": node.size, "parent_id": node.parent,
-            "uploaded_at": "2026-11-06T10:00:00Z", "updated_at": "2026-11-06T10:00:00Z",
+            "uploaded_at": uploaded_at, "updated_at": uploaded_at,
         })
     }
 
@@ -48,7 +54,9 @@ use beebeeb_types::backup::Category;
             let nodes: Arc<Mutex<std::collections::BTreeMap<String, Node>>> = Arc::default();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
+            let date_ahead_s: Arc<Mutex<Option<i64>>> = Arc::default();
             let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
+            let ahead = Arc::clone(&date_ahead_s);
             let handle = thread::spawn(move || {
                 let started = std::time::Instant::now();
                 while !halt.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(30) {
@@ -77,7 +85,15 @@ use beebeeb_types::backup::Category;
                             .collect();
                         let page: Vec<_> = children.iter().skip(offset).take(PAGE).cloned().collect();
                         let next = (offset + PAGE < children.len()).then(|| format!("c{}", offset + PAGE));
-                        http_json("200 OK", serde_json::json!({ "files": page, "next_cursor": next }))
+                        let listing = http_json("200 OK", serde_json::json!({ "files": page, "next_cursor": next }));
+                        match *ahead.lock().unwrap() {
+                            Some(seconds) => {
+                                let server_now = chrono::Utc::now() + chrono::Duration::seconds(seconds);
+                                let date = server_now.format("%a, %d %b %Y %H:%M:%S GMT");
+                                listing.replacen("\r\n", &format!("\r\nDate: {date}\r\n"), 1)
+                            }
+                            None => listing,
+                        }
                     } else if method == "GET" && path.starts_with("/api/v1/files/") {
                         let id = path.trim_start_matches("/api/v1/files/");
                         match tree.get(id) {
@@ -93,6 +109,7 @@ use beebeeb_types::backup::Category;
                             is_folder: true,
                             trashed: false,
                             size: 0,
+                            uploaded_at: None,
                         };
                         let answer = node_json(&id, &node);
                         tree.insert(id, node);
@@ -119,7 +136,7 @@ use beebeeb_types::backup::Category;
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
-            Self { base_url, nodes, requests, stop, handle }
+            Self { base_url, nodes, requests, stop, handle, date_ahead_s }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
@@ -151,10 +168,23 @@ use beebeeb_types::backup::Category;
 
         /// A server item with a self-minted id and its name sealed for it, as this device would have made it.
         fn add(&self, parent: Option<&str>, name: &str, is_folder: bool, size: u64) -> String {
+            self.add_stamped(parent, name, is_folder, size, None)
+        }
+
+        /// [`Self::add`] with the server's `uploaded_at` for the item.
+        fn add_stamped(
+            &self,
+            parent: Option<&str>,
+            name: &str,
+            is_folder: bool,
+            size: u64,
+            uploaded_at: Option<String>,
+        ) -> String {
             let master = beebeeb_core::kdf::MasterKey::from_bytes(*self.bridge.api.master_key());
             let id = beebeeb_core::item_id::NewItemId::owner(&master).unwrap().as_str().to_string();
             let name_encrypted = owned_metadata_for_name(&self.bridge.db, self.bridge.api.master_key(), &id, name, None).unwrap();
-            let node = Node { parent: parent.map(str::to_string), name_encrypted, is_folder, trashed: false, size };
+            let parent = parent.map(str::to_string);
+            let node = Node { parent, name_encrypted, is_folder, trashed: false, size, uploaded_at };
             self.server.nodes.lock().unwrap().insert(id.clone(), node);
             id
         }
@@ -328,6 +358,70 @@ use beebeeb_types::backup::Category;
         assert_eq!(fx.bridge.db.backup_held_keys("pictures").unwrap(), ["Trip/b.jpg", "Trip/c.jpg", "a.jpg"]);
         let requests = fx.server.finish();
         assert_eq!(Fixture::creates(&requests), 2, "the category folder and Trip");
+    }
+
+    /// LD-0123 (LD-0139): the records' rebuild uses the clock its listing measured from the server's `Date` header.
+    /// Here the device clock runs 3 minutes behind the server's. A copy the server stamped 30 s after the file last
+    /// changed counts as backed up (core's 10-minute floor alone would upload it again); one stamped 0.5 s after it,
+    /// inside the measurement's margin, is uploaded again; so is one stamped 2 minutes later by the device's clock,
+    /// which is a minute BEFORE the change on the server's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rebuild_with_a_measured_clock_keeps_a_timely_copy_and_uploads_one_inside_the_margin_again() {
+        let fx = Fixture::new();
+        *fx.server.date_ahead_s.lock().unwrap() = Some(180);
+        // Whole seconds an hour ago, so every file system keeps the mtime exactly.
+        let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let changed = std::time::UNIX_EPOCH + Duration::from_secs(now_s - 3600);
+        let changed_ms = i64::try_from((now_s - 3600) * 1000).unwrap();
+        let source = tempfile::tempdir().unwrap();
+        for name in ["early.jpg", "margin.jpg", "timely.jpg"] {
+            let path = source.path().join(name);
+            std::fs::write(&path, b"7 bytes").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(changed).unwrap();
+        }
+        let stamp = |after_ms: i64| {
+            let at = chrono::DateTime::from_timestamp_millis(changed_ms + after_ms).unwrap();
+            Some(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        };
+        let pictures = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
+        fx.bridge.db.set_backup_category_folder("pictures", Some(&pictures)).unwrap();
+        let timely = fx.add_stamped(Some(&pictures), "timely.jpg", false, 7, stamp(180_000 + 30_000));
+        fx.add_stamped(Some(&pictures), "margin.jpg", false, 7, stamp(180_000 + 500));
+        fx.add_stamped(Some(&pictures), "early.jpg", false, 7, stamp(120_000));
+        let host = fx.host(vec![Category::Pictures]);
+
+        let stored = crate::backup::scheduler::rebuild_records_if_empty(&host, source.path(), &[], &Category::Pictures)
+            .await
+            .unwrap();
+        let records: Vec<(String, uuid::Uuid)> =
+            fx.bridge.db.backup_records("pictures").unwrap().into_iter().map(|r| (r.key, r.remote_id)).collect();
+        assert_eq!(records, [("timely.jpg".to_string(), uuid(&timely))], "only the copy made after the change counts");
+        assert_eq!(stored, 1);
+
+        let report = beebeeb_backup::run_pass(&host, source.path(), &[], &Category::Pictures, budget()).await.unwrap();
+        assert_eq!(fx.bridge.db.backup_held_keys("pictures").unwrap(), ["early.jpg", "margin.jpg"], "{report:?}");
+        assert_eq!(count_backup_ops(&fx.bridge), 2, "{report:?}");
+        let requests = fx.server.finish();
+        // One listing of Pictures (its first page; 3 files at 2 a page is one more with a cursor).
+        let first_pages = requests
+            .iter()
+            .filter(|r| r.method == "GET" && r.path.starts_with("/api/v1/files?") && !r.path.contains("cursor="))
+            .count();
+        assert_eq!(first_pages, 1, "the pass takes the rebuild's listing instead of listing again");
+    }
+
+    /// Of two measured clocks the smaller margin wins, and a measured clock beats an unknown one either way round.
+    #[test]
+    fn the_tighter_clock_is_kept() {
+        use beebeeb_core::backup::RebuildClock;
+        let wide = RebuildClock { offset_ms: Some(10), margin_ms: 2_900 };
+        let tight = RebuildClock { offset_ms: Some(12), margin_ms: 2_100 };
+        assert_eq!(crate::engine_bridge::tighter_clock(wide, tight), tight);
+        assert_eq!(crate::engine_bridge::tighter_clock(tight, wide), tight);
+        assert_eq!(crate::engine_bridge::tighter_clock(RebuildClock::UNKNOWN, wide), wide);
+        assert_eq!(crate::engine_bridge::tighter_clock(wide, RebuildClock::UNKNOWN), wide);
+        let unknown = RebuildClock::UNKNOWN;
+        assert_eq!(crate::engine_bridge::tighter_clock(unknown, unknown), unknown);
     }
 
     /// `put_record`'s compare-and-set (core review 4 #3): a record still at its key keeps its stored fields and only

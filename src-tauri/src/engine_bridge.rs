@@ -112,7 +112,7 @@ mod hydrate;
 mod range_fetch;
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub(crate) use range_fetch::{PrepEnd, RangePrep};
-pub(crate) use backup_tree::{BackupChild, BackupFolderState};
+pub(crate) use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
 mod conflicts;
 
 

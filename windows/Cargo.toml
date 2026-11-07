@@ -6,8 +6,8 @@ description = "Beebeeb desktop sync daemon for Windows"
 publish = false
 
 [dependencies]
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-sync", rev = "a5413d2049f5a27f9392b3d323cd279643e8d24e" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "a5413d2049f5a27f9392b3d323cd279643e8d24e" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-sync", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

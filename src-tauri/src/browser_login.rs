@@ -1,9 +1,11 @@
 //! Browser-based device-code login handoff for the desktop client.
 //!
 //! This is the desktop counterpart to `bb login` in `repos/cli`. The server
-//! contract lives in `repos/server/beebeeb-api/src/cli_auth.rs`; the crypto is a
-//! byte-for-byte match of the CLI client (`repos/cli/src/commands/login.rs`) so
-//! all three clients (web/cli/desktop) interoperate against the same handoff.
+//! contract lives in `repos/server/beebeeb-api/src/cli_auth.rs`; the crypto is
+//! core's `beebeeb_core::cli_auth` (`beebeeb-cli-auth-v1`, LD-0139), the same
+//! code the CLI runs, so all three clients (web/cli/desktop) interoperate
+//! against the same handoff. Desktop holds no ECDH, HKDF or AES code of its own
+//! here; `tests::core_cli_auth_vectors` pins the wire bytes to core's vectors.
 //!
 //! Flow (see `cli_auth.rs` for the server side):
 //!   1. Desktop opens a WebSocket to `wss://api.beebeeb.io/api/v1/auth/cli` and
@@ -36,15 +38,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes_gcm::aead::Aead;
-use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::{Aes256Gcm, KeyInit};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use beebeeb_core::CoreError;
+use beebeeb_core::cli_auth::{CliEphemeralKey, decrypt_cli_payload};
 use futures_util::{SinkExt, StreamExt};
-use p256::PublicKey;
-use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
-use rand::rngs::OsRng;
 use tauri::{Emitter, State};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -67,9 +64,6 @@ macro_rules! bc {
         }
     };
 }
-
-/// HKDF `info` string — MUST match the CLI client and the web browser side.
-const HKDF_INFO: &[u8] = b"beebeeb-cli-auth-v1";
 
 /// Tauri event name the UI subscribes to for handoff progress.
 const EVENT: &str = "browser-login";
@@ -316,10 +310,9 @@ async fn run_handoff(
     // computer, so a Lock, a Sign-out or another sign-in that completes while the browser is open is never followed by
     // its writes (they are refused, and nothing of it is stored).
     let mut turn = state.active_account()?.session_generation();
-    // 1. Ephemeral P-256 key pair (uncompressed SEC1 point, base64).
-    let secret = EphemeralSecret::random(&mut OsRng);
-    let public_key = secret.public_key();
-    let pub_key_b64 = B64.encode(public_key.to_encoded_point(false).as_bytes());
+    // 1. Ephemeral P-256 key pair from core (uncompressed SEC1 point, base64).
+    let secret = CliEphemeralKey::generate();
+    let pub_key_b64 = ephemeral_public_b64(&secret);
     bc!("[bb-signin] run_handoff: after keygen");
 
     // 2. Connect the WebSocket — with a hard timeout and bundled-root TLS so a
@@ -589,28 +582,32 @@ fn browser_installed_outcome(reauthenticated: bool) -> crate::LoginOutcome {
     }
 }
 
-/// ECDH(P-256) → HKDF-SHA256(info="beebeeb-cli-auth-v1") → AES-256-GCM decrypt.
+/// The public half of this attempt's key as the init frame carries it: the
+/// SEC1-uncompressed point (`0x04 || X || Y`, 65 bytes), standard base64.
+fn ephemeral_public_b64(secret: &CliEphemeralKey) -> String {
+    B64.encode(secret.public_key_bytes())
+}
+
+/// ECDH(P-256) → HKDF-SHA256(info="beebeeb-cli-auth-v1") → AES-256-GCM decrypt,
+/// all of it core's `beebeeb_core::cli_auth` (LD-0139; it was a hand-written copy
+/// on `p256` 0.13 here). Core tries the HKDF key first (v0.5+ web app) and falls
+/// back to the raw shared secret (v0.4 web app), as the CLI does.
 ///
-/// Tries the HKDF-derived key first (v0.5+ web app); falls back to the raw
-/// shared secret (v0.4 web app) for backward compatibility, exactly as the CLI
-/// does — see `repos/cli/src/commands/login.rs`.
+/// The errors name the step that failed and carry no key material. A nonce that
+/// is not 12 bytes is now an error; the hand-written copy panicked on it.
 fn decrypt_payload(
-    secret: &EphemeralSecret,
+    secret: &CliEphemeralKey,
     browser_pub_b64: &str,
     nonce_b64: &str,
     payload_b64: &str,
 ) -> Result<Vec<u8>, String> {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
     let browser_pub_bytes = B64
         .decode(browser_pub_b64)
         .map_err(|e| format!("Invalid browser public key encoding: {e}"))?;
-    let browser_pub_key = PublicKey::from_sec1_bytes(&browser_pub_bytes)
-        .map_err(|e| format!("Invalid browser public key (not on curve): {e}"))?;
-
-    let shared_secret = secret.diffie_hellman(&browser_pub_key);
-    let shared_bytes = shared_secret.raw_secret_bytes();
+    // Core's only error here is a point that is not on P-256 (or not SEC1).
+    let shared_secret = secret
+        .shared_secret(&browser_pub_bytes)
+        .map_err(|_| "Invalid browser public key (not on curve).".to_string())?;
 
     let nonce_bytes = B64
         .decode(nonce_b64)
@@ -619,20 +616,10 @@ fn decrypt_payload(
         .decode(payload_b64)
         .map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
-    let hk = Hkdf::<Sha256>::new(None, shared_bytes);
-    let mut hkdf_key = zeroize::Zeroizing::new([0u8; 32]);
-    hk.expand(HKDF_INFO, &mut *hkdf_key)
-        .expect("HKDF expand failed — 32-byte output length is always valid");
-
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&*hkdf_key));
-    cipher
-        .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-        .or_else(|_| {
-            // v0.4 fallback: raw shared secret as the key.
-            let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
-            cipher.decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-        })
-        .map_err(|_| "Decryption failed — key mismatch or corrupted credentials.".to_string())
+    decrypt_cli_payload(&shared_secret, &nonce_bytes, &ciphertext).map_err(|e| match e {
+        CoreError::InvalidInput(_) => format!("Invalid nonce: {} bytes, expected 12.", nonce_bytes.len()),
+        _ => "Decryption failed — key mismatch or corrupted credentials.".to_string(),
+    })
 }
 
 /// Block until the next text frame, skipping ping/pong control frames.
@@ -944,5 +931,110 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Connection closed"));
+    }
+
+    /// LD-0139: the sign-in handshake is core's `beebeeb-cli-auth-v1`, and its wire bytes are the ones the
+    /// hand-written `p256` 0.13 copy sent. The constants are core's published vectors
+    /// (`beebeeb-core/tests/cli_auth_vectors.rs` at core `e60fbb4`), which core checks against an independent
+    /// pure-Python generator and which pin both public keys. Each test drives desktop's own functions
+    /// (`ephemeral_public_b64`, `decrypt_payload`), not core's directly.
+    mod core_cli_auth_vectors {
+        use super::*;
+        use aes_gcm::aead::Aead;
+        use aes_gcm::aead::generic_array::GenericArray;
+        use aes_gcm::{Aes256Gcm, KeyInit};
+
+        const CLI_PRIV_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        /// HKDF-SHA256(ikm = ECDH x, salt = None, info = "beebeeb-cli-auth-v1"): the v1 AES key.
+        const EXPECTED_AES_KEY_HEX: &str = "8bd295090ce8a6412b831704b601b55d60ba3cae056f5e1337a11b5f9eceac35";
+        /// The raw ECDH x-coordinate, the legacy v0.4 web app's AES key.
+        const EXPECTED_SHARED_HEX: &str = "ccfc261f58193c98ca4ad4a53bbac6f0ee29bc4d48438090446908622ca79af6";
+        const EXPECTED_CLI_PUB_HEX: &str = concat!(
+            "040217e617f0b6443928278f96999e69a23a4f2c152bdf6d6cdf66e5b80282d4ed",
+            "194a7debcb97712d2dda3ca85aa8765a56f45fc758599652f2897c65306e5794"
+        );
+        const EXPECTED_BROWSER_PUB_HEX: &str = concat!(
+            "04d65a93977caa3d1b081852ff57a79e465f1660577304baead505dd3a48589cf3",
+            "50185e895372df6221ea3a137557e473fddb6755f05bd507c3c533fce9c91285"
+        );
+        const BROWSER_PUB_COMPRESSED_HEX: &str = "03d65a93977caa3d1b081852ff57a79e465f1660577304baead505dd3a48589cf3";
+        const OFF_CURVE_COMPRESSED_HEX: &str = "020000000000000000000000000000000000000000000000000000000000000001";
+
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        }
+
+        fn cli_key() -> CliEphemeralKey {
+            CliEphemeralKey::from_secret_bytes(&unhex(CLI_PRIV_HEX).try_into().unwrap()).unwrap()
+        }
+
+        /// What the browser sends: AES-256-GCM under `key`, everything base64 as on the wire.
+        fn browser_frame(key_hex: &str, nonce: [u8; 12], plaintext: &[u8]) -> (String, String) {
+            let cipher = Aes256Gcm::new(GenericArray::from_slice(&unhex(key_hex)));
+            let ct = cipher.encrypt(GenericArray::from_slice(&nonce), plaintext).unwrap();
+            (B64.encode(nonce), B64.encode(ct))
+        }
+
+        #[test]
+        fn the_init_frame_key_is_the_pinned_uncompressed_point() {
+            let sent = ephemeral_public_b64(&cli_key());
+            assert_eq!(B64.decode(&sent).unwrap(), unhex(EXPECTED_CLI_PUB_HEX));
+            assert_eq!(init_frame(&sent, None)["ecdh_public_key_b64"], sent.as_str());
+        }
+
+        #[test]
+        fn a_v1_payload_under_the_pinned_hkdf_key_decrypts() {
+            let plaintext = br#"{"session_token":"s","master_key_b64":"AAAA","email":"a@beebeeb.io"}"#;
+            let (nonce, ct) = browser_frame(EXPECTED_AES_KEY_HEX, [0xAB; 12], plaintext);
+            let browser_pub = B64.encode(unhex(EXPECTED_BROWSER_PUB_HEX));
+            let got = decrypt_payload(&cli_key(), &browser_pub, &nonce, &ct).unwrap();
+            assert_eq!(got, plaintext);
+        }
+
+        #[test]
+        fn a_legacy_payload_under_the_raw_secret_still_decrypts() {
+            let (nonce, ct) = browser_frame(EXPECTED_SHARED_HEX, [0xCD; 12], b"legacy-v0.4");
+            let browser_pub = B64.encode(unhex(EXPECTED_BROWSER_PUB_HEX));
+            assert_eq!(
+                decrypt_payload(&cli_key(), &browser_pub, &nonce, &ct).unwrap(),
+                b"legacy-v0.4"
+            );
+        }
+
+        #[test]
+        fn a_compressed_browser_key_reaches_the_same_secret() {
+            let (nonce, ct) = browser_frame(EXPECTED_AES_KEY_HEX, [0x01; 12], b"compressed");
+            let browser_pub = B64.encode(unhex(BROWSER_PUB_COMPRESSED_HEX));
+            assert_eq!(
+                decrypt_payload(&cli_key(), &browser_pub, &nonce, &ct).unwrap(),
+                b"compressed"
+            );
+        }
+
+        #[test]
+        fn a_bad_frame_is_an_error_never_a_panic() {
+            let key = cli_key();
+            let browser_pub = B64.encode(unhex(EXPECTED_BROWSER_PUB_HEX));
+            let (nonce, ct) = browser_frame(EXPECTED_AES_KEY_HEX, [0x02; 12], b"x");
+            let off_curve = B64.encode(unhex(OFF_CURVE_COMPRESSED_HEX));
+            assert_eq!(
+                decrypt_payload(&key, &off_curve, &nonce, &ct).unwrap_err(),
+                "Invalid browser public key (not on curve)."
+            );
+            // The hand-written copy indexed a 12-byte nonce without checking and panicked on this.
+            let short_nonce = B64.encode([0u8; 11]);
+            assert_eq!(
+                decrypt_payload(&key, &browser_pub, &short_nonce, &ct).unwrap_err(),
+                "Invalid nonce: 11 bytes, expected 12."
+            );
+            let (_, other_ct) = browser_frame(&"00".repeat(32), [0x02; 12], b"x");
+            assert_eq!(
+                decrypt_payload(&key, &browser_pub, &nonce, &other_ct).unwrap_err(),
+                "Decryption failed — key mismatch or corrupted credentials."
+            );
+        }
     }
 }

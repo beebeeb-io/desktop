@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use beebeeb_backup::{BackupHost, DeviceTree, HostError, UploadRequest};
-use beebeeb_core::backup::{BackupRecord, FolderPresence, RecordRef, RemoteEntry};
+use beebeeb_core::backup::{BackupRecord, FolderPresence, RebuildClock, RecordRef, RemoteEntry};
 use beebeeb_types::backup::Category;
 use uuid::Uuid;
 
@@ -60,6 +60,17 @@ fn switch_off_in_settings(keys: &[String]) -> bool {
     .is_ok()
 }
 
+/// The tree of a backup whose device or category folder is gone: nothing listed, and complete (there is nothing more).
+fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> DeviceTree {
+    DeviceTree {
+        device_folder_live,
+        category_folder_live,
+        folders: HashMap::new(),
+        files: Vec::new(),
+        complete: true,
+    }
+}
+
 pub(crate) struct DesktopBackupHost {
     bridge: Arc<EngineBridge>,
     layout: BackupLayout,
@@ -75,13 +86,34 @@ impl DesktopBackupHost {
         Self { bridge, layout, enabled, listed: std::sync::Mutex::default() }
     }
 
-    /// [`BackupHost::device_tree`] for the records' rebuild; the pass that follows takes the same listing.
-    pub(crate) async fn device_tree_for_rebuild(&self, c: &Category) -> Result<DeviceTree, HostError> {
-        let tree = self.device_tree(c).await?;
+    /// [`BackupHost::device_tree`] for the records' rebuild, with the clock its listing measured (LD-0123: core's
+    /// `records_from_remote_with_clock` takes it); the pass that follows takes the same listing.
+    pub(crate) async fn device_tree_for_rebuild(&self, c: &Category) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let (tree, clock) = self.device_tree_clocked(c).await?;
         if let Ok(mut listed) = self.listed.lock() {
             listed.insert(c.key(), tree.clone());
         }
-        Ok(tree)
+        Ok((tree, clock))
+    }
+
+    /// This device's backup of `c` as the server has it now, and the clock of the listing that read it. A device or
+    /// category folder that is gone lists nothing, so its clock is `RebuildClock::UNKNOWN` (nothing is rebuilt then).
+    async fn device_tree_clocked(&self, c: &Category) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let device = self
+            .bridge
+            .backup_folder_state(&self.layout.device_folder_id)
+            .await
+            .map_err(host_error("device_folder_state"))?;
+        if device == BackupFolderState::Gone {
+            return Ok((gone_tree(false, None), RebuildClock::UNKNOWN));
+        }
+        let (folder_id, live) = self.category_folder(c).await?;
+        if live == Some(false) {
+            return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
+        }
+        let (mut tree, clock) = self.list_category(&folder_id).await?;
+        tree.category_folder_live = live;
+        Ok((tree, clock))
     }
 
     /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of
@@ -101,18 +133,21 @@ impl DesktopBackupHost {
         Ok((id, None))
     }
 
-    /// Every live folder and file under `category_folder`, keys joined with `/`. A folder whose name cannot be
-    /// opened is not entered and makes the listing partial; a file's is listed by id with an empty key.
-    async fn list_category(&self, category_folder: &str) -> Result<DeviceTree, HostError> {
+    /// Every live folder and file under `category_folder`, keys joined with `/`, and the tightest clock its pages
+    /// measured. A folder whose name cannot be opened is not entered and makes the listing partial; a file's is
+    /// listed by id with an empty key.
+    async fn list_category(&self, category_folder: &str) -> Result<(DeviceTree, RebuildClock), HostError> {
         let root = parse_id(category_folder).ok_or_else(|| HostError("category folder id is not a uuid".into()))?;
         let mut folders = HashMap::from([(String::new(), root)]);
         let mut files = Vec::new();
         let mut complete = true;
+        let mut clock = RebuildClock::UNKNOWN;
         let mut queue = std::collections::VecDeque::from([(String::new(), category_folder.to_string())]);
         while let Some((prefix, folder_id)) = queue.pop_front() {
-            let (children, all) =
-                self.bridge.backup_list_children(&folder_id).await.map_err(host_error("listing"))?;
+            let (children, all, folder_clock) =
+                self.bridge.backup_list_children_clocked(&folder_id).await.map_err(host_error("listing"))?;
             complete &= all;
+            clock = crate::engine_bridge::tighter_clock(clock, folder_clock);
             for BackupChild { id, name, is_folder, size, uploaded_at_ms, .. } in children {
                 let Some(remote_id) = parse_id(&id) else {
                     complete = false;
@@ -132,7 +167,7 @@ impl DesktopBackupHost {
                 }
             }
         }
-        Ok(DeviceTree { device_folder_live: true, category_folder_live: None, folders, files, complete })
+        Ok((DeviceTree { device_folder_live: true, category_folder_live: None, folders, files, complete }, clock))
     }
 }
 
@@ -141,33 +176,7 @@ impl BackupHost for DesktopBackupHost {
         if let Some(tree) = self.listed.lock().ok().and_then(|mut listed| listed.remove(&c.key())) {
             return Ok(tree);
         }
-        let device = self
-            .bridge
-            .backup_folder_state(&self.layout.device_folder_id)
-            .await
-            .map_err(host_error("device_folder_state"))?;
-        if device == BackupFolderState::Gone {
-            return Ok(DeviceTree {
-                device_folder_live: false,
-                category_folder_live: None,
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            });
-        }
-        let (folder_id, live) = self.category_folder(c).await?;
-        if live == Some(false) {
-            return Ok(DeviceTree {
-                device_folder_live: true,
-                category_folder_live: Some(false),
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            });
-        }
-        let mut tree = self.list_category(&folder_id).await?;
-        tree.category_folder_live = live;
-        Ok(tree)
+        Ok(self.device_tree_clocked(c).await?.0)
     }
 
     async fn ensure_folder(&self, parent: Uuid, name: &str) -> Result<Uuid, HostError> {
