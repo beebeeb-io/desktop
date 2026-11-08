@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use beebeeb_backup::{BackupHost, DeviceTree, HostError, UploadRequest};
-use beebeeb_core::backup::{BackupRecord, FolderPresence, RecordRef, RemoteEntry};
-use beebeeb_types::backup::Category;
+use beebeeb_core::backup::{BackupRecord, FolderPresence, RebuildClock, RecordRef, RemoteEntry};
+use beebeeb_types::backup::{BackupStopReason, Category};
 use uuid::Uuid;
 
 use crate::engine_bridge::{BackupChild, BackupFolderState, EngineBridge};
@@ -36,17 +36,6 @@ fn parse_id(id: &str) -> Option<Uuid> {
     Uuid::parse_str(id).ok()
 }
 
-/// LD-0121 seam (spec Amendment 12): why a backup stops. Today the pass knows only rule 11's two reasons; core's
-/// `backup_stop(notices, last_pass_at, listing)` (core v0.2.2) replaces this with the notice-based reason and its
-/// words (`files_removed`, `backup_deleted`, `unknown`).
-pub(crate) fn backup_stop_reason(why: FolderPresence) -> &'static str {
-    match why {
-        FolderPresence::DeviceDeleted => "device_deleted",
-        FolderPresence::CategoryDeleted => "category_deleted",
-        FolderPresence::Present => "present",
-    }
-}
-
 /// Turn the backup of these categories off in the settings (the same switch the person uses). `Ok(false)`: the
 /// settings could not be written; the stop notice still stands and no pass runs for a folder whose category folder
 /// is forgotten.
@@ -58,6 +47,17 @@ fn switch_off_in_settings(keys: &[String]) -> bool {
         (true, ())
     })
     .is_ok()
+}
+
+/// The tree of a backup whose device or category folder is gone: nothing listed, and complete (there is nothing more).
+fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> DeviceTree {
+    DeviceTree {
+        device_folder_live,
+        category_folder_live,
+        folders: HashMap::new(),
+        files: Vec::new(),
+        complete: true,
+    }
 }
 
 pub(crate) struct DesktopBackupHost {
@@ -75,13 +75,34 @@ impl DesktopBackupHost {
         Self { bridge, layout, enabled, listed: std::sync::Mutex::default() }
     }
 
-    /// [`BackupHost::device_tree`] for the records' rebuild; the pass that follows takes the same listing.
-    pub(crate) async fn device_tree_for_rebuild(&self, c: &Category) -> Result<DeviceTree, HostError> {
-        let tree = self.device_tree(c).await?;
+    /// [`BackupHost::device_tree`] for the records' rebuild, with the clock its listing measured (LD-0123: core's
+    /// `records_from_remote_with_clock` takes it); the pass that follows takes the same listing.
+    pub(crate) async fn device_tree_for_rebuild(&self, c: &Category) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let (tree, clock) = self.device_tree_clocked(c).await?;
         if let Ok(mut listed) = self.listed.lock() {
             listed.insert(c.key(), tree.clone());
         }
-        Ok(tree)
+        Ok((tree, clock))
+    }
+
+    /// This device's backup of `c` as the server has it now, and the clock of the listing that read it. A device or
+    /// category folder that is gone lists nothing, so its clock is `RebuildClock::UNKNOWN` (nothing is rebuilt then).
+    async fn device_tree_clocked(&self, c: &Category) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let device = self
+            .bridge
+            .backup_folder_state(&self.layout.device_folder_id)
+            .await
+            .map_err(host_error("device_folder_state"))?;
+        if device == BackupFolderState::Gone {
+            return Ok((gone_tree(false, None), RebuildClock::UNKNOWN));
+        }
+        let (folder_id, live) = self.category_folder(c).await?;
+        if live == Some(false) {
+            return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
+        }
+        let (mut tree, clock) = self.list_category(&folder_id).await?;
+        tree.category_folder_live = live;
+        Ok((tree, clock))
     }
 
     /// The category folder's id: the remembered one, else (a first backup, or "Back up again") the live folder of
@@ -101,18 +122,21 @@ impl DesktopBackupHost {
         Ok((id, None))
     }
 
-    /// Every live folder and file under `category_folder`, keys joined with `/`. A folder whose name cannot be
-    /// opened is not entered and makes the listing partial; a file's is listed by id with an empty key.
-    async fn list_category(&self, category_folder: &str) -> Result<DeviceTree, HostError> {
+    /// Every live folder and file under `category_folder`, keys joined with `/`, and the tightest clock its pages
+    /// measured. A folder whose name cannot be opened is not entered and makes the listing partial; a file's is
+    /// listed by id with an empty key.
+    async fn list_category(&self, category_folder: &str) -> Result<(DeviceTree, RebuildClock), HostError> {
         let root = parse_id(category_folder).ok_or_else(|| HostError("category folder id is not a uuid".into()))?;
         let mut folders = HashMap::from([(String::new(), root)]);
         let mut files = Vec::new();
         let mut complete = true;
+        let mut clock = RebuildClock::UNKNOWN;
         let mut queue = std::collections::VecDeque::from([(String::new(), category_folder.to_string())]);
         while let Some((prefix, folder_id)) = queue.pop_front() {
-            let (children, all) =
-                self.bridge.backup_list_children(&folder_id).await.map_err(host_error("listing"))?;
+            let (children, all, folder_clock) =
+                self.bridge.backup_list_children_clocked(&folder_id).await.map_err(host_error("listing"))?;
             complete &= all;
+            clock = crate::engine_bridge::tighter_clock(clock, folder_clock);
             for BackupChild { id, name, is_folder, size, uploaded_at_ms, .. } in children {
                 let Some(remote_id) = parse_id(&id) else {
                     complete = false;
@@ -132,7 +156,7 @@ impl DesktopBackupHost {
                 }
             }
         }
-        Ok(DeviceTree { device_folder_live: true, category_folder_live: None, folders, files, complete })
+        Ok((DeviceTree { device_folder_live: true, category_folder_live: None, folders, files, complete }, clock))
     }
 }
 
@@ -141,33 +165,7 @@ impl BackupHost for DesktopBackupHost {
         if let Some(tree) = self.listed.lock().ok().and_then(|mut listed| listed.remove(&c.key())) {
             return Ok(tree);
         }
-        let device = self
-            .bridge
-            .backup_folder_state(&self.layout.device_folder_id)
-            .await
-            .map_err(host_error("device_folder_state"))?;
-        if device == BackupFolderState::Gone {
-            return Ok(DeviceTree {
-                device_folder_live: false,
-                category_folder_live: None,
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            });
-        }
-        let (folder_id, live) = self.category_folder(c).await?;
-        if live == Some(false) {
-            return Ok(DeviceTree {
-                device_folder_live: true,
-                category_folder_live: Some(false),
-                folders: HashMap::new(),
-                files: Vec::new(),
-                complete: true,
-            });
-        }
-        let mut tree = self.list_category(&folder_id).await?;
-        tree.category_folder_live = live;
-        Ok(tree)
+        Ok(self.device_tree_clocked(c).await?.0)
     }
 
     async fn ensure_folder(&self, parent: Uuid, name: &str) -> Result<Uuid, HostError> {
@@ -218,47 +216,63 @@ impl BackupHost for DesktopBackupHost {
         Ok(())
     }
 
-    /// Rule 11: the folder was deleted elsewhere, so this backup turns off on this device, says why (the stop
-    /// notice the Backups screen shows with "Back up again") and never uploads again by itself (Amendment 12). A
-    /// deleted device folder turns every backup of this device off and forgets the layout.
+    /// Rule 11 in core's pass: the folder was deleted elsewhere after this pass's notice check found nothing (a race;
+    /// the check before the pass catches the usual case), so it stops as `unknown`: a folder gone with no notice.
     async fn turn_off(&self, c: &Category, why: FolderPresence) -> Result<(), HostError> {
+        let device_gone = why == FolderPresence::DeviceDeleted;
+        self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone)
+            .await
+    }
+}
+
+impl DesktopBackupHost {
+    /// A backup turns off on this device with core's reason (spec Amendment 12): it says why (the stop row the card
+    /// shows with "Back up again") and never uploads again by itself. With `every_backup` (a removal of the account's
+    /// files, a device folder that is gone, or a notice naming it) every backup of this device turns off at once; a
+    /// device folder that is gone also forgets the layout.
+    pub(crate) async fn stop_backups(
+        &self,
+        c: &Category,
+        reason: BackupStopReason,
+        device_gone: bool,
+        every_backup: bool,
+    ) -> Result<(), HostError> {
         let db = self.bridge.db();
-        let categories: Vec<Category> = match why {
-            FolderPresence::DeviceDeleted => {
-                // Every backup still on; one already off keeps the reason it stopped for.
-                let stopped: Vec<String> =
-                    db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();
-                // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
-                // waiting for the OneDrive answer), so none keeps a category folder inside the deleted device folder.
-                let mut on: Vec<Category> = self.enabled.clone();
-                if let Ok(cfg) = crate::config::DesktopConfig::load() {
-                    for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
-                        if !on.contains(&category) {
-                            on.push(category);
-                        }
+        let categories: Vec<Category> = if every_backup || device_gone || reason.files_removed() {
+            // Every backup still on; one already off keeps the reason it stopped for.
+            let stopped: Vec<String> =
+                db.backup_stops().map_err(db_error("turn_off"))?.into_iter().map(|s| s.category).collect();
+            // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
+            // waiting for the OneDrive answer), so none keeps going after its backup was removed.
+            let mut on: Vec<Category> = self.enabled.clone();
+            if let Ok(cfg) = crate::config::DesktopConfig::load() {
+                for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
+                    if !on.contains(&category) {
+                        on.push(category);
                     }
                 }
-                let mut all: Vec<Category> = on.into_iter().filter(|e| !stopped.contains(&e.key())).collect();
-                if !all.contains(c) {
-                    all.push(c.clone());
-                }
-                all
             }
-            _ => vec![c.clone()],
+            let mut all: Vec<Category> = on.into_iter().filter(|e| !stopped.contains(&e.key())).collect();
+            if !all.contains(c) {
+                all.push(c.clone());
+            }
+            all
+        } else {
+            vec![c.clone()]
         };
         let at_ms = chrono::Utc::now().timestamp_millis();
         let keys: Vec<String> = categories.iter().map(Category::key).collect();
         for key in &keys {
             self.bridge.turn_off_backup_uploads(key).await.map_err(host_error("turn_off"))?;
             db.set_backup_category_folder(key, None).map_err(db_error("turn_off"))?;
-            db.record_backup_stop(&BackupStop { category: key.clone(), reason: backup_stop_reason(why).into(), at_ms })
+            db.record_backup_stop(&BackupStop { category: key.clone(), reason: reason.as_str().into(), at_ms })
                 .map_err(db_error("turn_off"))?;
         }
-        if why == FolderPresence::DeviceDeleted {
+        if device_gone {
             db.clear_backup_layout().map_err(db_error("turn_off"))?;
         }
         let switched = switch_off_in_settings(&keys);
-        tracing::info!(turned_off = keys.len(), switched, reason = backup_stop_reason(why), "backup: turned off");
+        tracing::info!(turned_off = keys.len(), switched, reason = reason.as_str(), "backup: turned off");
         Ok(())
     }
 }

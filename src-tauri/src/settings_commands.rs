@@ -997,6 +997,9 @@ pub(super) struct KnownFolderStatus {
     /// LD-0113 Amendment 9: a folder OneDrive moved (`moved_path`, `source_choice`, `question`, `note`).
     #[serde(flatten)]
     pub(super) moved: crate::backup::kfm::MovedFolder,
+    /// LD-0139: why it stopped, in core's words, with "Back up again" (`stop_words`, `stop_action`, `check_note`).
+    #[serde(flatten)]
+    pub(super) stop: crate::backup::stop::StopView,
 }
 
 /// List the backupable known folders with their resolved source paths + current
@@ -1008,12 +1011,17 @@ pub(super) struct KnownFolderStatus {
 #[tauri::command]
 pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String> {
     let cfg = DesktopConfig::load()?;
+    let stops = crate::backup::stop::stopped_backups(&cfg);
     let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
     for kf in known_folder::KNOWN_FOLDERS {
         let enabled = cfg.known_folder_enabled(kf.key);
         let view = crate::backup::kfm::folder_view(kf.key, kf.display_name, enabled, cfg.known_folder_source.get(kf.key).copied());
         #[cfg(target_os = "windows")] // never counted inside OneDrive's folder (listing an online-only one can fetch it)
-        let item_count = view.source_path.as_deref().filter(|_| view.reads_default).and_then(count_items_bounded);
+        let item_count = view
+            .source_path
+            .as_deref()
+            .filter(|_| view.reads_default)
+            .and_then(crate::backup::sources::count_items_bounded);
         #[cfg(not(target_os = "windows"))]
         let item_count: Option<u64> = None;
 
@@ -1024,43 +1032,10 @@ pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String
             enabled,
             item_count,
             moved: view.moved,
+            stop: crate::backup::stop::stop_view(&stops, kf.key, kf.display_name, enabled),
         });
     }
     Ok(out)
-}
-
-/// Bounded, best-effort count of regular files under `root` (≤ this many before
-/// we stop — the panel only needs an "about this many" signal, not an exact
-/// total, and an exact recursive count of a huge Documents folder would block
-/// the IPC thread). Windows-only (the only caller is gated).
-#[cfg(target_os = "windows")]
-pub(super) fn count_items_bounded(root: &std::path::Path) -> Option<u64> {
-    const CAP: u64 = 10_000;
-    fn walk(dir: &std::path::Path, depth: usize, count: &mut u64) {
-        if depth > 32 || *count >= CAP {
-            return;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if *count >= CAP {
-                return;
-            }
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_symlink() {
-                continue;
-            }
-            if ft.is_dir() {
-                walk(&entry.path(), depth + 1, count);
-            } else if ft.is_file() {
-                *count += 1;
-            }
-        }
-    }
-    let mut count = 0u64;
-    walk(root, 0, &mut count);
-    Some(count)
 }
 
 /// Enable or disable known-folder backup for one folder key.
@@ -1128,10 +1103,10 @@ pub(super) async fn set_known_folder_backup(key: String, enabled: bool) -> Resul
     }
 
     // On ENABLE the runner's next backup tick picks the folder up from `desktop.toml`; returning immediately is
-    // the whole point of task 0811. LD-0113: a stop notice of this folder (rule 11) is cleared: "Back up again".
+    // the whole point of task 0811. LD-0139: "Back up again" (or a first switch-on) clears its stop and starts over.
     if enabled {
         if let Ok(Some(db)) = &db {
-            if let Err(e) = db.clear_backup_stop(&key) {
+            if let Err(e) = crate::backup::stop::restart(db, &key) {
                 tracing::warn!(folder = %key, error = %e, "known-folder backup enable: stop notice not cleared");
             }
         }

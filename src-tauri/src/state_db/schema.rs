@@ -592,6 +592,18 @@ impl StateDb {
                  asked_at_ms INTEGER NOT NULL
              );",
         )?;
+        // LD-0139 (spec Amendments 12 and 12c): per backup, `last_pass_at_ms` on the SERVER's clock (the `Date` of
+        // the notices check of its last pass; NULL until its first pass) and `setup_at_ms` on this device's clock
+        // (when the person last turned it on or chose "Back up again"; NULL when not known, e.g. on an upgrade).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_pass_marks (
+                 account_owner TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 last_pass_at_ms INTEGER,
+                 setup_at_ms INTEGER,
+                 PRIMARY KEY (account_owner, category)
+             );",
+        )?;
         Ok(())
     }
 }

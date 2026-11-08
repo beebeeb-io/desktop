@@ -17,6 +17,7 @@ pub(crate) mod kfm;
 pub(crate) mod layout;
 pub(crate) mod scheduler;
 pub(crate) mod sources;
+pub(crate) mod stop;
 
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::StateDb;

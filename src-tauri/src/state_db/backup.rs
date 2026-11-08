@@ -635,6 +635,79 @@ impl StateDb {
         Ok(())
     }
 
+    /// LD-0139: the marks of `category`'s backup (all `None` when it has none).
+    pub fn backup_pass_mark(&self, category: &str) -> Result<BackupPassMark> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(BackupPassMark::default());
+        };
+        let mark = conn
+            .query_row(
+                "SELECT last_pass_at_ms, setup_at_ms FROM backup_pass_marks WHERE account_owner = ?1 AND category = ?2",
+                params![owner, category],
+                |row| {
+                    Ok(BackupPassMark {
+                        last_pass_at_ms: row.get(0)?,
+                        setup_at_ms: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(mark.unwrap_or_default())
+    }
+
+    /// LD-0139: `category`'s pass checked the notices up to `at_ms` (the check's `Date`, server clock).
+    pub fn set_backup_last_pass(&self, category: &str, at_ms: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute(
+            "INSERT INTO backup_pass_marks (account_owner, category, last_pass_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_owner, category) DO UPDATE SET last_pass_at_ms = excluded.last_pass_at_ms",
+            params![owner, category, at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// LD-0139: "Back up again" on `category`'s stopped backup at `setup_at_ms` (this device's clock): it starts over,
+    /// with no pass yet (its first pass takes its baseline from this moment), and its records go in the same
+    /// transaction, so that pass rebuilds them from what the server holds (spec rule 10) instead of taking the files
+    /// the removal took as deleted elsewhere.
+    pub fn restart_backup_pass(&self, category: &str, setup_at_ms: i64) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO backup_pass_marks (account_owner, category, last_pass_at_ms, setup_at_ms) VALUES (?1, ?2, NULL, ?3)
+             ON CONFLICT(account_owner, category) DO UPDATE SET last_pass_at_ms = NULL, setup_at_ms = excluded.setup_at_ms",
+            params![owner, category, setup_at_ms],
+        )?;
+        tx.execute(
+            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2",
+            params![owner, category],
+        )?;
+        tx.commit()
+    }
+
+    /// LD-0139: `category`'s backup was switched on at `setup_at_ms` (this device's clock). Kept only where no setup
+    /// time is known: the first switch-on is when backups were set up (spec Amendment 12c). The last pass is untouched.
+    pub fn note_backup_setup(&self, category: &str, setup_at_ms: i64) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        conn.execute(
+            "INSERT INTO backup_pass_marks (account_owner, category, setup_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_owner, category) DO UPDATE
+                 SET setup_at_ms = COALESCE(backup_pass_marks.setup_at_ms, excluded.setup_at_ms)",
+            params![owner, category, setup_at_ms],
+        )?;
+        Ok(())
+    }
+
     /// The current owner's flagged Backups root, once resolved.
     pub fn backup_root(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

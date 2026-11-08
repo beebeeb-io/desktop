@@ -6,6 +6,8 @@
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, formatBytes, loadSyncStatus, desktopFileOverview, getKnownFolderBackup, setKnownFolderBackup, type KnownFolderStatus, type SyncStatus, type FileOverview, type StatusBucket, type RecentFile } from '../desktopApi'
 import { setKnownFolderSource, type KnownFolderSource } from '../knownFolderSource'
+import { backUpAgainLabel, type BackupStopFields } from '../backupStop'
+import { pollWhileVisible } from '../windows/visiblePoll'
 import { T, NavIcon, Chip, PrimaryBtn, Skeleton, PageHeader, Card, useToast } from '../windows/ui'
 import { usePlatformName } from '../platform'
 import { finderOpenFailedToast } from '../finderSetup'
@@ -523,9 +525,12 @@ export function BackupToggle({
 }
 
 /** Status line under each folder name: Backed up / Off / Syncing / unavailable. */
-export function backupStatus(f: KnownFolderStatus, pending: boolean): { text: string; tone: 'on' | 'off' | 'busy' | 'na' } {
+export function backupStatus(f: KnownFolderStatus & Partial<BackupStopFields>, pending: boolean): { text: string; tone: 'on' | 'off' | 'busy' | 'na' } {
   if (f.source_path == null) return { text: 'Not available on this platform', tone: 'na' }
   if (pending) return { text: f.enabled ? 'Starting backup…' : 'Updating…', tone: 'busy' }
+  // LD-0139: core's words for a backup that stopped by itself, or for a notices check that failed.
+  if (f.enabled && f.check_note) return { text: f.check_note, tone: 'busy' }
+  if (!f.enabled && f.stop_words) return { text: f.stop_words, tone: 'off' }
   // LD-0113 Amendment 9: OneDrive moved this folder and the person has not chosen which one to back up yet.
   if (f.enabled && f.question) return { text: 'Waiting for your answer: not backed up yet', tone: 'busy' }
   if (f.enabled) return { text: 'Backed up to your vault', tone: 'on' }
@@ -533,7 +538,7 @@ export function backupStatus(f: KnownFolderStatus, pending: boolean): { text: st
 }
 
 export function ManageBackupCard() {
-  const [folders, setFolders] = useState<KnownFolderStatus[] | null>(null)
+  const [folders, setFolders] = useState<(KnownFolderStatus & Partial<BackupStopFields>)[] | null>(null)
   const [unsupported, setUnsupported] = useState(false)
   // Persistent load failure (get_known_folder_backup) keeps its inline notice —
   // the card is stuck on skeletons until it loads, so a transient toast would
@@ -575,6 +580,11 @@ export function ManageBackupCard() {
     window.addEventListener(KF_BACKUP_CHANGED_EVENT, onChanged)
     return () => window.removeEventListener(KF_BACKUP_CHANGED_EVENT, onChanged)
   }, [])
+
+  // LD-0139: a pass can turn a backup off (core's words, "Back up again") or fail its notice check while the card is
+  // open, so it reads again every minute while the window is on screen, and at once when it is shown again after a
+  // skipped read (task 2243's poll; the effect above does the first load).
+  useEffect(() => pollWhileVisible(() => load(), 60_000, { leading: false }), [])
 
   const toggle = async (f: KnownFolderStatus) => {
     if (f.source_path == null) return
@@ -737,6 +747,11 @@ export function ManageBackupCard() {
                     </div>
                   )}
                   {f.note && <div style={{ fontSize: 11, color: T.ink3, marginTop: 2 }}>{f.note}</div>}
+                  {backUpAgainLabel(f) && (
+                    <div style={{ marginTop: 6 }}>
+                      <PrimaryBtn disabled={isPending} onClick={() => void toggle(f)}>{backUpAgainLabel(f)}</PrimaryBtn>
+                    </div>
+                  )}
                 </div>
                 <BackupToggle
                   on={f.enabled}

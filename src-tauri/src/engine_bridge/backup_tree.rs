@@ -6,6 +6,7 @@
 //! device only; the logs carry ids and counts.
 
 use super::*;
+use beebeeb_core::backup::RebuildClock;
 
 /// The most entries one backup listing reads before it stops and reports itself partial (core then marks nothing
 /// removed elsewhere from it).
@@ -33,6 +34,16 @@ pub(crate) enum BackupFolderState {
     Gone,
 }
 
+/// Of two clocks of the same listing, the measured one with the smaller margin; a measured clock always beats
+/// `RebuildClock::UNKNOWN`.
+pub(crate) fn tighter_clock(a: RebuildClock, b: RebuildClock) -> RebuildClock {
+    match (a.offset_ms, b.offset_ms) {
+        (Some(_), Some(_)) if b.margin_ms < a.margin_ms => b,
+        (Some(_), _) => a,
+        (None, _) => b,
+    }
+}
+
 pub(super) fn timestamp_ms(entry: &serde_json::Value) -> i64 {
     ["uploaded_at", "updated_at"]
         .iter()
@@ -50,17 +61,30 @@ impl EngineBridge {
     /// Every live child of `parent`, every page read. `complete` is `false` when a page cursor repeated, the cap
     /// was reached, or a page was cut short: the caller then lists what it has and claims nothing about the rest.
     pub(crate) async fn backup_list_children(&self, parent: &str) -> Result<(Vec<BackupChild>, bool), EngineError> {
+        let (children, complete, _) = self.backup_list_children_clocked(parent).await?;
+        Ok((children, complete))
+    }
+
+    /// [`Self::backup_list_children`] with the listing's clock (LD-0123): every page measures the device's offset
+    /// from the server's `Date` header, and the measurement with the smallest margin is kept (each bounds the same
+    /// offset; the shortest round trip bounds it tightest). No page measured: `RebuildClock::UNKNOWN`.
+    pub(crate) async fn backup_list_children_clocked(
+        &self,
+        parent: &str,
+    ) -> Result<(Vec<BackupChild>, bool, RebuildClock), EngineError> {
         let mut children = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen = std::collections::HashSet::new();
+        let mut clock = RebuildClock::UNKNOWN;
         loop {
-            let page = self.backup_api().list_owned_folder_page(parent, cursor.as_deref()).await?;
+            let (page, page_clock) = self.backup_api().list_owned_folder_page_clocked(parent, cursor.as_deref()).await?;
+            clock = tighter_clock(clock, page_clock);
             let Some(files) = page["files"].as_array() else {
-                return Ok((children, false));
+                return Ok((children, false, clock));
             };
             for entry in files {
                 let Some(id) = entry["id"].as_str() else {
-                    return Ok((children, false));
+                    return Ok((children, false, clock));
                 };
                 if entry["is_trashed"].as_bool() == Some(true) {
                     continue;
@@ -75,16 +99,26 @@ impl EngineBridge {
                 });
             }
             if children.len() >= BACKUP_LISTING_CAP {
-                return Ok((children, false));
+                return Ok((children, false, clock));
             }
             match &page["next_cursor"] {
                 serde_json::Value::String(next) if !next.is_empty() && seen.insert(next.clone()) => {
                     cursor = Some(next.clone())
                 }
-                serde_json::Value::Null => return Ok((children, true)),
-                _ => return Ok((children, false)),
+                serde_json::Value::Null => return Ok((children, true, clock)),
+                _ => return Ok((children, false, clock)),
             }
         }
+    }
+
+    /// LD-0139: the notice check a backup pass starts with (`crate::backup::stop::check_from`). Any failure is the
+    /// failed check (no pass runs), in words with no server text.
+    pub(crate) async fn backup_notice_check(&self) -> Result<crate::backup::stop::NoticeCheck, String> {
+        let (body, clock, server_now_ms) = self.backup_api().list_notifications_clocked().await.map_err(|error| {
+            let error = EngineError::from(error);
+            format!("the notices request failed ({})", error_category(&error))
+        })?;
+        crate::backup::stop::check_from(&body, clock, server_now_ms)
     }
 
     /// Whether the folder `id` is live: `GET /files/{id}`, trashed or 404/410 is gone. Any other failure is an error,

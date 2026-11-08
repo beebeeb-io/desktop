@@ -55,6 +55,14 @@ use super::*;
         )
     }
 
+    /// LD-0139: [`http_json`] with a `Date` header `ahead_s` seconds ahead of this machine's clock, as a server
+    /// answers (the notice check reads the server's clock from it).
+    pub(super) fn http_json_dated(status: &str, body: serde_json::Value, ahead_s: i64) -> String {
+        let server_now = chrono::Utc::now() + chrono::Duration::seconds(ahead_s);
+        let date = server_now.format("%a, %d %b %Y %H:%M:%S GMT");
+        http_json(status, body).replacen("\r\n", &format!("\r\nDate: {date}\r\n"), 1)
+    }
+
     /// [`http_json`] for a binary body (`application/octet-stream`).
     pub(super) fn http_bytes(status: &str, body: &[u8]) -> Vec<u8> {
         let mut response = format!(

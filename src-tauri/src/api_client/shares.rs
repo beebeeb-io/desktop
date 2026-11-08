@@ -67,8 +67,39 @@ impl ApiClient {
     /// Paginated listing for a bounded shared-index rebuild; ordinary sync
     /// retains its snapshot/delta transport.
     pub async fn list_owned_folder_page(&self, parent: &str, cursor: Option<&str>) -> anyhow::Result<serde_json::Value> {
-        let url=self.list_files_url(ListFilesScope {parent_id:Some(FolderId::new(parent)),cursor,..Default::default()});
-        Ok(self.send_with_retry(||self.client.get(&url)).await?.json().await?)
+        let url = self.owned_folder_page_url(parent, cursor);
+        Ok(self.send_with_retry(|| self.client.get(&url)).await?.json().await?)
+    }
+
+    fn owned_folder_page_url(&self, parent: &str, cursor: Option<&str>) -> String {
+        self.list_files_url(ListFilesScope {
+            parent_id: Some(FolderId::new(parent)),
+            cursor,
+            ..Default::default()
+        })
+    }
+
+    /// [`Self::list_owned_folder_page`] with the clock of its request (LD-0123), for the backup records' rebuild:
+    /// the response's `Date` header against this device's wall clock when the request went out, with the round trip
+    /// timed on the monotonic clock ([`measured_clock`]). A 429 retry inside `send_with_retry` lengthens the round
+    /// trip, which only widens the margin (more is uploaded again, never less).
+    pub async fn list_owned_folder_page_clocked(
+        &self,
+        parent: &str,
+        cursor: Option<&str>,
+    ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock)> {
+        let url = self.owned_folder_page_url(parent, cursor);
+        let sent_at_ms = chrono::Utc::now().timestamp_millis();
+        let started = std::time::Instant::now();
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let received_wall_ms = chrono::Utc::now().timestamp_millis();
+        let date = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok());
+        let clock = measured_clock(date, sent_at_ms, elapsed_ms, received_wall_ms);
+        Ok((response.json().await?, clock))
     }
 
     pub async fn get_shared_folder(&self, id: &str) -> anyhow::Result<serde_json::Value> {
@@ -156,5 +187,73 @@ impl ApiClient {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+}
+
+/// How far a wall clock may drift from the monotonic clock over one request before the request counts as having
+/// seen a clock step (NTP slews at most 0.5 ms a second; a step is seconds).
+const CLOCK_STEP_TOLERANCE_MS: i64 = 250;
+
+/// The clock of one listing request (LD-0123, review of LD-0139): core's `rebuild_clock_from_date` over the `Date`
+/// header, with the round trip taken from the monotonic clock (`elapsed_ms`), so a wall-clock step cannot shrink the
+/// margin. When the wall clock moved more than [`CLOCK_STEP_TOLERANCE_MS`] away from the monotonic one during the
+/// request (`received_wall_ms`), the device's clock was stepped and nothing it measured holds: the clock is
+/// `RebuildClock::UNKNOWN`, and core's 10-minute floor applies (more is uploaded again, never less).
+pub(crate) fn measured_clock(
+    date: Option<&str>,
+    sent_at_ms: i64,
+    elapsed_ms: i64,
+    received_wall_ms: i64,
+) -> beebeeb_core::backup::RebuildClock {
+    let received_at_ms = sent_at_ms.saturating_add(elapsed_ms);
+    if received_wall_ms.abs_diff(received_at_ms) > CLOCK_STEP_TOLERANCE_MS.unsigned_abs() {
+        return beebeeb_core::backup::RebuildClock::UNKNOWN;
+    }
+    beebeeb_core::backup::rebuild_clock_from_date(date, sent_at_ms, received_at_ms)
+}
+
+#[cfg(test)]
+mod measured_clock_tests {
+    use super::measured_clock;
+    use beebeeb_core::backup::RebuildClock;
+
+    // Sun, 06 Nov 1994 08:49:37 GMT
+    const DATE: &str = "Sun, 06 Nov 1994 08:49:37 GMT";
+    const SERVER_MS: i64 = 784_111_777_000;
+
+    #[test]
+    fn a_steady_clock_measures_the_offset_with_the_monotonic_round_trip() {
+        let sent = SERVER_MS - 60_000;
+        let clock = measured_clock(Some(DATE), sent, 400, sent + 400);
+        assert_eq!(
+            clock,
+            RebuildClock {
+                offset_ms: Some(60_000 - 200),
+                margin_ms: 2_000 + 400
+            }
+        );
+    }
+
+    #[test]
+    fn a_clock_stepped_during_the_request_measures_nothing() {
+        let sent = SERVER_MS - 60_000;
+        // Stepped back 3 s during a 3.1 s round trip: the wall clock alone would see 0.1 s and a 2.1 s margin.
+        assert_eq!(
+            measured_clock(Some(DATE), sent, 3_100, sent + 100),
+            RebuildClock::UNKNOWN
+        );
+        // Stepped forward 1 s.
+        assert_eq!(
+            measured_clock(Some(DATE), sent, 400, sent + 1_400),
+            RebuildClock::UNKNOWN
+        );
+        // Within the slew tolerance it still measures.
+        assert!(measured_clock(Some(DATE), sent, 400, sent + 600).offset_ms.is_some());
+    }
+
+    #[test]
+    fn no_date_measures_nothing() {
+        assert_eq!(measured_clock(None, 0, 100, 100), RebuildClock::UNKNOWN);
+        assert_eq!(measured_clock(Some("yesterday"), 0, 100, 100), RebuildClock::UNKNOWN);
     }
 }

@@ -202,6 +202,40 @@ fn settle_question(questions: Option<&crate::state_db::StateDb>, key: &str) {
     }
 }
 
+/// Bounded, best-effort count of regular files under `root` (≤ this many before
+/// we stop — the panel only needs an "about this many" signal, not an exact
+/// total, and an exact recursive count of a huge Documents folder would block
+/// the IPC thread). Windows-only (the only caller is gated).
+#[cfg(target_os = "windows")]
+pub(crate) fn count_items_bounded(root: &std::path::Path) -> Option<u64> {
+    const CAP: u64 = 10_000;
+    fn walk(dir: &std::path::Path, depth: usize, count: &mut u64) {
+        if depth > 32 || *count >= CAP {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if *count >= CAP {
+                return;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                walk(&entry.path(), depth + 1, count);
+            } else if ft.is_file() {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0u64;
+    walk(root, 0, &mut count);
+    Some(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

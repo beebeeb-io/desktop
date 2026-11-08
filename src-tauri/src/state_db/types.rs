@@ -633,9 +633,19 @@ pub struct BackupLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupStop {
     pub category: String,
-    /// `device_deleted` or `category_deleted` today.
+    /// Core's `BackupStopReason` wire string (LD-0139); a row a development build wrote before it
+    /// (`device_deleted`, `category_deleted`) reads as `unknown`.
     pub reason: String,
     pub at_ms: i64,
+}
+
+/// LD-0139: a backup's marks for core's `backup_stop` (spec Amendments 12 and 12c).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackupPassMark {
+    /// The `Date` (server clock) of the notices check of its last pass; `None` before its first pass.
+    pub last_pass_at_ms: Option<i64>,
+    /// When the person turned it on or chose "Back up again" (this device's clock); `None` when not known.
+    pub setup_at_ms: Option<i64>,
 }
 
 /// What [`StateDb::enqueue_backup_upload`] did.
