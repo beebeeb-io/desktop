@@ -136,7 +136,10 @@ pub(super) fn release_notes_url_for_version(version: &str) -> String {
     format!("{DESKTOP_RELEASE_REPO_URL}/{DESKTOP_RELEASE_TAG_PREFIX}{version}")
 }
 
-pub(super) fn compare_channel_release_to_current(current_version: &str, remote_version: &str) -> Option<std::cmp::Ordering> {
+pub(super) fn compare_channel_release_to_current(
+    current_version: &str,
+    remote_version: &str,
+) -> Option<std::cmp::Ordering> {
     Some(parse_release_version(remote_version)?.cmp(&parse_release_version(current_version)?))
 }
 
@@ -165,7 +168,10 @@ pub(super) fn configured_release_channel() -> ReleaseChannel {
     }
 }
 
-pub(super) fn installed_release_channel_from_config(config: Result<DesktopConfig, String>, version: &str) -> ReleaseChannel {
+pub(super) fn installed_release_channel_from_config(
+    config: Result<DesktopConfig, String>,
+    version: &str,
+) -> ReleaseChannel {
     match config {
         Ok(cfg) => cfg
             .installed_release_channel
@@ -601,12 +607,16 @@ pub(super) fn autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub(super) const WINDOWS_TRAY_FLYOUT_WIDTH: u32 = 400;
-pub(super) const WINDOWS_TRAY_FLYOUT_HEIGHT: u32 = 560;
+pub(super) const WINDOWS_TRAY_FLYOUT_WIDTH: u32 = 364;
+pub(super) const WINDOWS_TRAY_FLYOUT_HEIGHT: u32 = 592;
 pub(super) const WINDOWS_TRAY_FLYOUT_GAP: i32 = 10;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(super) fn windows_tray_flyout_position(click_x: f64, click_y: f64, scale_factor: f64) -> tauri::PhysicalPosition<i32> {
+pub(super) fn windows_tray_flyout_position(
+    click_x: f64,
+    click_y: f64,
+    scale_factor: f64,
+) -> tauri::PhysicalPosition<i32> {
     let scale_factor = valid_windows_tray_scale_factor(scale_factor);
     let physical_width = (WINDOWS_TRAY_FLYOUT_WIDTH as f64 * scale_factor).round() as i32;
     let physical_height = (WINDOWS_TRAY_FLYOUT_HEIGHT as f64 * scale_factor).round() as i32;
@@ -899,7 +909,6 @@ pub(super) fn back_in_main_window(app: &tauri::AppHandle) {
 
 /// The displays in logical points (each one's physical frame over its own scale, which each `Display` keeps), and
 /// the index of the primary one.
-#[cfg(target_os = "macos")]
 pub(super) fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::window_state::Display>, usize) {
     use surfaces::window_state::{Display, PRect};
     let monitors = win.available_monitors().unwrap_or_default();
@@ -907,7 +916,12 @@ pub(super) fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::windo
         .iter()
         .map(|m| {
             Display::from_physical(
-                PRect { x: m.position().x, y: m.position().y, w: m.size().width, h: m.size().height },
+                PRect {
+                    x: m.position().x,
+                    y: m.position().y,
+                    w: m.size().width,
+                    h: m.size().height,
+                },
                 PRect {
                     x: m.work_area().position.x,
                     y: m.work_area().position.y,
@@ -922,7 +936,11 @@ pub(super) fn macos_displays(win: &tauri::WebviewWindow) -> (Vec<surfaces::windo
         .primary_monitor()
         .ok()
         .flatten()
-        .and_then(|p| monitors.iter().position(|m| m.name() == p.name() && m.position() == p.position()))
+        .and_then(|p| {
+            monitors
+                .iter()
+                .position(|m| m.name() == p.name() && m.position() == p.position())
+        })
         .unwrap_or(0);
     (displays, primary)
 }
@@ -1020,7 +1038,6 @@ pub(super) fn place_main_window(app: &tauri::AppHandle, win: &tauri::WebviewWind
     let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(frame.x, frame.y)));
 }
 
-
 /// The activation policy last applied: 0 unknown (the app starts Regular), 1 Dock icon, 2 none.
 #[cfg(target_os = "macos")]
 pub(super) static MACOS_DOCK_ICON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -1105,7 +1122,12 @@ pub(super) fn apply_macos_main_menu_state(app: &tauri::AppHandle, state: MainMen
 
 /// The Beebeeb window says whether Settings shows and whether a sheet is open; the menu follows (§8.2, F15).
 #[tauri::command]
-pub(super) fn main_window_state(app: tauri::AppHandle, window: tauri::WebviewWindow, settings_showing: bool, sheet_open: bool) {
+pub(super) fn main_window_state(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    settings_showing: bool,
+    sheet_open: bool,
+) {
     #[cfg(target_os = "macos")]
     if window.label() == surfaces::policy::main_window_label(surfaces::policy::Platform::current()) {
         apply_macos_main_menu_state(&app, main_menu_state(true, settings_showing, sheet_open));
@@ -1145,5 +1167,6 @@ pub(super) fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(super) fn window_state_denylist_labels() -> &'static [&'static str] {
-    &["tray", "windows-onboarding"]
+    // `main-app` keeps its own frame in logical points (`place_desktop_main_window`), so the plugin leaves it alone.
+    &["tray", "windows-onboarding", "main-app"]
 }

@@ -289,6 +289,11 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
+            // v2 w1: the main window's kept frame (or the fitted default), applied while it is still hidden.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(w) = app.get_webview_window(surfaces::policy::main_window_label(surfaces::policy::Platform::current())) {
+                place_desktop_main_window(&app.handle().clone(), &w);
+            }
             attach_tray_status_listener(&app.handle().clone());
             {
                 let app_state = app.state::<AppState>();
@@ -486,6 +491,8 @@ pub fn run() {
             // Task 1683 slice 1: the Beebeeb window's end resets the menu and saves its frame; the Dock icon follows.
             #[cfg(target_os = "macos")]
             macos_window_lifecycle(window, event);
+            #[cfg(not(target_os = "macos"))]
+            desktop_main_window_lifecycle(window, event);
         })
         .build(tauri::generate_context!())
         .expect("error while building Beebeeb desktop")

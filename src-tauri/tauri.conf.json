@@ -15,8 +15,8 @@
         "label": "tray",
         "title": "Beebeeb",
         "url": "index.html?window=tray",
-        "width": 400,
-        "height": 560,
+        "width": 364,
+        "height": 592,
         "resizable": false,
         "fullscreen": false,
         "visible": false,
@@ -42,15 +42,15 @@
         "label": "main-app",
         "title": "Beebeeb",
         "url": "index.html?window=main-app&platform=windows",
-        "width": 1100,
-        "height": 720,
+        "width": 1280,
+        "height": 800,
         "resizable": true,
         "fullscreen": false,
         "visible": false,
         "center": true,
         "decorations": false,
-        "minWidth": 880,
-        "minHeight": 560
+        "minWidth": 960,
+        "minHeight": 640
       }
     ],
     "security": {
