@@ -3,9 +3,13 @@
 // maximizes (Windows' own rule). Close hides the window: Beebeeb keeps running in the notification area
 // (DW-1201 Rules). Windows' own window keys (Win+Up, Win+Down) stay Windows'.
 
-import { useCallback, type ReactNode } from 'react'
+import '../fonts/fonts.css'
+import { useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { BBProductIcon } from '@beebeeb/shared/design'
 import { hasTauri } from '../source'
+import { GlobalBanner } from './Banners'
+import { CommandsDialogHost } from './CommandsDialog'
+import { ToastHost } from './Toast'
 
 type WindowAction = 'minimize' | 'toggleMaximize' | 'hide'
 
@@ -26,9 +30,10 @@ function Glyph({ children }: { children: ReactNode }) {
   )
 }
 
-function CaptionButton({ label, onClick, danger, children }: { label: string; onClick: () => void; danger?: boolean; children: ReactNode }) {
+function CaptionButton({ label, onClick, danger, children, buttonRef }: { label: string; onClick: () => void; danger?: boolean; children: ReactNode; buttonRef?: React.Ref<HTMLButtonElement> }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       aria-label={label}
       title={label}
@@ -40,7 +45,30 @@ function CaptionButton({ label, onClick, danger, children }: { label: string; on
   )
 }
 
-export function CaptionBar({ title }: { title: string }) {
+/** Snap layouts (spec 8.1): tell Rust where the maximize button is, in physical pixels of the client area, so the
+ *  window can answer WM_NCHITTEST with HTMAXBUTTON there. No-op outside Tauri and off Windows. */
+function useReportMaximizeRect(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current
+    if (!el || !hasTauri()) return
+    let cancelled = false
+    const report = async () => {
+      const r = el.getBoundingClientRect()
+      const k = window.devicePixelRatio || 1
+      const { invoke } = await import('@tauri-apps/api/core')
+      if (cancelled) return
+      invoke('v2_set_maximize_rect', { x: Math.round(r.left * k), y: Math.round(r.top * k), width: Math.round(r.width * k), height: Math.round(r.height * k) }).catch(() => {})
+    }
+    void report()
+    const observer = new ResizeObserver(() => { void report() })
+    observer.observe(document.documentElement)
+    window.addEventListener('resize', report)
+    return () => { cancelled = true; observer.disconnect(); window.removeEventListener('resize', report) }
+  }, [ref])
+}
+
+/** The bar alone (frames draw it without the live hosts). */
+export function CaptionBarView({ title, maximizeRef }: { title: string; maximizeRef?: React.Ref<HTMLButtonElement> }) {
   const onDoubleClick = useCallback(() => { void windowAction('toggleMaximize') }, [])
   return (
     <header
@@ -56,7 +84,7 @@ export function CaptionBar({ title }: { title: string }) {
         <CaptionButton label="Minimize" onClick={() => void windowAction('minimize')}>
           <Glyph><path d="M0 5.5h10" /></Glyph>
         </CaptionButton>
-        <CaptionButton label="Maximize" onClick={() => void windowAction('toggleMaximize')}>
+        <CaptionButton label="Maximize" buttonRef={maximizeRef} onClick={() => void windowAction('toggleMaximize')}>
           <Glyph><rect x=".5" y=".5" width="9" height="9" rx="1.5" /></Glyph>
         </CaptionButton>
         <CaptionButton label="Close" danger onClick={() => void windowAction('hide')}>
@@ -64,5 +92,19 @@ export function CaptionBar({ title }: { title: string }) {
         </CaptionButton>
       </span>
     </header>
+  )
+}
+
+export function CaptionBar({ title }: { title: string }) {
+  const maximizeRef = useRef<HTMLButtonElement>(null)
+  useReportMaximizeRect(maximizeRef)
+  return (
+    <>
+    <CaptionBarView title={title} maximizeRef={maximizeRef} />
+    {/* The window-wide elements B03 owns, mounted with the bar until the shell mounts them (PR body). */}
+    <GlobalBanner />
+    <ToastHost />
+    <CommandsDialogHost />
+    </>
   )
 }

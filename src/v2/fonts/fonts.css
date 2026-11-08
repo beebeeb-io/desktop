@@ -1,0 +1,8 @@
+/* Inter (people) and JetBrains Mono (sizes, times, codes), bundled so the window never falls back to system
+   fonts. Both are SIL OFL 1.1 (LICENSE-*.txt next to the files). Latin subset, the weights the board uses.
+   The CSP allows fonts from 'self' only: Vite emits these as same-origin assets. */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url('./inter-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; font-display: swap; src: url('./inter-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; font-display: swap; src: url('./inter-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('./jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('./jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
