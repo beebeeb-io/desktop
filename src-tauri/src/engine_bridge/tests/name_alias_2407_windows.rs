@@ -217,3 +217,16 @@ async fn keep_both_never_renames_the_file_a_short_name_reaches() {
         "nothing renamed, nothing written"
     );
 }
+
+/// A Windows reclaim (free up space, a selective-sync exclusion) never targets the file a real short name reaches.
+#[test]
+fn a_reclaim_never_targets_the_file_a_short_name_reaches() {
+    let Some((dir, short)) = aliased("Report for 2026.pdf", Some(b"precious")) else {
+        return;
+    };
+    assert_eq!(crate::name_alias::reclaim_place(dir.path(), &short), None);
+    assert_eq!(
+        crate::name_alias::reclaim_place(dir.path(), "Report for 2026.pdf"),
+        Some(dir.path().join("Report for 2026.pdf"))
+    );
+}

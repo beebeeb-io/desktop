@@ -78,6 +78,17 @@ pub(crate) fn refuse_conflict_under_roots(dest: &Path, roots: &[&Path]) -> io::R
     refuse_conflict_below(base, dest)
 }
 
+/// Where a Windows reclaim (free up space, a selective-sync exclusion) may dehydrate a row's file: its place below
+/// `sync_root`, built from the row's '/'-joined path; `None` for an empty path.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(crate) fn reclaim_place(sync_root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.trim_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    Some(sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+}
+
 /// The folders one pass has found to be their own names, so a pass over many rows looks each folder up once
 /// (`windows_cf::populate_placeholders` runs every tick, over every cloud-only row).
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]

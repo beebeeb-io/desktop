@@ -105,11 +105,9 @@ pub(super) fn dehydrate_excluded_subtrees_windows(
                 continue;
             }
         }
-        let rel = entry.path.trim_matches('/');
-        if rel.is_empty() {
+        let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &entry.path) else {
             continue;
-        }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        };
         let Ok(canonical) = local_path.canonicalize() else {
             continue;
         };

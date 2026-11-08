@@ -385,3 +385,177 @@ async fn a_request_edit_is_never_copied_into_a_folder_an_alias_reaches() {
         "no create is queued"
     );
 }
+
+// ── Delta round (review of #237) ──
+
+/// The kept-original retry never removes Office owner files through a FOLDER whose name reaches a different folder:
+/// the owner names are checked from the sync root, not from the original's own folder.
+#[test]
+fn the_retry_never_removes_owner_files_through_a_folder_an_alias_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, sync_root) = super::reg_1640::regression_1640_edited_file_in_a_folder(dir.path());
+    let rows = db.mark_subtree_trashing("folder-docs").unwrap();
+    remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
+    assert_eq!(
+        db.list_kept_copies().unwrap().len(),
+        1,
+        "precondition: the original waits for the retry"
+    );
+    let owner = sync_root.join("docs").join("~$notes.txt");
+    std::fs::write(&owner, b"the other folder's open document").unwrap();
+    let _alias = stub::alias(&sync_root.join("docs"));
+
+    retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::InSync);
+
+    assert!(
+        owner.is_file(),
+        "the owner file in the folder the name reaches is untouched"
+    );
+    assert_eq!(
+        std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
+        b"edited, never sent"
+    );
+}
+
+/// A Windows reclaim (free up space, a selective-sync exclusion) dehydrates a row's file only at its own place.
+#[test]
+fn a_reclaim_never_targets_the_file_an_alias_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let _alias = stub::alias(&root.join("Docs").join("REPORT~1.PDF"));
+    let _folder = stub::alias(&root.join("PHOTOS~1"));
+    let _failing = stub::failing(&root.join("Locked"));
+    assert_eq!(crate::name_alias::reclaim_place(root, "Docs/REPORT~1.PDF"), None);
+    assert_eq!(crate::name_alias::reclaim_place(root, "/PHOTOS~1/a.jpg"), None);
+    assert_eq!(
+        crate::name_alias::reclaim_place(root, "Locked/a.txt"),
+        None,
+        "a check that fails keeps it local"
+    );
+    assert_eq!(crate::name_alias::reclaim_place(root, ""), None);
+    assert_eq!(
+        crate::name_alias::reclaim_place(root, "/Docs/Report for 2026.pdf/"),
+        Some(root.join("Docs").join("Report for 2026.pdf"))
+    );
+}
+
+/// A request row's edit whose staged copy is gone reads the row's own file only: never a different file its name
+/// reaches, whose bytes would be copied and uploaded.
+#[tokio::test]
+async fn a_request_edit_never_reads_the_file_an_alias_reaches() {
+    use crate::owner_keys::OwnedKeyRecord;
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    const REQUEST: &str = "0f000000-0000-4000-8000-000000002412";
+    const FOLDER: &str = "40000000-0000-4000-8000-000000002412";
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync");
+    std::fs::create_dir_all(sync_root.join("Inbox")).unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    seed_folder_row(&bridge, FOLDER, "Inbox");
+    seed_bridge_row(
+        &bridge,
+        REQUEST,
+        "Inbox/REPORT~1.TXT",
+        Some(FOLDER),
+        FileStatus::Local,
+        4,
+    );
+    let derived = derive_file_key(&MasterKey::from_bytes([7; 32]), REQUEST.as_bytes());
+    let name = beebeeb_core::encrypt::encrypt_name_for(
+        &derived,
+        "report.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    bridge
+        .db()
+        .put_owned_key_record(&OwnedKeyRecord {
+            file_id: REQUEST.into(),
+            name_encrypted: name.clone(),
+            request_row: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let source = sync_root.join("Inbox").join("REPORT~1.TXT");
+    std::fs::write(&source, b"a different private file").unwrap();
+    let op = PendingOperation {
+        op_id: "op-2407-request-source".into(),
+        kind: OperationKind::UploadVersion,
+        file_id: Some(REQUEST.into()),
+        parent_id: Some(FOLDER.into()),
+        target_path: Some("Inbox/REPORT~1.TXT".into()),
+        metadata_json: Some(serde_json::json!({"name_encrypted": name}).to_string()),
+        // The staged copy is gone.
+        payload_path: Some(dir.path().join("gone.bin").to_string_lossy().into_owned()),
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 25,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let _alias = stub::alias(&source);
+
+    let error = anyhow::Error::from(
+        bridge
+            .upload_version(&op, None, &sync_root, &mut Vec::new())
+            .await
+            .unwrap_err(),
+    );
+
+    assert!(
+        conflict_in_chain(&error),
+        "a name conflict, not another failure: {error:#}"
+    );
+    assert_eq!(
+        names_in(&sync_root.join("Inbox")),
+        ["REPORT~1.TXT"],
+        "no copy of the other file is made"
+    );
+    assert!(
+        bridge
+            .db()
+            .list_files()
+            .unwrap()
+            .iter()
+            .all(|row| !row.path.contains("(edited")),
+        "no create is queued"
+    );
+}
+
+/// Keep Both off Windows moves by hard link, then removes the old name. When that removal fails, the new link is
+/// removed again and the error returned: no conflict copy is left, and no further numbered links are made.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn keep_both_whose_removal_after_the_link_fails_leaves_no_extra_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync-root");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    std::fs::write(sync_root.join("notes.txt"), b"local conflict bytes").unwrap();
+    let file_id = "bbbb0000-0000-4000-8000-000000002412";
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [15u8; 32]);
+    let entry = conflicted_row(&bridge, file_id, "notes.txt");
+    super::super::fs::FAIL_REMOVE_AFTER_LINK.with(|fail| fail.set(true));
+
+    let result = bridge.auto_resolve_keep_both(&sync_root, &entry).await;
+    super::super::fs::FAIL_REMOVE_AFTER_LINK.with(|fail| fail.set(false));
+
+    let error = result.unwrap_err();
+    assert!(
+        error.chain().any(|cause| cause.to_string().contains("ermission")),
+        "the removal's own error: {error:#}"
+    );
+    assert_eq!(
+        names_in(&sync_root),
+        ["notes.txt"],
+        "no conflict copy and no extra links are left"
+    );
+    assert_eq!(
+        std::fs::read(sync_root.join("notes.txt")).unwrap(),
+        b"local conflict bytes"
+    );
+}

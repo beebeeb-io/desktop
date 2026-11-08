@@ -262,8 +262,25 @@ pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
         std::fs::hard_link(from, to)?;
-        std::fs::remove_file(from)
+        remove_after_link(from, to)
     }
+}
+
+/// The second step of a move by hard link: remove the old name `from` (`to` is its new link).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn remove_after_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    let _ = to;
+    #[cfg(test)]
+    if FAIL_REMOVE_AFTER_LINK.with(std::cell::Cell::get) {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    std::fs::remove_file(from)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the removal after a hard link fails on this thread (an immutable file, a sticky folder).
+    pub(crate) static FAIL_REMOVE_AFTER_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `path` relative to `sync_root`, '/'-joined.
