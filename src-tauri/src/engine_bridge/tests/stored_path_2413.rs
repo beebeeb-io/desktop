@@ -114,29 +114,28 @@ fn task_2413_a_long_name_the_host_holds_is_stored() {
     ];
     let too_long = ["😀".repeat(128), format!("{}a", "漢".repeat(255))]; // 256 units each
     let root = tempfile::tempdir().unwrap();
-    let mut checked = 0;
+    let (mut checked, mut wrong) = (0, Vec::new());
     for windows in [true, false] {
         let _rules = HostRules::windows(windows);
         // Without the Windows rules the build's own length applies: macOS counts UTF-16 units too, Linux bytes.
         let holds = windows || cfg!(target_os = "macos");
         let dir = tempfile::tempdir().unwrap();
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
-        for (n, name) in held.iter().enumerate() {
+        for (n, name) in held.iter().chain(&too_long).enumerate() {
+            let expected = holds && n < held.len();
             let id = format!("a2000000-0000-4000-8000-{:02}{n:010}", u8::from(windows));
-            let entry = apply_own(&db, &row(&id, name, false, false), "docs");
-            let at = (name.encode_utf16().count(), name.len());
-            assert_eq!(entry.map(|e| e.path), holds.then(|| format!("docs/{name}")), "{at:?} (units, bytes), Windows rules: {windows}");
-            let mapped = crate::engine_bridge::local_file_path_under_sync_root(root.path(), &format!("docs/{name}"));
-            assert_eq!(mapped.is_ok(), holds, "{at:?} (units, bytes) onto the sync folder, Windows rules: {windows}");
-            checked += 1;
-        }
-        for (n, name) in too_long.iter().enumerate() {
-            let id = format!("a2100000-0000-4000-8000-{:02}{n:010}", u8::from(windows));
-            assert!(apply_own(&db, &row(&id, name, false, false), "docs").is_none(), "256 units, Windows rules: {windows}");
-            assert!(db.get_file(&id).unwrap().is_none());
+            let stored = apply_own(&db, &row(&id, name, false, false), "docs").map(|entry| entry.path);
+            let mapped = crate::engine_bridge::local_file_path_under_sync_root(root.path(), &format!("docs/{name}")).is_ok();
+            if stored != expected.then(|| format!("docs/{name}")) || db.get_file(&id).unwrap().is_some() != expected {
+                wrong.push(format!("stored {:?}", (name.encode_utf16().count(), name.len(), windows)));
+            }
+            if n < held.len() && mapped != holds {
+                wrong.push(format!("onto the sync folder {:?}", (name.encode_utf16().count(), name.len(), windows)));
+            }
             checked += 1;
         }
     }
+    assert!(wrong.is_empty(), "wrong for (UTF-16 units, bytes, Windows rules):\n{}", wrong.join("\n"));
     assert_eq!(checked, 2 * (5 + 2));
 }
 

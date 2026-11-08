@@ -174,13 +174,17 @@ fn task_2413_windows_the_store_refuses_names_windows_cannot_hold() {
         "😀".repeat(80),
         format!("{}a", "😀".repeat(127)),
     ];
+    let mut wrong = Vec::new();
     for (n, long) in held.iter().enumerate() {
         let id = format!("a1310000-0000-4000-8000-0000000001{n:02}");
         let row = serde_json::json!({ "id": id, "name_encrypted": long, "size_bytes": 1 });
         let entry = apply_metadata_file_row(&db, &row, Namespace::MyFiles, None, None, PERMISSION_READ, 100, &[7u8; 32], "docs");
-        assert_eq!(entry.unwrap().map(|e| e.path), Some(format!("docs/{long}")), "{} UTF-16 units", long.encode_utf16().count());
-        assert!(crate::engine_bridge::local_file_path_under_sync_root(dir.path(), &format!("docs/{long}")).is_ok());
+        let mapped = crate::engine_bridge::local_file_path_under_sync_root(dir.path(), &format!("docs/{long}")).is_ok();
+        if entry.unwrap().map(|e| e.path) != Some(format!("docs/{long}")) || !mapped {
+            wrong.push((long.encode_utf16().count(), long.len()));
+        }
     }
+    assert!(wrong.is_empty(), "not stored, as (UTF-16 units, bytes): {wrong:?}");
     let row = serde_json::json!({ "id": "a1310000-0000-4000-8000-0000000002ff", "name_encrypted": "😀".repeat(128), "size_bytes": 1 });
     let entry = apply_metadata_file_row(&db, &row, Namespace::MyFiles, None, None, PERMISSION_READ, 100, &[7u8; 32], "docs");
     assert!(entry.unwrap().is_none(), "256 UTF-16 units");
