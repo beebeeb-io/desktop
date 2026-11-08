@@ -113,10 +113,20 @@ impl EngineBridge {
 
     /// LD-0139 (spec Amendments 12c and 12d): the notice check a backup pass starts with: EVERY page of the backup
     /// notices from `since_ms` on (server clock), following `next_cursor` until it is null. The clock and `Date` are
-    /// the first page's (`crate::backup::stop::first_page`). A failure on any page, or a cursor seen twice, fails the
-    /// whole check (core's `CheckFailed`: no pass runs), in words with no server text; a partial listing is never
-    /// handed to core.
+    /// the first page's (`crate::backup::stop::first_page`). A failure on any page, a cursor seen twice, or more than
+    /// `MAX_NOTICE_PAGES` pages fails the whole check (core's `CheckFailed`: no pass runs), in words with no server
+    /// text; a partial listing is never handed to core.
     pub(crate) async fn backup_notice_check(&self, since_ms: i64) -> Result<crate::backup::stop::NoticeCheck, String> {
+        self.backup_notice_check_capped(since_ms, crate::backup::stop::MAX_NOTICE_PAGES).await
+    }
+
+    /// [`Self::backup_notice_check`] reading at most `max_pages` pages (review 2026-11-08: a server that keeps
+    /// answering new cursors ends in a failed check, not a tick that never returns).
+    pub(crate) async fn backup_notice_check_capped(
+        &self,
+        since_ms: i64,
+        max_pages: usize,
+    ) -> Result<crate::backup::stop::NoticeCheck, String> {
         let failed = |page: usize| {
             move |error: anyhow::Error| {
                 let error = EngineError::from(error);
@@ -130,6 +140,9 @@ impl EngineBridge {
         let mut page = 1;
         while let Some(cursor) = next {
             page += 1;
+            if page > max_pages {
+                return Err(format!("the notices listing has more than {max_pages} pages"));
+            }
             if !seen.insert(cursor.clone()) {
                 return Err(format!("the notices listing repeated a page at page {page}"));
             }

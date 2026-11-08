@@ -277,6 +277,11 @@ impl DesktopBackupHost {
         };
         let at_ms = chrono::Utc::now().timestamp_millis();
         let keys: Vec<String> = categories.iter().map(Category::key).collect();
+        // The queued uploads go first, before the marks are read (review 2026-11-08): a failed read below must not
+        // leave a backup that turns off with uploads still queued.
+        for key in &keys {
+            self.bridge.turn_off_backup_uploads(key).await.map_err(host_error("turn_off"))?;
+        }
         // Amendment 12d: every stopped backup stores core's set for it in the stop's write: the decided one its gate's
         // answer, each other one (a stop that covers every backup) its own window's ids.
         let mut marks = Vec::new();
@@ -294,9 +299,6 @@ impl DesktopBackupHost {
                     acknowledged,
                 });
             }
-        }
-        for key in &keys {
-            self.bridge.turn_off_backup_uploads(key).await.map_err(host_error("turn_off"))?;
         }
         db.record_backup_stops(&BackupStopWrite {
             reason: reason.as_str(),

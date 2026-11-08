@@ -1139,11 +1139,11 @@ use beebeeb_types::backup::Category;
                 assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "account_reset".to_string())]);
 
                 fx.restart();
-                assert_eq!(mark(&fx, "pictures").acknowledged, [reset_id.clone()], "after a restart");
+                assert_eq!(mark(&fx, "pictures").acknowledged, std::slice::from_ref(&reset_id), "after a restart");
                 // The card's "Back up again" is `set_known_folder_backup(key, true)`: the switch on, then `restart`.
                 switch_on(&["pictures"]);
                 crate::backup::stop::restart(&fx.bridge.db, "pictures").unwrap();
-                assert_eq!(mark(&fx, "pictures").acknowledged, [reset_id.clone()], "after Back up again");
+                assert_eq!(mark(&fx, "pictures").acknowledged, std::slice::from_ref(&reset_id), "after Back up again");
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
                 assert!(stops(&fx.bridge).is_empty(), "the acknowledged notice stops nothing: {:?}", report.passes);
                 assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
@@ -1214,7 +1214,8 @@ use beebeeb_types::backup::Category;
                     );
                     for key in ["pictures", "documents"] {
                         let acknowledged = mark(&fx, key).acknowledged;
-                        assert_eq!(acknowledged, [erase_id.clone()], "{table}: {key} acknowledged with its stop");
+                        let expected = std::slice::from_ref(&erase_id);
+                        assert_eq!(acknowledged, expected, "{table}: {key} acknowledged with its stop");
                     }
 
                     switch_on(&["pictures"]);
@@ -1231,4 +1232,51 @@ use beebeeb_types::backup::Category;
                 })
                 .await;
         }
+    }
+
+    /// Review (2026-11-08): only the backups this tick can gate set how far back the check reads. A stopped backup and
+    /// one refused because it sits inside the sync root have no last pass; neither pulls `since` down to 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_or_refused_backup_does_not_widen_the_notice_check() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents", "music"]);
+                let fx = Fixture::new();
+                let (pictures, music, sync_root) = (source_with(1), source_with(1), tempfile::tempdir().unwrap());
+                let inside = sync_root.path().join("Documents");
+                std::fs::create_dir(&inside).unwrap();
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let stop = crate::state_db::BackupStop { category: "music".into(), reason: "unknown".into(), at_ms: 1 };
+                fx.bridge.db.record_backup_stop(&stop).unwrap();
+
+                let sources = [
+                    (Category::Pictures, pictures.path()),
+                    (Category::Documents, inside.as_path()),
+                    (Category::Music, music.path()),
+                ];
+                let report = run(&fx, &sources, sync_root.path()).await;
+                assert_eq!(count_backup_ops(&fx.bridge), 1, "Pictures ran: {:?}", report.passes);
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                assert_eq!(asked.len(), 1);
+                let since = beebeeb_core::backup::notices_since(last);
+                assert_eq!(query_param(&asked[0].path, "since"), Some(since.to_string().as_str()));
+            })
+            .await;
+    }
+
+    /// Review (2026-11-08): the check reads at most its page cap; a listing that goes on past it fails the check
+    /// (core's `CheckFailed`), and one within it is read whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_past_the_page_cap_fails_the_check() {
+        let fx = Fixture::new();
+        *fx.server.notices.lock().unwrap() = Some(other_devices_notices(NOTICE_PAGE + 1, now_ms() - 60_000));
+        let error = fx.bridge.backup_notice_check_capped(0, 1).await.unwrap_err();
+        assert!(error.contains("more than 1 pages"), "{error}");
+        let check = fx.bridge.backup_notice_check_capped(0, 2).await.unwrap();
+        assert_eq!(check.notices.len(), NOTICE_PAGE + 1);
+        let requests = fx.server.finish();
+        assert_eq!(notice_requests(&requests).len(), 3, "1 page, then 2");
     }

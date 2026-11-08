@@ -191,18 +191,6 @@ pub(crate) async fn run_passes(
         tracing::warn!("backup: the sync root has no clean absolute spelling; no pass");
         return report;
     };
-    let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
-    let since = super::stop::check_since(bridge.db(), &enabled);
-    let check = match bridge.backup_notice_check(since).await {
-        Ok(check) => Some(check),
-        Err(error) => {
-            tracing::warn!(%error, "backup: the notices could not be checked; no pass (the next pass retries)");
-            None
-        }
-    };
-    report.check_failed = check.is_none();
-    let check_clock = check.as_ref().map_or(beebeeb_core::backup::RebuildClock::UNKNOWN, |check| check.clock);
-    let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
     // Review (2026-11-07): a backup with a stop row is off until "Back up again", even when its switch could not be
     // turned off; it is never passed.
     let stopped: Vec<String> = bridge
@@ -212,6 +200,30 @@ pub(crate) async fn run_passes(
         .into_iter()
         .map(|s| s.category)
         .collect();
+    let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
+    // Review (2026-11-08): only the backups this tick can gate decide how far back the check reads; a stopped or
+    // refused one (which may never get a last pass) would otherwise read every notice on every tick.
+    let gated: Vec<Category> = sources
+        .iter()
+        .filter(|s| !stopped.contains(&s.category.key()) && super::sources::check_source(&s.path, sync_root).is_ok())
+        .map(|s| s.category.clone())
+        .collect();
+    let check = if gated.is_empty() {
+        None
+    } else {
+        match bridge.backup_notice_check(super::stop::check_since(bridge.db(), &gated)).await {
+            Ok(check) => Some(check),
+            Err(error) => {
+                tracing::warn!(%error, "backup: the notices could not be checked; no pass (the next pass retries)");
+                report.check_failed = true;
+                None
+            }
+        }
+    };
+    let check_clock = check
+        .as_ref()
+        .map_or(beebeeb_core::backup::RebuildClock::UNKNOWN, |check| check.clock);
+    let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
     let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
     for source in sources {
         let category = source.category.clone();

@@ -36,6 +36,11 @@ pub(crate) fn check_failed() -> bool {
     CHECK_FAILED.load(Ordering::Relaxed)
 }
 
+/// The most pages one notice check reads (500 notices each, server LD-0141): 100,000 backup notices, far more than an
+/// account writes (one per removal run, one per step-up delete). A listing that goes on past it fails the check (core's
+/// `CheckFailed`), so a server that keeps answering new cursors cannot hold a tick forever.
+pub(crate) const MAX_NOTICE_PAGES: usize = 200;
+
 /// One complete read of the account's backup notices (every page), the server's clock when it answered the first
 /// page, and the device's offset from it, measured on that request.
 #[derive(Debug, Clone)]
@@ -81,6 +86,7 @@ pub(crate) fn read_page(body: &serde_json::Value) -> Result<(Vec<ListedNotice>, 
         None => return Err("the notices answer is not the filtered listing".into()),
     };
     let mut notices = Vec::with_capacity(rows.len());
+    let mut without_id = 0usize;
     for row in rows {
         let Some(notice) = row["type"]
             .as_str()
@@ -93,11 +99,17 @@ pub(crate) fn read_page(body: &serde_json::Value) -> Result<(Vec<ListedNotice>, 
             .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
             .map(|at| at.timestamp_millis())
             .ok_or("a notice has no readable time")?;
+        let id = row["id"].as_str().map(str::to_string);
+        without_id += usize::from(id.is_none());
         notices.push(ListedNotice {
-            id: row["id"].as_str().map(str::to_string),
+            id,
             notice,
             created_at_ms,
         });
+    }
+    if without_id > 0 {
+        // Core never acknowledges a notice without an id: it counts on every pass whose window holds it.
+        tracing::warn!(without_id, "backup: notices without an id; they are never acknowledged");
     }
     Ok((notices, next))
 }
@@ -450,7 +462,7 @@ mod tests {
         db.set_backup_last_pass("pictures", 2_000_000_000).unwrap();
         db.set_backup_last_pass("music", 1_000_000_000).unwrap();
         let (pictures, music, videos) = (Category::Pictures, Category::Music, Category::Videos);
-        assert_eq!(check_since(&db, &[pictures.clone()]), 2_000_000_000 - NOTICE_OVERLAP_MS);
+        assert_eq!(check_since(&db, std::slice::from_ref(&pictures)), 2_000_000_000 - NOTICE_OVERLAP_MS);
         assert_eq!(
             check_since(&db, &[pictures.clone(), music.clone()]),
             1_000_000_000 - NOTICE_OVERLAP_MS
@@ -579,7 +591,9 @@ mod tests {
         assert_eq!(decide(None, last, &[], &listing), PassDecision::CheckFailed);
     }
 
-    /// A stop that covers every backup gives each other stopped backup its own window's ids.
+    /// A stop that covers every backup gives each other stopped backup its own window's ids: EVERY id in the window,
+    /// a notice about another device's folder included (core's documented `acknowledged`, which does not depend on
+    /// the listing; this pins it, since `acknowledged_after` passes core a stand-in listing).
     #[test]
     fn the_acknowledged_set_after_a_check_is_the_backups_own_window() {
         let last = 10_000_000;
@@ -587,21 +601,29 @@ mod tests {
             listed("files_removed", serde_json::json!({}), last - 1),
             listed("files_removed", serde_json::json!({}), last - NOTICE_OVERLAP_MS - 1),
         );
-        let (new_id, old_id) = (new.id.clone().unwrap(), old.id.clone().unwrap());
-        let check = check_of(vec![new, old]);
+        let elsewhere = listed(
+            "backup_deleted",
+            serde_json::json!({ "device_folder_id": Uuid::new_v4().to_string() }),
+            last - 2,
+        );
+        let (new_id, old_id, elsewhere_id) =
+            (new.id.clone().unwrap(), old.id.clone().unwrap(), elsewhere.id.clone().unwrap());
+        let check = check_of(vec![new, old, elsewhere]);
         let mark = BackupPassMark {
             last_pass_at_ms: Some(last),
             setup_at_ms: None,
             acknowledged: vec![old_id.clone()],
         };
-        assert_eq!(acknowledged_after(&check, &mark, &Category::Music), [new_id.clone()]);
+        let mut in_window = vec![new_id, elsewhere_id];
+        in_window.sort();
+        assert_eq!(acknowledged_after(&check, &mark, &Category::Music), in_window);
         let before = BackupPassMark {
             last_pass_at_ms: Some(last - NOTICE_OVERLAP_MS),
             ..mark
         };
-        let mut both = vec![new_id, old_id];
-        both.sort();
-        assert_eq!(acknowledged_after(&check, &before, &Category::Music), both);
+        let mut all = [in_window, vec![old_id]].concat();
+        all.sort();
+        assert_eq!(acknowledged_after(&check, &before, &Category::Music), all);
     }
 
     /// The acknowledged set is stored with the last pass, read back after a restart (the state DB reopened), and kept
