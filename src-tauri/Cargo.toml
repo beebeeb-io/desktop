@@ -20,6 +20,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
 # Folder picker for the first-launch sync-root chooser (spec 030 step 2)
 tauri-plugin-dialog = "2"
+# v2 b14: the QR code of the TOTP set-up URI (DW-A69), drawn by the web view from module rows.
+qrcode = { version = "0.14", default-features = false }
 # Native OS notifications — Phase 4 Task 11 of the desktop sync client
 # plan. Used by the daemon to alert the user when a conflict is
 # detected (banner on macOS, toast on Windows, libnotify on Linux).
@@ -142,13 +144,13 @@ rand = "0.8"
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
 # 124389a8 = the core v0.2.7 tag: `path_safety::short_name_alias` and `TempSibling` (task 2407).
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -327,7 +329,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "124389a82755970b5ec1722c323a0c08fa909e43", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new
