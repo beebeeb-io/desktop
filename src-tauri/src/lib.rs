@@ -223,6 +223,9 @@ use file_open_commands::*;
 pub(crate) use file_open_commands::{reject_unsafe_rel_path, is_contained, FreeUpSpaceResult, free_up_space_blocking};
 mod settings_commands;
 use settings_commands::*;
+// Task 2409: the "Not sent" list and its Try again.
+mod unsent_changes_commands;
+use unsent_changes_commands::*;
 mod vault_tree;
 use vault_tree::*;
 mod account_commands;

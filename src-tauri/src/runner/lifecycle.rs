@@ -8,6 +8,8 @@ use super::*;
 pub struct SendPhaseLink {
     pub(super) armed: AtomicBool,
     pub(crate) wake: tokio::sync::Notify,
+    /// Task 2409: Try again on a change that failed asks for a queue step now, not at the next tick (`Wake::Nudge`).
+    pub(crate) nudge: tokio::sync::Notify,
     pub(super) link: std::sync::OnceLock<Arc<crate::link_health::LinkMonitor>>,
     pub(super) signals: Mutex<AttemptSignals>,
 }
@@ -41,6 +43,11 @@ impl SendPhaseLink {
     pub fn wake(&self) {
         self.wake.notify_one();
     }
+    /// Task 2409: one queue step as soon as the runner is free (`Wake::Nudge`). A nudge sent while a tick runs is kept
+    /// (`notify_one` stores a permit), so the step follows that tick.
+    pub fn nudge(&self) {
+        self.nudge.notify_one();
+    }
     /// §6.1 condition 3: the link monitor has a failure since its last good answer.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn link_failed(&self) -> bool {
@@ -72,12 +79,22 @@ pub(crate) fn phase_step_due(
     armed && !mode.is_paused() && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
 }
 
+/// Task 2409 (self-review): how long a Try again's nudge waits before its queue step, when it came within the second
+/// after the last one (`phase_step_due`'s rate limit). `None`: it runs now. The arm asks again once the wait is out,
+/// so a second Try again in quick succession is deferred, never dropped until the next tick.
+pub(crate) fn nudge_wait(last_run: Option<std::time::Instant>, now: std::time::Instant) -> Option<Duration> {
+    let wait = Duration::from_secs(1).saturating_sub(now.duration_since(last_run?));
+    (!wait.is_zero()).then_some(wait)
+}
+
 /// What woke the runner's loop (spec 2026-10-10 §6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Wake {
     Cancel,
     Tick,
     Phase,
+    /// Task 2409: a change was made due again (Try again): the queue step alone, as the phase runs it.
+    Nudge,
 }
 
 /// Spec D11 (task 1888): the account's resume requests, shared with the engine. `asked` counts the sign-ins that asked

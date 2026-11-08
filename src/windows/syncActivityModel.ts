@@ -130,6 +130,11 @@ export interface SyncActivityView {
   pausable: boolean
   /** The live pause flag (or the caller's fallback when the summary is unavailable). */
   paused: boolean
+  /**
+   * Task 2409: the lines (headline or details) that count changes not sent: waiting, held and given up. The tray draws
+   * each as a link to Activity › Not sent, where those changes are listed one by one.
+   */
+  notSentLines: string[]
 }
 
 export interface SyncActivityOptions {
@@ -234,7 +239,7 @@ export function syncActivityView(
   const device = options.device ?? 'this PC'
   const now = options.now ?? new Date()
   const paused = summary?.paused ?? options.pausedFallback ?? false
-  const base = { details: [] as string[], progress: null, pausable: status?.logged_in === true, paused }
+  const base = { details: [] as string[], progress: null, pausable: status?.logged_in === true, paused, notSentLines: [] as string[] }
 
   if (status == null && summary == null) {
     return summary === undefined
@@ -254,6 +259,8 @@ export function syncActivityView(
   const gaveUp = queue?.gave_up ?? 0
   const heldLines = held.map((group) => heldSentence(group, now))
   const gaveUpLines = gaveUp > 0 ? [gaveUpSentence(gaveUp)] : []
+  const pausedWaitLine = `${plural(waiting, 'change waits', 'changes wait')} until you resume.`
+  const notSentLines = [...(waiting > 0 ? [waitingSentence(waiting), pausedWaitLine] : []), ...heldLines, ...gaveUpLines]
   const moving = summary
     ? summary.transfers_active > 0 || summary.engine_state === 'syncing'
     : (status?.syncing ?? 0) > 0
@@ -272,6 +279,7 @@ export function syncActivityView(
     extra: { waitingLine?: boolean; progress?: StartupCheck | null; lead?: string[] } = {},
   ): SyncActivityView => ({
     ...base,
+    notSentLines,
     kind,
     label,
     headline,
@@ -294,7 +302,7 @@ export function syncActivityView(
       waitingLine: false,
       progress: check,
       lead: [
-        ...(waiting > 0 ? [`${plural(waiting, 'change waits', 'changes wait')} until you resume.`] : []),
+        ...(waiting > 0 ? [pausedWaitLine] : []),
         ...(checkLine ? [checkLine] : []),
       ],
     })
@@ -329,7 +337,7 @@ export function syncActivityView(
     const [headline, ...rest] = [...heldLines, ...gaveUpLines]
     // "Not in sync", not "On hold": the engine runs and new changes flow; these changes are simply not synced. "Paused"
     // is only ever a pause the person made (coordinator ruling, 26 Oct). The held sentence is the notice.
-    return { ...base, kind: 'not_in_sync', label: 'Not in sync', headline, details: rest, tone: 'attention' }
+    return { ...base, notSentLines, kind: 'not_in_sync', label: 'Not in sync', headline, details: rest, tone: 'attention' }
   }
   if (status?.engine === 'locked') {
     return pick('locked', 'Locked', 'Beebeeb is locked. Unlock it to sync.', 'neutral')

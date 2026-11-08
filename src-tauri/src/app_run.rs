@@ -190,6 +190,9 @@ pub fn run() {
             tray_pause_sync,
             tray_resume_sync,
             sync_activity_summary,
+            // Task 2409 — the "Not sent" list on Activity, and Try again
+            unsent_changes,
+            retry_unsent_change,
             found_while_paused_review,
             found_while_paused_upload,
             found_while_paused_keep,
