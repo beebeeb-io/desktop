@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 mod account;
 mod v2_snap; // v2 b03
+mod auth_v2; // v2 b10
 mod account_binding;
 mod account_dto;
 mod api_client;
