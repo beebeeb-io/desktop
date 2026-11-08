@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState, type ComponentType, type ReactElement
 import { Icon, type IconName } from '@beebeeb/shared/design'
 import { Ctx, type PaneId } from './context'
 import { BASE_PANES, DIALOGS } from './panes'
-import { PANES_TODAY } from '../panes-today'
+import { PANES_TODAY, DIALOGS_TODAY } from '../panes-today'
 import { PANES_ACCOUNT } from '../panes-account'
 
 const SETTINGS: { id: PaneId; label: string; icon: IconName }[] = [
@@ -19,9 +19,10 @@ const DRIVE: { id: PaneId; label: string; icon: IconName }[] = [
   { id: 'backups', label: 'Backups', icon: 'upload' },
   { id: 'sync', label: 'Sync and File Explorer', icon: 'folder' },
   { id: 'thumbnails', label: 'Thumbnails and previews', icon: 'image' },
+  { id: 'bandwidth', label: 'Bandwidth', icon: 'activity' },
 ]
 /** Panes that live under another sidebar entry. */
-const PARENT: Partial<Record<PaneId, PaneId>> = { about: 'general', compare: 'thumbnails', 'backup-failures': 'backups', device: 'backups' }
+const PARENT: Partial<Record<PaneId, PaneId>> = { about: 'general', compare: 'thumbnails', 'backup-failures': 'backups', device: 'backups', insights: 'storage', recent: 'notifications', location: 'general', diagnostics: 'general' }
 
 function Missing({ pane }: { pane: string }) {
   return <div className="grid flex-1 place-items-center text-[13px] text-ink-3">The {pane} pane is not available in this build.</div>
@@ -49,7 +50,7 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
 
   const panes: Partial<Record<PaneId, ComponentType>> = { ...BASE_PANES, ...PANES_TODAY, ...PANES_ACCOUNT }
   const Pane = panes[pane]
-  const Dlg = dialog ? DIALOGS[dialog.split(':')[0]] : undefined
+  const Dlg = dialog ? { ...DIALOGS, ...DIALOGS_TODAY }[dialog.split(':')[0]] : undefined
   const active = PARENT[pane] ?? pane
 
   const item = (i: { id: PaneId; label: string; icon: IconName }) => (
