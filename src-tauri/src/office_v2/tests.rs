@@ -63,3 +63,23 @@ fn the_scheme_serves_pinned_paths_only() {
     assert_eq!(resolve(&bundle, "/v2/soffice.wasm"), None);
     assert_eq!(resolve(&bundle, "/v1/other.js"), None);
 }
+
+#[test]
+fn an_engine_answer_carries_the_isolation_headers() {
+    let resp = engine_response("text/html", b"<!doctype html>".to_vec()).unwrap();
+    let h = resp.headers();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(h.get("Content-Type").unwrap(), "text/html");
+    assert_eq!(h.get("Cross-Origin-Opener-Policy").unwrap(), "same-origin");
+    assert_eq!(h.get("Cross-Origin-Embedder-Policy").unwrap(), "require-corp");
+    // The window is another origin: a COEP require-corp window embeds the engine frame only with CORP cross-origin.
+    assert_eq!(h.get("Cross-Origin-Resource-Policy").unwrap(), "cross-origin");
+}
+
+#[test]
+fn the_main_window_is_cross_origin_isolated_by_config() {
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+    let headers = &conf["app"]["security"]["headers"];
+    assert_eq!(headers["Cross-Origin-Opener-Policy"], "same-origin");
+    assert_eq!(headers["Cross-Origin-Embedder-Policy"], "require-corp");
+}
