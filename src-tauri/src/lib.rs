@@ -228,6 +228,7 @@ mod settings_commands;
 mod passkey_commands; // v2 b15
 #[cfg(target_os = "windows")]
 mod passkey_windows; // v2 b15
+mod share_v2; // v2 b05
 use settings_commands::*;
 // Task 2409: the "Not sent" list and its Try again.
 mod unsent_changes_commands;
