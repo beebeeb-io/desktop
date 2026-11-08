@@ -47,7 +47,7 @@ import {
 } from '../downloadProgressCopy'
 import { pollWhileVisible } from '../visiblePoll'
 import { useSyncActivitySummary } from '../syncActivityUi'
-import { notSentCount } from '../homeSyncMetrics'
+import { notDownloadedCount, notSentCount } from '../homeSyncMetrics'
 import { NotSentSection } from './NotSentSection'
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
@@ -678,25 +678,52 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
   )
 }
 
+// ── Not sent / Not downloaded ────────────────────────────────────────────────
+
+/**
+ * Task 2409: the "Not sent" section shows while the counts say something is not sent, or when a link opened it (it then
+ * says so when nothing is left). Task 2414: "Not downloaded" next to it, the same way. The counts are the polled
+ * summary's; the names are read by each section only. Rendered on the Timeline tab only, so the summary is polled only
+ * while these sections can show (2409 review P3: every tab polled it, and each read opens the state DB).
+ */
+function QueueSections({
+  notSentFocus,
+  notDownloadedFocus,
+  onOpenSettings,
+}: {
+  notSentFocus: number
+  notDownloadedFocus: number
+  onOpenSettings?: () => void
+}) {
+  const { summary } = useSyncActivitySummary()
+  const notSent = notSentCount(summary) ?? 0
+  const notDownloaded = notDownloadedCount(summary) ?? 0
+  return (
+    <>
+      {(notSent > 0 || notSentFocus > 0) && <NotSentSection focus={notSentFocus} onOpenSyncSettings={onOpenSettings} />}
+      {(notDownloaded > 0 || notDownloadedFocus > 0) && <NotSentSection list="not-downloaded" focus={notDownloadedFocus} />}
+    </>
+  )
+}
+
 // ── Root ─────────────────────────────────────────────────────────────────────
 
 export default function ActivityView({
   notSentFocus = 0,
+  notDownloadedFocus = 0,
   onOpenSettings,
 }: {
   /** Task 2409: bumped by a link to Activity › Not sent (Home's figure, the tray's lines). */
   notSentFocus?: number
+  /** Task 2414: bumped by a link to Activity › Not downloaded. */
+  notDownloadedFocus?: number
   onOpenSettings?: () => void
 } = {}) {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
-  // Task 2409: the "Not sent" section shows while the counts say something is not sent, or when a link opened it (it
-  // then says so when nothing is left). The counts are the polled summary's; the names are read by the section only.
-  const { summary } = useSyncActivitySummary()
-  const notSent = notSentCount(summary) ?? 0
   useEffect(() => {
-    if (notSentFocus > 0) setTab('timeline')
-  }, [notSentFocus])
+    if (notSentFocus > 0 || notDownloadedFocus > 0) setTab('timeline')
+  }, [notSentFocus, notDownloadedFocus])
   const allTransfers = useActiveTransfers()
   // Download rows active, needing attention, or failed within the last 15 min; never an upload (U0 design).
   const liveTransfers = inProgressCardRows(allTransfers)
@@ -716,9 +743,10 @@ export default function ActivityView({
 
       <TabBar active={tab} onChange={setTab} />
 
-      {/* Task 2409: "Not sent" — every change on this PC that has not reached Beebeeb, one row each. */}
-      {tab === 'timeline' && (notSent > 0 || notSentFocus > 0) && (
-        <NotSentSection focus={notSentFocus} onOpenSyncSettings={onOpenSettings} />
+      {/* Task 2409: "Not sent" — every change on this PC that has not reached Beebeeb, one row each; task 2414: "Not
+          downloaded" — a pin's files that did not reach this PC. */}
+      {tab === 'timeline' && (
+        <QueueSections notSentFocus={notSentFocus} notDownloadedFocus={notDownloadedFocus} onOpenSettings={onOpenSettings} />
       )}
 
       {/* "In progress" card — shown above Timeline when files are arriving (LD-0105 U1). */}

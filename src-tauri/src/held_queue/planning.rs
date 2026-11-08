@@ -188,23 +188,19 @@ pub fn plan(
         {
             continue;
         }
-        let row = op.file_id.as_deref().and_then(|id| row_of.get(id));
-        // Replaying it would make old content current: the server already holds this file, or a newer version of it.
-        let superseded = row.is_some_and(|row| {
-            (op.create_file && row.server_known)
-                || (op.kind == "upload_version" && !op.create_file && op.base_version.is_some_and(|b| row.current_version > b))
-        });
+        let row = op.file_id.as_deref().and_then(|id| row_of.get(id)).copied();
         let op_id = op.op_id.clone();
-        if superseded && person_paused {
+        let block = presend_block(op, row, payload_exists);
+        if block == Some(PresendBlock::Superseded) && person_paused {
             continue;
         }
-        if superseded {
+        if block == Some(PresendBlock::Superseded) {
             counts.rearm_superseded += 1;
             match remap.map(|at| &mut remaps[at]) {
                 Some(Unit::Remap { hold, .. }) => hold.push(op_id),
                 _ => holds.push(Unit::Hold { op_id }),
             }
-        } else if UPLOAD_KINDS.contains(&op.kind.as_str()) && !op.payload_path.as_deref().is_some_and(payload_exists) {
+        } else if block == Some(PresendBlock::NoPayload) {
             counts.rearm_no_payload += 1;
         } else {
             if person_paused {
@@ -237,6 +233,33 @@ pub fn plan(
     units.extend(rearms);
     deepest_first(&mut counts.scaffold_dirs);
     (units, counts)
+}
+
+/// Why an op is not sent again (spec D8): the reconcile pass's two checks before it re-arms one, and Try again's before it
+/// makes a failed change due (task 2414).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresendBlock {
+    /// Replaying it would make old content current: the server already holds this file (a create), or a newer version
+    /// of it than the one the edit was made on.
+    Superseded,
+    /// An upload whose staged copy is gone: sent again, it only fails again.
+    NoPayload,
+}
+
+/// Spec D8's checks for one op, in the pass's order: superseded first, then the staged copy. `row` is the op's file row,
+/// if any; `payload_exists` says whether a staged copy is still on disk.
+pub fn presend_block(op: &Op, row: Option<&Row>, payload_exists: &dyn Fn(&str) -> bool) -> Option<PresendBlock> {
+    let superseded = row.is_some_and(|row| {
+        (op.create_file && row.server_known)
+            || (op.kind == "upload_version" && !op.create_file && op.base_version.is_some_and(|b| row.current_version > b))
+    });
+    if superseded {
+        Some(PresendBlock::Superseded)
+    } else if UPLOAD_KINDS.contains(&op.kind.as_str()) && !op.payload_path.as_deref().is_some_and(payload_exists) {
+        Some(PresendBlock::NoPayload)
+    } else {
+        None
+    }
 }
 
 /// `≡` as a lookup key: two names are `same_leaf` exactly when their keys are equal (spec §3).

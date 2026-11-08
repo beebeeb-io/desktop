@@ -34,7 +34,7 @@ const summaries = {
   'on-hold': { ...onHoldFixture, engine_state: 'idle', startup_check: null, last_tick_ok_at: now - 120 },
   checking: { ...onHoldFixture },
   syncing: { ...onHoldFixture, engine_state: 'syncing', files_remaining: 12, transfers_active: 3, startup_check: null, last_tick_ok_at: now - 30 },
-  'up-to-date': { paused: false, engine_state: 'idle', files_remaining: null, transfers_active: 0, last_tick_ok_at: now - 20, queue: { waiting: 0, gave_up: 0, held: [] }, startup_check: null },
+  'up-to-date': { paused: false, engine_state: 'idle', files_remaining: null, transfers_active: 0, last_tick_ok_at: now - 20, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 }, startup_check: null },
   paused: { ...onHoldFixture, paused: true, engine_state: 'paused', startup_check: null, queue: { ...onHoldFixture.queue, waiting: 7 } },
 }
 

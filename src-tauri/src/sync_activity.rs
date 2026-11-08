@@ -78,6 +78,7 @@ mod tests {
                     oldest_at: 1_791_115_500,
                     newest_at: 1_791_122_220,
                 }],
+                not_downloaded: 0,
             }),
         )
     }

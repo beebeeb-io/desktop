@@ -10,7 +10,10 @@ import {
   UNSENT_PAGE_SIZE,
   baseName,
   folderOf,
+  keepRowStates,
   kindWord,
+  notDownloadedAction,
+  notDownloadedReason,
   loadUnsentChanges,
   parseUnsentChanges,
   retryRefusal,
@@ -35,6 +38,7 @@ const base: UnsentChange = {
   retry_at: null,
   parked: false,
   retryable: false,
+  blocked: null,
   sending: null,
 }
 const idle = { engineState: 'idle', paused: false, now: new Date(2026, 10, 8, 13, 0) }
@@ -190,5 +194,95 @@ describe('the loader', () => {
     const malformed = (async () => ({ ok: true, value: { total: 'x' } })) as unknown as typeof import('../src/desktopApi').command
     const result: CommandResult<UnsentChangesPage> = await loadUnsentChanges(100, malformed)
     expect(result.ok).toBe(false)
+  })
+})
+
+// ── Task 2414 ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('task 2414: a failed change Try again would not send says why, and has no Try again', () => {
+  test('the copy to send is gone; a newer version is already in Beebeeb', () => {
+    expect(reason({ group: 'gave_up', blocked: 'copy_gone' })).toEqual({ text: 'Can’t send: the copy to send is gone.', attention: true })
+    expect(reason({ group: 'gave_up', kind: 'edit', blocked: 'superseded' }).text).toBe('Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.')
+    expect(reason({ group: 'gave_up', kind: 'new_file', blocked: 'superseded' }).text).toBe('Can’t send: this file is already in Beebeeb. Nothing was overwritten.')
+    expect(reason({ group: 'gave_up', blocked: 'a-later-reason' })).toEqual({ text: 'Can’t send it as it is.', attention: true })
+    expect(unsentAction({ ...base, group: 'gave_up', blocked: 'copy_gone' })).toBeNull()
+  })
+
+  test('one still backing off says when the engine tries it again (it does, all the same), with no Try again', () => {
+    const item = { ...base, group: 'waiting', retry_at: new Date(2026, 10, 8, 14, 5).getTime() / 1000, blocked: 'superseded' }
+    expect(reason(item)).toEqual({ text: 'Couldn’t send; trying again at 14:05', attention: true })
+    expect(unsentAction(item)).toBeNull()
+  })
+
+  test('a refused Try again says why', () => {
+    expect(retryRefusal('superseded')).toBe('A newer version of this file is already in Beebeeb, so this change isn’t sent over it. Nothing was overwritten.')
+    expect(retryRefusal('copy_gone')).toBe('The copy to send is gone, so trying again can’t send it.')
+  })
+
+  test('the wire carries blocked as a word or null; anything else is no page', () => {
+    const page = (blocked: unknown) => ({ ...fixture, items: [{ ...fixture.items[0], blocked }] })
+    expect(parseUnsentChanges(page('copy_gone'))?.items[0].blocked).toBe('copy_gone')
+    expect(parseUnsentChanges(page(null))?.items[0].blocked).toBeNull()
+    expect(parseUnsentChanges(page(7))).toBeNull()
+    const { blocked: _, ...without } = fixture.items[0]
+    expect(parseUnsentChanges({ ...fixture, items: [without] })).toBeNull()
+  })
+})
+
+describe('task 2414: "Not downloaded" rows', () => {
+  test('a download is a kind of its own; a stopped or paused one reads as "Not sent" words it; no Try again', () => {
+    expect(kindWord('download')).toBe('Download')
+    const page = { ...fixture, items: [{ ...fixture.items[0], id: 'pin-1', kind: 'download', group: 'gave_up', retryable: false }] }
+    const parsed = parseUnsentChanges(page)
+    expect(parsed?.items[0].kind).toBe('download')
+    const item = parsed!.items[0]
+    expect(reason(item).text).toBe('Stopped after repeated errors')
+    expect(unsentAction(item)).toBeNull()
+    expect(reason({ ...item, group: 'auth' }).text).toBe('On hold until you sign in again')
+  })
+
+  test('its own words: never an upload’s sentence or action for a pause the queue never gives a download', () => {
+    const row = { ...base, kind: 'download' as const }
+    expect(notDownloadedReason({ ...row, group: 'gave_up' })).toEqual({ text: 'Stopped after repeated errors', attention: true })
+    expect(notDownloadedReason({ ...row, group: 'auth' })).toEqual({ text: 'On hold until you sign in again', attention: true })
+    expect(notDownloadedReason({ ...row, group: 'locked' })).toEqual({ text: 'On hold while Beebeeb is locked', attention: false })
+    for (const group of ['quota', 'found_while_paused', 'permission', 'needs_review', 'other']) {
+      expect(notDownloadedReason({ ...row, group })).toEqual({ text: 'On hold', attention: true })
+      expect(notDownloadedAction({ ...row, group })).toBeNull()
+    }
+    expect(notDownloadedAction({ ...row, group: 'auth' })).toEqual({ kind: 'sign_in_again', label: 'Sign in again' })
+    expect(notDownloadedAction({ ...row, group: 'gave_up' })).toBeNull()
+  })
+
+  test('the loader reads the list it is given', async () => {
+    const names: string[] = []
+    const call = (async (name: string) => {
+      names.push(name)
+      return { ok: true, value: { ...fixture, total: 0, items: [] } }
+    }) as unknown as typeof import('../src/desktopApi').command
+    await loadUnsentChanges(100, call, 'not_downloaded')
+    await loadUnsentChanges(100, call)
+    expect(names).toEqual(['not_downloaded', 'unsent_changes'])
+    const malformed = (async () => ({ ok: true, value: { total: 'x' } })) as unknown as typeof import('../src/desktopApi').command
+    expect(await loadUnsentChanges(100, malformed, 'not_downloaded')).toEqual({ ok: false, reason: 'The list of files not downloaded could not be read.', unsupported: false })
+  })
+})
+
+describe('task 2414 (2409 review P3): "Queued" holds until a read shows the change moving', () => {
+  const waiting: UnsentChange = { ...base, id: 'a', group: 'waiting' }
+  test('kept while the change waits its turn; an action in flight always kept', () => {
+    expect(keepRowStates({ a: 'queued', b: 'busy' }, [waiting])).toEqual({ a: 'queued', b: 'busy' })
+  })
+  test('dropped once it moves: sending, failed again, given up, held, blocked, or gone', () => {
+    for (const moved of [
+      { ...waiting, sending: { done: 1, total: 10 } },
+      { ...waiting, retry_at: 99, retryable: true },
+      { ...waiting, group: 'gave_up', retryable: true },
+      { ...waiting, group: 'auth' },
+      { ...waiting, blocked: 'copy_gone' },
+    ]) {
+      expect(keepRowStates({ a: 'queued' }, [moved])).toEqual({})
+    }
+    expect(keepRowStates({ a: 'queued' }, [])).toEqual({})
   })
 })

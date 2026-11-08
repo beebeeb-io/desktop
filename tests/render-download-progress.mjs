@@ -151,7 +151,7 @@ const idleSummary = {
   files_remaining: null,
   transfers_active: 0,
   last_tick_ok_at: NOW - 20,
-  queue: { waiting: 0, gave_up: 0, held: [] },
+  queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 },
   startup_check: null,
 }
 

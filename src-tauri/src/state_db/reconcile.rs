@@ -2,6 +2,54 @@
 
 use super::*;
 
+/// A `files` row as the reconcile pass reads it ([`crate::held_queue::Row`]): these columns, through [`reconcile_row`].
+const RECONCILE_ROW_COLUMNS: &str = "file_id, NULLIF(parent_id, ''), path, item_kind = 'folder',
+     current_version > 0 OR remote_updated_at > 0, current_version";
+
+fn reconcile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::held_queue::Row> {
+    Ok(crate::held_queue::Row {
+        file_id: row.get(0)?,
+        parent_id: row.get(1)?,
+        path: row.get(2)?,
+        is_folder: row.get(3)?,
+        server_known: row.get(4)?,
+        current_version: row.get(5)?,
+    })
+}
+
+/// An `operation_queue` row as the reconcile pass reads it ([`crate::held_queue::Op`]): these columns, through
+/// [`reconcile_op`].
+const RECONCILE_OP_COLUMNS: &str = "op_id, kind, NULLIF(file_id, ''), NULLIF(parent_id, ''), target_path,
+     kind IN ('upload_version', 'upload_file') AND COALESCE(CASE WHEN json_valid(metadata_json)
+         THEN json_extract(metadata_json, '$.operation') = 'create_file' END, 0),
+     paused_reason,
+     attempts >= max_attempts AND paused_reason IS NULL AND last_error_class IS NULL,
+     last_error_class IS NOT NULL, last_error, payload_path, base_version";
+
+fn reconcile_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::held_queue::Op> {
+    Ok(crate::held_queue::Op {
+        op_id: row.get(0)?,
+        kind: row.get(1)?,
+        file_id: row.get(2)?,
+        parent_id: row.get(3)?,
+        target_path: row.get(4)?,
+        create_file: row.get(5)?,
+        paused_reason: row.get(6)?,
+        given_up: row.get(7)?,
+        parked: row.get(8)?,
+        last_error: row.get(9)?,
+        payload_path: row.get(10)?,
+        base_version: row.get(11)?,
+    })
+}
+
+/// Whether an upload's staged copy is still on disk, as the pass asks it. Gone means `NotFound`, as the uploader reads
+/// it (`engine_bridge/upload.rs`: any other read error retries); a copy that cannot be read just now is not gone
+/// (task 2414 self-review: `Path::exists` said gone on a permission error).
+fn payload_on_disk(path: &str) -> bool {
+    !matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Tasks 1888 + 2226 (spec §3): the rows and ops the reconcile pass plans over, read in one transaction. Rows in rowid
 /// order, so folders at the same depth are decided in the order they were written; ops in the queue's order.
 pub(super) fn reconcile_plan_conn(
@@ -9,52 +57,51 @@ pub(super) fn reconcile_plan_conn(
     opts: &crate::held_queue::Options,
     disk_has_file: &dyn Fn(&str) -> bool,
 ) -> Result<(Vec<crate::held_queue::Unit>, crate::held_queue::Counts)> {
-    use crate::held_queue::{Op, Row};
     let rows = conn
-        .prepare(
-            "SELECT file_id, NULLIF(parent_id, ''), path, item_kind = 'folder',
-                    current_version > 0 OR remote_updated_at > 0, current_version
-             FROM files ORDER BY rowid",
-        )?
-        .query_map([], |row| {
-            Ok(Row {
-                file_id: row.get(0)?,
-                parent_id: row.get(1)?,
-                path: row.get(2)?,
-                is_folder: row.get(3)?,
-                server_known: row.get(4)?,
-                current_version: row.get(5)?,
-            })
-        })?
+        .prepare(&format!("SELECT {RECONCILE_ROW_COLUMNS} FROM files ORDER BY rowid"))?
+        .query_map([], reconcile_row)?
         .collect::<Result<Vec<_>>>()?;
     let ops = conn
-        .prepare(&format!(
-            "SELECT op_id, kind, NULLIF(file_id, ''), NULLIF(parent_id, ''), target_path,
-                    kind IN ('upload_version', 'upload_file') AND COALESCE(CASE WHEN json_valid(metadata_json)
-                        THEN json_extract(metadata_json, '$.operation') = 'create_file' END, 0),
-                    paused_reason,
-                    attempts >= max_attempts AND paused_reason IS NULL AND last_error_class IS NULL,
-                    last_error_class IS NOT NULL, last_error, payload_path, base_version
-             FROM operation_queue {DUE_ORDER_SQL}"
-        ))?
-        .query_map([], |row| {
-            Ok(Op {
-                op_id: row.get(0)?,
-                kind: row.get(1)?,
-                file_id: row.get(2)?,
-                parent_id: row.get(3)?,
-                target_path: row.get(4)?,
-                create_file: row.get(5)?,
-                paused_reason: row.get(6)?,
-                given_up: row.get(7)?,
-                parked: row.get(8)?,
-                last_error: row.get(9)?,
-                payload_path: row.get(10)?,
-                base_version: row.get(11)?,
-            })
-        })?
+        .prepare(&format!("SELECT {RECONCILE_OP_COLUMNS} FROM operation_queue {DUE_ORDER_SQL}"))?
+        .query_map([], reconcile_op)?
         .collect::<Result<Vec<_>>>()?;
-    Ok(crate::held_queue::plan(&rows, &ops, opts, &|path| Path::new(path).exists(), disk_has_file))
+    Ok(crate::held_queue::plan(&rows, &ops, opts, &payload_on_disk, disk_has_file))
+}
+
+/// Task 2414: spec D8's pre-send checks ([`crate::held_queue::presend_block`]) for one queued op, read as the reconcile
+/// pass reads it, so Try again never makes due a change the pass would not re-arm. `None` when it is not in the queue,
+/// and for two ops the checks do not apply to: a backup op (LD-0113: it sends the person's own file from `source_path`,
+/// never a staged copy, and its uploader drops it itself when that file is gone or changed, `backup_upload.rs`), and an
+/// upload whose completion is recorded (§8.6 rules 4 and 6: it lands without its payload or the network, and never
+/// parks).
+pub(super) fn presend_block_conn(conn: &Connection, op_id: &str) -> Result<Option<crate::held_queue::PresendBlock>> {
+    let read = conn
+        .query_row(
+            &format!(
+                "SELECT {RECONCILE_OP_COLUMNS}, origin = 'backup',
+                        EXISTS (SELECT 1 FROM upload_resume r WHERE r.op_id = operation_queue.op_id
+                                                                AND r.completed_version IS NOT NULL)
+                 FROM operation_queue WHERE op_id = ?1"
+            ),
+            params![op_id],
+            |row| Ok((reconcile_op(row)?, row.get::<_, bool>(12)?, row.get::<_, bool>(13)?)),
+        )
+        .optional()?;
+    let Some((op, backup, completed)) = read else { return Ok(None) };
+    if backup || completed {
+        return Ok(None);
+    }
+    let row = match op.file_id.as_deref() {
+        Some(file_id) => conn
+            .query_row(
+                &format!("SELECT {RECONCILE_ROW_COLUMNS} FROM files WHERE file_id = ?1"),
+                params![file_id],
+                reconcile_row,
+            )
+            .optional()?,
+        None => None,
+    };
+    Ok(crate::held_queue::presend_block(&op, row.as_ref(), &payload_on_disk))
 }
 
 /// A remap's statements, once per remapped folder: each reads through a `parent_id` index (`idx_files_parent_id`,

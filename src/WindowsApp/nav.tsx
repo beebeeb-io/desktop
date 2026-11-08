@@ -40,20 +40,30 @@ export function navIdFromString(value: string | null): NavId | null {
 }
 
 /**
- * Task 2409: a place inside a route, after `#`. Only Activity has one: "Not sent", which "Not sent N" on Home and the
- * tray's waiting, held and given-up lines open.
+ * Task 2409: a place inside a route, after `#`. Only Activity has them: "Not sent", which "Not sent N" on Home and the
+ * tray's waiting, held and given-up lines open; and (task 2414) "Not downloaded", which "Not downloaded N" and the
+ * tray's line open.
  */
-export type NavSection = 'not-sent'
+export type NavSection = 'not-sent' | 'not-downloaded'
 export interface NavTarget {
   nav: NavId
   section: NavSection | null
 }
 /** What Home's figure and the tray's lines send. */
-export const NOT_SENT_TARGET = 'activity#not-sent'
+export const NOT_SENT_TARGET = 'activity#not-sent' as const
+/** Task 2414: Activity › Not downloaded, which Home's figure and the tray's line open. */
+export const NOT_DOWNLOADED_TARGET = 'activity#not-downloaded' as const
+
+/** Task 2414: where each section's count links and its tooltip, one place for Home's figures and the tray's lines. */
+export const SECTION_LINKS = {
+  'not-sent': { target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' },
+  'not-downloaded': { target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which items' },
+} as const satisfies Record<NavSection, { target: string; href: string; title: string }>
 
 /** A route (`activity`) or a route and its section (`activity#not-sent`); anything else is no target. */
 export function navTargetFromString(value: string | null): NavTarget | null {
   if (value === NOT_SENT_TARGET) return { nav: 'activity', section: 'not-sent' }
+  if (value === NOT_DOWNLOADED_TARGET) return { nav: 'activity', section: 'not-downloaded' }
   const nav = navIdFromString(value)
   return nav == null ? null : { nav, section: null }
 }

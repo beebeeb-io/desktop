@@ -9,6 +9,9 @@
  *
  * The list carries names, so it is read only while this section is mounted and its window on screen (task 2243), and
  * only while the vault is unlocked; it is paged by {@link UNSENT_PAGE_SIZE} with "Show more".
+ *
+ * Task 2414: the same section, rows and layout serve Activity › "Not downloaded" (`list="not-downloaded"`): a pin's
+ * downloads that are paused or out of attempts, which "Not downloaded N" on Home and the tray's line open.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { command, commandUnavailableLabel, forceReauth, openUrl } from '../../desktopApi'
@@ -20,13 +23,17 @@ import {
   baseName,
   folderOf,
   isLockedRefusal,
+  keepRowStates,
   kindWord,
   loadUnsentChanges,
+  notDownloadedAction,
+  notDownloadedReason,
   queuedAgo,
   retryRefusal,
   retryUnsentChange,
   unsentAction,
   unsentReason,
+  type RowState,
   type UnsentAction,
   type UnsentChange,
   type UnsentChangesPage,
@@ -34,8 +41,35 @@ import {
 
 /** How often the open section re-reads the list. */
 export const NOT_SENT_POLL_MS = 5000
-/** The anchor Home's figure and the tray's lines open. */
-export const NOT_SENT_ANCHOR = 'not-sent'
+
+/** The two lists, each its anchor (the one Home's figure and the tray's lines open), its read and its words. */
+export const QUEUE_LISTS = {
+  'not-sent': {
+    anchor: 'not-sent',
+    command: 'unsent_changes',
+    icon: 'cloud',
+    heading: 'Not sent',
+    subtitle: 'Changes on this PC that haven’t reached Beebeeb yet.',
+    reading: 'Reading the changes not sent…',
+    failed: 'Couldn’t read the changes not sent',
+    locked: 'Beebeeb is locked. Unlock it to see which changes these are.',
+    empty: 'Every change on this PC has been sent.',
+    counted: 'not sent',
+  },
+  'not-downloaded': {
+    anchor: 'not-downloaded',
+    command: 'not_downloaded',
+    icon: 'download',
+    heading: 'Not downloaded',
+    subtitle: 'Files and folders you chose to keep on this PC that didn’t finish downloading.',
+    reading: 'Reading the files not downloaded…',
+    failed: 'Couldn’t read the files not downloaded',
+    locked: 'Beebeeb is locked. Unlock it to see which items these are.',
+    empty: 'Everything you chose to keep on this PC is downloaded.',
+    counted: 'not downloaded',
+  },
+} as const
+export type QueueList = keyof typeof QUEUE_LISTS
 
 const WARN_COLOR = 'var(--warn-text)'
 
@@ -44,9 +78,6 @@ type Read =
   | { state: 'locked' }
   | { state: 'failed'; reason: string }
   | { state: 'loaded'; page: UnsentChangesPage }
-
-/** A row's action in flight, or a Try again that worked and reads "Queued" until the next read says so too. */
-type RowState = 'busy' | 'queued'
 
 const actionButton: React.CSSProperties = {
   padding: '5px 12px',
@@ -63,13 +94,17 @@ const actionButton: React.CSSProperties = {
 }
 
 export function NotSentSection({
+  list = 'not-sent',
   focus = 0,
   onOpenSyncSettings,
 }: {
+  /** Which list: "Not sent" (default) or "Not downloaded" (task 2414). */
+  list?: QueueList
   /** Bumped each time a link opens this section: it scrolls into view and takes the focus. */
   focus?: number
   onOpenSyncSettings?: () => void
 }) {
+  const words = QUEUE_LISTS[list]
   const [read, setRead] = useState<Read>({ state: 'reading' })
   const [shown, setShown] = useState(UNSENT_PAGE_SIZE)
   const [rows, setRows] = useState<Record<string, RowState>>({})
@@ -79,15 +114,16 @@ export function NotSentSection({
 
   const refresh = useCallback(async () => {
     const ticket = ++latest.current
-    const result = await loadUnsentChanges(shown)
+    const result = await loadUnsentChanges(shown, command, words.command)
     if (ticket !== latest.current) return
     if (result.ok) {
       setRead({ state: 'loaded', page: result.value })
-      // The read now says what a Try again did; only an action still in flight keeps its row state.
-      setRows((all) => Object.fromEntries(Object.entries(all).filter(([, state]) => state === 'busy')))
+      // An action in flight keeps its row state, and a Try again's "Queued" until the read shows the change moving.
+      const items = result.value.items
+      setRows((all) => keepRowStates(all, items))
     } else if (isLockedRefusal(result.reason)) setRead({ state: 'locked' })
-    else setRead({ state: 'failed', reason: result.unsupported ? commandUnavailableLabel('unsent_changes') : result.reason })
-  }, [shown])
+    else setRead({ state: 'failed', reason: result.unsupported ? commandUnavailableLabel(words.command) : result.reason })
+  }, [shown, words.command])
 
   useEffect(() => pollWhileVisible(refresh, NOT_SENT_POLL_MS), [refresh])
 
@@ -149,32 +185,32 @@ export function NotSentSection({
   const total = page?.total ?? null
 
   return (
-    <section id={NOT_SENT_ANCHOR} aria-labelledby="not-sent-heading" style={{ marginBottom: 16, scrollMarginTop: 16 }}>
+    <section id={words.anchor} aria-labelledby={`${words.anchor}-heading`} style={{ marginBottom: 16, scrollMarginTop: 16 }}>
       <Card style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <NavIcon name="cloud" size={14} color={T.ink2} />
+          <NavIcon name={words.icon} size={14} color={T.ink2} />
           <div style={{ minWidth: 0, flex: 1 }}>
-            <h2 id="not-sent-heading" ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 12.5, fontWeight: 600, color: T.ink, outline: 'none' }}>
-              Not sent
+            <h2 id={`${words.anchor}-heading`} ref={heading} tabIndex={-1} style={{ margin: 0, fontSize: 12.5, fontWeight: 600, color: T.ink, outline: 'none' }}>
+              {words.heading}
             </h2>
-            <div style={{ fontSize: 11, color: T.ink3 }}>Changes on this PC that haven’t reached Beebeeb yet.</div>
+            <div style={{ fontSize: 11, color: T.ink3 }}>{words.subtitle}</div>
           </div>
           {total !== null && (
-            <span aria-label={`${total} not sent`} style={{ fontSize: 12, fontFamily: T.fontMono, color: T.ink2 }}>
+            <span aria-label={`${total} ${words.counted}`} style={{ fontSize: 12, fontFamily: T.fontMono, color: T.ink2 }}>
               {total.toLocaleString('en-US')}
             </span>
           )}
         </div>
 
-        {read.state === 'reading' && <Line>Reading the changes not sent…</Line>}
-        {read.state === 'failed' && <Line warn>Couldn’t read the changes not sent: {read.reason}</Line>}
+        {read.state === 'reading' && <Line>{words.reading}</Line>}
+        {read.state === 'failed' && <Line warn>{words.failed}: {read.reason}</Line>}
         {read.state === 'locked' && (
           <div style={{ padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' as const }}>
-            <span style={{ fontSize: 12, color: T.ink2, flex: 1, minWidth: 200 }}>Beebeeb is locked. Unlock it to see which changes these are.</span>
+            <span style={{ fontSize: 12, color: T.ink2, flex: 1, minWidth: 200 }}>{words.locked}</span>
             <button type="button" style={actionButton} onClick={() => void unlock()}>Unlock</button>
           </div>
         )}
-        {page && page.items.length === 0 && <Line>Every change on this PC has been sent.</Line>}
+        {page && page.items.length === 0 && <Line>{words.empty}</Line>}
 
         {page?.items.map((item, i) => (
           <NotSentRow
@@ -183,6 +219,7 @@ export function NotSentSection({
             page={page}
             last={i === page.items.length - 1 && page.items.length >= page.total}
             row={rows[item.id] ?? null}
+            downloads={list === 'not-downloaded'}
             onAct={(action) => void act(item, action)}
           />
         ))}
@@ -211,21 +248,24 @@ function NotSentRow({
   page,
   last,
   row,
+  downloads = false,
   onAct,
 }: {
   item: UnsentChange
   page: UnsentChangesPage
   last: boolean
   row: RowState | null
+  /** A "Not downloaded" row (task 2414): its own words and action. */
+  downloads?: boolean
   onAct: (action: UnsentAction) => void
 }) {
   const name = baseName(item.path) || 'An item'
   const folder = folderOf(item.path)
   const type = getFileType(name)
-  const reason = unsentReason(item, { engineState: page.engine_state, paused: page.paused })
-  // A Try again that just worked reads "Queued" until the next read says so too.
+  const reason = downloads ? notDownloadedReason(item) : unsentReason(item, { engineState: page.engine_state, paused: page.paused })
+  // A Try again that just worked reads "Queued" until a read shows it moving.
   const done = row === 'queued'
-  const action = done ? null : unsentAction(item)
+  const action = done ? null : downloads ? notDownloadedAction(item) : unsentAction(item)
   const fraction = item.sending && item.sending.total > 0 ? Math.min(1, item.sending.done / item.sending.total) : null
   return (
     <div

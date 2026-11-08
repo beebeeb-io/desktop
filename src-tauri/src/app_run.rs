@@ -193,6 +193,8 @@ pub fn run() {
             // Task 2409 — the "Not sent" list on Activity, and Try again
             unsent_changes,
             retry_unsent_change,
+            // Task 2414 — the "Not downloaded" list on Activity
+            not_downloaded,
             found_while_paused_review,
             found_while_paused_upload,
             found_while_paused_keep,

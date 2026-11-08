@@ -616,7 +616,7 @@ mod system_role;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
-use unsent::UNSENT_KINDS_SQL;
+use unsent::{NOT_DOWNLOADED_SQL, UNSENT_KINDS_SQL};
 pub use unsent::{RetryOutcome, UnsentChange, UnsentPage};
 
 mod types;

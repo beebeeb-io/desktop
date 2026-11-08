@@ -1,5 +1,6 @@
 /**
- * The sync figures on the Windows main window's Home strip (0.8.15): State, Not sent, Conflicts.
+ * The sync figures on the Windows main window's Home strip (0.8.15): State, Not sent, Conflicts; and, while a pin's files
+ * did not download, Not downloaded (task 2414).
  *
  * On Guus's PC (a local 0.8.15 build) Home said "Up to date · Syncing 0" while 2,924 changes were on hold, 43 had given
  * up and the startup check was still running: it read `sync_status` alone. State is now the label of the one model that
@@ -10,13 +11,20 @@
  * ("Sign out with changes not sent?", `signOutCopy.ts`).
  */
 import type { SyncStatus } from '../desktopApi'
+import type { NavSection } from '../WindowsApp/nav'
 import { formatCount, syncActivityView, type SyncActivityOptions, type SyncActivitySummary } from './syncActivityModel'
+
+/** The Activity section a figure opens: where what it counts is listed. */
+export type HomeMetricLink = NavSection
 
 export interface HomeSyncMetric {
   k: string
   v: string
-  /** Task 2409: the figure opens Activity › Not sent, where the changes it counts are listed (only when it counts any). */
-  notSentLink?: boolean
+  /**
+   * Task 2409: "Not sent" opens Activity › Not sent, where the changes it counts are listed; task 2414: "Not downloaded"
+   * opens Activity › Not downloaded. Only when the figure counts any.
+   */
+  link?: HomeMetricLink
 }
 
 /**
@@ -31,6 +39,14 @@ export function notSentCount(summary: SyncActivitySummary | null | undefined): n
 }
 
 /**
+ * Task 2414: a pin's downloads that are paused or out of attempts (never part of {@link notSentCount}). Null as
+ * {@link notSentCount} is.
+ */
+export function notDownloadedCount(summary: SyncActivitySummary | null | undefined): number | null {
+  return summary?.queue?.not_downloaded ?? null
+}
+
+/**
  * The "Not sent" figure: {@link notSentCount}, "…" before the first read, "—" when the summary could not be read or
  * carries no queue: an unknown queue is never shown as 0.
  */
@@ -40,15 +56,20 @@ export function notSentFigure(summary: SyncActivitySummary | null | undefined): 
   return count === null ? '—' : formatCount(count)
 }
 
-/** State, Not sent and Conflicts, in the strip's order. "In vault" is the caller's (it comes from billing usage). */
+/**
+ * State, Not sent and Conflicts, in the strip's order; Not downloaded after Not sent, only while it counts any (task
+ * 2414: shown as Not sent is, a link to its list). "In vault" is the caller's (it comes from billing usage).
+ */
 export function homeSyncMetrics(
   status: SyncStatus | null,
   summary: SyncActivitySummary | null | undefined,
   options: SyncActivityOptions = {},
 ): HomeSyncMetric[] {
+  const notDownloaded = notDownloadedCount(summary) ?? 0
   return [
     { k: 'State', v: syncActivityView(status, summary, options).label },
-    { k: 'Not sent', v: notSentFigure(summary), notSentLink: (notSentCount(summary) ?? 0) > 0 },
+    { k: 'Not sent', v: notSentFigure(summary), ...((notSentCount(summary) ?? 0) > 0 ? { link: 'not-sent' as const } : {}) },
+    ...(notDownloaded > 0 ? [{ k: 'Not downloaded', v: formatCount(notDownloaded), link: 'not-downloaded' as const }] : []),
     { k: 'Conflicts', v: status ? String(status.conflicts) : '…' },
   ]
 }

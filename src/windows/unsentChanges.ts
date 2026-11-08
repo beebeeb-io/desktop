@@ -7,13 +7,16 @@
  * there is for it. Try again (Guus, 13:39) is the action of a change that failed: it stopped after repeated errors, or
  * it waits out a backoff after an error.
  *
+ * Task 2414: the same rows serve "Not downloaded" (`not_downloaded`): a pin's downloads that are paused or out of
+ * attempts, kind `download` (a file) or `folder` (a folder's pin), never with Try again.
+ *
  * Copy rules: honest, never reassuring. A row names its file (this list is the place the names are; the polled
  * summary stays counts-only). Nothing here promises when a held change goes.
  */
 import { BILLING_URL, command, type CommandResult } from '../desktopApi'
 
-/** The kinds a row can be, as Rust names them (`state_db::unsent::change_kind`). */
-export type UnsentKind = 'new_file' | 'edit' | 'folder' | 'rename' | 'move' | 'delete' | 'restore'
+/** The kinds a row can be, as Rust names them (`state_db::unsent::change_kind`); `download` is a "Not downloaded" row. */
+export type UnsentKind = 'new_file' | 'edit' | 'folder' | 'rename' | 'move' | 'delete' | 'restore' | 'download'
 
 export interface UnsentChange {
   id: string
@@ -32,6 +35,11 @@ export interface UnsentChange {
   parked: boolean
   /** Try again applies. */
   retryable: boolean
+  /**
+   * Task 2414: a change that failed which Try again would not send (spec D8, the reconcile pass's checks):
+   * `superseded` (a newer version of the file is already in Beebeeb) or `copy_gone` (the copy to send is gone).
+   */
+  blocked: string | null
   /** Being sent right now: bytes done of total. */
   sending: { done: number; total: number } | null
 }
@@ -55,7 +63,7 @@ export function isLockedRefusal(reason: string): boolean {
   return reason.startsWith('vault is locked')
 }
 
-const KINDS: ReadonlySet<string> = new Set(['new_file', 'edit', 'folder', 'rename', 'move', 'delete', 'restore'])
+const KINDS: ReadonlySet<string> = new Set(['new_file', 'edit', 'folder', 'rename', 'move', 'delete', 'restore', 'download'])
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -78,6 +86,7 @@ function isChange(v: unknown): v is UnsentChange {
     (v.retry_at === null || isNum(v.retry_at)) &&
     typeof v.parked === 'boolean' &&
     typeof v.retryable === 'boolean' &&
+    isStrOrNull(v.blocked) &&
     (sending === null || (isObj(sending) && isCount(sending.done) && isCount(sending.total)))
   )
 }
@@ -89,8 +98,11 @@ export function parseUnsentChanges(raw: unknown): UnsentChangesPage | null {
   return raw as unknown as UnsentChangesPage
 }
 
+/** The two lists these rows serve: "Not sent" and (task 2414) "Not downloaded". */
+export type UnsentListCommand = 'unsent_changes' | 'not_downloaded'
+
 /**
- * The first `count` rows (the rows shown). Up to `UNSENT_MAX_PER_CALL` that is one call, so one read transaction: the
+ * The first `count` rows (the rows shown) of `name`'s list. Up to `UNSENT_MAX_PER_CALL` that is one call, so one read transaction: the
  * count and the rows agree, and no row repeats or goes missing. Past it, further calls; a change that moved between two
  * calls can shift the order, so a row already read is not added twice (the next poll reads it right). One answer with
  * the total and engine state of the first call; a call that fails fails the read.
@@ -98,6 +110,7 @@ export function parseUnsentChanges(raw: unknown): UnsentChangesPage | null {
 export async function loadUnsentChanges(
   count: number,
   call: typeof command = command,
+  name: UnsentListCommand = 'unsent_changes',
 ): Promise<CommandResult<UnsentChangesPage>> {
   let first: UnsentChangesPage | null = null
   const items: UnsentChange[] = []
@@ -105,10 +118,13 @@ export async function loadUnsentChanges(
   const want = Math.max(count, 1)
   for (let offset = 0; offset < want; offset += UNSENT_MAX_PER_CALL) {
     const limit = Math.min(want - offset, UNSENT_MAX_PER_CALL)
-    const result = await call<unknown>('unsent_changes', { offset, limit })
+    const result = await call<unknown>(name, { offset, limit })
     if (!result.ok) return result
     const next = parseUnsentChanges(result.value)
-    if (!next) return { ok: false, reason: 'The list of changes not sent could not be read.', unsupported: false }
+    if (!next) {
+      const what = name === 'not_downloaded' ? 'files not downloaded' : 'changes not sent'
+      return { ok: false, reason: `The list of ${what} could not be read.`, unsupported: false }
+    }
     first ??= next
     for (const item of next.items) {
       if (seen.has(item.id)) continue
@@ -120,7 +136,10 @@ export async function loadUnsentChanges(
   return { ok: true, value: { ...(first as UnsentChangesPage), items } }
 }
 
-/** Try again on one change. `queued` on success; a refusal's code (`unknown`, `held`, `parked`) as the reason. */
+/**
+ * Try again on one change. `queued` on success; a refusal's code (`unknown`, `held`, `parked`, `superseded`,
+ * `copy_gone`) as the reason.
+ */
 export function retryUnsentChange(id: string, call: typeof command = command): Promise<CommandResult<string>> {
   return call<string>('retry_unsent_change', { id })
 }
@@ -134,6 +153,10 @@ export function retryRefusal(reason: string): string {
       return 'It’s on hold, so it can’t be tried again. Its own action is shown.'
     case 'parked':
       return 'Beebeeb can’t send this one as it is, so trying again won’t help.'
+    case 'superseded':
+      return 'A newer version of this file is already in Beebeeb, so this change isn’t sent over it. Nothing was overwritten.'
+    case 'copy_gone':
+      return 'The copy to send is gone, so trying again can’t send it.'
     default:
       return reason
   }
@@ -149,17 +172,15 @@ const KIND_WORD: Record<UnsentKind, string> = {
   move: 'Move',
   delete: 'Delete',
   restore: 'Restore',
+  download: 'Download',
 }
 
 export function kindWord(kind: UnsentKind): string {
   return KIND_WORD[kind]
 }
 
-/** The last part of a path, with either separator (a backup's path is a Windows one). */
-export function baseName(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean)
-  return parts.length > 0 ? parts[parts.length - 1] : path
-}
+/** The last part of a path: the one shared helper (`src/pathParts.ts`). */
+export { baseName } from '../pathParts'
 
 /** Everything before the last part, as written; "" at the top of the sync folder. */
 export function folderOf(path: string): string {
@@ -191,6 +212,19 @@ export function unsentReason(item: UnsentChange, ctx: UnsentContext): { text: st
   if (item.sending) {
     const { done, total } = item.sending
     return calm(total > 0 ? `Sending · ${Math.min(100, Math.floor((done / total) * 100))}%` : 'Sending')
+  }
+  // Task 2414: a change that failed and that Try again would not send says why (it has no Try again). One still waiting
+  // out a backoff keeps its retry line: the engine tries it again at that time all the same (self-review).
+  if (item.blocked !== null && item.retry_at === null) {
+    if (item.blocked === 'copy_gone') return needs('Can’t send: the copy to send is gone.')
+    if (item.blocked === 'superseded') {
+      return needs(
+        item.kind === 'new_file'
+          ? 'Can’t send: this file is already in Beebeeb. Nothing was overwritten.'
+          : 'Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.',
+      )
+    }
+    return needs('Can’t send it as it is.')
   }
   switch (item.group) {
     case 'waiting':
@@ -227,6 +261,29 @@ export function unsentReason(item: UnsentChange, ctx: UnsentContext): { text: st
   }
 }
 
+/**
+ * Task 2414: why a "Not downloaded" row did not download. A pin's downloads are paused only by what pauses the whole
+ * queue (signed out, locked); the upload reasons ("storage full", "found while paused", …) are never theirs, so any
+ * other pause is "On hold", never an upload's sentence (self-review).
+ */
+export function notDownloadedReason(item: UnsentChange): { text: string; attention: boolean } {
+  switch (item.group) {
+    case 'gave_up':
+      return { text: 'Stopped after repeated errors', attention: true }
+    case 'auth':
+      return { text: 'On hold until you sign in again', attention: true }
+    case 'locked':
+      return { text: 'On hold while Beebeeb is locked', attention: false }
+    default:
+      return { text: 'On hold', attention: true }
+  }
+}
+
+/** Task 2414: a "Not downloaded" row's one action: Sign in again, for one held until then; nothing else applies. */
+export function notDownloadedAction(item: UnsentChange): UnsentAction | null {
+  return item.group === 'auth' ? { kind: 'sign_in_again', label: 'Sign in again' } : null
+}
+
 export type UnsentAction =
   | { kind: 'retry'; label: 'Try again' }
   | { kind: 'sign_in_again'; label: 'Sign in again' }
@@ -246,6 +303,24 @@ export function unsentAction(item: UnsentChange): UnsentAction | null {
     default:
       return null
   }
+}
+
+/** A row's action in flight, or a Try again that worked: the row reads "Queued" until a read shows it moving. */
+export type RowState = 'busy' | 'queued'
+
+/**
+ * The row states that still hold after a read (2409 review P3: the read right after Try again cleared "Queued" at once,
+ * and the row then said "Waiting for the first sync check"). An action in flight stays. "Queued" stays while the read
+ * shows the change still waiting its turn: listed, waiting, not failed again, not being sent. Once it moves (sent,
+ * sending, failed again, held, or off the page), the read words it.
+ */
+export function keepRowStates(states: Record<string, RowState>, items: UnsentChange[]): Record<string, RowState> {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  const waitingItsTurn = (id: string) => {
+    const item = byId.get(id)
+    return !!item && item.group === 'waiting' && item.retry_at === null && !item.sending && !item.retryable && item.blocked === null
+  }
+  return Object.fromEntries(Object.entries(states).filter(([id, state]) => state === 'busy' || waitingItsTurn(id)))
 }
 
 /** "just now", "12 min ago", "3 hr ago", "4 days ago"; "" when not recorded. */

@@ -7,7 +7,8 @@ import { command, formatBytes, accountProfile, accountActivity, type BillingUsag
 import { T, NavIcon, Chip, Skeleton, PageHeader, Card } from '../windows/ui'
 import { usePlatformName, thisDeviceNoun } from '../platform'
 import { useSyncActivitySummary } from '../windows/syncActivityUi'
-import { homeSyncMetrics } from '../windows/homeSyncMetrics'
+import { homeSyncMetrics, type HomeMetricLink, type HomeSyncMetric } from '../windows/homeSyncMetrics'
+import { SECTION_LINKS } from './nav'
 
 // ── Views ───────────────────────────────────────────────────────────────────
 
@@ -62,13 +63,16 @@ export function HomeView({
   status,
   usage,
   storage,
-  onOpenNotSent,
+  onOpenList,
 }: {
   status: SyncStatus | null
   usage: BillingUsage | null
   storage: StorageSummary | null
-  /** Task 2409: "Not sent N" opens Activity › Not sent, where those changes are listed. */
-  onOpenNotSent?: () => void
+  /**
+   * Task 2409: "Not sent N" opens Activity › Not sent, where those changes are listed; task 2414: "Not downloaded N"
+   * opens Activity › Not downloaded.
+   */
+  onOpenList?: (section: HomeMetricLink) => void
 }) {
   const platform = usePlatformName()
   // What sync is doing (0.8.15): the model Settings › Sync and the tray render, so Home never says "Up to date" over
@@ -87,7 +91,7 @@ export function HomeView({
   const usedBytes = usage?.used_bytes ?? storage?.used_bytes ?? null
   const quotaBytes = usage?.quota_bytes ?? storage?.quota_bytes ?? null
 
-  const metrics: Array<{ k: string; v: string; notSentLink?: boolean }> = [
+  const metrics: HomeSyncMetric[] = [
     ...homeSyncMetrics(status, summary, { device: thisDeviceNoun(platform), pausedFallback }),
     { k: 'In vault', v: usedBytes != null ? formatBytes(usedBytes) : '…' },
   ]
@@ -308,20 +312,21 @@ export function HomeView({
         border: `1px solid ${T.amberDeep}`,
         marginBottom: 22,
         display: 'grid',
-        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+        // Four figures, five while "Not downloaded" shows (task 2414).
+        gridTemplateColumns: `repeat(${metrics.length}, minmax(0, 1fr))`,
         gap: 20,
       }}>
-        {metrics.map(({ k, v, notSentLink }) => (
+        {metrics.map(({ k, v, link }) => (
           <div key={k}>
             <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>{k}</div>
-            {notSentLink && onOpenNotSent ? (
+            {link && onOpenList ? (
               // Task 2409: the count opens the list of what it counts. A link (it goes somewhere), underlined, in ink.
               <a
-                href="#not-sent"
-                title="See which changes"
+                href={SECTION_LINKS[link].href}
+                title={SECTION_LINKS[link].title}
                 onClick={(event) => {
                   event.preventDefault()
-                  onOpenNotSent()
+                  onOpenList(link)
                 }}
                 style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink, textDecoration: 'underline', textUnderlineOffset: 3, textDecorationColor: T.ink3 }}
               >
