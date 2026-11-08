@@ -158,7 +158,13 @@ pub(crate) fn acknowledged_after(check: &NoticeCheck, mark: &BackupPassMark, cat
             category_folder_live: None,
         }],
     };
-    backup_stop_v2(&check.notices, last_pass_at(mark, check.clock), &mark.acknowledged, &listing).acknowledged
+    backup_stop_v2(
+        &check.notices,
+        last_pass_at(mark, check.clock),
+        &mark.acknowledged,
+        &listing,
+    )
+    .acknowledged
 }
 
 /// One backup as the device knows it, for [`decide`]: before its listing (`category_folder_live` `None`, the device
@@ -371,7 +377,8 @@ mod tests {
     fn a_page_reads_backup_notices_with_their_ids_and_its_cursor() {
         let body = serde_json::json!({ "next_cursor": "c2", "notifications": [
             { "id": "a", "type": "share_invite", "data": null, "created_at": "not a time" },
-            { "id": "b", "type": "files_removed", "data": { "reason": "erase_request" }, "created_at": "2026-11-07T19:00:00.250Z" },
+            { "id": "b", "type": "files_removed", "data": { "reason": "erase_request" },
+              "created_at": "2026-11-07T19:00:00.250Z" },
             { "type": "files_removed", "data": null, "created_at": "2026-11-07T19:00:01Z" },
         ]});
         let (notices, next) = read_page(&body).unwrap();
@@ -388,7 +395,11 @@ mod tests {
         );
         assert_eq!(next.as_deref(), Some("c2"));
         let last = serde_json::json!({ "next_cursor": null, "notifications": [] });
-        assert_eq!(read_page(&last).unwrap(), (Vec::new(), None), "a null cursor ends the listing");
+        assert_eq!(
+            read_page(&last).unwrap(),
+            (Vec::new(), None),
+            "a null cursor ends the listing"
+        );
     }
 
     /// A page the device cannot be sure of fails the whole check (core's `CheckFailed`), never a partial listing.
@@ -400,8 +411,14 @@ mod tests {
             page(serde_json::json!({ "notifications": [] })).is_err(),
             "no next_cursor: a server without the filtered listing (its newest rows of every type)"
         );
-        assert!(page(serde_json::json!({ "notifications": [], "next_cursor": "" })).is_err(), "an empty cursor");
-        assert!(page(serde_json::json!({ "notifications": [], "next_cursor": 5 })).is_err(), "a cursor not a string");
+        assert!(
+            page(serde_json::json!({ "notifications": [], "next_cursor": "" })).is_err(),
+            "an empty cursor"
+        );
+        assert!(
+            page(serde_json::json!({ "notifications": [], "next_cursor": 5 })).is_err(),
+            "a cursor not a string"
+        );
         let untimed = serde_json::json!({ "next_cursor": null,
             "notifications": [{ "id": "x", "type": "backup_deleted", "data": {}, "created_at": null }] });
         assert!(page(untimed).is_err(), "a backup notice with no time");
@@ -409,11 +426,18 @@ mod tests {
 
     #[test]
     fn the_first_page_fixes_the_checks_date_and_clock() {
-        let body = serde_json::json!({ "notifications": [row("files_removed", serde_json::json!({}), 7)], "next_cursor": "n" });
+        let rows = [row("files_removed", serde_json::json!({}), 7)];
+        let body = serde_json::json!({ "notifications": rows, "next_cursor": "n" });
         assert!(first_page(&body, measured(), None).is_err(), "no Date");
-        assert!(first_page(&body, RebuildClock::UNKNOWN, Some(1)).is_err(), "a clock that moved");
+        assert!(
+            first_page(&body, RebuildClock::UNKNOWN, Some(1)).is_err(),
+            "a clock that moved"
+        );
         let (check, next) = first_page(&body, measured(), Some(9_000)).unwrap();
-        assert_eq!((check.server_now_ms, check.clock, check.notices.len()), (9_000, measured(), 1));
+        assert_eq!(
+            (check.server_now_ms, check.clock, check.notices.len()),
+            (9_000, measured(), 1)
+        );
         assert_eq!(next.as_deref(), Some("n"));
     }
 
@@ -432,7 +456,11 @@ mod tests {
             1_000_000_000 - NOTICE_OVERLAP_MS
         );
         db.note_backup_setup("videos", 3_000_000_000).unwrap();
-        assert_eq!(check_since(&db, &[pictures, music, videos]), 0, "no pass yet: every notice");
+        assert_eq!(
+            check_since(&db, &[pictures, music, videos]),
+            0,
+            "no pass yet: every notice"
+        );
         assert_eq!(check_since(&db, &[]), 0);
     }
 
@@ -472,7 +500,10 @@ mod tests {
         };
         let decision = |notice: Option<ListedNotice>| {
             let ids: Vec<String> = notice.iter().filter_map(|n| n.id.clone()).collect();
-            (decide(Some(&check_of(notice.into_iter().collect())), 5, &[], &listing), ids)
+            (
+                decide(Some(&check_of(notice.into_iter().collect())), 5, &[], &listing),
+                ids,
+            )
         };
         let stop = |reason, every_backup, acknowledged| PassDecision::Stop {
             reason,
@@ -488,7 +519,12 @@ mod tests {
         let (got, ids) = decision(Some(erased));
         assert_eq!(got, stop(BackupStopReason::EraseRequest, true, ids));
         let (got, _) = decision(None);
-        assert_eq!(got, PassDecision::Run { acknowledged: Vec::new() });
+        assert_eq!(
+            got,
+            PassDecision::Run {
+                acknowledged: Vec::new()
+            }
+        );
     }
 
     /// Amendment 12d through core's v2 gate: a notice inside the overlap margin before the last pass counts; one
@@ -505,7 +541,11 @@ mod tests {
             category_folder_live: Some(true),
         };
         let last = 10_000_000;
-        let inside = listed("files_removed", serde_json::json!({ "reason": "account_lapsed" }), last - 60_000);
+        let inside = listed(
+            "files_removed",
+            serde_json::json!({ "reason": "account_lapsed" }),
+            last - 60_000,
+        );
         let id = inside.id.clone().unwrap();
         let check = check_of(vec![inside]);
         assert_eq!(
@@ -524,10 +564,16 @@ mod tests {
             },
             "acknowledged: it never stops again, and stays acknowledged while in the window"
         );
-        let older = listed("files_removed", serde_json::json!({ "reason": "account_lapsed" }), last - NOTICE_OVERLAP_MS);
+        let older = listed(
+            "files_removed",
+            serde_json::json!({ "reason": "account_lapsed" }),
+            last - NOTICE_OVERLAP_MS,
+        );
         assert_eq!(
             decide(Some(&check_of(vec![older])), last, std::slice::from_ref(&id), &listing),
-            PassDecision::Run { acknowledged: Vec::new() },
+            PassDecision::Run {
+                acknowledged: Vec::new()
+            },
             "older than the margin: out of the window, and the set drops what left it"
         );
         assert_eq!(decide(None, last, &[], &listing), PassDecision::CheckFailed);
@@ -575,7 +621,11 @@ mod tests {
         }
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         let mark = db.backup_pass_mark("pictures").unwrap();
-        assert_eq!((mark.last_pass_at_ms, &mark.acknowledged), (Some(77), &acknowledged), "after a restart");
+        assert_eq!(
+            (mark.last_pass_at_ms, &mark.acknowledged),
+            (Some(77), &acknowledged),
+            "after a restart"
+        );
         db.restart_backup_pass("pictures", 5).unwrap();
         let mark = db.backup_pass_mark("pictures").unwrap();
         assert_eq!(
@@ -584,10 +634,18 @@ mod tests {
             "Back up again starts over and keeps the set"
         );
         db.note_backup_setup("pictures", 9).unwrap();
-        assert_eq!(db.backup_pass_mark("pictures").unwrap().acknowledged, acknowledged, "a switch-on keeps it");
+        assert_eq!(
+            db.backup_pass_mark("pictures").unwrap().acknowledged,
+            acknowledged,
+            "a switch-on keeps it"
+        );
         let conn = rusqlite::Connection::open(dir.path().join("state.db")).unwrap();
-        conn.execute("UPDATE backup_pass_marks SET acknowledged_json = 'not json'", []).unwrap();
-        assert!(db.backup_pass_mark("pictures").unwrap().acknowledged.is_empty(), "unreadable: empty");
+        conn.execute("UPDATE backup_pass_marks SET acknowledged_json = 'not json'", [])
+            .unwrap();
+        assert!(
+            db.backup_pass_mark("pictures").unwrap().acknowledged.is_empty(),
+            "unreadable: empty"
+        );
     }
 
     /// "Back up again" after a stop starts over and forgets the records; switching on a backup that did not stop

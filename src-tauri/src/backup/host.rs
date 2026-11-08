@@ -242,7 +242,8 @@ impl DesktopBackupHost {
     /// LD-0139 (Amendment 12d): each backup's queued uploads are dropped first (idempotent); then its stop row, its
     /// forgotten category folder, the forgotten layout and, for a stop `gate` decided, each stopped backup's new
     /// `last_pass_at` and acknowledged set go in ONE state-DB transaction. A crash before it commits leaves no stop and
-    /// no acknowledgement (the next pass decides the same stop again); after it, both (the stop is never applied twice).
+    /// no acknowledgement (the next pass decides the same stop again); after it, both (the stop is never applied
+    /// twice).
     pub(crate) async fn stop_backups(
         &self,
         c: &Category,

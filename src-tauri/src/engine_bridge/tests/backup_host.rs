@@ -989,12 +989,14 @@ use beebeeb_types::backup::Category;
                 let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
                 let last = now_ms() - 120_000;
                 fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
-                let erase = notice_row("files_removed", serde_json::json!({ "reason": "erase_request" }), last - 60_000);
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, last - 60_000);
                 let erase_id = id_of(&erase);
                 *fx.server.notices.lock().unwrap() = Some(vec![erase]);
 
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
-                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())], "{:?}", report.passes);
+                let erased = [("pictures".to_string(), "erase_request".to_string())];
+                assert_eq!(stops(&fx.bridge), erased, "{:?}", report.passes);
                 assert_eq!(count_backup_ops(&fx.bridge), 0);
                 assert_eq!(mark(&fx, "pictures").acknowledged, [erase_id], "stored with the stop");
                 let requests = fx.server.finish();
@@ -1018,7 +1020,8 @@ use beebeeb_types::backup::Category;
                 let fx = Fixture::new();
                 let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
                 let last = now_ms() - 120_000;
-                let erase = notice_row("files_removed", serde_json::json!({ "reason": "erase_request" }), last - 60_000);
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, last - 60_000);
                 let erase_id = id_of(&erase);
                 let pass = crate::state_db::BackupPassRecord {
                     category: "pictures".into(),
@@ -1052,13 +1055,15 @@ use beebeeb_types::backup::Category;
                 let last = now_ms() - 120_000;
                 fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
                 let mut rows = other_devices_notices(NOTICE_PAGE, last + 2_000);
-                let lapsed = notice_row("files_removed", serde_json::json!({ "reason": "account_lapsed" }), last + 1_000);
+                let lapsed_data = serde_json::json!({ "reason": "account_lapsed" });
+                let lapsed = notice_row("files_removed", lapsed_data, last + 1_000);
                 let lapsed_id = id_of(&lapsed);
                 rows.push(lapsed);
                 *fx.server.notices.lock().unwrap() = Some(rows);
 
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
-                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "account_lapsed".to_string())], "{:?}", report.passes);
+                let lapsed_stop = [("pictures".to_string(), "account_lapsed".to_string())];
+                assert_eq!(stops(&fx.bridge), lapsed_stop, "{:?}", report.passes);
                 assert_eq!(count_backup_ops(&fx.bridge), 0);
                 let acknowledged = mark(&fx, "pictures").acknowledged;
                 assert_eq!(acknowledged.len(), NOTICE_PAGE + 1, "every id in the window, from both pages");
@@ -1100,11 +1105,8 @@ use beebeeb_types::backup::Category;
                 assert!(stops(&fx.bridge).is_empty(), "nothing is turned off");
                 let kept = mark(&fx, "pictures");
                 assert_eq!((kept.last_pass_at_ms, kept.acknowledged), (Some(last), vec!["earlier".to_string()]));
-                let all_stops = fx.bridge.db.backup_stops().unwrap();
-                crate::backup::stop::set_check_failed(report.check_failed);
-                let view = crate::backup::stop::stop_view(&all_stops, "pictures", "Pictures", true);
-                crate::backup::stop::set_check_failed(false);
-                assert_eq!(view.check_note, Some(beebeeb_core::backup::MSG_STOP_CHECK_FAILED));
+                // The card's "Couldn't check — will retry." follows `check_failed` (the tick's `set_check_failed`;
+                // `stop::tests::a_stop_says_why_in_cores_words_and_offers_back_up_again` checks the words).
 
                 fx.server.fail_later_pages.store(false, Ordering::SeqCst);
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
@@ -1129,7 +1131,8 @@ use beebeeb_types::backup::Category;
                 let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
                 let last = now_ms() - 120_000;
                 fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
-                let reset = notice_row("files_removed", serde_json::json!({ "reason": "account_reset" }), now_ms() - 60_000);
+                let reset_data = serde_json::json!({ "reason": "account_reset" });
+                let reset = notice_row("files_removed", reset_data, now_ms() - 60_000);
                 let reset_id = id_of(&reset);
                 *fx.server.notices.lock().unwrap() = Some(vec![reset]);
                 run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
@@ -1167,27 +1170,33 @@ use beebeeb_types::backup::Category;
                 .scope(config_dir.path().to_path_buf(), async {
                     switch_on(&["pictures", "documents"]);
                     let mut fx = Fixture::new();
-                    let (pictures, documents, sync_root) = (source_with(2), source_with(1), tempfile::tempdir().unwrap());
+                    let (pictures, documents) = (source_with(2), source_with(1));
+                    let sync_root = tempfile::tempdir().unwrap();
                     let sources = [(Category::Pictures, pictures.path()), (Category::Documents, documents.path())];
                     let last = now_ms() - 120_000;
                     fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
                     fx.bridge.db.set_backup_last_pass("documents", last).unwrap();
-                    let erase = notice_row("files_removed", serde_json::json!({ "reason": "erase_request" }), now_ms() - 60_000);
+                    let erase_data = serde_json::json!({ "reason": "erase_request" });
+                    let erase = notice_row("files_removed", erase_data, now_ms() - 60_000);
                     let erase_id = id_of(&erase);
                     *fx.server.notices.lock().unwrap() = Some(vec![erase]);
 
                     let crash = rusqlite::Connection::open(fx.db_path()).unwrap();
                     crash
                         .execute_batch(&format!(
-                            "CREATE TRIGGER crash_insert BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'crash'); END;
-                             CREATE TRIGGER crash_update BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, 'crash'); END;"
+                            "CREATE TRIGGER crash_insert BEFORE INSERT ON {table}
+                                 BEGIN SELECT RAISE(ABORT, 'crash'); END;
+                             CREATE TRIGGER crash_update BEFORE UPDATE ON {table}
+                                 BEGIN SELECT RAISE(ABORT, 'crash'); END;"
                         ))
                         .unwrap();
                     let report = run(&fx, &sources, sync_root.path()).await;
-                    assert!(stops(&fx.bridge).is_empty(), "{table}: no stop without its acknowledgement: {:?}", report.passes);
+                    let unstopped = stops(&fx.bridge).is_empty();
+                    assert!(unstopped, "{table}: no stop without its acknowledgement: {:?}", report.passes);
                     for key in ["pictures", "documents"] {
                         let crashed = mark(&fx, key);
-                        assert_eq!((crashed.last_pass_at_ms, crashed.acknowledged), (Some(last), Vec::new()), "{table}: {key}");
+                        let marks = (crashed.last_pass_at_ms, crashed.acknowledged);
+                        assert_eq!(marks, (Some(last), Vec::new()), "{table}: {key}");
                     }
                     let on = crate::config::DesktopConfig::load().unwrap().known_folder_backup;
                     assert_eq!(on.len(), 2, "{table}: both switches stay on: {on:?}");
@@ -1204,7 +1213,8 @@ use beebeeb_types::backup::Category;
                         "{table}: the stop is not lost"
                     );
                     for key in ["pictures", "documents"] {
-                        assert_eq!(mark(&fx, key).acknowledged, [erase_id.clone()], "{table}: {key} acknowledged with its stop");
+                        let acknowledged = mark(&fx, key).acknowledged;
+                        assert_eq!(acknowledged, [erase_id.clone()], "{table}: {key} acknowledged with its stop");
                     }
 
                     switch_on(&["pictures"]);

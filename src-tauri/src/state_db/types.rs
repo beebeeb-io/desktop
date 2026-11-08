@@ -661,7 +661,8 @@ pub struct BackupPassRecord {
     pub acknowledged: Vec<String>,
 }
 
-/// LD-0139: backups that one decision turns off, written in ONE transaction ([`crate::state_db::StateDb::record_backup_stops`]).
+/// LD-0139: backups that one decision turns off, written in ONE transaction
+/// ([`crate::state_db::StateDb::record_backup_stops`]).
 #[derive(Debug, Clone, Copy)]
 pub struct BackupStopWrite<'a> {
     /// Core's `BackupStopReason` wire string.

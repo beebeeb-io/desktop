@@ -1,8 +1,9 @@
 //! The Backups root endpoints (LD-0113 spec §5.2, server `42a05fac`): `GET` and `PUT /api/v1/backups/root`, and the
 //! root-level listing the root resolution reads (`GET /api/v1/files` with no parent).
 //!
-//! Owns: those three requests, and the notices read each backup pass starts with (LD-0139). Must not: decide which
-//! folder is the root (core's `resolve_root`), seal a name, or decide what a notice means (core's `backup_stop`).
+//! Owns: those three requests, and the pages of the notices read each backup pass starts with (LD-0139). Must not:
+//! decide which folder is the root (core's `resolve_root`), seal a name, or decide what a notice means (core's
+//! `backup_pass_gate_v2`).
 
 use super::*;
 
@@ -64,7 +65,8 @@ impl ApiClient {
         cursor: Option<&str>,
     ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock, Option<i64>)> {
         use beebeeb_types::backup::{NOTICE_BACKUP_DELETED, NOTICE_FILES_REMOVED};
-        let mut path = format!("/api/v1/notifications?type={NOTICE_FILES_REMOVED},{NOTICE_BACKUP_DELETED}&since={since_ms}");
+        let mut path =
+            format!("/api/v1/notifications?type={NOTICE_FILES_REMOVED},{NOTICE_BACKUP_DELETED}&since={since_ms}");
         if let Some(cursor) = cursor {
             path.push_str(&format!("&cursor={}", encode(cursor)));
         }
