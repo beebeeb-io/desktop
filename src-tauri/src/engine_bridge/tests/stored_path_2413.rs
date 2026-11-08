@@ -411,6 +411,37 @@ fn task_2413_ops_below_a_refused_folder_ask_for_no_resnapshot() {
     assert_eq!(asked, Vec::<usize>::new(), "the ops (of 5) that asked for a re-snapshot");
 }
 
+/// The retry of a kept file whose path goes through a link (a symlink under a server folder's name inside the sync
+/// folder; on Windows a junction, `stored_path_2413_windows`): nothing is removed through it, not the file and not its
+/// Office owner file, and the entry resolves (nothing of the item is at that path).
+#[cfg(unix)]
+#[test]
+fn task_2413_the_kept_file_retry_removes_nothing_through_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, outside) = (dir.path().join("root"), dir.path().join("outside"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), b"outside bytes").unwrap();
+    std::fs::write(outside.join("~$ecious.txt"), b"owner file").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("Plans")).unwrap();
+    assert_eq!(std::fs::read(root.join("Plans/precious.txt")).unwrap(), b"outside bytes", "the fixture reaches outside");
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    db.record_kept_copy(&crate::state_db::KeptCopyInput {
+        original_file_id: "a1340000-0000-4000-8000-000000000001",
+        original_path: "Plans/precious.txt",
+        copy_path: "",
+        copied_hash: "",
+        original_removed: false,
+        reason: KeptReason::InUse,
+        kept_at: 100,
+    })
+    .unwrap();
+    retry_kept_originals(&db, &root, &|_, _| LocalEntry::InSync);
+    assert_eq!(std::fs::read(outside.join("precious.txt")).unwrap(), b"outside bytes");
+    assert_eq!(std::fs::read(outside.join("~$ecious.txt")).unwrap(), b"owner file", "the owner file behind the link");
+    assert!(db.list_kept_copies().unwrap().is_empty(), "resolved");
+}
+
 /// A refused rename of a stored folder changes nothing, reports nothing as applied, and leaves its rows in place.
 #[test]
 fn task_2413_a_refused_rename_of_a_stored_folder_changes_nothing() {

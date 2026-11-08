@@ -97,8 +97,61 @@ fn task_2413_windows_a_remote_delete_through_a_junction_leaves_its_target() {
         remove_pruned_entries(bridge.db(), &f.root, &rows, &|_, _| local);
         f.outside_untouched();
     }
+    // The retry of a kept file at the same path (an entry kept before the junction was made).
+    for local in [LocalEntry::InSync, LocalEntry::WhollyLocal] {
+        bridge
+            .db()
+            .record_kept_copy(&crate::state_db::KeptCopyInput {
+                original_file_id: file,
+                original_path: "Plans/precious.txt",
+                copy_path: "",
+                copied_hash: "",
+                original_removed: false,
+                reason: KeptReason::InUse,
+                kept_at: 100,
+            })
+            .unwrap();
+        retry_kept_originals(bridge.db(), &f.root, &|_, _| local);
+        f.outside_untouched();
+        assert!(bridge.db().list_kept_copies().unwrap().is_empty(), "resolved: nothing of the item is at that path");
+    }
     assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the junction is left as it is");
     std::fs::remove_dir(&link).unwrap();
+}
+
+/// The Backups tree's read-only state, where `Backups\Laptop` is a junction to `outside`: setting and clearing it
+/// changes no file behind the junction, and still changes the tree's own file.
+#[test]
+fn task_2413_windows_the_backups_read_only_state_never_changes_a_file_through_a_junction() {
+    let f = Folders::new();
+    std::fs::create_dir_all(f.root.join("Backups")).unwrap();
+    let link = f.root.join("Backups").join("Laptop");
+    f.junction(&link);
+    std::fs::write(f.root.join("Backups").join("own.txt"), b"own").unwrap();
+    let bridge = test_bridge(&f.root.parent().unwrap().join("state.db"));
+    seed_bridge_entry(&bridge, "a1350000-0000-4000-8000-000000000001", "Backups", None, FileStatus::CloudOnly, true, 0);
+    seed_bridge_entry(&bridge, "a1350000-0000-4000-8000-000000000002", "Backups/own.txt", None, FileStatus::Local, false, 3);
+    seed_bridge_entry(&bridge, "a1350000-0000-4000-8000-000000000003", "Backups/Laptop", None, FileStatus::CloudOnly, true, 0);
+    seed_bridge_entry(&bridge, "a1350000-0000-4000-8000-000000000004", "Backups/Laptop/precious.txt", None, FileStatus::Local, false, 13);
+    let read_only = |path: &Path| std::fs::metadata(path).unwrap().permissions().readonly();
+    let set_read_only = |path: &Path, on: bool| {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(on);
+        std::fs::set_permissions(path, permissions).unwrap();
+    };
+    let (own, behind) = (f.root.join("Backups").join("own.txt"), f.outside.join("precious.txt"));
+
+    let changed = crate::backup_protect::apply_tree_read_only(bridge.db(), &f.root, "Backups", true);
+    let set = (changed, read_only(&own), read_only(&behind));
+    // Cleared, where the file behind the junction was made read-only by its owner.
+    set_read_only(&behind, true);
+    let cleared = crate::backup_protect::apply_tree_read_only(bridge.db(), &f.root, "Backups", false);
+    let clear = (cleared, read_only(&own), read_only(&behind));
+    set_read_only(&behind, false);
+    std::fs::remove_dir(&link).unwrap();
+    assert_eq!(set, (1, true, false), "set: (changed, own file read-only, the file behind the junction read-only)");
+    assert_eq!(clear, (1, false, true), "cleared: (changed, own file read-only, the file behind the junction read-only)");
+    f.outside_untouched();
 }
 
 /// The placeholder pass over rows below `Plans`, where `Plans` on disk is a junction to `outside`: no folder is made
