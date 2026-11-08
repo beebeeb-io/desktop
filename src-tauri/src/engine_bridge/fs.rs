@@ -231,7 +231,7 @@ pub(super) fn resolve_relative_path(
         if name.is_empty() {
             return Ok(String::new());
         }
-        crate::stored_path::check_name_for(name, crate::stored_path::host_is_windows())?;
+        crate::stored_path::check_name(name)?;
         Ok(name.to_string())
     };
     if let Some(name_enc) = f["name_encrypted"].as_str() {
@@ -316,33 +316,46 @@ pub(super) fn rel_under(sync_root: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Where an op puts a row, by its parent ([`parent_rel_path_by_id`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ParentPath {
+    /// Under this stored path ("" at the top level).
+    At(String),
+    /// Under a folder the store refused and does not hold (task 2413): the row is not placed either, and is recorded
+    /// as refused (`StateDb::note_refused_server_row`) so the next op under it asks for nothing.
+    Refused,
+    /// Under a folder this device does not hold yet: a re-snapshot is requested, which places the row under it.
+    Unknown,
+}
+
 /// Resolve a parent's FULL relative path from the local mirror by its `file_id`
 /// — the parent path a freshly-created/moved child must be prefixed with. This
 /// mirrors how [`apply_snapshot`] resolves nesting (it threads each parent's
 /// resolved full path into its children), so an op-driven create/move lands at
 /// the SAME path a fresh snapshot would produce.
 ///
-///   * `parent_id == None`            → "" (root child),
-///   * parent row present locally     → the parent's stored full `path` (its
+///   * `parent_id == None`            → `At("")` (root child),
+///   * parent row present locally     → `At` the parent's stored full `path` (its
 ///     leading slash trimmed so it composes cleanly as a prefix),
-///   * `parent_id == Some` but the parent row is NOT in the local mirror yet
-///     (the create/move arrived before its parent's create op landed, or the
-///     store refused the parent, task 2413) → `None`, and a re-snapshot is
+///   * a parent the store refused and does not hold (task 2413) → `Refused`: the
+///     row is not placed either, and asks for no re-snapshot (one would refuse
+///     the parent again),
+///   * any other parent NOT in the local mirror yet (the create/move arrived
+///     before its parent's create op landed) → `Unknown`, and a re-snapshot is
 ///     requested: the caller applies nothing now, and the authoritative snapshot
 ///     places the row under its parent on the next tick. Task 2413: before, the
-///     row went to the top level for this tick, and a row under a refused folder
-///     stayed there.
-pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> Option<String> {
+///     row went to the top level for this tick.
+pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> ParentPath {
     let Some(pid) = parent_id.filter(|p| !p.is_empty()) else {
-        return Some(String::new()); // root child — no prefix
+        return ParentPath::At(String::new()); // root child — no prefix
     };
     match bridge.db().get_file(pid).ok().flatten() {
-        Some(parent) => Some(parent.path.trim_start_matches('/').to_string()),
-        // Task 2413: a parent the store refused is not placed, so neither is the row; a re-snapshot would refuse it
-        // again (the parent's own write asks for one once it is stored).
+        Some(parent) => ParentPath::At(parent.path.trim_start_matches('/').to_string()),
+        // Task 2413: a re-snapshot would refuse the parent again; the parent's own write asks for one once it is
+        // stored.
         None if bridge.db().is_refused_server_row(pid).unwrap_or(false) => {
             tracing::debug!(parent_id = %pid, "sync_tick: op under a folder not placed; not placed either");
-            None
+            ParentPath::Refused
         }
         None => {
             // Parent not locally known — can't compute the prefix from the op
@@ -355,7 +368,7 @@ pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&st
                 parent_id = %pid,
                 "sync_tick: op references a parent not in the local mirror; scheduling re-snapshot"
             );
-            None
+            ParentPath::Unknown
         }
     }
 }

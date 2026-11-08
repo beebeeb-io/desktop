@@ -679,7 +679,8 @@ pub(super) fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
 ///
 /// Task 2407 (core 2404): a `path` (below `sync_root`) whose name reaches a different entry, e.g. a Windows 8.3 short
 /// name, is not this item's entry: nothing is removed or copied, and nothing of the item is on disk (`Gone`). A check
-/// that cannot finish removes nothing either; the entry is kept for the retry.
+/// that cannot finish removes nothing either; the entry is kept for the retry. Task 2413: so is a path through a link
+/// (`stored_path::refuse_links_below`), the entry itself included.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(crate) fn remove_pruned_entry(
     sync_root: &Path,
@@ -689,6 +690,25 @@ pub(crate) fn remove_pruned_entry(
     local: LocalEntry,
     copy_dir: &Path,
 ) -> PrunedEntry {
+    // Task 2413: a link from the sync folder down to the entry, the entry included (a junction or symlink made inside
+    // the folder, under a server folder's name), leads to another place: nothing there is this item's entry, so
+    // nothing is removed or copied (`Gone`, as for an 8.3 alias). A walk that cannot finish removes nothing either.
+    match crate::stored_path::refuse_links_below(sync_root, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            // Zero-knowledge: never the path.
+            tracing::warn!("remote-deletion reconcile: the path goes through a link; it is left alone");
+            return PrunedEntry::Gone;
+        }
+        Err(error) => {
+            tracing::warn!(kind = ?error.kind(), "remote-deletion reconcile: the path's folders could not be checked; nothing is removed");
+            return if kind == RemovedKind::Dir {
+                PrunedEntry::FolderKept
+            } else {
+                PrunedEntry::KeptInPlace(KeptReason::InUse)
+            };
+        }
+    }
     match crate::name_alias::conflict_below(sync_root, path) {
         Ok(None) => {}
         Ok(Some(_)) => {

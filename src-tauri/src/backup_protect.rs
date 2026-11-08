@@ -315,7 +315,9 @@ pub(crate) fn system_role_changed(db: &StateDb, file_id: &str) {
             return;
         };
         let flagged = db.backups_roots().is_ok_and(|roots| roots.iter().any(|(id, _)| id == file_id));
-        let (root, files) = tree_on_disk(db, &sync_root, &row.path);
+        let Some((root, files)) = tree_on_disk(db, &sync_root, &row.path) else {
+            return;
+        };
         let spawned = std::thread::Builder::new()
             .name("backups-read-only".into())
             .spawn(move || {
@@ -334,22 +336,29 @@ pub(crate) fn system_role_changed(db: &StateDb, file_id: &str) {
 /// when `flagged`, both taken away when not (the role was cleared). Returns how many files changed.
 #[cfg(target_os = "windows")]
 pub(crate) fn apply_tree_read_only(db: &StateDb, sync_root: &Path, root_rel: &str, flagged: bool) -> usize {
-    let (root, files) = tree_on_disk(db, sync_root, root_rel);
+    let Some((root, files)) = tree_on_disk(db, sync_root, root_rel) else {
+        return 0;
+    };
     apply_read_only(&root, &files, flagged)
 }
 
-/// The root folder of the tree at `root_rel` on disk, and where each row under it is on disk.
+/// The root folder of the tree at `root_rel` on disk, and where each row under it is on disk. Each path goes through
+/// the one map every placeholder caller shares (`EngineBridge::placeholder_path_under`, task 2413); `None` when the
+/// root's does not map (nothing is changed), and a row whose path does not map is left out.
 #[cfg(target_os = "windows")]
-fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> (PathBuf, Vec<PathBuf>) {
+fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> Option<(PathBuf, Vec<PathBuf>)> {
     let root_rel = root_rel.trim_matches('/');
-    let on_disk = |rel: &str| crate::engine_bridge::local_file_path_under_sync_root(sync_root, rel.trim_matches('/')).ok();
-    let root = on_disk(root_rel).unwrap_or_else(|| sync_root.join(root_rel));
+    let on_disk = |rel: &str| crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel);
+    let Some(root) = on_disk(root_rel) else {
+        tracing::warn!("backup protection: the Backups root's stored path does not map onto the sync folder; skipped");
+        return None;
+    };
     let rows = db.paths_at_or_under(root_rel).unwrap_or_else(|error| {
         tracing::warn!(%error, "backup protection: the Backups tree's rows could not be read");
         Vec::new()
     });
     let files = rows.iter().filter(|rel| rel.trim_matches('/') != root_rel).filter_map(|rel| on_disk(rel)).collect();
-    (root, files)
+    Some((root, files))
 }
 
 /// [`apply_tree_read_only`] on paths already read. A folder, or a row with nothing on disk yet (the

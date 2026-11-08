@@ -290,7 +290,7 @@ pub(super) fn shared_leaf_name(name: &str) -> Result<Option<String>, beebeeb_cor
     if leaf.is_empty() {
         return Ok(None);
     }
-    crate::stored_path::check_name_for(leaf, crate::stored_path::host_is_windows())?;
+    crate::stored_path::check_name(leaf)?;
     Ok(Some(leaf.to_string()))
 }
 

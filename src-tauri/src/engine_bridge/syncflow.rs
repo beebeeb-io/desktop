@@ -478,6 +478,11 @@ pub(super) fn apply_snapshot(
         }
         if f["parent_id"].as_str().is_some_and(|pid| unplaced.contains(pid)) {
             tracing::debug!(file_id = %file_id, "sync_tick: snapshot node under a folder not placed; not placed either");
+            // Recorded as refused (unless stored), so an op under it waits without asking for a re-snapshot
+            // (`parent_rel_path_by_id`): the snapshot it would ask for skips it again.
+            if bridge.db().get_file(file_id)?.is_none() {
+                bridge.db().note_refused_server_row(file_id)?;
+            }
             unplaced.insert(file_id.to_string());
             continue;
         }
@@ -744,10 +749,15 @@ pub(super) fn apply_sync_op(
             // `resolve_relative_path` re-derives the plaintext leaf. We keep the
             // existing row's parent path by reading its current path's parent.
             let new_name = payload["new_name_encrypted"].as_str();
-            let row = synthesize_op_row(bridge, id, op, new_name);
-            let parent_rel = existing_parent_rel_path(bridge, id);
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
-                applied.push(id.to_string());
+            if bridge.db().get_file(id)?.is_none() {
+                // Task 2413: the new name may be one the store accepts, under a parent the op does not name.
+                op_on_a_row_not_held(bridge, id, &op.op_type, true)?;
+            } else {
+                let row = synthesize_op_row(bridge, id, op, new_name);
+                let parent_rel = existing_parent_rel_path(bridge, id);
+                if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                    applied.push(id.to_string());
+                }
             }
         }
         "file_move" | "folder_move" => {
@@ -764,16 +774,25 @@ pub(super) fn apply_sync_op(
             // Spec §7.2 (final review): with no `new_parent_id` key the op names no
             // new parent, so the row keeps its path's folders as it keeps its parent
             // (`synthesize_op_row`); a key decides both, `null` meaning the top level.
-            let parent_rel = if payload.get("new_parent_id").is_some() {
+            let new_parent = payload.get("new_parent_id").is_some();
+            let parent = if new_parent {
                 parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str())
             } else {
-                Some(existing_parent_rel_path(bridge, id))
+                ParentPath::At(existing_parent_rel_path(bridge, id))
             };
-            // Task 2413: a new parent this device does not hold leaves the row where it is; the re-snapshot places it.
-            if let Some(parent_rel) = parent_rel
-                && process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some()
-            {
-                applied.push(id.to_string());
+            let held = bridge.db().get_file(id)?.is_some();
+            match parent {
+                ParentPath::At(parent_rel) if held => {
+                    if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                        applied.push(id.to_string());
+                    }
+                }
+                // Task 2413: a move names no name, so a row this device does not hold has none to place.
+                ParentPath::At(_) => op_on_a_row_not_held(bridge, id, &op.op_type, new_parent)?,
+                // Task 2413: under a refused folder, a stored row stays where it is, and one not stored is not placed.
+                ParentPath::Refused if !held => bridge.db().note_refused_server_row(id)?,
+                // A new parent this device does not hold yet leaves the row where it is; the re-snapshot places it.
+                ParentPath::Refused | ParentPath::Unknown => {}
             }
         }
         "file_create" | "folder_create" | "file_update" => {
@@ -800,17 +819,28 @@ pub(super) fn apply_sync_op(
             // path prefix MUST be correct here; there is no periodic snapshot to
             // fix it later. For an UPDATE the row already exists, so keep its
             // current parent prefix (`existing_parent_rel_path`).
-            let parent_rel = if op.op_type == "file_update" {
-                Some(existing_parent_rel_path(bridge, id))
-            } else {
+            let held = bridge.db().get_file(id)?.is_some();
+            let parent = if op.op_type != "file_update" {
                 parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
+            } else if held {
+                ParentPath::At(existing_parent_rel_path(bridge, id))
+            } else {
+                // Task 2413: an update keeps the name; it never decides whether the store takes the row.
+                op_on_a_row_not_held(bridge, id, &op.op_type, false)?;
+                ParentPath::Unknown
             };
-            // Task 2413: a parent this device does not hold never puts the row at the top level; the re-snapshot that
-            // `parent_rel_path_by_id` requested places it.
-            if let Some(parent_rel) = parent_rel
-                && process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some()
-            {
-                applied.push(id.to_string());
+            match parent {
+                ParentPath::At(parent_rel) => {
+                    if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+                        applied.push(id.to_string());
+                    }
+                }
+                // Task 2413: a row under a refused folder is not placed either, and is recorded so the next op under
+                // it asks for nothing; a stored one stays where it is.
+                ParentPath::Refused if !held => bridge.db().note_refused_server_row(id)?,
+                // A parent this device does not hold never puts the row at the top level; the re-snapshot that
+                // `parent_rel_path_by_id` requested places it.
+                ParentPath::Refused | ParentPath::Unknown => {}
             }
             #[cfg(target_os = "macos")]
             {
@@ -849,6 +879,23 @@ pub(super) fn apply_sync_op(
         rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
     }
     Ok(applied)
+}
+
+/// Task 2413: an op on a row this device does not hold, other than a create, places nothing. Such a row has no stored
+/// path to keep a parent or a name from (a rename names no parent, a move no name, an update neither), so composing its
+/// path would put it at the top level, or store it with an empty path. The snapshot places it under its parent if the
+/// store accepts it: a re-snapshot is requested when the op may change the store's answer (`may_change`: a new name, a
+/// new parent this device holds), and when the row is not one the store refused in this run (this device misses it
+/// for another reason; a refusal from before a restart is not remembered, so such a row is treated as missed). A row
+/// the store refused, and an op that changes nothing it was refused for, asks for nothing.
+fn op_on_a_row_not_held(bridge: &EngineBridge, id: &str, op_type: &str, may_change: bool) -> Result<(), EngineError> {
+    let refused = bridge.db().is_refused_server_row(id)?;
+    let resnapshot = may_change || !refused;
+    if resnapshot {
+        bridge.db().request_resnapshot()?;
+    }
+    tracing::debug!(file_id = %id, op_type, refused, resnapshot, "sync_tick: op on a row this device does not hold; nothing placed");
+    Ok(())
 }
 
 pub(super) fn rebase_folder_descendants(

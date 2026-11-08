@@ -79,16 +79,19 @@ pub(crate) fn refuse_conflict_under_roots(dest: &Path, roots: &[&Path]) -> io::R
 }
 
 /// Where a Windows reclaim (free up space, a selective-sync exclusion) may dehydrate a row's file: its place below
-/// `sync_root`, built from the row's '/'-joined path. `None` for an empty path, and for a path whose name reaches a
-/// different file or folder (a Windows 8.3 short name; `canonicalize` would follow it to that file's long name) or
-/// that cannot be checked: the file stays local.
+/// `sync_root`, built from the row's '/'-joined path through the one map every placeholder caller shares
+/// (`EngineBridge::placeholder_path_under`, task 2413). `None` for an empty path, for a path that is not plain names
+/// under `sync_root`, and for a path whose name reaches a different file or folder (a Windows 8.3 short name;
+/// `canonicalize` would follow it to that file's long name) or that cannot be checked: the file stays local.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(crate) fn reclaim_place(sync_root: &Path, rel: &str) -> Option<PathBuf> {
-    let rel = rel.trim_matches('/');
-    if rel.is_empty() {
+    if rel.trim_matches('/').is_empty() {
         return None;
     }
-    let place = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let Some(place) = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel) else {
+        tracing::debug!("reclaim: the stored path does not map onto the sync folder; the file stays local");
+        return None;
+    };
     matches!(conflict_below(sync_root, &place), Ok(None)).then_some(place)
 }
 

@@ -21,6 +21,9 @@ pub(crate) struct PopulateStats {
     pub name_conflicts: usize,
     /// Task 2407: rows skipped because that check could not finish (retried next pass).
     pub name_check_errors: usize,
+    /// Task 2413: rows skipped because a folder on their path is a link (a junction or symlink made inside the sync
+    /// folder), or that walk could not finish (retried next pass).
+    pub link_skips: usize,
     pub db_ms: u64,
     pub elapsed_ms: u64,
 }
@@ -67,6 +70,8 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
     let backups = crate::backup_protect::BackupsTree::read(db);
     // Task 2407 (core 2404): the folders this pass found to be their own names, each looked up once per pass.
     let mut dirs = crate::name_alias::CheckedDirs::new(sync_root);
+    // Task 2413: the parent folders this pass found to have no link on the way from the sync root, each walked once.
+    let mut no_links: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
 
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
@@ -99,6 +104,23 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
                 continue;
             }
         };
+
+        // Task 2413: a link on the way from the sync root (a junction or symlink made inside the folder, under a
+        // server folder's name) would take the folders `ensure_directory` makes, and the placeholder, to another place.
+        // The row is skipped; its file stays on the server, in the web app.
+        if !no_links.contains(&parent_dir) {
+            match crate::stored_path::refuse_links_below(sync_root, &parent_dir) {
+                Ok(()) => {
+                    no_links.insert(parent_dir.clone());
+                }
+                Err(e) => {
+                    // Zero-knowledge: the kind only.
+                    tracing::warn!(kind = ?e.kind(), file_id = %entry.file_id, "placeholder skipped: a folder on its path is a link, or could not be checked");
+                    stats.link_skips += 1;
+                    continue;
+                }
+            }
+        }
 
         // Task 2407 (core 2404): a folder on the way whose name reaches a DIFFERENT folder (a Windows 8.3 short name)
         // would put the placeholder into that folder, and every later delete or fetch by this row's path would reach
