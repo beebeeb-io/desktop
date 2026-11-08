@@ -388,25 +388,25 @@ describe('task 2414: a pin’s files not downloaded', () => {
 
   test('40 downloads that gave up: never "Up to date"; "Not in sync" with the count, as a not-downloaded line', () => {
     const view = syncActivityView(signedIn, failedPin(40), { now })
-    expect([view.kind, view.label, view.headline, view.tone]).toEqual(['not_in_sync', 'Not in sync', '40 files not downloaded to this PC.', 'attention'])
-    expect(view.notDownloadedLines).toEqual(['40 files not downloaded to this PC.'])
+    expect([view.kind, view.label, view.headline, view.tone]).toEqual(['not_in_sync', 'Not in sync', '40 items not downloaded to this PC.', 'attention'])
+    expect(view.notDownloadedLines).toEqual(['40 items not downloaded to this PC.'])
     expect(view.notSentLines).toEqual([])
   })
 
   test('next to changes not sent it is a detail line of its own, never counted with them', () => {
     const view = syncActivityView(signedIn, failedPin(1, { gave_up: 43 }), { now })
     expect(view.headline).toBe(GAVE_UP_LINE)
-    expect(view.details).toEqual(['1 file not downloaded to this PC.'])
+    expect(view.details).toEqual(['1 item not downloaded to this PC.'])
     expect(view.notSentLines).toEqual([GAVE_UP_LINE])
-    expect(view.notDownloadedLines).toEqual(['1 file not downloaded to this PC.'])
+    expect(view.notDownloadedLines).toEqual(['1 item not downloaded to this PC.'])
     const syncing = syncActivityView(signedIn, summary({ transfers_active: 2, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 3 } }), { now })
     expect(syncing.kind).toBe('syncing')
-    expect(syncing.details).toContain('3 files not downloaded to this PC.')
+    expect(syncing.details).toContain('3 items not downloaded to this PC.')
   })
 
   test('none: no line; the device word follows the surface', () => {
     expect(syncActivityView(signedIn, failedPin(0), { now }).notDownloadedLines).toEqual([])
     expect(syncActivityView(signedIn, failedPin(0), { now }).kind).toBe('up_to_date')
-    expect(notDownloadedSentence(2, 'this device')).toBe('2 files not downloaded to this device.')
+    expect(notDownloadedSentence(2, 'this device')).toBe('2 items not downloaded to this device.')
   })
 })

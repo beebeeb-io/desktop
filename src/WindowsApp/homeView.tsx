@@ -8,6 +8,7 @@ import { T, NavIcon, Chip, Skeleton, PageHeader, Card } from '../windows/ui'
 import { usePlatformName, thisDeviceNoun } from '../platform'
 import { useSyncActivitySummary } from '../windows/syncActivityUi'
 import { homeSyncMetrics, type HomeMetricLink, type HomeSyncMetric } from '../windows/homeSyncMetrics'
+import { SECTION_LINKS } from './nav'
 
 // ── Views ───────────────────────────────────────────────────────────────────
 
@@ -321,8 +322,8 @@ export function HomeView({
             {link && onOpenList ? (
               // Task 2409: the count opens the list of what it counts. A link (it goes somewhere), underlined, in ink.
               <a
-                href={`#${link}`}
-                title={link === 'not-sent' ? 'See which changes' : 'See which files'}
+                href={SECTION_LINKS[link].href}
+                title={SECTION_LINKS[link].title}
                 onClick={(event) => {
                   event.preventDefault()
                   onOpenList(link)

@@ -225,9 +225,12 @@ export function gaveUpSentence(n: number): string {
   return `${plural(n, 'change', 'changes')} stopped after repeated errors and ${n === 1 ? 'is' : 'are'} not retried.`
 }
 
-/** Task 2414: "2 files not downloaded to this PC." */
+/**
+ * Task 2414: "2 items not downloaded to this PC." Items, not files: the count holds a folder's pin (`pin_tree`) as one,
+ * next to each file's download (self-review).
+ */
 export function notDownloadedSentence(n: number, device = 'this PC'): string {
-  return `${plural(n, 'file', 'files')} not downloaded to ${device}.`
+  return `${plural(n, 'item', 'items')} not downloaded to ${device}.`
 }
 
 export function waitingSentence(n: number): string {

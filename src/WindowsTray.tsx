@@ -52,7 +52,7 @@ import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
 import { pollWhileVisible } from './windows/visiblePoll'
-import { NOT_DOWNLOADED_TARGET, NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'
+import { SECTION_LINKS, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'
 import { baseName } from './pathParts'
 
 // FileGlyph, getFileType, FILE_COLOR imported from ./windows/fileGlyph (shared with ActivityView)
@@ -311,7 +311,7 @@ export default function WindowsTray() {
 
   // Task 2409: a waiting, held or given-up line opens Activity › Not sent, where those changes are listed one by one;
   // task 2414: the not-downloaded line opens Activity › Not downloaded.
-  const openList = async (target: typeof NOT_SENT_TARGET | typeof NOT_DOWNLOADED_TARGET) => {
+  const openList = async (target: (typeof SECTION_LINKS)[keyof typeof SECTION_LINKS]['target']) => {
     try {
       window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, target)
     } catch {
@@ -324,9 +324,9 @@ export default function WindowsTray() {
   /** A status line: a link to the Activity list of what it counts (changes not sent, files not downloaded), else text. */
   const statusLine = (line: string) => {
     const list = activity.notSentLines.includes(line)
-      ? { target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' }
+      ? SECTION_LINKS['not-sent']
       : activity.notDownloadedLines.includes(line)
-        ? { target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which files' }
+        ? SECTION_LINKS['not-downloaded']
         : null
     return list ? (
       <a

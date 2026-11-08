@@ -16,6 +16,7 @@ import { parseSyncActivitySummary, type SyncActivitySummary } from '../src/windo
 import { ENGINE_STATUS_EVENT } from '../src/popoverContract'
 import { pollWhileVisible, windowVisible } from '../src/windows/visiblePoll'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
+import { SECTION_LINKS } from '../src/WindowsApp/nav'
 
 const raw: unknown = JSON.parse(readFileSync(new URL('./fixtures/sync-activity-summary.on-hold.json', import.meta.url), 'utf8'))
 const fixture = parseSyncActivitySummary(raw)
@@ -128,6 +129,7 @@ function openHome(
     bindings: {
       command: desktopApi.command,
       homeSyncMetrics,
+      SECTION_LINKS,
       usePlatformName: () => 'windows',
       thisDeviceNoun: () => 'this PC',
       formatBytes: (n: number) => `${n} B`,
@@ -201,6 +203,7 @@ describe('task 2409: "Not sent N" opens the list of what it counts', () => {
       bindings: {
         command: desktopApi.command,
         homeSyncMetrics,
+        SECTION_LINKS,
         usePlatformName: () => 'windows',
         thisDeviceNoun: () => 'this PC',
         formatBytes: (n: number) => `${n} B`,
@@ -248,7 +251,7 @@ describe('task 2414: "Not downloaded N" next to "Not sent", only while it counts
     await settle(m)
     expect(strip(m)).toEqual({ State: 'Not in sync', 'Not sent': '0', 'Not downloaded': '40', Conflicts: '0', 'In vault': '201000000000 B' })
     const anchors = m.elements().filter((el) => el.type === 'a')
-    expect(anchors.map((a) => [textOf(a.props.children), a.props.href, a.props.title])).toEqual([['40', '#not-downloaded', 'See which files']])
+    expect(anchors.map((a) => [textOf(a.props.children), a.props.href, a.props.title])).toEqual([['40', '#not-downloaded', 'See which items']])
     anchors[0].props.onClick({ preventDefault() {} })
     expect(sections).toEqual(['not-downloaded'])
     const grid = m.elements().find((el) => typeof el.props.style?.gridTemplateColumns === 'string')

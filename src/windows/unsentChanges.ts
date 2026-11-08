@@ -213,16 +213,19 @@ export function unsentReason(item: UnsentChange, ctx: UnsentContext): { text: st
     const { done, total } = item.sending
     return calm(total > 0 ? `Sending · ${Math.min(100, Math.floor((done / total) * 100))}%` : 'Sending')
   }
-  // Task 2414: a change that failed and that Try again would not send says why, whatever its group.
-  if (item.blocked === 'copy_gone') return needs('Can’t send: the copy to send is gone.')
-  if (item.blocked === 'superseded') {
-    return needs(
-      item.kind === 'new_file'
-        ? 'Can’t send: this file is already in Beebeeb. Nothing was overwritten.'
-        : 'Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.',
-    )
+  // Task 2414: a change that failed and that Try again would not send says why (it has no Try again). One still waiting
+  // out a backoff keeps its retry line: the engine tries it again at that time all the same (self-review).
+  if (item.blocked !== null && item.retry_at === null) {
+    if (item.blocked === 'copy_gone') return needs('Can’t send: the copy to send is gone.')
+    if (item.blocked === 'superseded') {
+      return needs(
+        item.kind === 'new_file'
+          ? 'Can’t send: this file is already in Beebeeb. Nothing was overwritten.'
+          : 'Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.',
+      )
+    }
+    return needs('Can’t send it as it is.')
   }
-  if (item.blocked !== null) return needs('Can’t send it as it is.')
   switch (item.group) {
     case 'waiting':
       if (item.retry_at !== null) return needs(`Couldn’t send; trying again at ${retryTime(item.retry_at, now)}`)
@@ -256,6 +259,29 @@ export function unsentReason(item: UnsentChange, ctx: UnsentContext): { text: st
     default:
       return needs('On hold')
   }
+}
+
+/**
+ * Task 2414: why a "Not downloaded" row did not download. A pin's downloads are paused only by what pauses the whole
+ * queue (signed out, locked); the upload reasons ("storage full", "found while paused", …) are never theirs, so any
+ * other pause is "On hold", never an upload's sentence (self-review).
+ */
+export function notDownloadedReason(item: UnsentChange): { text: string; attention: boolean } {
+  switch (item.group) {
+    case 'gave_up':
+      return { text: 'Stopped after repeated errors', attention: true }
+    case 'auth':
+      return { text: 'On hold until you sign in again', attention: true }
+    case 'locked':
+      return { text: 'On hold while Beebeeb is locked', attention: false }
+    default:
+      return { text: 'On hold', attention: true }
+  }
+}
+
+/** Task 2414: a "Not downloaded" row's one action: Sign in again, for one held until then; nothing else applies. */
+export function notDownloadedAction(item: UnsentChange): UnsentAction | null {
+  return item.group === 'auth' ? { kind: 'sign_in_again', label: 'Sign in again' } : null
 }
 
 export type UnsentAction =

@@ -2,7 +2,7 @@
 // section. The tray sends the target as a string over the navigate event and localStorage; the main window parses it.
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { NOT_DOWNLOADED_TARGET, NOT_SENT_TARGET, navIdFromString, navTargetFromString } from '../src/WindowsApp/nav'
+import { NOT_DOWNLOADED_TARGET, NOT_SENT_TARGET, SECTION_LINKS, navIdFromString, navTargetFromString } from '../src/WindowsApp/nav'
 
 describe('a navigation target', () => {
   test('a route, or Activity › Not sent; anything else is nothing', () => {
@@ -19,13 +19,17 @@ describe('a navigation target', () => {
   test('the tray sends the same target the main window reads', () => {
     const tray = readFileSync(new URL('../src/WindowsTray.tsx', import.meta.url), 'utf8')
     // The constants are imported, not copied, so the two cannot drift (2409 self-review).
-    expect(tray).toContain("import { NOT_DOWNLOADED_TARGET, NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'")
+    expect(tray).toContain("import { SECTION_LINKS, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'")
     expect(tray).not.toContain("const NOT_SENT_TARGET =")
     expect(tray).not.toContain("const NOT_DOWNLOADED_TARGET =")
     expect(tray).toContain('await emit(WINDOWS_APP_NAV_EVENT, target)')
     expect(tray).toContain('window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, target)')
-    expect(tray).toContain("{ target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' }")
-    expect(tray).toContain("{ target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which files' }")
+    expect(tray).toContain("? SECTION_LINKS['not-sent']")
+    expect(tray).toContain("? SECTION_LINKS['not-downloaded']")
+    expect(SECTION_LINKS).toEqual({
+      'not-sent': { target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' },
+      'not-downloaded': { target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which items' },
+    })
     // Both status lines go through the link-or-text helper.
     expect(tray).toContain('{statusLine(activity.headline)}')
     expect(tray).toContain('{statusLine(line)}')

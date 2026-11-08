@@ -43,9 +43,11 @@ fn reconcile_op(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::held_queue::
     })
 }
 
-/// Whether an upload's staged copy is still on disk, as the pass asks it.
+/// Whether an upload's staged copy is still on disk, as the pass asks it. Gone means `NotFound`, as the uploader reads
+/// it (`engine_bridge/upload.rs`: any other read error retries); a copy that cannot be read just now is not gone
+/// (task 2414 self-review: `Path::exists` said gone on a permission error).
 fn payload_on_disk(path: &str) -> bool {
-    Path::new(path).exists()
+    !matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Tasks 1888 + 2226 (spec §3): the rows and ops the reconcile pass plans over, read in one transaction. Rows in rowid

@@ -215,6 +215,7 @@ describe('task 2414: Activity › Not downloaded', () => {
     items: [
       { ...fixture.items[0], id: 'pin-a', kind: 'download', path: 'Photos/2026/IMG_0001.jpg', group: 'gave_up', retryable: false },
       { ...fixture.items[0], id: 'pin-b', kind: 'folder', path: 'Projects/Archive', group: 'auth', retryable: false },
+      { ...fixture.items[0], id: 'pin-c', kind: 'download', path: 'Music/track.flac', group: 'found_while_paused', retryable: false },
     ],
   }
 
@@ -223,16 +224,20 @@ describe('task 2414: Activity › Not downloaded', () => {
     await settle(m)
     expect(m.calls.map((c) => c.name)).toEqual(['not_downloaded'])
     const listed = rows(m)
-    expect(Object.keys(listed)).toEqual(['pin-a', 'pin-b'])
+    expect(Object.keys(listed)).toEqual(['pin-a', 'pin-b', 'pin-c'])
     expect(listed['pin-a']).toContain('IMG_0001.jpg')
     expect(listed['pin-a']).toContain('Download')
     expect(listed['pin-a']).toContain('Photos/2026')
     expect(listed['pin-a']).toContain('Stopped after repeated errors')
     expect(listed['pin-b']).toContain('On hold until you sign in again')
+    // Never an upload's sentence or its link (self-review): this section has no Settings › Sync to open.
+    expect(listed['pin-c']).toContain('On hold')
+    expect(listed['pin-c']).not.toContain('not uploaded')
     expect(buttons(m)).toEqual(['Sign in again'])
+    expect(links(m)).toEqual([])
     const text = textOf(m.tree())
     expect(text).toContain('Not downloaded')
-    expect(text).toContain('Files you chose to keep on this PC that didn’t finish downloading.')
+    expect(text).toContain('Files and folders you chose to keep on this PC that didn’t finish downloading.')
     const section = m.elements().find((el) => el.type === 'section')!
     expect([section.props.id, section.props['aria-labelledby']]).toEqual(['not-downloaded', 'not-downloaded-heading'])
   })
@@ -240,10 +245,10 @@ describe('task 2414: Activity › Not downloaded', () => {
   test('locked and empty say so in its own words', async () => {
     const locked = open({ not_downloaded: () => { throw 'vault is locked' } }, { list: 'not-downloaded' })
     await settle(locked)
-    expect(textOf(locked.tree())).toContain('Beebeeb is locked. Unlock it to see which files these are.')
+    expect(textOf(locked.tree())).toContain('Beebeeb is locked. Unlock it to see which items these are.')
     const empty = open({ not_downloaded: () => ({ ...pin, total: 0, items: [] }) }, { list: 'not-downloaded' })
     await settle(empty)
-    expect(textOf(empty.tree())).toContain('Every file you chose to keep on this PC is downloaded.')
+    expect(textOf(empty.tree())).toContain('Everything you chose to keep on this PC is downloaded.')
   })
 })
 

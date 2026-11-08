@@ -333,7 +333,7 @@ try {
     const link = page.locator('a[href="#not-downloaded"]')
     await link.waitFor({ timeout: 5000 })
     assert.equal((await link.textContent())?.trim(), '2', 'the link is the count')
-    assert.equal(await link.getAttribute('title'), 'See which files')
+    assert.equal(await link.getAttribute('title'), 'See which items')
     assert.equal((await page.locator('a[href="#not-sent"]').textContent())?.trim(), '3', '"Not sent" does not count them')
     const sfx = colorScheme === 'dark' ? '-dark' : ''
     results.push([`home-not-downloaded-link${sfx} (an <a> reading 2 next to Not sent 3)`, await shot(page, `home-not-downloaded-link${sfx}`)])
@@ -345,7 +345,7 @@ try {
     const a = await rowText(page, 'pin-a')
     for (const t of ['IMG_0001.jpg', 'Download', 'Photos/2026', 'Stopped after repeated errors']) assert.ok(a.includes(t), `pin row: ${t} in ${JSON.stringify(a)}`)
     assert.equal(await section.getByRole('button').count(), 0, 'no Try again on a download')
-    assert.ok((await section.innerText()).includes('Files you chose to keep on this PC that didn’t finish downloading.'))
+    assert.ok((await section.innerText()).includes('Files and folders you chose to keep on this PC that didn’t finish downloading.'))
     assert.deepEqual(await amberIn(page, '#not-downloaded'), [], 'no Amber in Not downloaded')
     results.push([`activity-not-downloaded${sfx} (2 rows, no Try again, 0 Amber)`, await shot(page, `activity-not-downloaded${sfx}`)])
     await section.screenshot({ path: path.join(output, `activity-not-downloaded${sfx}-section.png`) })
@@ -362,8 +362,8 @@ try {
     await page.goto(`${base}/?window=tray`)
     const link = page.locator('a[href="#not-downloaded"]')
     await link.waitFor({ timeout: 5000 })
-    assert.equal((await link.textContent())?.trim(), '2 files not downloaded to this PC.')
-    assert.equal(await link.getAttribute('title'), 'See which files')
+    assert.equal((await link.textContent())?.trim(), '2 items not downloaded to this PC.')
+    assert.equal(await link.getAttribute('title'), 'See which items')
     const sfx = colorScheme === 'dark' ? '-dark' : ''
     results.push([`tray-not-downloaded-link${sfx}`, await shot(page, `tray-not-downloaded-link${sfx}`)])
     if (colorScheme === 'light') {
@@ -382,7 +382,7 @@ try {
     await page.goto(`${base}/?window=tray`)
     await page.locator('a[href="#not-downloaded"]').waitFor({ timeout: 5000 })
     assert.equal(await page.getByText('Your files are synced.', { exact: true }).count(), 0)
-    assert.equal((await page.locator('a[href="#not-downloaded"]').textContent())?.trim(), '40 files not downloaded to this PC.')
+    assert.equal((await page.locator('a[href="#not-downloaded"]').textContent())?.trim(), '40 items not downloaded to this PC.')
     results.push(['tray-only-not-downloaded (40; never "Your files are synced.")', await shot(page, 'tray-only-not-downloaded')])
     assert.deepEqual(errors, [])
     await page.close()

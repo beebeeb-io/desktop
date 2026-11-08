@@ -53,6 +53,7 @@ pub struct UnsentChange {
     /// Task 2414: a change that failed which Try again would not send, by spec D8's checks (the reconcile pass's):
     /// `superseded` (a newer version of the file is already in Beebeeb, or the server already holds the new file) or
     /// `copy_gone` (the staged copy to send is gone). [`StateDb::retry_unsent_change`] refuses it for the same reason.
+    /// One still waiting out a backoff is tried again by the engine at `retry_at` all the same; the window words that.
     pub blocked: Option<&'static str>,
 }
 

@@ -26,6 +26,8 @@ import {
   keepRowStates,
   kindWord,
   loadUnsentChanges,
+  notDownloadedAction,
+  notDownloadedReason,
   queuedAgo,
   retryRefusal,
   retryUnsentChange,
@@ -59,11 +61,11 @@ export const QUEUE_LISTS = {
     command: 'not_downloaded',
     icon: 'download',
     heading: 'Not downloaded',
-    subtitle: 'Files you chose to keep on this PC that didn’t finish downloading.',
+    subtitle: 'Files and folders you chose to keep on this PC that didn’t finish downloading.',
     reading: 'Reading the files not downloaded…',
     failed: 'Couldn’t read the files not downloaded',
-    locked: 'Beebeeb is locked. Unlock it to see which files these are.',
-    empty: 'Every file you chose to keep on this PC is downloaded.',
+    locked: 'Beebeeb is locked. Unlock it to see which items these are.',
+    empty: 'Everything you chose to keep on this PC is downloaded.',
     counted: 'not downloaded',
   },
 } as const
@@ -217,6 +219,7 @@ export function NotSentSection({
             page={page}
             last={i === page.items.length - 1 && page.items.length >= page.total}
             row={rows[item.id] ?? null}
+            downloads={list === 'not-downloaded'}
             onAct={(action) => void act(item, action)}
           />
         ))}
@@ -245,21 +248,24 @@ function NotSentRow({
   page,
   last,
   row,
+  downloads = false,
   onAct,
 }: {
   item: UnsentChange
   page: UnsentChangesPage
   last: boolean
   row: RowState | null
+  /** A "Not downloaded" row (task 2414): its own words and action. */
+  downloads?: boolean
   onAct: (action: UnsentAction) => void
 }) {
   const name = baseName(item.path) || 'An item'
   const folder = folderOf(item.path)
   const type = getFileType(name)
-  const reason = unsentReason(item, { engineState: page.engine_state, paused: page.paused })
-  // A Try again that just worked reads "Queued" until the next read says so too.
+  const reason = downloads ? notDownloadedReason(item) : unsentReason(item, { engineState: page.engine_state, paused: page.paused })
+  // A Try again that just worked reads "Queued" until a read shows it moving.
   const done = row === 'queued'
-  const action = done ? null : unsentAction(item)
+  const action = done ? null : downloads ? notDownloadedAction(item) : unsentAction(item)
   const fraction = item.sending && item.sending.total > 0 ? Math.min(1, item.sending.done / item.sending.total) : null
   return (
     <div

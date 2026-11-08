@@ -54,6 +54,12 @@ export const NOT_SENT_TARGET = 'activity#not-sent' as const
 /** Task 2414: Activity › Not downloaded, which Home's figure and the tray's line open. */
 export const NOT_DOWNLOADED_TARGET = 'activity#not-downloaded' as const
 
+/** Task 2414: where each section's count links and its tooltip, one place for Home's figures and the tray's lines. */
+export const SECTION_LINKS = {
+  'not-sent': { target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' },
+  'not-downloaded': { target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which items' },
+} as const satisfies Record<NavSection, { target: string; href: string; title: string }>
+
 /** A route (`activity`) or a route and its section (`activity#not-sent`); anything else is no target. */
 export function navTargetFromString(value: string | null): NavTarget | null {
   if (value === NOT_SENT_TARGET) return { nav: 'activity', section: 'not-sent' }

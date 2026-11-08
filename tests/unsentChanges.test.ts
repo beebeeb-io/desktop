@@ -12,6 +12,8 @@ import {
   folderOf,
   keepRowStates,
   kindWord,
+  notDownloadedAction,
+  notDownloadedReason,
   loadUnsentChanges,
   parseUnsentChanges,
   retryRefusal,
@@ -198,14 +200,18 @@ describe('the loader', () => {
 // ── Task 2414 ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 describe('task 2414: a failed change Try again would not send says why, and has no Try again', () => {
-  test('the copy to send is gone; a newer version is already in Beebeeb; whatever the group', () => {
-    for (const group of ['gave_up', 'waiting']) {
-      expect(reason({ group, retry_at: group === 'waiting' ? 1 : null, blocked: 'copy_gone' })).toEqual({ text: 'Can’t send: the copy to send is gone.', attention: true })
-      expect(reason({ group, kind: 'edit', blocked: 'superseded' }).text).toBe('Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.')
-      expect(reason({ group, kind: 'new_file', blocked: 'superseded' }).text).toBe('Can’t send: this file is already in Beebeeb. Nothing was overwritten.')
-    }
+  test('the copy to send is gone; a newer version is already in Beebeeb', () => {
+    expect(reason({ group: 'gave_up', blocked: 'copy_gone' })).toEqual({ text: 'Can’t send: the copy to send is gone.', attention: true })
+    expect(reason({ group: 'gave_up', kind: 'edit', blocked: 'superseded' }).text).toBe('Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.')
+    expect(reason({ group: 'gave_up', kind: 'new_file', blocked: 'superseded' }).text).toBe('Can’t send: this file is already in Beebeeb. Nothing was overwritten.')
     expect(reason({ group: 'gave_up', blocked: 'a-later-reason' })).toEqual({ text: 'Can’t send it as it is.', attention: true })
     expect(unsentAction({ ...base, group: 'gave_up', blocked: 'copy_gone' })).toBeNull()
+  })
+
+  test('one still backing off says when the engine tries it again (it does, all the same), with no Try again', () => {
+    const item = { ...base, group: 'waiting', retry_at: new Date(2026, 10, 8, 14, 5).getTime() / 1000, blocked: 'superseded' }
+    expect(reason(item)).toEqual({ text: 'Couldn’t send; trying again at 14:05', attention: true })
+    expect(unsentAction(item)).toBeNull()
   })
 
   test('a refused Try again says why', () => {
@@ -233,6 +239,19 @@ describe('task 2414: "Not downloaded" rows', () => {
     expect(reason(item).text).toBe('Stopped after repeated errors')
     expect(unsentAction(item)).toBeNull()
     expect(reason({ ...item, group: 'auth' }).text).toBe('On hold until you sign in again')
+  })
+
+  test('its own words: never an upload’s sentence or action for a pause the queue never gives a download', () => {
+    const row = { ...base, kind: 'download' as const }
+    expect(notDownloadedReason({ ...row, group: 'gave_up' })).toEqual({ text: 'Stopped after repeated errors', attention: true })
+    expect(notDownloadedReason({ ...row, group: 'auth' })).toEqual({ text: 'On hold until you sign in again', attention: true })
+    expect(notDownloadedReason({ ...row, group: 'locked' })).toEqual({ text: 'On hold while Beebeeb is locked', attention: false })
+    for (const group of ['quota', 'found_while_paused', 'permission', 'needs_review', 'other']) {
+      expect(notDownloadedReason({ ...row, group })).toEqual({ text: 'On hold', attention: true })
+      expect(notDownloadedAction({ ...row, group })).toBeNull()
+    }
+    expect(notDownloadedAction({ ...row, group: 'auth' })).toEqual({ kind: 'sign_in_again', label: 'Sign in again' })
+    expect(notDownloadedAction({ ...row, group: 'gave_up' })).toBeNull()
   })
 
   test('the loader reads the list it is given', async () => {

@@ -11,10 +11,11 @@
  * ("Sign out with changes not sent?", `signOutCopy.ts`).
  */
 import type { SyncStatus } from '../desktopApi'
+import type { NavSection } from '../WindowsApp/nav'
 import { formatCount, syncActivityView, type SyncActivityOptions, type SyncActivitySummary } from './syncActivityModel'
 
-/** The Activity sections a figure opens: where what it counts is listed (`NavSection`, `WindowsApp/nav.tsx`). */
-export type HomeMetricLink = 'not-sent' | 'not-downloaded'
+/** The Activity section a figure opens: where what it counts is listed. */
+export type HomeMetricLink = NavSection
 
 export interface HomeSyncMetric {
   k: string
