@@ -569,6 +569,10 @@ mod typed_ids;
 mod remote_move;
 mod ld0105_u1_rows;
 mod ld0113_protect;
+// Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
+mod name_alias_2407;
+#[cfg(windows)]
+mod name_alias_2407_windows;
 
 use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
 use finder_queue_2::{capture_logs_async, fp_create};

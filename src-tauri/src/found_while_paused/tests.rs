@@ -805,3 +805,58 @@
         );
         assert_ne!(attributes & 0x0040_0000, 0, "still cloud-only (RECALL_ON_DATA_ACCESS)");
     }
+
+    /// Task 2407 (core 2404): an item whose name reaches a different entry (on Windows an 8.3 short name; stubbed here,
+    /// the stubbed file standing in for that entry) is never made plain or moved: it stays where it is, held.
+    #[test]
+    fn keep_never_moves_the_entry_an_alias_reaches() {
+        let pc = Pc::new();
+        pc.new_file("new-top", "REPORT~1.PDF", None, b"a different file");
+        pc.hold_all();
+        let _alias = crate::name_alias::stub::alias(&pc.on_disk("REPORT~1.PDF"));
+
+        let result = pc.keep();
+
+        assert_eq!((result.moved_items, result.not_moved), (0, 1));
+        assert_eq!(std::fs::read(pc.on_disk("REPORT~1.PDF")).unwrap(), b"a different file");
+        assert!(!pc.kept_dir().exists(), "nothing was moved out");
+        assert_eq!(pc.held(), ["op-new-top"], "it stays held");
+    }
+
+    /// Task 2407, Windows: the same against a real 8.3 short name. The item's row names `REPORT~1.PDF`, the short name of
+    /// the person's `Report for 2026.pdf`; keep never moves that file out. Skipped (with the reason printed) on a volume
+    /// that makes no 8.3 names; with `CI` set, it fails instead.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn keep_never_moves_the_file_a_short_name_reaches() {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        let pc = Pc::new();
+        let precious = pc.on_disk("Report for 2026.pdf");
+        std::fs::write(&precious, b"precious").unwrap();
+        let wide: Vec<u16> = precious.as_os_str().encode_wide().chain([0]).collect();
+        let mut buffer = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated; `buffer` is writable for its whole length.
+        let written = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+        assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed");
+        let short_path = String::from_utf16(&buffer[..written]).unwrap();
+        let short = short_path.rsplit('\\').next().unwrap().to_owned();
+        if short == "Report for 2026.pdf" {
+            assert!(std::env::var_os("CI").is_none(), "the temp volume made no 8.3 short name; this test proves nothing here");
+            eprintln!("skipped: the temp volume makes no 8.3 short names");
+            return;
+        }
+        assert_eq!(std::fs::read(pc.on_disk(&short)).unwrap(), b"precious", "the fixture must alias");
+        // A new file's row and queued upload at the short name; nothing of its own is on disk there.
+        pc.row("new-top", &short, None, false, false, Namespace::MyFiles);
+        let staged = pc.staging.join("new-top.staged");
+        std::fs::write(&staged, b"new").unwrap();
+        pc.db.track_staged_payload(&staged.to_string_lossy(), Some(&pc.on_disk(&short).to_string_lossy()), false).unwrap();
+        pc.queue_create_file("op-new-top", Some("new-top"), None, Some(&staged));
+        pc.hold_all();
+
+        let result = pc.keep();
+
+        assert_eq!((result.moved_items, result.not_moved), (0, 1));
+        assert_eq!(std::fs::read(&precious).unwrap(), b"precious", "the person's file is where it was");
+    }
