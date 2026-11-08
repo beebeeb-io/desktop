@@ -168,10 +168,12 @@ export default function WindowsApp() {
     }
   }, [loggedIn])
 
-  // When signed out, snap back to an always-accessible view.
+  // When signed out, snap back to an always-accessible view. Only once the first status has answered (task 2409): before
+  // it, `loggedIn` is false for everyone, and a window opened on a route (the tray's "Not sent" lines open
+  // Activity › Not sent) was sent Home before it knew. Until then the gate below shows instead of the route.
   useEffect(() => {
-    if (!loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) setActiveNav('home')
-  }, [loggedIn, activeNav])
+    if (status !== null && !loggedIn && !ALWAYS_ACCESSIBLE.has(activeNav)) setActiveNav('home')
+  }, [status, loggedIn, activeNav])
 
   const openSignIn = () => { void command<void>('open_onboarding_window') }
   const openUpgrade = () => { void openUrl('https://app.beebeeb.io/billing') }
