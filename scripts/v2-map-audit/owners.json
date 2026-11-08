@@ -1,0 +1,5 @@
+{
+  "B05c sharing": { "commands": ["share_v2_*", "share_*"] },
+  "B08b office": { "commands": ["office_v2_*", "office_*"] },
+  "#422 delete-undo": { "commands": ["account_delete_*", "drive_undo_delete", "drive_delete_undo"] }
+}

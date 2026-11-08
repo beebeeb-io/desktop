@@ -336,8 +336,10 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     onCrumb: go,
     onView: (view) => changePrefs({ ...prefs, view }),
     onSortColumn: (key) => changePrefs({ ...prefs, sort: { ...prefs.sort, key, dir: prefs.sort.key === key && prefs.sort.dir === 'asc' ? 'desc' : 'asc' } }),
-    onSortMenu: (e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 4, label: 'Sort', entries: sortMenu(prefs), run: runBackground }) },
+    // The view's own click closes a menu, so the click that opens one stops here (M1 audit: New and Sort never opened).
+    onSortMenu: (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 4, label: 'Sort', entries: sortMenu(prefs), run: runBackground }) },
     onNewMenu: (e) => {
+      e.stopPropagation()
       const r = e.currentTarget.getBoundingClientRect()
       setMenu({
         x: r.right - 264, y: r.bottom + 4, label: 'New', entries: newMenu(),
