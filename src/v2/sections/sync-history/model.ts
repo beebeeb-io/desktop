@@ -3,6 +3,7 @@
 import type { ActivityRow } from '../../../popoverContract'
 import type { SyncActivitySummary } from '../../../windows/syncActivityModel'
 import type { HistoryRow } from '../../source/fixtures/photos'
+import type { SyncProblem } from '../../source/extras'
 
 export type { HistoryRow }
 export type Filter = 'all' | 'this-pc' | 'other' | 'problems'
@@ -71,3 +72,16 @@ export function rowsFromActivity(activity: ActivityRow[]): HistoryRow[] {
 
 /** Problems the queue gave up on beyond the rows listed: counts only, never a file name (sync_activity_summary). */
 export const gaveUp = (s: SyncActivitySummary | null): number => s?.queue?.gave_up ?? 0
+
+/** Live (B02b): the queue's problems, each with why in plain words. A stopped backup change names its source. */
+export function rowsFromProblems(problems: SyncProblem[], now: Date): HistoryRow[] {
+  return problems.map((p) => ({
+    id: `problem:${p.id}`, name: p.name, device: 'This PC', scope: 'this-pc' as const, kind: 'file' as const,
+    at: p.at ?? now.toISOString(), itemId: p.fileId,
+    what: p.backup ? 'Didn’t back up' : `Didn’t sync · ${p.folder || 'Beebeeb'}`,
+    problem: p.reason.endsWith('Nothing was lost.') ? p.reason : `${p.reason} Nothing was lost.`,
+  }))
+}
+
+/** The queue's change id behind a problem row, or null for a row with nothing to retry. */
+export const problemId = (r: HistoryRow): string | null => (r.id.startsWith('problem:') ? r.id.slice('problem:'.length) : null)

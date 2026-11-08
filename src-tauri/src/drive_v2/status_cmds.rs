@@ -115,6 +115,11 @@ pub(crate) async fn drive_status(
             .collect();
         let stops = crate::backup::stop::stopped_backups(&cfg).len();
         out.backup = status::backup_view(&enabled, &marks, stops);
+        out.backup.device_folder = db
+            .backup_layout()
+            .ok()
+            .flatten()
+            .map(|layout| layout.device_folder_name);
         out.backup_problems = (stops + backup_stuck) as u32;
         Ok(out)
     })

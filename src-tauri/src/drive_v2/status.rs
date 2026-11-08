@@ -70,6 +70,9 @@ pub(crate) struct BackupView {
     /// When the newest pass of a folder that is on finished (ISO 8601); absent before the first pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_backup_at: Option<String>,
+    /// This PC's folder in Backups (its name as the server layout has it); absent before the layout is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device_folder: Option<String>,
     /// Folders that are on.
     pub(crate) folders_on: u32,
     /// Folders that are on but have not finished a first pass.
@@ -112,6 +115,7 @@ pub(crate) fn backup_view(enabled: &[&str], marks: &HashMap<String, Option<i64>>
     BackupView {
         state,
         last_backup_at,
+        device_folder: None,
         folders_on,
         folders_getting_ready,
     }

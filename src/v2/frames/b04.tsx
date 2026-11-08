@@ -18,7 +18,7 @@ import { SearchView } from '../sections/files/SearchView'
 import { backgroundMenu, fileMenu, newMenu, sortMenu } from '../sections/files/menus'
 import { Menu, type MenuEntry } from '../sections/files/ui'
 import { arrange, DEFAULT_PREFS, takenMessage, type FolderPrefs } from '../sections/files/model'
-import { createFilesSource, detailsOf, FILES_TREE, listingOf, VIDEO_LENGTH } from '../source/fixtures/files'
+import { BACKUP_META, createFilesSource, detailsOf, FILES_TREE, listingOf, VIDEO_LENGTH } from '../source/fixtures/files'
 
 const SRC = createFilesSource()
 const SRC_OFFLINE = createFilesSource({ scenario: 'offline' })
@@ -53,7 +53,7 @@ function pane(o: PaneOpts = {}): PaneProps {
   const sel = new Set(o.sel ?? [])
   const dId = o.detailsFor ?? (o.sel?.length === 1 ? o.sel[0] : undefined)
   const details = dId ? detailsOf(dId, o.items ?? FILES_TREE) : null
-  return { listing, items, prefs, selection: sel, currentId: o.sel?.length === 1 ? o.sel[0] : null, details, canNew: true, ...o.rest }
+  return { listing, items, prefs, selection: sel, currentId: o.sel?.length === 1 ? o.sel[0] : null, details, canNew: true, backupMeta: BACKUP_META, now: new Date('2026-11-08T12:00:00'), ...o.rest }
 }
 
 /** A frame: the window with its chrome around one Files state, plus overlays. */
