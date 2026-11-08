@@ -1,0 +1,231 @@
+/**
+ * CodeMirror 6 theme tokens for the Beebeeb text editor (task 1563).
+ *
+ * Syntax-highlighting hues are lifted directly from the approved design mock
+ * (design/editor-1563.html, `.mock` custom properties) — NOT the brand's one
+ * accent color. Per the existing precedent in text-preview.tsx (Shiki's
+ * github-dark theme, already shipping multiple hues for code), a code
+ * viewer/editor's token colors are exempt from the "amber only" rule: amber
+ * stays reserved for encryption state and primary actions everywhere else in
+ * the chrome (the Save button, the lock icon, the unsaved dot).
+ *
+ * Light values are the default; `.dark` (toggled on <html> by
+ * theme-context.tsx, same convention as index.css) overrides them.
+ */
+
+.bb-editor {
+  --ed-bg: var(--color-paper);
+  --ed-gutter-bg: var(--color-paper-2);
+  --ed-line: var(--color-line);
+  --ed-selection: color-mix(in oklab, var(--color-amber) 22%, transparent);
+  --ed-active-line: color-mix(in oklab, var(--color-ink) 4%, transparent);
+  --ed-cursor: var(--color-ink);
+
+  /* Syntax token hues — from design/editor-1563.html `.mock[data-mode="light"]` */
+  --ed-keyword: #7446d1;
+  --ed-string: #3c7b33;
+  --ed-number: #1d74a0;
+  --ed-function: #2e5cc0;
+  --ed-type: #0e806e;
+  --ed-comment: #9a9285;
+  --ed-property: #4a443b;
+  --ed-punctuation: #7c7466;
+  /* Bracket-pair colourisation cycle — `.mock` --b1/--b2/--b3 */
+  --ed-bracket-1: #7446d1;
+  --ed-bracket-2: #0e806e;
+  --ed-bracket-3: #2e5cc0;
+  /* Inline-code / fenced-code background pill — `.mc` background */
+  --ed-inline-code-bg: color-mix(in oklab, var(--color-ink) 6%, transparent);
+  /* Indentation guide line — subtle, barely-there per design's `.guide` */
+  --ed-indent-guide: color-mix(in oklab, var(--color-ink) 9%, transparent);
+  --ed-indent-guide-active: color-mix(in oklab, var(--color-ink) 22%, transparent);
+  /* Minimap */
+  --ed-minimap-bg: var(--color-paper-2);
+  --ed-minimap-viewport: color-mix(in oklab, var(--color-ink) 7%, transparent);
+}
+
+.dark .bb-editor {
+  /* From design/editor-1563.html `.mock` (dark, the file's default) */
+  --ed-keyword: #b89dff;
+  --ed-string: #9ccb8c;
+  --ed-number: #78c3e0;
+  --ed-function: #93b6ff;
+  --ed-type: #6fd1be;
+  --ed-comment: #6e6a62;
+  --ed-property: #dcd2c2;
+  --ed-punctuation: #a9a397;
+  --ed-bracket-1: #b89dff;
+  --ed-bracket-2: #6fd1be;
+  --ed-bracket-3: #93b6ff;
+}
+
+.bb-editor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bb-editor .cm-editor {
+  height: 100%;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12.5px;
+  background: var(--ed-bg);
+  color: var(--color-ink);
+}
+
+.bb-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* CodeMirror's OWN base theme (@codemirror/view) sets `font-family:
+   monospace` directly on `.cm-scroller` (its `.baseThemeID .cm-scroller`
+   rule, 2 class selectors). A directly-declared property on an element
+   always wins over one merely INHERITED from an ancestor — so `.cm-editor`'s
+   font-family above (set on the ANCESTOR) never reached the actual text,
+   which rendered in the browser's generic fallback monospace (looks like
+   Courier), not JetBrains Mono, regardless of stylesheet insertion order
+   (task 1563 PR #103 review, evidence screenshots 02/05). Re-declaring it
+   here, one selector level deeper (3 classes — always beats the base
+   theme's 2-class selector on specificity, no !important / order race
+   needed), on both `.cm-scroller` AND `.cm-content` fixes it for good. */
+.bb-editor .cm-editor .cm-scroller,
+.bb-editor .cm-editor .cm-content {
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+}
+
+.bb-editor .cm-scroller {
+  overflow: auto;
+}
+
+.bb-editor .cm-gutters {
+  background: var(--ed-gutter-bg);
+  color: var(--color-ink-4);
+  border-right: 1px solid var(--ed-line);
+}
+
+.bb-editor .cm-activeLineGutter {
+  background: var(--ed-active-line);
+  color: var(--color-ink-2);
+}
+
+.bb-editor .cm-activeLine {
+  background: var(--ed-active-line);
+}
+
+.bb-editor .cm-selectionBackground,
+.bb-editor .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--ed-selection) !important;
+}
+
+.bb-editor .cm-cursor {
+  border-left-color: var(--ed-cursor);
+}
+
+.bb-editor .cm-foldPlaceholder {
+  background: var(--color-paper-3);
+  border-color: var(--ed-line);
+  color: var(--color-ink-3);
+}
+
+.bb-editor .cm-matchingBracket {
+  background: color-mix(in oklab, var(--color-amber) 18%, transparent);
+  outline: 1px solid color-mix(in oklab, var(--color-amber) 45%, transparent);
+}
+
+/* Find/replace panel — CodeMirror's built-in @codemirror/search panel,
+   restyled to the app's chrome instead of its unstyled defaults. */
+.bb-editor .cm-panels {
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+}
+
+.bb-editor .cm-panel.cm-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--color-line);
+  background: var(--color-paper-2);
+  font-family: var(--font-sans, Inter, sans-serif);
+  font-size: 12px;
+}
+
+.bb-editor .cm-panel.cm-search input[type='text'] {
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--color-ink);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+
+.bb-editor .cm-panel.cm-search input[type='text']:focus {
+  outline: 2px solid var(--color-amber);
+  outline-offset: 1px;
+}
+
+.bb-editor .cm-panel.cm-search button {
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--color-ink-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.bb-editor .cm-panel.cm-search button:hover {
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+}
+
+.bb-editor .cm-panel.cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-ink-3);
+  font-size: 11px;
+}
+
+.bb-editor .cm-searchMatch {
+  background: color-mix(in oklab, var(--color-amber) 30%, transparent);
+}
+
+.bb-editor .cm-searchMatch-selected {
+  background: color-mix(in oklab, var(--color-amber) 55%, transparent);
+}
+
+/* Syntax highlighting */
+.bb-editor .tok-keyword { color: var(--ed-keyword); }
+.bb-editor .tok-string { color: var(--ed-string); }
+.bb-editor .tok-number { color: var(--ed-number); }
+.bb-editor .tok-function { color: var(--ed-function); }
+.bb-editor .tok-typeName { color: var(--ed-type); }
+.bb-editor .tok-comment { color: var(--ed-comment); font-style: italic; }
+.bb-editor .tok-propertyName { color: var(--ed-property); }
+.bb-editor .tok-punctuation,
+.bb-editor .tok-bracket { color: var(--ed-punctuation); }
+.bb-editor .tok-atom,
+.bb-editor .tok-bool { color: var(--ed-number); }
+.bb-editor .tok-heading { color: var(--color-ink); font-weight: 700; }
+.bb-editor .tok-link { color: var(--color-amber-deep); text-decoration: underline; }
+.bb-editor .tok-emphasis { font-style: italic; }
+.bb-editor .tok-strong { font-weight: 700; }
+
+/* Bracket-pair colourisation (bracket-colors.ts) — a matched pair always
+   shares one of 3 cycling colours by nesting depth. */
+.bb-editor .cm-bracket-1 { color: var(--ed-bracket-1); }
+.bb-editor .cm-bracket-2 { color: var(--ed-bracket-2); }
+.bb-editor .cm-bracket-3 { color: var(--ed-bracket-3); }
+
+/* Minimap (@replit/codemirror-minimap, lazy-loaded) */
+.bb-editor .cm-minimap-gutter {
+  background: var(--ed-minimap-bg);
+  border-left: 1px solid var(--ed-line);
+}
+.bb-editor .cm-minimap-overlay-container {
+  background: var(--ed-minimap-viewport);
+}
