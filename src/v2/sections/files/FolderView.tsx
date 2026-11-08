@@ -11,6 +11,7 @@ import type { Navigation } from '../../routes'
 import { FilesPane, type PaneHandlers, type Renaming } from './FilesPane'
 import { ConflictDialog, DetailsDialog, MoveDialog, NewFolderDialog, ProtectedAlert, ShareDialog, VersionsDialog, type FolderRow } from './Dialogs'
 import { NoPreview, PreviewPanel, UploadsPanel } from './Panels'
+import { copyShareLink } from './shareLink'
 import { backgroundMenu, fileMenu, newMenu, sortMenu } from './menus'
 import { OPEN_WITH_EDITOR, OPEN_WITH_OTHER, withOfficeOpen } from '../open/office/menu'
 import { isOfficeFile } from '../open/office'
@@ -408,7 +409,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       {dialog?.kind === 'share' && (
         <ShareDialog
           name={dialog.items[0].name} size={dialog.items[0].size} count={dialog.items.length}
-          onCopy={() => { setDialog(null); showToast({ kind: 'failed', text: 'Sharing isn’t available in this build yet.' }) }}
+          onCopy={(o) => { const items = dialog.items; setDialog(null); void copyShareLink(items.map((i) => i.id), o, showToast) }}
           onInvite={() => { setDialog(null); nav.go({ section: 'shared' }) }} onClose={() => setDialog(null)}
         />
       )}
