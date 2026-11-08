@@ -16,7 +16,9 @@ export const shareLeave = (id: string) => command<void>('share_leave', { id })
 export const sharePeople = (itemId: string) => command<Member[]>('share_people', { itemId })
 export const shareInvite = (itemId: string, email: string, access: Access, acceptChangedKey = false) =>
   command<InviteOutcome>('share_invite', { itemId, email, canEdit: access === 'Can edit', acceptChangedKey })
-export const shareSetAccess = (itemId: string, memberId: string, access: Access) => command<void>('share_set_access', { itemId, memberId, canEdit: access === 'Can edit' })
+/** The server's permission for a member (`read` / `add` / `write` / `admin`); the UI offers view and edit. */
+export const shareSetAccess = (itemId: string, memberId: string, access: Access) =>
+  command<void>('share_set_access', { itemId, memberId, permission: access === 'Can edit' ? 'write' : 'read' })
 /** Stop sharing: one person (`memberId`) or the whole share or link (`memberId` null). */
 export const shareRevoke = (itemId: string, memberId: string | null) => command<void>('share_revoke', { itemId, memberId })
 /** Link options from the Files share dialog (DW-0407); none means "copy the live link". Several ids make one bundle link. */

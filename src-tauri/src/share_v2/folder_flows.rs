@@ -16,7 +16,6 @@ use beebeeb_core::share_flow::{
     },
     folder_keys::CustodyMemory,
     link::{CreateLink, LinkOptions},
-    member::InviteOutcome,
 };
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -79,18 +78,24 @@ async fn drive_folder(
     }
 }
 
-pub(super) async fn folder_invite(u: &Unlocked, id: &str, email: &str) -> Answer<Value> {
+pub(super) async fn folder_invite(
+    u: &Unlocked,
+    own: &str,
+    id: &str,
+    email: &str,
+    expected_peer_fingerprint: Option<[u8; 32]>,
+) -> Answer<Value> {
     let client = crate::auth_v2::transport::client()?;
     let input = FolderInviteInput {
         folder_id: id,
         email,
         shared_folders_write: shared_folders_write(&client, u).await?,
         custody: custody_memory()?,
+        expected_peer_fingerprint,
     };
     let (flow, first) = FolderShare::invite(input, &u.master).map_err(flow_reason)?;
     match drive_folder(&client, u, flow, first).await? {
-        FolderStep::Done(InviteOutcome::Shared { .. }) => Ok(serde_json::json!({ "status": "shared" })),
-        FolderStep::Done(_) => Ok(serde_json::json!({ "status": "invited" })),
+        FolderStep::Done(outcome) => super::safety::record_outcome(own, &outcome),
         _ => Err(flow_reason(ShareFlowError::WrongState)),
     }
 }

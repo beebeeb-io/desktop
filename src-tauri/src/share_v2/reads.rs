@@ -223,11 +223,11 @@ pub(crate) async fn share_set_access(
     state: State<'_, AppState>,
     item_id: String,
     member_id: String,
-    can_edit: bool,
+    permission: String,
 ) -> Answer<()> {
     let u = unlocked(&state)?;
     self::item_id(&item_id)?;
-    let req = super::safety::set_access_request(&member_id, can_edit)?;
+    let req = super::safety::set_access_request(&member_id, &permission)?;
     let resp = send(&transport::client()?, &u, req).await?;
     match resp.status {
         200..=299 => Ok(()),

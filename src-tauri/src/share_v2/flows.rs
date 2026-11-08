@@ -7,7 +7,7 @@ use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::{
     self as sf, ShareFlowError,
     link::{CreateLink, LinkOptions, LinkStep},
-    member::{InviteOutcome, InviteStep, MemberInvite, ShareTarget},
+    member::{InviteStep, MemberInvite, ShareTarget},
 };
 use serde_json::Value;
 use tauri::State;
@@ -144,6 +144,10 @@ async fn my_links(client: &reqwest::Client, u: &Unlocked, id: &str) -> Answer<Ve
 
 /// Share one file with a person. A folder answers `unsupported` (core has no folder invite yet);
 /// `can_edit` is not sent: web's invite has no permission field, so neither does this one.
+const SENT: &str = "/api/v1/shares/invites/sent";
+const FOLDER_SHARE_ANYWAY: &str =
+    "unsupported: sharing a folder to a changed key needs a folder approval core does not offer yet";
+
 #[tauri::command]
 #[allow(unused_variables)]
 pub(crate) async fn share_invite(
@@ -155,23 +159,31 @@ pub(crate) async fn share_invite(
 ) -> Answer<Value> {
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
+    let own = super::safety::own_id(&u).await?;
+    // A "compared" mark for this person: core refuses to seal to any other key (DW-0515).
+    let expected = super::safety::expected_fingerprint(&super::reads::fetch(&u, SENT).await?, &own, &email);
     if is_folder(&id)? {
-        return super::folder_flows::folder_invite(&u, &id, &email).await;
+        if accept_changed_key {
+            return Err(FOLDER_SHARE_ANYWAY.into());
+        }
+        return super::folder_flows::folder_invite(&u, &own, &id, &email, expected).await;
     }
     let key = file_key(&u.master, &id)?;
+    if accept_changed_key {
+        return super::safety::share_anyway(&u, &id, &email, &key).await;
+    }
     let target = ShareTarget {
         item_id: id,
         is_folder: false,
     };
-    let (mut flow, mut req) = MemberInvite::start(&target, &email, &u.master, &key).map_err(flow_reason)?;
+    let (mut flow, mut req) = MemberInvite::start(&target, &email, &u.master, &key, expected).map_err(flow_reason)?;
     drop(key);
     let client = transport::client()?;
     loop {
         let resp = send(&client, &u, req).await?;
         match flow.on_response(resp).map_err(flow_reason)? {
             InviteStep::Send(next) => req = next,
-            InviteStep::Done(InviteOutcome::Shared { .. }) => return Ok(serde_json::json!({ "status": "shared" })),
-            InviteStep::Done(_) => return Ok(serde_json::json!({ "status": "invited" })),
+            InviteStep::Done(outcome) => return super::safety::record_outcome(&own, &outcome),
         }
     }
 }

@@ -19,15 +19,29 @@ fn key(h: &str) -> [u8; 32] {
 }
 
 #[test]
-fn the_view_is_twelve_groups_of_the_core_vector_and_nothing_else() {
-    let (groups, fp) = safety_view(UID_A, &key(ALICE_PK), UID_B, &key(BOB_PK)).unwrap();
+fn the_view_is_twelve_groups_from_the_sealed_key_and_nothing_else() {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([1; 32]);
+    let (groups, fp) = safety_view(&master, UID_A, UID_B, &key(BOB_PK)).unwrap();
     assert_eq!(groups.len(), 12);
-    assert_eq!(
-        groups.concat(),
-        "125734655894184515799576627809760712380416734985096630590130"
+    assert!(
+        groups
+            .iter()
+            .all(|g| g.len() == 5 && g.bytes().all(|c| c.is_ascii_digit()))
     );
-    assert!(groups.iter().all(|g| g.len() == 5));
+    // The own key is derived in core from the master key: another master gives another number.
+    let (other, _) = safety_view(
+        &beebeeb_core::kdf::MasterKey::from_bytes([2; 32]),
+        UID_A,
+        UID_B,
+        &key(BOB_PK),
+    )
+    .unwrap();
+    assert_ne!(groups, other);
     assert_eq!(fp, "f35e5616160a30bf3c6e79fa73c576d40205e8fc3ba4e1c6dcf93e6b98e857b4");
+    assert!(
+        safety_view(&master, UID_A, UID_A, &key(BOB_PK)).is_err(),
+        "own == peer is refused"
+    );
     let answer = groups_answer(&groups);
     assert_eq!(answer.as_object().unwrap().len(), 1, "only the groups leave Rust");
 }
@@ -55,28 +69,41 @@ fn the_peer_comes_from_the_sent_invite() {
     assert_eq!(peer_user_id(&sent, INVITE).unwrap(), UID_B);
     assert!(peer_user_id(&sent, UID_A).unwrap_err().starts_with("unsupported"));
     assert_eq!(peer_user_id(&sent, UID_B), Err("not-found".to_string()));
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key(BOB_PK));
+}
+
+#[test]
+fn share_anyway_finds_the_claimed_invite_of_this_item_and_address() {
+    let sent = json!({ "invites": [
+        { "id": INVITE, "file_id": UID_A, "recipient_email": "jonas@northwind.studio", "status": "claimed" },
+        { "id": UID_B, "file_id": UID_A, "recipient_email": "mia@example.com", "status": "approved" },
+    ]});
     assert_eq!(
-        public_key_of(&json!({ "user_id": UID_B, "public_key": b64 }), UID_B).unwrap(),
-        key(BOB_PK)
+        refused_invite(&sent, UID_A, " Jonas@Northwind.Studio ").unwrap(),
+        INVITE
     );
     assert_eq!(
-        public_key_of(&json!({ "user_id": UID_A, "public_key": b64 }), UID_B),
-        Err("failed".to_string())
+        refused_invite(&sent, UID_A, "mia@example.com"),
+        Err("not-found".to_string())
     );
     assert_eq!(
-        public_key_of(&json!({ "user_id": UID_B, "public_key": "AAAA" }), UID_B),
-        Err("failed".to_string())
+        refused_invite(&sent, UID_B, "jonas@northwind.studio"),
+        Err("not-found".to_string())
     );
 }
 
 #[test]
 fn set_access_is_a_core_patch() {
-    let r = set_access_request(INVITE, true).unwrap();
-    assert_eq!(r.method, Method::Patch);
-    assert_eq!(r.path, format!("/api/v1/shares/invites/{INVITE}"));
-    assert_eq!(r.body, Some(json!({ "permission": "write" })));
-    assert_eq!(set_access_request("../x", true).unwrap_err(), "not-found");
+    let mut n = 0;
+    for p in ["read", "add", "write", "admin"] {
+        let r = set_access_request(INVITE, p).unwrap();
+        assert_eq!(r.method, Method::Patch);
+        assert_eq!(r.path, format!("/api/v1/shares/invites/{INVITE}"));
+        assert_eq!(r.body, Some(json!({ "permission": p })));
+        n += 1;
+    }
+    assert_eq!(n, 4);
+    assert_eq!(set_access_request(INVITE, "owner").unwrap_err(), "failed");
+    assert_eq!(set_access_request("../x", "read").unwrap_err(), "not-found");
 }
 
 #[test]
@@ -91,4 +118,21 @@ fn marks_round_trip_in_the_state_db() {
     assert_eq!(db.share_mark(UID_A, UID_B).unwrap(), Some(("cd".to_string(), false)));
     db.clear_share_mark(UID_A, UID_B).unwrap();
     assert_eq!(db.share_mark(UID_A, UID_B).unwrap(), None);
+}
+
+#[test]
+fn sealed_and_offered_keys_round_trip_in_the_state_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+    assert_eq!(db.share_sealed_key(UID_A, INVITE).unwrap(), None);
+    db.set_share_offered_key(UID_A, INVITE, ALICE_PK).unwrap();
+    assert_eq!(db.share_offered_key(UID_A, INVITE).unwrap().as_deref(), Some(ALICE_PK));
+    db.set_share_sealed_key(UID_A, INVITE, BOB_PK).unwrap();
+    assert_eq!(db.share_sealed_key(UID_A, INVITE).unwrap().as_deref(), Some(BOB_PK));
+    assert_eq!(
+        db.share_offered_key(UID_A, INVITE).unwrap(),
+        None,
+        "sealing clears the offer"
+    );
+    assert_eq!(db.share_sealed_key(UID_B, INVITE).unwrap(), None, "keyed by account");
 }

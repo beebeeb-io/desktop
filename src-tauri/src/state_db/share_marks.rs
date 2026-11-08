@@ -55,3 +55,51 @@ impl StateDb {
         Ok(())
     }
 }
+
+/// The exact recipient key a share was sealed to (B05e), per (account id, invite id), hex. The
+/// safety number and the "compared" mark are computed from these bytes, never from a separate key
+/// lookup. `offered` holds a key the seal refused (`peer_key_changed`) until the user accepts it.
+const SEALED: &str = "share_sealed";
+const OFFERED: &str = "share_offered";
+
+impl StateDb {
+    fn share_key_get(&self, kind: &str, account_id: &str, invite_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT value FROM sync_state WHERE key = ?1",
+            params![format!("{kind}:{account_id}:{invite_id}")],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    fn share_key_set(&self, kind: &str, account_id: &str, invite_id: &str, key_hex: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let key = format!("{kind}:{account_id}:{invite_id}");
+        match key_hex {
+            Some(v) => conn.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, v],
+            )?,
+            None => conn.execute("DELETE FROM sync_state WHERE key = ?1", params![key])?,
+        };
+        Ok(())
+    }
+
+    pub fn share_sealed_key(&self, account_id: &str, invite_id: &str) -> Result<Option<String>> {
+        self.share_key_get(SEALED, account_id, invite_id)
+    }
+
+    pub fn set_share_sealed_key(&self, account_id: &str, invite_id: &str, key_hex: &str) -> Result<()> {
+        self.share_key_set(SEALED, account_id, invite_id, Some(key_hex))?;
+        self.share_key_set(OFFERED, account_id, invite_id, None)
+    }
+
+    pub fn share_offered_key(&self, account_id: &str, invite_id: &str) -> Result<Option<String>> {
+        self.share_key_get(OFFERED, account_id, invite_id)
+    }
+
+    pub fn set_share_offered_key(&self, account_id: &str, invite_id: &str, key_hex: &str) -> Result<()> {
+        self.share_key_set(OFFERED, account_id, invite_id, Some(key_hex))
+    }
+}
