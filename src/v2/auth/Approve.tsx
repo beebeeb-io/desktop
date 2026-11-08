@@ -1,9 +1,9 @@
 // DW-A11 to A17: approving a sign-in from this PC. The notification (Windows draws it), the code field in Account,
 // the review dialog (what the server measured, what the device reported, the typed code), Windows Hello, and the
 // results. The approval itself runs in Rust (`auth_approve_request`): Windows Hello, then the step-up, claim and relay.
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { BBProductIcon, Icon } from '@beebeeb/shared/design'
-import type { ApprovalReview } from './api'
+import { approveLookup, approveRequest, type ApprovalReview } from './api'
 import { approveErrorText, formatDeviceCode, isDeviceCode, type ApproveStage } from './model'
 import { Field, HelloGlyph, HelloPrompt, Note, PrimaryButton, SecondaryButton, TextLink, Tile } from './parts'
 
@@ -174,6 +174,62 @@ function Result(p: ApproveDialogProps & { device: string }) {
           : 'Nothing was approved and no keys were shared. Ask for a new code on the other device if you still want to sign in.'}
       </p>
       <PrimaryButton amber={false} onClick={p.onDone}>Done</PrimaryButton>
+    </>
+  )
+}
+
+/**
+ * The live approval, for Account › Approve a sign-in (B14 mounts it): look the code up, review, then Rust raises
+ * Windows Hello and runs the step-up, claim and relay. The password is cleared from state as soon as it is sent.
+ */
+export function ApproveSignIn({ onSeeSessions }: { onSeeSessions: () => void }) {
+  const [code, setCode] = useState('')
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A12: the board's one honest message sits under the code field, tied to it.
+  const [lookupError, setLookupError] = useState<string>()
+  const [busy, setBusy] = useState(false)
+  const [review, setReview] = useState<ApprovalReview | null>(null)
+  const [stage, setStage] = useState<ApproveStage>('code')
+  const [typed, setTyped] = useState('')
+  const [password, setPassword] = useState('')
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A13: errors are announced as alerts tied to the password field.
+  const [error, setError] = useState<string>()
+  useEffect(() => () => setPassword(''), [])
+
+  const lookup = async () => {
+    setBusy(true)
+    setLookupError(undefined)
+    const r = await approveLookup(code)
+    setBusy(false)
+    if (!r.ok) { setLookupError(approveErrorText(r.reason)); return }
+    setReview(r.value)
+    setTyped('')
+    setStage(r.value.seconds_left <= 0 ? 'expired' : 'review')
+  }
+  const decide = async (approve: boolean) => {
+    const secret = password
+    setPassword('')
+    setError(undefined)
+    if (approve) { setBusy(true); setStage('hello') }
+    const r = await approveRequest(review?.code ?? code, secret, approve)
+    setBusy(false)
+    if (r.ok) { setStage(r.value.status === 'approved' ? 'approved' : 'denied'); return }
+    if (r.reason === 'already_handled') setStage('already-handled')
+    else if (r.reason === 'expired' || r.reason === 'request_not_found') setStage('expired')
+    else if (r.reason === 'hello_cancelled') setStage('review')
+    else { setStage('review'); setError(r.reason) }
+  }
+  const done = () => { setReview(null); setStage('code'); setCode('') }
+  return (
+    <>
+      <ApproveCodePanel code={code} error={lookupError} busy={busy && stage === 'code'} onCode={setCode} onContinue={() => void lookup()} />
+      {review && stage !== 'code' && (
+        <ApproveDialog
+          stage={stage} review={review} typedCode={typed} password={password} error={error} busy={busy}
+          onTypedCode={setTyped} onPassword={setPassword}
+          onApprove={() => void decide(true)} onDeny={() => void decide(false)}
+          onSeeSessions={onSeeSessions} onDone={done}
+        />
+      )}
     </>
   )
 }

@@ -101,7 +101,7 @@ export function PhraseView({ words, focus, unknown, state, onWords, onRestore, o
       {state === 'too-many' && <Note tone="red">Too many tries. Wait an hour.</Note>}
       <div className="grid grid-cols-3 gap-2" data-phrase-grid>
         {words.map((w, i) => (
-          <label key={i} className={`flex h-9 items-center gap-1.5 rounded-md border bg-paper px-2 ${unknown.includes(i) ? 'border-red' : 'border-line'} focus-within:ring-2 focus-within:ring-amber-deep`} data-word>
+          <label key={i} className={`flex h-9 items-center gap-1.5 rounded-md border bg-paper px-2 font-mono text-[12px] text-ink ${unknown.includes(i) ? 'border-red' : 'border-line'} focus-within:ring-2 focus-within:ring-amber-deep`} data-word>
             <span className="w-4 flex-none text-right font-mono text-[11px] text-ink-4">{i + 1}</span>
             <input
               {...SECRET_FIELD}
@@ -113,7 +113,7 @@ export function PhraseView({ words, focus, unknown, state, onWords, onRestore, o
               disabled={state === 'restoring'}
               onChange={(e) => { const next = [...words]; next[i] = normalizeWord(e.target.value); onWords(next) }}
               onPaste={(e) => { e.preventDefault(); onWords(spreadPaste(words, i, e.clipboardData.getData('text'))) }}
-              className="min-w-0 flex-1 border-0 bg-transparent font-mono text-[12px] text-ink outline-none"
+              className="min-w-0 flex-1 border-0 bg-transparent outline-none"
             />
           </label>
         ))}

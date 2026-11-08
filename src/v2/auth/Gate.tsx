@@ -76,7 +76,7 @@ export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error
         <h1 id="locked-heading" className="m-0 text-[18px] font-semibold">Beebeeb is locked</h1>
         <p className="mt-1 mb-5 text-[13px] text-ink-2">Unlock to see your files.</p>
         {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
-        <BBButton variant="amber" onClick={onUnlock}>Unlock</BBButton>
+        <BBButton variant="amber" onClick={onUnlock}><span className="text-[13px] font-medium">Unlock</span></BBButton>
       </section>
     </GateWindow>
   )
@@ -116,9 +116,9 @@ export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { ch
           Your account is ready. Choose a plan on beebeeb.io, including the free trial. Beebeeb continues here by itself.
         </p>
         <div className="flex flex-wrap justify-center gap-2">
-          <BBButton variant="amber" onClick={onChoose}>Choose a plan on beebeeb.io</BBButton>
-          <BBButton onClick={onCheckAgain} disabled={checking}>{checking ? 'Checking…' : 'Check again'}</BBButton>
-          <BBButton variant="ghost" onClick={onSignOut}>Sign out</BBButton>
+          <BBButton variant="amber" onClick={onChoose}><span className="text-[13px] font-medium">Choose a plan on beebeeb.io</span></BBButton>
+          <BBButton onClick={onCheckAgain} disabled={checking}><span className="text-[13px] font-medium">{checking ? 'Checking…' : 'Check again'}</span></BBButton>
+          <BBButton variant="ghost" onClick={onSignOut}><span className="text-[13px] font-medium">Sign out</span></BBButton>
         </div>
       </section>
     </GateWindow>

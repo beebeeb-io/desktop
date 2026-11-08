@@ -54,11 +54,11 @@ export function SignInView(p: SignInViewProps) {
       ) : undefined}
     >
       <StepLockup />
-      <div className="mt-4" />
+      <div className="mt-3" />
       <Heading sub="One Beebeeb account for Drive, Pass, VPN, Chat and Mail.">Sign in to Drive</Heading>
       {offline && <Note tone="red" title="You’re offline">Nothing was sent. Sign in again when you’re connected.</Note>}
       {p.continueAs && (
-        <section aria-label={`Continue as ${p.continueAs.name}, ${p.continueAs.email}`} data-continue-as className="mb-3 rounded-lg border border-line bg-paper-2 p-3.5">
+        <section aria-label={`Continue as ${p.continueAs.name}, ${p.continueAs.email}`} data-continue-as className="mb-2.5 rounded-lg border border-line bg-paper-2 p-3">
           <div className="mb-3 flex items-center gap-3">
             <Avatar name={p.continueAs.name} />
             <div className="min-w-0">
@@ -79,7 +79,7 @@ export function SignInView(p: SignInViewProps) {
         <Field label="Password" icon="lock" secret ref={passwordRef} value={p.password} disabled={p.busy} error={fieldError}
           onChange={(e) => p.onPassword(e.target.value)} />
         {p.problem?.kind === 'locked-hint' && <p data-lock-note className="-mt-1 mb-3 text-[12px] leading-4 text-ink-2">{LOCK_NOTE}</p>}
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between">
           <TextLink onClick={p.onForgot}>Forgot password?</TextLink>
           <span className="inline-flex items-center gap-1.5 text-ink-2"><Icon name="key" size={13} /><TextLink onClick={p.onPasskey}>Use a passkey</TextLink></span>
         </div>

@@ -11,6 +11,11 @@ import { initials } from './model'
  */
 export const SECRET_FIELD = { autoComplete: 'off', spellCheck: false, autoCorrect: 'off', autoCapitalize: 'off' } as const
 
+/**
+ * Note on type in buttons and inputs: the legacy stylesheet's unlayered `button, input { font: inherit }` beats Tailwind's
+ * utilities on those elements, so the size and weight sit on an inner span or on the field's wrapper.
+ */
+
 /** The first-run / sign-in window: caption bar, brand panel at the left, the step at the right. */
 export function AuthWindow({ children, overlay }: { children: ReactNode; overlay?: ReactNode }) {
   return (
@@ -18,8 +23,9 @@ export function AuthWindow({ children, overlay }: { children: ReactNode; overlay
       <CaptionBarView title="Beebeeb Drive" />
       <div className="flex min-h-0 flex-1">
         <BrandPanel />
-        <main className="flex min-w-0 flex-1 items-center justify-center overflow-auto px-10 py-8">
-          <div className="w-full max-w-[344px]">{children}</div>
+        <main className="flex min-w-0 flex-1 overflow-auto px-10 py-6">
+          {/* m-auto centres the step and still scrolls from its top when it is taller than the window. */}
+          <div className="m-auto w-full max-w-[344px]">{children}</div>
         </main>
       </div>
       {overlay}
@@ -59,7 +65,7 @@ export function StepLockup() {
 
 export function Heading({ children, sub }: { children: ReactNode; sub?: ReactNode }) {
   return (
-    <div className="mb-5">
+    <div className="mb-4">
       <h1 className="m-0 text-[22px] font-semibold tracking-[-0.01em] text-ink">{children}</h1>
       {sub && <p className="mt-1.5 text-[13px] leading-[18px] text-ink-2">{sub}</p>}
     </div>
@@ -79,9 +85,9 @@ interface FieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'size'>
 export function Field({ label, icon, error, mono, secret, id, ...input }: FieldProps) {
   const fieldId = id ?? `f-${label.toLowerCase().replace(/\W+/g, '-')}`
   return (
-    <div className="mb-3">
+    <div className="mb-2.5">
       <label htmlFor={fieldId} className="mb-1 block text-[12px] font-medium text-ink-2">{label}</label>
-      <div className={`flex h-9 items-center gap-2 rounded-md border bg-paper px-2.5 ${error ? 'border-red' : 'border-line'} focus-within:ring-2 focus-within:ring-amber-deep`}>
+      <div className={`flex h-8 items-center gap-2 rounded-md border bg-paper px-2.5 text-[13px] text-ink ${mono ? 'font-mono' : 'font-sans'} ${error ? 'border-red' : 'border-line'} focus-within:ring-2 focus-within:ring-amber-deep`}>
         {icon && <Icon name={icon} size={15} className="flex-none text-ink-3" />}
         <input
           id={fieldId}
@@ -89,7 +95,7 @@ export function Field({ label, icon, error, mono, secret, id, ...input }: FieldP
           {...input}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${fieldId}-error` : undefined}
-          className={`min-w-0 flex-1 border-0 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-4 ${mono ? 'font-mono' : ''}`}
+          className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-ink-4"
         />
       </div>
       {error && <p id={`${fieldId}-error`} role="alert" className="mt-1.5 text-[12px] leading-4 text-red">{error}</p>}
@@ -103,11 +109,11 @@ export function PrimaryButton({ children, disabled, onClick, amber = true, type 
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-9 w-full items-center justify-center gap-2 rounded-md text-[13px] font-medium disabled:cursor-default ${
+      className={`flex h-8 w-full items-center justify-center gap-2 rounded-md text-[13px] font-medium disabled:cursor-default ${
         amber ? 'bg-amber text-[oklch(0.22_0.01_70)] disabled:opacity-50' : 'border border-line bg-paper text-ink hover:bg-paper-2 disabled:opacity-60'
       }`}
     >
-      {children}
+      <span className="inline-flex items-center gap-2 font-sans text-[13px] font-medium">{children}</span>
     </button>
   )
 }

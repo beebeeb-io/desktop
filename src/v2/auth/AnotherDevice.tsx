@@ -64,8 +64,8 @@ export function AnotherDeviceView(p: AnotherDeviceViewProps) {
         />
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wide text-ink-3">Code</div>
-          <button type="button" onClick={p.onCopyCode} title="Copy the code (Ctrl+C)" className="mt-0.5 block font-mono text-[26px] font-semibold tracking-[0.06em] text-ink" data-code>
-            {p.code ?? '····-····'}
+          <button type="button" onClick={p.onCopyCode} title="Copy the code (Ctrl+C)" className="mt-0.5 block text-ink" data-code>
+            <span className="font-mono text-[26px] font-semibold tracking-[0.06em]">{p.code ?? '····-····'}</span>
           </button>
           <div className="mt-2 flex items-center gap-3">
             <Ring fraction={p.secondsLeft / LIFETIME} label={expired ? 'Expired' : `Expires in ${countdown(p.secondsLeft)}`} dim={expired} />
