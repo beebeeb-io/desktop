@@ -7,7 +7,7 @@ import { command } from '../../desktopApi'
 import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/FrameWindow'
 import { Sidebar } from '../chrome/Sidebar'
-import { SignInFlow } from './index'
+import { AccountEntry } from './create/entry'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 
@@ -41,7 +41,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('focus', check)
   }, [check])
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
-  if (state === 'signed-out') return <SignInFlow onSignedIn={check} />
+  if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
   if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={check} />
   return <>{children}</>
