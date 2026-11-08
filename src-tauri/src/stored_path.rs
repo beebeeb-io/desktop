@@ -22,10 +22,11 @@ use beebeeb_core::path_safety::{UnsafeName, check_component_for};
 pub(crate) enum Host {
     /// NTFS: a name of at most 255 UTF-16 units, and the Windows rules.
     Windows,
-    /// APFS: a name of at most 255 UTF-16 units (an emoji counts two), as on HFS+. Sources: the
-    /// Apple Developer Forums thread "How to query APFS file name size limit? (NAME_MAX is wrong)" (thread 726970;
-    /// APFS's own format allows longer names, 1022 bytes), and `task_2413_the_host_length_is_what_this_volume_holds`,
-    /// which creates the names on the CI runner's volume.
+    /// APFS: a name of at most 255 UTF-16 units (an emoji counts two), counted on its composed (NFC) form: an `e` and a
+    /// combining acute count as one `é`. Sources: the Apple Developer Forums thread "How to query APFS file name size
+    /// limit? (NAME_MAX is wrong)" (thread 726970; APFS's own format allows longer names, 1022 bytes) for the unit, and
+    /// `task_2413_the_host_length_is_what_this_volume_holds`, which creates the boundary names on the macOS CI runner's
+    /// volume: 128 decomposed `é` (256 units as given) are held there, 256 composed ones are not.
     Mac,
     /// Linux and any other host: a name of at most 255 bytes (ext4, btrfs, tmpfs, XFS).
     Linux,
@@ -48,12 +49,16 @@ impl Host {
 
     /// `Err` when `name` is longer than one name on this host may be, in the host's own unit.
     fn check_length(self, name: &str) -> Result<(), UnsafeName> {
-        match self {
-            Host::Windows | Host::Mac if name.encode_utf16().count() > MAX_NAME => {
-                Err(UnsafeName("is longer than 255 UTF-16 units"))
-            }
-            Host::Linux if name.len() > MAX_NAME => Err(UnsafeName("is longer than 255 bytes")),
-            _ => Ok(()),
+        use unicode_normalization::UnicodeNormalization as _;
+        let too_long = match self {
+            Host::Windows => name.encode_utf16().count() > MAX_NAME,
+            Host::Mac => name.nfc().map(char::len_utf16).sum::<usize>() > MAX_NAME,
+            Host::Linux => name.len() > MAX_NAME,
+        };
+        match (too_long, self) {
+            (false, _) => Ok(()),
+            (true, Host::Linux) => Err(UnsafeName("is longer than 255 bytes")),
+            (true, _) => Err(UnsafeName("is longer than 255 UTF-16 units")),
         }
     }
 }
@@ -414,6 +419,9 @@ mod tests {
             ("\u{200b}".repeat(100), false, false, false),
             (format!(".{}", "\u{200b}".repeat(100)), false, false, false),
             (format!("CONSOLE.{}", han(100)), false, true, true),
+            // macOS counts the composed form: 128 decomposed `é` are 256 units as given, 128 composed.
+            ("e\u{301}".repeat(128), false, true, false),
+            ("e\u{301}".repeat(256), false, false, false),
         ];
         for (name, linux, mac, windows) in &cases {
             let at = (name.encode_utf16().count(), name.len());
@@ -421,7 +429,7 @@ mod tests {
             assert_eq!(check_name_for(name, Host::Mac).is_ok(), *mac, "{at:?} (units, bytes) on macOS: {name:?}");
             assert_eq!(check_name_for(name, Host::Windows).is_ok(), *windows, "{at:?} (units, bytes) on Windows: {name:?}");
         }
-        assert_eq!(cases.len(), 25);
+        assert_eq!(cases.len(), 27);
         assert_eq!(check_name_for(&format!("{}:x", han(100)), Host::Windows), check_component_for("漢:x", false, true));
     }
 
@@ -493,6 +501,11 @@ mod tests {
             "é".repeat(256),
             "e\u{301}".repeat(127),
             "e\u{301}".repeat(128),
+            "e\u{301}".repeat(255),
+            "e\u{301}".repeat(256),
+            // Hangul as conjoining jamo (three per syllable), 100 and 86 syllables composed.
+            "\u{1112}\u{1161}\u{11ab}".repeat(100),
+            "\u{1112}\u{1161}\u{11ab}".repeat(86),
         ];
         let mut mismatches = Vec::new();
         for name in &names {
@@ -510,7 +523,7 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{:?}: the volume and the rule differ on\n{}", Host::BUILD, mismatches.join("\n"));
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 22);
     }
 
     /// The walk refuses a link at the root, at a folder on the way and at the destination, and passes plain entries

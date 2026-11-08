@@ -338,7 +338,7 @@ fn task_2413_a_refused_row_stays_refused_through_a_rename_an_update_and_a_move()
     let ops = [
         (sync_op(12, "file_rename", serde_json::json!({ "id": file, "new_name_encrypted": "con2.txt" })), true),
         (sync_op(13, "file_update", serde_json::json!({ "id": file, "size_bytes": 9, "version_number": 2 })), false),
-        (sync_op(14, "file_update", serde_json::json!({ "id": file, "name_encrypted": "CON.txt", "size_bytes": 9 })), false),
+        (sync_op(14, "file_update", serde_json::json!({ "id": file, "name_encrypted": "CON.txt", "size_bytes": 9, "version_number": 3 })), false),
         (sync_op(15, "file_move", serde_json::json!({ "id": file, "new_parent_id": other })), true),
         (sync_op(16, "file_move", serde_json::json!({ "id": file, "new_parent_id": refused_folder })), false),
         (sync_op(17, "file_move", serde_json::json!({ "id": file })), false),
