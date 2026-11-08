@@ -174,3 +174,47 @@ describe('HomeView: the strip renders the model', () => {
     expect(strip(m)).toEqual({ State: 'Paused', 'Not sent': '—', Conflicts: '0', 'In vault': '201000000000 B' })
   })
 })
+
+describe('task 2409: "Not sent N" opens the list of what it counts', () => {
+  test('the figure is a link only while it counts something', () => {
+    const link = (s: SyncActivitySummary | null | undefined) =>
+      homeSyncMetrics(signedIn, s, { device: 'this PC' }).find((m) => m.k === 'Not sent')?.notSentLink
+    expect(link(onHold)).toBe(true)
+    expect(link(calm)).toBe(false)
+    expect(link(undefined)).toBe(false)
+    expect(link(null)).toBe(false)
+  })
+
+  test('Home renders it as an <a>, and a click opens Activity › Not sent', async () => {
+    let opened = 0
+    const m = mount('WindowsApp/homeView.tsx', 'HomeView', {
+      backend: {
+        sync_activity_summary: () => onHold,
+        desktop_config: () => ({ upload_kbps_limit: 0, download_kbps_limit: 0, pause_sync: false, notify_conflicts: true, notify_sync_complete: false, notify_quota_warnings: true }),
+      },
+      props: { status: signedIn, usage: null, storage: null, onOpenNotSent: () => { opened += 1 } },
+      hookModules: [summaryHook],
+      bindings: {
+        command: desktopApi.command,
+        homeSyncMetrics,
+        usePlatformName: () => 'windows',
+        thisDeviceNoun: () => 'this PC',
+        formatBytes: (n: number) => `${n} B`,
+        accountProfile: async () => ({ ok: false, reason: 'signed out', unsupported: false }),
+        accountActivity: async () => ({ ok: false, reason: 'signed out', unsupported: false }),
+        homeRelativeTime: () => '',
+        homeEventVisual: () => ({ icon: 'clock', dot: '' }),
+        homeHumanizeType: (t: string) => t,
+        T: new Proxy({}, { get: () => '' }),
+        Card: 'card', Chip: 'chip', PageHeader: 'header', Skeleton: 'skeleton', NavIcon: 'icon',
+      },
+    })
+    mounted.push(m)
+    await settle(m)
+    const anchors = m.elements().filter((el) => el.type === 'a')
+    expect(anchors.map((a) => [textOf(a.props.children), a.props.href])).toEqual([[NOT_SENT, '#not-sent']])
+    let prevented = false
+    anchors[0].props.onClick({ preventDefault: () => { prevented = true } })
+    expect([opened, prevented]).toEqual([1, true])
+  })
+})

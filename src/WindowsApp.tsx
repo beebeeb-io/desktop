@@ -21,7 +21,7 @@ import SecurityView from './windows/views/SecurityView'
 import ActivityView from './windows/views/ActivityView'
 import SettingsView from './windows/views/SettingsView'
 import { pollWhileVisible } from './windows/visiblePoll'
-import { NavId, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY, navIdFromString, initialNav, ALWAYS_ACCESSIBLE, NAV_SECTIONS } from './WindowsApp/nav'
+import { NavId, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY, navTargetFromString, initialNavTarget, ALWAYS_ACCESSIBLE, NAV_SECTIONS, type NavTarget } from './WindowsApp/nav'
 import { SignedOutGate, PlaceholderView } from './WindowsApp/shell'
 import { HomeView } from './WindowsApp/homeView'
 import { KF_ONBOARDING_REOPEN_EVENT, KF_BACKUP_CHANGED_EVENT, FilesView } from './WindowsApp/filesView'
@@ -33,7 +33,14 @@ import { StorageWidget } from './WindowsApp/storageWidget'
 export default function WindowsApp() {
   const regionLabel = useRegionLabel()
   const caps = useCapabilities()
-  const [activeNav, setActiveNav] = useState<NavId>(() => initialNav())
+  // Task 2409: a link to Activity › Not sent opens the route and bumps this, which scrolls the section into view.
+  const [initialTarget] = useState<NavTarget>(() => initialNavTarget())
+  const [activeNav, setActiveNav] = useState<NavId>(initialTarget.nav)
+  const [notSentFocus, setNotSentFocus] = useState(initialTarget.section === 'not-sent' ? 1 : 0)
+  const openTarget = (target: NavTarget) => {
+    setActiveNav(target.nav)
+    if (target.section === 'not-sent') setNotSentFocus((n) => n + 1)
+  }
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
   const [status, setStatus] = useState<SyncStatus | null>(null)
@@ -56,14 +63,14 @@ export default function WindowsApp() {
     let cancelled = false
     const unlisten = listen<string>(WINDOWS_APP_NAV_EVENT, (event) => {
       if (cancelled) return
-      const nav = navIdFromString(event.payload)
-      if (nav != null) setActiveNav(nav)
+      const target = navTargetFromString(event.payload)
+      if (target != null) openTarget(target)
     })
 
     const onStorage = (event: StorageEvent) => {
       if (event.key !== WINDOWS_APP_NAV_STORAGE_KEY) return
-      const nav = navIdFromString(event.newValue)
-      if (nav != null) setActiveNav(nav)
+      const target = navTargetFromString(event.newValue)
+      if (target != null) openTarget(target)
       try {
         window.localStorage.removeItem(WINDOWS_APP_NAV_STORAGE_KEY)
       } catch {
@@ -181,7 +188,11 @@ export default function WindowsApp() {
     }
     switch (activeNav) {
       case 'home':
-        return loggedIn ? <HomeView status={status} usage={usage} storage={storage} /> : <SignedOutGate onOpenSignIn={openSignIn} />
+        return loggedIn ? (
+          <HomeView status={status} usage={usage} storage={storage} onOpenNotSent={() => openTarget({ nav: 'activity', section: 'not-sent' })} />
+        ) : (
+          <SignedOutGate onOpenSignIn={openSignIn} />
+        )
       case 'files':
         return <FilesView status={status} />
       case 'trash':
@@ -197,7 +208,7 @@ export default function WindowsApp() {
       case 'security':
         return <SecurityView />
       case 'activity':
-        return <ActivityView />
+        return <ActivityView notSentFocus={notSentFocus} onOpenSettings={() => setActiveNav('settings')} />
       case 'bandwidth':
         return <BandwidthView />
       case 'selective-sync':

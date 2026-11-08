@@ -46,6 +46,9 @@ import {
   NEEDS_ATTENTION_ERRORS,
 } from '../downloadProgressCopy'
 import { pollWhileVisible } from '../visiblePoll'
+import { useSyncActivitySummary } from '../syncActivityUi'
+import { notSentCount } from '../homeSyncMetrics'
+import { NotSentSection } from './NotSentSection'
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 // All wire timestamps are RFC3339 strings; guard null/undefined + unparseable.
@@ -677,9 +680,23 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
 
 // ── Root ─────────────────────────────────────────────────────────────────────
 
-export default function ActivityView() {
+export default function ActivityView({
+  notSentFocus = 0,
+  onOpenSettings,
+}: {
+  /** Task 2409: bumped by a link to Activity › Not sent (Home's figure, the tray's lines). */
+  notSentFocus?: number
+  onOpenSettings?: () => void
+} = {}) {
   const regionLabel = useRegionLabel()
   const [tab, setTab] = useState<Tab>('timeline')
+  // Task 2409: the "Not sent" section shows while the counts say something is not sent, or when a link opened it (it
+  // then says so when nothing is left). The counts are the polled summary's; the names are read by the section only.
+  const { summary } = useSyncActivitySummary()
+  const notSent = notSentCount(summary) ?? 0
+  useEffect(() => {
+    if (notSentFocus > 0) setTab('timeline')
+  }, [notSentFocus])
   const allTransfers = useActiveTransfers()
   // Download rows active, needing attention, or failed within the last 15 min; never an upload (U0 design).
   const liveTransfers = inProgressCardRows(allTransfers)
@@ -688,7 +705,7 @@ export default function ActivityView() {
     <div style={{ overflow: 'auto', padding: '28px 36px', flex: 1 }}>
       <PageHeader
         title="Activity"
-        subtitle="Your account's timeline and notifications. Notification preferences now live under Settings."
+        subtitle="Changes not sent yet, your account's timeline, and notifications. Notification preferences now live under Settings."
         aside={
           <Chip tone="amber">
             <NavIcon name="shield" size={11} color={T.amberDeep} />
@@ -698,6 +715,11 @@ export default function ActivityView() {
       />
 
       <TabBar active={tab} onChange={setTab} />
+
+      {/* Task 2409: "Not sent" — every change on this PC that has not reached Beebeeb, one row each. */}
+      {tab === 'timeline' && (notSent > 0 || notSentFocus > 0) && (
+        <NotSentSection focus={notSentFocus} onOpenSyncSettings={onOpenSettings} />
+      )}
 
       {/* "In progress" card — shown above Timeline when files are arriving (LD-0105 U1). */}
       {tab === 'timeline' && liveTransfers.length > 0 && (

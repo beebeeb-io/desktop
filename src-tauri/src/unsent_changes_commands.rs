@@ -227,6 +227,41 @@ mod tests {
         assert_eq!(json["items"][0]["sending"]["done"], 34);
     }
 
+    /// The answer is the JSON the window parses: `tests/fixtures/unsent-changes.page.json`, which
+    /// `tests/unsentChanges.test.ts` narrows with `parseUnsentChanges`.
+    #[test]
+    fn the_view_is_the_json_the_window_parses() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/unsent-changes.page.json")).unwrap();
+        let item = |id: &str, file: &str, kind: &'static str, path: &str, group: &str, at: i64, retryable: bool| {
+            state_db::UnsentChange {
+                id: id.into(),
+                file_id: Some(file.into()),
+                kind,
+                path: path.into(),
+                backup: false,
+                group: group.into(),
+                queued_at: at,
+                retry_at: None,
+                parked: false,
+                retryable,
+            }
+        };
+        let page = state_db::UnsentPage {
+            total: 3,
+            items: vec![
+                item("op-delete", "file-plan", "delete", "Projects/2026/old plan.docx", "gave_up", 1_793_000_000, true),
+                item("op-edit", "file-budget", "edit", "Finance/budget.xlsx", "quota", 1_793_000_100, false),
+                item("op-new", "file-photo", "new_file", "Camera Roll/IMG_0412.jpg", "waiting", 1_793_000_200, false),
+            ],
+        };
+        let transfers = vec![(
+            "file-photo".to_string(),
+            Transfer { direction: Direction::Up, done: 34, total: 100, ..Transfer::default() },
+        )];
+        assert_eq!(serde_json::to_value(view_of(page, &transfers, "running".into(), false)).unwrap(), fixture);
+    }
+
     /// A refusal is an error with a code the window words; queued (done now, or already) is an answer.
     #[test]
     fn try_again_answers_queued_or_a_refusal_code() {

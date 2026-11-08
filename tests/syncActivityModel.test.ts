@@ -347,3 +347,33 @@ describe('held sentences for auth, needs_review, waiting_for_folder', () => {
     expect(heldSentence({ reason: 'waiting_for_folder', count: 1_200, oldest_at: 0, newest_at: 0 }, now)).toBe('1,200 changes are waiting for their folder to reach Beebeeb.')
   })
 })
+
+describe('task 2409: the lines that count changes not sent', () => {
+  test('waiting, held and given-up lines are marked, so the tray can link them to Activity › Not sent', () => {
+    const view = syncActivityView(signedIn, guusOnHold({ queue: { waiting: 2, gave_up: 43, held: guusOnHold().queue!.held } }), { now })
+    for (const line of ['2 changes waiting to sync.', HELD_LINE, GAVE_UP_LINE]) expect(view.notSentLines).toContain(line)
+    for (const line of [view.headline, ...view.details]) {
+      expect(view.notSentLines.includes(line)).toBe(/waiting to sync|on hold|stopped after repeated errors/.test(line))
+    }
+  })
+
+  test('Guus’s screenshot: "Starting" is not a link, "2 changes waiting to sync." is', () => {
+    const view = syncActivityView(signedIn, summary({ engine_state: 'running', last_tick_ok_at: null, queue: { waiting: 2, gave_up: 0, held: [] } }), { now })
+    expect(view.headline).toBe('Starting. No sync check has finished yet.')
+    expect(view.details).toEqual(['2 changes waiting to sync.'])
+    expect(view.notSentLines.includes(view.headline)).toBe(false)
+    expect(view.notSentLines.includes(view.details[0])).toBe(true)
+  })
+
+  test('a waiting headline, a held headline and a paused wait line are links too; checks and conflicts never are', () => {
+    const waiting = syncActivityView(signedIn, summary({ queue: { waiting: 1, gave_up: 0, held: [] } }), { now })
+    expect(waiting.notSentLines).toContain(waiting.headline)
+    const held = syncActivityView(signedIn, guusOnHold(), { now })
+    expect(held.notSentLines).toContain(held.headline)
+    const paused = syncActivityView(signedIn, summary({ paused: true, queue: { waiting: 3, gave_up: 0, held: [] } }), { now })
+    expect(paused.notSentLines).toContain('3 changes wait until you resume.')
+    const busy = syncActivityView({ ...signedIn, conflicts: 2 }, summary({ engine_state: 'running', startup_check: { done: 1, total: 9 } }), { now })
+    expect(busy.notSentLines).toEqual([])
+    expect(syncActivityView(null, undefined, { now }).notSentLines).toEqual([])
+  })
+})

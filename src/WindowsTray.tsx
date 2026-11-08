@@ -194,6 +194,8 @@ const TRAY_VIEW_ALL_THRESHOLD = 8
 const TRAY_RECENT_ROW_HEIGHT = 48
 const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
 const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
+/** `NOT_SENT_TARGET` in `WindowsApp/nav.tsx`: the route and section the main window opens. */
+const NOT_SENT_TARGET = 'activity#not-sent'
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -315,6 +317,35 @@ export default function WindowsTray() {
     void getCurrentWindow().hide()
   }
 
+  // Task 2409: a waiting, held or given-up line opens Activity › Not sent, where those changes are listed one by one.
+  const openNotSent = async () => {
+    try {
+      window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, NOT_SENT_TARGET)
+    } catch {
+      // Best effort only; already-open main windows still receive the Tauri event below.
+    }
+    await command<void>('show_main_app_window')
+    await emit(WINDOWS_APP_NAV_EVENT, NOT_SENT_TARGET).catch(() => undefined)
+    void getCurrentWindow().hide()
+  }
+  /** A status line: a link to Activity › Not sent when it counts changes not sent, plain text otherwise. */
+  const statusLine = (line: string) =>
+    activity.notSentLines.includes(line) ? (
+      <a
+        href="#not-sent"
+        title="See which changes"
+        onClick={(event) => {
+          event.preventDefault()
+          void openNotSent()
+        }}
+        style={{ color: 'inherit', textDecoration: 'underline', textUnderlineOffset: 2, textDecorationColor: T.ink4 }}
+      >
+        {line}
+      </a>
+    ) : (
+      line
+    )
+
   const openActivity = async () => {
     try {
       window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, 'activity')
@@ -424,10 +455,10 @@ export default function WindowsTray() {
               <SyncActivityIcon view={activity} />
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2, lineHeight: 1.35 }}>{activity.headline}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 500, color: T.ink2, lineHeight: 1.35 }}>{statusLine(activity.headline)}</div>
               {activity.details.map((line) => (
                 <div key={line} style={{ fontSize: 11, color: T.ink3, marginTop: 3, lineHeight: 1.35 }}>
-                  {line}
+                  {statusLine(line)}
                 </div>
               ))}
               {activity.progress && <SyncCheckProgress check={activity.progress} compact />}
