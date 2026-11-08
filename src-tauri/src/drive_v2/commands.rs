@@ -19,17 +19,21 @@ use super::model::{self, Sort};
 use crate::state_db::{FileEntry, FileStatus, StateDb};
 use crate::{AppState, api_client};
 
-type Answer<T> = Result<T, String>;
+pub(super) type Answer<T> = Result<T, String>;
 
 /// The unlocked session's account: a locked vault is `locked`, no account `signed-out`.
-fn require_session(state: &AppState) -> Result<(), DriveError> {
+pub(super) fn require_session(state: &AppState) -> Result<(), DriveError> {
     let acct = state.active_account().map_err(|_| DriveError::SignedOut)?;
     let unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     if unlocked {
         return Ok(());
     }
     let present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
-    Err(if present { DriveError::Locked } else { DriveError::SignedOut })
+    Err(if present {
+        DriveError::Locked
+    } else {
+        DriveError::SignedOut
+    })
 }
 
 fn api(state: &State<'_, AppState>) -> Result<api_client::ApiClient, DriveError> {
@@ -38,9 +42,11 @@ fn api(state: &State<'_, AppState>) -> Result<api_client::ApiClient, DriveError>
 
 /// The state DB and the sync root. No sync root or no database yet (before the first sync) is
 /// `None`: a read shows an empty, stale listing, an action fails.
-fn local() -> Result<Option<(StateDb, PathBuf)>, DriveError> {
+pub(super) fn local() -> Result<Option<(StateDb, PathBuf)>, DriveError> {
     let cfg = crate::config::DesktopConfig::load().map_err(|_| DriveError::Failed("config"))?;
-    let Some(root) = cfg.sync_root.clone() else { return Ok(None) };
+    let Some(root) = cfg.sync_root.clone() else {
+        return Ok(None);
+    };
     let db = crate::local_state_purge::state_db_for_config(&cfg).map_err(DriveError::db)?;
     Ok(db.map(|db| (db, root)))
 }
@@ -49,7 +55,9 @@ fn local_required() -> Result<(StateDb, PathBuf), DriveError> {
     local()?.ok_or(DriveError::Failed("not synced yet"))
 }
 
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, DriveError> + Send + 'static) -> Answer<T> {
+pub(super) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, DriveError> + Send + 'static,
+) -> Answer<T> {
     tauri::async_runtime::spawn_blocking(work)
         .await
         .map_err(|_| String::from(DriveError::Failed("task")))?
@@ -72,7 +80,9 @@ fn item_at_path(db: &StateDb, rel: &str, is_folder: bool, parent_id: Option<Stri
         std::thread::sleep(Duration::from_millis(100));
     }
     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
-    let mime = (!is_folder).then(|| model::mime_for_name(&name).map(str::to_string)).flatten();
+    let mime = (!is_folder)
+        .then(|| model::mime_for_name(&name).map(str::to_string))
+        .flatten();
     Ok(DriveItem {
         id: format!("{}{rel}", model::LOCAL_ID_PREFIX),
         parent_id,
@@ -104,8 +114,17 @@ pub(crate) async fn drive_list(
     blocking(move || match local()? {
         Some((db, _)) => model::list(&db, folder_id.as_deref(), sort.unwrap_or_default(), stale),
         None if folder_id.is_none() => {
-            let root = Crumb { id: None, name: model::ROOT_NAME.to_string() };
-            Ok(Listing { folder: root.clone(), path: vec![root], items: Vec::new(), as_of: model::now_iso(), stale: true })
+            let root = Crumb {
+                id: None,
+                name: model::ROOT_NAME.to_string(),
+            };
+            Ok(Listing {
+                folder: root.clone(),
+                path: vec![root],
+                items: Vec::new(),
+                as_of: model::now_iso(),
+                stale: true,
+            })
         }
         None => Err(DriveError::NotFound),
     })
@@ -122,7 +141,11 @@ pub(crate) async fn drive_details(state: State<'_, AppState>, id: String) -> Ans
 /// shows it through a blob URL. Fetched and decrypted by the engine bridge, which keeps the file
 /// key in Rust and refuses while the item's own write is still queued.
 #[tauri::command]
-pub(crate) async fn drive_thumbnail(state: State<'_, AppState>, id: String, size: Option<String>) -> Answer<tauri::ipc::Response> {
+pub(crate) async fn drive_thumbnail(
+    state: State<'_, AppState>,
+    id: String,
+    size: Option<String>,
+) -> Answer<tauri::ipc::Response> {
     require_session(&state)?;
     let api = Arc::new(api(&state)?);
     let variant = match size.as_deref() {
@@ -144,7 +167,9 @@ pub(crate) async fn drive_thumbnail(state: State<'_, AppState>, id: String, size
 #[tauri::command]
 pub(crate) async fn drive_versions(state: State<'_, AppState>, id: String) -> Answer<Vec<VersionEntry>> {
     require_session(&state)?;
-    let body = crate::settings_commands::list_file_versions(state, id).await.map_err(|e| DriveError::from_text(&e))?;
+    let body = crate::settings_commands::list_file_versions(state, id)
+        .await
+        .map_err(|e| DriveError::from_text(&e))?;
     Ok(model::versions_from_payload(&body)?)
 }
 
@@ -190,7 +215,10 @@ pub(crate) async fn drive_photos(state: State<'_, AppState>, cursor: Option<Stri
     require_session(&state)?;
     blocking(move || match local()? {
         Some((db, _)) => model::photos(&db, cursor.as_deref()),
-        None => Ok(PhotoPage { entries: Vec::new(), next: None }),
+        None => Ok(PhotoPage {
+            entries: Vec::new(),
+            next: None,
+        }),
     })
     .await
 }
@@ -198,7 +226,9 @@ pub(crate) async fn drive_photos(state: State<'_, AppState>, cursor: Option<Stri
 #[tauri::command]
 pub(crate) async fn drive_trash(state: State<'_, AppState>) -> Answer<Vec<TrashEntry>> {
     require_session(&state)?;
-    let raw = crate::account_commands::desktop_trash_list(state).await.map_err(|e| DriveError::from_text(&e))?;
+    let raw = crate::account_commands::desktop_trash_list(state)
+        .await
+        .map_err(|e| DriveError::from_text(&e))?;
     blocking(move || {
         let db = local().ok().flatten().map(|(db, _)| db);
         Ok(model::trash_entries(db.as_ref(), raw))
@@ -209,7 +239,9 @@ pub(crate) async fn drive_trash(state: State<'_, AppState>) -> Answer<Vec<TrashE
 #[tauri::command]
 pub(crate) async fn drive_storage(state: State<'_, AppState>) -> Answer<StorageSummary> {
     require_session(&state)?;
-    let summary = crate::file_open_commands::desktop_storage_summary(state).await.map_err(|e| DriveError::from_text(&e))?;
+    let summary = crate::file_open_commands::desktop_storage_summary(state)
+        .await
+        .map_err(|e| DriveError::from_text(&e))?;
     let (files, photos, backups) = blocking(move || match local()? {
         Some((db, _)) => model::storage_split(&db),
         None => Ok((0, 0, 0)),
@@ -230,8 +262,18 @@ pub(crate) async fn drive_sync_summary(app: tauri::AppHandle, state: State<'_, A
     let view = events::engine_view(&state);
     blocking(move || {
         let Some((db, _)) = local()? else {
-            let phase = if view.is_some() { SyncPhase::Checking } else { SyncPhase::Stopped };
-            return Ok(SyncSummary { phase, on_device: 0, available_offline: 0, online_only: 0, pending: 0 });
+            let phase = if view.is_some() {
+                SyncPhase::Checking
+            } else {
+                SyncPhase::Stopped
+            };
+            return Ok(SyncSummary {
+                phase,
+                on_device: 0,
+                available_offline: 0,
+                online_only: 0,
+                pending: 0,
+            });
         };
         let counts = model::sync_counts(&db);
         let (raw, paused) = view.clone().unwrap_or_default();
@@ -263,7 +305,12 @@ pub(crate) async fn drive_create_folder(
 }
 
 #[tauri::command]
-pub(crate) async fn drive_rename(app: tauri::AppHandle, state: State<'_, AppState>, id: String, name: String) -> Answer<DriveItem> {
+pub(crate) async fn drive_rename(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Answer<DriveItem> {
     require_session(&state)?;
     let item = blocking(move || {
         let (db, root) = local_required()?;
@@ -290,7 +337,12 @@ fn resolve_all(db: &StateDb, ids: &[String]) -> Result<Vec<FileEntry>, DriveErro
 }
 
 #[tauri::command]
-pub(crate) async fn drive_move(app: tauri::AppHandle, state: State<'_, AppState>, ids: Vec<String>, target_id: Option<String>) -> Answer<()> {
+pub(crate) async fn drive_move(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    target_id: Option<String>,
+) -> Answer<()> {
     require_session(&state)?;
     let target = target_id.clone();
     let sources = blocking(move || {
@@ -309,7 +361,11 @@ pub(crate) async fn drive_move(app: tauri::AppHandle, state: State<'_, AppState>
 }
 
 #[tauri::command]
-pub(crate) async fn drive_duplicate(app: tauri::AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Answer<Vec<DriveItem>> {
+pub(crate) async fn drive_duplicate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Answer<Vec<DriveItem>> {
     require_session(&state)?;
     let items = blocking(move || {
         let (db, root) = local_required()?;
@@ -355,11 +411,21 @@ pub(crate) fn check_trashable(db: &StateDb, entry: &FileEntry) -> Result<(), Dri
         return Err(DriveError::Conflict);
     }
     let own = crate::backup_protect::own_backups();
-    if crate::backup_protect::protected_reason(db, &own, entry.path.trim_matches('/'), beebeeb_core::backup::Mutation::Trash).is_some() {
+    if crate::backup_protect::protected_reason(
+        db,
+        &own,
+        entry.path.trim_matches('/'),
+        beebeeb_core::backup::Mutation::Trash,
+    )
+    .is_some()
+    {
         return Err(DriveError::ReadOnly);
     }
     let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
-    if contract.is_some_and(|c| c.namespace == crate::state_db::Namespace::SharedWithMe && c.permission_bits & crate::state_db::PERMISSION_WRITE == 0) {
+    if contract.is_some_and(|c| {
+        c.namespace == crate::state_db::Namespace::SharedWithMe
+            && c.permission_bits & crate::state_db::PERMISSION_WRITE == 0
+    }) {
         return Err(DriveError::ReadOnly);
     }
     Ok(())
@@ -368,7 +434,11 @@ pub(crate) fn check_trashable(db: &StateDb, entry: &FileEntry) -> Result<(), Dri
 /// Move to Trash, no question asked (DW-0405): the server trashes, the engine's next pull removes
 /// the local copies. Answers the token Undo hands back.
 #[tauri::command]
-pub(crate) async fn drive_trash_items(app: tauri::AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Answer<UndoTicket> {
+pub(crate) async fn drive_trash_items(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Answer<UndoTicket> {
     require_session(&state)?;
     let api = api(&state)?;
     let entries = blocking(move || {
@@ -393,10 +463,17 @@ pub(crate) async fn drive_trash_items(app: tauri::AppHandle, state: State<'_, Ap
     }
     resnapshot();
     for entry in &entries {
-        events::emit(&app, &DriveEvent::Removed { id: entry.file_id.clone() });
+        events::emit(
+            &app,
+            &DriveEvent::Removed {
+                id: entry.file_id.clone(),
+            },
+        );
     }
     events::changed(&app, entries.first().and_then(|e| e.parent_id.clone()));
-    Ok(UndoTicket { undo_token: remember_undo(done) })
+    Ok(UndoTicket {
+        undo_token: remember_undo(done),
+    })
 }
 
 fn resnapshot() {
@@ -407,14 +484,20 @@ fn resnapshot() {
 
 async fn restore_ids(api: &api_client::ApiClient, ids: &[String]) -> Result<(), DriveError> {
     for id in ids {
-        api.restore_file(id).await.map_err(|e| DriveError::from_text(&e.to_string()))?;
+        api.restore_file(id)
+            .await
+            .map_err(|e| DriveError::from_text(&e.to_string()))?;
     }
     resnapshot();
     Ok(())
 }
 
 #[tauri::command]
-pub(crate) async fn drive_undo_trash(app: tauri::AppHandle, state: State<'_, AppState>, undo_token: String) -> Answer<()> {
+pub(crate) async fn drive_undo_trash(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    undo_token: String,
+) -> Answer<()> {
     require_session(&state)?;
     let api = api(&state)?;
     let ids = take_undo(&undo_token).ok_or(DriveError::NotFound)?;
@@ -425,7 +508,11 @@ pub(crate) async fn drive_undo_trash(app: tauri::AppHandle, state: State<'_, App
 
 /// Restore from Trash, for a selection (the existing `desktop_trash_restore` takes one id).
 #[tauri::command]
-pub(crate) async fn drive_restore_from_trash(app: tauri::AppHandle, state: State<'_, AppState>, ids: Vec<String>) -> Answer<()> {
+pub(crate) async fn drive_restore_from_trash(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Answer<()> {
     require_session(&state)?;
     if ids.is_empty() || ids.iter().any(|id| id.parse::<uuid::Uuid>().is_err()) {
         return Err(DriveError::NotFound.into());
@@ -459,10 +546,25 @@ pub(crate) async fn drive_upload_pick(
         let parent = model::resolve_folder(&db, parent_id.as_deref())?;
         let dialog = picker_app.dialog().file().set_title("Upload to Beebeeb");
         let picked: Vec<PathBuf> = match mode {
-            PickMode::Folder => dialog.blocking_pick_folder().and_then(|p| p.into_path().ok()).into_iter().collect(),
-            PickMode::Files => dialog.blocking_pick_files().unwrap_or_default().into_iter().filter_map(|p| p.into_path().ok()).collect(),
+            PickMode::Folder => dialog
+                .blocking_pick_folder()
+                .and_then(|p| p.into_path().ok())
+                .into_iter()
+                .collect(),
+            PickMode::Files => dialog
+                .blocking_pick_files()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| p.into_path().ok())
+                .collect(),
             PickMode::Photos => dialog
-                .add_filter("Photos and videos", &["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "dng", "tif", "tiff", "mp4", "mov", "m4v", "webm"])
+                .add_filter(
+                    "Photos and videos",
+                    &[
+                        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "dng", "tif", "tiff", "mp4",
+                        "mov", "m4v", "webm",
+                    ],
+                )
                 .blocking_pick_files()
                 .unwrap_or_default()
                 .into_iter()
@@ -495,7 +597,11 @@ pub(crate) async fn drive_upload_dropped(
     let started = blocking(move || {
         let (db, root) = local_required()?;
         let parent = model::resolve_folder(&db, parent_id.as_deref())?;
-        let sources: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).filter(|p| p.is_absolute()).collect();
+        let sources: Vec<PathBuf> = paths
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .collect();
         let started = fsops::copy_in(&db, &root, parent.as_ref(), &sources)?;
         Ok((started, parent.map(|p| p.file_id)))
     })
@@ -523,7 +629,9 @@ pub(crate) async fn drive_open(app: tauri::AppHandle, state: State<'_, AppState>
         if !entry.is_dir() && crate::file_open_commands::is_dangerous_executable(&path) {
             return Err(DriveError::Unsupported);
         }
-        app.opener().open_path(path.to_string_lossy().into_owned(), None::<&str>).map_err(|_| DriveError::Failed("open"))
+        app.opener()
+            .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|_| DriveError::Failed("open"))
     })
     .await
 }
@@ -533,13 +641,18 @@ pub(crate) async fn drive_reveal(app: tauri::AppHandle, state: State<'_, AppStat
     require_session(&state)?;
     blocking(move || {
         let (_, _, path) = local_file(&id)?;
-        app.opener().reveal_item_in_dir(&path).map_err(|_| DriveError::Failed("reveal"))
+        app.opener()
+            .reveal_item_in_dir(&path)
+            .map_err(|_| DriveError::Failed("reveal"))
     })
     .await
 }
 
 fn current_version(db: &StateDb, entry: &FileEntry) -> Result<i64, DriveError> {
-    Ok(db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?.map_or(0, |c| c.current_version))
+    Ok(db
+        .get_file_contract_state(&entry.file_id)
+        .map_err(DriveError::db)?
+        .map_or(0, |c| c.current_version))
 }
 
 #[tauri::command]
@@ -609,7 +722,11 @@ pub(crate) async fn drive_read_bytes(state: State<'_, AppState>, id: String) -> 
 
 /// The body is a frame whose header is `{ "id", "baseVersionId" }`. Answers `{ versionId }`.
 #[tauri::command]
-pub(crate) async fn drive_save_bytes(app: tauri::AppHandle, state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Answer<serde_json::Value> {
+pub(crate) async fn drive_save_bytes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Answer<serde_json::Value> {
     require_session(&state)?;
     let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
         return Err(DriveError::Failed("frame").into());
@@ -617,8 +734,14 @@ pub(crate) async fn drive_save_bytes(app: tauri::AppHandle, state: State<'_, App
     let body = body.clone();
     let (version_id, parent) = blocking(move || {
         let (header, bytes) = unframe(&body)?;
-        let id = header.get("id").and_then(|v| v.as_str()).ok_or(DriveError::Failed("frame"))?;
-        let base = header.get("baseVersionId").and_then(|v| v.as_str()).ok_or(DriveError::Failed("frame"))?;
+        let id = header
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(DriveError::Failed("frame"))?;
+        let base = header
+            .get("baseVersionId")
+            .and_then(|v| v.as_str())
+            .ok_or(DriveError::Failed("frame"))?;
         let (db, root) = local_required()?;
         let entry = model::resolve(&db, id)?;
         let version_id = fsops::save_checked(&db, &root, &entry, base, bytes, fsops::BYTES_LIMIT)?;

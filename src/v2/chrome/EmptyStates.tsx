@@ -31,7 +31,7 @@ export function EmptyFiles({ onAddFiles }: { onAddFiles?: () => void }) {
   )
 }
 
-export interface ListLoading { done: number; total: number; minutesLeft: number; thumbnails: 'waiting' | 'in-progress' | 'done' }
+export interface ListLoading { done: number; total: number; /** Absent when the engine has no estimate: the strip leaves it out. */ minutesLeft?: number; thumbnails: 'waiting' | 'in-progress' | 'done' }
 
 const nf = new Intl.NumberFormat('en-US')
 
@@ -44,7 +44,7 @@ export function GettingReadyStrip({ loading }: { loading: ListLoading }) {
         <div className="flex items-baseline gap-2">
           <span className="text-[13px] font-medium text-ink">Getting your files ready</span>
           <span className="font-mono">{nf.format(loading.done)} of {nf.format(loading.total)}</span>
-          <span>· about {loading.minutesLeft} min left</span>
+          {loading.minutesLeft !== undefined && <span>· about {loading.minutesLeft} min left</span>}
         </div>
         <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-paper-3" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="File list">
           <div className="h-full bg-ink-3" style={{ width: `${pct}%` }} />

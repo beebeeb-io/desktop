@@ -44,7 +44,11 @@ pub(crate) fn validate_name(name: &str) -> Result<String, DriveError> {
 
 fn join_rel(parent_rel: &str, name: &str) -> String {
     let parent = parent_rel.trim_matches('/');
-    if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") }
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
 }
 
 /// The state DB path of a folder (`""` for the root).
@@ -62,7 +66,11 @@ pub(crate) fn full_path(sync_root: &Path, rel: &str) -> Result<PathBuf, DriveErr
     let full = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     // Not on disk yet (a new name, or a folder the engine has not placed): the nearest ancestor that
     // is must be inside the root; the segments below it passed the string checks.
-    let anchor = full.ancestors().find(|p| p.exists()).map(Path::to_path_buf).unwrap_or_default();
+    let anchor = full
+        .ancestors()
+        .find(|p| p.exists())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     if !crate::file_open_commands::is_contained(sync_root, &anchor) {
         return Err(DriveError::NotFound);
     }
@@ -71,14 +79,30 @@ pub(crate) fn full_path(sync_root: &Path, rel: &str) -> Result<PathBuf, DriveErr
 
 /// Whether a child named `name` exists in `parent_rel`, as Windows and macOS compare names
 /// (case-insensitively): on disk, or in the mirror (a cloud-only item has no bytes but has a name).
-pub(crate) fn name_taken(db: &StateDb, sync_root: &Path, parent_id: Option<&str>, parent_rel: &str, name: &str) -> bool {
+pub(crate) fn name_taken(
+    db: &StateDb,
+    sync_root: &Path,
+    parent_id: Option<&str>,
+    parent_rel: &str,
+    name: &str,
+) -> bool {
     let lower = name.to_lowercase();
-    if db.child_names_lowercase(parent_id).map(|names| names.contains(&lower)).unwrap_or(false) {
+    if db
+        .child_names_lowercase(parent_id)
+        .map(|names| names.contains(&lower))
+        .unwrap_or(false)
+    {
         return true;
     }
-    let Ok(dir) = full_path(sync_root, parent_rel) else { return true };
+    let Ok(dir) = full_path(sync_root, parent_rel) else {
+        return true;
+    };
     std::fs::read_dir(dir)
-        .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().to_lowercase() == lower))
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().to_lowercase() == lower)
+        })
         .unwrap_or(false)
 }
 
@@ -94,13 +118,19 @@ fn refuse_if_shared_read_only(db: &StateDb, entry: Option<&FileEntry>) -> Result
     let Some(entry) = entry else { return Ok(()) };
     let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
     let read_only = contract.is_some_and(|c| {
-        c.namespace == crate::state_db::Namespace::SharedWithMe && c.permission_bits & crate::state_db::PERMISSION_WRITE == 0
+        c.namespace == crate::state_db::Namespace::SharedWithMe
+            && c.permission_bits & crate::state_db::PERMISSION_WRITE == 0
     });
     if read_only { Err(DriveError::ReadOnly) } else { Ok(()) }
 }
 
 /// `drive_create_folder`: a new folder in `parent`. Returns its state DB path.
-pub(crate) fn create_folder(db: &StateDb, sync_root: &Path, parent: Option<&FileEntry>, name: &str) -> Result<String, DriveError> {
+pub(crate) fn create_folder(
+    db: &StateDb,
+    sync_root: &Path,
+    parent: Option<&FileEntry>,
+    name: &str,
+) -> Result<String, DriveError> {
     let name = validate_name(name)?;
     refuse_if_shared_read_only(db, parent)?;
     let parent_rel = folder_rel(parent);
@@ -126,7 +156,8 @@ pub(crate) fn rename(db: &StateDb, sync_root: &Path, entry: &FileEntry, name: &s
     refuse_if_shared_read_only(db, Some(entry))?;
     refuse_if_protected(db, &old_rel, Mutation::Rename)?;
     // A change of case only is the same name to Windows: no clash with itself.
-    let same_but_case = crate::vault_tree::folder_leaf_name(&old_rel).is_some_and(|old| old.to_lowercase() == name.to_lowercase());
+    let same_but_case =
+        crate::vault_tree::folder_leaf_name(&old_rel).is_some_and(|old| old.to_lowercase() == name.to_lowercase());
     if !same_but_case && name_taken(db, sync_root, entry.parent_id.as_deref(), &parent_rel, &name) {
         return Err(DriveError::NameTaken);
     }
@@ -136,7 +167,12 @@ pub(crate) fn rename(db: &StateDb, sync_root: &Path, entry: &FileEntry, name: &s
 }
 
 /// `drive_move`: each item into `target`. All are checked before the first one moves.
-pub(crate) fn move_items(db: &StateDb, sync_root: &Path, entries: &[FileEntry], target: Option<&FileEntry>) -> Result<(), DriveError> {
+pub(crate) fn move_items(
+    db: &StateDb,
+    sync_root: &Path,
+    entries: &[FileEntry],
+    target: Option<&FileEntry>,
+) -> Result<(), DriveError> {
     let target_rel = folder_rel(target);
     let target_id = target.map(|t| t.file_id.as_str());
     refuse_if_shared_read_only(db, target)?;
@@ -176,7 +212,11 @@ pub(crate) fn copy_name(name: &str, attempt: u32) -> String {
         Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
         _ => (name, None),
     };
-    let suffix = if attempt <= 1 { " - Copy".to_string() } else { format!(" - Copy ({attempt})") };
+    let suffix = if attempt <= 1 {
+        " - Copy".to_string()
+    } else {
+        format!(" - Copy ({attempt})")
+    };
     match ext {
         Some(ext) => format!("{stem}{suffix}.{ext}"),
         None => format!("{stem}{suffix}"),
@@ -230,7 +270,12 @@ pub(crate) fn duplicate(db: &StateDb, sync_root: &Path, entry: &FileEntry) -> Re
 /// `drive_upload_pick` / `drive_upload_dropped`: copy files and folders from this PC into `parent`;
 /// the engine uploads them. A clash gets `Name 2.ext`, as the menu's upload does. Returns how many
 /// top-level items were copied in.
-pub(crate) fn copy_in(db: &StateDb, sync_root: &Path, parent: Option<&FileEntry>, sources: &[PathBuf]) -> Result<usize, DriveError> {
+pub(crate) fn copy_in(
+    db: &StateDb,
+    sync_root: &Path,
+    parent: Option<&FileEntry>,
+    sources: &[PathBuf],
+) -> Result<usize, DriveError> {
     refuse_if_shared_read_only(db, parent)?;
     let parent_rel = folder_rel(parent);
     let dir = full_path(sync_root, &parent_rel)?;
@@ -240,7 +285,9 @@ pub(crate) fn copy_in(db: &StateDb, sync_root: &Path, parent: Option<&FileEntry>
     let canonical_root = dunce_canonical(sync_root);
     let mut started = 0;
     for source in sources {
-        let Ok(meta) = std::fs::symlink_metadata(source) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(source) else {
+            continue;
+        };
         if meta.file_type().is_symlink() {
             continue;
         }
@@ -250,14 +297,17 @@ pub(crate) fn copy_in(db: &StateDb, sync_root: &Path, parent: Option<&FileEntry>
         {
             continue;
         }
-        let Some(name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        let Some(name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
         if validate_name(&name).is_err() {
             continue;
         }
         if crate::backup_protect::protected_destination(db, &join_rel(&parent_rel, &name)).is_some() {
             return Err(DriveError::ReadOnly);
         }
-        let destination = crate::settings_commands::unused_child_path(&dir, &name).map_err(|_| DriveError::NameTaken)?;
+        let destination =
+            crate::settings_commands::unused_child_path(&dir, &name).map_err(|_| DriveError::NameTaken)?;
         copy_recursive(source, &destination).map_err(DriveError::io)?;
         started += 1;
     }
@@ -315,7 +365,10 @@ pub(crate) fn save_checked(
     refuse_if_protected(db, &rel, Mutation::Write)?;
     let path = full_path(sync_root, &rel)?;
     let now = read_capped(&path, limit.max(TEXT_LIMIT))?;
-    let current_version = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?.map_or(0, |c| c.current_version);
+    let current_version = db
+        .get_file_contract_state(&entry.file_id)
+        .map_err(DriveError::db)?
+        .map_or(0, |c| c.current_version);
     let now_tag = version_tag(current_version, &now);
     if content_of_tag(&now_tag) != content_of_tag(base) {
         return Err(DriveError::Conflict);

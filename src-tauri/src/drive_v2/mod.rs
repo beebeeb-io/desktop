@@ -15,10 +15,16 @@ mod dto;
 mod events;
 mod fsops;
 mod model;
+mod photo_meta; // v2 b02b
+mod status; // v2 b02b
+mod status_cmds; // v2 b02b
+#[cfg(test)]
+mod status_tests; // v2 b02b
 #[cfg(test)]
 mod tests;
 
 pub(crate) use commands::*;
+pub(crate) use status_cmds::*; // v2 b02b
 
 use std::fmt;
 
@@ -84,7 +90,11 @@ impl DriveError {
         let t = text.to_ascii_lowercase();
         if t.contains("vault is locked") {
             DriveError::Locked
-        } else if t.contains("not signed in") || t.contains("401") || t.contains("unauthorized") || t.contains("no active account") {
+        } else if t.contains("not signed in")
+            || t.contains("401")
+            || t.contains("unauthorized")
+            || t.contains("no active account")
+        {
             DriveError::SignedOut
         } else if t.contains("404") || t.contains("not found") {
             DriveError::NotFound
@@ -94,7 +104,12 @@ impl DriveError {
             DriveError::Quota
         } else if t.contains("403") || t.contains("forbidden") {
             DriveError::ReadOnly
-        } else if t.contains("network") || t.contains("connect") || t.contains("timed out") || t.contains("dns") || t.contains("sending request") {
+        } else if t.contains("network")
+            || t.contains("connect")
+            || t.contains("timed out")
+            || t.contains("dns")
+            || t.contains("sending request")
+        {
             DriveError::Offline
         } else {
             DriveError::Failed("request")

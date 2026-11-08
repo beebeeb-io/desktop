@@ -46,7 +46,9 @@ pub(crate) fn ensure_started(app: &tauri::AppHandle) {
         return;
     }
     let app = app.clone();
-    let spawned = std::thread::Builder::new().name("drive-events".into()).spawn(move || run(app));
+    let spawned = std::thread::Builder::new()
+        .name("drive-events".into())
+        .spawn(move || run(app));
     if let Err(error) = spawned {
         tracing::warn!(%error, "drive event poller did not start");
     }
@@ -67,13 +69,21 @@ fn run(app: tauri::AppHandle) {
             last_seen = None;
             continue;
         };
-        let Ok(Some(db)) = crate::config::DesktopConfig::load().and_then(|cfg| crate::local_state_purge::state_db_for_config(&cfg)) else {
+        let Ok(Some(db)) =
+            crate::config::DesktopConfig::load().and_then(|cfg| crate::local_state_purge::state_db_for_config(&cfg))
+        else {
             continue;
         };
         let counts = model::sync_counts(&db);
         let seen = Seen {
             anchor: db.fp_last_anchor().ok().flatten(),
-            counts: (counts.on_device, counts.online_only, counts.moving, counts.conflicts, counts.on_hold),
+            counts: (
+                counts.on_device,
+                counts.online_only,
+                counts.moving,
+                counts.conflicts,
+                counts.on_hold,
+            ),
         };
         let moved = last_seen.as_ref() != Some(&seen);
         if moved && last_seen.is_some() {

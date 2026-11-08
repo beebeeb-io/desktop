@@ -22,8 +22,29 @@ fn fixture() -> Fixture {
     Fixture { _dir: dir, root, db }
 }
 
-fn row(db: &StateDb, id: &str, path: &str, parent: Option<&str>, folder: bool, size: i64, modified: i64, status: FileStatus) {
-    row_in(db, id, path, parent, folder, size, modified, status, Namespace::MyFiles, None, state_db::PERMISSION_OWNER);
+fn row(
+    db: &StateDb,
+    id: &str,
+    path: &str,
+    parent: Option<&str>,
+    folder: bool,
+    size: i64,
+    modified: i64,
+    status: FileStatus,
+) {
+    row_in(
+        db,
+        id,
+        path,
+        parent,
+        folder,
+        size,
+        modified,
+        status,
+        Namespace::MyFiles,
+        None,
+        state_db::PERMISSION_OWNER,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -66,12 +87,42 @@ fn row_in(
 fn drive(f: &Fixture) {
     let db = &f.db;
     row(db, "d0c5", "Docs", None, true, 0, 100, FileStatus::Local);
-    row(db, "a1", "Docs/Report.pdf", Some("d0c5"), false, 2_000, 300, FileStatus::CloudOnly);
-    row(db, "a2", "Docs/notes.txt", Some("d0c5"), false, 10, 200, FileStatus::Local);
+    row(
+        db,
+        "a1",
+        "Docs/Report.pdf",
+        Some("d0c5"),
+        false,
+        2_000,
+        300,
+        FileStatus::CloudOnly,
+    );
+    row(
+        db,
+        "a2",
+        "Docs/notes.txt",
+        Some("d0c5"),
+        false,
+        10,
+        200,
+        FileStatus::Local,
+    );
     row(db, "b1", "zebra.txt", None, false, 50, 400, FileStatus::Local);
     row(db, "b2", "Beach.jpg", None, false, 9_000, 500, FileStatus::Downloading);
     row(db, "gone", "old.txt", None, false, 1, 600, FileStatus::Trashing);
-    row_in(db, "s1", "Shared/Plans", None, true, 0, 50, FileStatus::CloudOnly, Namespace::SharedWithMe, Some("ana.lima@example.eu"), state_db::PERMISSION_READ);
+    row_in(
+        db,
+        "s1",
+        "Shared/Plans",
+        None,
+        true,
+        0,
+        50,
+        FileStatus::CloudOnly,
+        Namespace::SharedWithMe,
+        Some("ana.lima@example.eu"),
+        state_db::PERMISSION_READ,
+    );
     std::fs::create_dir(f.root.join("Docs")).unwrap();
     std::fs::write(f.root.join("Docs").join("notes.txt"), "hello").unwrap();
     std::fs::write(f.root.join("zebra.txt"), "z").unwrap();
@@ -86,19 +137,39 @@ fn drive_v2_list_shows_one_folder_from_the_mirror() {
     let f = fixture();
     drive(&f);
     let root = model::list(&f.db, None, Sort::default(), false).unwrap();
-    assert_eq!(names(&root.items), ["Docs", "Beach.jpg", "zebra.txt"], "folders first, the trashing row and the shared root left out");
+    assert_eq!(
+        names(&root.items),
+        ["Docs", "Beach.jpg", "zebra.txt"],
+        "folders first, the trashing row and the shared root left out"
+    );
     assert_eq!(root.path.len(), 1);
     assert_eq!(root.folder.name, "Files");
     assert_eq!(root.items[0].child_count, Some(2));
     assert_eq!(root.items[1].local, Some(LocalState::Syncing));
     assert_eq!(root.items[1].mime.as_deref(), Some("image/jpeg"));
 
-    let docs = model::list(&f.db, Some("d0c5"), Sort { key: SortKey::Size, dir: SortDir::Desc }, true).unwrap();
+    let docs = model::list(
+        &f.db,
+        Some("d0c5"),
+        Sort {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        },
+        true,
+    )
+    .unwrap();
     assert_eq!(names(&docs.items), ["Report.pdf", "notes.txt"]);
     assert_eq!(docs.items[0].local, Some(LocalState::OnlineOnly));
-    assert_eq!(docs.path.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Files", "Docs"]);
+    assert_eq!(
+        docs.path.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["Files", "Docs"]
+    );
     assert!(docs.stale);
-    assert_eq!(model::list(&f.db, Some("a1"), Sort::default(), false).unwrap_err(), DriveError::NotFound, "a file is not a folder");
+    assert_eq!(
+        model::list(&f.db, Some("a1"), Sort::default(), false).unwrap_err(),
+        DriveError::NotFound,
+        "a file is not a folder"
+    );
 }
 
 #[test]
@@ -118,9 +189,21 @@ fn drive_v2_thumbnail_resolves_ids_and_never_a_trashing_row() {
     let f = fixture();
     drive(&f);
     assert_eq!(model::resolve(&f.db, "b2").unwrap().file_id, "b2");
-    assert_eq!(model::resolve(&f.db, "local:Docs/notes.txt").unwrap().file_id, "a2", "a provisional id resolves by path");
+    assert_eq!(
+        model::resolve(&f.db, "local:Docs/notes.txt").unwrap().file_id,
+        "a2",
+        "a provisional id resolves by path"
+    );
     assert_eq!(model::resolve(&f.db, "gone").unwrap_err(), DriveError::NotFound);
-    assert!(model::list(&f.db, None, Sort::default(), false).unwrap().items.iter().filter(|i| i.has_thumbnail).count() == 1);
+    assert!(
+        model::list(&f.db, None, Sort::default(), false)
+            .unwrap()
+            .items
+            .iter()
+            .filter(|i| i.has_thumbnail)
+            .count()
+            == 1
+    );
 }
 
 #[test]
@@ -153,7 +236,11 @@ fn drive_v2_recent_is_newest_files_first() {
     let f = fixture();
     drive(&f);
     let recent = model::recent(&f.db, 3).unwrap();
-    assert_eq!(names(&recent), ["Beach.jpg", "zebra.txt", "Report.pdf"], "folders and the trashing row left out");
+    assert_eq!(
+        names(&recent),
+        ["Beach.jpg", "zebra.txt", "Report.pdf"],
+        "folders and the trashing row left out"
+    );
 }
 
 #[test]
@@ -174,7 +261,10 @@ fn drive_v2_shared_lists_with_me_and_by_me() {
     ]});
     let by_me = model::shared_by_me(&f.db, &sent).unwrap();
     assert_eq!(by_me.len(), 1, "revoked and unknown items left out");
-    assert_eq!(by_me[0].item.name, "Docs", "the name comes from the mirror, never the invite's ciphertext");
+    assert_eq!(
+        by_me[0].item.name, "Docs",
+        "the name comes from the mirror, never the invite's ciphertext"
+    );
     assert_eq!(by_me[0].people.len(), 2);
     assert_eq!(by_me[0].people[0].role, ShareRole::Editor);
 }
@@ -184,11 +274,24 @@ fn drive_v2_photos_pages_images_and_videos() {
     let f = fixture();
     drive(&f);
     for i in 0..(model::PHOTOS_PAGE + 1) {
-        row(&f.db, &format!("p{i}"), &format!("Camera/IMG_{i}.HEIC"), None, false, 1, 1_000 + i as i64, FileStatus::CloudOnly);
+        row(
+            &f.db,
+            &format!("p{i}"),
+            &format!("Camera/IMG_{i}.HEIC"),
+            None,
+            false,
+            1,
+            1_000 + i as i64,
+            FileStatus::CloudOnly,
+        );
     }
     let first = model::photos(&f.db, None).unwrap();
     assert_eq!(first.entries.len(), model::PHOTOS_PAGE);
-    assert_eq!(first.entries[0].item.name, format!("IMG_{}.HEIC", model::PHOTOS_PAGE), "newest first");
+    assert_eq!(
+        first.entries[0].item.name,
+        format!("IMG_{}.HEIC", model::PHOTOS_PAGE),
+        "newest first"
+    );
     let second = model::photos(&f.db, first.next.as_deref()).unwrap();
     assert_eq!(second.entries.len(), 2, "the last HEIC and Beach.jpg");
     assert!(second.next.is_none());
@@ -199,8 +302,22 @@ fn drive_v2_trash_says_where_each_item_was() {
     let f = fixture();
     drive(&f);
     let raw = vec![
-        crate::account_dto::DesktopTrashItem { id: "t1".into(), name: "Draft.docx".into(), is_folder: false, size_bytes: 5, updated_at: "2026-11-01T10:00:00Z".into(), parent_id: Some("d0c5".into()) },
-        crate::account_dto::DesktopTrashItem { id: "t2".into(), name: "Old".into(), is_folder: true, size_bytes: 0, updated_at: "2026-11-02T10:00:00Z".into(), parent_id: None },
+        crate::account_dto::DesktopTrashItem {
+            id: "t1".into(),
+            name: "Draft.docx".into(),
+            is_folder: false,
+            size_bytes: 5,
+            updated_at: "2026-11-01T10:00:00Z".into(),
+            parent_id: Some("d0c5".into()),
+        },
+        crate::account_dto::DesktopTrashItem {
+            id: "t2".into(),
+            name: "Old".into(),
+            is_folder: true,
+            size_bytes: 0,
+            updated_at: "2026-11-02T10:00:00Z".into(),
+            parent_id: None,
+        },
     ];
     let t = model::trash_entries(Some(&f.db), raw);
     assert_eq!(t.len(), 2);
@@ -214,21 +331,49 @@ fn drive_v2_storage_splits_files_and_photos() {
     let f = fixture();
     drive(&f);
     let (files, photos, backups) = model::storage_split(&f.db).unwrap();
-    assert_eq!((files, photos, backups), (2_000 + 10 + 50, 9_000, 0), "the trashing row is not counted");
+    assert_eq!(
+        (files, photos, backups),
+        (2_000 + 10 + 50, 9_000, 0),
+        "the trashing row is not counted"
+    );
 }
 
 #[test]
 fn drive_v2_sync_summary_phase() {
-    let counts = |moving, conflicts| model::SyncCounts { on_device: 4, online_only: 4, moving, conflicts, on_hold: 1 };
-    assert_eq!(model::sync_phase(true, "idle", false, &counts(0, 0)), SyncPhase::UpToDate);
-    assert_eq!(model::sync_phase(true, "idle", false, &counts(2, 0)), SyncPhase::Syncing);
-    assert_eq!(model::sync_phase(true, "running", false, &counts(0, 1)), SyncPhase::NeedsDecision);
+    let counts = |moving, conflicts| model::SyncCounts {
+        on_device: 4,
+        online_only: 4,
+        moving,
+        conflicts,
+        on_hold: 1,
+    };
+    assert_eq!(
+        model::sync_phase(true, "idle", false, &counts(0, 0)),
+        SyncPhase::UpToDate
+    );
+    assert_eq!(
+        model::sync_phase(true, "idle", false, &counts(2, 0)),
+        SyncPhase::Syncing
+    );
+    assert_eq!(
+        model::sync_phase(true, "running", false, &counts(0, 1)),
+        SyncPhase::NeedsDecision
+    );
     assert_eq!(model::sync_phase(true, "idle", true, &counts(0, 0)), SyncPhase::Paused);
-    assert_eq!(model::sync_phase(true, "offline", false, &counts(0, 0)), SyncPhase::Offline);
+    assert_eq!(
+        model::sync_phase(true, "offline", false, &counts(0, 0)),
+        SyncPhase::Offline
+    );
     assert_eq!(model::sync_phase(true, "", false, &counts(0, 0)), SyncPhase::Checking);
-    assert_eq!(model::sync_phase(false, "idle", false, &counts(0, 0)), SyncPhase::Stopped);
+    assert_eq!(
+        model::sync_phase(false, "idle", false, &counts(0, 0)),
+        SyncPhase::Stopped
+    );
     let s = model::sync_summary(SyncPhase::UpToDate, &counts(2, 0), 3);
-    assert_eq!((s.on_device, s.available_offline, s.online_only, s.pending), (4, 3, 4, 3));
+    assert_eq!(
+        (s.on_device, s.available_offline, s.online_only, s.pending),
+        (4, 3, 4, 3)
+    );
 }
 
 #[test]
@@ -236,14 +381,28 @@ fn drive_v2_create_folder_on_the_sync_root() {
     let f = fixture();
     drive(&f);
     let docs = model::resolve(&f.db, "d0c5").unwrap();
-    assert_eq!(fsops::create_folder(&f.db, &f.root, Some(&docs), "Invoices 2026").unwrap(), "Docs/Invoices 2026");
+    assert_eq!(
+        fsops::create_folder(&f.db, &f.root, Some(&docs), "Invoices 2026").unwrap(),
+        "Docs/Invoices 2026"
+    );
     assert!(f.root.join("Docs").join("Invoices 2026").is_dir());
-    assert_eq!(fsops::create_folder(&f.db, &f.root, Some(&docs), "REPORT.pdf").unwrap_err(), DriveError::NameTaken, "a cloud-only name counts, any case");
+    assert_eq!(
+        fsops::create_folder(&f.db, &f.root, Some(&docs), "REPORT.pdf").unwrap_err(),
+        DriveError::NameTaken,
+        "a cloud-only name counts, any case"
+    );
     for bad in ["", "a/b", "..", "con", "x?", "trailing."] {
-        assert_eq!(fsops::create_folder(&f.db, &f.root, None, bad).unwrap_err(), DriveError::InvalidName, "{bad:?}");
+        assert_eq!(
+            fsops::create_folder(&f.db, &f.root, None, bad).unwrap_err(),
+            DriveError::InvalidName,
+            "{bad:?}"
+        );
     }
     let shared = model::resolve(&f.db, "s1").unwrap();
-    assert_eq!(fsops::create_folder(&f.db, &f.root, Some(&shared), "x").unwrap_err(), DriveError::ReadOnly);
+    assert_eq!(
+        fsops::create_folder(&f.db, &f.root, Some(&shared), "x").unwrap_err(),
+        DriveError::ReadOnly
+    );
 }
 
 #[test]
@@ -251,10 +410,17 @@ fn drive_v2_rename_on_the_sync_root() {
     let f = fixture();
     drive(&f);
     let notes = model::resolve(&f.db, "a2").unwrap();
-    assert_eq!(fsops::rename(&f.db, &f.root, &notes, "Notes.txt").unwrap(), "Docs/Notes.txt", "a change of case is allowed");
+    assert_eq!(
+        fsops::rename(&f.db, &f.root, &notes, "Notes.txt").unwrap(),
+        "Docs/Notes.txt",
+        "a change of case is allowed"
+    );
     assert!(f.root.join("Docs").join("Notes.txt").exists());
     let zebra = model::resolve(&f.db, "b1").unwrap();
-    assert_eq!(fsops::rename(&f.db, &f.root, &zebra, "docs").unwrap_err(), DriveError::NameTaken);
+    assert_eq!(
+        fsops::rename(&f.db, &f.root, &zebra, "docs").unwrap_err(),
+        DriveError::NameTaken
+    );
 }
 
 #[test]
@@ -266,7 +432,11 @@ fn drive_v2_move_on_the_sync_root() {
     fsops::move_items(&f.db, &f.root, &[zebra], Some(&docs)).unwrap();
     assert!(f.root.join("Docs").join("zebra.txt").exists());
     assert!(!f.root.join("zebra.txt").exists());
-    assert_eq!(fsops::move_items(&f.db, &f.root, std::slice::from_ref(&docs), Some(&docs)).unwrap_err(), DriveError::Conflict, "never into itself");
+    assert_eq!(
+        fsops::move_items(&f.db, &f.root, std::slice::from_ref(&docs), Some(&docs)).unwrap_err(),
+        DriveError::Conflict,
+        "never into itself"
+    );
 }
 
 #[test]
@@ -281,7 +451,10 @@ fn drive_v2_duplicate_names_the_copy() {
     assert_eq!(std::fs::read_to_string(f.root.join("zebra - Copy.txt")).unwrap(), "z");
     let docs = model::resolve(&f.db, "d0c5").unwrap();
     assert_eq!(fsops::duplicate(&f.db, &f.root, &docs).unwrap(), "Docs - Copy");
-    assert!(f.root.join("Docs - Copy").join("notes.txt").exists(), "a folder is copied with its contents");
+    assert!(
+        f.root.join("Docs - Copy").join("notes.txt").exists(),
+        "a folder is copied with its contents"
+    );
 }
 
 #[test]
@@ -290,8 +463,14 @@ fn drive_v2_trash_items_refuses_what_the_server_does_not_have() {
     drive(&f);
     assert!(check_trashable(&f.db, &model::resolve(&f.db, "b1").unwrap()).is_ok());
     row(&f.db, "up", "draft.txt", None, false, 1, 700, FileStatus::Uploading);
-    assert_eq!(check_trashable(&f.db, &model::resolve(&f.db, "up").unwrap()).unwrap_err(), DriveError::Conflict);
-    assert_eq!(check_trashable(&f.db, &model::resolve(&f.db, "s1").unwrap()).unwrap_err(), DriveError::ReadOnly);
+    assert_eq!(
+        check_trashable(&f.db, &model::resolve(&f.db, "up").unwrap()).unwrap_err(),
+        DriveError::Conflict
+    );
+    assert_eq!(
+        check_trashable(&f.db, &model::resolve(&f.db, "s1").unwrap()).unwrap_err(),
+        DriveError::ReadOnly
+    );
 }
 
 #[test]
@@ -313,8 +492,17 @@ fn drive_v2_upload_copies_in_with_unique_names() {
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(folder.join("1.jpg"), "x").unwrap();
     let inside = f.root.join("zebra.txt");
-    let started = fsops::copy_in(&f.db, &f.root, None, &[a, folder, inside, outside.path().join("missing")]).unwrap();
-    assert_eq!(started, 2, "a file inside the Beebeeb folder and a missing path are skipped");
+    let started = fsops::copy_in(
+        &f.db,
+        &f.root,
+        None,
+        &[a, folder, inside, outside.path().join("missing")],
+    )
+    .unwrap();
+    assert_eq!(
+        started, 2,
+        "a file inside the Beebeeb folder and a missing path are skipped"
+    );
     assert_eq!(std::fs::read_to_string(f.root.join("zebra 2.txt")).unwrap(), "new");
     assert!(f.root.join("Album").join("1.jpg").exists());
 }
@@ -323,11 +511,17 @@ fn drive_v2_upload_copies_in_with_unique_names() {
 fn drive_v2_open_and_reveal_stay_inside_the_sync_root() {
     let f = fixture();
     assert!(fsops::full_path(&f.root, "Docs/notes.txt").is_ok());
-    assert!(fsops::full_path(&f.root, "/etc/passwd").unwrap().starts_with(&f.root), "a state DB path's leading slash stays inside");
+    assert!(
+        fsops::full_path(&f.root, "/etc/passwd").unwrap().starts_with(&f.root),
+        "a state DB path's leading slash stays inside"
+    );
     for bad in ["../outside.txt", "Docs/../../x", "C:\\x", "a\\..\\..\\x"] {
         assert!(fsops::full_path(&f.root, bad).is_err(), "{bad}");
     }
-    assert_eq!(fsops::full_path(&f.root, "../outside.txt").unwrap_err(), DriveError::NotFound);
+    assert_eq!(
+        fsops::full_path(&f.root, "../outside.txt").unwrap_err(),
+        DriveError::NotFound
+    );
 }
 
 #[test]
@@ -342,7 +536,10 @@ fn drive_v2_text_save_refuses_a_stale_base() {
     assert_ne!(next, base);
     // Someone else's edit lands; the editor's old base is now stale.
     std::fs::write(&path, "theirs").unwrap();
-    assert_eq!(fsops::save_checked(&f.db, &f.root, &notes, &next, b"mine", fsops::TEXT_LIMIT).unwrap_err(), DriveError::Conflict);
+    assert_eq!(
+        fsops::save_checked(&f.db, &f.root, &notes, &next, b"mine", fsops::TEXT_LIMIT).unwrap_err(),
+        DriveError::Conflict
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs", "never an overwrite");
     assert_eq!(fsops::read_capped(&path, 2).unwrap_err(), DriveError::TooLarge);
 }
@@ -361,14 +558,23 @@ fn drive_v2_bytes_frames_round_trip() {
 fn drive_v2_errors_carry_a_code_and_no_detail_from_outside() {
     assert_eq!(String::from(DriveError::NameTaken), "name-taken: drive");
     assert_eq!(DriveError::from_text("vault is locked"), DriveError::Locked);
-    assert_eq!(DriveError::from_text("HTTP 404 for /api/v1/files/x"), DriveError::NotFound);
-    assert_eq!(DriveError::from_text("error sending request for url"), DriveError::Offline);
+    assert_eq!(
+        DriveError::from_text("HTTP 404 for /api/v1/files/x"),
+        DriveError::NotFound
+    );
+    assert_eq!(
+        DriveError::from_text("error sending request for url"),
+        DriveError::Offline
+    );
     assert_eq!(DriveError::from_text("413 Payload Too Large"), DriveError::Quota);
-    assert_eq!(String::from(DriveError::from_text("C:\\Users\\guus\\secret.txt broke")), "failed: request");
+    assert_eq!(
+        String::from(DriveError::from_text("C:\\Users\\guus\\secret.txt broke")),
+        "failed: request"
+    );
 }
 
 /// Spec 2.1: no DTO carries a field named like a secret.
-fn assert_no_secret_fields(value: &serde_json::Value, at: &str) {
+pub(super) fn assert_no_secret_fields(value: &serde_json::Value, at: &str) {
     const FORBIDDEN: [&str; 5] = ["key", "token", "url", "nonce", "ciphertext"];
     match value {
         serde_json::Value::Object(map) => {
@@ -393,27 +599,128 @@ fn drive_v2_no_dto_has_a_secret_shaped_field() {
     let f = fixture();
     drive(&f);
     let item = model::details(&f.db, "a1").unwrap().item;
-    let shared = DriveItem { shared: SharedState::People { people: vec![Person { name: "Ana".into(), initials: "A".into() }] }, ..item.clone() };
-    let sync = model::sync_summary(SyncPhase::UpToDate, &model::SyncCounts { on_device: 1, online_only: 1, moving: 0, conflicts: 0, on_hold: 0 }, 1);
-    let storage = StorageSummary { used_bytes: 1, quota_bytes: 2, files_bytes: 1, photos_bytes: 0, backups_bytes: 0 };
+    let shared = DriveItem {
+        shared: SharedState::People {
+            people: vec![Person {
+                name: "Ana".into(),
+                initials: "A".into(),
+            }],
+        },
+        ..item.clone()
+    };
+    let sync = model::sync_summary(
+        SyncPhase::UpToDate,
+        &model::SyncCounts {
+            on_device: 1,
+            online_only: 1,
+            moving: 0,
+            conflicts: 0,
+            on_hold: 0,
+        },
+        1,
+    );
+    let storage = StorageSummary {
+        used_bytes: 1,
+        quota_bytes: 2,
+        files_bytes: 1,
+        photos_bytes: 0,
+        backups_bytes: 0,
+    };
     let dtos: Vec<(&str, serde_json::Value)> = vec![
         ("DriveItem", serde_json::to_value(&shared).unwrap()),
-        ("Listing", serde_json::to_value(model::list(&f.db, None, Sort::default(), false).unwrap()).unwrap()),
-        ("ItemDetails", serde_json::to_value(model::details(&f.db, "a1").unwrap()).unwrap()),
-        ("VersionEntry", serde_json::to_value(VersionEntry { id: "v".into(), created_at: "t".into(), size: 1, current: true }).unwrap()),
-        ("TrashEntry", serde_json::to_value(TrashEntry { item: item.clone(), trashed_at: "t".into(), original_path: "Files".into() }).unwrap()),
+        (
+            "Listing",
+            serde_json::to_value(model::list(&f.db, None, Sort::default(), false).unwrap()).unwrap(),
+        ),
+        (
+            "ItemDetails",
+            serde_json::to_value(model::details(&f.db, "a1").unwrap()).unwrap(),
+        ),
+        (
+            "VersionEntry",
+            serde_json::to_value(VersionEntry {
+                id: "v".into(),
+                created_at: "t".into(),
+                size: 1,
+                current: true,
+            })
+            .unwrap(),
+        ),
+        (
+            "TrashEntry",
+            serde_json::to_value(TrashEntry {
+                item: item.clone(),
+                trashed_at: "t".into(),
+                original_path: "Files".into(),
+            })
+            .unwrap(),
+        ),
         ("StorageSummary", serde_json::to_value(&storage).unwrap()),
         ("SyncSummary", serde_json::to_value(&sync).unwrap()),
-        ("ShareEntry", serde_json::to_value(ShareEntry { item: item.clone(), direction: ShareDirection::ByMe, people: vec![SharePerson { name: "a".into(), email: Some("a@b.eu".into()), role: ShareRole::Editor }], has_link: true }).unwrap()),
-        ("PhotoPage", serde_json::to_value(PhotoPage { entries: vec![PhotoEntry { item: item.clone(), taken_at: "t".into() }], next: Some("1".into()) }).unwrap()),
-        ("UndoTicket", serde_json::to_value(UndoTicket { undo_token: "u".into() }).unwrap()),
-        ("UploadStarted", serde_json::to_value(UploadStarted { started: 1 }).unwrap()),
-        ("TextDocument", serde_json::to_value(TextDocument { text: "x".into(), version_id: "v1-ab".into() }).unwrap()),
-        ("DriveEvent::Changed", serde_json::to_value(DriveEvent::Changed { folder_id: Some("d".into()) }).unwrap()),
-        ("DriveEvent::Item", serde_json::to_value(DriveEvent::Item { item }).unwrap()),
-        ("DriveEvent::Removed", serde_json::to_value(DriveEvent::Removed { id: "x".into() }).unwrap()),
-        ("DriveEvent::Sync", serde_json::to_value(DriveEvent::Sync { sync }).unwrap()),
-        ("DriveEvent::Storage", serde_json::to_value(DriveEvent::Storage { storage }).unwrap()),
+        (
+            "ShareEntry",
+            serde_json::to_value(ShareEntry {
+                item: item.clone(),
+                direction: ShareDirection::ByMe,
+                people: vec![SharePerson {
+                    name: "a".into(),
+                    email: Some("a@b.eu".into()),
+                    role: ShareRole::Editor,
+                }],
+                has_link: true,
+            })
+            .unwrap(),
+        ),
+        (
+            "PhotoPage",
+            serde_json::to_value(PhotoPage {
+                entries: vec![PhotoEntry {
+                    item: item.clone(),
+                    taken_at: "t".into(),
+                }],
+                next: Some("1".into()),
+            })
+            .unwrap(),
+        ),
+        (
+            "UndoTicket",
+            serde_json::to_value(UndoTicket { undo_token: "u".into() }).unwrap(),
+        ),
+        (
+            "UploadStarted",
+            serde_json::to_value(UploadStarted { started: 1 }).unwrap(),
+        ),
+        (
+            "TextDocument",
+            serde_json::to_value(TextDocument {
+                text: "x".into(),
+                version_id: "v1-ab".into(),
+            })
+            .unwrap(),
+        ),
+        (
+            "DriveEvent::Changed",
+            serde_json::to_value(DriveEvent::Changed {
+                folder_id: Some("d".into()),
+            })
+            .unwrap(),
+        ),
+        (
+            "DriveEvent::Item",
+            serde_json::to_value(DriveEvent::Item { item }).unwrap(),
+        ),
+        (
+            "DriveEvent::Removed",
+            serde_json::to_value(DriveEvent::Removed { id: "x".into() }).unwrap(),
+        ),
+        (
+            "DriveEvent::Sync",
+            serde_json::to_value(DriveEvent::Sync { sync }).unwrap(),
+        ),
+        (
+            "DriveEvent::Storage",
+            serde_json::to_value(DriveEvent::Storage { storage }).unwrap(),
+        ),
     ];
     assert_eq!(dtos.len(), 17);
     for (name, value) in &dtos {

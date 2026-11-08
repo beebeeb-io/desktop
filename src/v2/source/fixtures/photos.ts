@@ -9,7 +9,8 @@ const none = { kind: 'none' } as const
 
 /** What the board shows beside a photo that DriveSource's PhotoEntry does not carry yet (reported as a gap). */
 export interface PhotoMeta {
-  device: string
+  /** Absent live: the engine doesn't know which device took it. */
+  device?: string
   duration?: string
   uploading?: boolean
   camera?: string

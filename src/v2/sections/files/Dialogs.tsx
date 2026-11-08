@@ -168,7 +168,7 @@ export function ProtectedAlert({ name, inside, onOk, onSettings }: { name: strin
   )
 }
 
-export interface ConflictSide { label: string; /** As the Keep button names it: "this PC’s", "Anna’s iPad’s". */ keep: string; when: string; size: number; page?: ReactNode }
+export interface ConflictSide { label: string; /** As the Keep button names it: "this PC’s", "Anna’s iPad’s". */ keep: string; /** Absent when the engine doesn't know it: the line leaves it out. */ when?: string; size?: number; page?: ReactNode }
 
 /** DW-0429: Two versions. Keep both is the default and sits at the right. */
 export function ConflictDialog({ index, total, name, mine, theirs, onKeep, onLater }: {
@@ -178,7 +178,7 @@ export function ConflictDialog({ index, total, name, mine, theirs, onKeep, onLat
   const card = (s: ConflictSide) => (
     <button type="button" aria-label={s.label} className={`flex min-w-0 flex-1 flex-col gap-2 rounded-lg border border-line bg-paper p-2 text-left ${FOCUS}`}>
       <div className="grid h-36 place-items-center overflow-hidden rounded-md bg-paper-2">{s.page}</div>
-      <div className="px-1 pb-1"><div className="text-[13px] font-medium text-ink">{s.label}</div><div className="font-mono text-[11px] text-ink-3">{s.when} · {fmtSize(s.size)}</div></div>
+      <div className="px-1 pb-1"><div className="text-[13px] font-medium text-ink">{s.label}</div><div className="font-mono text-[11px] text-ink-3">{[s.when, s.size !== undefined ? fmtSize(s.size) : null].filter(Boolean).join(' · ')}</div></div>
     </button>
   )
   return (

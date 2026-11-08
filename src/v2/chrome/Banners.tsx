@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useDriveSource, type StorageSummary, type SyncSummary } from '@beebeeb/shared/drive-ui'
+import { useDriveExtras, type DriveStatus } from '../source/extras'
 
 export type BannerKind = 'signed-out' | 'storage-full' | 'sync-problem' | 'backup-problem' | 'storage-almost-full' | 'offline'
 
@@ -95,23 +96,35 @@ export const BANNER_TARGET: Partial<Record<BannerKind, string>> = {
 }
 export const BANNER_ACTION_EVENT = 'bb:banner-action'
 
-/** The live banner of the window: reads storage and sync from the DriveSource. Sync, backup and signed-out
- *  problem counts have no DriveSource field yet; they arrive through `extra` when a command supplies them. */
+/** The live banner of the window: storage and sync from the DriveSource; the signed-out state and the sync and
+ *  backup problem counts from B02b's `drive_status` (refreshed with each sync event). `extra` overrides them. */
 export function GlobalBanner({ extra }: { extra?: Pick<BannerInput, 'signedOut' | 'syncProblems' | 'backupProblems'> }): ReactNode {
   const source = useDriveSource()
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [sync, setSync] = useState<SyncSummary | null>(null)
+  const extras = useDriveExtras()
+  const [status, setStatus] = useState<DriveStatus | null>(null)
   const [dismissed, setDismissed] = useState<ReadonlySet<BannerKind>>(new Set())
   useEffect(() => {
+    const readStatus = () => extras.status().then(setStatus, () => setStatus(null))
     source.storage().then(setStorage, () => setStorage(null))
     source.sync().then(setSync, () => setSync(null))
+    void readStatus()
     return source.subscribe((e) => {
       if (e.kind === 'storage') setStorage(e.storage)
-      if (e.kind === 'sync') setSync(e.sync)
+      if (e.kind === 'sync') { setSync(e.sync); void readStatus() }
     })
-  }, [source])
-  const input: BannerInput = useMemo(() => ({ ...extra, storage, offline: sync?.phase === 'offline' }), [extra, storage, sync])
+  }, [source, extras])
+  const input: BannerInput = useMemo(() => ({
+    signedOut: status?.signedOut, syncProblems: status?.syncProblems, backupProblems: status?.backupProblems,
+    ...extra, storage, offline: sync?.phase === 'offline',
+  }), [extra, status, storage, sync])
   const kind = activeBanner({ ...input, dismissed })
+  // The offline banner names when the list was last fresh: the last sync summary heard while online, never a guess.
+  const [lastOnline, setLastOnline] = useState<string | null>(null)
+  useEffect(() => {
+    if (sync && sync.phase !== 'offline') setLastOnline(new Date().toTimeString().slice(0, 5))
+  }, [sync])
   // A dismissed banner comes back when it happens again: forget a dismissal once its condition clears.
   useEffect(() => {
     const live = new Set(activeKinds(input))
@@ -121,7 +134,7 @@ export function GlobalBanner({ extra }: { extra?: Pick<BannerInput, 'signedOut' 
   return (
     <Banner
       kind={kind}
-      copy={bannerCopy(kind, { ...extra, storage })}
+      copy={bannerCopy(kind, { syncProblems: input.syncProblems, backupProblems: input.backupProblems, storage, asOf: lastOnline ? `today at ${lastOnline}` : 'before the connection dropped' })}
       onAction={() => window.dispatchEvent(new CustomEvent(BANNER_ACTION_EVENT, { detail: { kind, frame: BANNER_TARGET[kind] } }))}
       onDismiss={() => setDismissed((d) => new Set(d).add(kind))}
     />
