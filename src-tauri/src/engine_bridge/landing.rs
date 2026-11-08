@@ -769,7 +769,8 @@ pub(crate) fn remove_pruned_entry(
 /// are never synced, so they would be lost for good.
 ///
 /// Task 2407 (core 2404): each owner name is checked from `sync_root`, every folder on the way included, so a name
-/// that reaches a different file or folder (a Windows 8.3 short name) never removes that one's owner file.
+/// that reaches a different file or folder (a Windows 8.3 short name) never removes that one's owner file. Task 2413:
+/// nor does a path through a link (`stored_path::refuse_links_below`, the owner file itself included).
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(super) fn remove_office_owner_files(sync_root: &Path, original: &Path) {
     let (Some(dir), Some(name)) = (original.parent(), original.file_name().and_then(|n| n.to_str())) else {
@@ -781,6 +782,9 @@ pub(super) fn remove_office_owner_files(sync_root: &Path, original: &Path) {
     }
     for owner in owners {
         let path = dir.join(owner);
+        if crate::stored_path::refuse_links_below(sync_root, &path).is_err() {
+            continue;
+        }
         if !matches!(crate::name_alias::conflict_below(sync_root, &path), Ok(None)) {
             continue;
         }
@@ -1063,10 +1067,13 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
         // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
         match remove_pruned_entry(sync_root, &original, RemovedKind::File, agreed, local(&original, agreed.is_some()), &copy_dir) {
-            PrunedEntry::Removed | PrunedEntry::Gone => {
+            PrunedEntry::Removed => {
                 remove_office_owner_files(sync_root, &original);
                 resolve(&copy);
             }
+            // Task 2413: `Gone` also answers for a path that is not this item's entry (an 8.3 alias, a path through
+            // a link): nothing of the item was removed there, so neither is an owner file beside it.
+            PrunedEntry::Gone => resolve(&copy),
             PrunedEntry::KeptCopy { copy: new_copy, copied_hash, removal } => {
                 if removal.is_removed() {
                     remove_office_owner_files(sync_root, &original);

@@ -343,14 +343,24 @@ pub(crate) fn apply_tree_read_only(db: &StateDb, sync_root: &Path, root_rel: &st
 }
 
 /// The root folder of the tree at `root_rel` on disk, and where each row under it is on disk. Each path goes through
-/// the one map every placeholder caller shares (`EngineBridge::placeholder_path_under`, task 2413); `None` when the
-/// root's does not map (nothing is changed), and a row whose path does not map is left out.
+/// the one map every placeholder caller shares (`EngineBridge::placeholder_path_under`, task 2413), and then the link
+/// walk (`stored_path::refuse_links_below`): a path through a link (a junction or symlink made inside the sync folder)
+/// leads to another place, whose files are never made read-only or writable. `None` when the root's path does not map
+/// or goes through a link (nothing is changed); a row whose path does is left out.
 #[cfg(target_os = "windows")]
 fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> Option<(PathBuf, Vec<PathBuf>)> {
     let root_rel = root_rel.trim_matches('/');
-    let on_disk = |rel: &str| crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel);
+    let linked = std::cell::Cell::new(0usize);
+    let on_disk = |rel: &str| {
+        let path = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel)?;
+        if crate::stored_path::refuse_links_below(sync_root, &path).is_err() {
+            linked.set(linked.get() + 1);
+            return None;
+        }
+        Some(path)
+    };
     let Some(root) = on_disk(root_rel) else {
-        tracing::warn!("backup protection: the Backups root's stored path does not map onto the sync folder; skipped");
+        tracing::warn!("backup protection: the Backups root's stored path does not map onto the sync folder, or goes through a link; skipped");
         return None;
     };
     let rows = db.paths_at_or_under(root_rel).unwrap_or_else(|error| {
@@ -358,6 +368,10 @@ fn tree_on_disk(db: &StateDb, sync_root: &Path, root_rel: &str) -> Option<(PathB
         Vec::new()
     });
     let files = rows.iter().filter(|rel| rel.trim_matches('/') != root_rel).filter_map(|rel| on_disk(rel)).collect();
+    if linked.get() > 0 {
+        // Zero-knowledge: a count, never a path.
+        tracing::warn!(skipped = linked.get(), "backup protection: rows whose path goes through a link were left alone");
+    }
     Some((root, files))
 }
 
