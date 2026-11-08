@@ -12,7 +12,7 @@
 //! share of a file or, through `folder_flows.rs`, a folder), `share_link_copy` (rebuild the owner's
 //! link, or mint one: a file link, a folder link, or a bundle over several files, with the Files
 //! dialog's expiry and password), `share_revoke`, and `file_request_create|copy|update` (close) in
-//! `requests.rs`. The list commands and the rest answer `unsupported: not implemented`, and the
+//! `requests.rs`. `reads.rs` (B05d) holds the lists and member commands; four commands with no server route or core flow answer `unsupported: not implemented`, and the
 //! window shows its honest "isn't available in this version" copy. Never a half flow behind a
 //! working command.
 
@@ -32,6 +32,7 @@ const NOT_YET: &str = "unsupported: not implemented in this build";
 
 pub(crate) mod flows;
 pub(crate) mod folder_flows;
+pub(crate) mod reads;
 pub(crate) mod requests;
 #[cfg(test)]
 mod tests;
@@ -132,10 +133,10 @@ pub(crate) async fn drive_delete_permanently(
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ShareLists {
-    invitations: Vec<serde_json::Value>,
-    links: Vec<serde_json::Value>,
-    requests: Vec<serde_json::Value>,
-    pending: Vec<String>,
+    pub(super) invitations: Vec<serde_json::Value>,
+    pub(super) links: Vec<serde_json::Value>,
+    pub(super) requests: Vec<serde_json::Value>,
+    pub(super) pending: Vec<String>,
 }
 
 /// A link Rust put on the clipboard: the display form only (no `#` part).
@@ -160,31 +161,5 @@ pub(crate) struct FileRequestInput {
     pub max_bytes: Option<u64>,
 }
 
-#[tauri::command]
-pub(crate) async fn share_list(state: State<'_, AppState>) -> Answer<ShareLists> {
-    session_token(&state)?;
-    Err(NOT_YET.into())
-}
-
-macro_rules! not_yet {
-    ($(fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {$(
-        #[tauri::command]
-        #[allow(unused_variables)]
-        pub(crate) async fn $name(state: State<'_, AppState>, $($arg: $ty),*) -> Answer<$ret> {
-            session_token(&state)?;
-            Err(NOT_YET.into())
-        }
-    )*};
-}
-
-not_yet! {
-    fn share_accept(id: String) -> ();
-    fn share_decline(id: String) -> ();
-    fn share_leave(id: String) -> ();
-    fn share_people(item_id: String) -> Vec<serde_json::Value>;
-    fn share_set_access(item_id: String, member_id: String, can_edit: bool) -> ();
-    fn share_link_update(item_id: String, expires_days: Option<u32>, set_expiry: bool, password: Option<String>, set_password: bool) -> ();
-    fn share_safety_number(member_id: String) -> serde_json::Value;
-    fn share_mark_compared(member_id: String, matched: bool) -> ();
-    fn file_request_remove(id: String) -> ();
-}
+#[cfg(test)]
+mod reads_tests;
