@@ -37,6 +37,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             crate::v2_snap::v2_set_maximize_rect, // v2 b03
+            crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
             consume_main_navigation,
             set_pending_setup,
             pending_setup,
