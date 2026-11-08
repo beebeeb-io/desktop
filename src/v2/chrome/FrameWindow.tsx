@@ -8,7 +8,7 @@ import type { StorageSummary, SyncSummary } from '@beebeeb/shared/drive-ui'
 import { CaptionBarView } from './CaptionBar'
 import { Sidebar } from './Sidebar'
 import { StatusLine } from './StatusLine'
-import { ROOT_ITEMS } from '../source/fixtures'
+import { rootItems } from '../source/fixtures'
 import type { SectionId } from '../routes'
 
 const GB = 1024 ** 3
@@ -33,7 +33,7 @@ function size(bytes: number | null): string {
 export function ListBackdrop({ dim }: { dim?: boolean }) {
   return (
     <ul className={`m-0 flex-1 list-none overflow-hidden p-0 ${dim ? 'opacity-60' : ''}`}>
-      {ROOT_ITEMS.map((item) => (
+      {rootItems().map((item) => (
         <li key={item.id} data-row className="flex h-10 items-center gap-3 border-b border-line px-4 text-[13px]">
           <span className="min-w-0 flex-1 truncate text-ink">{item.name}</span>
           <span className="w-24 text-right font-mono text-[12px] text-ink-3">{item.isFolder ? `${item.childCount} items` : size(item.size)}</span>

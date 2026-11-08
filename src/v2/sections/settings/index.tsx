@@ -3,7 +3,7 @@ import { SettingsView } from './shell/SettingsView'
 import type { PaneId } from './shell/context'
 import type { SectionProps } from '../types'
 
-const KNOWN: PaneId[] = ['general', 'about', 'account', 'security', 'devices', 'notifications', 'storage', 'backups', 'sync', 'thumbnails', 'bandwidth', 'insights', 'recent', 'location', 'diagnostics']
+const KNOWN: PaneId[] = ['general', 'about', 'account', 'security', 'devices', 'notifications', 'storage', 'backups', 'sync', 'thumbnails', 'compare', 'backup-failures', 'device', 'bandwidth', 'insights', 'recent', 'location', 'diagnostics']
 
 export default function Section({ nav }: SectionProps) {
   const sub = nav.route.sub as PaneId | null
