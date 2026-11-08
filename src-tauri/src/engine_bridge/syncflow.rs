@@ -131,6 +131,9 @@ pub(super) fn upload_parent_change<'a>(
 pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) -> Result<PathBuf, EngineError> {
     crate::reject_unsafe_rel_path(rel_path)
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
+    // Task 2413: and every segment one name this host can hold, the rule a server row is stored under (on Windows no
+    // `:`, reserved device name, or trailing dot or space, which would reach another entry than the row's own).
+    crate::stored_path::check_path(rel_path).map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
@@ -461,6 +464,9 @@ pub(super) fn apply_snapshot(
     let mut seen: HashSet<String> = HashSet::new();
     // file_id → resolved FULL relative path (so children can prefix their leaf).
     let mut resolved_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Task 2413: nodes not placed in the mirror (the store refused a new row): their rows are not placed either, never
+    // at the top level. They stay in `seen`, so nothing stored for them is pruned.
+    let mut unplaced: HashSet<String> = HashSet::new();
 
     for f in order {
         let file_id = f["id"].as_str().unwrap_or_default();
@@ -468,6 +474,11 @@ pub(super) fn apply_snapshot(
             continue;
         }
         if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        if f["parent_id"].as_str().is_some_and(|pid| unplaced.contains(pid)) {
+            tracing::debug!(file_id = %file_id, "sync_tick: snapshot node under a folder not placed; not placed either");
+            unplaced.insert(file_id.to_string());
             continue;
         }
         // Parent's resolved path ("" at the vault root, or when the parent
@@ -502,6 +513,8 @@ pub(super) fn apply_snapshot(
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
             applied.push(file_id.to_string());
+        } else {
+            unplaced.insert(file_id.to_string());
         }
     }
 
@@ -751,9 +764,12 @@ pub(super) fn apply_sync_op(
             let parent_rel = if payload.get("new_parent_id").is_some() {
                 parent_rel_path_by_id(bridge, payload["new_parent_id"].as_str())
             } else {
-                existing_parent_rel_path(bridge, id)
+                Some(existing_parent_rel_path(bridge, id))
             };
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+            // Task 2413: a new parent this device does not hold leaves the row where it is; the re-snapshot places it.
+            if let Some(parent_rel) = parent_rel
+                && process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some()
+            {
                 applied.push(id.to_string());
             }
         }
@@ -782,11 +798,15 @@ pub(super) fn apply_sync_op(
             // fix it later. For an UPDATE the row already exists, so keep its
             // current parent prefix (`existing_parent_rel_path`).
             let parent_rel = if op.op_type == "file_update" {
-                existing_parent_rel_path(bridge, id)
+                Some(existing_parent_rel_path(bridge, id))
             } else {
                 parent_rel_path_by_id(bridge, payload["parent_id"].as_str())
             };
-            if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
+            // Task 2413: a parent this device does not hold never puts the row at the top level; the re-snapshot that
+            // `parent_rel_path_by_id` requested places it.
+            if let Some(parent_rel) = parent_rel
+                && process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some()
+            {
                 applied.push(id.to_string());
             }
             #[cfg(target_os = "macos")]

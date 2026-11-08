@@ -562,31 +562,11 @@ pub(super) fn db_placeholder_path(bridge: &crate::engine_bridge::EngineBridge, f
     }
 }
 
-/// Join a server-relative, '/'-separated `rel_path` onto `sync_root`, returning
-/// the on-disk path ONLY if it is provably contained under the root. Pure +
-/// unit-testable (no CF / DB state). Mirrors `populate_placeholders`'
-/// `trim_matches('/')` → `replace('/', MAIN_SEPARATOR)` mapping, but rejects:
-///   - an empty rel path (would resolve to the root itself),
-///   - any segment that is empty, `.`, or `..` (traversal),
-/// then re-checks lexical containment as belt-and-suspenders. Returns `None` on
-/// any rejection so the caller falls through to Tier-2 (visible error).
+/// Join a server-relative, '/'-separated `rel_path` onto `sync_root`, returning the on-disk path ONLY if it is provably
+/// contained under the root; `None` makes the caller fall through to Tier-2 (visible error). Task 2413: the one map
+/// every placeholder caller shares ([`crate::stored_path::path_under`]).
 fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<std::path::PathBuf> {
-    let rel = rel_path.trim_matches('/');
-    if rel.is_empty() {
-        return None;
-    }
-    if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
-        return None;
-    }
-    let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
-    let candidate = sync_root.join(&native_rel);
-    // The joined path must still be under the sync root. We compare lexically
-    // (we avoid canonicalize() — it would resolve the placeholder's reparse
-    // point; the per-segment check above already blocks traversal).
-    if !candidate.starts_with(sync_root) {
-        return None;
-    }
-    Some(candidate)
+    crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel_path)
 }
 
 // ── Upload triggers — Cloud Files NOTIFY callbacks (task 0780) ───────────────

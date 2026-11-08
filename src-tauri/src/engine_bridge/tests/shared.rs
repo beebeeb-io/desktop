@@ -337,7 +337,7 @@ use super::*;
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         let metadata = serde_json::json!({
             "id": "file-1",
-            "path": "Projects/spec.docx",
+            "path": "spec.docx",
             "parent_id": "folder-1",
             "size_bytes": 4096,
             "updated_at": 1234,
@@ -348,7 +348,8 @@ use super::*;
 
         // This fixture carries a plaintext `path` and no `name_encrypted`, so
         // it exercises the plaintext fallback in `resolve_relative_path`; the
-        // master key is unused on that branch.
+        // master key is unused on that branch. Task 2413: the fallback is the
+        // row's own name, one segment (its folders come from its parents).
         let entry = apply_metadata_file_row(
             &db,
             &metadata,

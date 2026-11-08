@@ -1,6 +1,7 @@
 //! File rows: upsert, lookup, status, content versions and contract state (split out of `state_db.rs`).
 
 use super::*;
+use crate::stored_path::ServerRowWrite;
 
 impl StateDb {
     /// Insert or update a row keyed by `file_id`. ON CONFLICT replaces
@@ -33,11 +34,18 @@ impl StateDb {
     /// [`Self::upsert_file_with_contract`], with the Windows-rename hold decided in the same
     /// transaction: while a `local_rename` op of the file is queued, the row keeps its current path
     /// and parent whatever `entry` and `update` say. Returns the path written.
+    ///
+    /// Task 2413: one of the two writers of a server row (the other: [`Self::upsert_shared_server_row`]); both run
+    /// [`server_row_refused`] first, so a row whose path holds a segment this host cannot hold as one name is
+    /// [`ServerRowWrite::Refused`] and nothing is written.
     pub fn upsert_server_file_row(
         &self,
         entry: &FileEntry,
         update: impl FnOnce(&mut FileContractState),
-    ) -> Result<String> {
+    ) -> Result<ServerRowWrite> {
+        if let Some(refused) = server_row_refused(entry) {
+            return Ok(refused);
+        }
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
@@ -69,7 +77,20 @@ impl StateDb {
         }
         set_file_contract_state_conn(&tx, &contract)?;
         tx.commit()?;
-        Ok(entry.path)
+        Ok(ServerRowWrite::Written(entry.path))
+    }
+    /// Task 2413: the write of a shared row (a shared root, or a row inside a shared folder), as
+    /// [`Self::upsert_file_with_contract`] after the same check as [`Self::upsert_server_file_row`].
+    pub fn upsert_shared_server_row(
+        &self,
+        entry: &FileEntry,
+        update: impl FnOnce(&mut FileContractState),
+    ) -> Result<ServerRowWrite> {
+        if let Some(refused) = server_row_refused(entry) {
+            return Ok(refused);
+        }
+        self.upsert_file_with_contract(entry, update)?;
+        Ok(ServerRowWrite::Written(entry.path.clone()))
     }
     /// Task 2191: `file_id` is a file of unknown content, whatever its status (the guarded set).
     pub fn is_unknown_content(&self, file_id: &str) -> Result<bool> {
@@ -747,4 +768,14 @@ impl StateDb {
         })?;
         rows.collect()
     }
+}
+
+/// Task 2413: the one check before a server row is written: every segment of its path is a name this host holds as
+/// exactly one entry ([`crate::stored_path::check_path`]). An empty path is the row whose name did not resolve: it is
+/// stored as before and never placed (the placeholder pass and `placeholder_path_under` skip it).
+fn server_row_refused(entry: &FileEntry) -> Option<ServerRowWrite> {
+    if entry.path.is_empty() {
+        return None;
+    }
+    crate::stored_path::check_path(&entry.path).err().map(ServerRowWrite::Refused)
 }

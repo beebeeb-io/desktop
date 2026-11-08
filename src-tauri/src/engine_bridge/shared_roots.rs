@@ -206,9 +206,8 @@ impl EngineBridge {
                 folder_material.as_ref().map(|(folder_key, _)| &**folder_key),
                 folder_material.as_ref().map(|(_, keys_response)| keys_response),
             );
+            // Task 2413: the display name is one name or the placeholder name; the store checks the path again.
             let root_path = format!("Shared with me/{display_name}");
-            crate::reject_unsafe_rel_path(&root_path)
-                .map_err(|e| anyhow::anyhow!("unsafe shared root path for {}: {e}", root.file_id))?;
 
             let item_kind = if root.is_folder {
                 ItemKind::Folder
@@ -217,7 +216,7 @@ impl EngineBridge {
             };
             // Spec §7.2 (final review): the row and its contract in one transaction, so no
             // listing sees a new shared root in the person's own namespace.
-            self.db.upsert_file_with_contract(
+            let written = self.db.upsert_shared_server_row(
                 &FileEntry {
                     file_id: root.file_id.clone(),
                     path: root_path,
@@ -243,6 +242,12 @@ impl EngineBridge {
                     contract.last_sync_at = now;
                 },
             )?;
+            // Task 2413: a refused root is skipped (nothing written, its rows not refreshed), never an error that
+            // would stop the other roots' refresh. It stays active, so nothing stored for it is purged.
+            if let crate::stored_path::ServerRowWrite::Refused(rule) = written {
+                tracing::warn!(file_id = %root.file_id, rule = %rule, "shared root not stored: a name on its path is not one this device can hold");
+                continue;
+            }
 
             if let Some((folder_key, folder_keys_response)) = folder_material
                 && let Err(e) = self

@@ -404,10 +404,13 @@ use super::*;
             ("fn apply_metadata_file_row(", 1),
         ] {
             // Task 2204 S0.3: the pull's writer is `upsert_server_file_row`, the same one-transaction
-            // write with the Windows-rename hold decided inside it.
+            // write with the Windows-rename hold decided inside it. Task 2413: a shared row's is
+            // `upsert_shared_server_row`, `upsert_file_with_contract` after the stored-path check.
             let body = body(&production, writer);
             assert_eq!(
-                body.matches("upsert_file_with_contract(").count() + body.matches("upsert_server_file_row(").count(),
+                body.matches("upsert_file_with_contract(").count()
+                    + body.matches("upsert_server_file_row(").count()
+                    + body.matches("upsert_shared_server_row(").count(),
                 calls,
                 "{writer} writes each row and its contract in one call"
             );
@@ -417,6 +420,13 @@ use super::*;
             held.contains("upsert_file_conn(") && held.contains("set_file_contract_state_conn(") && held.contains("tx.commit()"),
             "{held}"
         );
+        // Task 2413: both writers of a server row run the one stored-path check before they write.
+        let shared = body(&state_db, "    pub fn upsert_shared_server_row(");
+        assert!(shared.contains("upsert_file_with_contract("), "{shared}");
+        for writer in [held, shared] {
+            let check = writer.find("server_row_refused(").unwrap_or_else(|| panic!("no stored-path check: {writer}"));
+            assert!(writer[..check].matches("conn").count() == 0, "the check runs before any write: {writer}");
+        }
         // Spec 2026-10-10 §5.2 step 6: a Finder folder create writes its row and its contract in the same
         // transaction as its op, behind the sign-out's fence, so a refused create leaves no row.
         assert!(

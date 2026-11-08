@@ -82,7 +82,13 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
             stats.skipped += 1;
             continue;
         }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Task 2413: through the one map every placeholder caller shares, so a stored path whose segments are not
+        // plain names makes no folder and no placeholder anywhere.
+        let Some(local_path) = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel) else {
+            tracing::warn!(file_id = %entry.file_id, "skipping placeholder: its stored path is not plain names under the sync folder");
+            stats.skipped += 1;
+            continue;
+        };
         let (parent_dir, name) = match (local_path.parent(), local_path.file_name()) {
             (Some(parent), Some(name)) => (parent.to_path_buf(), name.to_string_lossy().into_owned()),
             _ => {

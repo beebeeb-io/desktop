@@ -285,27 +285,13 @@ impl EngineBridge {
         })
     }
 
-    /// Map a server-relative, '/'-joined DB key (`FileEntry::path`) to its
-    /// on-disk placeholder path under `sync_root`, rejecting empty/traversal
-    /// keys. Mirrors `windows_cf::callbacks::safe_join_under_root` (kept private
-    /// there) so the pin path resolution uses the same containment guard as the
-    /// fetch fallback. Returns `None` for an empty key or any `.`/`..`/empty
-    /// segment, or if the join escapes the root.
+    /// Map a server-relative, '/'-joined DB key (`FileEntry::path`) to its on-disk placeholder path under
+    /// `sync_root`. Task 2413: [`crate::stored_path::path_under`], the one map every caller shares (the Windows fetch
+    /// fallback's `safe_join_under_root` and the placeholder pass included): it splits on both `/` and `\`, refuses
+    /// any segment that is not one plain Windows name, and checks containment by component. `None` for an empty key.
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     pub(crate) fn placeholder_path_under(sync_root: &Path, rel_path: &str) -> Option<PathBuf> {
-        let rel = rel_path.trim_matches('/');
-        if rel.is_empty() {
-            return None;
-        }
-        if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
-            return None;
-        }
-        let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
-        let candidate = sync_root.join(&native_rel);
-        if !candidate.starts_with(sync_root) {
-            return None;
-        }
-        Some(candidate)
+        crate::stored_path::path_under(sync_root, rel_path)
     }
 
     pub fn enforce_smart_cache(&self, policy: CachePolicy) -> anyhow::Result<CacheCleanupOutcome> {

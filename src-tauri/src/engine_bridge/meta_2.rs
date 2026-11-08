@@ -281,15 +281,19 @@ pub(super) fn shared_placeholder_name(item_kind: &ItemKind) -> &'static str {
     }
 }
 
+/// Task 2413: a shared item's own name, when it is one name this host can hold (the rule own rows meet,
+/// [`crate::stored_path::check_name_for`]); otherwise `None` and the caller shows the placeholder name. The name is
+/// checked as it is: trimming it made `a.txt ` and `a.txt` one path.
 pub(super) fn safe_shared_leaf_name(name: &str) -> Option<String> {
-    let leaf = name.trim();
-    if crate::reject_unsafe_rel_path(leaf).is_err() || leaf.contains('/') || leaf.contains('\\') {
-        return None;
-    }
-    if leaf.is_empty() {
-        return None;
-    }
-    Some(leaf.to_string())
+    crate::stored_path::check_name_for(name, crate::stored_path::host_is_windows()).ok()?;
+    Some(name.to_string())
+}
+
+/// Task 2413: a server row the store refused. Logged by id and rule only (never a name); nothing is written. A row
+/// stored before is returned as it is, so the rows of a folder it holds are still placed under it; a new one is `None`.
+fn refused_server_row(file_id: &str, rule: &beebeeb_core::path_safety::UnsafeName, existing: Option<FileEntry>) -> Option<FileEntry> {
+    tracing::warn!(file_id = %file_id, rule = %rule, "server row not stored: a name on its path is not one this device can hold");
+    existing
 }
 
 pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
@@ -331,12 +335,12 @@ pub(super) fn apply_shared_metadata_file_row(
     let remote_updated = json_timestamp_secs(f, &["updated_at", "uploaded_at", "created_at"]).unwrap_or(now);
     let item_kind = item_kind_from_metadata(f);
     let leaf = shared_name_from_metadata(f, &item_kind, file_key);
-    let path = if parent_rel_path.is_empty() {
-        leaf
-    } else {
-        format!("{}/{}", parent_rel_path.trim_end_matches('/'), leaf)
+    // Task 2413: the leaf is one name (or the placeholder name); its parent's segments are checked again here and by
+    // the store. A refused row is skipped, never an error that would stop the rest of the folder's refresh.
+    let path = match crate::stored_path::compose(parent_rel_path, &leaf) {
+        Ok(path) => path,
+        Err(rule) => return Ok(refused_server_row(file_id, &rule, None)),
     };
-    crate::reject_unsafe_rel_path(&path).map_err(|e| anyhow::anyhow!("unsafe shared item path for {file_id}: {e}"))?;
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
@@ -355,7 +359,7 @@ pub(super) fn apply_shared_metadata_file_row(
     };
     // Spec §7.2 (final review): the row and its contract in one transaction, so no listing
     // sees a new shared row in the person's own namespace.
-    db.upsert_file_with_contract(&entry, |contract| {
+    let written = db.upsert_shared_server_row(&entry, |contract| {
         contract.namespace = Namespace::SharedWithMe;
         contract.parent_id = parent_id;
         contract.shared_root_id = Some(root.file_id.clone());
@@ -379,6 +383,9 @@ pub(super) fn apply_shared_metadata_file_row(
             .or(contract.current_object_version_id.take());
         contract.last_sync_at = now;
     })?;
+    if let crate::stored_path::ServerRowWrite::Refused(rule) = written {
+        return Ok(refused_server_row(file_id, &rule, None));
+    }
     Ok(Some(entry))
 }
 
@@ -415,19 +422,21 @@ pub(super) fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let leaf = crate::owner_keys::stored_name(db,file_id,master_key)?.unwrap_or_else(||resolve_relative_path(f,file_id,master_key));
+    let leaf = match crate::owner_keys::stored_name(db, file_id, master_key)? {
+        Some(name) => name,
+        None => match resolve_relative_path(f, file_id, master_key) {
+            Ok(name) => name,
+            Err(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
+        },
+    };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
-    // tick) rather than seeding a bare parent dir. A leaf that already carries
-    // a leading slash (legacy plaintext-`path` fallback) is normalised.
-    let path = if parent_rel_path.is_empty() || leaf.is_empty() {
-        leaf
-    } else {
-        format!(
-            "{}/{}",
-            parent_rel_path.trim_end_matches('/'),
-            leaf.trim_start_matches('/')
-        )
+    // tick) rather than seeding a bare parent dir. Task 2413: the leaf must be
+    // ONE name and every segment of the path one this host can hold, or the row
+    // is refused and nothing about it is written (a stored row stays as it was).
+    let path = match crate::stored_path::compose(parent_rel_path, &leaf) {
+        Ok(path) => path,
+        Err(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
     };
     // Task 2204 S0.3: while a Windows rename of this file is queued (parked included), the row's
     // path and parent are where the file is on disk; the server's are still the old ones.
@@ -482,7 +491,7 @@ pub(super) fn apply_metadata_file_row(
     // sees a new nested row without its parent.
     // Task 2204 S0.3 (review-155): the hold is decided again inside the write's own
     // transaction, so a Windows rename committed after the reads above is never written over.
-    entry.path = db.upsert_server_file_row(&entry, |contract| {
+    let written = db.upsert_server_file_row(&entry, |contract| {
         contract.namespace = namespace;
         contract.parent_id = server_parent_id;
         contract.shared_root_id = shared_root_id;
@@ -507,6 +516,10 @@ pub(super) fn apply_metadata_file_row(
         // version. 0 stays unknown; an edit on an unknown base is held, not sent (task 2229).
         contract.last_sync_at = now;
     })?;
+    entry.path = match written {
+        crate::stored_path::ServerRowWrite::Written(path) => path,
+        crate::stored_path::ServerRowWrite::Refused(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
+    };
     apply_system_role_field(db, file_id, f)?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
     // new place: it becomes mixed, its version kept.
@@ -600,7 +613,6 @@ pub(super) fn process_metadata_row(
     if file_id.is_empty() {
         return Ok(None);
     }
-    let size = f["size_bytes"].as_i64().unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
 
     // §6.3.2: a snapshot node fills a row at version 0, or raises an older one, in any
@@ -611,6 +623,7 @@ pub(super) fn process_metadata_row(
         && let Some(node_version) = f["version_number"].as_i64()
     {
         let is_uploading = f["is_uploading"].as_bool() == Some(true);
+        let size = f["size_bytes"].as_i64().unwrap_or(0);
         match bridge
             .db()
             .apply_snapshot_version(file_id, node_version, size, is_uploading)?
@@ -696,11 +709,8 @@ pub(super) fn process_metadata_row(
             // queued on it, refused as stale and parked: the parked op is the conflict (E1). The pull
             // reads no file: `content_hash` is not read either (E2), and no hash is taken on a cold
             // cache just to choose a log line.
-            let mut updated = entry.clone();
-            updated.remote_updated_at = remote_updated;
-            updated.size_bytes = size;
-            updated.modified_at = remote_updated;
-            bridge.db().upsert_file(&updated)?;
+            // Task 2413: `apply` writes the size and both times from the row in its one transaction (it wrote them over
+            // a separate write here before), so a row the store refuses keeps them as they were too.
             apply(bridge)
         }
         Some(entry) => {
