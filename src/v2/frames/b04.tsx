@@ -38,6 +38,8 @@ interface PaneOpts {
   trim?: string
   detailsFor?: string
   rest?: Partial<PaneProps>
+  /** Keep the listing's own order (the board's Backups order is not by name). */
+  raw?: boolean
 }
 
 /** The props of one Files pane state, computed synchronously from the fixtures. */
@@ -47,7 +49,7 @@ function pane(o: PaneOpts = {}): PaneProps {
   let path = base.path
   if (o.trim) path = path.slice(Math.max(0, path.findIndex((c) => c.id === o.trim)))
   const listing = { ...base, path, folder: path[path.length - 1] }
-  const items = arrange(listing.items, prefs.sort)
+  const items = o.raw ? listing.items : arrange(listing.items, prefs.sort)
   const sel = new Set(o.sel ?? [])
   const dId = o.detailsFor ?? (o.sel?.length === 1 ? o.sel[0] : undefined)
   const details = dId ? detailsOf(dId, o.items ?? FILES_TREE) : null
@@ -182,7 +184,7 @@ export const FRAMES: FrameRegistry = {
   // Browse files
   'DW-1101': () => <Win p={pane()} />,
   'DW-1102': () => <Win p={pane({ folder: 'f-lisbon', sel: ['p-alfama'], prefs: { ...GRID, ...PANEL } })} />,
-  'DW-1103': () => <Win p={pane()} overlay={<Menu x={700} y={470} label="List" entries={backgroundMenu(DEFAULT_PREFS, true, true)} onPick={noop} onClose={noop} />} />,
+  'DW-1103': () => <Win p={pane()} overlay={<Menu x={700} y={330} label="List" entries={backgroundMenu(DEFAULT_PREFS, true, true)} onPick={noop} onClose={noop} />} />,
   'DW-1104': () => <Win p={pane({ sel: ['i-harbour'] })} overlay={<RowMenu rowId="i-harbour" label="File" entries={fileMenu([FILES_TREE.find((i) => i.id === 'i-harbour')!])} />} />,
   'DW-1105': () => {
     const hits = FILES_TREE.filter((i) => i.name.toLowerCase().includes('contr')).map((item) => ({ item, where: item.parentId ? `Files › ${FILES_TREE.find((f) => f.id === item.parentId)!.name}` : 'Files' }))
@@ -207,7 +209,7 @@ export const FRAMES: FrameRegistry = {
   'DW-0420': () => <Win p={pane({ folder: 'f-lisbon' })} />,
   'DW-0420b': () => <Win p={pane({ folder: 'f-archive', rest: { scrollTop: 138 * 36 } })} />,
   'DW-0421': () => <Win p={pane({ folder: 'f-lisbon', prefs: GRID, rest: { videoLength: VIDEO_LENGTH } })} />,
-  'DW-0422': () => <Win section="backups" p={pane({ folder: 'f-backups', ...BACKUPS, rest: { columns: 'backups', canNew: false } })} />,
+  'DW-0422': () => <Win section="backups" p={pane({ folder: 'f-backups', ...BACKUPS, raw: true, rest: { columns: 'backups', canNew: false } })} />,
   'DW-0423': () => <Win section="backups" p={pane({ folder: 'f-bk-laptop', ...BACKUPS, rest: { canNew: false } })} />,
   'DW-0424': () => <Win section="backups" p={pane({ folder: 'f-bk-mail', ...BACKUPS, rest: { canNew: false } })} top={serviceBanner} />,
   'DW-0425': () => <Win section="backups" p={pane({ folder: 'f-bk-mail', ...BACKUPS, rest: { canNew: false } })} top={serviceBanner} overlay={<ProtectedAlert name="Mail Backup" inside />} />,
@@ -238,8 +240,8 @@ export const FRAMES: FrameRegistry = {
     <Win p={pane({ sel: ['i-contract'] })} overlay={
       <ConflictDialog
         index={1} total={2} name="Contract draft.pdf"
-        mine={{ label: 'This PC', keep: 'this PC’s', when: 'Today, 09:12', size: 1_200_000, page: <Page title="Contract draft" lines={contractPage.slice(0, 2)} /> }}
-        theirs={{ label: 'Anna’s iPad', keep: 'Anna’s iPad’s', when: 'Today, 08:50', size: 1_300_000, page: <Page title="Contract draft" lines={contractPage.slice(0, 3)} /> }}
+        mine={{ label: 'This PC', keep: 'this PC’s', when: 'Today, 09:12', size: 1_200_000, page: <Page compact title="Contract draft" lines={contractPage.slice(0, 2)} /> }}
+        theirs={{ label: 'Anna’s iPad', keep: 'Anna’s iPad’s', when: 'Today, 08:50', size: 1_300_000, page: <Page compact title="Contract draft" lines={contractPage.slice(0, 3)} /> }}
       />
     } />
   ),

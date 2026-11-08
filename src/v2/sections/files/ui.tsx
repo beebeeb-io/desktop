@@ -4,7 +4,7 @@ import { Icon, type IconName } from '@beebeeb/shared/design'
 import { useFocusTrap } from '@beebeeb/shared/drive-ui'
 
 export const FOCUS = 'focus-visible:outline-2 focus-visible:outline-ink-3'
-export const BTN = `inline-flex h-8 items-center justify-center rounded-md border border-line bg-paper px-4 text-[13px] font-medium text-ink hover:bg-paper-2 ${FOCUS}`
+export const BTN = `inline-flex h-8 flex-none whitespace-nowrap items-center justify-center rounded-md border border-line bg-paper px-4 text-[13px] font-medium text-ink hover:bg-paper-2 ${FOCUS}`
 export const BTN_AMBER = `inline-flex h-8 items-center justify-center rounded-md bg-amber px-4 text-[13px] font-medium text-[oklch(0.22_0.01_70)] hover:brightness-95 ${FOCUS}`
 
 export function CloseX({ onClick, label = 'Close (Esc)' }: { onClick?: () => void; label?: string }) {

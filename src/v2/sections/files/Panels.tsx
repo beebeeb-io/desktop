@@ -49,9 +49,9 @@ export function NoPreview({ name, size, onOpenElsewhere, onKeep, onClose }: { na
 }
 
 /** A page of a document, drawn from text, for the preview body. */
-export function Page({ lines, title }: { lines: string[]; title: string }) {
+export function Page({ lines, title, compact }: { lines: string[]; title: string; compact?: boolean }) {
   return (
-    <article aria-label="Page 1" data-page className="w-[520px] max-w-full flex-none rounded-sm border border-line bg-white p-10 text-[12px] leading-5 text-[oklch(0.25_0.01_70)] shadow-sm">
+    <article aria-label="Page 1" data-page className={`${compact ? 'w-full p-4' : 'w-[520px] max-w-full flex-none p-10'} rounded-sm border border-line bg-white text-[12px] leading-5 text-[oklch(0.25_0.01_70)] shadow-sm`}>
       <h3 className="m-0 mb-4 text-[16px] font-semibold">{title}</h3>
       {lines.map((l, i) => <p key={i} className="m-0 mb-2">{l}</p>)}
     </article>

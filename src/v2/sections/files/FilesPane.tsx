@@ -74,8 +74,8 @@ export interface PaneProps {
 export interface Transfer { kind: 'uploading' | 'downloading' | 'waiting'; done: number; total: number }
 
 const noopKey = () => {}
-const COLS_FILES = 'grid-cols-[minmax(0,1fr)_150px_92px_118px_140px]'
-const COLS_BACKUPS = 'grid-cols-[minmax(0,1fr)_150px_92px_150px_140px]'
+const COLS_FILES = 'grid-cols-[minmax(0,1fr)_128px_76px_84px_124px]'
+const COLS_BACKUPS = 'grid-cols-[minmax(0,1fr)_128px_76px_150px_124px]'
 
 function Thumb({ item, className = '', fallback = 36 }: { item: DriveItem; className?: string; fallback?: number }) {
   const source = useDriveSource()
@@ -167,13 +167,13 @@ function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h
       {p.columns === 'backups' ? (
         <span role="gridcell" className="font-mono text-[12px] text-ink-3">{meta ? fmtWhen(meta.last, new Date('2026-11-08T12:00:00')) : '—'}</span>
       ) : tr ? (
-        <span role="gridcell" data-transfer={tr.kind} className="font-mono text-[12px] text-ink-3">
+        <span role="gridcell" data-transfer={tr.kind} className="col-span-2 whitespace-nowrap font-mono text-[12px] text-ink-3">
           {tr.kind === 'waiting' ? 'Waiting' : `${tr.kind === 'uploading' ? 'Uploading' : 'Downloading'}, ${(tr.done / 1e6).toFixed(1)} of ${(tr.total / 1e6).toFixed(1)} MB`}
         </span>
       ) : (
         <span role="gridcell" className={`font-mono text-[12px] ${dim ? 'text-ink-2' : 'text-ink-3'}`}>{dim ? <span className="font-sans">Needs a connection</span> : fmtWhen(item.modifiedAt, new Date('2026-11-08T12:00:00'))}</span>
       )}
-      <span role="gridcell" className={`font-mono text-[12px] text-ink-3 ${dim ? 'opacity-50' : ''}`}>{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span>
+      {!tr && <span role="gridcell" className={`font-mono text-[12px] text-ink-3 ${dim ? 'opacity-50' : ''}`}>{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span>}
       <span role="gridcell" className={`text-[12px] ${dim ? 'opacity-50' : ''}`}>
         {p.columns === 'backups'
           ? <span className="inline-flex items-center gap-1.5 text-ink-2">{meta?.status === 'Managed by Beebeeb' && <Icon name="lock" size={12} />}{meta ? meta.status : '—'}{meta?.thisPc && <span className="font-mono text-[11px] text-ink-3">This PC</span>}</span>

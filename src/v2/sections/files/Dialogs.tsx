@@ -176,7 +176,7 @@ export function ConflictDialog({ index, total, name, mine, theirs, onKeep, onLat
   onKeep?: (choice: 'mine' | 'theirs' | 'both') => void; onLater?: () => void
 }) {
   const card = (s: ConflictSide) => (
-    <button type="button" aria-label={s.label} className={`flex flex-1 flex-col gap-2 rounded-lg border border-line bg-paper p-2 text-left ${FOCUS}`}>
+    <button type="button" aria-label={s.label} className={`flex min-w-0 flex-1 flex-col gap-2 rounded-lg border border-line bg-paper p-2 text-left ${FOCUS}`}>
       <div className="grid h-36 place-items-center overflow-hidden rounded-md bg-paper-2">{s.page}</div>
       <div className="px-1 pb-1"><div className="text-[13px] font-medium text-ink">{s.label}</div><div className="font-mono text-[11px] text-ink-3">{s.when} · {fmtSize(s.size)}</div></div>
     </button>
@@ -184,7 +184,7 @@ export function ConflictDialog({ index, total, name, mine, theirs, onKeep, onLat
   return (
     <Modal
       title={<span>Two versions <span className="ml-1 font-mono text-[12px] font-normal text-ink-3">{index} of {total}</span></span>}
-      label="Two versions" width={560} onClose={onLater}
+      label="Two versions" width={680} onClose={onLater}
       footer={<><button type="button" className={BTN} onClick={onLater}>Cancel</button><span className="flex-1" /><button type="button" className={BTN} onClick={() => onKeep?.('mine')}>Keep {mine.keep}</button><button type="button" className={BTN} onClick={() => onKeep?.('theirs')}>Keep {theirs.keep}</button><button type="button" ref={(el) => { if (el) setTimeout(() => el.focus(), 50) }} className={`${BTN} border-ink-3`} onClick={() => onKeep?.('both')}>Keep both</button></>}
     >
       <p className="m-0 mb-3 text-ink"><span className="font-medium">{name}</span> changed in two places at once.</p>
