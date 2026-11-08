@@ -262,7 +262,7 @@ pub(crate) async fn auth_passkey_sign_in(
                         Ok(profile) => profile,
                         Err(_) => {
                             let _ = revoke_desktop_session(&http.client, &http.base_url, &token).await;
-                            return Err(SIGN_IN_ACCOUNT_UNKNOWN.to_string());
+                            return Err("sign_in_account_unknown".to_string());
                         }
                     };
                     let _transition = SESSION_TRANSITION.lock().await;
