@@ -45,3 +45,51 @@ fn dtos_carry_no_secret_field() {
         }
     }
 }
+
+#[test]
+fn only_a_live_file_link_is_rebuilt() {
+    use serde_json::json;
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z")
+        .unwrap()
+        .to_utc();
+    assert!(flows::live_link(&json!({"id": "a", "expires_at": null}), now));
+    assert!(flows::live_link(
+        &json!({"expires_at": "2026-11-09T00:00:00Z", "share_type": "file"}),
+        now
+    ));
+    assert!(
+        !flows::live_link(&json!({"expires_at": "2026-11-08T11:59:59Z"}), now),
+        "expired"
+    );
+    assert!(!flows::live_link(&json!({"revoked": true}), now), "revoked");
+    assert!(
+        !flows::live_link(&json!({"share_type": "bundle"}), now),
+        "a bundle is not this item's link"
+    );
+}
+
+#[test]
+fn ids_must_be_canonical_uuids() {
+    let id = "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01";
+    assert_eq!(flows::item_id(id).unwrap(), id);
+    for bad in [
+        "",
+        "../x",
+        "6f1c2b9e1d1a4c559a513f7a2b8c9d01",
+        "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01?x=1",
+    ] {
+        assert_eq!(flows::item_id(bad).unwrap_err(), "not-found", "{bad}");
+    }
+}
+
+#[test]
+fn a_folder_share_answers_unsupported_and_server_codes_never_leak_text() {
+    use beebeeb_core::share_flow::ShareFlowError;
+    assert_eq!(flows::flow_reason(ShareFlowError::FolderInviteUnsupported), NOT_YET);
+    assert_eq!(flows::flow_reason(ShareFlowError::NotFound), "not-found");
+    assert_eq!(
+        flows::flow_reason(ShareFlowError::Refused("plan_required")),
+        "plan_required"
+    );
+    assert_eq!(flows::flow_reason(ShareFlowError::Server { status: 500 }), "server");
+}

@@ -27,6 +27,7 @@ pub fn run() {
     builder
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Native OS notifications — Task 11. The first conflict
         // notification on macOS triggers Apple's "allow notifications?"
         // permission prompt; we surface that, not a custom UI.
@@ -44,7 +45,7 @@ pub fn run() {
             crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
             crate::auth_v2::signup_v2::auth_signup_begin, crate::auth_v2::signup_v2::auth_signup_send_code, crate::auth_v2::signup_v2::auth_signup_verify_code, crate::auth_v2::signup_v2::auth_signup_password_meter, crate::auth_v2::signup_v2::auth_signup_breach_check, crate::auth_v2::signup_v2::auth_signup_set_password, crate::auth_v2::signup_v2::auth_signup_phrase_words, crate::auth_v2::signup_v2::auth_signup_phrase_save, crate::auth_v2::signup_v2::auth_signup_phrase_challenge, crate::auth_v2::signup_v2::auth_signup_confirm_phrase, crate::auth_v2::signup_v2::auth_signup_default_device_name, crate::auth_v2::signup_v2::auth_signup_create, crate::auth_v2::signup_v2::auth_signup_cancel, crate::auth_v2::signup_v2::auth_recover_with_phrase, crate::auth_v2::signup_v2::auth_recover_set_password, crate::auth_v2::signup_v2::auth_phrase_suggest, // v2 b11
             crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
-            crate::share_v2::drive_delete_permanently, crate::share_v2::share_list, crate::share_v2::share_accept, crate::share_v2::share_decline, crate::share_v2::share_leave, crate::share_v2::share_people, crate::share_v2::share_invite, crate::share_v2::share_set_access, crate::share_v2::share_revoke, crate::share_v2::share_link_copy, crate::share_v2::share_link_update, crate::share_v2::share_safety_number, crate::share_v2::share_mark_compared, crate::share_v2::file_request_create, crate::share_v2::file_request_copy, crate::share_v2::file_request_update, crate::share_v2::file_request_remove, // v2 b05
+            crate::share_v2::drive_delete_permanently, crate::share_v2::share_list, crate::share_v2::share_accept, crate::share_v2::share_decline, crate::share_v2::share_leave, crate::share_v2::share_people, crate::share_v2::flows::share_invite, crate::share_v2::share_set_access, crate::share_v2::flows::share_revoke, crate::share_v2::flows::share_link_copy, crate::share_v2::share_link_update, crate::share_v2::share_safety_number, crate::share_v2::share_mark_compared, crate::share_v2::file_request_create, crate::share_v2::file_request_copy, crate::share_v2::file_request_update, crate::share_v2::file_request_remove, // v2 b05
             consume_main_navigation,
             set_pending_setup,
             pending_setup,

@@ -16,11 +16,16 @@ pub(crate) fn client() -> Result<reqwest::Client, String> {
 
 /// Send `req`; `session` is put on a [`RequestAuth::Session`] request. A body that is not JSON reads as `Null`; the
 /// body is never logged or passed on.
-pub(crate) async fn send(client: &reqwest::Client, session: Option<&str>, req: HttpRequest) -> Result<HttpResponse, String> {
+pub(crate) async fn send(
+    client: &reqwest::Client,
+    session: Option<&str>,
+    req: HttpRequest,
+) -> Result<HttpResponse, String> {
     let url = format!("{}{}", crate::runner::api_base_url(), req.path);
     let mut builder = match req.method {
         Method::Get => client.get(&url),
         Method::Post => client.post(&url),
+        Method::Delete => client.delete(&url),
     };
     if req.auth == RequestAuth::Session {
         let token = session.ok_or_else(|| "locked".to_string())?;

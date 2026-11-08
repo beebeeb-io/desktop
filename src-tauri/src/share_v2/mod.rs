@@ -8,10 +8,12 @@
 //! - a share link that carries a key is put on the clipboard by Rust; the web view gets only the
 //!   display form without the part after `#`.
 //!
-//! The share flows themselves (member key wrap, link mint, request keypair) are composed in core
-//! (`share_link`, `share_token`, `file_request`). Core has the primitives but not yet the flows over
-//! its API client, so those commands answer `unsupported: not implemented` until the core flows land;
-//! the window then shows its honest "isn't available in this version" copy.
+//! The share flows run in core (`beebeeb_core::share_flow`, B05b): `share_invite` (a person share of
+//! a file), `share_link_copy` (rebuild the owner's link, or mint a double-encrypted one) and
+//! `share_revoke` drive them over this module's transport (`flows.rs`). A folder share, a folder link,
+//! file requests and the remaining list commands are not in core yet: they answer
+//! `unsupported: not implemented`, and the window shows its honest "isn't available in this version"
+//! copy. Never a half flow behind a working command.
 
 use beebeeb_core::auth_flow::step_up::{StepUp, StepUpPurpose, StepUpStep};
 use beebeeb_core::auth_flow::{AuthFlowError, HttpRequest, Method, RequestAuth};
@@ -27,6 +29,7 @@ type Answer<T> = Result<T, String>;
 const EVENT: &str = "drive://event";
 const NOT_YET: &str = "unsupported: not implemented in this build";
 
+pub(crate) mod flows;
 #[cfg(test)]
 mod tests;
 
@@ -75,9 +78,10 @@ pub(crate) fn valid_ids(ids: &[String]) -> bool {
 
 /// DW-0748, DW-0749, DW-0749b: delete items in Trash for good. The password proves the account
 /// (core's step-up; a wrong one stops before anything is deleted); each delete spends its own
-/// single-use token. A `removed` event per item drives the progress note. An authenticator code
-/// (the board's DW-0749 for an account with two-factor) needs a code step-up core does not have
-/// yet: `unsupported` until it does (see the PR's gap list).
+/// single-use token. A `removed` event per item drives the progress note. A two-factor account
+/// steps up with its password too. An authenticator code alone (the board's DW-0749) cannot mint a
+/// token: the server's step-up legs (`/auth/confirm`, `confirm-opaque-*`) take no TOTP or backup
+/// code (B05b, checked against the server routes), so it stays `unsupported`.
 #[tauri::command]
 pub(crate) async fn drive_delete_permanently(
     app: tauri::AppHandle,
@@ -138,9 +142,8 @@ pub(crate) struct CopiedLink {
 }
 
 /// The display form of a share link: everything before `#`. The key never crosses to the web view.
-#[allow(dead_code)] // used by share_link_copy / file_request_create once the core flows land
 pub(crate) fn display_form(link: &str) -> String {
-    link.split('#').next().unwrap_or_default().to_string()
+    beebeeb_core::share_flow::display_form(link)
 }
 
 #[derive(Deserialize)]
@@ -177,10 +180,7 @@ not_yet! {
     fn share_decline(id: String) -> ();
     fn share_leave(id: String) -> ();
     fn share_people(item_id: String) -> Vec<serde_json::Value>;
-    fn share_invite(item_id: String, email: String, can_edit: bool, accept_changed_key: bool) -> serde_json::Value;
     fn share_set_access(item_id: String, member_id: String, can_edit: bool) -> ();
-    fn share_revoke(item_id: String, member_id: Option<String>) -> ();
-    fn share_link_copy(item_id: String) -> CopiedLink;
     fn share_link_update(item_id: String, expires_days: Option<u32>, set_expiry: bool, password: Option<String>, set_password: bool) -> ();
     fn share_safety_number(member_id: String) -> serde_json::Value;
     fn share_mark_compared(member_id: String, matched: bool) -> ();
