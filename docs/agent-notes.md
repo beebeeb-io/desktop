@@ -139,6 +139,19 @@ Every request from the daemon `ApiClient` and every ad-hoc `reqwest::Client` in 
 
 **Upload resume:** `POST /uploads/init` persists the session (`upload_resume` table, keyed by `op_id`, fingerprinted by staged path + size + mtime); watermark advances on every 2xx chunk PUT; retry resumes from the watermark; changed payload / gone session / given-up op abandons (create's orphaned `is_uploading` row is trashed; a replace's never). Exception for macOS Finder writes (`write_id`): after `complete` answers, the completion is recorded first and the op is never abandoned/parked — it retries only local landing (one transaction). Windows local-create completion keeps a separate `upload_finalizations` journal. Advanced settings (`desktop.toml`): `theme` light/dark/system; `local_cache_limit_bytes` per-device cap (`0` = Unlimited; evict LRU non-pinned first, never auto-evict pinned).
 
+**Names that reach another file (task 2407, core 2404):**
+- Windows resolves a name through a folder's 8.3 short names too, and strips a trailing dot or space. So a row's path can reach a different existing file: `REPORT~1.PDF` reaches `Report for 2026.pdf`.
+- Every site that creates, truncates, replaces, renames, copies, uploads from or deletes a sync-folder entry by a name the folder did not report calls `name_alias::conflict_below(sync_root, path)` first. That is core's `path_safety::short_name_alias`, which reads the entry's own long name and never the name's shape.
+- On a conflict, the site takes its conflict path:
+  - remote deletion: `Gone`, nothing removed;
+  - placeholder minting: row skipped;
+  - hydrate, Keep Both and Keep Mine: refused, and the row stays in conflict;
+  - keep on this PC: stays held;
+  - free up space: kept local.
+- A check that cannot finish refuses too.
+- `NameConflict` and the check's errors never carry a name.
+- Tests stub the answer per path (`name_alias::stub`); the Windows tests prove a real 8.3 alias first and fail under `CI` when the volume makes none.
+
 ## Auto-update signing
 
 Tauri updater verifies with minisign (keypair generated 2026-05-07).

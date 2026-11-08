@@ -22,7 +22,12 @@
 
     impl Pc {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            Self::new_in(&std::env::temp_dir())
+        }
+
+        /// A PC whose temp folder is made under `parent` (task 2407: a volume that makes 8.3 short names).
+        fn new_in(parent: &Path) -> Self {
+            let temp = tempfile::tempdir_in(parent).unwrap();
             let root = temp.path().join("Beebeeb");
             let staging = temp.path().join("staging");
             for dir in [&root, &staging, &temp.path().join("state")] {
@@ -804,4 +809,70 @@
             &std::fs::symlink_metadata(pc.on_disk("Trip/cloud.bin")).unwrap(),
         );
         assert_ne!(attributes & 0x0040_0000, 0, "still cloud-only (RECALL_ON_DATA_ACCESS)");
+    }
+
+    /// Task 2407 (core 2404): an item whose name reaches a different entry (on Windows an 8.3 short name; stubbed here,
+    /// the stubbed file standing in for that entry) is never made plain or moved: it stays where it is, held.
+    #[test]
+    fn keep_never_moves_the_entry_an_alias_reaches() {
+        let pc = Pc::new();
+        pc.new_file("new-top", "REPORT~1.PDF", None, b"a different file");
+        pc.hold_all();
+        let _alias = crate::name_alias::stub::alias(&pc.on_disk("REPORT~1.PDF"));
+
+        let result = pc.keep();
+
+        assert_eq!((result.moved_items, result.not_moved), (0, 1));
+        assert_eq!(std::fs::read(pc.on_disk("REPORT~1.PDF")).unwrap(), b"a different file");
+        assert!(!pc.kept_dir().exists(), "nothing was moved out");
+        assert_eq!(pc.held(), ["op-new-top"], "it stays held");
+    }
+
+    /// Task 2407, Windows: the same against a real 8.3 short name. The item's row names `REPORT~1.PDF`, the short name of
+    /// the person's `Report for 2026.pdf`; keep never moves that file out. Skipped (with the reason printed) on a volume
+    /// that makes no 8.3 names; with `CI` set, it fails instead.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn keep_never_moves_the_file_a_short_name_reaches() {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        // The temp folder, then the local-app-data temp folder (often the system drive, which makes 8.3 names by
+        // default; CI's temp volume makes none).
+        let mut roots = vec![std::env::temp_dir()];
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(local).join("Temp"));
+        }
+        let short_of = |path: &Path| -> String {
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            let mut buffer = vec![0u16; 1024];
+            // SAFETY: `wide` is NUL-terminated; `buffer` is writable for its whole length.
+            let written = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+            assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed");
+            let short_path = String::from_utf16(&buffer[..written]).unwrap();
+            short_path.rsplit('\\').next().unwrap().to_owned()
+        };
+        let Some((pc, short)) = roots.iter().find_map(|root| {
+            let pc = Pc::new_in(root);
+            std::fs::write(pc.on_disk("Report for 2026.pdf"), b"precious").unwrap();
+            let short = short_of(&pc.on_disk("Report for 2026.pdf"));
+            (short != "Report for 2026.pdf").then_some((pc, short))
+        }) else {
+            assert!(std::env::var_os("CI").is_none(), "no volume among {roots:?} made an 8.3 short name; this test proves nothing here");
+            eprintln!("skipped: no volume among {roots:?} makes 8.3 short names");
+            return;
+        };
+        let precious = pc.on_disk("Report for 2026.pdf");
+        assert_eq!(std::fs::read(pc.on_disk(&short)).unwrap(), b"precious", "the fixture must alias");
+        // A new file's row and queued upload at the short name; nothing of its own is on disk there.
+        pc.row("new-top", &short, None, false, false, Namespace::MyFiles);
+        let staged = pc.staging.join("new-top.staged");
+        std::fs::write(&staged, b"new").unwrap();
+        pc.db.track_staged_payload(&staged.to_string_lossy(), Some(&pc.on_disk(&short).to_string_lossy()), false).unwrap();
+        pc.queue_create_file("op-new-top", Some("new-top"), None, Some(&staged));
+        pc.hold_all();
+
+        let result = pc.keep();
+
+        assert_eq!((result.moved_items, result.not_moved), (0, 1));
+        assert_eq!(std::fs::read(&precious).unwrap(), b"precious", "the person's file is where it was");
     }

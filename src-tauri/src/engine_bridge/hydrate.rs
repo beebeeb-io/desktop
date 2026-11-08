@@ -99,6 +99,9 @@ impl EngineBridge {
         if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
             return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
         }
+        // Task 2407 (core 2404): a destination whose name reaches a different entry (a Windows 8.3 short name) is
+        // refused before anything is downloaded; the Windows writer checks again right before it writes.
+        crate::name_alias::refuse_conflict_under_roots(dest_path, allowed_roots)?;
         self.ensure_shared_hydrate_path_safe(file_id)?;
         // Task 1640: a hydrate into the file's own place in the sync folder (on Windows, only
         // conflict resolution reaches it) never writes over an unsent local change: bytes that differ from the content this

@@ -90,6 +90,9 @@ mod own_data_proof;
 // Task 2267 (fix round 2): what the person decides about the changes the proof held for review.
 #[cfg(any(target_os = "windows", test))]
 mod found_while_paused;
+// Task 2407 (core 2404): a sync-folder write, rename or delete by name never touches a different entry the name reaches
+// (a Windows 8.3 short name), through core's `path_safety::short_name_alias`.
+mod name_alias;
 // Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
 // memory. Windows and Linux run it; macOS keeps its own resume.
 mod held_queue;

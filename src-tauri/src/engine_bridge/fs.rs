@@ -262,8 +262,31 @@ pub(crate) fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
         std::fs::hard_link(from, to)?;
-        std::fs::remove_file(from)
+        remove_after_link(from, to)
     }
+}
+
+/// The second step of a move by hard link: remove the old name `from` (`to` is its new link). Task 2407: when that
+/// fails, the new link `to` is removed again and the error returned, so a failed move leaves one name, never two.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn remove_after_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    let removed = if FAIL_REMOVE_AFTER_LINK.with(std::cell::Cell::get) {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    } else {
+        std::fs::remove_file(from)
+    };
+    #[cfg(not(test))]
+    let removed = std::fs::remove_file(from);
+    removed.inspect_err(|_| {
+        let _ = std::fs::remove_file(to);
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the removal after a hard link fails on this thread (an immutable file, a sticky folder).
+    pub(crate) static FAIL_REMOVE_AFTER_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `path` relative to `sync_root`, '/'-joined.

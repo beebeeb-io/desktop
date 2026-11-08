@@ -67,6 +67,9 @@ impl EngineBridge {
             owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        // Task 2407 (core 2404): through a name that reaches a different file (a Windows 8.3 short name), "mine" is
+        // that other file: its bytes are never uploaded as this file's version. The row stays in conflict.
+        crate::name_alias::refuse_conflict_below(sync_root, &local_path)?;
         let staged =
             crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, self.finder_staging_root()?)?;
         let staged_path = staged.path().to_string();
@@ -185,6 +188,9 @@ impl EngineBridge {
     /// itself doesn't know it (the runner owns that).
     pub async fn auto_resolve_keep_both(&self, sync_root: &Path, entry: &FileEntry) -> anyhow::Result<String> {
         let original = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        // Task 2407 (core 2404): through a name that reaches a different entry (a Windows 8.3 short name), "the local
+        // copy" is another file: it is never renamed or written over, and the row stays in conflict.
+        crate::name_alias::refuse_conflict_below(sync_root, &original)?;
 
         // If the local file no longer exists on disk (user deleted it
         // outside the daemon), Keep Both collapses to Keep Remote.
@@ -204,11 +210,21 @@ impl EngineBridge {
             .and_then(|e| e.to_str())
             .map(|e| format!(".{e}"))
             .unwrap_or_default();
-        let conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
-        let conflict_path = original.with_file_name(&conflict_name);
-
-        std::fs::rename(&original, &conflict_path)
-            .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", original.display(), conflict_path.display()))?;
+        // Task 2407: the copy never replaces what holds its name (an earlier conflict copy of the same day): the next
+        // free name, `… 2`, `… 3`, is taken instead.
+        let mut conflict_name = format!("{stem} (conflict - {host} - {date}){ext}");
+        for n in 2u32.. {
+            let conflict_path = original.with_file_name(&conflict_name);
+            match rename_without_replacing(&original, &conflict_path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n <= 100 => {
+                    conflict_name = format!("{stem} (conflict - {host} - {date}) {n}{ext}");
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("rename {} -> {}: {e}", original.display(), conflict_path.display()));
+                }
+            }
+        }
 
         // Hydrate remote into the now-vacant original path. On failure
         // we mark Error rather than Conflict — the conflict copy is
@@ -428,6 +444,17 @@ impl EngineBridge {
                 };
             }
         };
+        // Task 2407 (core 2404): a name that reaches a different file (a Windows 8.3 short name) never shows that
+        // file's content as this one's.
+        if !matches!(crate::name_alias::conflict_below(sync_root, &local_path), Ok(None)) {
+            return ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some(
+                    "On this PC the file's name leads to a different file, so it is not shown.".to_string(),
+                ),
+            };
+        }
 
         let size_bytes = match std::fs::metadata(&local_path) {
             Ok(m) => m.len(),
@@ -570,6 +597,30 @@ impl EngineBridge {
                 text: None,
                 unavailable_reason: Some(format!("Couldn't download the other device's version: {e}")),
             }),
+        }
+    }
+}
+
+/// Task 2407: move `from` to `to`, never over anything `to` reaches (`AlreadyExists`). Windows: [`move_no_replace`]
+/// (`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, which also refuses another entry's 8.3 short name). Elsewhere: a
+/// hard link, then the old name is removed ([`super::fs::remove_after_link`]: when that fails, the link is removed again
+/// and its error returned). Only a volume without hard links falls back: a taken name is refused, then a rename, as
+/// before this task.
+#[cfg(target_os = "windows")]
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_no_replace(from, to)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => super::fs::remove_after_link(from, to),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Err(_) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the conflict copy's name is taken"));
+            }
+            std::fs::rename(from, to)
         }
     }
 }

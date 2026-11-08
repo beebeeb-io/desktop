@@ -569,6 +569,10 @@ mod typed_ids;
 mod remote_move;
 mod ld0105_u1_rows;
 mod ld0113_protect;
+// Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
+mod name_alias_2407;
+#[cfg(windows)]
+mod name_alias_2407_windows;
 // Task 2409: Try again on a change that failed.
 mod unsent_retry;
 

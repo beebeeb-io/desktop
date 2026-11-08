@@ -862,11 +862,11 @@ pub(super) fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::pat
     let mut dehydrated_ids: Vec<String> = Vec::new();
 
     for (file_id, rel_path, _size_bytes) in candidates {
-        let rel = rel_path.trim_matches('/');
-        if rel.is_empty() {
+        // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
+        // follow it to that file's long name). A check that cannot finish keeps the file local.
+        let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
             continue;
-        }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        };
         // Path-safety: only dehydrate placeholders that actually resolve under
         // an allowed engine root (the sync root). A corrupt `path` row can
         // never point us at a file outside the vault.

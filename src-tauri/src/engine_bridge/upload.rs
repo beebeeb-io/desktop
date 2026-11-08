@@ -791,18 +791,35 @@ impl EngineBridge {
             }
             rel = sibling_path(&entry.path, &edited_sibling_name(&current, n));
         }
-        let source = op
-            .payload_path
-            .as_deref()
-            .map(Path::new)
-            .filter(|path| path.is_file())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| local_file_path_under_sync_root(sync_root, &entry.path).unwrap_or_default());
+        let source = match op.payload_path.as_deref().map(Path::new).filter(|path| path.is_file()) {
+            Some(staged) => staged.to_path_buf(),
+            None => {
+                // Task 2407 (core 2404): the row's own file only, never a different one its name reaches (a Windows
+                // 8.3 short name), whose bytes would be copied and uploaded.
+                let source = local_file_path_under_sync_root(sync_root, &entry.path)?;
+                crate::name_alias::refuse_conflict_below(sync_root, &source)?;
+                source
+            }
+        };
         let dest = local_file_path_under_sync_root(sync_root, &rel)?;
+        // Task 2407 (core 2404): the copy goes beside the request row, never into a different folder that a folder's
+        // name reaches (a Windows 8.3 short name). It is written to an exclusive temp sibling, then published without
+        // replacing anything that appeared at its name meanwhile (core's `TempSibling`).
+        crate::name_alias::refuse_conflict_below(sync_root, &dest)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&source, &dest)?;
+        // Zero-knowledge: core's errors here name the file; a conflict travels as `NameConflict`, the rest by kind.
+        let nameless = |error: std::io::Error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                std::io::Error::new(std::io::ErrorKind::AlreadyExists, crate::name_alias::NameConflict)
+            }
+            kind => std::io::Error::from(kind),
+        };
+        let (temp, mut copy) = beebeeb_core::path_safety::TempSibling::create(&dest).map_err(nameless)?;
+        std::io::copy(&mut std::fs::File::open(&source)?, &mut copy)?;
+        drop(copy);
+        temp.publish().map_err(nameless)?;
         let content_type = op
             .metadata_json
             .as_deref()

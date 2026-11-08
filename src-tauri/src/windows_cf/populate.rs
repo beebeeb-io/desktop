@@ -17,6 +17,10 @@ pub(crate) struct PopulateStats {
     pub created: usize,
     pub already_existed: usize,
     pub create_errors: usize,
+    /// Task 2407: rows skipped because a folder on their path reaches a different folder (an 8.3 short name).
+    pub name_conflicts: usize,
+    /// Task 2407: rows skipped because that check could not finish (retried next pass).
+    pub name_check_errors: usize,
     pub db_ms: u64,
     pub elapsed_ms: u64,
 }
@@ -61,6 +65,8 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
     let needs_identity = db.files_needing_identity().unwrap_or_default();
     // LD-0113: the Backups tree, read once for the pass.
     let backups = crate::backup_protect::BackupsTree::read(db);
+    // Task 2407 (core 2404): the folders this pass found to be their own names, each looked up once per pass.
+    let mut dirs = crate::name_alias::CheckedDirs::new(sync_root);
 
     for entry in entries {
         // Stored paths are server-relative, '/'-separated, possibly with a
@@ -87,6 +93,25 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
                 continue;
             }
         };
+
+        // Task 2407 (core 2404): a folder on the way whose name reaches a DIFFERENT folder (a Windows 8.3 short name)
+        // would put the placeholder into that folder, and every later delete or fetch by this row's path would reach
+        // it. The row is skipped: its file stays on the server, in the web app. Placeholder creation itself never
+        // replaces (`CF_CREATE_FLAG_NONE`), so a leaf name that reaches another file only answers "already exists".
+        match dirs.check(&parent_dir) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                tracing::warn!(file_id = %entry.file_id, "placeholder skipped: a folder on its path reaches a different folder (8.3 alias)");
+                stats.name_conflicts += 1;
+                continue;
+            }
+            Err(e) => {
+                // Zero-knowledge: the kind only (the error text can carry the plaintext path).
+                tracing::warn!(kind = ?e.kind(), file_id = %entry.file_id, "placeholder skipped: its path could not be checked");
+                stats.name_check_errors += 1;
+                continue;
+            }
+        }
 
         // Ensure the immediate parent directory exists on disk. For a nested
         // row, depth-ordering means the parent FOLDER row was already minted as
@@ -116,6 +141,10 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
         ) {
             Ok(true) => {
                 stats.created += 1;
+                // Created under exactly its name: rows below it need no lookup of it this pass.
+                if entry.is_dir() {
+                    dirs.mark_own(parent_dir.join(&name));
+                }
                 // LD-0113 Amendment 8a: a Backups root minted again (the after-the-fact restore) shows its
                 // badge again.
                 if entry.is_dir() && backups.position(rel) == beebeeb_core::backup::BackupPosition::Root {
@@ -141,8 +170,11 @@ pub(super) fn populate_placeholders(db: &crate::state_db::StateDb, sync_root: &s
                 // Review P2 (task 2180): a placeholder minted before identities were recorded (0.8.21), or
                 // kept across a version change, takes the listing's version when it holds nothing: as at a
                 // mint, its first fetch serves that version whole. One that holds bytes stays without.
+                // Task 2407: only an entry that is this name's own (never a different file an 8.3 short name
+                // reaches) takes the row's identity.
                 if !entry.is_dir()
                     && needs_identity.contains(&entry.file_id)
+                    && matches!(crate::name_alias::conflict_below(&parent_dir, &parent_dir.join(&name)), Ok(None))
                     && matches!(
                         placeholders::platform_view(&parent_dir.join(&name)),
                         crate::unknown_check::PlatformView::Placeholder { on_disk: crate::unknown_check::OnDisk::Nothing, .. }
