@@ -109,6 +109,10 @@ pub struct Subscription {
     pub storage_grace_deadline: Option<String>,
     #[serde(default)]
     pub pause_until: Option<String>,
+    /// Server #422: `none` | `trial` | `free` | `active` | `lapsed`. Absent from an older server (the gate then reads
+    /// the plan and quota as before).
+    #[serde(default)]
+    pub plan_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

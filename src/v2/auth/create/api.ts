@@ -29,6 +29,7 @@ export const breachCheck = (password: string): Promise<CommandResult<BreachAnswe
 export const setPassword = (password: string, confirmation: string): Promise<CommandResult<void>> =>
   command('auth_signup_set_password', { password, confirmation })
 export const phraseWords = (): Promise<CommandResult<string[]>> => command('auth_signup_phrase_words')
+export const copyPhrase = (): Promise<CommandResult<void>> => command('auth_signup_phrase_copy')
 export const savePhrase = (): Promise<CommandResult<boolean>> => command('auth_signup_phrase_save')
 export const phraseChallenge = (): Promise<CommandResult<number[]>> => command('auth_signup_phrase_challenge')
 export const confirmPhrase = (words: string[]): Promise<CommandResult<void>> => command('auth_signup_confirm_phrase', { words })

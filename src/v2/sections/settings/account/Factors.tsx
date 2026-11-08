@@ -88,7 +88,7 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
 }
 
 export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dialog }: {
-  state: AccountState; onBack: () => void; onNewCodes: () => void; onMove: () => void; onTurnedOff: () => void; dialog?: 'off' | 'new-codes' | 'move'
+  state: AccountState; onBack: () => void; onNewCodes: (codes: string[]) => void; onMove: () => void; onTurnedOff: () => void; dialog?: 'off' | 'new-codes' | 'move'
 }) {
   const [ask, setAsk] = useState<'off' | 'new-codes' | 'move' | null>(dialog ?? null)
   useEscBack(onBack, !ask)
@@ -109,13 +109,13 @@ export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dia
         <Row label="Move to a new authenticator" onClick={() => setAsk('move')} />
         <Row label={<span className="text-red">Turn off two-factor</span>} onClick={() => setAsk('off')} />
       </Group>
-      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={() => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(); else onNewCodes() }} /> : null}
+      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={(_c, codes) => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(); else onNewCodes(codes ?? []) }} /> : null}
     </Page>
   )
 }
 
 /** A current code first: turning off (DW-A72), new backup codes and moving (the current code, then set-up). */
-function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'move'; onCancel: () => void; onOk: (code: string) => void }) {
+function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'move'; onCancel: () => void; onOk: (code: string, codes?: string[]) => void }) {
   const [code, setCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const ok = async () => {
@@ -124,6 +124,12 @@ function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'mov
     if (kind === 'off') {
       const r = await run('account_totp_disable', { code: c }, null)
       if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
+    }
+    if (kind === 'new-codes') {
+      // Server #422: new codes with the current code; the authenticator stays (no new set-up).
+      const r = await run<{ backup_codes: string[] }>('account_backup_codes_regenerate', { code: c }, { backup_codes: FIXTURE_BACKUP_CODES })
+      if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
+      return onOk(c, r.value.backup_codes)
     }
     onOk(c)
   }
@@ -174,7 +180,7 @@ export function Passkeys({ state, setState, onBack, menuOn, removing: initialRem
               <Icon name="key" size={15} className="shrink-0 text-ink-3" />
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] leading-5 text-ink">{p.name}</div>
-                <div className="text-[12px] leading-4 text-ink-3">Added {day(p.created_at)} · {p.prf ? 'Signs in and unlocks your data' : 'Signs in only'}</div>
+                <div className="text-[12px] leading-4 text-ink-3">Added {day(p.created_at)}{p.last_used_at ? ` · last used ${ago(p.last_used_at)}` : ''} · {p.prf ? 'Signs in and unlocks your data' : 'Signs in only'}</div>
               </div>
               <button type="button" aria-label={`More for ${p.name}`} aria-haspopup="menu" onClick={() => setMenu(menu === p.id ? null : p.id)}
                 className="grid h-7 w-7 place-items-center rounded-md text-ink-3 hover:bg-paper-2"><Icon name="more" size={15} /></button>
@@ -275,27 +281,26 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
   state: AccountState; setState: Set; onBack: () => void; onPassword: () => void; onDevices: () => void; asking?: boolean; now: number
 }) {
   const [ask, setAsk] = useState(!!asking)
-  const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   useEscBack(onBack, !ask)
   const on = state.activityLogging
   const toggle = async (next: boolean) => {
     if (!next) return setAsk(true)
-    const r = await run('account_set_activity_logging', { on: true }, null)
+    const r = await run('account_set_activity_logging', { on: true, password: null }, null)
     if (r.ok) setState((s) => ({ ...s, activityLogging: true }))
     else setError(errorText(r.code))
   }
   const turnOff = async () => {
-    setCode(''); setPassword('')
-    const r = await run('account_set_activity_logging', { on: false }, null)
+    const pw = password
+    setPassword('')
+    const r = await run('account_set_activity_logging', { on: false, password: pw }, null)
     setAsk(false)
     if (r.ok) setState((s) => ({ ...s, activityLogging: false, activity: [] }))
     else setError(errorText(r.code))
   }
   const groups = new Map<string, typeof state.activity>()
   for (const e of state.activity) groups.set(period(e.at, now), [...(groups.get(period(e.at, now)) ?? []), e])
-  const totp = state.totp.on
   return (
     <Page title="Sign-in activity" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
@@ -329,12 +334,11 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
       ) : null}
       {ask ? (
         <Dialog labelId="log-off-h" title="Turn off security logging?" onCancel={() => setAsk(false)}
-          actions={<><Btn onClick={() => setAsk(false)}>Cancel</Btn><Btn variant="danger" disabled={totp ? code.length !== 6 : !password} onClick={() => void turnOff()} aria-label="Turn off security logging, destructive">Turn off</Btn></>}>
+          actions={<><Btn onClick={() => setAsk(false)}>Cancel</Btn><Btn variant="danger" disabled={!password} onClick={() => void turnOff()} aria-label="Turn off security logging, destructive">Turn off</Btn></>}>
           <p className="mb-2">Without the log you can’t see a sign-in you didn’t make.</p>
           <p className="mb-3">We will stop collecting sign-in and activity data immediately. All data already collected will be deleted within 30 days. Deletion is irreversible.</p>
-          {totp
-            ? <CodeBoxes length={6} label="6-digit code" value={code} onChange={setCode} focus />
-            : <Field label="Password"><PasswordInput label="Password" value={password} onChange={setPassword} focus /></Field>}
+          {/* Server #422 confirms this with a password step-up; an authenticator code is not a step-up (B10b note). */}
+          <Field label="Password"><PasswordInput label="Password" value={password} onChange={setPassword} focus /></Field>
         </Dialog>
       ) : null}
     </Page>

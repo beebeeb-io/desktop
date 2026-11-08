@@ -110,12 +110,13 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
     if (w.ok) { setWords(w.value); setStep('phrase') }
   }
 
+  // B11 ruling: Rust puts the words on the clipboard and clears them after 60 s; the web view never runs the copy.
   const copyPhrase = async () => {
-    await navigator.clipboard?.writeText(words.join(' '))
+    const r = await api.copyPhrase()
+    if (!r.ok) return
     setCopied(true)
-    // The clipboard is cleared after 60 seconds.
     window.clearTimeout(clipboardTimer.current)
-    clipboardTimer.current = window.setTimeout(() => { void navigator.clipboard?.writeText(''); setCopied(false) }, 60_000)
+    clipboardTimer.current = window.setTimeout(() => setCopied(false), 60_000)
   }
 
   const toConfirm = async () => {

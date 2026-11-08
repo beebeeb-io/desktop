@@ -220,6 +220,15 @@ pub(crate) fn auth_signup_phrase_words() -> Result<Vec<String>, String> {
     Ok(words.iter().map(|w| w.as_str().to_owned()).collect())
 }
 
+/// DW-A39 Copy (B11 ruling): Rust puts the 12 words on the clipboard itself, numbered, and clears them after 60 s if
+/// the clipboard still holds them. The web view never runs the copy.
+#[tauri::command]
+pub(crate) fn auth_signup_phrase_copy(app: tauri::AppHandle) -> Result<(), String> {
+    let words = with(&SIGNUP, |f| f.phrase_words().map_err(code))?;
+    let text = Zeroizing::new(words.iter().map(|w| w.as_str()).collect::<Vec<_>>().join(" "));
+    crate::auth_v2::private_screen::copy_for_60s(&app, text)
+}
+
 /// DW-A39 Save as file: written from Rust's copy of the words, a plain text file with the email in its name.
 #[tauri::command]
 pub(crate) async fn auth_signup_phrase_save(app: tauri::AppHandle) -> Result<bool, String> {
