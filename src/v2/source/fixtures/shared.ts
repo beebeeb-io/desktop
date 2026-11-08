@@ -4,8 +4,8 @@ import type { DriveItem, DriveSource, ShareEntry, TrashEntry } from '@beebeeb/sh
 import { createFilesSource } from './files'
 
 export const B05_NOW = '2026-11-08T12:00:00'
-const KB = 1024
-const MB = 1024 ** 2
+const KB = 1000
+const MB = 1_000_000
 
 function item(id: string, name: string, o: Partial<DriveItem> = {}): DriveItem {
   return {

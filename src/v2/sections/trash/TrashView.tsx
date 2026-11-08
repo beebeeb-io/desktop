@@ -16,7 +16,8 @@ export const trashMenu = (): MenuEntry[] => [
 ]
 
 export const totalBytes = (entries: TrashEntry[]) => entries.reduce((n, e) => n + (e.item.size ?? 0), 0)
-export const countLine = (n: number, bytes: number) => `${n} ${n === 1 ? 'item' : 'items'} · ${fmtSize(bytes)}`
+const size = (b: number) => fmtSize(b).replace('.0 ', ' ')
+export const countLine = (n: number, bytes: number) => `${n} ${n === 1 ? 'item' : 'items'} · ${size(bytes)}`
 
 export interface TrashViewProps {
   entries: TrashEntry[]
@@ -126,7 +127,7 @@ export function DeleteForGoodDialog({ title, count, bytes, factor, initialCode =
   return (
     <Modal title={title} onClose={onCancel} width={460}
       footer={<><span className="flex-1" /><button type="button" className={BTN} onClick={onCancel}>Cancel</button><button type="button" className={BTN_RED} disabled={!ok || busy} onClick={confirm}>{title.replace(/\?$/, '')}</button></>}>
-      <p className="m-0">{what} and {fmtSize(bytes)} will be permanently deleted. They can’t be restored by you or by Beebeeb, on any device.</p>
+      <p className="m-0">{what} and {size(bytes)} will be permanently deleted. They can’t be restored by you or by Beebeeb, on any device.</p>
       {factor === 'code' ? (
         <>
           <div className="mt-3 text-[12px] font-medium text-ink-2">Authenticator code</div>

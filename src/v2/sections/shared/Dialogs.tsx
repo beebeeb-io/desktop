@@ -111,7 +111,7 @@ export function PersonDialog({ member, onAccess, onSafety, onRemove, onBack }: {
   return (
     <Modal label={member.name} onClose={onBack} width={460}
       title={<span className="flex items-center gap-2"><button type="button" aria-label="Back" onClick={onBack} className={`grid h-7 w-7 place-items-center rounded-md text-ink-2 hover:bg-paper-2 ${FOCUS}`}><span className="inline-flex rotate-180"><Icon name="chevron-right" size={12} /></span></button>{member.name}</span>}
-      footer={<><button type="button" className={`${BTN} ${RED_TEXT}`} onClick={onRemove}>Remove access</button><span className="flex-1" /><button type="button" className={BTN} onClick={onBack}>Done</button></>}>
+      footer={<><button type="button" className={`${BTN.replace(" text-ink ", " ")} ${RED_TEXT}`} onClick={onRemove}>Remove access</button><span className="flex-1" /><button type="button" className={BTN} onClick={onBack}>Done</button></>}>
       <div className="flex min-h-10 items-center justify-between border-b border-line"><span className="text-ink">Email</span><span className="font-mono text-[12px] text-ink-2">{member.email}</span></div>
       <div className="flex min-h-12 items-center justify-between border-b border-line"><span className="text-ink">Access</span><Segmented<Access> label="Access" value={member.access ?? 'Can view'} options={['Can view', 'Can edit']} onChange={onAccess} /></div>
       <div className="pt-3 text-[12px] font-semibold text-ink-2">Identity</div>
@@ -163,7 +163,7 @@ export function MismatchDialog({ member, groups, onRemove, onCompare, onClose }:
   return (
     <Modal label="Sharing stopped" onClose={onClose} width={500}
       title={<span className="flex items-center gap-3"><span aria-hidden="true" className={`grid h-9 w-9 place-items-center rounded-lg border border-line bg-paper-2 ${RED_TEXT}`}><Icon name="shield" size={18} /></span><span>Sharing with {first} is stopped<span className="block text-[12px] font-normal text-ink-2">The safety numbers didn’t match.</span></span></span>}
-      footer={<><button type="button" className={`${BTN} ${RED_TEXT}`} onClick={onRemove}>Remove {first}’s access</button><span className="flex-1" /><button type="button" className={BTN_AMBER} onClick={onCompare}>Compare again</button></>}>
+      footer={<><button type="button" className={`${BTN.replace(" text-ink ", " ")} ${RED_TEXT}`} onClick={onRemove}>Remove {first}’s access</button><span className="flex-1" /><button type="button" className={BTN_AMBER} onClick={onCompare}>Compare again</button></>}>
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg border border-line px-3 py-2"><div className="text-[12px] font-semibold text-ink">What stops</div><div className="text-[12px] text-ink-2">New files, invites and links to {first}.</div></div>
         <div className="rounded-lg border border-line px-3 py-2"><div className="text-[12px] font-semibold text-ink">What stays</div><div className="text-[12px] text-ink-2">What they already have.</div></div>
