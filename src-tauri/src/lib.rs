@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 mod account;
 mod v2_snap; // v2 b03
+mod auth_v2; // v2 b10
 mod account_binding;
 mod account_dto;
 mod api_client;
@@ -224,6 +225,9 @@ mod file_open_commands;
 use file_open_commands::*;
 pub(crate) use file_open_commands::{reject_unsafe_rel_path, is_contained, FreeUpSpaceResult, free_up_space_blocking};
 mod settings_commands;
+mod passkey_commands; // v2 b15
+#[cfg(target_os = "windows")]
+mod passkey_windows; // v2 b15
 use settings_commands::*;
 // Task 2409: the "Not sent" list and its Try again.
 mod unsent_changes_commands;

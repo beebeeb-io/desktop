@@ -73,7 +73,7 @@ const EVENT: &str = "browser-login";
 /// cert-store path) left the UI frozen on "Connecting" forever and the browser
 /// never opened. 15s is generous for a healthy network yet fails fast enough to
 /// show the user an actionable error instead of an infinite spinner.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Hard ceiling on the device-code HANDOFF — sending our public key and
 /// receiving the server's first reply (the `{user_code, verification_uri}`
@@ -117,21 +117,21 @@ fn emit(app: &tauri::AppHandle, phase: &str, payload: serde_json::Value) {
 }
 
 /// Build the `wss://…/api/v1/auth/cli` URL from the engine's API base.
-fn ws_url() -> String {
+pub(crate) fn ws_url() -> String {
     let base = runner::api_base_url();
     let ws = base.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     format!("{ws}/api/v1/auth/cli")
 }
 
 /// This machine's name, if it has one.
-fn device_hostname() -> Option<String> {
+pub(crate) fn device_hostname() -> Option<String> {
     hostname::get().ok().and_then(|h| h.into_string().ok())
 }
 
 /// The version this build reports: `BEEBEEB_RELEASE_VERSION` (set by
 /// release.yml) falling back to the Cargo version for local builds — the same
 /// string `api_client`'s `X-Beebeeb-Client-Version` header carries.
-const CLIENT_VERSION: &str = match option_env!("BEEBEEB_RELEASE_VERSION") {
+pub(crate) const CLIENT_VERSION: &str = match option_env!("BEEBEEB_RELEASE_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
@@ -163,7 +163,7 @@ fn init_frame(pub_key_b64: &str, hostname: Option<String>) -> serde_json::Value 
 /// `IntoClientRequest` is the seam that lets a caller add headers before the
 /// connect. A free function (not inlined into `run_handoff`) so the test below
 /// exercises the IDENTICAL code path `run_handoff` calls, not a re-implementation.
-fn build_ws_request(url: &str) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+pub(crate) fn build_ws_request(url: &str) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     let mut request = url
         .into_client_request()
         .map_err(|e| format!("build WS request: {e}"))?;
@@ -202,7 +202,7 @@ fn build_ws_request(url: &str) -> Result<tokio_tungstenite::tungstenite::handsha
 /// in `catch_unwind` (it is fully synchronous, so this is valid) so a provider
 /// init panic becomes a clean `Err` the caller surfaces as an `error` phase,
 /// instead of a silent infinite spinner.
-fn webpki_rustls_connector() -> Result<Connector, String> {
+pub(crate) fn webpki_rustls_connector() -> Result<Connector, String> {
     std::panic::catch_unwind(|| {
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -623,7 +623,7 @@ fn decrypt_payload(
 }
 
 /// Block until the next text frame, skipping ping/pong control frames.
-async fn recv_text<S>(ws: &mut S) -> Result<String, String>
+pub(crate) async fn recv_text<S>(ws: &mut S) -> Result<String, String>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {

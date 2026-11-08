@@ -17,7 +17,9 @@ pub fn run() {
         .manage(popover_data::PopoverRuntime::default())
         .plugin(tauri_plugin_opener::init())
         // 0.8.15: before any window exists, so its `on_webview_ready` sees every webview (Ctrl+Shift+P printed in 0.8.14).
-        .plugin(webview_browser_keys::plugin());
+        .plugin(webview_browser_keys::plugin())
+        // v2 b10, task 2422: no web view offers to save or fill a password, a phrase or a code.
+        .plugin(crate::auth_v2::webview_autofill::plugin());
     // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
     // review item 5; see `window_state_plugin`).
     #[cfg(not(target_os = "macos"))]
@@ -39,6 +41,8 @@ pub fn run() {
             app_version,
             crate::v2_snap::v2_set_maximize_rect, // v2 b03
             account_v2::account_change_password, account_v2::account_change_email, account_v2::account_verify_email, account_v2::account_set_name, account_v2::account_totp_setup, account_v2::account_totp_confirm, account_v2::account_totp_disable, account_v2::account_totp_abandon, account_v2::account_set_activity_logging, account_v2::account_delete_check_password, account_v2::account_delete_confirm, account_v2::account_delete_cancel, account_v2::account_delete_undo, account_v2::account_display_name, account_v2::account_activity_logging, account_v2::account_save_backup_codes, // v2 b14
+            crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
+            crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
             consume_main_navigation,
             set_pending_setup,
             pending_setup,

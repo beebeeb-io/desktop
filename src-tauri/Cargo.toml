@@ -20,8 +20,6 @@ tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
 # Folder picker for the first-launch sync-root chooser (spec 030 step 2)
 tauri-plugin-dialog = "2"
-# v2 b14: the QR code of the TOTP set-up URI (DW-A69), drawn by the web view from module rows.
-qrcode = { version = "0.14", default-features = false }
 # Native OS notifications — Phase 4 Task 11 of the desktop sync client
 # plan. Used by the daemon to alert the user when a conflict is
 # detected (banner on macOS, toast on Windows, libnotify on Linux).
@@ -143,14 +141,22 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-# 124389a8 = the core v0.2.7 tag: `path_safety::short_name_alias` and `TempSibling` (task 2407).
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
+# b421ffff = core PR #97 (`feat/v2-account-flows`: `account_flows`) on top of #95 (`auth_flow`) and #96
+# (passkeys) on main; pinned by rev until a release is tagged (BATCHES.md crypto rule 0).
+# v2 B10: the QR code on "Sign in with another device" (DW-A07), drawn as SVG in Rust. The same crate and features
+# the CLI already ships (`repos/cli/Cargo.toml`); no default features, so no image dependencies. v2 b14 uses it too:
+# the QR code of the TOTP set-up URI (DW-A69), drawn by the web view from module rows.
+qrcode = { version = "0.14", default-features = false }
+# v2 B10: DW-A24 marks a recovery word that is not in the 2048-word list, in Rust. Already in the tree through core
+# (same 2.x version); a direct dependency only so this crate can name `Language::English`.
+bip39 = { version = "2", default-features = false, features = ["std"] }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -187,6 +193,8 @@ windows = { version = "0.58", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
+    # v2 B15: webauthn.dll (passkey ceremonies with PRF), passkey_windows.rs.
+    "Win32_Networking_WindowsWebServices",
     "Win32_System_Com",
     "Win32_Security_Credentials",
     # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
@@ -290,6 +298,9 @@ windows = { version = "0.58", features = [
     #     fires (the shell's CoCreateInstance hangs on an unserviced message queue).
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    # v2 B10: Windows Hello (UserConsentVerifier + its window interop) before an approval and for the app lock.
+    "Security_Credentials_UI",
+    "Win32_System_WinRT",
 ] }
 
 # Direct dependency on `windows-core` — REQUIRED by the `#[windows::core::implement]`
@@ -329,7 +340,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d3cd77193369e29f85ff7badbc0b506bfdb7d08a", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new
