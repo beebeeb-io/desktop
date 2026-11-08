@@ -182,3 +182,105 @@ fn the_delete_link_commands_need_no_session() {
         );
     }
 }
+
+/// W2 (`v2` did not compile on Windows): a password change ends every other session and mints a new token for this
+/// device. The engine holds the ended token, so it is stopped, the new token is stored and swapped in, and the engine
+/// starts again with it, on every platform. Each platform's start must be one that platform compiles: `v2` called
+/// `start_engine_unless_running` (macOS and Linux only) on Windows too. Windows starts through
+/// `start_engine_if_possible` under the session-transition lock, the way its unlock and sign-in do (the session gate,
+/// its generation and the binding's `OTHER_ACCOUNT_ON_WINDOWS`); macOS and Linux keep the start after a naming.
+#[test]
+fn the_password_change_restarts_the_engine_on_every_platform() {
+    use crate::finder_setup_command_tests::{body_between, production_source, without_items};
+    use crate::source_pin::squeeze;
+    const WINDOWS: &str = "#[cfg(target_os = \"windows\")]";
+    const NOT_WINDOWS: &str = "#[cfg(not(target_os = \"windows\"))]";
+    const MACOS: &str = "#[cfg(target_os = \"macos\")]";
+    const NOT_MACOS: &str = "#[cfg(not(target_os = \"macos\"))]";
+    const LINUX: &str = "#[cfg(target_os = \"linux\")]";
+    const WINDOWS_OR_TEST: &str = "#[cfg(any(target_os = \"windows\", test))]";
+    const UNIX: &str = "#[cfg(unix)]";
+    const NOT_UNIX: &str = "#[cfg(not(unix))]";
+    const TEST: &str = "#[cfg(test)]";
+    const STARTS: [&str; 3] = [
+        "start_engine_unless_running(",
+        "start_engine_if_possible(",
+        "spawn_bound_engine(",
+    ];
+    let source = include_str!("mod.rs").replace("\r\n", "\n");
+    let production = production_source();
+    let after_a_naming = "start_engine_unless_running(app, state.inner()).await";
+    for (platform, left_out, expected) in [
+        (
+            "macOS",
+            &[WINDOWS, NOT_MACOS, LINUX, WINDOWS_OR_TEST, NOT_UNIX, TEST][..],
+            after_a_naming,
+        ),
+        (
+            "Linux",
+            &[WINDOWS, MACOS, WINDOWS_OR_TEST, NOT_UNIX, TEST][..],
+            after_a_naming,
+        ),
+        (
+            "Windows",
+            &[NOT_WINDOWS, MACOS, LINUX, UNIX, TEST][..],
+            "start_engine_if_possible(app, state, &transition).await",
+        ),
+    ] {
+        let compiled = without_items(&source, left_out);
+        let rotate = squeeze(body_between(&compiled, "async fn install_rotated_session(", "\n}\n"));
+        let called: Vec<&str> = STARTS.into_iter().filter(|start| rotate.contains(start)).collect();
+        let count: usize = STARTS.iter().map(|start| rotate.matches(start).count()).sum();
+        assert_eq!(
+            count, 1,
+            "{platform}: one engine start after the swap, found {called:?}:\n{rotate}"
+        );
+        let callee = called[0].trim_end_matches('(');
+        // The start is one this platform builds: the crate root, as this platform compiles it, defines it.
+        let platform_crate = without_items(&production, left_out);
+        assert!(
+            platform_crate.contains(&format!("fn {callee}(")),
+            "{platform}: the password change starts the engine with `{callee}`, which {platform} does not compile"
+        );
+        let started = rotate
+            .find(&squeeze(expected))
+            .unwrap_or_else(|| panic!("{platform}: the start is `{expected}`:\n{rotate}"));
+        let stopped = rotate
+            .find(&squeeze("stop_engine_in_slot(acct, engine).await"))
+            .unwrap_or_else(|| panic!("{platform}: the engine holding the ended token is stopped:\n{rotate}"));
+        let stored = rotate
+            .find(&squeeze(
+                "persist_session_token_to_keychain(&write, acct.id.as_str(), new_token,",
+            ))
+            .unwrap_or_else(|| panic!("{platform}: the new token is stored:\n{rotate}"));
+        let swapped = rotate
+            .find(&squeeze("std::mem::replace(&mut session.token, new_token.to_string())"))
+            .unwrap_or_else(|| panic!("{platform}: the new token is swapped into memory:\n{rotate}"));
+        assert!(
+            stopped < stored && stored < swapped && swapped < started,
+            "{platform}: stop, store, swap, then start:\n{rotate}"
+        );
+        if platform == "Windows" {
+            // One session transition from the stop to the start, as `apply_session` holds it for a sign-in: a Lock or
+            // a sign-out waits for it, and no other start runs between the swap and this one.
+            let transition = rotate
+                .find(&squeeze("let transition = SESSION_TRANSITION.lock().await;"))
+                .unwrap_or_else(|| panic!("Windows: the swap is one session transition:\n{rotate}"));
+            let slot = rotate
+                .find(&squeeze("acct.engine.lock().await"))
+                .expect("the engine slot");
+            assert!(
+                transition < slot,
+                "Windows: the transition is taken before the engine stops:\n{rotate}"
+            );
+        }
+    }
+    // The command reaches it.
+    let command = squeeze(body_between(&source, "async fn account_change_password(", "\n}\n"));
+    assert!(
+        command.contains(&squeeze(
+            "install_rotated_session(app, &state, &acct, &mut turn, &session_token).await"
+        )),
+        "{command}"
+    );
+}
