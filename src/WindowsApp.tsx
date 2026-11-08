@@ -37,14 +37,20 @@ export default function WindowsApp() {
   const [initialTarget] = useState<NavTarget>(() => initialNavTarget())
   const [activeNav, setActiveNav] = useState<NavId>(initialTarget.nav)
   const [notSentFocus, setNotSentFocus] = useState(initialTarget.section === 'not-sent' ? 1 : 0)
+  // Task 2414: the same for Activity › Not downloaded.
+  const [notDownloadedFocus, setNotDownloadedFocus] = useState(initialTarget.section === 'not-downloaded' ? 1 : 0)
   const openTarget = (target: NavTarget) => {
     setActiveNav(target.nav)
     if (target.section === 'not-sent') setNotSentFocus((n) => n + 1)
+    if (target.section === 'not-downloaded') setNotDownloadedFocus((n) => n + 1)
   }
   // A link's focus lasts while Activity stays open: a later visit from the sidebar is Activity as before (the section
   // then shows only while something is not sent, and is not scrolled to).
   useEffect(() => {
-    if (activeNav !== 'activity') setNotSentFocus(0)
+    if (activeNav !== 'activity') {
+      setNotSentFocus(0)
+      setNotDownloadedFocus(0)
+    }
   }, [activeNav])
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
@@ -196,7 +202,7 @@ export default function WindowsApp() {
     switch (activeNav) {
       case 'home':
         return loggedIn ? (
-          <HomeView status={status} usage={usage} storage={storage} onOpenNotSent={() => openTarget({ nav: 'activity', section: 'not-sent' })} />
+          <HomeView status={status} usage={usage} storage={storage} onOpenList={(section) => openTarget({ nav: 'activity', section })} />
         ) : (
           <SignedOutGate onOpenSignIn={openSignIn} />
         )
@@ -215,7 +221,7 @@ export default function WindowsApp() {
       case 'security':
         return <SecurityView />
       case 'activity':
-        return <ActivityView notSentFocus={notSentFocus} onOpenSettings={() => setActiveNav('settings')} />
+        return <ActivityView notSentFocus={notSentFocus} notDownloadedFocus={notDownloadedFocus} onOpenSettings={() => setActiveNav('settings')} />
       case 'bandwidth':
         return <BandwidthView />
       case 'selective-sync':

@@ -9,6 +9,7 @@ import type { SyncStatus } from '../src/desktopApi'
 import {
   gaveUpSentence,
   heldSentence,
+  notDownloadedSentence,
   parseSyncActivitySummary,
   shortDate,
   syncActivityView,
@@ -26,7 +27,7 @@ function summary(patch: Partial<SyncActivitySummary> = {}): SyncActivitySummary 
     files_remaining: null,
     transfers_active: 0,
     last_tick_ok_at: 1_793_000_000,
-    queue: { waiting: 0, gave_up: 0, held: [] },
+    queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 },
     startup_check: null,
     ...patch,
   }
@@ -50,7 +51,7 @@ describe('the summary contract', () => {
       files_remaining: null,
       transfers_active: 0,
       last_tick_ok_at: null,
-      queue: { waiting: 0, gave_up: 43, held: [{ reason: 'auth', count: 2924, oldest_at: 1_791_115_500, newest_at: 1_791_122_220 }] },
+      queue: { waiting: 0, gave_up: 43, held: [{ reason: 'auth', count: 2924, oldest_at: 1_791_115_500, newest_at: 1_791_122_220 }], not_downloaded: 0 },
       startup_check: { done: 12_400, total: 37_169 },
     })
   })
@@ -69,6 +70,9 @@ describe('the summary contract', () => {
       { ...good, queue: { waiting: 0, gave_up: 0 } },
       { ...good, queue: { waiting: 0, gave_up: -2, held: [] } },
       { ...good, queue: { waiting: 0, gave_up: 0, held: [{ reason: 7, count: 1, oldest_at: 0, newest_at: 0 }] } },
+      // Task 2414: the count of a pin's files not downloaded is part of the contract.
+      { ...good, queue: { waiting: 0, gave_up: 0, held: [] } },
+      { ...good, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: -1 } },
       { ...good, startup_check: { done: 1 } },
     ]) {
       expect(parseSyncActivitySummary(bad)).toBeNull()
@@ -375,5 +379,34 @@ describe('task 2409: the lines that count changes not sent', () => {
     const busy = syncActivityView({ ...signedIn, conflicts: 2 }, summary({ engine_state: 'running', startup_check: { done: 1, total: 9 } }), { now })
     expect(busy.notSentLines).toEqual([])
     expect(syncActivityView(null, undefined, { now }).notSentLines).toEqual([])
+  })
+})
+
+describe('task 2414: a pin’s files not downloaded', () => {
+  const failedPin = (n: number, patch: Partial<SyncActivitySummary['queue'] & object> = {}) =>
+    summary({ queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: n, ...patch } })
+
+  test('40 downloads that gave up: never "Up to date"; "Not in sync" with the count, as a not-downloaded line', () => {
+    const view = syncActivityView(signedIn, failedPin(40), { now })
+    expect([view.kind, view.label, view.headline, view.tone]).toEqual(['not_in_sync', 'Not in sync', '40 files not downloaded to this PC.', 'attention'])
+    expect(view.notDownloadedLines).toEqual(['40 files not downloaded to this PC.'])
+    expect(view.notSentLines).toEqual([])
+  })
+
+  test('next to changes not sent it is a detail line of its own, never counted with them', () => {
+    const view = syncActivityView(signedIn, failedPin(1, { gave_up: 43 }), { now })
+    expect(view.headline).toBe(GAVE_UP_LINE)
+    expect(view.details).toEqual(['1 file not downloaded to this PC.'])
+    expect(view.notSentLines).toEqual([GAVE_UP_LINE])
+    expect(view.notDownloadedLines).toEqual(['1 file not downloaded to this PC.'])
+    const syncing = syncActivityView(signedIn, summary({ transfers_active: 2, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 3 } }), { now })
+    expect(syncing.kind).toBe('syncing')
+    expect(syncing.details).toContain('3 files not downloaded to this PC.')
+  })
+
+  test('none: no line; the device word follows the surface', () => {
+    expect(syncActivityView(signedIn, failedPin(0), { now }).notDownloadedLines).toEqual([])
+    expect(syncActivityView(signedIn, failedPin(0), { now }).kind).toBe('up_to_date')
+    expect(notDownloadedSentence(2, 'this device')).toBe('2 files not downloaded to this device.')
   })
 })

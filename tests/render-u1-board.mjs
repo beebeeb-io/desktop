@@ -59,7 +59,7 @@ function shim({ caps, transfers, recent, surface }) {
         case 'sync_status':
           return { logged_in: true, engine: 'running', sync_root: 'C:\\Users\\Fixture\\Beebeeb', syncing: 1, cloud_only: 0, conflicts: 0, session_revision: 1 }
         case 'sync_activity_summary':
-          return { paused: false, engine_state: 'syncing', files_remaining: 1, transfers_active: 1, last_tick_ok_at: Math.floor(Date.now() / 1000) - 5, queue: { waiting: 0, gave_up: 0, held: [] }, startup_check: null }
+          return { paused: false, engine_state: 'syncing', files_remaining: 1, transfers_active: 1, last_tick_ok_at: Math.floor(Date.now() / 1000) - 5, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 }, startup_check: null }
         case 'desktop_config':
           return { theme: 'system', pause_sync: false, local_cache_limit_bytes: 0, upload_kbps_limit: 0, download_kbps_limit: 0, metered: false, files_on_demand: true, sync_overlays: true }
         case 'desktop_storage_summary':

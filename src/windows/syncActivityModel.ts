@@ -35,6 +35,11 @@ export interface QueueHold {
   /** Out of attempts: nothing retries them. */
   gave_up: number
   held: HeldGroup[]
+  /**
+   * Task 2414: downloads a pin queued that are paused or out of attempts: files meant to be on this PC that are not,
+   * and will not be by themselves. Never part of "Not sent" (the three counts above, task 2224).
+   */
+  not_downloaded: number
 }
 
 export interface StartupCheck {
@@ -70,7 +75,7 @@ export function parseSyncActivitySummary(raw: unknown): SyncActivitySummary | nu
   if (!isCount(raw.transfers_active)) return null
   if (!(raw.last_tick_ok_at === null || isNum(raw.last_tick_ok_at))) return null
   const { queue, startup_check: check } = raw
-  if (queue !== null && !(isObj(queue) && isCount(queue.waiting) && isCount(queue.gave_up) && Array.isArray(queue.held) && queue.held.every(isHeldGroup))) return null
+  if (queue !== null && !(isObj(queue) && isCount(queue.waiting) && isCount(queue.gave_up) && Array.isArray(queue.held) && queue.held.every(isHeldGroup) && isCount(queue.not_downloaded))) return null
   if (check !== null && !(isObj(check) && isCount(check.done) && isCount(check.total))) return null
   return raw as unknown as SyncActivitySummary
 }
@@ -135,6 +140,8 @@ export interface SyncActivityView {
    * each as a link to Activity › Not sent, where those changes are listed one by one.
    */
   notSentLines: string[]
+  /** Task 2414: the line that counts a pin's files not downloaded; the tray links it to Activity › Not downloaded. */
+  notDownloadedLines: string[]
 }
 
 export interface SyncActivityOptions {
@@ -218,6 +225,11 @@ export function gaveUpSentence(n: number): string {
   return `${plural(n, 'change', 'changes')} stopped after repeated errors and ${n === 1 ? 'is' : 'are'} not retried.`
 }
 
+/** Task 2414: "2 files not downloaded to this PC." */
+export function notDownloadedSentence(n: number, device = 'this PC'): string {
+  return `${plural(n, 'file', 'files')} not downloaded to ${device}.`
+}
+
 export function waitingSentence(n: number): string {
   return `${plural(n, 'change', 'changes')} waiting to sync.`
 }
@@ -225,7 +237,7 @@ export function waitingSentence(n: number): string {
 /**
  * The view for one `sync_status` and one `sync_activity_summary` (either may be missing). Precedence, highest first:
  * not signed in, session ended, engine refused, paused, startup check, conflicts, moving, offline, error, starting,
- * waiting, not in sync (held or given-up changes), locked, not running, up to date. Whatever is pending and not the
+ * waiting, not in sync (held or given-up changes, or files not downloaded), locked, not running, up to date. Whatever is pending and not the
  * headline is a detail line, so a surface never shows a calm state over a queue that is not empty.
  *
  * `summary` is `undefined` before the first read and `null` when it could not be read. Neither ever ends in "up to
@@ -239,7 +251,14 @@ export function syncActivityView(
   const device = options.device ?? 'this PC'
   const now = options.now ?? new Date()
   const paused = summary?.paused ?? options.pausedFallback ?? false
-  const base = { details: [] as string[], progress: null, pausable: status?.logged_in === true, paused, notSentLines: [] as string[] }
+  const base = {
+    details: [] as string[],
+    progress: null,
+    pausable: status?.logged_in === true,
+    paused,
+    notSentLines: [] as string[],
+    notDownloadedLines: [] as string[],
+  }
 
   if (status == null && summary == null) {
     return summary === undefined
@@ -261,6 +280,10 @@ export function syncActivityView(
   const gaveUpLines = gaveUp > 0 ? [gaveUpSentence(gaveUp)] : []
   const pausedWaitLine = `${plural(waiting, 'change waits', 'changes wait')} until you resume.`
   const notSentLines = [...(waiting > 0 ? [waitingSentence(waiting), pausedWaitLine] : []), ...heldLines, ...gaveUpLines]
+  // Task 2414: a pin's downloads that stopped or are paused. Before 2409 they were in the given-up count; since, they
+  // were counted nowhere and the tray could say "Up to date" over 40 files that never reached this PC.
+  const notDownloaded = queue?.not_downloaded ?? 0
+  const notDownloadedLines = notDownloaded > 0 ? [notDownloadedSentence(notDownloaded, device)] : []
   const moving = summary
     ? summary.transfers_active > 0 || summary.engine_state === 'syncing'
     : (status?.syncing ?? 0) > 0
@@ -280,6 +303,7 @@ export function syncActivityView(
   ): SyncActivityView => ({
     ...base,
     notSentLines,
+    notDownloadedLines,
     kind,
     label,
     headline,
@@ -291,6 +315,7 @@ export function syncActivityView(
       ...(extra.waitingLine !== false && waiting > 0 ? [waitingSentence(waiting)] : []),
       ...heldLines,
       ...gaveUpLines,
+      ...notDownloadedLines,
     ],
   })
 
@@ -333,11 +358,11 @@ export function syncActivityView(
   if (waiting > 0) {
     return pick('waiting', 'Waiting', waitingSentence(waiting), 'busy', { waitingLine: false })
   }
-  if (heldLines.length > 0 || gaveUpLines.length > 0) {
-    const [headline, ...rest] = [...heldLines, ...gaveUpLines]
+  if (heldLines.length > 0 || gaveUpLines.length > 0 || notDownloadedLines.length > 0) {
+    const [headline, ...rest] = [...heldLines, ...gaveUpLines, ...notDownloadedLines]
     // "Not in sync", not "On hold": the engine runs and new changes flow; these changes are simply not synced. "Paused"
     // is only ever a pause the person made (coordinator ruling, 26 Oct). The held sentence is the notice.
-    return { ...base, notSentLines, kind: 'not_in_sync', label: 'Not in sync', headline, details: rest, tone: 'attention' }
+    return { ...base, notSentLines, notDownloadedLines, kind: 'not_in_sync', label: 'Not in sync', headline, details: rest, tone: 'attention' }
   }
   if (status?.engine === 'locked') {
     return pick('locked', 'Locked', 'Beebeeb is locked. Unlock it to sync.', 'neutral')

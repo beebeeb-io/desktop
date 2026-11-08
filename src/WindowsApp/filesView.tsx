@@ -3,6 +3,7 @@
  * toggle and the known-folder backup card. The two window events it dispatches (re-open backup,
  * backup changed) are named here because this view owns that flow.
  */
+import { baseName } from '../pathParts'
 import { useEffect, useState } from 'react'
 import { command, commandUnavailableLabel, formatBytes, loadSyncStatus, desktopFileOverview, getKnownFolderBackup, setKnownFolderBackup, type KnownFolderStatus, type SyncStatus, type FileOverview, type StatusBucket, type RecentFile } from '../desktopApi'
 import { setKnownFolderSource, type KnownFolderSource } from '../knownFolderSource'
@@ -64,11 +65,6 @@ export function statusColor(status: string): string {
   return STATUS_COLOR[status] ?? T.ink3
 }
 
-// basename of a forward- or back-slash path.
-export function baseName(path: string): string {
-  const parts = path.split(/[/\\]/)
-  return parts[parts.length - 1] || path
-}
 
 // Relative time from a Unix-epoch (seconds) timestamp. Coarse on purpose —
 // "just now" / "3m ago" / "2h ago" / "5d ago" / a short date for older.

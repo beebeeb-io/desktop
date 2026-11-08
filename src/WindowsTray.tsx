@@ -52,7 +52,8 @@ import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
 import { pollWhileVisible } from './windows/visiblePoll'
-import { NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'
+import { NOT_DOWNLOADED_TARGET, NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'
+import { baseName } from './pathParts'
 
 // FileGlyph, getFileType, FILE_COLOR imported from ./windows/fileGlyph (shared with ActivityView)
 
@@ -131,12 +132,6 @@ function BrandMark() {
 }
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
-
-/** Last path segment (handles both `/` and `\` separators). */
-function basename(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean)
-  return parts.length ? parts[parts.length - 1] : path
-}
 
 /** The folder a file lives in — the path segment before the basename. */
 function parentFolder(path: string): string {
@@ -314,26 +309,32 @@ export default function WindowsTray() {
     void getCurrentWindow().hide()
   }
 
-  // Task 2409: a waiting, held or given-up line opens Activity › Not sent, where those changes are listed one by one.
-  const openNotSent = async () => {
+  // Task 2409: a waiting, held or given-up line opens Activity › Not sent, where those changes are listed one by one;
+  // task 2414: the not-downloaded line opens Activity › Not downloaded.
+  const openList = async (target: typeof NOT_SENT_TARGET | typeof NOT_DOWNLOADED_TARGET) => {
     try {
-      window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, NOT_SENT_TARGET)
+      window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, target)
     } catch {
       // Best effort only; already-open main windows still receive the Tauri event below.
     }
     await command<void>('show_main_app_window')
-    await emit(WINDOWS_APP_NAV_EVENT, NOT_SENT_TARGET).catch(() => undefined)
+    await emit(WINDOWS_APP_NAV_EVENT, target).catch(() => undefined)
     void getCurrentWindow().hide()
   }
-  /** A status line: a link to Activity › Not sent when it counts changes not sent, plain text otherwise. */
-  const statusLine = (line: string) =>
-    activity.notSentLines.includes(line) ? (
+  /** A status line: a link to the Activity list of what it counts (changes not sent, files not downloaded), else text. */
+  const statusLine = (line: string) => {
+    const list = activity.notSentLines.includes(line)
+      ? { target: NOT_SENT_TARGET, href: '#not-sent', title: 'See which changes' }
+      : activity.notDownloadedLines.includes(line)
+        ? { target: NOT_DOWNLOADED_TARGET, href: '#not-downloaded', title: 'See which files' }
+        : null
+    return list ? (
       <a
-        href="#not-sent"
-        title="See which changes"
+        href={list.href}
+        title={list.title}
         onClick={(event) => {
           event.preventDefault()
-          void openNotSent()
+          void openList(list.target)
         }}
         style={{ color: 'inherit', textDecoration: 'underline', textUnderlineOffset: 2, textDecorationColor: T.ink4 }}
       >
@@ -342,6 +343,7 @@ export default function WindowsTray() {
     ) : (
       line
     )
+  }
 
   const openActivity = async () => {
     try {
@@ -490,7 +492,7 @@ export default function WindowsTray() {
           </div>
         ) : (
           recent.map((file) => {
-            const name = basename(file.path)
+            const name = baseName(file.path)
             const folder = parentFolder(file.path)
             const type = getFileType(name)
             const deleted = file.activity_type === 'moved_to_trash' || file.status === 'moved_to_trash'

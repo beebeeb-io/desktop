@@ -35,7 +35,7 @@ const summary = {
   files_remaining: null,
   transfers_active: 1,
   last_tick_ok_at: now - 20,
-  queue: { waiting: 1, gave_up: 1, held: [{ reason: 'quota', count: 1, oldest_at: now - 3 * 3600, newest_at: now - 3 * 3600 }] },
+  queue: { waiting: 1, gave_up: 1, held: [{ reason: 'quota', count: 1, oldest_at: now - 3 * 3600, newest_at: now - 3 * 3600 }], not_downloaded: 0 },
   startup_check: null,
 }
 const ROW_IDS = ['op-delete', 'op-edit', 'op-new']
@@ -100,7 +100,7 @@ async function open({ surface, viewport, colorScheme = 'light', locked = false, 
     }
   }, {
     caps,
-    summary: allSent ? { ...summary, transfers_active: 0, queue: { waiting: 0, gave_up: 0, held: [] } } : summary,
+    summary: allSent ? { ...summary, transfers_active: 0, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 } } : summary,
     unsent: allSent ? { ...unsent, total: 0, items: [] } : unsent,
     surface,
     locked,
