@@ -1,9 +1,47 @@
 {
-  "_roots": {
-    "DW-0401": { "query": "window=main-app&platform=windows&section=files", "steps": [[{ "verb": "click", "name": "Contract Initlabs.pdf" }]], "declared": "Files with one file selected; the live fixture source has its own files (Contract Initlabs.pdf), the frame the board's (Contract draft.pdf)" },
-    "DW-0601": { "query": "window=main-app&platform=windows&section=photos", "steps": [], "declared": "Photos: the live fixture source has its own photos (Harbour.jpg), the frame the board's (Harbour.heic)" },
-    "DW-1202": { "query": "window=tray&platform=windows", "steps": [], "declared": "the flyout: the live extras source lists its own recent files" },
-    "DW-0801": { "query": "window=main-app&platform=windows&section=search", "steps": [], "declared": "Search: the live section" },
-    "DW-1301": { "query": "window=main-app&platform=windows&section=sync-history", "steps": [], "declared": "Sync history: the live section with the live source's entries" }
+ "_roots": {
+  "DW-0401": {
+   "query": "window=main-app&platform=windows&section=files",
+   "steps": [
+    [
+     {
+      "verb": "click",
+      "name": "Contract Initlabs.pdf"
+     }
+    ]
+   ],
+   "declared": "Files with one file selected; the live fixture source has its own files (Contract Initlabs.pdf), the frame the board's (Contract draft.pdf)"
+  },
+  "DW-0601": {
+   "query": "window=main-app&platform=windows&section=photos",
+   "steps": [],
+   "declared": "Photos: the live fixture source has its own photos (Harbour.jpg), the frame the board's (Harbour.heic)"
+  },
+  "DW-1202": {
+   "query": "window=tray&platform=windows",
+   "steps": [],
+   "declared": "the flyout: the live extras source lists its own recent files"
+  },
+  "DW-0801": {
+   "query": "window=main-app&platform=windows&section=search",
+   "steps": [],
+   "declared": "Search: the live section"
+  },
+  "DW-1301": {
+   "query": "window=main-app&platform=windows&section=sync-history",
+   "steps": [],
+   "declared": "Sync history: the live section with the live source's entries"
   }
+ },
+ "_same": [
+  {
+   "frames": [
+    "DW-0401",
+    "DW-0119",
+    "DW-0481",
+    "DW-1101"
+   ],
+   "why": "the Files view: with or without a selection, the details panel or the drop target; the live source has its own files"
+  }
+ ]
 }

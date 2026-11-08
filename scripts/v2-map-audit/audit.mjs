@@ -83,6 +83,16 @@ if (PLANT) {
   victim.planted = true
 }
 
+// Which window a frame is drawn in: an action whose target is in another window is Tauri's to open.
+const SECTION_WINDOW = {
+  'The notification area: the b and its flyout': 'the tray flyout', 'The b, its menu, and the app menus': 'the tray flyout',
+  'File Explorer': 'File Explorer', 'Install Beebeeb on Windows': 'the installer',
+  'First run': 'sign-in', 'Sign in': 'sign-in', 'Continue as': 'sign-in', 'Another device': 'sign-in', 'Email and password': 'sign-in',
+  'Two-factor and passkeys': 'sign-in', 'Create an account': 'sign-in', 'Forgot password': 'sign-in', 'Before Files: locked, no plan yet': 'sign-in',
+  'First run on Windows': 'first run', 'The first-time guide': 'first run',
+}
+const SECTION_OF = Object.fromEntries(board.map((f) => [f.id, f.section]))
+const windowOf = (id) => SECTION_WINDOW[SECTION_OF[id]] ?? 'the main window'
 const url = (q) => `${BASE}/?${q}`
 const frameUrl = (id) => url(`window=main-app&platform=windows&frame=${id}`)
 
@@ -448,10 +458,13 @@ async function audit(page, a) {
   const score = (id) => {
     const sig = sigs[id]
     const distinct = sig.filter((x) => !pre.has(x))
-    return 0.5 * cover(sig, post) + 0.5 * (distinct.length ? cover(distinct, post) : changed ? 0.5 : 1)
+    // A frame that adds nothing to the starting screen is the starting screen: a weak answer once the screen changed.
+    return 0.5 * cover(sig, post) + 0.5 * (distinct.length ? cover(distinct, post) : changed ? 0.3 : 1)
   }
   const ranked = board.map((f) => ({ id: f.id, s: score(f.id) })).sort((x, y) => y.s - x.s)
-  const targets = new Set(a.to.flatMap((t) => board.filter((f) => family(f.id) === family(t)).map((f) => f.id)))
+  // `_same` (controls.json): frames that are one screen with other data or selection, e.g. the Files view.
+  const sameScreen = (t) => (overrides._same ?? []).find((g) => g.frames.includes(t))?.frames ?? [t]
+  const targets = new Set(a.to.flatMap(sameScreen).flatMap((t) => board.filter((f) => family(f.id) === family(t)).map((f) => f.id)))
   const bestTarget = ranked.find((r) => targets.has(r.id))
   const bestOther = ranked.find((r) => !targets.has(r.id))
   if (bestTarget && bestTarget.s >= 0.6 && bestTarget.s >= bestOther.s - 0.05 && (changed || bestTarget.s >= 0.95)) {
@@ -461,6 +474,8 @@ async function audit(page, a) {
   }
   row.score = bestTarget ? Number(bestTarget.s.toFixed(2)) : 0
   if (cmds.length) return { ...row, outcome: 'command-unsupported', detail: cmds.join(', '), owner: ownerOf(cmds[0]) }
+  const elsewhere = a.to.filter((t) => windowOf(t) !== windowOf(a.source))
+  if (elsewhere.length === a.to.length) return { ...row, outcome: 'not-automatable', detail: `the target is another window (${elsewhere.map((t) => `${t}: ${windowOf(t)}`).join(', ')}); Tauri opens it, a browser cannot` }
   if (!changed) return { ...row, outcome: 'no-effect' }
   if (bestOther.s >= 0.6) return { ...row, outcome: 'wrong-target', reached: bestOther.id, detail: `reached ${bestOther.id} (score ${bestOther.s.toFixed(2)}; target ${row.score})` }
   return { ...row, outcome: 'wrong-target', reached: null, detail: `an unrecognised screen (target score ${row.score}): ${[...post].filter((x) => !pre.has(x)).slice(0, 6).join(' | ')}` }
