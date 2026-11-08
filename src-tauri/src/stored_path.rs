@@ -22,11 +22,13 @@ use beebeeb_core::path_safety::{UnsafeName, check_component_for};
 pub(crate) enum Host {
     /// NTFS: a name of at most 255 UTF-16 units, and the Windows rules.
     Windows,
-    /// APFS: a name of at most 255 UTF-16 units (an emoji counts two), counted on its composed (NFC) form: an `e` and a
-    /// combining acute count as one `é`. Sources: the Apple Developer Forums thread "How to query APFS file name size
-    /// limit? (NAME_MAX is wrong)" (thread 726970; APFS's own format allows longer names, 1022 bytes) for the unit, and
-    /// `task_2413_the_host_length_is_what_this_volume_holds`, which creates the boundary names on the macOS CI runner's
-    /// volume: 128 decomposed `é` (256 units as given) are held there, 256 composed ones are not.
+    /// APFS: a name of at most 255 UTF-16 units (an emoji counts two), counted after macOS composes combining marks onto
+    /// their base: an `e` and a combining acute count as one `é`, while Hangul conjoining jamo count one each
+    /// ([`mac_units`]). Sources: the Apple Developer Forums thread "How to query APFS file name size limit? (NAME_MAX
+    /// is wrong)" (thread 726970; APFS's own format allows longer names, 1022 bytes) for the unit, and
+    /// `task_2413_the_host_length_is_what_this_volume_holds` on the macOS CI runner's volume for the composition: 128
+    /// decomposed `é` (256 units as given) are held there, 256 composed ones are not, and 86 Hangul syllables written
+    /// as conjoining jamo (258 units) are not.
     Mac,
     /// Linux and any other host: a name of at most 255 bytes (ext4, btrfs, tmpfs, XFS).
     Linux,
@@ -49,10 +51,9 @@ impl Host {
 
     /// `Err` when `name` is longer than one name on this host may be, in the host's own unit.
     fn check_length(self, name: &str) -> Result<(), UnsafeName> {
-        use unicode_normalization::UnicodeNormalization as _;
         let too_long = match self {
             Host::Windows => name.encode_utf16().count() > MAX_NAME,
-            Host::Mac => name.nfc().map(char::len_utf16).sum::<usize>() > MAX_NAME,
+            Host::Mac => mac_units(name) > MAX_NAME,
             Host::Linux => name.len() > MAX_NAME,
         };
         match (too_long, self) {
@@ -65,6 +66,16 @@ impl Host {
 
 /// The length limit of one name, in the host's unit ([`Host`]); also core's byte limit.
 const MAX_NAME: usize = beebeeb_core::path_safety::MAX_COMPONENT_BYTES;
+
+/// A name's length as macOS counts it ([`Host::Mac`]): UTF-16 units after combining marks are composed onto their base
+/// (NFC), with Hangul conjoining jamo counted one each, as given. Each stretch between jamo counts the shorter of its
+/// given and its composed form, so composing never makes a name count longer than it is written.
+fn mac_units(name: &str) -> usize {
+    use unicode_normalization::UnicodeNormalization as _;
+    let is_jamo = |c: char| matches!(c, '\u{1100}'..='\u{11ff}' | '\u{a960}'..='\u{a97f}' | '\u{d7b0}'..='\u{d7ff}');
+    let stretch = |text: &str| text.encode_utf16().count().min(text.nfc().map(char::len_utf16).sum());
+    name.split(is_jamo).map(stretch).sum::<usize>() + name.chars().filter(|c| is_jamo(*c)).count()
+}
 
 #[cfg(test)]
 thread_local! {
@@ -422,6 +433,9 @@ mod tests {
             // macOS counts the composed form: 128 decomposed `é` are 256 units as given, 128 composed.
             ("e\u{301}".repeat(128), false, true, false),
             ("e\u{301}".repeat(256), false, false, false),
+            // ... but not Hangul conjoining jamo: 86 syllables as jamo are 258 units there too; 86 composed are 86.
+            ("\u{1112}\u{1161}\u{11ab}".repeat(86), false, false, false),
+            ("\u{d55c}".repeat(86), false, true, true),
         ];
         for (name, linux, mac, windows) in &cases {
             let at = (name.encode_utf16().count(), name.len());
@@ -429,7 +443,7 @@ mod tests {
             assert_eq!(check_name_for(name, Host::Mac).is_ok(), *mac, "{at:?} (units, bytes) on macOS: {name:?}");
             assert_eq!(check_name_for(name, Host::Windows).is_ok(), *windows, "{at:?} (units, bytes) on Windows: {name:?}");
         }
-        assert_eq!(cases.len(), 27);
+        assert_eq!(cases.len(), 29);
         assert_eq!(check_name_for(&format!("{}:x", han(100)), Host::Windows), check_component_for("漢:x", false, true));
     }
 
@@ -503,9 +517,12 @@ mod tests {
             "e\u{301}".repeat(128),
             "e\u{301}".repeat(255),
             "e\u{301}".repeat(256),
-            // Hangul as conjoining jamo (three per syllable), 100 and 86 syllables composed.
+            // Hangul as conjoining jamo (three per syllable: 100 and 86 syllables), and composed.
             "\u{1112}\u{1161}\u{11ab}".repeat(100),
             "\u{1112}\u{1161}\u{11ab}".repeat(86),
+            "\u{1112}\u{1161}\u{11ab}".repeat(85),
+            "\u{d55c}".repeat(255),
+            "\u{d55c}".repeat(256),
         ];
         let mut mismatches = Vec::new();
         for name in &names {
@@ -523,7 +540,7 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{:?}: the volume and the rule differ on\n{}", Host::BUILD, mismatches.join("\n"));
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 25);
     }
 
     /// The walk refuses a link at the root, at a folder on the way and at the destination, and passes plain entries
