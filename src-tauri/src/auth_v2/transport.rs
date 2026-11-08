@@ -27,6 +27,7 @@ pub(crate) async fn send(
         Method::Post => client.post(&url),
         Method::Delete => client.delete(&url),
         Method::Put => client.put(&url),
+        Method::Patch => client.patch(&url),
     };
     if req.auth == RequestAuth::Session {
         let token = session.ok_or_else(|| "locked".to_string())?;

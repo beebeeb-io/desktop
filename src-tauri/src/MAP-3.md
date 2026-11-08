@@ -20,7 +20,7 @@ Modules 94–128, sorted by path.
 | `speedtest_tests.rs` | (no //! header) | — |
 | `staged_payload.rs` | Durable ownership of plaintext copies, including work cancelled before an upload session exists. | — |
 | `startup_session_tests.rs` | (no //! header) | — |
-| `state_db.rs` | SQLite-backed per-file sync state. | RecordedIdentity (3), RetryOutcome (7), UnsentChange (11), UnsentPage (2), OpOrigin (2), NewBackupUpload (12), BackupEnqueue (4), BackupLayout (3), BackupStop (3), BackupPassMark (3), BackupPassRecord (3), BackupStopWrite (5), … (+62 more) |
+| `state_db.rs` | SQLite-backed per-file sync state. | RecordedIdentity (3), RetryOutcome (7), UnsentChange (11), UnsentPage (2), AcceptOutcome (6), BackupEnqueue (4), BackupLayout (3), BackupPassMark (3), BackupPassRecord (3), BackupStop (3), BackupStopWrite (5), BackupUploadOp (11), … (+62 more) |
 | `state_db_purge_tests.rs` | State-db resolution, purge-path and file-versions tests, split out of `tests.rs` (file-size ratchet; moved unchanged). | — |
 | `state_paths.rs` | Where `state.db`, the lock and the device identity live, and the one-way move out of the legacy `.beebeeb` dir. | — |
 | `sync_activity.rs` | What Settings › Sync and the Windows tray popover read to say what sync is doing (0.8.15). | — |

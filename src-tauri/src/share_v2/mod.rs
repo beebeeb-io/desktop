@@ -34,6 +34,9 @@ pub(crate) mod flows;
 pub(crate) mod folder_flows;
 pub(crate) mod reads;
 pub(crate) mod requests;
+pub(crate) mod safety;
+#[cfg(test)]
+mod safety_tests;
 #[cfg(test)]
 mod tests;
 

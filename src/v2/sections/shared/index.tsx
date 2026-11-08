@@ -1,7 +1,7 @@
 // Shared, live: DriveSource.shared() for the lists it can fill; share_list (Rust) for invitations, link expiry,
 // pending and file requests; the share_* and file_request_* commands for every action (sections/shared/api.ts).
 // A command this build lacks shows the honest "isn't available" toast, never invented data.
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
@@ -26,6 +26,7 @@ type Dialog =
   | { kind: 'mismatch'; itemId: string; member: Member; groups: string[] }
   | { kind: 'invite'; itemId: string }
   | { kind: 'key-changed'; itemId: string; member: Member; email: string; canEdit: boolean }
+  | { kind: 'mark-changed'; itemId: string; member: Member }
 
 const EMPTY_LISTS: ShareLists = { invitations: [], links: [], requests: [], pending: [] }
 const days = (label: string) => (label === 'Never' ? null : Number(label.replace(/\D/g, '')) || null)
@@ -44,6 +45,7 @@ export default function Section({ nav }: SectionProps) {
   const [menu, setMenu] = useState<{ kind: RowKind; id: string; x: number; y: number } | null>(null)
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [busy, setBusy] = useState(false)
+  const dismissed = useRef(new Set<string>())
   const now = useMemo(() => new Date(), [])
 
   const load = useCallback(async () => {
@@ -66,7 +68,9 @@ export default function Section({ nav }: SectionProps) {
     const r = await api.sharePeople(itemId)
     if (!r.ok) return toast(r)
     setMembers(r.value)
-    setDialog({ kind: 'people', itemId })
+    // DW-0515: a remembered key no longer matches; nothing new goes to them until the owner chooses.
+    const changed = r.value.find((m) => m.keyChanged && !dismissed.current.has(m.id))
+    setDialog(changed ? { kind: 'mark-changed', itemId, member: changed } : { kind: 'people', itemId })
   }
 
   const pick = async (id: string) => {
@@ -150,6 +154,11 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'password' && <LinkPasswordDialog name={nameOf(d.itemId)} hasPassword={!!links.find((l) => l.id === d.itemId)?.password} onClose={() => setDialog(null)}
         onSave={async (pw) => { setDialog(null); toast(await api.shareLinkUpdate(d.itemId, { password: pw }), pw ? 'Password set' : 'Password removed'); void load() }} />}
       {d?.kind === 'new-request' && <NewRequestDialog folders={['Files', 'Documents', 'Photos']} busy={busy} onCreate={(r) => void createRequest(r)} onClose={() => setDialog(null)} />}
+      {d?.kind === 'mark-changed' && <><PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members} />
+        <KeyChangedAlert member={d.member}
+          onCompare={() => void safety(d.itemId, d.member)}
+          onShareAnyway={async () => { const r = await api.shareForgetCompared(d.member.id); if (!r.ok) return toast(r); await openPeople(d.itemId) }}
+          onCancel={() => { dismissed.current.add(d.member.id); setDialog({ kind: 'people', itemId: d.itemId }) }} /></>}
       {d?.kind === 'people' && <PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members}
         onPerson={(m) => setDialog({ kind: 'person', itemId: d.itemId, member: m })} onInvite={() => setDialog({ kind: 'invite', itemId: d.itemId })} onClose={() => setDialog(null)} />}
       {d?.kind === 'person' && <PersonDialog member={d.member}

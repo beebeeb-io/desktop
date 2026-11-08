@@ -499,8 +499,8 @@ mod tests {
 
     // ── Rule 5: the item's status follows the queue (spec §9.1–§9.2) ──────────
 
-    mod startup_and_accepts;
     mod backup;
+    mod startup_and_accepts;
     mod unsent;
 
     /// A row the server holds at version 1.
@@ -586,7 +586,6 @@ mod tests {
         db.track_staged_payload("/staged/late", None, false).unwrap();
         (dir, db)
     }
-
 }
 
 /// Tasks 1888 + 2226 (spec §4 D1-D4, D8, D14; I1-I4, §5): the reconcile pass against a real database.
@@ -609,6 +608,7 @@ mod landing;
 mod ops;
 mod removals;
 mod schema;
+mod share_marks;
 mod signout;
 mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).
@@ -621,19 +621,29 @@ pub use unsent::{RetryOutcome, UnsentChange, UnsentPage};
 
 mod types;
 use types::*;
-pub use types::{OpOrigin, NewBackupUpload, BackupEnqueue, BackupLayout, BackupStop, BackupPassMark, BackupPassRecord, BackupStopWrite, BackupUploadOp, BackupUploadResume, UploadFinalization, FileStatus, PERMISSION_READ, PERMISSION_WRITE, PERMISSION_SHARE, PERMISSION_OWNER, Namespace, ItemKind, PinState, OperationKind, FpChangeKind, FileChange, PrunedRow, FileEntry, FileContractState, RevokedSharedCache, LocalStatePurge, LocalActivityKind, KeptReason, KeptCopyInput, KeptCopy, LocalActivityEventInput, LocalActivityEvent, TransferActivityInput, TransferActivity, TransferBacklog, PendingOperation, UploadResume, WriteOrigin, FinderWrite, ItemPresentation, WaitingRow, PurgeGuardRead, FinderEnqueue, FinderFolderRow, FinderAccept, RetireParked, FinderAcceptKind, AcceptOutcome, ParkReason, LandingInput, LandingOutcome, SnapshotVersion, ClaimedOp, TookOver, ClaimOutcome, EngineStartRepair, OperationPauseReason, QueueDiagnostics, QueueHold, HeldGroup, TreeRow, BandwidthSample};
+pub use types::{
+    AcceptOutcome, BackupEnqueue, BackupLayout, BackupPassMark, BackupPassRecord, BackupStop, BackupStopWrite,
+    BackupUploadOp, BackupUploadResume, BandwidthSample, ClaimOutcome, ClaimedOp, EngineStartRepair, FileChange,
+    FileContractState, FileEntry, FileStatus, FinderAccept, FinderAcceptKind, FinderEnqueue, FinderFolderRow,
+    FinderWrite, FpChangeKind, HeldGroup, ItemKind, ItemPresentation, KeptCopy, KeptCopyInput, KeptReason,
+    LandingInput, LandingOutcome, LocalActivityEvent, LocalActivityEventInput, LocalActivityKind, LocalStatePurge,
+    Namespace, NewBackupUpload, OpOrigin, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, PinState, PrunedRow, PurgeGuardRead,
+    QueueDiagnostics, QueueHold, RetireParked, RevokedSharedCache, SnapshotVersion, TookOver, TransferActivity,
+    TransferActivityInput, TransferBacklog, TreeRow, UploadFinalization, UploadResume, WaitingRow, WriteOrigin,
+};
 
 mod sql;
 use sql::*;
-pub use sql::{GuardedRow, LOCAL_ACTIVITY_MAX_ROWS, ALIAS_MAX_AGE_SECS, TRANSFER_ACTIVITY_MAX_ROWS, decode_os_state};
-pub(crate) use sql::{page_cache_limit_kib, tree_holds_a_file, is_file_provider_trash};
+pub use sql::{ALIAS_MAX_AGE_SECS, GuardedRow, LOCAL_ACTIVITY_MAX_ROWS, TRANSFER_ACTIVITY_MAX_ROWS, decode_os_state};
+pub(crate) use sql::{is_file_provider_trash, page_cache_limit_kib, tree_holds_a_file};
 
 mod conn;
 use conn::*;
 
 mod error;
-use error::*;
 pub use error::StateDbError;
+use error::*;
 
 mod flags;
 use flags::*;
@@ -643,5 +653,5 @@ use ids::*;
 pub(crate) use ids::{LocalFileId, ServerFileId, VersionId};
 
 mod reconcile;
+pub use reconcile::RECONCILE_UNITS_PER_TX;
 use reconcile::*;
-pub use reconcile::{RECONCILE_UNITS_PER_TX};

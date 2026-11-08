@@ -31,6 +31,8 @@ export const shareLinkUpdate = (itemId: string, change: { expiresDays?: number |
   command<void>('share_link_update', { itemId, expiresDays: change.expiresDays, setExpiry: 'expiresDays' in change, password: change.password ?? null, setPassword: 'password' in change })
 export const shareSafetyNumber = (memberId: string) => command<{ groups: string[] }>('share_safety_number', { memberId })
 export const shareMarkCompared = (memberId: string, matched: boolean) => command<void>('share_mark_compared', { memberId, matched })
+/** DW-0515 Share anyway: accept a changed key; the person reads as not compared again. */
+export const shareForgetCompared = (memberId: string) => command<void>('share_forget_compared', { memberId })
 
 export interface FileRequestInput { title: string; note: string; folderName: string; expiresDays: number | null; maxFiles: number | null; maxBytes: number | null }
 export const fileRequestCreate = (input: FileRequestInput) => command<CopiedLink>('file_request_create', { input })

@@ -68,7 +68,7 @@ export const REQUESTS: FileRequestRow[] = [
 // ── People with access, a person, the safety number ──────────────────────────
 
 export type Access = 'Can view' | 'Can edit'
-export interface Member { id: string; name: string; email: string; you?: boolean; owner?: boolean; access?: Access; invited?: boolean; compared?: boolean; mismatch?: boolean }
+export interface Member { id: string; name: string; email: string; you?: boolean; owner?: boolean; access?: Access; invited?: boolean; compared?: boolean; mismatch?: boolean; keyChanged?: boolean }
 
 export const LISBON = { id: 'sb-lisbon', name: 'Lisbon trip', items: 212 }
 export const LISBON_PEOPLE: Member[] = [

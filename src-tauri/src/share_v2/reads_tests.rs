@@ -12,8 +12,6 @@ fn request_shapes() {
     assert_eq!(claim.path, format!("/api/v1/shares/invites/{ID}/claim"));
     assert_eq!(invite_path(ID, "").unwrap(), format!("/api/v1/shares/invites/{ID}"));
     assert_eq!(invite_path("../x", "/hide"), Err("not-found".to_string()));
-    assert_eq!(permission_body(true), json!({ "permission": "write" }));
-    assert_eq!(permission_body(false), json!({ "permission": "read" }));
 }
 
 #[test]

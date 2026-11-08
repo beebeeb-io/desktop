@@ -214,6 +214,7 @@ async fn drive(mut flow: AccountFlow, token: Option<&str>) -> Result<AccountOutc
                     Method::Post => reqwest::Method::POST,
                     Method::Put => reqwest::Method::PUT,
                     Method::Delete => reqwest::Method::DELETE,
+                    Method::Patch => reqwest::Method::PATCH,
                 };
                 let url = format!("{}{}", base.trim_end_matches('/'), req.path);
                 let mut rb = client.request(method, url).header("X-Beebeeb-Client", "desktop");

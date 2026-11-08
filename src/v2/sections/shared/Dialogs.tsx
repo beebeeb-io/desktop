@@ -198,7 +198,7 @@ export function InviteDialog({ email: initialEmail = '', access: initialAccess =
 export function KeyChangedAlert({ member, onCompare, onShareAnyway, onCancel }: { member: Member; onCompare?: () => void; onShareAnyway?: () => void; onCancel?: () => void }) {
   const first = member.name.split(' ')[0]
   return (
-    <Modal title={`${first}’s key has changed`} onClose={onCancel} width={440}
+    <Modal title={`${first}’s key has changed`} onClose={onCancel} width={520}
       footer={<><button type="button" className={BTN} onClick={onShareAnyway}>Share anyway</button><span className="flex-1" /><button type="button" className={BTN} onClick={onCancel}>Cancel</button><button type="button" className={BTN} onClick={onCompare}>Compare safety numbers</button></>}>
       <p className="m-0">{first} may have set up a new account, or someone may be trying to read what you share. Nothing new goes to {first} until you choose.</p>
     </Modal>
