@@ -13,6 +13,9 @@ pub(crate) mod device;
 pub(crate) mod hello;
 pub(crate) mod phrase;
 pub(crate) mod qr;
+/// v2 b11: create an account, recover one (declared here: lib.rs is not rustfmt-clean on v2).
+#[path = "../signup_v2/mod.rs"]
+pub(crate) mod signup_v2;
 pub(crate) mod transport;
 pub(crate) mod webview_autofill;
 

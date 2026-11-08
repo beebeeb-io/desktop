@@ -150,13 +150,13 @@ qrcode = { version = "0.14", default-features = false }
 # v2 B10: DW-A24 marks a recovery word that is not in the 2048-word list, in Rust. Already in the tree through core
 # (same 2.x version); a direct dependency only so this crate can name `Language::English`.
 bip39 = { version = "2", default-features = false, features = ["std"] }
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -340,7 +340,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "9dde0cdddefd0ed44d825e390f1b522913357501", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

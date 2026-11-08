@@ -24,7 +24,7 @@ export interface SignInFlowProps {
   /** B11 builds recovery (DW-A45); until it is wired, the web page opens. */
   onForgotPassword?: () => void
   /** Start at the sign-in screen instead of first run (a returning person). */
-  startAt?: 'first-run' | 'sign-in'
+  startAt?: 'first-run' | 'sign-in' | 'another-device'
 }
 
 const EMPTY_WORDS = Array.from({ length: 12 }, () => '')
