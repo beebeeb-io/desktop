@@ -22,15 +22,23 @@ use crate::auth_v2::transport;
 pub(super) struct Unlocked {
     session: Zeroizing<String>,
     pub(super) master: MasterKey,
+    /// My account id from the profile cached at sign-in (`/auth/me`), when there is one.
+    pub(super) own_cached: Option<String>,
 }
 
 pub(super) fn unlocked(state: &AppState) -> Answer<Unlocked> {
     let acct = state.active_account().map_err(|_| "signed-out".to_string())?;
+    let own_cached = acct
+        .cached_profile
+        .lock()
+        .ok()
+        .and_then(|p| p.as_ref().map(|p| p.user_id.clone()));
     let guard = acct.session.lock().map_err(|_| "failed".to_string())?;
     let session = guard.as_ref().ok_or_else(|| "locked".to_string())?;
     Ok(Unlocked {
         session: Zeroizing::new(session.token.clone()),
         master: MasterKey::from_bytes(session.master_key),
+        own_cached,
     })
 }
 
@@ -153,8 +161,9 @@ const FOLDER_SHARE_ANYWAY: &str =
     "unsupported: sharing a folder to a changed key needs a folder approval core does not offer yet";
 
 /// Share a file or a folder (`folder_flows`) with a person; `accept_changed_key` is DW-0515's
-/// "Share anyway" after a refused seal. `can_edit` is not sent: web's invite has no permission
-/// field, so neither does this one.
+/// "Share anyway" for the refused invite `member_id` (the id the `key-changed` answer named, so the
+/// key sealed to is the one that dialog was about). `can_edit` is not sent: web's invite has no
+/// permission field, so neither does this one.
 #[tauri::command]
 #[allow(unused_variables)]
 pub(crate) async fn share_invite(
@@ -163,6 +172,7 @@ pub(crate) async fn share_invite(
     email: String,
     can_edit: bool,
     accept_changed_key: bool,
+    member_id: Option<String>,
 ) -> Answer<Value> {
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
@@ -173,8 +183,9 @@ pub(crate) async fn share_invite(
         if folder {
             return Err(FOLDER_SHARE_ANYWAY.into());
         }
+        let member = self::item_id(member_id.as_deref().unwrap_or_default())?;
         let key = file_key(&u.master, &id)?;
-        return super::safety::share_anyway(&u, &own, &sent, &id, &email, &key).await;
+        return super::safety::share_anyway(&u, &own, &sent, &member, &id, &email, &key).await;
     }
     // Core v0.2.8 item 15: every member seal states what this app knows of the person's key. A mark
     // for them is `Compared(its fingerprint)`, and core refuses any other key before a seal byte

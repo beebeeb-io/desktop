@@ -96,8 +96,8 @@ fn a_mark_is_read_against_each_share_key() {
     assert_eq!(trust(Some((&other, MarkKind::NotMatched)), fp, None), Trust::KeyChanged);
     assert_eq!(
         trust(Some((&other, MarkKind::Accepted)), fp, None),
-        Trust::NotCompared,
-        "an accepted key is no reference to differ from"
+        Trust::KeyChanged,
+        "an accepted key still pins: a share sealed to a third key is flagged"
     );
     assert_eq!(
         trust(Some((&other, MarkKind::Matched)), fp, Some(fp)),
@@ -127,20 +127,59 @@ fn the_peer_comes_from_the_sent_invite() {
 }
 
 #[test]
-fn share_anyway_finds_the_claimed_invite_of_this_item_and_address() {
+fn share_anyway_seals_only_the_refused_invite_the_dialog_named() {
     let sent = json!({ "invites": [
-        { "id": INVITE, "file_id": UID_A, "recipient_email": EMAIL, "status": "claimed" },
-        { "id": UID_B, "file_id": UID_A, "recipient_email": "mia@example.com", "status": "approved" },
+        { "id": INVITE, "file_id": FILE, "recipient_email": EMAIL, "status": "claimed" },
+        { "id": INVITE_2, "file_id": FILE, "recipient_email": EMAIL, "status": "claimed" },
+        { "id": INVITE_3, "file_id": FILE, "recipient_email": "mia@example.com", "status": "approved" },
     ]});
+    // Two claimed invites to Jonas for this file: only the named one, never the first found.
     assert_eq!(
-        refused_invite(&sent, UID_A, " Jonas@Northwind.Studio ").unwrap(),
-        INVITE
+        refused_invite(&sent, INVITE_2, FILE, " Jonas@Northwind.Studio ").unwrap(),
+        INVITE_2
     );
+    assert_eq!(refused_invite(&sent, INVITE, FILE, EMAIL).unwrap(), INVITE);
+    for (member, item, email) in [
+        (INVITE_3, FILE, "mia@example.com"),
+        (INVITE, UID_A, EMAIL),
+        (INVITE, FILE, "mia@example.com"),
+        (UID_B, FILE, EMAIL),
+    ] {
+        assert_eq!(
+            refused_invite(&sent, member, item, email),
+            Err("not-found".to_string()),
+            "{member} {item} {email}"
+        );
+    }
+}
+
+#[test]
+fn a_they_match_on_the_offered_key_survives_the_seal() {
+    let (_dir, db) = db();
+    let k2 = key(BOB_PK);
+    // DW-0515 Compare on the refused invite, They match, then the seal of that invite.
+    db.set_share_mark(UID_A, UID_B, &fp_hex(&k2), MarkKind::Matched)
+        .unwrap();
+    record_anyway_in(&db, UID_A, INVITE, &[UID_B.to_string()], &k2).unwrap();
     assert_eq!(
-        refused_invite(&sent, UID_A, "mia@example.com"),
-        Err("not-found".to_string())
+        db.share_mark(UID_A, UID_B).unwrap(),
+        Some((fp_hex(&k2), MarkKind::Matched))
     );
-    assert_eq!(refused_invite(&sent, UID_B, EMAIL), Err("not-found".to_string()));
+    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE), Some(Trust::Compared));
+}
+
+#[test]
+fn stored_keys_are_read_as_exactly_64_hex_digits() {
+    assert_eq!(key_hex(BOB_PK), Some(key(BOB_PK)));
+    for bad in [
+        "+a".repeat(32),
+        format!("{} ", &BOB_PK[..63]),
+        BOB_PK[..62].to_string(),
+        format!("{BOB_PK}00"),
+        "zz".repeat(32),
+    ] {
+        assert_eq!(key_hex(&bad), None, "{bad}");
+    }
 }
 
 #[test]

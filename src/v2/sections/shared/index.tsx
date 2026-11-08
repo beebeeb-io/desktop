@@ -22,7 +22,8 @@ type Dialog =
   | { kind: 'people'; itemId: string }
   | { kind: 'person'; itemId: string; member: Member }
   | { kind: 'remove'; itemId: string; member: Member }
-  | { kind: 'safety'; itemId: string; member: Member; groups: string[] }
+  // `refused`: the comparison is for an invite a changed key stopped (DW-0515); They match then seals it.
+  | { kind: 'safety'; itemId: string; member: Member; groups: string[]; refused?: { email: string; canEdit: boolean } }
   | { kind: 'mismatch'; itemId: string; member: Member; groups: string[] }
   | { kind: 'invite'; itemId: string }
   | { kind: 'key-changed'; itemId: string; member: Member; email: string; canEdit: boolean }
@@ -113,9 +114,9 @@ export default function Section({ nav }: SectionProps) {
     if (res.ok) { setDialog(null); void load() }
   }
 
-  const invite = async (itemId: string, email: string, canEdit: boolean, acceptChangedKey = false) => {
+  const invite = async (itemId: string, email: string, canEdit: boolean, acceptChangedKey = false, memberId: string | null = null) => {
     setBusy(true)
-    const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey)
+    const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey, memberId)
     setBusy(false)
     if (!r.ok) return toast(r)
     if (r.value.status === 'key-changed') {
@@ -125,10 +126,18 @@ export default function Section({ nav }: SectionProps) {
     await openPeople(itemId)
   }
 
-  const safety = async (itemId: string, member: Member) => {
+  const safety = async (itemId: string, member: Member, refused?: { email: string; canEdit: boolean }) => {
     const r = await api.shareSafetyNumber(member.id)
     if (!r.ok) return toast(r)
-    setDialog({ kind: 'safety', itemId, member, groups: r.value.groups })
+    setDialog({ kind: 'safety', itemId, member, groups: r.value.groups, refused })
+  }
+
+  // DW-0515 Cancel on a refused seal: "Shares nothing". The refused invite holds no key; it is withdrawn so it never
+  // waits on the other side as an invitation that cannot open.
+  const withdraw = async (itemId: string, member: Member) => {
+    const r = await api.shareRevoke(itemId, member.id)
+    if (!r.ok) toast(r)
+    await openPeople(itemId)
   }
 
   const go = (t: SharedTab) => nav.go({ section: 'shared', id: null, sub: t })
@@ -168,14 +177,20 @@ export default function Section({ nav }: SectionProps) {
         onRemove={async () => { setBusy(true); const r = await api.shareRevoke(d.itemId, d.member.id); setBusy(false); toast(r); if (r.ok) await openPeople(d.itemId) }}
         onCancel={() => setDialog({ kind: 'person', itemId: d.itemId, member: d.member })} />}
       {d?.kind === 'safety' && <SafetyNumberDialog member={d.member} groups={d.groups}
-        onMatch={async () => { const r = await api.shareMarkCompared(d.member.id, true); toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: { ...d.member, compared: r.ok } }) }}
+        onMatch={async () => {
+          const r = await api.shareMarkCompared(d.member.id, true)
+          // A refused invite is not shared yet: They match seals it now, to the key just compared.
+          if (r.ok && d.refused) return void invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id)
+          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: { ...d.member, compared: r.ok } })
+        }}
         onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: d.member, groups: d.groups }) }}
         onClose={() => setDialog({ kind: 'person', itemId: d.itemId, member: d.member })} />}
       {d?.kind === 'mismatch' && <MismatchDialog member={d.member} groups={d.groups}
         onRemove={() => setDialog({ kind: 'remove', itemId: d.itemId, member: d.member })} onCompare={() => setDialog({ kind: 'safety', itemId: d.itemId, member: d.member, groups: d.groups })} onClose={() => setDialog(null)} />}
       {d?.kind === 'invite' && <InviteDialog busy={busy} onSend={(email, a) => void invite(d.itemId, email, a === 'Can edit')} onClose={() => void openPeople(d.itemId)} />}
       {d?.kind === 'key-changed' && <KeyChangedAlert member={d.member}
-        onCompare={() => void safety(d.itemId, d.member)} onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true)} onCancel={() => void openPeople(d.itemId)} />}
+        onCompare={() => void safety(d.itemId, d.member, { email: d.email, canEdit: d.canEdit })}
+        onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true, d.member.id)} onCancel={() => void withdraw(d.itemId, d.member)} />}
     </>
   )
 }

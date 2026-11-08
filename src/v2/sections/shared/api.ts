@@ -14,8 +14,9 @@ export const shareAccept = (id: string) => command<void>('share_accept', { id })
 export const shareDecline = (id: string) => command<void>('share_decline', { id })
 export const shareLeave = (id: string) => command<void>('share_leave', { id })
 export const sharePeople = (itemId: string) => command<Member[]>('share_people', { itemId })
-export const shareInvite = (itemId: string, email: string, access: Access, acceptChangedKey = false) =>
-  command<InviteOutcome>('share_invite', { itemId, email, canEdit: access === 'Can edit', acceptChangedKey })
+/** `memberId`: with `acceptChangedKey`, the refused invite the `key-changed` answer named (DW-0515 Share anyway seals that one). */
+export const shareInvite = (itemId: string, email: string, access: Access, acceptChangedKey = false, memberId: string | null = null) =>
+  command<InviteOutcome>('share_invite', { itemId, email, canEdit: access === 'Can edit', acceptChangedKey, memberId })
 /** The server's permission for a member (`read` / `add` / `write` / `admin`); the UI offers view and edit. */
 export const shareSetAccess = (itemId: string, memberId: string, access: Access) =>
   command<void>('share_set_access', { itemId, memberId, permission: access === 'Can edit' ? 'write' : 'read' })
@@ -47,11 +48,19 @@ export const fileRequestRemove = (id: string) => command<void>('file_request_rem
 export const deletePermanently = (ids: string[], secret: { password?: string; code?: string }) =>
   command<void>('drive_delete_permanently', { ids, password: secret.password ?? null, code: secret.code ?? null })
 
+/** Rust's specific `unsupported: …` reasons, each with words that say what to do. */
+const UNSUPPORTED_WORDS: [RegExp, string][] = [
+  [/link can't be copied again/, 'This link can’t be copied again in this version of Beebeeb. To share the file by link, stop sharing the link and make a new one.'],
+  [/does not list this person's account id/, 'Safety numbers need a newer server. Nothing was changed.'],
+  [/sealed before this app kept the key/, 'This share was made before Beebeeb kept what it needs for a safety number. Nothing was changed.'],
+  [/sharing a folder to a changed key/, 'Sharing a folder after a key change isn’t available in this version of Beebeeb. Nothing was shared.'],
+]
+
 /** The copy for a failed command: never the host's text. */
 export function failureText(r: CommandResult<unknown>): string {
   if (r.ok) return ''
   if (r.unsupported) return commandUnavailableLabel('')
-  if (/^unsupported/.test(r.reason)) return commandUnavailableLabel('')
+  if (/^unsupported/.test(r.reason)) return UNSUPPORTED_WORDS.find(([re]) => re.test(r.reason))?.[1] ?? commandUnavailableLabel('')
   if (/^offline/.test(r.reason)) return 'You’re offline. Try again when you’re connected.'
   if (/^peer_key_changed/.test(r.reason)) return 'This person’s key has changed. Nothing was shared.'
   if (/^(invalid_credentials|wrong_code)/.test(r.reason)) return 'That didn’t work. Check it and try again.'

@@ -59,6 +59,11 @@ await page.addInitScript(({ invite, plant }) => {
         case 'share_accept_changed_key':
           keyChanged = false
           return null
+        case 'share_revoke':
+        case 'share_mark_compared':
+          return null
+        case 'share_safety_number':
+          return { groups: Array.from({ length: 12 }, () => '12345') }
         case 'share_invite':
           if (plant || a?.acceptChangedKey) return { status: 'shared' }
           return { status: 'key-changed', memberId: invite }
@@ -85,26 +90,58 @@ check('people: "Share anyway"', await page.getByRole('button', { name: 'Share an
 await page.screenshot({ path: join(OUT, PLANT ? 'DW-0515-people-planted.png' : 'DW-0515-people.png') })
 if (!PLANT) await page.getByRole('button', { name: 'Share anyway' }).click()
 await settle()
-const accepted = await calls('share_accept_changed_key')
-check('people: share_accept_changed_key calls', accepted.length, 1)
-check('people: accepted the member', accepted[0]?.args?.memberId ?? null, INVITE)
+const acceptedKey = await calls('share_accept_changed_key')
+check('people: share_accept_changed_key calls', acceptedKey.length, 1)
+check('people: accepted the member', acceptedKey[0]?.args?.memberId ?? null, INVITE)
 check('people: alert gone after Share anyway', await title.count(), 0)
 
-// 2. Invite: the seal is refused (`key-changed`) → DW-0515; Share anyway asks again with acceptChangedKey.
-await page.getByRole('button', { name: 'Invite someone…' }).click()
-await page.getByLabel('Email').fill('jonas@northwind.studio')
-await page.getByRole('button', { name: 'Send invite' }).click()
-await settle()
+// 2. Invite: the seal is refused (`key-changed`) → DW-0515. Every choice names the refused invite.
+const inviteJonas = async () => {
+  await page.getByRole('button', { name: 'Invite someone…' }).click()
+  await page.getByLabel('Email').fill('jonas@northwind.studio')
+  await page.getByRole('button', { name: 'Send invite' }).click()
+  await settle()
+}
+const accepted = async () => (await calls('share_invite')).filter((c) => c.args?.acceptChangedKey === true)
+await inviteJonas()
 check('invite: "’s key has changed"', await title.count(), 1)
 await page.screenshot({ path: join(OUT, PLANT ? 'DW-0515-invite-planted.png' : 'DW-0515-invite.png') })
 const first = await calls('share_invite')
 check('invite: share_invite calls before the choice', first.length, 1)
 check('invite: first call accepts no changed key', first[0]?.args?.acceptChangedKey ?? null, false)
+
+// 2a. Cancel: shares nothing, and the refused invite (it holds no key) is withdrawn.
+if (!PLANT) await page.getByRole('button', { name: 'Cancel' }).click()
+await settle()
+const revoked = await calls('share_revoke')
+check('cancel: share_revoke calls', revoked.length, 1)
+check('cancel: withdrew the refused invite', revoked[0]?.args?.memberId ?? null, INVITE)
+check('cancel: nothing accepted', (await accepted()).length, 0)
+check('cancel: alert gone', await title.count(), 0)
+
+// 2b. Share anyway: seals the named refused invite.
+await inviteJonas()
 if (!PLANT) await page.getByRole('button', { name: 'Share anyway' }).click()
 await settle()
-const all = await calls('share_invite')
-check('invite: Share anyway calls with acceptChangedKey', all.filter((c) => c.args?.acceptChangedKey === true).length, 1)
-check('invite: alert gone after Share anyway', await title.count(), 0)
+const anyway = await accepted()
+check('share anyway: calls with acceptChangedKey', anyway.length, 1)
+check('share anyway: names the refused invite', anyway[0]?.args?.memberId ?? null, INVITE)
+check('share anyway: alert gone', await title.count(), 0)
+
+// 2c. Compare safety numbers, They match: the mark, then the seal of that invite.
+await inviteJonas()
+if (!PLANT) await page.getByRole('button', { name: 'Compare safety numbers' }).click()
+await settle()
+check('compare: 5-digit groups', await page.getByText(/^\d{5}$/).count(), 12)
+await page.screenshot({ path: join(OUT, PLANT ? 'DW-0513-refused-planted.png' : 'DW-0513-refused.png') })
+if (!PLANT) await page.getByRole('button', { name: 'They match' }).click()
+await settle()
+const marked = await calls('share_mark_compared')
+check('compare: share_mark_compared calls', marked.length, 1)
+check('compare: They match', marked[0]?.args?.matched ?? null, true)
+const sealed = await accepted()
+check('compare: then sealed the refused invite', sealed.length, 2)
+check('compare: names the refused invite', sealed[1]?.args?.memberId ?? null, INVITE)
 
 lines.push(`fails=${fails}`)
 writeFileSync(join(OUT, PLANT ? 'shots-planted.log' : 'shots.log'), `${lines.join('\n')}\n`)

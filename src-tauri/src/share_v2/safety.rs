@@ -80,8 +80,6 @@ pub(super) fn trust(mark: Option<(&str, MarkKind)>, share_fp: &str, accepted_for
             MarkKind::NotMatched => Trust::Mismatch,
             MarkKind::Accepted => Trust::NotCompared,
         },
-        // An accepted, never compared key is no reference a share could differ from.
-        Some((_, MarkKind::Accepted)) => Trust::NotCompared,
         Some(_) if accepted_for_share == Some(share_fp) => Trust::NotCompared,
         Some(_) => Trust::KeyChanged,
     }
@@ -115,13 +113,21 @@ pub(super) fn set_access_request(member_id: &str, permission: &str) -> Answer<Ht
     access::set_member_access_request(&item_id(member_id)?, permission).map_err(|_| "not-found".to_string())
 }
 
-/// My account id (`/auth/me`). My sharing key is derived inside core from the master key.
+/// My account id: from the profile cached at sign-in, else `/auth/me`. My sharing key is derived
+/// inside core from the master key.
 pub(super) async fn own_id(u: &Unlocked) -> Answer<String> {
+    if let Some(id) = u.own_cached.as_deref().and_then(|id| item_id(id).ok()) {
+        return Ok(id);
+    }
     let me = fetch(u, ME).await?;
     item_id(me.get("user_id").and_then(Value::as_str).ok_or("failed")?)
 }
 
-fn key_hex(hex_str: &str) -> Option<[u8; 32]> {
+/// 32 bytes from exactly 64 hex digits; anything else (a sign, a space, another length) is `None`.
+pub(super) fn key_hex(hex_str: &str) -> Option<[u8; 32]> {
+    if hex_str.len() != 64 || !hex_str.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let bytes: Vec<u8> = (0..hex_str.len())
         .step_by(2)
         .map(|i| hex_str.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok()))
@@ -233,16 +239,19 @@ pub(super) fn record_outcome(own: &str, outcome: &InviteOutcome) -> Answer<Value
     record_outcome_in(&state_db()?, own, outcome)
 }
 
-/// The claimed invite of `item` to `email` that a changed key stopped.
-pub(super) fn refused_invite(sent: &Value, item: &str, email: &str) -> Answer<String> {
+/// The refused invite `member` the `key-changed` answer named, checked against my sent list: a
+/// claimed invite of `item` to `email`. Never a search: with several claimed invites to the same
+/// person, only the one the dialog was about may be sealed.
+pub(super) fn refused_invite(sent: &Value, member: &str, item: &str, email: &str) -> Answer<String> {
     let email = email.trim().to_lowercase();
     list(sent, "invites")
         .find(|i| {
-            i.get("file_id")
-                .and_then(Value::as_str)
-                .and_then(|f| item_id(f).ok())
-                .as_deref()
-                == Some(item)
+            i.get("id").and_then(Value::as_str) == Some(member)
+                && i.get("file_id")
+                    .and_then(Value::as_str)
+                    .and_then(|f| item_id(f).ok())
+                    .as_deref()
+                    == Some(item)
                 && i.get("recipient_email")
                     .and_then(Value::as_str)
                     .map(str::to_lowercase)
@@ -278,7 +287,8 @@ pub(super) fn anyway_seal(
 /// After "Share anyway" went through: the share's sealed key, and the mark of every account id the
 /// address names (`peers`, see [`peers_for_email`]) pinned to the accepted key's fingerprint
 /// ([`MarkKind::Accepted`]), so the next seal to the person refuses another key, and an older
-/// account id's mark can never stop every later share again.
+/// account id's mark can never stop every later share again. A "They match" mark on that same key
+/// (DW-0515 Compare, then the seal) stays `Matched`.
 pub(super) fn record_anyway_in(
     db: &StateDb,
     own: &str,
@@ -290,23 +300,29 @@ pub(super) fn record_anyway_in(
         .map_err(|_| "failed".to_string())?;
     let fp = hex(&safety::key_fingerprint(sealed_to).map_err(flow_reason)?);
     for peer in peers {
+        let current = db.share_mark(own, peer).map_err(|_| "failed".to_string())?;
+        if current.as_ref() == Some(&(fp.clone(), MarkKind::Matched)) {
+            continue;
+        }
         db.set_share_mark(own, peer, &fp, MarkKind::Accepted)
             .map_err(|_| "failed".to_string())?;
     }
     Ok(())
 }
 
-/// DW-0515 "Share anyway" for a file: seal to the key the user was shown (see [`anyway_seal`]),
-/// then pin the mark to it. `own` and `sent` are the ones `share_invite` already read.
+/// DW-0515 "Share anyway" for a file: seal the refused invite `member` to the key the user was
+/// shown (see [`anyway_seal`]), then pin the mark to it. `own` and `sent` are the ones
+/// `share_invite` already read.
 pub(super) async fn share_anyway(
     u: &Unlocked,
     own: &str,
     sent: &Value,
+    member: &str,
     item: &str,
     email: &str,
     key: &FileKey,
 ) -> Answer<Value> {
-    let invite = refused_invite(sent, item, email)?;
+    let invite = refused_invite(sent, member, item, email)?;
     let db = state_db()?;
     let carried = db
         .share_offered_key(own, &invite)
