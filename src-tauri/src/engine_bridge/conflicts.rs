@@ -601,19 +601,26 @@ impl EngineBridge {
     }
 }
 
-/// Task 2407: move `from` to `to`, never over anything `to` reaches (`AlreadyExists`), through [`move_no_replace`]
-/// (Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, which also refuses another entry's 8.3 short name;
-/// elsewhere a hard link, then the old name is removed). Off Windows, a volume without hard links refuses a taken name
-/// and then renames, as before this task.
+/// Task 2407: move `from` to `to`, never over anything `to` reaches (`AlreadyExists`). Windows: [`move_no_replace`]
+/// (`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, which also refuses another entry's 8.3 short name). Elsewhere: a
+/// hard link, then the old name is removed ([`super::fs::remove_after_link`]: when that fails, the link is removed again
+/// and its error returned). Only a volume without hard links falls back: a taken name is refused, then a rename, as
+/// before this task.
+#[cfg(target_os = "windows")]
 fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
-    match move_no_replace(from, to) {
-        #[cfg(not(target_os = "windows"))]
-        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+    move_no_replace(from, to)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => super::fs::remove_after_link(from, to),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Err(_) => {
             if std::fs::symlink_metadata(to).is_ok() {
                 return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the conflict copy's name is taken"));
             }
             std::fs::rename(from, to)
         }
-        result => result,
     }
 }

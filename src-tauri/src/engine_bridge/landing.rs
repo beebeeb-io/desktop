@@ -747,8 +747,11 @@ pub(crate) fn remove_pruned_entry(
 /// and its name, or `~$` and its name without the first two characters) goes too: it belongs to
 /// that file, and would keep its folder. No other file is touched: names the sync folder ignores
 /// are never synced, so they would be lost for good.
+///
+/// Task 2407 (core 2404): each owner name is checked from `sync_root`, every folder on the way included, so a name
+/// that reaches a different file or folder (a Windows 8.3 short name) never removes that one's owner file.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-pub(super) fn remove_office_owner_files(original: &Path) {
+pub(super) fn remove_office_owner_files(sync_root: &Path, original: &Path) {
     let (Some(dir), Some(name)) = (original.parent(), original.file_name().and_then(|n| n.to_str())) else {
         return;
     };
@@ -758,8 +761,7 @@ pub(super) fn remove_office_owner_files(original: &Path) {
     }
     for owner in owners {
         let path = dir.join(owner);
-        // Task 2407 (core 2404): never another file the owner name reaches (a Windows 8.3 short name).
-        if !matches!(crate::name_alias::conflict_below(dir, &path), Ok(None)) {
+        if !matches!(crate::name_alias::conflict_below(sync_root, &path), Ok(None)) {
             continue;
         }
         if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
@@ -938,11 +940,11 @@ pub(super) fn remove_pruned_entries(
         let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
         let kind = if row.is_dir { RemovedKind::Dir } else { RemovedKind::File };
         match remove_pruned_entry(sync_root, &path, kind, agreed, state, &copy_dir) {
-            PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(&path),
+            PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(sync_root, &path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
             PrunedEntry::KeptCopy { copy, copied_hash, removal } => {
                 if removal.is_removed() {
-                    remove_office_owner_files(&path);
+                    remove_office_owner_files(sync_root, &path);
                 }
                 // Zero-knowledge: never log the path, only the file_id.
                 tracing::warn!(
@@ -1042,12 +1044,12 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
         match remove_pruned_entry(sync_root, &original, RemovedKind::File, agreed, local(&original, agreed.is_some()), &copy_dir) {
             PrunedEntry::Removed | PrunedEntry::Gone => {
-                remove_office_owner_files(&original);
+                remove_office_owner_files(sync_root, &original);
                 resolve(&copy);
             }
             PrunedEntry::KeptCopy { copy: new_copy, copied_hash, removal } => {
                 if removal.is_removed() {
-                    remove_office_owner_files(&original);
+                    remove_office_owner_files(sync_root, &original);
                 }
                 // Changed since (or wholly on disk now, with changes): a new change, in the same entry.
                 record_kept_copy(

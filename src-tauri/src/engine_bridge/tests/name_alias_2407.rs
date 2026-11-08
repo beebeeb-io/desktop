@@ -106,7 +106,7 @@ fn an_office_owner_file_an_alias_reaches_is_never_removed() {
     let owner = dir.path().join("~$REPO~1.DOC");
     std::fs::write(&owner, b"another document's owner file").unwrap();
     let _alias = stub::alias(&owner);
-    landing::remove_office_owner_files(&dir.path().join("REPO~1.DOC"));
+    landing::remove_office_owner_files(dir.path(), &dir.path().join("REPO~1.DOC"));
     assert!(owner.is_file(), "the owner file the name reaches is untouched");
 }
 

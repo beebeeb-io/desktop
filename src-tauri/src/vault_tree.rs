@@ -105,6 +105,8 @@ pub(super) fn dehydrate_excluded_subtrees_windows(
                 continue;
             }
         }
+        // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
+        // follow it to that file's long name). A check that cannot finish keeps the file local.
         let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &entry.path) else {
             continue;
         };

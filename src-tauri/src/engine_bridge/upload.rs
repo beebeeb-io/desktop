@@ -791,13 +791,16 @@ impl EngineBridge {
             }
             rel = sibling_path(&entry.path, &edited_sibling_name(&current, n));
         }
-        let source = op
-            .payload_path
-            .as_deref()
-            .map(Path::new)
-            .filter(|path| path.is_file())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| local_file_path_under_sync_root(sync_root, &entry.path).unwrap_or_default());
+        let source = match op.payload_path.as_deref().map(Path::new).filter(|path| path.is_file()) {
+            Some(staged) => staged.to_path_buf(),
+            None => {
+                // Task 2407 (core 2404): the row's own file only, never a different one its name reaches (a Windows
+                // 8.3 short name), whose bytes would be copied and uploaded.
+                let source = local_file_path_under_sync_root(sync_root, &entry.path)?;
+                crate::name_alias::refuse_conflict_below(sync_root, &source)?;
+                source
+            }
+        };
         let dest = local_file_path_under_sync_root(sync_root, &rel)?;
         // Task 2407 (core 2404): the copy goes beside the request row, never into a different folder that a folder's
         // name reaches (a Windows 8.3 short name). It is written to an exclusive temp sibling, then published without

@@ -162,7 +162,7 @@ fn an_office_owner_file_a_short_name_reaches_is_never_removed() {
         eprintln!("skipped: the volume named the owner file {short}, which no document's owner name can be");
         return;
     };
-    landing::remove_office_owner_files(&dir.path().join(original));
+    landing::remove_office_owner_files(dir.path(), &dir.path().join(original));
     assert!(
         dir.path().join("~$Report for 2026.docx").is_file(),
         "the owner file the name reaches is untouched"
