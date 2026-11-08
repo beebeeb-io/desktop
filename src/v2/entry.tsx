@@ -1,6 +1,10 @@
 // Desktop v2's entry, loaded on demand by src/main.tsx so its CSS (Tailwind, the board's tokens) never
 // reaches a window that is still on the legacy stylesheet.
 import './v2.css'
+import Main from './V2App'
+import Tray from './tray'
+import Onboarding from './onboarding'
+import { withLiveState } from './live'
 
 /** The desktop theme sets data-theme on <html>; the shared tokens switch on `.dark`. `?theme=` overrides it for screenshots. */
 export function followTheme(root: HTMLElement = document.documentElement): void {
@@ -11,6 +15,7 @@ export function followTheme(root: HTMLElement = document.documentElement): void 
   if (!forced) new MutationObserver(apply).observe(root, { attributes: true, attributeFilter: ['data-theme'] })
 }
 
-export { default as V2App } from './V2App'
-export { default as TrayApp } from './tray'
-export { default as OnboardingApp } from './onboarding'
+// Each window passes the live state route's door (./live.tsx): a no-op outside the dev server.
+export const V2App = withLiveState(Main, 'main-app')
+export const TrayApp = withLiveState(Tray, 'tray')
+export const OnboardingApp = withLiveState(Onboarding, 'onboarding')

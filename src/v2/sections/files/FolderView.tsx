@@ -5,6 +5,7 @@ import { EmptyFiles, GettingReadyStrip, NeedsConnection } from '../../chrome/Emp
 import { backupMetaFor, uploadSummary, useLiveFolderExtras } from './liveExtras'
 import { showToast } from '../../chrome/Toast'
 import { uploadDroppedPaths } from '../../source/desktop'
+import { hasTauri } from '../../source'
 import { setSyncPaused } from '../../../desktopApi'
 import { useCommand } from '../../shortcuts'
 import type { Navigation } from '../../routes'
@@ -38,8 +39,6 @@ function words(e: unknown, fallback = 'That didn’t work. Try again.'): string 
   if (code === 'quota') return 'Not enough space.'
   return fallback
 }
-
-const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'backups' }) {
   const source = useDriveSource()
@@ -293,7 +292,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
 
   // Drops from File Explorer: the window's native drag-drop event carries the paths (a browser File has none).
   useEffect(() => {
-    if (!isTauri()) return
+    if (!hasTauri()) return
     let off: (() => void) | undefined
     let gone = false
     const hit = (pos: { x: number; y: number }): DriveItem | undefined => {

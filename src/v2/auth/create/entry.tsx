@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { SignInFlow } from '../index'
 import { ForgotPasswordFlow } from '../forgot'
 import { CreateAccountFlow } from './index'
+import { seed } from '../../seed'
 
 type Mode = { kind: 'sign-in'; startAt: 'first-run' | 'sign-in' | 'another-device' } | { kind: 'create' } | { kind: 'forgot' }
 
@@ -13,7 +14,7 @@ export function AccountEntry({ onSignedIn, onCreated, startAt = 'first-run' }: {
   onCreated: () => void
   startAt?: 'first-run' | 'sign-in'
 }) {
-  const [mode, setMode] = useState<Mode>({ kind: 'sign-in', startAt })
+  const [mode, setMode] = useState<Mode>(() => seed('entry.mode', { kind: 'sign-in', startAt }))
   const signIn = (at: 'first-run' | 'sign-in' | 'another-device' = 'sign-in') => setMode({ kind: 'sign-in', startAt: at })
   if (mode.kind === 'create') return <CreateAccountFlow onBack={() => signIn('first-run')} onCreated={onCreated} onSignIn={() => signIn()} />
   if (mode.kind === 'forgot') {

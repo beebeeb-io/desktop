@@ -17,7 +17,7 @@ function Wrap({ children, routes }: { children?: ReactNode; routes: Record<strin
   )
 }
 
-const wrap = (el: ComponentType, routes: Record<string, PaneId>): ComponentType => () => createElement(Wrap, { routes }, createElement(el))
+const wrap = (el: ComponentType<object>, routes: Record<string, PaneId>): ComponentType<object> => (props: object) => createElement(Wrap, { routes }, createElement(el, props))
 export const InterceptLinks = {
   general: wrap(General as ComponentType, { 'sub=diagnostics': 'diagnostics' }),
   notifications: wrap(Notifications as ComponentType, { 'recent=1': 'recent' }),

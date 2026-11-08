@@ -9,6 +9,7 @@ import { pollWhileVisible } from '../../windows/visiblePoll'
 import { Flyout, type FlyoutHandlers } from './Flyout'
 import { flyoutView, RECENT_LIMIT, type FlyoutCommand, type FlyoutExtras } from './model'
 import { pickExtras, type DriveStatus } from '../source/extras'
+import { hasTauri } from '../source'
 
 /** The engine fields the snapshot lacks (B02b's drive_status). Absent stays absent: the flyout leaves that part out. */
 export function extrasFromStatus(status: DriveStatus | null): FlyoutExtras {
@@ -22,7 +23,7 @@ export function extrasFromStatus(status: DriveStatus | null): FlyoutExtras {
 const openLink = (url: string) => command<void>('plugin:opener|open_url', { url })
 
 async function hideFlyout(): Promise<void> {
-  if (!('__TAURI_INTERNALS__' in window)) return
+  if (!hasTauri()) return
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   await getCurrentWindow().hide()
 }
@@ -69,7 +70,7 @@ export default function TrayApp() {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') void hideFlyout() }
     window.addEventListener('keydown', onKey)
     let unlisten: (() => void) | undefined
-    if ('__TAURI_INTERNALS__' in window) {
+    if (hasTauri()) {
       void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
         unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => { if (!focused) void getCurrentWindow().hide() })
       })

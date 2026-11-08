@@ -5,6 +5,7 @@ import { command, openUrl } from '../../../desktopApi'
 import * as api from './api'
 import { emailErrorText, NEW_CODE_LINE, TICKET_EXPIRED, type CreateStep } from './model'
 import { ConfirmStep, CreatingStep, DeviceStep, DoneStep, EmailStep, PasswordStep, PhraseStep, TermsStep, useCountdown, VerifyStep } from './views'
+import { seed } from '../../seed'
 
 const TERMS = 'https://beebeeb.io/terms'
 const PRIVACY = 'https://beebeeb.io/privacy'
@@ -19,32 +20,32 @@ export interface CreateAccountFlowProps {
 }
 
 export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccountFlowProps) {
-  const [step, setStep] = useState<CreateStep>('email')
+  const [step, setStep] = useState<CreateStep>(() => seed('create.step', 'email'))
   const [policy, setPolicy] = useState<api.SignupPolicyView | null>(null)
   const [email, setEmail] = useState('')
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the board ties DW-A31's error to the Email field
   const [emailError, setEmailError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [code, setCode] = useState('')
+  const [code, setCode] = useState(() => seed('create.code', ''))
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A33: the error is tied to the code field and gates Verify
-  const [codeState, setCodeState] = useState<'idle' | 'verifying' | 'wrong' | 'too-many'>('idle')
-  const [notice, setNotice] = useState<{ tone: 'neutral' | 'red'; text: string } | null>(null)
+  const [codeState, setCodeState] = useState<'idle' | 'verifying' | 'wrong' | 'too-many'>(() => seed('create.codeState', 'idle'))
+  const [notice, setNotice] = useState<{ tone: 'neutral' | 'red'; text: string } | null>(() => seed('create.notice', null))
   const [sentAt, setSentAt] = useState(0)
-  const [terms, setTerms] = useState({ accepted: false, understood: false })
-  const [pw, setPw] = useState({ password: '', confirm: '', show: false })
-  const [meter, setMeter] = useState<api.PasswordMeter | null>(null)
-  const [breach, setBreach] = useState<'breached' | 'blocked' | null>(null)
-  const [words, setWords] = useState<string[]>([])
+  const [terms, setTerms] = useState(() => seed('create.terms', { accepted: false, understood: false }))
+  const [pw, setPw] = useState(() => seed('create.pw', { password: '', confirm: '', show: false }))
+  const [meter, setMeter] = useState<api.PasswordMeter | null>(() => seed('create.meter', null))
+  const [breach, setBreach] = useState<'breached' | 'blocked' | null>(() => seed('create.breach', null))
+  const [words, setWords] = useState<string[]>(() => seed('create.words', []))
   const [saved, setSaved] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [positions, setPositions] = useState<number[]>([])
-  const [answers, setAnswers] = useState<string[]>([])
-  const [active, setActive] = useState(0)
-  const [suggestions, setSuggestions] = useState<string[]>([])
-  const [wrongWords, setWrongWords] = useState(false)
+  const [positions, setPositions] = useState<number[]>(() => seed('create.positions', []))
+  const [answers, setAnswers] = useState<string[]>(() => seed('create.answers', []))
+  const [active, setActive] = useState(() => seed('create.active', 0))
+  const [suggestions, setSuggestions] = useState<string[]>(() => seed('create.suggestions', []))
+  const [wrongWords, setWrongWords] = useState(() => seed('create.wrongWords', false))
   const [device, setDevice] = useState('')
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A43: the failure replaces the progress screen and gates the way on
-  const [problem, setProblem] = useState<'failed' | 'finish-failed' | null>(null)
+  const [problem, setProblem] = useState<'failed' | 'finish-failed' | null>(() => seed('create.problem', null))
   /** Where a verified code leads: Terms, or straight back to creating after DW-A43's expired code. */
   const [afterVerify, setAfterVerify] = useState<CreateStep>('terms')
   const secondsLeft = useCountdown(policy?.resend_after_secs ?? 60, sentAt)

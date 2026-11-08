@@ -1,22 +1,26 @@
 #!/usr/bin/env bun
-// The desktop v2 action map audit (batch M1). For every action on the board (frames.json → Windows.frames[].notes.Actions)
-// it opens the source frame in the running dev server, finds the control the action names, triggers it and records what
-// happened: ok, missing-control, no-effect, wrong-target, command-unsupported or not-automatable.
+// The desktop v2 action map audit (batch M1; M2 opens every source frame live). For every action on the board
+// (frames.json → Windows.frames[].notes.Actions) it opens the source frame's state in the running dev server, finds the
+// control the action names, triggers it and records what happened: ok, missing-control, no-effect, wrong-target,
+// command-unsupported, not-automatable or source-unreached.
 //
 // Usage (the dev server must be running):
-//   bun scripts/v2-map-audit/audit.mjs --base http://localhost:5221 --out <dir> [--only DW-0401,DW-0402] [--plant] [--workers 4]
+//   bun scripts/v2-map-audit/audit.mjs --base http://localhost:5225 --out <dir> [--only DW-0401,DW-0402] [--plant] [--workers 4]
+//     [--before <an earlier map-audit.json>]   the report then shows before → after, in total and per batch
 //
-// How a screen is recognised: every frame is rendered once through the frame registry (?frame=DW-xxxx) and reduced to a
-// signature: its headings, dialog names, menu items, button and link names, selected/pressed/current controls and its
-// data-screen / data-frame markers. After an action, the live page's signature is compared with the target frame's.
+// How a screen is recognised: every frame is rendered once through the frame registry (?frame=DW-xxxx), the board's
+// drawing of that screen, and reduced to a signature: its headings, dialog names, menu items, button and link names,
+// selected/pressed/current controls and its data-screen / data-frame markers. After an action, the live page's
+// signature is compared with the target frame's.
 //
-// How a source frame is opened: the sections' own routes (?section=…, ?sub=…, the tray and first-run windows) are the
-// live roots. A frame reached by an `ok` action from a live frame is opened the same way (the root, then the recorded
-// steps), so most rows run in the live app. A frame no live path reaches yet falls back to its registry renderer, which
-// mounts the same section components at an initial state; the row says which (`entry`).
+// How a source frame is opened (M2): through the live state route, `?window=main-app&platform=windows&state=DW-xxxx`,
+// which mounts the REAL window and drives it into that frame's state from the one fixture set (src/v2/dev/). The frame
+// renderer is never used to open a source: its components get fixed props and no handlers, so it says nothing about
+// the wiring. A frame Windows draws (a picker, the tray menu, File Explorer, the installer) is not automatable; a state
+// whose recipe step found no control is source-unreached; a state the live app cannot fully draw carries its gap.
 //
 // --plant replaces one action's control name with a label that exists nowhere, and the run fails unless that row comes
-// back missing-control: the check proves it can fail before its oks are trusted.
+// back missing-control from a live state: the check proves it can fail before its oks are trusted.
 
 import { chromium } from 'playwright'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -31,10 +35,10 @@ const args = Object.fromEntries(
   }, []),
 )
 const WORKSPACE = process.env.BB_WORKSPACE ?? join(process.env.HOME ?? '', 'code/beebeeb.io')
-const BASE = args.base ?? 'http://localhost:5221'
+const BASE = args.base ?? 'http://localhost:5225'
 const BOARD = args.board ?? join(WORKSPACE, 'design/desktop-v2/frames.json')
 const BATCHES = args.batches ?? join(WORKSPACE, 'design/desktop-v2/BATCHES.md')
-const OUT = args.out ?? join(WORKSPACE, '.claude/tasks/verification-evidence/desktop-v2/m1')
+const OUT = args.out ?? join(WORKSPACE, '.claude/tasks/verification-evidence/desktop-v2/m2')
 const ONLY = args.only ? new Set(args.only.split(',')) : null
 const WORKERS = Number(args.workers ?? 4)
 const PLANT = args.plant === 'true'
@@ -216,13 +220,17 @@ function planFor(action) {
 const ROLES = ['button', 'link', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'tab', 'switch', 'checkbox', 'radio', 'option', 'treeitem', 'row', 'gridcell', 'textbox', 'combobox', 'searchbox', 'listitem']
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+/** The first visible match that takes input; a disabled one only when no other is there (so it can be reported). */
 async function firstVisible(locator) {
   const n = Math.min(await locator.count().catch(() => 0), 12)
+  let disabled = null
   for (let i = 0; i < n; i++) {
     const l = locator.nth(i)
-    if (await l.isVisible().catch(() => false)) return l
+    if (!(await l.isVisible().catch(() => false))) continue
+    if (await l.isEnabled().catch(() => true)) return l
+    disabled ??= l
   }
-  return null
+  return disabled
 }
 
 async function findControl(page, p) {
@@ -234,27 +242,58 @@ async function findControl(page, p) {
   return null
 }
 
+const GENERIC_ROWS = '[role=row]:not(:has([role=columnheader])),[role=option],[role=gridcell],[role=treeitem],[data-row],[data-tile],[data-person],tbody tr,[role=listitem]'
+
+/**
+ * Where a person looks for a control: an open menu, then an open dialog, then the window behind them (M2: M1 searched
+ * the whole page, so "Share…" in a file menu could match the sidebar's "Shared" link behind it). Exact names first in
+ * every scope, then loose ones; a generic row prefers the selected one.
+ */
 async function findOnce(page, p) {
+  const scopes = []
+  for (const sel of ['[role=menu]', '[role=alertdialog]', '[role=dialog]']) {
+    const l = page.locator(sel).last()
+    if ((await l.count().catch(() => 0)) && (await l.isVisible().catch(() => false))) scopes.push(l)
+  }
+  scopes.push(page)
   if (p.selector) return firstVisible(page.locator(p.selector))
   if (p.name == null) {
-    return firstVisible(page.locator('[role=row]:not(:has([role=columnheader])),[role=option],[role=gridcell],[role=treeitem],[data-row],tbody tr,[role=listitem]'))
+    for (const scope of scopes) {
+      const rows = scope.locator(GENERIC_ROWS)
+      const acting = p.verb === 'right-click' || p.verb === 'double-click'
+      const hit = acting
+        ? (await firstVisible(rows.and(scope.locator('[aria-selected="true"]')))) ?? (await firstVisible(rows))
+        : (await firstVisible(rows.and(scope.locator(':not([aria-selected="true"])')))) ?? (await firstVisible(rows))
+      if (hit) return hit
+    }
+    return null
   }
   const exact = p.name
-  for (const role of p.role ? [p.role] : ROLES) {
-    const l = await firstVisible(page.getByRole(role, { name: exact, exact: true }))
-    if (l) return l
+  const names = exact.endsWith('…') ? [exact] : [exact, `${exact}…`]
+  for (const scope of scopes) {
+    for (const role of p.role ? [p.role] : ROLES) {
+      for (const n of names) {
+        const l = await firstVisible(scope.getByRole(role, { name: n, exact: true }))
+        if (l) return l
+      }
+    }
   }
   const loose = new RegExp(esc(exact), 'i')
-  for (const role of p.role ? [p.role] : ROLES) {
-    const l = await firstVisible(page.getByRole(role, { name: loose }))
+  for (const scope of scopes) {
+    for (const role of p.role ? [p.role] : ROLES) {
+      const l = await firstVisible(scope.getByRole(role, { name: loose }))
+      if (l) return l
+    }
+    const l = (await firstVisible(scope.getByLabel(loose))) ?? (await firstVisible(scope.getByTitle(loose))) ?? (await firstVisible(scope.getByText(exact, { exact: true }))) ?? (await firstVisible(scope.getByText(loose)))
     if (l) return l
   }
-  return (await firstVisible(page.getByLabel(loose))) ?? (await firstVisible(page.getByTitle(loose))) ?? (await firstVisible(page.getByText(exact, { exact: true }))) ?? (await firstVisible(page.getByText(loose)))
+  return null
 }
 
 /** Runs one plan; resolves to null when done, or to 'missing' / a not-automatable reason. */
 async function perform(page, plans) {
   let reason = null
+  let disabled = null
   for (const p of plans) {
     if (p.notAutomatable) { reason ??= p.notAutomatable; continue }
     if (p.key) {
@@ -264,6 +303,7 @@ async function perform(page, plans) {
     }
     const control = await findControl(page, p)
     if (!control) { if (process.env.AUDIT_DEBUG) console.error('not found', p, page.url()); continue }
+    if (!(await control.isEnabled().catch(() => true))) { disabled ??= p.name ?? p.generic ?? p.selector; continue }
     const opts = { timeout: 2000 }
     try {
       if (p.verb === 'right-click') await control.click({ ...opts, button: 'right' })
@@ -287,7 +327,7 @@ async function perform(page, plans) {
     return { done: true, how: `${p.verb ?? 'click'} ${p.name ?? p.selector ?? p.generic ?? 'first row'}` }
   }
   if (reason) return { done: false, notAutomatable: reason }
-  return { done: false }
+  return { done: false, disabled }
 }
 
 // ---------- the run ----------
@@ -330,59 +370,25 @@ if (!cached) await pool(board, async (page, f) => {
 mkdirSync(OUT, { recursive: true })
 if (!cached) writeFileSync(SIGS_FILE, JSON.stringify({ sigs, notBuilt: [...notBuilt] }))
 
-// 2. the live roots: every section route, every settings pane, the tray and first-run windows
-const ROOT_QUERIES = [
-  ...['files', 'shared', 'photos', 'backups', 'trash', 'sync-history', 'available-offline', 'search'].map((s) => `window=main-app&platform=windows&section=${s}`),
-  ...['general', 'about', 'account', 'security', 'devices', 'notifications', 'storage', 'backups', 'sync', 'thumbnails', 'compare', 'backup-failures', 'device', 'bandwidth', 'insights', 'recent', 'location', 'diagnostics'].map((p) => `window=main-app&platform=windows&section=settings&sub=${p}`),
-  'window=tray&platform=windows',
-  'window=onboarding&platform=windows',
-]
-const live = {}
-const liveRoots = []
-await pool(ROOT_QUERIES, async (page, q) => {
-  await load(page, url(q))
-  const state = new Set(await signature(page))
-  // A root is every frame whose whole signature is on the live screen (the live window may add its own chrome), as long
-  // as it is not a sliver of it: a dialog frame whose few tokens all happen to be there too is not this screen.
-  const jac = (sig) => { const s = new Set(sig); const inter = [...s].filter((t) => state.has(t)).length; return inter / (s.size + state.size - inter || 1) }
-  const matches = board.map((f) => ({ id: f.id, j: cover(sigs[f.id], state), k: jac(sigs[f.id]) })).filter((m) => m.j >= 0.9 && m.k >= 0.6).sort((x, y) => y.k - x.k)
-  liveRoots.push({ query: q, frames: matches.map((m) => `${m.id}:${m.j.toFixed(2)}`) })
-  for (const m of matches) if (!live[m.id]) live[m.id] = { url: url(q), steps: [] }
-})
+// 2. every source frame opens through the live state route: the REAL window driven into the frame's state from the one
+// fixture set (src/v2/dev/: route, reads, seeds, replayed steps). Never the frame renderer: a frame's own component with
+// fixed props says nothing about the live wiring. The route writes its result on <html>: ready, native (Windows draws
+// that frame), or failed (a step found no control); and, for a state the live app cannot fully draw, the gap.
+const stateUrl = (id) => url(`window=main-app&platform=windows&state=${id}`)
 
-// 2b. roots that need a step or two on a section route (DW-0401 is Files with a row selected), checked before use
-for (const [id, hint] of Object.entries(overrides._roots ?? {})) {
-  if (live[id]) continue
-  const { ctx, page } = await fresh()
-  await load(page, url(hint.query))
-  let done = true
-  for (const step of hint.steps) { const r = await perform(page, step); if (!r.done) { done = false; break } await page.waitForTimeout(SETTLE_MS) }
-  const state = new Set(await signature(page))
-  const c = cover(sigs[id], state)
-  // `declared`: the live screen shows the frame's state with the live source's own data (the frame renders the board's
-  // example rows), so the signatures differ by data, not by screen; the hint says why.
-  const used = done && (c >= 0.75 || Boolean(hint.declared))
-  liveRoots.push({ query: hint.query, steps: hint.steps.length, frames: [`${id}:${c.toFixed(2)}`], used, declared: hint.declared })
-  if (used) live[id] = { url: url(hint.query), steps: hint.steps }
-  await ctx.close()
-}
-
-// 3. BFS levels over the board from the live roots
-const level = {}
-{
-  let frontier = Object.keys(live)
-  frontier.forEach((id) => (level[id] = 0))
-  let d = 0
-  while (frontier.length) {
-    const next = []
-    for (const id of frontier) for (const a of actions.filter((x) => x.source === id)) for (const t of a.to) if (level[t] == null) { level[t] = d + 1; next.push(t) }
-    frontier = next
-    d++
+async function openState(page, id) {
+  // The route may move once (another window, or the recipe's own route and scenario), so poll across the reload.
+  await page.goto(stateUrl(id), { waitUntil: 'load' }).catch(() => {})
+  let result = null
+  const until = Date.now() + 15000
+  while (!result && Date.now() < until) {
+    result = await page.evaluate(() => document.documentElement.dataset.v2StateResult ?? null).catch(() => null)
+    if (!result) await page.waitForTimeout(100)
   }
-  for (const f of board) level[f.id] ??= 99
+  const gap = await page.evaluate(() => document.documentElement.dataset.v2StateGap ?? null).catch(() => null)
+  await settle(page, 2500)
+  return { result: result ?? 'failed: the state route never finished', gap }
 }
-const byLevel = {}
-for (const a of actions) if (!ONLY || ONLY.has(a.source)) (byLevel[level[a.source]] ??= []).push(a)
 
 const unavailable = (page) => {
   const seen = []
@@ -395,33 +401,21 @@ const unavailable = (page) => {
   return { seen, stop: () => page.off('console', on) }
 }
 
-
-async function openSource(page, id) {
-  const entry = live[id]
-  if (entry) {
-    await load(page, entry.url)
-    let ok = true
-    for (const step of entry.steps) {
-      const r = await perform(page, step)
-      if (!r.done) { ok = false; break }
-      await settle(page, 2500)
-      if (step.follow) { const u = new URL(page.url()); u.searchParams.delete('frame'); await load(page, u.toString()) }
-    }
-    if (ok) return { mode: 'live', steps: entry.steps.length }
-  }
-  await load(page, frameUrl(id))
-  return { mode: 'frame', steps: 0 }
-}
-
 async function audit(page, a) {
   const row = { key: a.key, source: a.source, batch: batchOf[a.source] ?? null, on: a.on, does: a.does, to: a.to, planted: a.planted || undefined }
   const plans = PLANT && a.planted ? planFor({ ...a, key: 'planted' }) : planFor(a)
   if (plans.every((p) => p.notAutomatable)) return { ...row, outcome: 'not-automatable', detail: plans[0].notAutomatable }
   if (notBuilt.has(a.source)) return { ...row, outcome: 'missing-control', detail: 'the source frame is not built' }
-  const entry = await openSource(page, a.source)
-  row.entry = entry.mode === 'live' ? `live(${entry.steps} steps)` : 'frame'
+  const state = await openState(page, a.source)
+  row.entry = 'state'
+  row.state = state.result.split(':')[0]
+  if (state.gap) row.gap = state.gap
+  if (state.result.startsWith('native')) return { ...row, outcome: 'not-automatable', detail: state.result.replace(/^native: /, 'drawn by Windows: ') }
+  if (state.result !== 'ready') return { ...row, outcome: 'source-unreached', detail: state.result }
   const preUrl = page.url()
   const pre = new Set(await signature(page))
+  // How much of the frame's own screen the live state shows (1 = every token of the frame's signature is on screen).
+  row.stateScore = Number(cover(sigs[a.source] ?? [], pre).toFixed(2))
   // Commands the window calls on its own (sync_status every second, the theme's desktop_config) are not the control's.
   const idle = unavailable(page)
   await page.waitForTimeout(SETTLE_MS)
@@ -431,18 +425,13 @@ async function audit(page, a) {
   const r = await perform(page, plans)
   await settle(page, 2500)
   log.stop()
-  if (!r.done) return r.notAutomatable ? { ...row, outcome: 'not-automatable', detail: r.notAutomatable } : { ...row, outcome: 'missing-control', detail: `no control for "${a.on}"` }
-  row.how = r.how
-  let followed = false
-  const postUrl = new URL(page.url())
-  if (postUrl.toString() !== preUrl && entry.mode === 'frame' && postUrl.searchParams.get('frame')) {
-    // A section route changed under a registry renderer: follow it into the live window.
-    postUrl.searchParams.delete('frame')
-    await load(page, postUrl.toString())
-    followed = true
+  if (!r.done) {
+    if (r.notAutomatable) return { ...row, outcome: 'not-automatable', detail: r.notAutomatable }
+    return { ...row, outcome: 'missing-control', detail: r.disabled ? `"${r.disabled}" is there but disabled in this state` : `no control for "${a.on}"` }
   }
+  row.how = r.how
   const post = new Set(await signature(page))
-  const changed = followed || page.url() !== preUrl || !same(pre, post)
+  const changed = page.url() !== preUrl || !same(pre, post)
   const cmds = [...new Set(log.seen)].filter((c) => !background.has(c) && !BACKGROUND_COMMANDS.has(c))
   if (cmds.length) row.commands = cmds
   const ownerOf = (c) => Object.entries(owners).find(([, o]) => o.commands.some((x) => (x.endsWith('*') ? c.startsWith(x.slice(0, -1)) : x === c)))?.[0] ?? null
@@ -468,9 +457,7 @@ async function audit(page, a) {
   const bestTarget = ranked.find((r) => targets.has(r.id))
   const bestOther = ranked.find((r) => !targets.has(r.id))
   if (bestTarget && bestTarget.s >= 0.6 && bestTarget.s >= bestOther.s - 0.05 && (changed || bestTarget.s >= 0.95)) {
-    const t = bestTarget.id
-    if (entry.mode === 'live' && !live[t]) live[t] = { url: live[a.source].url, steps: [...live[a.source].steps, followed ? plans.map((p) => ({ ...p, follow: true })) : plans] }
-    return { ...row, outcome: 'ok', reached: t, score: Number(bestTarget.s.toFixed(2)) }
+    return { ...row, outcome: 'ok', reached: bestTarget.id, score: Number(bestTarget.s.toFixed(2)) }
   }
   row.score = bestTarget ? Number(bestTarget.s.toFixed(2)) : 0
   if (cmds.length) return { ...row, outcome: 'command-unsupported', detail: cmds.join(', '), owner: ownerOf(cmds[0]) }
@@ -481,53 +468,69 @@ async function audit(page, a) {
   return { ...row, outcome: 'wrong-target', reached: null, detail: `an unrecognised screen (target score ${row.score}): ${[...post].filter((x) => !pre.has(x)).slice(0, 6).join(' | ')}` }
 }
 
-const rows = []
-for (const lvl of Object.keys(byLevel).map(Number).sort((x, y) => x - y)) {
-  // Frames on one level run together; a frame's actions run in order so a level's ok rows can open the next level live.
-  rows.push(...(await pool(byLevel[lvl], audit)))
-}
+const todo = actions.filter((a) => !ONLY || ONLY.has(a.source))
+const rows = await pool(todo, audit)
 await browser.close()
 rows.sort((x, y) => actions.findIndex((a) => a.key === x.key) - actions.findIndex((a) => a.key === y.key))
 
 // ---------- the report ----------
-const OUTCOMES = ['ok', 'missing-control', 'no-effect', 'wrong-target', 'command-unsupported', 'not-automatable']
-const totals = Object.fromEntries(OUTCOMES.map((o) => [o, rows.filter((r) => r.outcome === o).length]))
-const perBatch = {}
-for (const r of rows) {
-  const b = r.batch ?? 'none'
-  perBatch[b] ??= Object.fromEntries(OUTCOMES.map((o) => [o, 0]))
-  perBatch[b][r.outcome]++
+const OUTCOMES = ['ok', 'missing-control', 'no-effect', 'wrong-target', 'command-unsupported', 'not-automatable', 'source-unreached']
+const tally = (list) => {
+  const t = Object.fromEntries(OUTCOMES.map((o) => [o, list.filter((r) => r.outcome === o).length]))
+  t['frame-renderer-only'] = list.filter((r) => r.entry === 'frame').length
+  return t
 }
+const COLUMNS = [...OUTCOMES, 'frame-renderer-only']
+const totals = tally(rows)
+const batches = [...new Set(rows.map((r) => r.batch ?? 'none'))].sort()
+const perBatch = Object.fromEntries(batches.map((b) => [b, tally(rows.filter((r) => (r.batch ?? 'none') === b))]))
+const before = args.before ? JSON.parse(readFileSync(args.before, 'utf8')) : null
+const beforeTotals = before ? tally(before.rows) : null
+const beforeBatch = before ? Object.fromEntries(batches.map((b) => [b, tally(before.rows.filter((r) => (r.batch ?? 'none') === b))])) : null
+const gapRows = rows.filter((r) => r.entry === 'state' && r.gap)
+const states = Object.fromEntries(rows.filter((r) => r.entry === 'state').map((r) => [r.source, { state: r.state, score: r.stateScore ?? null, gap: r.gap ?? null }]))
 mkdirSync(OUT, { recursive: true })
 const name = PLANT ? 'map-audit-planted' : args.name ?? 'map-audit'
-writeFileSync(join(OUT, `${name}.json`), JSON.stringify({ base: BASE, actions: rows.length, totals, perBatch, liveRoots, notBuilt: [...notBuilt], rows }, null, 1))
+writeFileSync(join(OUT, `${name}.json`), JSON.stringify({ base: BASE, actions: rows.length, totals, perBatch, before: beforeTotals, beforePerBatch: beforeBatch, states, notBuilt: [...notBuilt], rows }, null, 1))
+const cell = (b, o) => (beforeBatch ? `${beforeBatch[b][o]} → ${perBatch[b][o]}` : `${perBatch[b][o]}`)
+const lowScore = rows.filter((r) => r.entry === 'state' && r.state === 'ready' && (r.stateScore ?? 1) < 0.6)
 const md = [
   `# Desktop v2 action map audit${PLANT ? ' (planted label)' : ''}`,
   '',
   `${rows.length} actions from ${board.length} frames (Mail Backup excluded). Generated by \`scripts/v2-map-audit/audit.mjs\`.`,
-  `Rows opened live: ${rows.filter((r) => r.entry?.startsWith('live')).length}; through the frame renderer: ${rows.filter((r) => r.entry === 'frame').length}; not opened (not automatable or unbuilt): ${rows.filter((r) => !r.entry).length}.`,
+  `Every source frame opens through the live state route (\`?window=main-app&platform=windows&state=DW-xxxx\`): rows opened live ${rows.filter((r) => r.entry === 'state').length}; through the frame renderer ${totals['frame-renderer-only']}; not opened (every way to trigger the action is not automatable, or the frame is not built) ${rows.filter((r) => !r.entry).length}.`,
   '',
-  '| Outcome | Count |',
-  '|---|---|',
-  ...OUTCOMES.map((o) => `| ${o} | ${totals[o]} |`),
+  `| Outcome | ${before ? 'Before (M1) | After' : 'Count'} |`,
+  `|---|${before ? '---|---' : '---'}|`,
+  ...COLUMNS.map((o) => `| ${o} | ${before ? `${beforeTotals[o]} | ${totals[o]}` : totals[o]} |`),
+  '',
+  'source-unreached: the state route ran but a step found no control, so the frame\'s state was not reached and the action was not tried.',
+  `Opened live but the live app cannot draw the frame's whole state (a declared gap in the recipe): ${gapRows.length} rows from ${new Set(gapRows.map((r) => r.source)).size} frames. The action still ran on the live screen; the gaps are listed below.`,
+  `Opened live with less than 0.6 of the frame's signature on screen (data or layout differs from the frame): ${lowScore.length} rows.`,
   '',
   '## Per batch',
   '',
-  `| Batch | ${OUTCOMES.join(' | ')} |`,
-  `|---|${OUTCOMES.map(() => '---').join('|')}|`,
-  ...Object.keys(perBatch).sort().map((b) => `| ${b} | ${OUTCOMES.map((o) => perBatch[b][o]).join(' | ')} |`),
+  `| Batch | ${COLUMNS.join(' | ')} |`,
+  `|---|${COLUMNS.map(() => '---').join('|')}|`,
+  ...batches.map((b) => `| ${b} | ${COLUMNS.map((o) => cell(b, o)).join(' | ')} |`),
+  '',
+  '## Declared gaps (the live app cannot draw these frames\' states yet)',
+  '',
+  '| Frame | Batch | Gap |',
+  '|---|---|---|',
+  ...Object.entries(states).filter(([, s]) => s.gap).map(([id, s]) => `| ${id} | ${batchOf[id] ?? ''} | ${s.gap.replace(/\|/g, '/')} |`),
   '',
   '## Rows that are not ok',
   '',
-  '| Action | Batch | On | To | Outcome | Detail |',
-  '|---|---|---|---|---|---|',
-  ...rows.filter((r) => r.outcome !== 'ok').map((r) => `| ${r.key} | ${r.batch ?? ''} | ${r.on.replace(/\|/g, '/')} | ${r.to.join(' ')} | ${r.outcome}${r.owner ? ` (${r.owner})` : ''} | ${(r.detail ?? '').replace(/\|/g, '/')} |`),
+  '| Action | Batch | On | To | Outcome | Detail | State score |',
+  '|---|---|---|---|---|---|---|',
+  ...rows.filter((r) => r.outcome !== 'ok').map((r) => `| ${r.key} | ${r.batch ?? ''} | ${r.on.replace(/\|/g, '/')} | ${r.to.join(' ')} | ${r.outcome}${r.owner ? ` (${r.owner})` : ''} | ${(r.detail ?? '').replace(/\|/g, '/')} | ${r.stateScore ?? ''} |`),
   '',
 ]
 writeFileSync(join(OUT, `${name}.md`), md.join('\n'))
-console.log(`actions=${rows.length} ${OUTCOMES.map((o) => `${o}=${totals[o]}`).join(' ')}`)
+console.log(`actions=${rows.length} ${COLUMNS.map((o) => `${o}=${totals[o]}`).join(' ')}`)
 if (PLANT) {
   const p = rows.find((r) => r.planted)
-  console.log(`planted ${p?.key}: ${p?.outcome}`)
-  process.exit(p?.outcome === 'missing-control' ? 0 : 1)
+  console.log(`planted ${p?.key}: ${p?.outcome} (entry ${p?.entry}, state ${p?.state})`)
+  process.exit(p?.outcome === 'missing-control' && p?.entry === 'state' ? 0 : 1)
 }

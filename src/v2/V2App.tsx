@@ -12,6 +12,8 @@ import { FRAMES } from './frames/registry'
 import { useNavigation, type SectionId } from './routes'
 import { useShortcuts, type CommandId } from './shortcuts'
 import { pickSource } from './source'
+import { useDriveExtras } from './source/extras'
+import { shareList } from './sections/shared/api'
 import type { SectionProps } from './sections/types'
 
 const SECTION_COMPONENTS: Record<SectionId, ComponentType<SectionProps>> = {
@@ -46,6 +48,7 @@ export function V2Shell() {
   const nav = useNavigation()
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [sync, setSync] = useState<SyncSummary | null>(null)
+  const counts = useSidebarCounts()
 
   useEffect(() => {
     source.storage().then(setStorage, () => setStorage(null))
@@ -71,7 +74,7 @@ export function V2Shell() {
     <div className="flex h-screen flex-col bg-paper font-sans text-ink">
       <CaptionBar title={title} />
       <div className="flex min-h-0 flex-1">
-        <Sidebar active={nav.route.section} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" />
+        <Sidebar active={nav.route.section} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
         <main className="flex min-w-0 flex-1 flex-col">
           <Suspense fallback={null}>
             <Section nav={nav} />
@@ -81,6 +84,30 @@ export function V2Shell() {
       <StatusLine sync={sync} />
     </div>
   )
+}
+
+/**
+ * The sidebar's counts from the sources (DW-0401: "Shared (1 request waiting)", "Trash (12)"; DW-1301: "Sync history 3"):
+ * invitations waiting from share_list, Trash from DriveSource, sync problems from the extras. Unknown stays absent.
+ */
+function useSidebarCounts(): Partial<Record<SectionId, number>> {
+  const source = useDriveSource()
+  const extras = useDriveExtras()
+  const [counts, setCounts] = useState<Partial<Record<SectionId, number>>>({})
+  useEffect(() => {
+    let live = true
+    const read = () => {
+      void Promise.all([
+        shareList().then((r) => (r.ok ? r.value.invitations.length : undefined)),
+        source.trash().then((t) => t.length, () => undefined),
+        extras.syncProblems().then((p) => p.length, () => undefined),
+      ]).then(([shared, trash, problems]) => { if (live) setCounts({ shared, trash, 'sync-history': problems }) })
+    }
+    read()
+    const stop = source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'removed' || e.kind === 'sync') read() })
+    return () => { live = false; stop() }
+  }, [source, extras])
+  return counts
 }
 
 function FrameNotBuilt({ id }: { id: string }) {

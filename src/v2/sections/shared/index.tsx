@@ -13,6 +13,7 @@ import {
 } from './Dialogs'
 import { byMeMenu, EXPIRY_CHOICES, requestLine, requestMenu, rowsFromEntries, withMeMenu, type Member, type SharedTab } from './model'
 import * as api from './api'
+import { seed } from '../../seed'
 import type { ShareLists } from './api'
 
 type Dialog =
@@ -40,9 +41,9 @@ export default function Section({ nav }: SectionProps) {
   const tab = (['with-me', 'by-me', 'requests'].includes(nav.route.sub ?? '') ? nav.route.sub : 'with-me') as SharedTab
   const [rows, setRows] = useState(() => rowsFromEntries([]))
   const [lists, setLists] = useState<ShareLists>(EMPTY_LISTS)
-  const [members, setMembers] = useState<Member[]>([])
+  const [members, setMembers] = useState<Member[]>(() => seed('shared.members', []))
   const [menu, setMenu] = useState<{ kind: RowKind; id: string; x: number; y: number } | null>(null)
-  const [dialog, setDialog] = useState<Dialog | null>(null)
+  const [dialog, setDialog] = useState<Dialog | null>(() => seed('shared.dialog', null))
   const [busy, setBusy] = useState(false)
   const now = useMemo(() => new Date(), [])
 

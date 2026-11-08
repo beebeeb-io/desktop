@@ -48,13 +48,15 @@ function photoMeta(id: string): PhotoMeta | undefined {
 }
 
 export function createFixtureExtras(scenario: string): DriveExtras {
+  // `empty` (DW-0114, DW-1305, DW-0120): a new account, nothing moving, nothing kept, no problems.
+  const empty = scenario === 'empty'
   return {
     status: async () => fixtureStatus(scenario),
-    transfers: async () => FIXTURE_TRANSFERS,
+    transfers: async () => (empty ? [] : FIXTURE_TRANSFERS),
     subscribeTransfers: () => () => {},
-    syncProblems: async () => FIXTURE_PROBLEMS,
+    syncProblems: async () => (empty ? [] : FIXTURE_PROBLEMS),
     retry: async (ids) => ({ retried: ids.length }),
-    offlineList: async () => OFFLINE_ENTRIES.map((o) => ({ item: o.item, items: o.item.isFolder ? o.item.childCount : undefined, bytes: o.bytes ?? 0 })),
+    offlineList: async () => (empty ? [] : OFFLINE_ENTRIES).map((o) => ({ item: o.item, items: o.item.isFolder ? o.item.childCount : undefined, bytes: o.bytes ?? 0 })),
     photoMeta: async (ids) => Object.fromEntries(ids.flatMap((id) => { const m = photoMeta(id); return m ? [[id, m]] : [] })),
     photoSources: async () => [{ id: 'f-backups', name: 'Camera uploads', path: 'Backups/Anna’s iPhone/Camera uploads', count: PHOTO_ENTRIES.length }],
     paths: async (ids) => Object.fromEntries(ids.map((id) => [id, 'Files'])),

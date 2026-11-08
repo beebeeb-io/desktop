@@ -9,6 +9,7 @@ import { showToast } from '../../chrome/Toast'
 import { Menu } from '../files/ui'
 import { deletePermanently, failureText } from '../shared/api'
 import { DeleteForGoodDialog, TrashView, totalBytes, trashMenu } from './TrashView'
+import { seed } from '../../seed'
 
 
 export default function Section({ nav }: SectionProps) {
@@ -21,7 +22,7 @@ export default function Section({ nav }: SectionProps) {
   const [factor, setFactor] = useState<'code' | 'password'>('password')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [emptying, setEmptying] = useState<{ done: number; total: number } | null>(null)
+  const [emptying, setEmptying] = useState<{ done: number; total: number } | null>(() => seed('trash.emptying', null))
   const now = useMemo(() => new Date(), [])
   const removedRun = useRef<{ ids: Set<string>; done: number } | null>(null)
 

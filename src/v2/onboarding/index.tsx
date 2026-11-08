@@ -10,6 +10,7 @@ import {
   type BackupFolder, type ExplorerStatus, type LockAfter, type PreviewSample, type SetupStep, type SetupSummary,
 } from './views'
 import { AccountEntry } from '../auth/create/entry'
+import { seed } from '../seed'
 
 export const DEFAULT_ON = new Set(['desktop', 'documents', 'pictures'])
 
@@ -50,7 +51,7 @@ export default function OnboardingApp() {
 }
 
 export function SetupFlow() {
-  const [step, setStep] = useState<SetupStep | 'done' | 'compare'>('passkey')
+  const [step, setStep] = useState<SetupStep | 'done' | 'compare'>(() => seed('setup.step', 'passkey'))
   const [summary, setSummary] = useState<SetupSummary>({ passkey: 'Not now', lock: 'Off', backup: 'Off', previews: '4K HEIC', explorer: 'Adding', notifications: 'On', login: 'On' })
   const [passkey, setPasskey] = useState({ asking: false, password: '', error: null as string | null })
   const [lock, setLock] = useState<{ on: boolean; after: LockAfter }>({ on: true, after: 'Immediately' })

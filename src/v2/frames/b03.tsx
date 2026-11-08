@@ -9,7 +9,7 @@ import { EmptyFiles, GettingReadyStrip, NeedsConnection, PlainTile } from '../ch
 import { FrameWindow, ListBackdrop, STORAGE_240, SYNC_OK } from '../chrome/FrameWindow'
 import { TaskbarStrip, TrayIcon, TrayMenu, TRAY_STATES } from '../chrome/TrayArt'
 import { ToastView } from '../chrome/Toast'
-import { ROOT_ITEMS } from '../source/fixtures'
+import { rootItems } from '../source/fixtures'
 
 const GB = 1024 ** 3
 const TB = 1024 * GB
@@ -36,7 +36,7 @@ const OFFLINE: SyncSummary = { ...SYNC_OK, phase: 'offline' }
 
 /** DW-0119: the grid with plain tiles where thumbnails have not arrived. */
 function PlainGrid() {
-  const files = ROOT_ITEMS.filter((i) => !i.isFolder)
+  const files = rootItems().filter((i) => !i.isFolder)
   const size = (b: number) => (b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`)
   return (
     <div data-grid className="grid flex-1 grid-cols-4 content-start gap-4 overflow-hidden p-4">
