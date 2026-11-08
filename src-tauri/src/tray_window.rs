@@ -320,7 +320,8 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         "open_settings" => show_main_app_window_impl(app),
         "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
             // A Mac hides the app (⌘H): the Beebeeb window and the menu-bar popover; the Dock or a reopen unhides.
-            surfaces::policy::TrayHide::App => {
+            surfaces::policy::TrayHide::App =>
+            {
                 #[cfg(target_os = "macos")]
                 if let Err(error) = app.hide() {
                     tracing::warn!(%error, "the tray's Hide could not hide the app");
@@ -374,7 +375,9 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         {
             let app = tray.app_handle();
             #[cfg(not(target_os = "macos"))]
-            if button != MouseButton::Left { return; }
+            if button != MouseButton::Left {
+                return;
+            }
             #[cfg(target_os = "macos")]
             let _ = button;
 
@@ -664,13 +667,14 @@ pub(super) fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<
 
         match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url.into()))
             .title("Beebeeb")
-            .inner_size(1100.0, 720.0)
-            .min_inner_size(880.0, 560.0)
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(960.0, 640.0)
             .resizable(true)
-            .center()
+            .visible(false)
             .build()
         {
             Ok(win) => {
+                place_desktop_main_window(app, &win);
                 let _ = win.show();
                 let _ = win.set_focus();
                 if let Some(nav) = nav {

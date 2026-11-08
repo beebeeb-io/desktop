@@ -6,6 +6,7 @@ Modules 46–93, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
+| `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
 | `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | IpcRequest (11), IpcResponse (10), FileProviderItemPayload (22), FileProviderChangePayload (5), serve_ipc, serve_ipc_at |
 | `ipc_socket_framing_tests.rs` | End-to-end framing tests for the daemon IPC socket (task 1670 issue 3). | — |
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
@@ -14,7 +15,7 @@ Modules 46–93, sorted by path.
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `known_folder.rs` | The known folders a backup can be turned on for (Windows' Desktop, Documents, Pictures, Music, Videos and Downloads), and what is left of th | resolve_known_folder, resolve_known_folder_current |
 | `launch_wiring_tests.rs` | (no //! header) | — |
-| `lib.rs` | (no //! header) | Session (3), AppState (5), SpeedtestResult (3), SpeedtestLatency (3), run |
+| `lib.rs` | (no //! header) | AppState (5), Session (3), SpeedtestLatency (3), SpeedtestResult (3), run |
 | `lifecycle_log.rs` | The lifecycle log (spec 2026-10-06 §8). | — |
 | `link_health.rs` | Can Beebeeb reach its server, and when did it last get an answer? | — |
 | `linux_thumbnail.rs` | Freedesktop thumbnails for Linux: encode a synced file's preview into the user's thumbnail cache and delete it on removal. | — |
@@ -50,7 +51,6 @@ Modules 46–93, sorted by path.
 | `reveal_and_open_file_tests.rs` | (no //! header) | — |
 | `root_source.rs` | Scanner input after the lib.rs split (LD-0057 PR 2, spec §4.8): the text the source-reading tests used to `include_str!("lib.rs")`. | — |
 | `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, SendPhaseLink, AttemptSignals (3), ResumeTicket (4), EngineRunner, AbortOutcome (2) |
+| `selective_sync_wave2_tests.rs` | SelectiveSync wave-2 tests, split out of `tests.rs` (file-size ratchet; moved unchanged). | — |
 | `session_apply.rs` | `session_apply` items split out of `lib.rs`. | — |
 | `session_commands.rs` | Windows command admission, independent of whether a sync root/runner exists. | — |
-| `session_reauth.rs` | `session_reauth` items split out of `lib.rs`. | — |
-| `session_state.rs` | `session_state` items split out of `lib.rs`. | — |

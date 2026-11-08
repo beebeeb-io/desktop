@@ -28,6 +28,7 @@ Modules 1–45, sorted by path.
 | `config_write_pin_tests.rs` | (no //! header) | — |
 | `conflict.rs` | Conflict detection primitives — pure functions over `VersionInfo`s, plus the policy timestamps Task 13's auto-resolution timer reads. | — |
 | `desktop_capabilities.rs` | Host support, deliberately independent of WebView layout/query parameters. | — |
+| `desktop_main_window.rs` | The main window's size and kept frame on Windows and Linux (v2 W1): the board's 1280 x 800 with a 960 x 640 minimum, fitted to the work area | — |
 | `desktop_search.rs` | The local search index and its server sync: build it from `state.db`, rank results for a query, and push/pull the encrypted shards. | — |
 | `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), classify_error_code, QUEUE_KIND_LABELS, PAUSE_REASON_LABELS, allowed_label, KnownNames, redact_secrets_only, redact_for_export |
 | `diagnostics_export_tests.rs` | (no //! header) | — |
@@ -50,4 +51,3 @@ Modules 1–45, sorted by path.
 | `found_while_paused.rs` | Task 2267 (fix round 2): what the person decides about the changes Beebeeb found while sync was paused. | — |
 | `found_while_paused/tests.rs` | `found_while_paused` unit tests, split out of `found_while_paused.rs`. | — |
 | `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Row (6), Op (8), Options (2), Unit, Counts (21), NEEDS_REVIEW, same_leaf, is_parent_404, plan, presend_block, PresendBlock (2) |
-| `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
