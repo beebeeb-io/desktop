@@ -22,7 +22,12 @@
 
     impl Pc {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            Self::new_in(&std::env::temp_dir())
+        }
+
+        /// A PC whose temp folder is made under `parent` (task 2407: a volume that makes 8.3 short names).
+        fn new_in(parent: &Path) -> Self {
+            let temp = tempfile::tempdir_in(parent).unwrap();
             let root = temp.path().join("Beebeeb");
             let staging = temp.path().join("staging");
             for dir in [&root, &staging, &temp.path().join("state")] {
@@ -831,21 +836,32 @@
     fn keep_never_moves_the_file_a_short_name_reaches() {
         use std::os::windows::ffi::OsStrExt as _;
         use windows::Win32::Storage::FileSystem::GetShortPathNameW;
-        let pc = Pc::new();
-        let precious = pc.on_disk("Report for 2026.pdf");
-        std::fs::write(&precious, b"precious").unwrap();
-        let wide: Vec<u16> = precious.as_os_str().encode_wide().chain([0]).collect();
-        let mut buffer = vec![0u16; 1024];
-        // SAFETY: `wide` is NUL-terminated; `buffer` is writable for its whole length.
-        let written = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
-        assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed");
-        let short_path = String::from_utf16(&buffer[..written]).unwrap();
-        let short = short_path.rsplit('\\').next().unwrap().to_owned();
-        if short == "Report for 2026.pdf" {
-            assert!(std::env::var_os("CI").is_none(), "the temp volume made no 8.3 short name; this test proves nothing here");
-            eprintln!("skipped: the temp volume makes no 8.3 short names");
-            return;
+        // The temp folder, then the local-app-data temp folder (often the system drive, which makes 8.3 names by
+        // default; CI's temp volume makes none).
+        let mut roots = vec![std::env::temp_dir()];
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(local).join("Temp"));
         }
+        let short_of = |path: &Path| -> String {
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            let mut buffer = vec![0u16; 1024];
+            // SAFETY: `wide` is NUL-terminated; `buffer` is writable for its whole length.
+            let written = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+            assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed");
+            let short_path = String::from_utf16(&buffer[..written]).unwrap();
+            short_path.rsplit('\\').next().unwrap().to_owned()
+        };
+        let Some((pc, short)) = roots.iter().find_map(|root| {
+            let pc = Pc::new_in(root);
+            std::fs::write(pc.on_disk("Report for 2026.pdf"), b"precious").unwrap();
+            let short = short_of(&pc.on_disk("Report for 2026.pdf"));
+            (short != "Report for 2026.pdf").then_some((pc, short))
+        }) else {
+            assert!(std::env::var_os("CI").is_none(), "no volume among {roots:?} made an 8.3 short name; this test proves nothing here");
+            eprintln!("skipped: no volume among {roots:?} makes 8.3 short names");
+            return;
+        };
+        let precious = pc.on_disk("Report for 2026.pdf");
         assert_eq!(std::fs::read(pc.on_disk(&short)).unwrap(), b"precious", "the fixture must alias");
         // A new file's row and queued upload at the short name; nothing of its own is on disk there.
         pc.row("new-top", &short, None, false, false, Namespace::MyFiles);
