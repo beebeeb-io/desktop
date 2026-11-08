@@ -6,6 +6,9 @@
 //! `sync_activity_summary` it answers only while the vault is unlocked; the window reads it only while the list is on
 //! screen. `retry_unsent_change` is Try again on a change that failed (Guus, 13:39): its attempts and next-attempt time
 //! are reset, and the engine is asked for a queue step at once.
+//!
+//! Task 2414: `not_downloaded` serves [`state_db::StateDb::not_downloaded`] the same way, for the Activity page's "Not
+//! downloaded" section: the downloads a pin queued that are paused or out of attempts.
 
 use super::*;
 
@@ -77,13 +80,6 @@ fn view_of(
     }
 }
 
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// The unlocked-session gate the other path-carrying reads use (`desktop_recent_files`).
 fn require_unlocked(state: &AppState) -> Result<Arc<account::AccountRuntime>, String> {
     let acct = state.active_account()?;
@@ -120,7 +116,7 @@ pub(super) async fn unsent_changes(
                     items: Vec::new(),
                 });
             };
-            db.unsent_changes(offset, limit, unix_now())
+            db.unsent_changes(offset, limit, crate::local_state_purge::now_unix_seconds())
                 .map_err(|e| format!("read the changes not sent: {e}"))
         })
         .await
@@ -136,7 +132,41 @@ pub(super) fn retry_answer(outcome: state_db::RetryOutcome) -> Result<&'static s
         state_db::RetryOutcome::Unknown => Err("unknown"),
         state_db::RetryOutcome::Held => Err("held"),
         state_db::RetryOutcome::Parked => Err("parked"),
+        state_db::RetryOutcome::Superseded => Err("superseded"),
+        state_db::RetryOutcome::CopyGone => Err("copy_gone"),
     }
+}
+
+/// Task 2414: the downloads a pin queued that will not finish by themselves, one row each, behind "Not downloaded N".
+/// Paths, so the same gate as `unsent_changes`; the window reads it only while its section is on screen.
+#[tauri::command]
+pub(super) async fn not_downloaded(
+    state: State<'_, AppState>,
+    runtime: State<'_, popover_data::PopoverRuntime>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<UnsentChangesView, String> {
+    session_command!(async {
+        let acct = require_unlocked(&state)?;
+        let paused = acct.sync_paused.load(Ordering::Relaxed);
+        let engine_state = runtime.status.lock().map(|view| view.state.clone()).unwrap_or_default();
+        let (offset, limit) = (offset.unwrap_or(0), limit.unwrap_or(100).clamp(1, MAX_PAGE));
+        let page = tokio::task::spawn_blocking(move || -> Result<state_db::UnsentPage, String> {
+            let config = DesktopConfig::load().ok();
+            let Some(db) = config.as_ref().map(state_db_for_config).transpose()?.flatten() else {
+                return Ok(state_db::UnsentPage {
+                    total: 0,
+                    items: Vec::new(),
+                });
+            };
+            db.not_downloaded(offset, limit)
+                .map_err(|e| format!("read the files not downloaded: {e}"))
+        })
+        .await
+        .map_err(|e| format!("files not downloaded task failed: {e}"))??;
+        // No upload progress: a download is never "being sent" (`view_of` gives it none).
+        Ok(view_of(page, &[], engine_state, paused))
+    })
 }
 
 #[tauri::command]
@@ -148,7 +178,7 @@ pub(super) async fn retry_unsent_change(state: State<'_, AppState>, id: String) 
             let Some(db) = config.as_ref().map(state_db_for_config).transpose()?.flatten() else {
                 return Ok(state_db::RetryOutcome::Unknown);
             };
-            db.retry_unsent_change(&id, unix_now())
+            db.retry_unsent_change(&id, crate::local_state_purge::now_unix_seconds())
                 .map_err(|e| format!("try the change again: {e}"))
         })
         .await
@@ -187,6 +217,7 @@ mod tests {
             retry_at: None,
             parked: false,
             retryable: false,
+            blocked: None,
         }
     }
 
@@ -299,6 +330,7 @@ mod tests {
                 retry_at: None,
                 parked: false,
                 retryable,
+                blocked: None,
             }
         };
         let page = state_db::UnsentPage {
@@ -325,6 +357,8 @@ mod tests {
         assert_eq!(retry_answer(Unknown), Err("unknown"));
         assert_eq!(retry_answer(Held), Err("held"));
         assert_eq!(retry_answer(Parked), Err("parked"));
+        assert_eq!(retry_answer(Superseded), Err("superseded"));
+        assert_eq!(retry_answer(CopyGone), Err("copy_gone"));
     }
 
     /// Both commands answer only while the vault is unlocked (they carry paths, or change the queue), and Try again
@@ -332,7 +366,7 @@ mod tests {
     #[test]
     fn both_commands_need_an_unlocked_vault_and_try_again_nudges_after_a_change() {
         let source = include_str!("unsent_changes_commands.rs").replace("\r\n", "\n");
-        for command in ["async fn unsent_changes(", "async fn retry_unsent_change("] {
+        for command in ["async fn unsent_changes(", "async fn retry_unsent_change(", "async fn not_downloaded("] {
             let body = &source[source.find(command).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
             let gate = body

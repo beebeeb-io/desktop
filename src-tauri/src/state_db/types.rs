@@ -1167,6 +1167,9 @@ pub struct QueueHold {
     /// Paused, one group per reason (`PAUSE_REASON_LABELS`, anything else as `other`), ordered by reason. On Windows
     /// and Linux it also holds the computed `waiting_for_folder` group (spec D7).
     pub held: Vec<HeldGroup>,
+    /// Task 2414: downloads a pin queued (`hydrate_file`, `pin_tree`) that are paused or out of attempts: files meant to
+    /// be on this computer that are not, and will not be by themselves. Never in the three counts above ("Not sent").
+    pub not_downloaded: i64,
 }
 
 /// The operations paused for one reason.

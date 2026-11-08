@@ -256,6 +256,8 @@ impl StateDb {
     ///
     /// Task 2409: [`Self::unsent_changes`] lists exactly the rows counted here, in the same groups. Both leave out the
     /// downloads a pin queues ([`UNSENT_KINDS_SQL`], task 2224): they are not changes waiting to leave this computer.
+    /// Task 2414: those that will not finish by themselves are `not_downloaded` ([`NOT_DOWNLOADED_SQL`]), which
+    /// [`Self::not_downloaded`] lists.
     pub fn queue_hold_summary(&self) -> Result<QueueHold> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let (waiting, gave_up) = conn.query_row(
@@ -266,6 +268,17 @@ impl StateDb {
             ),
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        // Task 2414: `NOT_DOWNLOADED_SQL`, split on `paused_reason` so each half searches the two ranges of
+        // `idx_operation_queue_unsent` the counts above and below already read (one scan of the whole index read 26
+        // more pages from disk in task 2243's poll test). The index carries every column, so no operation row.
+        let not_downloaded: i64 = conn.query_row(
+            &format!(
+                "SELECT (SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NOT NULL AND {NOT_DOWNLOADED_SQL})
+                      + (SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NULL AND {NOT_DOWNLOADED_SQL})"
+            ),
+            [],
+            |row| row.get(0),
         )?;
         let mut stmt = conn.prepare(&format!(
             "SELECT paused_reason, COUNT(*), MIN(created_at), MAX(created_at)
@@ -333,6 +346,7 @@ impl StateDb {
             waiting,
             gave_up,
             held: held.into_values().collect(),
+            not_downloaded,
         })
     }
     // ── Bandwidth samples (P3 — 20h traffic chart, task 0810) ────────────────

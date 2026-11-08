@@ -357,6 +357,18 @@ fn due_ids(db: &StateDb) -> Vec<String> {
         .collect()
 }
 
+/// The op's staged copy, on disk under `dir`, as the queue records it.
+fn stage(db: &StateDb, dir: &tempfile::TempDir, op_id: &str) -> std::path::PathBuf {
+    let payload = dir.path().join(format!("{op_id}.payload"));
+    std::fs::write(&payload, b"sealed bytes").unwrap();
+    sql(
+        db,
+        "UPDATE operation_queue SET payload_path = ?2 WHERE op_id = ?1",
+        params![op_id, payload.to_string_lossy()],
+    );
+    payload
+}
+
 fn listed<'a>(items: &'a [UnsentChange], id: &str) -> &'a UnsentChange {
     items
         .iter()
@@ -414,8 +426,9 @@ fn try_again_makes_a_given_up_change_due_and_the_count_does_not_move() {
 /// A change that waits out a backoff after an error is due at once.
 #[test]
 fn try_again_sends_a_backing_off_change_at_once() {
-    let (_dir, db) = db();
+    let (dir, db) = db();
     queue(&db, "backing-off", ("upload_file", None), (None, 3, NOW + 600), None, 1);
+    stage(&db, &dir, "backing-off");
     let item = listed(&db.unsent_changes(0, 100, NOW).unwrap().items, "backing-off").clone();
     assert_eq!((item.retry_at, item.retryable), (Some(NOW + 600), true));
     assert!(due_ids(&db).is_empty(), "not due before its retry time");
@@ -516,9 +529,10 @@ fn try_again_refuses_what_did_not_fail_and_changes_nothing() {
 /// rebase does. Another file's row is not touched.
 #[test]
 fn try_again_on_a_finder_upload_presents_its_file_uploading_again() {
-    let (_dir, db) = db();
+    let (dir, db) = db();
     queue(&db, "finder", ("upload_version", None), (None, 5, 0), None, 1);
     queue(&db, "other", ("upload_version", None), (None, 5, 0), None, 2);
+    stage(&db, &dir, "finder");
     sql(&db, "UPDATE operation_queue SET write_id = 'w-' || op_id", []);
     sql(&db, "UPDATE files SET status = 'error'", []);
     let status = |file: &str| -> String {
@@ -536,4 +550,165 @@ fn try_again_on_a_finder_upload_presents_its_file_uploading_again() {
         (status("file-finder").as_str(), status("file-other").as_str()),
         ("uploading", "error")
     );
+}
+
+// ── Task 2414: Try again runs the reconcile pass's checks first (spec D8) ─────────────────────────────────────────
+
+/// An edit made on version 3 of a file that is at version 4 in Beebeeb, and a new file the server already holds: sent,
+/// either would make old content current. The list offers no Try again and says why; the command refuses with the
+/// same reason and changes nothing, whether the change gave up or waits out a backoff. A change of the same file whose
+/// checks pass is still tried again.
+#[test]
+fn try_again_refuses_a_change_a_newer_version_has_superseded() {
+    let (dir, db) = db();
+    let edit = ("upload_version", Some(r#"{"operation":"update_file"}"#));
+    queue(&db, "old-edit", edit, (None, 5, 0), None, 1);
+    queue(&db, "old-edit-backing-off", edit, (None, 2, NOW + 600), None, 2);
+    queue(&db, "new-file", ("upload_version", Some(r#"{"operation":"create_file"}"#)), (None, 5, 0), None, 3);
+    queue(&db, "current-edit", edit, (None, 5, 0), None, 4);
+    for op in ["old-edit", "old-edit-backing-off", "new-file", "current-edit"] {
+        stage(&db, &dir, op);
+    }
+    sql(&db, "UPDATE operation_queue SET base_version = 3 WHERE op_id LIKE 'old-edit%' OR op_id = 'current-edit'", []);
+    sql(&db, "UPDATE files SET current_version = 4 WHERE file_id IN ('file-old-edit', 'file-old-edit-backing-off', 'file-new-file')", []);
+    sql(&db, "UPDATE files SET current_version = 3 WHERE file_id = 'file-current-edit'", []);
+
+    let items = db.unsent_changes(0, 100, NOW).unwrap().items;
+    for id in ["old-edit", "old-edit-backing-off", "new-file"] {
+        let item = listed(&items, id);
+        assert_eq!((item.retryable, item.blocked), (false, Some("superseded")), "{id}");
+    }
+    let current = listed(&items, "current-edit");
+    assert_eq!((current.retryable, current.blocked), (true, None));
+    let ids = ["old-edit", "old-edit-backing-off", "new-file"];
+    let before: Vec<_> = ids.iter().map(|id| row_state(&db, id)).collect();
+
+    let outcomes: Vec<_> = ids.iter().map(|id| db.retry_unsent_change(id, NOW).unwrap()).collect();
+
+    assert_eq!(outcomes, [RetryOutcome::Superseded; 3]);
+    assert_eq!(ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(), before, "nothing changed");
+    assert!(due_ids(&db).is_empty(), "none of them is sent");
+    assert_eq!(db.retry_unsent_change("current-edit", NOW).unwrap(), RetryOutcome::Retried);
+    assert_eq!(due_ids(&db), ["current-edit"]);
+}
+
+/// An upload whose staged copy is gone (deleted, or never recorded) would only fail again: no Try again, the list says
+/// the copy is gone, and the command refuses and changes nothing. A rename has no copy to check.
+#[test]
+fn try_again_refuses_an_upload_whose_copy_is_gone() {
+    let (dir, db) = db();
+    queue(&db, "copy-deleted", ("upload_file", None), (None, 5, 0), None, 1);
+    queue(&db, "copy-deleted-backing-off", ("upload_version", None), (None, 1, NOW + 60), None, 2);
+    queue(&db, "no-copy-recorded", ("upload_file", None), (None, 5, 0), None, 3);
+    queue(&db, "rename", ("rename_file", None), (None, 5, 0), None, 4);
+    for op in ["copy-deleted", "copy-deleted-backing-off"] {
+        std::fs::remove_file(stage(&db, &dir, op)).unwrap();
+    }
+
+    let items = db.unsent_changes(0, 100, NOW).unwrap().items;
+    let ids = ["copy-deleted", "copy-deleted-backing-off", "no-copy-recorded"];
+    for id in ids {
+        let item = listed(&items, id);
+        assert_eq!((item.retryable, item.blocked), (false, Some("copy_gone")), "{id}");
+    }
+    assert_eq!((listed(&items, "rename").retryable, listed(&items, "rename").blocked), (true, None));
+    let before: Vec<_> = ids.iter().map(|id| row_state(&db, id)).collect();
+
+    let outcomes: Vec<_> = ids.iter().map(|id| db.retry_unsent_change(id, NOW).unwrap()).collect();
+
+    assert_eq!(outcomes, [RetryOutcome::CopyGone; 3]);
+    assert_eq!(ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(), before, "nothing changed");
+    assert_eq!(db.retry_unsent_change("rename", NOW).unwrap(), RetryOutcome::Retried);
+}
+
+/// Two uploads the checks do not apply to: a backup sends the person's own file (`source_path`), never a staged copy
+/// (LD-0113; its uploader drops the op itself when that file is gone), and an upload whose completion is recorded lands
+/// without its payload (§8.6 rules 4 and 6). Both are tried again.
+#[test]
+fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
+    let (_dir, db) = db();
+    sql(
+        &db,
+        "INSERT INTO operation_queue (op_id, kind, file_id, target_path, origin, source_path, attempts, max_attempts,
+                                      next_retry_at, created_at)
+         VALUES ('backup', 'upload_file', 'b1', 'Backups/PC/a.jpg', 'backup', 'C:\\Users\\me\\a.jpg', 5, 5, 0, 1)",
+        [],
+    );
+    queue(&db, "completed", ("upload_version", None), (None, 5, 0), None, 2);
+    sql(
+        &db,
+        "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id, server_file_id,
+                                    object_version_id, chunk_size_bytes, chunk_count, completed_version)
+         VALUES ('completed', '/gone', 1, 1, 's', 'file-completed', 'o', 1, 1, 7)",
+        [],
+    );
+    sql(&db, "UPDATE files SET current_version = 7 WHERE file_id = 'file-completed'", []);
+    sql(&db, "UPDATE operation_queue SET base_version = 6 WHERE op_id = 'completed'", []);
+
+    let items = db.unsent_changes(0, 100, NOW).unwrap().items;
+    for id in ["backup", "completed"] {
+        assert_eq!((listed(&items, id).retryable, listed(&items, id).blocked), (true, None), "{id}");
+        assert_eq!(db.retry_unsent_change(id, NOW).unwrap(), RetryOutcome::Retried, "{id}");
+    }
+}
+
+/// A change that gave up but still holds a claim is being sent (`retry_unsent_change` answers "already queued"): the
+/// list offers no Try again for it either (2409 review P3).
+#[test]
+fn a_claimed_change_that_gave_up_offers_no_try_again() {
+    let (_dir, db) = db();
+    queue(&db, "claimed", ("rename_file", None), (None, 5, 0), None, 1);
+    sql(&db, "UPDATE operation_queue SET claim_id = 'claim', claimed_at = 1 WHERE op_id = 'claimed'", []);
+    let items = db.unsent_changes(0, 100, NOW).unwrap().items;
+    assert!(!listed(&items, "claimed").retryable);
+    assert_eq!(db.retry_unsent_change("claimed", NOW).unwrap(), RetryOutcome::AlreadyQueued);
+}
+
+// ── Task 2414: "Not downloaded" ────────────────────────────────────────────────────────────────────────────────────
+
+/// A pin's downloads that are paused or out of attempts are counted as `not_downloaded` and listed one each, for every
+/// state the queue holds; due and backing-off ones are on their way and in neither. None is in "Not sent". A download
+/// that gave up long ago stays (the In progress card drops a failed one after 15 minutes).
+#[test]
+fn failed_and_paused_pin_downloads_are_counted_and_listed_as_not_downloaded() {
+    let (_dir, db) = db();
+    let mut expected: BTreeMap<String, (&str, String)> = BTreeMap::new();
+    let mut at = 1;
+    for (kind, word) in [("hydrate_file", "download"), ("pin_tree", "folder")] {
+        for (state, reason, attempts, retry, group) in STATES {
+            at += 1;
+            let id = format!("{kind}-{state}");
+            queue(&db, &id, (kind, None), (reason, attempts, retry), None, at);
+            if reason.is_some() || attempts >= 5 {
+                expected.insert(id, (word, group.to_string()));
+            }
+        }
+    }
+    queue(&db, "upload-gave-up", ("upload_file", None), (None, 5, 0), None, 900);
+
+    let hold = db.queue_hold_summary().unwrap();
+    let first = db.not_downloaded(0, 7).unwrap();
+    let mut items = first.items.clone();
+    while (items.len() as i64) < first.total {
+        let page = db.not_downloaded(items.len() as u32, 7).unwrap();
+        assert_eq!(page.total, first.total);
+        assert!(!page.items.is_empty());
+        items.extend(page.items);
+    }
+
+    assert_eq!(hold.not_downloaded, expected.len() as i64, "the count");
+    assert_eq!(first.total, hold.not_downloaded, "the list's total is the count");
+    let listed: BTreeMap<String, (&str, String)> =
+        items.iter().map(|i| (i.id.clone(), (i.kind, i.group.clone()))).collect();
+    assert_eq!(listed, expected, "each listed once, under its kind and group");
+    assert!(items.iter().all(|i| !i.retryable && i.blocked.is_none() && i.path.starts_with("docs/")));
+    let dates: Vec<i64> = items.iter().map(|i| i.queued_at).collect();
+    assert!(dates.windows(2).all(|w| w[0] <= w[1]), "oldest first");
+    assert_eq!(items[0].queued_at, 4, "the oldest, given up long ago, is still there");
+    assert_eq!(
+        (hold.waiting, hold.gave_up, hold.held.len()),
+        (0, 1, 0),
+        "Not sent counts the upload only: {hold:?}"
+    );
+    assert_eq!(db.unsent_changes(0, 100, NOW).unwrap().total, 1);
 }

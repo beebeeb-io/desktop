@@ -56,4 +56,4 @@ use twins::*;
 
 mod planning;
 use planning::*;
-pub use planning::{plan};
+pub use planning::{plan, presend_block, PresendBlock};
