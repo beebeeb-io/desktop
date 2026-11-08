@@ -8,6 +8,7 @@ import { unknownPhraseWords } from '../api'
 import * as api from '../create/api'
 import { recoverErrorText } from '../create/model'
 import { PasswordFields } from '../create/views'
+import { seed } from '../../seed'
 
 // ── Views ────────────────────────────────────────────────────────────────────
 
@@ -120,15 +121,15 @@ type Screen = 'options' | 'neither' | 'phrase' | 'password' | 'updated'
 export function ForgotPasswordFlow({ initialEmail = '', onBack, onAnotherDevice, onRecovered, onSignIn }: {
   initialEmail?: string; onBack: () => void; onAnotherDevice: () => void; onRecovered: () => void; onSignIn: () => void
 }) {
-  const [screen, setScreen] = useState<Screen>('options')
-  const [email, setEmail] = useState(initialEmail)
-  const [words, setWords] = useState<string[]>(() => Array(12).fill(''))
-  const [unknown, setUnknown] = useState<number[]>([])
+  const [screen, setScreen] = useState<Screen>(() => seed('forgot.screen', 'options'))
+  const [email, setEmail] = useState(() => seed('forgot.email', initialEmail))
+  const [words, setWords] = useState<string[]>(() => seed('forgot.words', Array(12).fill('')))
+  const [unknown, setUnknown] = useState<number[]>(() => seed('forgot.unknown', []))
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A48: the banner and the marked word persist until the words change
-  const [state, setState] = useState<'idle' | 'verifying' | 'wrong' | 'too-many' | 'offline'>('idle')
-  const [pw, setPw] = useState({ password: '', confirm: '', show: false })
-  const [meter, setMeter] = useState<api.PasswordMeter | null>(null)
-  const [breach, setBreach] = useState<'breached' | 'blocked' | null>(null)
+  const [state, setState] = useState<'idle' | 'verifying' | 'wrong' | 'too-many' | 'offline'>(() => seed('forgot.state', 'idle'))
+  const [pw, setPw] = useState(() => seed('forgot.pw', { password: '', confirm: '', show: false }))
+  const [meter, setMeter] = useState<api.PasswordMeter | null>(() => seed('forgot.meter', null))
+  const [breach, setBreach] = useState<'breached' | 'blocked' | null>(() => seed('forgot.breach', null))
   const [busy, setBusy] = useState(false)
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A49: the failure sits above the fields it gates
   const [problem, setProblem] = useState<string | null>(null)

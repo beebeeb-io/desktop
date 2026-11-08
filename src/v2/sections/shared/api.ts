@@ -3,13 +3,15 @@
 // link answers with its display form, without the part after #; Rust has already put the full link on the clipboard.
 import { command, commandUnavailableLabel, type CommandResult } from '../../../desktopApi'
 import type { Access, FileRequestRow, Invitation, LinkShare, Member } from './model'
+import { publishCount } from '../../chrome/counts'
 
 export interface ShareLists { invitations: Invitation[]; links: LinkShare[]; requests: FileRequestRow[]; pending: string[] }
 /** A link made or copied by Rust: `display` is the link without its key part, for a toast. */
 export interface CopiedLink { display: string }
 export type InviteOutcome = { status: 'shared' } | { status: 'invited' } | { status: 'key-changed'; memberId: string }
 
-export const shareList = () => command<ShareLists>('share_list')
+/** Each answer also gives the sidebar its Shared count (../../chrome/counts.ts), whoever asked. */
+export const shareList = () => command<ShareLists>('share_list').then((r) => { if (r.ok) publishCount('shared', r.value.invitations.length); return r })
 export const shareAccept = (id: string) => command<void>('share_accept', { id })
 export const shareDecline = (id: string) => command<void>('share_decline', { id })
 export const shareLeave = (id: string) => command<void>('share_leave', { id })

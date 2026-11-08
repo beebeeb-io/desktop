@@ -6,6 +6,7 @@ import { Ctx, type PaneId } from './context'
 import { BASE_PANES, DIALOGS } from './panes'
 import { PANES_TODAY, DIALOGS_TODAY } from '../panes-today'
 import { PANES_ACCOUNT } from '../panes-account'
+import { seed } from '../../../seed'
 
 const SETTINGS: { id: PaneId; label: string; icon: IconName }[] = [
   { id: 'general', label: 'General', icon: 'settings' },
@@ -37,7 +38,11 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
   override?: ReactElement
 }) {
   const [pane, setPane] = useState<PaneId>(initialPane)
-  const [dialog, setDialog] = useState<string | null>(initialDialog)
+  const [dialog, setDialog] = useState<string | null>(() => seed('settings.dialog', initialDialog))
+  // The live state route (../../../seed.ts): the first pane's props, read once, so the pane keeps them until it changes.
+  // Leaving that pane drops them: coming back opens the pane plain.
+  const [seeded, setSeeded] = useState(() => ({ pane: initialPane, props: seed<Record<string, unknown> | null>('settings.paneProps', null) }))
+  useEffect(() => { if (seeded.props && pane !== seeded.pane) setSeeded({ pane: seeded.pane, props: null }) }, [pane, seeded])
   const close = useCallback(() => setDialog(null), [])
   const open = useCallback((d: string) => setDialog(d), [])
 
@@ -49,7 +54,8 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
   }, [onBack])
 
   const panes: Partial<Record<PaneId, ComponentType>> = { ...BASE_PANES, ...PANES_TODAY, ...PANES_ACCOUNT }
-  const Pane = panes[pane]
+  const Pane = panes[pane] as ComponentType<Record<string, unknown>> | undefined
+  const paneProps = seeded.props && pane === seeded.pane ? seeded.props : {}
   const Dlg = dialog ? { ...DIALOGS, ...DIALOGS_TODAY }[dialog.split(':')[0]] : undefined
   const active = PARENT[pane] ?? pane
 
@@ -79,7 +85,7 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
           <div className="px-2.5 pb-0.5 pt-3 text-[11px] font-medium uppercase tracking-wide text-ink-3">Drive</div>
           <ul className="flex flex-col gap-0.5" data-testid="drive-nav">{DRIVE.map(item)}</ul>
         </nav>
-        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">{override && pane === initialPane ? override : Pane ? <Pane /> : <Missing pane={pane} />}</div>
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">{override && pane === initialPane ? override : Pane ? <Pane {...paneProps} /> : <Missing pane={pane} />}</div>
         {Dlg ? <Dlg arg={dialog!.split(':')[1]} /> : null}
       </div>
     </Ctx.Provider>

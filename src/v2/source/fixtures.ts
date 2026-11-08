@@ -1,5 +1,6 @@
-// The fixtures DriveSource: the board's own data (DW-0401), so every frame builds and screenshots headless
-// with no Tauri, no network and no account. `?scenario=` picks a state the global frames need:
+// The base fixtures DriveSource: the board's own data (DW-0401's rows come from B04's tree, the one fixture set; a plain
+// browser gets ./fixtures/board.ts, which layers every batch's fixtures on it), so every frame builds and screenshots
+// headless with no Tauri, no network and no account. `?scenario=` picks a state the global frames need:
 //   default | empty (DW-0114) | offline (DW-0101) | nearly-full (DW-0103) | full (DW-0104) | syncing (DW-1203)
 // Batches add fixture data in src/v2/source/fixtures/<area>.ts (their own files), never by editing this one's rows.
 
@@ -14,6 +15,7 @@ import {
   type StorageSummary,
   type SyncSummary,
 } from '@beebeeb/shared/drive-ui'
+import { childrenIn, FILES_TREE } from './fixtures/files'
 
 export type Scenario = 'default' | 'empty' | 'offline' | 'nearly-full' | 'full' | 'syncing'
 
@@ -27,29 +29,13 @@ function folder(id: string, name: string, childCount: number, extra: Partial<Dri
   }
 }
 
-function file(id: string, name: string, size: number, modifiedAt: string, extra: Partial<DriveItem> = {}): DriveItem {
-  return {
-    id, parentId: null, name, isFolder: false, size, modifiedAt,
-    shared: { kind: 'none' }, local: 'online-only', hasThumbnail: false, storageCountry: 'DE', ...extra,
-  }
+/**
+ * DW-0401's list: the board's Files root, from B04's tree (./fixtures/files.ts), the one fixture set the live app and
+ * the frames share (batch M2). A function, read at render time: ./fixtures/files imports this module.
+ */
+export function rootItems(): DriveItem[] {
+  return childrenIn(FILES_TREE, null)
 }
-
-/** DW-0401's list: Backups first, then the folders, then the files by name. */
-export const ROOT_ITEMS: DriveItem[] = [
-  folder('f-backups', 'Backups', 2, { readOnly: true }),
-  folder('f-documents', 'Documents', 14, { local: 'downloaded' }),
-  folder('f-invoices', 'Invoices 2026', 9, { shared: { kind: 'link' } }),
-  folder('f-lisbon', 'Lisbon trip', 86, {
-    shared: { kind: 'people', people: [{ name: 'Naiches', initials: 'N' }] },
-  }),
-  folder('f-shoot', 'Shoot selects', 31, { local: 'available-offline' }),
-  file('i-contract', 'Contract Initlabs.pdf', 482_133, '2026-11-06T15:20:00Z', { mime: 'application/pdf', local: 'available-offline', hasThumbnail: true }),
-  file('i-budget', 'Budget 2027.xlsx', 38_912, '2026-11-07T09:02:00Z', { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', local: 'downloaded' }),
-  file('i-notes', 'Meeting notes.md', 4_211, '2026-11-08T08:41:00Z', { mime: 'text/markdown', local: 'available-offline' }),
-  file('i-harbour', 'Harbour.jpg', 6_420_118, '2026-10-30T18:12:00Z', { mime: 'image/jpeg', hasThumbnail: true }),
-  file('i-pitch', 'Pitch.pptx', 2_912_004, '2026-10-21T11:00:00Z', { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }),
-  file('i-passport', 'Passport scan.png', 1_204_551, '2026-09-02T07:30:00Z', { mime: 'image/png', local: 'downloaded', hasThumbnail: true }),
-]
 
 function sortItems(items: DriveItem[], key: SortKey, dir: SortDir): DriveItem[] {
   const sign = dir === 'asc' ? 1 : -1
@@ -69,7 +55,7 @@ function sortItems(items: DriveItem[], key: SortKey, dir: SortDir): DriveItem[] 
 }
 
 export function createFixtureSource(scenario: Scenario = 'default'): DriveSource {
-  let items = scenario === 'empty' ? [] : [...ROOT_ITEMS]
+  let items = scenario === 'empty' ? [] : rootItems()
   const listeners = new Set<Parameters<DriveSource['subscribe']>[0]>()
   const find = (id: ItemId): DriveItem => {
     const hit = items.find((i) => i.id === id)
