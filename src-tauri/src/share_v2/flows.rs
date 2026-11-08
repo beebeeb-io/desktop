@@ -24,6 +24,13 @@ pub(super) struct Unlocked {
     pub(super) master: MasterKey,
 }
 
+impl Unlocked {
+    /// The bearer token for a request this module cannot send through `transport` (a PATCH).
+    pub(super) fn session_token(&self) -> Zeroizing<String> {
+        self.session.clone()
+    }
+}
+
 pub(super) fn unlocked(state: &AppState) -> Answer<Unlocked> {
     let acct = state.active_account().map_err(|_| "signed-out".to_string())?;
     let guard = acct.session.lock().map_err(|_| "failed".to_string())?;
