@@ -96,12 +96,13 @@ fn task_2413_windows_the_hydrate_writer_never_writes_through_a_junction() {
     std::fs::remove_dir(f.root.join("docs").join("deeper")).unwrap();
 }
 
-/// The store, with this build's Windows rules: a reserved name, a `:` and a trailing dot are never stored.
+/// The store, with this build's Windows rules: a reserved name, a `:`, a trailing dot and a `\` are never stored; a
+/// long CJK name Windows holds (100 UTF-16 units, 300 bytes) is.
 #[test]
 fn task_2413_windows_the_store_refuses_names_windows_cannot_hold() {
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
-    for (n, name) in ["CON", "nul.txt", "report.txt:stream", "trailing.", "trailing ", "a\\..\\..\\x.txt"].iter().enumerate() {
+    for (n, name) in ["CON", "nul.txt", "report.txt:stream", "trailing.", "Q1: plan", "a\\..\\..\\x.txt"].iter().enumerate() {
         let id = format!("a1310000-0000-4000-8000-{n:012}");
         let row = serde_json::json!({ "id": id, "name_encrypted": name, "size_bytes": 1, "updated_at": 5 });
         let entry = apply_metadata_file_row(
@@ -119,4 +120,9 @@ fn task_2413_windows_the_store_refuses_names_windows_cannot_hold() {
         assert!(entry.is_none(), "{name:?}");
         assert!(db.get_file(&id).unwrap().is_none(), "{name:?}");
     }
+    let long = "漢".repeat(100);
+    let row = serde_json::json!({ "id": "a1310000-0000-4000-8000-0000000000ff", "name_encrypted": long, "size_bytes": 1 });
+    let entry = apply_metadata_file_row(&db, &row, Namespace::MyFiles, None, None, PERMISSION_READ, 100, &[7u8; 32], "docs");
+    assert_eq!(entry.unwrap().unwrap().path, format!("docs/{long}"));
+    assert!(crate::engine_bridge::local_file_path_under_sync_root(dir.path(), &format!("docs/{long}")).is_ok());
 }

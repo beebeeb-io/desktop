@@ -217,19 +217,18 @@ pub(super) fn display_name_for_path(path: &str) -> String {
 ///      surfaces one (older rows / test fixtures)
 ///   3. empty string — caller skips placeholder seeding for the row
 ///
-/// Task 2413: what it returns is never a server field as it came. The name
-/// that resolves (decrypted, or the first plaintext field present) must be ONE
-/// name this host can hold ([`crate::stored_path::check_name_for`]), checked as
-/// it is (a trimmed `a.txt ` would be `a.txt`, another file's path); otherwise
-/// `Err` and the caller refuses the row. Only an empty or blank result is
-/// `Ok("")`.
+/// Task 2413: what it returns is never a server field unchecked. The name that
+/// resolves (decrypted and trimmed, as before, or the first plaintext field
+/// present, as it is) must be ONE name this host can hold
+/// ([`crate::stored_path::check_name_for`]); otherwise `Err` and the caller
+/// refuses the row. Nothing resolving is `Ok("")`, as before.
 pub(super) fn resolve_relative_path(
     f: &serde_json::Value,
     file_id: &str,
     master_key: &[u8; 32],
 ) -> Result<String, beebeeb_core::path_safety::UnsafeName> {
     let one_name = |name: &str| -> Result<String, beebeeb_core::path_safety::UnsafeName> {
-        if name.trim().is_empty() {
+        if name.is_empty() {
             return Ok(String::new());
         }
         crate::stored_path::check_name_for(name, crate::stored_path::host_is_windows())?;
@@ -239,8 +238,10 @@ pub(super) fn resolve_relative_path(
         let mk_bytes: [u8; 32] = *master_key;
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
         if let Ok(name) = beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_enc) {
-            if !name.trim().is_empty() {
-                return one_name(&name);
+            // Trimmed as before, so a row stored under the trimmed name keeps its path.
+            let name = name.trim();
+            if !name.is_empty() {
+                return one_name(name);
             }
         }
         // Decryption failed (wrong key, garbled blob, legacy envelope) —
@@ -337,6 +338,12 @@ pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&st
     };
     match bridge.db().get_file(pid).ok().flatten() {
         Some(parent) => Some(parent.path.trim_start_matches('/').to_string()),
+        // Task 2413: a parent the store refused is not placed, so neither is the row; a re-snapshot would refuse it
+        // again (the parent's own write asks for one once it is stored).
+        None if bridge.db().is_refused_server_row(pid).unwrap_or(false) => {
+            tracing::debug!(parent_id = %pid, "sync_tick: op under a folder not placed; not placed either");
+            None
+        }
         None => {
             // Parent not locally known — can't compute the prefix from the op
             // alone. Schedule a re-snapshot so the next tick reconciles nesting

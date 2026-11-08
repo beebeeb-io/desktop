@@ -43,10 +43,11 @@ impl StateDb {
         entry: &FileEntry,
         update: impl FnOnce(&mut FileContractState),
     ) -> Result<ServerRowWrite> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
         if let Some(refused) = server_row_refused(entry) {
+            note_refused_conn(&conn, &entry.file_id)?;
             return Ok(refused);
         }
-        let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
         let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test)) {
@@ -76,8 +77,29 @@ impl StateDb {
             contract.parent_id = parent_id;
         }
         set_file_contract_state_conn(&tx, &contract)?;
+        // Task 2413: a folder refused before and written now asks for a re-snapshot, which places the rows below it
+        // (their ops waited without one while the folder was refused).
+        if forget_refused_conn(&tx, &entry.file_id)? && entry.item_kind == ItemKind::Folder {
+            Self::request_resnapshot_conn(&tx)?;
+        }
         tx.commit()?;
         Ok(ServerRowWrite::Written(entry.path))
+    }
+    /// Task 2413: remember that the pull refused this own row (its name, before the store saw a path).
+    pub fn note_refused_server_row(&self, file_id: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        note_refused_conn(&conn, file_id)
+    }
+    /// Task 2413: the store refused this own row since this process started (it holds no row for it, or keeps an old
+    /// one). An op naming it as its parent then waits without asking for a re-snapshot, which would refuse it again.
+    pub fn is_refused_server_row(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute_batch(REFUSED_ROWS_TABLE)?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM temp.refused_server_rows WHERE file_id = ?1)",
+            params![file_id],
+            |r| r.get(0),
+        )
     }
     /// Task 2413: the write of a shared row (a shared root, or a row inside a shared folder), as
     /// [`Self::upsert_file_with_contract`] after the same check as [`Self::upsert_server_file_row`].
@@ -778,4 +800,20 @@ fn server_row_refused(entry: &FileEntry) -> Option<ServerRowWrite> {
         return None;
     }
     crate::stored_path::check_path(&entry.path).err().map(ServerRowWrite::Refused)
+}
+
+/// Task 2413: the own rows the store refused, for this connection's life only (a TEMP table: nothing is migrated or
+/// kept across a restart, where the next snapshot or op refuses them again).
+const REFUSED_ROWS_TABLE: &str = "CREATE TEMP TABLE IF NOT EXISTS refused_server_rows (file_id TEXT PRIMARY KEY)";
+
+fn note_refused_conn(conn: &Connection, file_id: &str) -> Result<()> {
+    conn.execute_batch(REFUSED_ROWS_TABLE)?;
+    conn.execute("INSERT OR IGNORE INTO temp.refused_server_rows (file_id) VALUES (?1)", params![file_id])?;
+    Ok(())
+}
+
+/// Whether `file_id` was refused before (and is no longer).
+fn forget_refused_conn(conn: &Connection, file_id: &str) -> Result<bool> {
+    conn.execute_batch(REFUSED_ROWS_TABLE)?;
+    Ok(conn.execute("DELETE FROM temp.refused_server_rows WHERE file_id = ?1", params![file_id])? > 0)
 }

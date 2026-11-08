@@ -64,7 +64,6 @@ const REFUSED_WITH_WINDOWS_RULES: &[&str] = &[
     "a:b.txt",
     "report.txt:stream",
     "trailing.",
-    "trailing ",
 ];
 
 #[test]
@@ -85,11 +84,20 @@ fn task_2413_an_own_row_whose_name_is_not_one_plain_name_is_never_stored() {
             }
         }
     }
-    assert!(stored.is_empty(), "{} of {} stored:\n{}", stored.len(), 18 * 4, stored.join("\n"));
-    assert_eq!(refused, 18 * 4);
-    // A plain name under the same rules is stored as before.
+    assert!(stored.is_empty(), "{} of {} stored:\n{}", stored.len(), 17 * 4, stored.join("\n"));
+    assert_eq!(refused, 17 * 4);
+    // A plain name under the same rules is stored as before, and so is a long CJK name Windows holds (300 bytes,
+    // 100 UTF-16 units).
     let entry = apply_own(&db, &row("a0000000-0000-4000-8000-0000000000ff", "Report 2026.pdf", false, false), "docs").unwrap();
     assert_eq!(entry.path, "docs/Report 2026.pdf");
+    let long = "漢".repeat(100);
+    let entry = apply_own(&db, &row("a0000000-0000-4000-8000-0000000000fe", &long, false, false), "docs").unwrap();
+    assert_eq!(entry.path, format!("docs/{long}"));
+    // A decrypted name is trimmed as before (a row stored under the trimmed name keeps its path); a plaintext name
+    // field is taken as it is, so its trailing space is refused.
+    let entry = apply_own(&db, &row("a0000000-0000-4000-8000-0000000000fd", "trailing ", false, false), "docs").unwrap();
+    assert_eq!(entry.path, "docs/trailing");
+    assert!(apply_own(&db, &row("a0000000-0000-4000-8000-0000000000fc", "trailing ", true, false), "docs").is_none());
 }
 
 /// Without the Windows rules (Linux, macOS) the names that are ordinary file names there are kept as they are, so
@@ -113,7 +121,7 @@ fn task_2413_without_the_windows_rules_only_what_is_not_one_name_anywhere_is_ref
         stored,
         [
             "C:\\x.txt", "C:x.txt", "\\\\server\\share\\x.txt", "a\\b.txt", "..\\..\\x.txt", "CON", "nul.txt",
-            "COM1.txt", "LPT9.log", "a:b.txt", "report.txt:stream", "trailing.", "trailing "
+            "COM1.txt", "LPT9.log", "a:b.txt", "report.txt:stream", "trailing."
         ]
     );
 }
@@ -164,9 +172,16 @@ fn task_2413_a_refused_update_leaves_the_stored_row_as_it_was_and_unpruned() {
     for (entry, contract) in before {
         let id = entry.file_id.clone();
         let now = bridge.db().get_file(&id).unwrap().unwrap_or_else(|| panic!("{id}: not pruned"));
-        assert_eq!(fields(&now), fields(&entry), "{id}: the row as it was");
         let after = bridge.db().get_file_contract_state(&id).unwrap().unwrap();
-        assert_eq!(after.current_version, contract.current_version, "{id}: version");
+        // macOS: the snapshot's version fill and raise (spec §6.3.2) runs before the row is read, by id, and changes
+        // only the version and the size, never the path.
+        let (mut now_fields, mut then_fields) = (fields(&now), fields(&entry));
+        if cfg!(target_os = "macos") {
+            (now_fields.2, then_fields.2) = (0, 0);
+        } else {
+            assert_eq!(after.current_version, contract.current_version, "{id}: version");
+        }
+        assert_eq!(now_fields, then_fields, "{id}: the row as it was");
         assert_eq!(after.parent_id, contract.parent_id, "{id}: parent");
     }
 }
@@ -196,35 +211,57 @@ fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level()
     assert!(bridge.db().list_files().unwrap().is_empty(), "nothing at the top level either");
 
     // The op stream: the folder's create is refused, so the child's create names a parent this device does not hold.
-    let create = |seq_id: i64, op_type: &str, payload: serde_json::Value| crate::api_client::SyncOp {
+    // It waits, and asks for no re-snapshot (one would refuse the folder again); a parent never seen asks for one.
+    let op = |seq_id: i64, op_type: &str, payload: serde_json::Value| crate::api_client::SyncOp {
         seq_id,
         op_type: op_type.into(),
         payload,
     };
-    let applied = apply_sync_op(
-        &bridge,
-        dir.path(),
-        &create(10, "folder_create", serde_json::json!({ "id": folder, "name_encrypted": "CON" })),
-        200,
-        &mut Vec::new(),
-    )
-    .unwrap();
+    let apply_op = |op: crate::api_client::SyncOp| apply_sync_op(&bridge, dir.path(), &op, 200, &mut Vec::new()).unwrap();
+    let applied = apply_op(op(10, "folder_create", serde_json::json!({ "id": folder, "name_encrypted": "CON" })));
     assert!(applied.is_empty(), "{applied:?}");
-    assert_eq!(bridge.db().peek_resnapshot_request().unwrap(), None);
-    apply_sync_op(
-        &bridge,
-        dir.path(),
-        &create(11, "file_create", serde_json::json!({ "id": grandchild, "parent_id": folder, "name_encrypted": "a.txt" })),
-        200,
-        &mut Vec::new(),
-    )
-    .unwrap();
+    let child_create = |seq_id: i64, id: &str, parent: &str| {
+        op(seq_id, "file_create", serde_json::json!({
+            "id": id, "parent_id": parent, "name_encrypted": "a.txt", "version_number": 1, "size_bytes": 3,
+        }))
+    };
+    assert!(apply_op(child_create(11, grandchild, folder)).is_empty());
     assert!(bridge.db().list_files().unwrap().is_empty(), "the child is not placed at the top level");
-    assert!(bridge.db().peek_resnapshot_request().unwrap().is_some(), "the snapshot will place it");
+    assert_eq!(bridge.db().peek_resnapshot_request().unwrap(), None, "no re-snapshot for a refused parent");
+    let orphan = "e0000000-0000-4000-8000-000000000004";
+    assert!(apply_op(child_create(12, orphan, "e0000000-0000-4000-8000-0000000000ff")).is_empty());
+    assert!(bridge.db().get_file(orphan).unwrap().is_none(), "not at the top level either");
+    assert!(bridge.db().take_needs_resnapshot().unwrap(), "a parent never seen: the snapshot will place it");
+    // Renamed to a name this host holds, the folder is stored, and asks once for the snapshot that places its rows.
+    let applied = apply_op(op(13, "folder_rename", serde_json::json!({ "id": folder, "new_name_encrypted": "Plans" })));
+    assert_eq!(applied, [folder.to_string()]);
+    assert_eq!(bridge.db().get_file(folder).unwrap().unwrap().path, "Plans");
+    assert!(bridge.db().take_needs_resnapshot().unwrap(), "the folder's rows are placed by the next snapshot");
 }
 
-/// The same name rule for a shared row: a decrypted name that is not one plain name shows as the placeholder name,
-/// as an undecryptable one does, and is checked as it is (never trimmed into another name).
+/// A refused rename of a stored folder changes nothing, reports nothing as applied, and leaves its rows in place.
+#[test]
+fn task_2413_a_refused_rename_of_a_stored_folder_changes_nothing() {
+    let _rules = HostRules::windows(true);
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let folder = "e1000000-0000-4000-8000-000000000001";
+    let child = "e1000000-0000-4000-8000-000000000002";
+    seed_bridge_entry(&bridge, folder, "Plans", None, FileStatus::CloudOnly, true, 10);
+    seed_bridge_entry(&bridge, child, "Plans/a.txt", Some(folder), FileStatus::CloudOnly, false, 10);
+    let op = crate::api_client::SyncOp {
+        seq_id: 5,
+        op_type: "folder_rename".into(),
+        payload: serde_json::json!({ "id": folder, "new_name_encrypted": "Q1: plan" }),
+    };
+    let applied = apply_sync_op(&bridge, dir.path(), &op, 200, &mut Vec::new()).unwrap();
+    assert!(applied.is_empty(), "{applied:?}");
+    assert_eq!(bridge.db().get_file(folder).unwrap().unwrap().path, "Plans");
+    assert_eq!(bridge.db().get_file(child).unwrap().unwrap().path, "Plans/a.txt");
+}
+
+/// The same name rule for a shared row: a decrypted name that is not one plain name refuses the row, as for an own row
+/// (the placeholder name stays for a name that does not decrypt), so no two refused items share a path.
 #[test]
 fn task_2413_a_shared_name_meets_the_same_rule_as_an_own_name() {
     let _rules = HostRules::windows(true);
@@ -250,13 +287,10 @@ fn task_2413_a_shared_name_meets_the_same_rule_as_an_own_name() {
         let metadata = serde_json::json!({ "name": name, "mime_type": "text/plain" }).to_string();
         serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(&file_key, &metadata).unwrap()).unwrap()
     };
-    let names = ["CON", "nul.txt", "report:v2.txt", "notes.", "notes.txt ", "a\\b.txt", "..", "a/b"];
-    let mut shown = Vec::new();
-    for (n, name) in names.iter().enumerate() {
-        let id = format!("f0000000-0000-4000-8000-{n:012}");
-        let entry = apply_shared_metadata_file_row(
+    let shared = |id: &str, name: &str, is_folder: bool| {
+        apply_shared_metadata_file_row(
             &db,
-            &serde_json::json!({ "id": id, "name_encrypted": sealed(name), "size_bytes": 12, "is_folder": false }),
+            &serde_json::json!({ "id": id, "name_encrypted": sealed(name), "size_bytes": 12, "is_folder": is_folder }),
             &root,
             1_700_000_000,
             Some(root.file_id.clone()),
@@ -264,12 +298,23 @@ fn task_2413_a_shared_name_meets_the_same_rule_as_an_own_name() {
             Some(&file_key),
         )
         .unwrap()
-        .unwrap();
-        if entry.path != "Shared with me/Shared folder/Encrypted file" {
-            shown.push(format!("{name:?} -> {:?}", entry.path));
+    };
+    let names = [
+        ("CON", false), ("nul.txt", false), ("report:v2.txt", false), ("notes.", false), ("a\\b.txt", false),
+        ("..", false), ("a/b", false), ("Q1: plan", true), ("Q2: plan", true),
+    ];
+    let mut stored = Vec::new();
+    for (n, (name, is_folder)) in names.iter().enumerate() {
+        let id = format!("f0000000-0000-4000-8000-{n:012}");
+        match shared(&id, name, *is_folder) {
+            Some(entry) => stored.push(format!("{name:?} -> {:?}", entry.path)),
+            None => assert!(db.get_file(&id).unwrap().is_none(), "{name:?}: no row"),
         }
     }
-    assert!(shown.is_empty(), "{} of {} shown as another name:\n{}", shown.len(), names.len(), shown.join("\n"));
+    assert!(stored.is_empty(), "{} of {} stored:\n{}", stored.len(), names.len(), stored.join("\n"));
+    // A plain name is stored, its outer spaces trimmed as before.
+    let entry = shared("f0000000-0000-4000-8000-0000000000ff", " notes.txt ", false).unwrap();
+    assert_eq!(entry.path, "Shared with me/Shared folder/notes.txt");
     // Under a parent with a segment that is not plain, nothing is stored.
     let entry = apply_shared_metadata_file_row(
         &db,

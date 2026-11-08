@@ -63,11 +63,52 @@ pub enum ServerRowWrite {
 
 /// One name, a single segment of a stored path. `windows`: the host applies Windows path rules.
 ///
-/// Refused on every host: an empty name (or one only of invisible characters), `.` and `..`, a `/`, a NUL, more than
-/// 255 bytes. With the Windows rules also: a `\`, a drive prefix, a `:` anywhere, `< > " | ? *`, control and
+/// Refused on every host: an empty name (or one only of invisible characters), `.` and `..`, a `/`, a NUL, a name
+/// longer than the host holds (Linux and macOS: 255 bytes; Windows: 255 UTF-16 units, so a long CJK name Windows holds
+/// stays one name). With the Windows rules also: a `\`, a drive prefix, a `:` anywhere, `< > " | ? *`, control and
 /// bidi-control characters, a trailing dot or space, and a reserved device name (`CON`, `NUL`, `COM1.txt` ...).
 pub(crate) fn check_name_for(name: &str, windows: bool) -> Result<(), UnsafeName> {
-    check_component_for(name, false, windows)
+    const MAX: usize = beebeeb_core::path_safety::MAX_COMPONENT_BYTES;
+    if name.len() <= MAX {
+        return check_component_for(name, false, windows);
+    }
+    // Over core's 255 bytes: the host's own limit decides the length, and core checks every other rule on a short
+    // stand-in that breaks a rule exactly when `name` does.
+    if windows && name.encode_utf16().count() > MAX {
+        return Err(UnsafeName("is longer than 255 UTF-16 units"));
+    }
+    if !windows {
+        return Err(UnsafeName("is longer than 255 bytes"));
+    }
+    check_component_for(&length_stand_in(name), false, windows)
+}
+
+/// `name` with every run of more than 8 letters and digits replaced by `aaaaaaaa`. Every rule core applies looks at a
+/// character that is no letter or digit (a separator, `:`, a dot, a space, a control, bidi or invisible character), at
+/// the first two characters (a drive prefix: a run of one is kept) or at a stem of at most 7 characters (a device
+/// name: a run of 8 or fewer is kept, and `aaaaaaaa` is no device name); so the stand-in breaks a rule exactly when
+/// `name` does, at a length core's byte limit accepts unless `name` is mostly other characters.
+fn length_stand_in(name: &str) -> String {
+    let mut out = String::with_capacity(64);
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.chars().count() > 8 {
+            out.push_str("aaaaaaaa");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 /// A stored path: every '/'-separated segment passes [`check_name_for`]. Leading `/`s are the stored form some older
@@ -85,20 +126,19 @@ pub(crate) fn check_path(path: &str) -> Result<(), UnsafeName> {
 }
 
 /// The path a server row is stored at: `parent` (a stored path, "" at the top level) and the row's own `name`, which
-/// must be ONE segment. An empty `name` (it did not resolve) gives "", a row that is stored but never placed, as
-/// before. The joined form is the one the pull always wrote, so a row's stored path does not change with this check.
+/// must be ONE name ([`check_name_for`]); the state DB checks every segment of the result before it writes it. An
+/// empty `name` (it did not resolve) gives "", a row that is stored but never placed, as before. The joined form is the
+/// one the pull always wrote, so a row's stored path does not change with this check.
 pub(crate) fn compose_for(parent: &str, name: &str, windows: bool) -> Result<String, UnsafeName> {
     if name.is_empty() {
         return Ok(String::new());
     }
     check_name_for(name, windows)?;
-    let path = if parent.is_empty() {
+    Ok(if parent.is_empty() {
         name.to_string()
     } else {
         format!("{}/{name}", parent.trim_end_matches('/'))
-    };
-    check_path_for(&path, windows)?;
-    Ok(path)
+    })
 }
 
 /// [`compose_for`] with this host's rules.
@@ -227,13 +267,39 @@ mod tests {
             for name in ["..", ".", "a/b", "/a", "a/", "../../x"] {
                 assert!(compose_for("docs", name, windows).is_err(), "{name:?} is not one name");
             }
-            for parent in ["../up", "docs/../..", "docs//x"] {
-                assert!(compose_for(parent, "a.txt", windows).is_err(), "{parent:?} as a parent");
+            for path in ["../up/a.txt", "docs/../../a.txt", "docs//x/a.txt", "docs/", ""] {
+                assert!(check_path_for(path, windows).is_err(), "{path:?}");
             }
+            assert_eq!(check_path_for("/docs/a.txt", windows), Ok(()), "an older row's leading slash");
         }
         assert_eq!(compose_for("docs", "CON", false).as_deref(), Ok("docs/CON"));
         assert!(compose_for("docs", "CON", true).is_err());
-        assert!(compose_for("a:b", "x.txt", true).is_err(), "a parent segment with the Windows rules");
+        assert!(check_path_for("a:b/x.txt", true).is_err(), "a parent segment with the Windows rules");
+        assert_eq!(check_path_for("a:b/x.txt", false), Ok(()));
+    }
+
+    /// Core's 255-byte limit is Linux's and macOS's; Windows holds 255 UTF-16 units, so a long CJK name stays one
+    /// name there, and every other rule still applies to it.
+    #[test]
+    fn task_2413_a_long_name_meets_the_host_length_and_every_other_rule() {
+        let han = |n: usize| "漢".repeat(n);
+        let cases: [(String, bool, bool); 9] = [
+            (han(85), true, true),
+            (han(100), false, true),
+            (han(255), false, true),
+            (han(256), false, false),
+            (format!("{}:x", han(100)), false, false),
+            (format!("CON.{}", han(100)), false, false),
+            (format!("{}.", han(100)), false, false),
+            (format!("{}\\x", han(100)), false, false),
+            ("a".repeat(300), false, false),
+        ];
+        for (name, unix, windows) in &cases {
+            assert_eq!(check_name_for(name, false).is_ok(), *unix, "{} chars without the Windows rules", name.chars().count());
+            assert_eq!(check_name_for(name, true).is_ok(), *windows, "{} chars with the Windows rules", name.chars().count());
+        }
+        assert_eq!(length_stand_in("Report 2026 final.pdf"), "Report 2026 final.pdf");
+        assert_eq!(length_stand_in("CON.abcdefghijk"), "CON.aaaaaaaa");
     }
 
     /// The walk refuses a link at the root, at a folder on the way and at the destination, and passes plain entries

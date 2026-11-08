@@ -109,7 +109,7 @@ impl EngineBridge {
         root: &SharedRootMapping,
         folder_key: Option<&[u8; 32]>,
         folder_keys_response: Option<&serde_json::Value>,
-    ) -> String {
+    ) -> Result<String, beebeeb_core::path_safety::UnsafeName> {
         let item_kind = if root.is_folder {
             ItemKind::Folder
         } else {
@@ -123,10 +123,11 @@ impl EngineBridge {
             self.decrypted_direct_shared_root_name(root)
         };
 
-        decrypted
-            .as_deref()
-            .and_then(safe_shared_leaf_name)
-            .unwrap_or_else(|| shared_placeholder_name(&item_kind).to_string())
+        // Task 2413: a decrypted name that is not one name this host can hold refuses the root (`shared_leaf_name`).
+        Ok(match decrypted.as_deref().map(shared_leaf_name).transpose()?.flatten() {
+            Some(leaf) => leaf,
+            None => shared_placeholder_name(&item_kind).to_string(),
+        })
     }
 
     async fn refresh_shared_folder_children(
@@ -201,11 +202,18 @@ impl EngineBridge {
                     }
                 }
             }
-            let display_name = self.shared_root_display_name(
+            let display_name = match self.shared_root_display_name(
                 root,
                 folder_material.as_ref().map(|(folder_key, _)| &**folder_key),
                 folder_material.as_ref().map(|(_, keys_response)| keys_response),
-            );
+            ) {
+                Ok(name) => name,
+                // Task 2413: skipped as a refused root is below (nothing written, still active, nothing purged).
+                Err(rule) => {
+                    tracing::warn!(file_id = %root.file_id, rule = %rule, "shared root not stored: its name is not one this device can hold");
+                    continue;
+                }
+            };
             // Task 2413: the display name is one name or the placeholder name; the store checks the path again.
             let root_path = format!("Shared with me/{display_name}");
 

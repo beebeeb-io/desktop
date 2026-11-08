@@ -281,39 +281,46 @@ pub(super) fn shared_placeholder_name(item_kind: &ItemKind) -> &'static str {
     }
 }
 
-/// Task 2413: a shared item's own name, when it is one name this host can hold (the rule own rows meet,
-/// [`crate::stored_path::check_name_for`]); otherwise `None` and the caller shows the placeholder name. The name is
-/// checked as it is: trimming it made `a.txt ` and `a.txt` one path.
-pub(super) fn safe_shared_leaf_name(name: &str) -> Option<String> {
-    crate::stored_path::check_name_for(name, crate::stored_path::host_is_windows()).ok()?;
-    Some(name.to_string())
+/// Task 2413: a shared item's decrypted name, trimmed as before. `Ok(Some(name))` when it is one name this host can
+/// hold (the rule own names meet, [`crate::stored_path::check_name_for`]), `Ok(None)` when it is blank (the caller
+/// shows the placeholder name, as for a name that does not decrypt), and `Err` when it breaks the rule: the row is
+/// refused, as an own row is (several such names under the one placeholder name would share a path).
+pub(super) fn shared_leaf_name(name: &str) -> Result<Option<String>, beebeeb_core::path_safety::UnsafeName> {
+    let leaf = name.trim();
+    if leaf.is_empty() {
+        return Ok(None);
+    }
+    crate::stored_path::check_name_for(leaf, crate::stored_path::host_is_windows())?;
+    Ok(Some(leaf.to_string()))
 }
 
-/// Task 2413: a server row the store refused. Logged by id and rule only (never a name); nothing is written. A row
-/// stored before is returned as it is, so the rows of a folder it holds are still placed under it; a new one is `None`.
-fn refused_server_row(file_id: &str, rule: &beebeeb_core::path_safety::UnsafeName, existing: Option<FileEntry>) -> Option<FileEntry> {
+/// Task 2413: a server row the store refused. Logged by id and rule only (never a name); nothing is written, and a row
+/// stored before stays exactly as it was. Always `None`: the row is neither applied nor reported as changed.
+fn refused_server_row(file_id: &str, rule: &beebeeb_core::path_safety::UnsafeName) -> Option<FileEntry> {
     tracing::warn!(file_id = %file_id, rule = %rule, "server row not stored: a name on its path is not one this device can hold");
-    existing
+    None
 }
 
 pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
     beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
 }
 
+/// A shared row's own name: its decrypted name, or the placeholder name when it does not decrypt (or is blank).
+/// Task 2413: `Err` when the decrypted name is not one name this host can hold ([`shared_leaf_name`]).
 pub(super) fn shared_name_from_metadata(
     f: &serde_json::Value,
     item_kind: &ItemKind,
     file_key: Option<&beebeeb_core::kdf::FileKey>,
-) -> String {
+) -> Result<String, beebeeb_core::path_safety::UnsafeName> {
     if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str()) {
         if let Some(name) = decrypt_shared_name_with_key(key, name_encrypted) {
-            if let Some(leaf) = safe_shared_leaf_name(&name) {
-                return leaf;
+            if let Some(leaf) = shared_leaf_name(&name)? {
+                return Ok(leaf);
             }
         }
     }
 
-    shared_placeholder_name(item_kind).to_string()
+    Ok(shared_placeholder_name(item_kind).to_string())
 }
 
 pub(super) fn apply_shared_metadata_file_row(
@@ -334,12 +341,13 @@ pub(super) fn apply_shared_metadata_file_row(
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = json_timestamp_secs(f, &["updated_at", "uploaded_at", "created_at"]).unwrap_or(now);
     let item_kind = item_kind_from_metadata(f);
-    let leaf = shared_name_from_metadata(f, &item_kind, file_key);
-    // Task 2413: the leaf is one name (or the placeholder name); its parent's segments are checked again here and by
-    // the store. A refused row is skipped, never an error that would stop the rest of the folder's refresh.
-    let path = match crate::stored_path::compose(parent_rel_path, &leaf) {
+    // Task 2413: the leaf is one name (or the placeholder name), and the store checks every segment of the path. A
+    // refused row is skipped, never an error that would stop the rest of the folder's refresh.
+    let path = match shared_name_from_metadata(f, &item_kind, file_key)
+        .and_then(|leaf| crate::stored_path::compose(parent_rel_path, &leaf))
+    {
         Ok(path) => path,
-        Err(rule) => return Ok(refused_server_row(file_id, &rule, None)),
+        Err(rule) => return Ok(refused_server_row(file_id, &rule)),
     };
     let status = existing
         .as_ref()
@@ -384,7 +392,7 @@ pub(super) fn apply_shared_metadata_file_row(
         contract.last_sync_at = now;
     })?;
     if let crate::stored_path::ServerRowWrite::Refused(rule) = written {
-        return Ok(refused_server_row(file_id, &rule, None));
+        return Ok(refused_server_row(file_id, &rule));
     }
     Ok(Some(entry))
 }
@@ -422,21 +430,27 @@ pub(super) fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+    // Task 2413: a refused own row is remembered, so an op under it waits without asking for a re-snapshot.
+    let refuse = |rule: beebeeb_core::path_safety::UnsafeName| -> Result<Option<FileEntry>, EngineError> {
+        db.note_refused_server_row(file_id)?;
+        Ok(refused_server_row(file_id, &rule))
+    };
     let leaf = match crate::owner_keys::stored_name(db, file_id, master_key)? {
         Some(name) => name,
         None => match resolve_relative_path(f, file_id, master_key) {
             Ok(name) => name,
-            Err(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
+            Err(rule) => return refuse(rule),
         },
     };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
     // tick) rather than seeding a bare parent dir. Task 2413: the leaf must be
-    // ONE name and every segment of the path one this host can hold, or the row
-    // is refused and nothing about it is written (a stored row stays as it was).
+    // ONE name and every segment of the path one this host can hold (the store
+    // checks the path), or the row is refused and nothing about it is written (a
+    // stored row stays as it was).
     let path = match crate::stored_path::compose(parent_rel_path, &leaf) {
         Ok(path) => path,
-        Err(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
+        Err(rule) => return refuse(rule),
     };
     // Task 2204 S0.3: while a Windows rename of this file is queued (parked included), the row's
     // path and parent are where the file is on disk; the server's are still the old ones.
@@ -518,7 +532,7 @@ pub(super) fn apply_metadata_file_row(
     })?;
     entry.path = match written {
         crate::stored_path::ServerRowWrite::Written(path) => path,
-        crate::stored_path::ServerRowWrite::Refused(rule) => return Ok(refused_server_row(file_id, &rule, existing)),
+        crate::stored_path::ServerRowWrite::Refused(rule) => return Ok(refused_server_row(file_id, &rule)),
     };
     apply_system_role_field(db, file_id, f)?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the

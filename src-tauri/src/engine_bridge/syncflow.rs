@@ -464,8 +464,8 @@ pub(super) fn apply_snapshot(
     let mut seen: HashSet<String> = HashSet::new();
     // file_id → resolved FULL relative path (so children can prefix their leaf).
     let mut resolved_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    // Task 2413: nodes not placed in the mirror (the store refused a new row): their rows are not placed either, never
-    // at the top level. They stay in `seen`, so nothing stored for them is pruned.
+    // Task 2413: nodes not placed in the mirror (the store refused a row it did not hold): their rows are not placed
+    // either, never at the top level. They stay in `seen`, so nothing stored for them is pruned.
     let mut unplaced: HashSet<String> = HashSet::new();
 
     for f in order {
@@ -513,6 +513,9 @@ pub(super) fn apply_snapshot(
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
             applied.push(file_id.to_string());
+        } else if let Some(stored) = bridge.db().get_file(file_id)?.filter(|row| !row.path.is_empty()) {
+            // Task 2413: a stored row the store refused now keeps its place; the rows below it stay under it.
+            resolved_paths.insert(file_id.to_string(), stored.path);
         } else {
             unplaced.insert(file_id.to_string());
         }
