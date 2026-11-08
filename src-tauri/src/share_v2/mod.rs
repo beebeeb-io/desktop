@@ -8,12 +8,13 @@
 //! - a share link that carries a key is put on the clipboard by Rust; the web view gets only the
 //!   display form without the part after `#`.
 //!
-//! The share flows run in core (`beebeeb_core::share_flow`, B05b): `share_invite` (a person share of
-//! a file), `share_link_copy` (rebuild the owner's link, or mint a double-encrypted one) and
-//! `share_revoke` drive them over this module's transport (`flows.rs`). A folder share, a folder link,
-//! file requests and the remaining list commands are not in core yet: they answer
-//! `unsupported: not implemented`, and the window shows its honest "isn't available in this version"
-//! copy. Never a half flow behind a working command.
+//! The share flows run in core (`beebeeb_core::share_flow`, B05b/B05c): `share_invite` (a person
+//! share of a file or, through `folder_flows.rs`, a folder), `share_link_copy` (rebuild the owner's
+//! link, or mint one: a file link, a folder link, or a bundle over several files, with the Files
+//! dialog's expiry and password), `share_revoke`, and `file_request_create|copy|update` (close) in
+//! `requests.rs`. The list commands and the rest answer `unsupported: not implemented`, and the
+//! window shows its honest "isn't available in this version" copy. Never a half flow behind a
+//! working command.
 
 use beebeeb_core::auth_flow::step_up::{StepUp, StepUpPurpose, StepUpStep};
 use beebeeb_core::auth_flow::{AuthFlowError, HttpRequest, Method, RequestAuth};
@@ -30,6 +31,8 @@ const EVENT: &str = "drive://event";
 const NOT_YET: &str = "unsupported: not implemented in this build";
 
 pub(crate) mod flows;
+pub(crate) mod folder_flows;
+pub(crate) mod requests;
 #[cfg(test)]
 mod tests;
 
@@ -148,7 +151,6 @@ pub(crate) fn display_form(link: &str) -> String {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // read by file_request_create once the core flow lands
 pub(crate) struct FileRequestInput {
     pub title: String,
     pub note: String,
@@ -184,8 +186,5 @@ not_yet! {
     fn share_link_update(item_id: String, expires_days: Option<u32>, set_expiry: bool, password: Option<String>, set_password: bool) -> ();
     fn share_safety_number(member_id: String) -> serde_json::Value;
     fn share_mark_compared(member_id: String, matched: bool) -> ();
-    fn file_request_create(input: FileRequestInput) -> CopiedLink;
-    fn file_request_copy(id: String) -> CopiedLink;
-    fn file_request_update(id: String, expires_days: Option<u32>, set_expiry: bool, close: bool) -> ();
     fn file_request_remove(id: String) -> ();
 }

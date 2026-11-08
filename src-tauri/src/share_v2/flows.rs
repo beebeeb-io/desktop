@@ -14,17 +14,17 @@ use tauri::State;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use zeroize::Zeroizing;
 
-use super::{Answer, CopiedLink, NOT_YET, display_form};
+use super::{Answer, CopiedLink, display_form};
 use crate::AppState;
 use crate::auth_v2::transport;
 
 /// The unlocked session: the bearer token and the master key, both wiped on drop.
 pub(super) struct Unlocked {
     session: Zeroizing<String>,
-    master: MasterKey,
+    pub(super) master: MasterKey,
 }
 
-fn unlocked(state: &AppState) -> Answer<Unlocked> {
+pub(super) fn unlocked(state: &AppState) -> Answer<Unlocked> {
     let acct = state.active_account().map_err(|_| "signed-out".to_string())?;
     let guard = acct.session.lock().map_err(|_| "failed".to_string())?;
     let session = guard.as_ref().ok_or_else(|| "locked".to_string())?;
@@ -37,7 +37,6 @@ fn unlocked(state: &AppState) -> Answer<Unlocked> {
 /// A flow error as the window's reason: `unsupported` for what core does not have yet.
 pub(super) fn flow_reason(e: ShareFlowError) -> String {
     match e {
-        ShareFlowError::FolderInviteUnsupported => NOT_YET.into(),
         ShareFlowError::NotFound => "not-found".into(),
         ShareFlowError::Unauthorized => "signed-out".into(),
         ShareFlowError::InvalidInput(_) => "invalid".into(),
@@ -57,19 +56,34 @@ pub(super) fn item_id(id: &str) -> Answer<String> {
 /// `EngineBridge::resolved_owned_key`): its owned-key record, else an owner id's derivation; a
 /// foreign id with no record is unavailable. A folder answers `unsupported` before any key lookup:
 /// folder shares and folder links are not in core yet.
-fn file_key(master: &MasterKey, id: &str) -> Answer<FileKey> {
-    use beebeeb_core::item_id::{ItemClass, item_class};
+pub(super) fn state_db() -> Answer<crate::state_db::StateDb> {
     let cfg = crate::config::DesktopConfig::load().map_err(|_| "failed".to_string())?;
-    let db = crate::local_state_purge::state_db_for_config(&cfg)
+    crate::local_state_purge::state_db_for_config(&cfg)
         .map_err(|_| "failed".to_string())?
+        .ok_or_else(|| "not-found".to_string())
+}
+
+/// Whether a live item is a folder (`not-found` for an unknown or trashing one).
+pub(super) fn is_folder(id: &str) -> Answer<bool> {
+    let entry = state_db()?
+        .get_file(id)
+        .map_err(|_| "failed".to_string())?
+        .filter(|e| e.status != crate::state_db::FileStatus::Trashing)
         .ok_or_else(|| "not-found".to_string())?;
+    Ok(entry.is_dir())
+}
+
+pub(super) fn file_key(master: &MasterKey, id: &str) -> Answer<FileKey> {
+    use beebeeb_core::item_id::{ItemClass, item_class};
+    let db = state_db()?;
     let entry = db
         .get_file(id)
         .map_err(|_| "failed".to_string())?
         .filter(|e| e.status != crate::state_db::FileStatus::Trashing)
         .ok_or_else(|| "not-found".to_string())?;
     if entry.is_dir() {
-        return Err(NOT_YET.into());
+        // A folder has no file key: folders go through `folder_flows` (core's `FolderShare`).
+        return Err("invalid".into());
     }
     fn unavailable<E>(_: E) -> String {
         "key-unavailable".into()
@@ -86,11 +100,11 @@ fn file_key(master: &MasterKey, id: &str) -> Answer<FileKey> {
     }
 }
 
-async fn send(client: &reqwest::Client, u: &Unlocked, req: HttpRequest) -> Answer<HttpResponse> {
+pub(super) async fn send(client: &reqwest::Client, u: &Unlocked, req: HttpRequest) -> Answer<HttpResponse> {
     transport::send(client, Some(&u.session), req).await
 }
 
-fn get(path: String) -> HttpRequest {
+pub(super) fn get(path: String) -> HttpRequest {
     HttpRequest {
         method: Method::Get,
         path,
@@ -100,7 +114,7 @@ fn get(path: String) -> HttpRequest {
     }
 }
 
-fn list<'a>(body: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
+pub(super) fn list<'a>(body: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
     body.get(field).and_then(Value::as_array).into_iter().flatten()
 }
 
@@ -141,6 +155,9 @@ pub(crate) async fn share_invite(
 ) -> Answer<Value> {
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
+    if is_folder(&id)? {
+        return super::folder_flows::folder_invite(&u, &id, &email).await;
+    }
     let key = file_key(&u.master, &id)?;
     let target = ShareTarget {
         item_id: id,
@@ -167,12 +184,53 @@ pub(crate) async fn share_link_copy(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     item_id: String,
+    item_ids: Option<Vec<String>>,
+    expires_hours: Option<u32>,
+    password: Option<String>,
 ) -> Answer<CopiedLink> {
+    let password = password.map(Zeroizing::new);
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
     let client = transport::client()?;
     let app_url = crate::native_menu::WEB_APP_URL;
-    let existing = my_links(&client, &u, &id).await?.into_iter().find_map(|s| {
+    // The Files dialog's choices (DW-0407): a new link with them. Without any (Shared's
+    // "Copy link"), the owner's live link is rebuilt first.
+    let options = LinkOptions {
+        expires_in_hours: expires_hours,
+        max_opens: None,
+        passphrase: password.clone().filter(|p| !p.trim().is_empty()),
+    };
+    let chosen = options.expires_in_hours.is_some() || options.passphrase.is_some();
+    let link = match item_ids.filter(|ids| ids.len() > 1) {
+        Some(ids) => super::folder_flows::bundle_link(&client, &u, app_url, &ids, &options).await?,
+        None if is_folder(&id)? => {
+            super::folder_flows::folder_link(&client, &u, app_url, &id, chosen, &options).await?
+        }
+        None => file_link(&client, &u, app_url, &id, chosen, &options).await?,
+    };
+    app.clipboard()
+        .write_text(link.as_str())
+        .map_err(|_| "clipboard".to_string())?;
+    Ok(CopiedLink {
+        display: display_form(&link),
+    })
+}
+
+async fn file_link(
+    client: &reqwest::Client,
+    u: &Unlocked,
+    app_url: &str,
+    id: &str,
+    chosen: bool,
+    options: &LinkOptions,
+) -> Answer<Zeroizing<String>> {
+    let id = id.to_owned();
+    let existing = if chosen {
+        Vec::new()
+    } else {
+        my_links(client, u, &id).await?
+    };
+    let existing = existing.into_iter().find_map(|s| {
         sf::link::rebuild_link(
             app_url,
             &u.master,
@@ -184,27 +242,32 @@ pub(crate) async fn share_link_copy(
         Some(link) => link,
         None => {
             let key = file_key(&u.master, &id)?;
-            let (mut flow, mut req) =
-                CreateLink::start(app_url, &id, &u.master, &key, &LinkOptions::default()).map_err(flow_reason)?;
+            let (flow, req) = CreateLink::start(app_url, &id, &u.master, &key, options).map_err(flow_reason)?;
             drop(key);
-            loop {
-                let resp = send(&client, &u, req).await?;
-                match flow.on_response(resp).map_err(flow_reason)? {
-                    LinkStep::Send(next) => req = next,
-                    LinkStep::Created(created) => break created.link,
-                }
-            }
+            drive_link(&client, u, flow, req).await?
         }
     };
-    app.clipboard()
-        .write_text(link.as_str())
-        .map_err(|_| "clipboard".to_string())?;
-    Ok(CopiedLink {
-        display: display_form(&link),
-    })
+    Ok(link)
 }
 
-/// Stop sharing: one person (`member_id`, the invite id) or, with none, every live link of the item
+/// Drive a file or bundle link to its full URL.
+pub(super) async fn drive_link(
+    client: &reqwest::Client,
+    u: &Unlocked,
+    mut flow: CreateLink,
+    mut req: HttpRequest,
+) -> Answer<Zeroizing<String>> {
+    loop {
+        let resp = send(client, u, req).await?;
+        match flow.on_response(resp).map_err(flow_reason)? {
+            LinkStep::Send(next) => req = next,
+            LinkStep::Created(created) => return Ok(created.link),
+        }
+    }
+}
+
+/// Stop sharing: one person (`member_id`, the invite id: the server's `DELETE /shares/invites/{id}`
+/// takes the invite id) or, with none, every live link of the item (a folder's folder links too)
 /// and every invite the owner sent for it.
 #[tauri::command]
 pub(crate) async fn share_revoke(state: State<'_, AppState>, item_id: String, member_id: Option<String>) -> Answer<()> {
@@ -215,6 +278,9 @@ pub(crate) async fn share_revoke(state: State<'_, AppState>, item_id: String, me
     match member_id {
         Some(member) => requests.push(sf::cancel_invite_request(&self::item_id(&member)?).map_err(flow_reason)?),
         None => {
+            if is_folder(&id)? {
+                requests.extend(super::folder_flows::folder_link_revokes(&client, &u, &id).await?);
+            }
             for share in my_links(&client, &u, &id).await? {
                 let sid = share.get("id").and_then(Value::as_str).unwrap_or_default();
                 requests.push(sf::revoke_link_request(sid).map_err(flow_reason)?);

@@ -19,7 +19,14 @@ export const shareInvite = (itemId: string, email: string, access: Access, accep
 export const shareSetAccess = (itemId: string, memberId: string, access: Access) => command<void>('share_set_access', { itemId, memberId, canEdit: access === 'Can edit' })
 /** Stop sharing: one person (`memberId`) or the whole share or link (`memberId` null). */
 export const shareRevoke = (itemId: string, memberId: string | null) => command<void>('share_revoke', { itemId, memberId })
-export const shareLinkCopy = (itemId: string) => command<CopiedLink>('share_link_copy', { itemId })
+/** Link options from the Files share dialog (DW-0407); none means "copy the live link". Several ids make one bundle link. */
+export interface LinkChoices { itemIds?: string[]; expiresHours?: number | null; password?: string | null }
+export const shareLinkCopy = (itemId: string, choices: LinkChoices = {}) =>
+  command<CopiedLink>('share_link_copy', { itemId, itemIds: choices.itemIds ?? null, expiresHours: choices.expiresHours ?? null, password: choices.password ?? null })
+/** The Files dialog's expiry choice in hours; `Never` is null. */
+export function expiryHours(choice: string): number | null {
+  return ({ 'In 1 day': 24, 'In 7 days': 168, 'In 30 days': 720 } as Record<string, number>)[choice] ?? null
+}
 export const shareLinkUpdate = (itemId: string, change: { expiresDays?: number | null; password?: string | null }) =>
   command<void>('share_link_update', { itemId, expiresDays: change.expiresDays, setExpiry: 'expiresDays' in change, password: change.password ?? null, setPassword: 'password' in change })
 export const shareSafetyNumber = (memberId: string) => command<{ groups: string[] }>('share_safety_number', { memberId })

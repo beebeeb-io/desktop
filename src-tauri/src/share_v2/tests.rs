@@ -83,9 +83,16 @@ fn ids_must_be_canonical_uuids() {
 }
 
 #[test]
-fn a_folder_share_answers_unsupported_and_server_codes_never_leak_text() {
+fn folder_refusals_keep_their_code_and_server_codes_never_leak_text() {
     use beebeeb_core::share_flow::ShareFlowError;
-    assert_eq!(flows::flow_reason(ShareFlowError::FolderInviteUnsupported), NOT_YET);
+    assert_eq!(
+        flows::flow_reason(ShareFlowError::FolderKeyUnverified),
+        "folder_key_unverified"
+    );
+    assert_eq!(
+        flows::flow_reason(ShareFlowError::FolderNeedsUpgrade),
+        "folder_needs_upgrade"
+    );
     assert_eq!(flows::flow_reason(ShareFlowError::NotFound), "not-found");
     assert_eq!(
         flows::flow_reason(ShareFlowError::Refused("plan_required")),
