@@ -1,8 +1,8 @@
 // The Office engine on this PC, through Rust only (src-tauri/src/office_v2): its status, the first-time download
 // with progress, and the base the window loads the cached files from. The window never fetches the engine itself.
 import { listen } from '@tauri-apps/api/event'
-import { engineReadyBridge, type OfficeBridge } from '@beebeeb/shared/drive-ui'
 import { command } from '../../../../desktopApi'
+import { connectRelay, originOf, type RelayBridge } from './relay'
 
 export interface EngineStatus { state: 'ready' | 'missing' | 'unpublished'; version: string | null; totalBytes: number }
 export interface EngineProgress { loaded: number; total: number }
@@ -42,21 +42,8 @@ export function engineHostUrl(version: string): string {
   return `${windows ? 'http://bboffice.localhost' : 'bboffice://localhost'}/${version}/bb-office-host.html`
 }
 
-/** Wait for the engine in the frame to take calls (its bridge and its UNO port), up to `timeoutMs`. */
-export function waitForBridge(frame: HTMLIFrameElement, timeoutMs = 180_000): Promise<OfficeBridge> {
-  const started = Date.now()
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      let bridge: OfficeBridge | null = null
-      try {
-        bridge = frame.contentWindow ? engineReadyBridge(frame.contentWindow) : null
-      } catch {
-        return reject(new Error('boot: the editor frame is not reachable'))
-      }
-      if (bridge) return resolve(bridge)
-      if (Date.now() - started > timeoutMs) return reject(new Error('boot: timed out'))
-      setTimeout(tick, 250)
-    }
-    tick()
-  })
+/** Wait for the engine in the frame to take calls, up to `timeoutMs`. The frame is another origin (the `bboffice`
+ *  scheme), so the engine is reached through its postMessage relay, checked against the frame's own origin. */
+export function waitForBridge(frame: HTMLIFrameElement, timeoutMs = 180_000): Promise<RelayBridge> {
+  return connectRelay(frame, originOf(frame.src), timeoutMs)
 }

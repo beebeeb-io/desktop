@@ -15,8 +15,8 @@
         "label": "tray",
         "title": "Beebeeb",
         "url": "index.html?window=tray",
-        "width": 400,
-        "height": 560,
+        "width": 364,
+        "height": 592,
         "resizable": false,
         "fullscreen": false,
         "visible": false,
@@ -42,19 +42,23 @@
         "label": "main-app",
         "title": "Beebeeb",
         "url": "index.html?window=main-app&platform=windows",
-        "width": 1100,
-        "height": 720,
+        "width": 1280,
+        "height": 800,
         "resizable": true,
         "fullscreen": false,
         "visible": false,
         "center": true,
         "decorations": false,
-        "minWidth": 880,
-        "minHeight": 560
+        "minWidth": 960,
+        "minHeight": 640
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.beebeeb.io https://releases.beebeeb.io; img-src 'self' blob: data:; font-src 'self'; frame-src 'self' bboffice: http://bboffice.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.beebeeb.io https://releases.beebeeb.io; img-src 'self' blob: data:; font-src 'self'; frame-src 'self' bboffice: http://bboffice.localhost",
+      "headers": {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp"
+      }
     },
     "trayIcon": {
       "id": "tray",

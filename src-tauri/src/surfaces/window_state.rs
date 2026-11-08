@@ -203,6 +203,128 @@ pub fn plan_main_window(
     Some(centred(kept.map_or(default_size, |frame| (frame.w, frame.h)), display))
 }
 
+/// The margin kept free on each side of the work area when the default size does not fit (logical points).
+pub const FIT_MARGIN: f64 = 24.0;
+
+/// The size and minimum a window gets on a display: `default`, shrunk to the work area minus [`FIT_MARGIN`] on each
+/// side when it does not fit; the minimum never exceeds that size (so never the work area). `(size, minimum)`.
+pub fn fit_to_work_area(default: (f64, f64), minimum: (f64, f64), work_area: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+    let room = |area: f64| (area - 2.0 * FIT_MARGIN).max(1.0);
+    let size = (default.0.min(room(work_area.0)), default.1.min(room(work_area.1)));
+    (size, (minimum.0.min(size.0), minimum.1.min(size.1)))
+}
+
+/// What is kept of the main window on Windows and Linux: its last ordinary frame and whether it was maximized.
+/// The file is [`MAIN_FRAME_FILENAME`]; its frame fields are the same ones the Mac writes, so either reads the other.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct KeptMain {
+    #[serde(flatten)]
+    pub frame: LRect,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// The state to write now: the current ordinary frame (None when maximized or full screen), else the previous frame
+/// with the flag set, so a maximized window reopens maximized and un-maximizes to where it was.
+pub fn next_kept(previous: Option<KeptMain>, current: Option<LRect>, maximized: bool) -> Option<KeptMain> {
+    match (current, maximized) {
+        (Some(frame), false) => Some(KeptMain {
+            frame,
+            maximized: false,
+        }),
+        // Maximized with nothing kept: nothing to un-maximize to; the next open fits the default.
+        _ => previous.map(|p| KeptMain { maximized: true, ..p }),
+    }
+}
+
+/// Reads the kept state; a missing, empty, partial or unusable file is no state (never a crash).
+pub fn read_kept_main(path: &std::path::Path) -> Option<KeptMain> {
+    let bytes = std::fs::read(path).ok()?;
+    let kept: KeptMain = serde_json::from_str(std::str::from_utf8(&bytes).ok()?).ok()?;
+    kept.frame.is_usable().then_some(kept)
+}
+
+/// Writes the kept state atomically (a temporary file, then a rename over it).
+pub fn write_kept_main(path: &std::path::Path, kept: &KeptMain) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(kept).map_err(std::io::Error::other)?)?;
+    std::fs::rename(&temporary, path)
+}
+
+/// Where the main window goes on Windows and Linux, and its minimum size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DesktopPlacement {
+    pub frame: LRect,
+    pub minimum: (f64, f64),
+    pub maximized: bool,
+}
+
+/// The whole placement, decided before any of it is applied. A kept frame that is at least half on a display is
+/// reused (its size raised to the minimum and cut to that display's work area); anything else (none, corrupt,
+/// off-screen) is the default size fitted to the primary display's work area and centred on it.
+pub fn plan_desktop_main_window(
+    kept: Option<KeptMain>,
+    displays: &[Display],
+    primary: usize,
+    default: (f64, f64),
+    minimum: (f64, f64),
+) -> Option<DesktopPlacement> {
+    let kept = kept.filter(|k| k.frame.is_usable());
+    if let Some(k) = kept.filter(|k| mostly_on_screen(k.frame, displays)) {
+        let centre = (k.frame.x + k.frame.w / 2.0, k.frame.y + k.frame.h / 2.0);
+        let display = displays
+            .iter()
+            .find(|d| d.work_area.contains(centre.0, centre.1))
+            .or_else(|| {
+                displays.iter().max_by(|a, b| {
+                    k.frame
+                        .overlap(&a.work_area)
+                        .partial_cmp(&k.frame.overlap(&b.work_area))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })?;
+        let area_size = (display.work_area.w, display.work_area.h);
+        let min = (minimum.0.min(area_size.0), minimum.1.min(area_size.1));
+        let size = (
+            k.frame.w.max(min.0).min(area_size.0),
+            k.frame.h.max(min.1).min(area_size.1),
+        );
+        let area = display.work_area;
+        let frame = LRect {
+            x: k.frame.x.clamp(area.x, (area.right() - size.0).max(area.x)),
+            y: k.frame.y.clamp(area.y, (area.bottom() - size.1).max(area.y)),
+            w: size.0,
+            h: size.1,
+        };
+        return Some(DesktopPlacement {
+            frame,
+            minimum: min,
+            maximized: k.maximized,
+        });
+    }
+    let display = displays.get(primary).or_else(|| displays.first())?;
+    let (size, min) = fit_to_work_area(default, minimum, (display.work_area.w, display.work_area.h));
+    Some(DesktopPlacement {
+        frame: centred(size, display),
+        minimum: min,
+        maximized: false,
+    })
+}
+
+/// The wiring: the kept file at `path` (or none) against the displays.
+pub fn plan_from_file(
+    path: &std::path::Path,
+    displays: &[Display],
+    primary: usize,
+    default: (f64, f64),
+    minimum: (f64, f64),
+) -> Option<DesktopPlacement> {
+    plan_desktop_main_window(read_kept_main(path), displays, primary, default, minimum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,13 +338,33 @@ mod tests {
     fn desk() -> [Display; 2] {
         [
             Display::from_physical(
-                PRect { x: 0, y: 0, w: 3024, h: 1964 },
-                PRect { x: 0, y: 74, w: 3024, h: 1750 },
+                PRect {
+                    x: 0,
+                    y: 0,
+                    w: 3024,
+                    h: 1964,
+                },
+                PRect {
+                    x: 0,
+                    y: 74,
+                    w: 3024,
+                    h: 1750,
+                },
                 BUILT_IN,
             ),
             Display::from_physical(
-                PRect { x: 1512, y: 0, w: 1920, h: 1080 },
-                PRect { x: 1512, y: 25, w: 1920, h: 1055 },
+                PRect {
+                    x: 1512,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
+                PRect {
+                    x: 1512,
+                    y: 25,
+                    w: 1920,
+                    h: 1055,
+                },
                 EXTERNAL,
             ),
         ]
@@ -241,10 +383,34 @@ mod tests {
     #[test]
     fn a_display_is_its_physical_frame_over_its_own_scale() {
         let d = desk();
-        assert_eq!(d[0].frame, LRect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
+        assert_eq!(
+            d[0].frame,
+            LRect {
+                x: 0.0,
+                y: 0.0,
+                w: 1512.0,
+                h: 982.0
+            }
+        );
         assert_eq!((d[0].scale, d[1].scale), (BUILT_IN, EXTERNAL));
-        assert_eq!(d[0].work_area, LRect { x: 0.0, y: 37.0, w: 1512.0, h: 875.0 });
-        assert_eq!(d[1].frame, LRect { x: 1512.0, y: 0.0, w: 1920.0, h: 1080.0 });
+        assert_eq!(
+            d[0].work_area,
+            LRect {
+                x: 0.0,
+                y: 37.0,
+                w: 1512.0,
+                h: 875.0
+            }
+        );
+        assert_eq!(
+            d[1].frame,
+            LRect {
+                x: 1512.0,
+                y: 0.0,
+                w: 1920.0,
+                h: 1080.0
+            }
+        );
     }
 
     #[test]
@@ -269,8 +435,36 @@ mod tests {
         assert_eq!(icon_display(icon_at(1600.0, 30.0, EXTERNAL), &d[1..]), Some(0));
         // Two 2× displays side by side: only one contains the icon at their (equal) scale, whatever its height.
         let twins = [
-            Display::from_physical(PRect { x: 0, y: 0, w: 3024, h: 1964 }, PRect { x: 0, y: 74, w: 3024, h: 1750 }, 2.0),
-            Display::from_physical(PRect { x: 3024, y: 0, w: 3024, h: 1964 }, PRect { x: 3024, y: 50, w: 3024, h: 1774 }, 2.0),
+            Display::from_physical(
+                PRect {
+                    x: 0,
+                    y: 0,
+                    w: 3024,
+                    h: 1964,
+                },
+                PRect {
+                    x: 0,
+                    y: 74,
+                    w: 3024,
+                    h: 1750,
+                },
+                2.0,
+            ),
+            Display::from_physical(
+                PRect {
+                    x: 3024,
+                    y: 0,
+                    w: 3024,
+                    h: 1964,
+                },
+                PRect {
+                    x: 3024,
+                    y: 50,
+                    w: 3024,
+                    h: 1774,
+                },
+                2.0,
+            ),
         ];
         assert_eq!(icon_display(icon_at(1400.0, 40.0, 2.0), &twins), Some(0));
         assert_eq!(icon_display(icon_at(2900.0, 40.0, 2.0), &twins), Some(1));
@@ -280,8 +474,16 @@ mod tests {
     fn off_screen_recovery_keeps_the_kept_size() {
         // Review round 2, P3: centred again, at the size it was left, not the default.
         let d = desk();
-        let gone = LRect { x: 4000.0, y: 100.0, w: 1000.0, h: 700.0 };
-        assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), Some(centred((1000.0, 700.0), &d[1])));
+        let gone = LRect {
+            x: 4000.0,
+            y: 100.0,
+            w: 1000.0,
+            h: 700.0,
+        };
+        assert_eq!(
+            plan_main_window(Some(gone), &d, Some(1), 0, SIZE),
+            Some(centred((1000.0, 700.0), &d[1]))
+        );
     }
 
     #[test]
@@ -290,8 +492,14 @@ mod tests {
         assert_eq!(icon_display(icon_at(9000.0, 25.0, EXTERNAL), &d), None);
         // Auto-hiding menu bars: no height to tell the displays apart, and both fit, so the caller's primary decides.
         let hidden = [
-            Display { work_area: d[0].frame, ..d[0] },
-            Display { work_area: d[1].frame, ..d[1] },
+            Display {
+                work_area: d[0].frame,
+                ..d[0]
+            },
+            Display {
+                work_area: d[1].frame,
+                ..d[1]
+            },
         ];
         assert_eq!(icon_display(icon_at(1400.0, 37.0, BUILT_IN), &hidden), None);
     }
@@ -300,11 +508,30 @@ mod tests {
     fn first_open_centres_on_the_icon_display_in_points_whichever_display_holds_it() {
         let d = desk();
         // Built-in work area 1512 × 875 from y 37: (1512 - 920) / 2 = 296, 37 + (875 - 620) / 2 = 164.5.
-        assert_eq!(plan_main_window(None, &d, Some(0), 0, SIZE), Some(LRect { x: 296.0, y: 164.5, w: 920.0, h: 620.0 }));
+        assert_eq!(
+            plan_main_window(None, &d, Some(0), 0, SIZE),
+            Some(LRect {
+                x: 296.0,
+                y: 164.5,
+                w: 920.0,
+                h: 620.0
+            })
+        );
         // External work area 1920 × 1055 from (1512, 25): 1512 + 500, 25 + 217.5.
-        assert_eq!(plan_main_window(None, &d, Some(1), 0, SIZE), Some(LRect { x: 2012.0, y: 242.5, w: 920.0, h: 620.0 }));
+        assert_eq!(
+            plan_main_window(None, &d, Some(1), 0, SIZE),
+            Some(LRect {
+                x: 2012.0,
+                y: 242.5,
+                w: 920.0,
+                h: 620.0
+            })
+        );
         // No icon display: the primary.
-        assert_eq!(plan_main_window(None, &d, None, 1, SIZE), plan_main_window(None, &d, Some(1), 0, SIZE));
+        assert_eq!(
+            plan_main_window(None, &d, None, 1, SIZE),
+            plan_main_window(None, &d, Some(1), 0, SIZE)
+        );
     }
 
     #[test]
@@ -312,11 +539,27 @@ mod tests {
         let d = desk();
         // Left on the 1× external at (2200, 300) pt, 1000 × 700: what `frame_to_keep` writes from tao's numbers.
         let kept = frame_to_keep((2200, 300), (1000, 700), EXTERNAL, false, false).unwrap();
-        assert_eq!(kept, LRect { x: 2200.0, y: 300.0, w: 1000.0, h: 700.0 });
+        assert_eq!(
+            kept,
+            LRect {
+                x: 2200.0,
+                y: 300.0,
+                w: 1000.0,
+                h: 700.0
+            }
+        );
         assert_eq!(plan_main_window(Some(kept), &d, Some(0), 0, SIZE), Some(kept));
         // Left on the 2× built-in at (100, 80) pt, 920 × 620: tao reports (200, 160) and 1840 × 1240.
         let kept = frame_to_keep((200, 160), (1840, 1240), BUILT_IN, false, false).unwrap();
-        assert_eq!(kept, LRect { x: 100.0, y: 80.0, w: 920.0, h: 620.0 });
+        assert_eq!(
+            kept,
+            LRect {
+                x: 100.0,
+                y: 80.0,
+                w: 920.0,
+                h: 620.0
+            }
+        );
         assert_eq!(plan_main_window(Some(kept), &d, Some(1), 0, SIZE), Some(kept));
     }
 
@@ -324,19 +567,41 @@ mod tests {
     fn exactly_half_on_screen_is_kept_and_less_than_half_is_centred_again() {
         let d = desk();
         // The desk's right edge is 3432 pt.
-        let at = |x| LRect { x, y: 200.0, w: 920.0, h: 620.0 };
-        assert!(mostly_on_screen(at(3432.0 - 460.0), &d), "460 of 920 points on screen: half");
+        let at = |x| LRect {
+            x,
+            y: 200.0,
+            w: 920.0,
+            h: 620.0,
+        };
+        assert!(
+            mostly_on_screen(at(3432.0 - 460.0), &d),
+            "460 of 920 points on screen: half"
+        );
         assert!(!mostly_on_screen(at(3432.0 - 459.0), &d), "459 of 920: less than half");
-        assert_eq!(plan_main_window(Some(at(3432.0 - 459.0)), &d, Some(0), 1, SIZE), plan_main_window(None, &d, Some(0), 1, SIZE));
+        assert_eq!(
+            plan_main_window(Some(at(3432.0 - 459.0)), &d, Some(0), 1, SIZE),
+            plan_main_window(None, &d, Some(0), 1, SIZE)
+        );
     }
 
     #[test]
     fn a_frame_on_a_display_that_was_unplugged_is_centred_on_the_icon_display() {
         let d = desk();
-        let gone = LRect { x: 4000.0, y: 100.0, w: 920.0, h: 620.0 };
-        assert_eq!(plan_main_window(Some(gone), &d, Some(1), 0, SIZE), plan_main_window(None, &d, Some(1), 0, SIZE));
+        let gone = LRect {
+            x: 4000.0,
+            y: 100.0,
+            w: 920.0,
+            h: 620.0,
+        };
+        assert_eq!(
+            plan_main_window(Some(gone), &d, Some(1), 0, SIZE),
+            plan_main_window(None, &d, Some(1), 0, SIZE)
+        );
         // Unplugged with only the built-in left.
-        assert_eq!(plan_main_window(Some(gone), &d[..1], Some(0), 0, SIZE), plan_main_window(None, &d[..1], Some(0), 0, SIZE));
+        assert_eq!(
+            plan_main_window(Some(gone), &d[..1], Some(0), 0, SIZE),
+            plan_main_window(None, &d[..1], Some(0), 0, SIZE)
+        );
     }
 
     #[test]
@@ -350,21 +615,48 @@ mod tests {
     fn under_the_menu_bar_counts_as_off_the_work_area() {
         let d = desk();
         // 620 tall, only its bottom 200 pt below the built-in's 37 pt menu bar band: less than half on screen.
-        assert!(!mostly_on_screen(LRect { x: 100.0, y: 37.0 + 200.0 - 620.0, w: 920.0, h: 620.0 }, &d));
+        assert!(!mostly_on_screen(
+            LRect {
+                x: 100.0,
+                y: 37.0 + 200.0 - 620.0,
+                w: 920.0,
+                h: 620.0
+            },
+            &d
+        ));
     }
 
     #[test]
     fn a_window_larger_than_the_work_area_keeps_its_title_bar_on_screen() {
         let d = desk();
-        assert_eq!(centred((4000.0, 3000.0), &d[1]), LRect { x: 1512.0, y: 25.0, w: 4000.0, h: 3000.0 });
+        assert_eq!(
+            centred((4000.0, 3000.0), &d[1]),
+            LRect {
+                x: 1512.0,
+                y: 25.0,
+                w: 4000.0,
+                h: 3000.0
+            }
+        );
     }
 
     #[test]
     fn the_file_round_trips_and_anything_else_is_no_frame() {
-        let frame = LRect { x: 2200.0, y: 300.5, w: 1000.0, h: 700.0 };
+        let frame = LRect {
+            x: 2200.0,
+            y: 300.5,
+            w: 1000.0,
+            h: 700.0,
+        };
         let json = serde_json::to_string(&frame).unwrap();
         assert_eq!(parse_kept_frame(&json), Some(frame));
-        for bad in ["", "not json", "{}", r#"{"x":1,"y":2,"w":0,"h":5}"#, r#"{"x":1,"y":2,"w":-3,"h":5}"#] {
+        for bad in [
+            "",
+            "not json",
+            "{}",
+            r#"{"x":1,"y":2,"w":0,"h":5}"#,
+            r#"{"x":1,"y":2,"w":-3,"h":5}"#,
+        ] {
             assert_eq!(parse_kept_frame(bad), None, "{bad:?}");
         }
     }
@@ -372,8 +664,213 @@ mod tests {
     #[test]
     fn no_displays_place_nothing_and_a_bad_scale_counts_as_one() {
         assert_eq!(plan_main_window(None, &[], None, 0, SIZE), None);
-        let d = Display::from_physical(PRect { x: 0, y: 0, w: 1920, h: 1080 }, PRect { x: 0, y: 25, w: 1920, h: 1055 }, 0.0);
+        let d = Display::from_physical(
+            PRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            PRect {
+                x: 0,
+                y: 25,
+                w: 1920,
+                h: 1055,
+            },
+            0.0,
+        );
         assert_eq!(d.frame.w, 1920.0);
-        assert_eq!(frame_to_keep((10, 10), (920, 620), f64::NAN, false, false), Some(LRect { x: 10.0, y: 10.0, w: 920.0, h: 620.0 }));
+        assert_eq!(
+            frame_to_keep((10, 10), (920, 620), f64::NAN, false, false),
+            Some(LRect {
+                x: 10.0,
+                y: 10.0,
+                w: 920.0,
+                h: 620.0
+            })
+        );
+    }
+
+    // ---- W1: fit to the work area, and the Windows/Linux kept frame ----
+    const DEFAULT: (f64, f64) = (1280.0, 800.0);
+    const MINIMUM: (f64, f64) = (960.0, 640.0);
+
+    /// A Windows display: physical size and work area (taskbar excluded) at a scale.
+    fn win_display(w: u32, h: u32, taskbar: u32, scale: f64) -> Display {
+        Display::from_physical(
+            PRect { x: 0, y: 0, w, h },
+            PRect {
+                x: 0,
+                y: 0,
+                w,
+                h: h - taskbar,
+            },
+            scale,
+        )
+    }
+
+    #[test]
+    fn fit_1920x1080_at_100_keeps_the_board_size() {
+        let d = win_display(1920, 1080, 48, 1.0);
+        let (size, min) = fit_to_work_area(DEFAULT, MINIMUM, (d.work_area.w, d.work_area.h));
+        assert_eq!((size, min), (DEFAULT, MINIMUM));
+        let p = plan_desktop_main_window(None, &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!(
+            p.frame,
+            LRect {
+                x: 320.0,
+                y: 116.0,
+                w: 1280.0,
+                h: 800.0
+            }
+        );
+    }
+
+    #[test]
+    fn fit_1366x768_at_125_shrinks_and_the_minimum_follows() {
+        // 1092.8 x 614.4 pt desk minus a 40 px taskbar: 1366/1.25 = 1092.8, (768 - 40)/1.25 = 582.4.
+        let d = win_display(1366, 768, 40, 1.25);
+        let (size, min) = fit_to_work_area(DEFAULT, MINIMUM, (d.work_area.w, d.work_area.h));
+        assert!(
+            (size.0 - (1092.8 - 48.0)).abs() < 1e-9 && (size.1 - (582.4 - 48.0)).abs() < 1e-9,
+            "{size:?}"
+        );
+        assert_eq!(min.0, 960.0);
+        assert!(
+            (min.1 - size.1).abs() < 1e-9,
+            "the minimum height never exceeds the window: {min:?}"
+        );
+        let p = plan_desktop_main_window(None, &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert!(
+            (p.frame.x - 24.0).abs() < 1e-9 && (p.frame.y - 24.0).abs() < 1e-9,
+            "{:?}",
+            p.frame
+        );
+    }
+
+    #[test]
+    fn fit_1280x720_at_150_fits_inside_the_margin() {
+        // 853.3 x 480 pt, taskbar 48 px: work area 853.3 x 448.
+        let d = win_display(1280, 720, 48, 1.5);
+        let p = plan_desktop_main_window(None, &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert!(p.frame.w <= d.work_area.w - 48.0 + 1e-9 && p.frame.h <= d.work_area.h - 48.0 + 1e-9);
+        assert!(p.minimum.0 <= p.frame.w && p.minimum.1 <= p.frame.h && p.minimum.1 <= d.work_area.h);
+        assert!(p.frame.x >= d.work_area.x && p.frame.y >= d.work_area.y);
+    }
+
+    #[test]
+    fn fit_portrait_1080x1920_shrinks_the_width_only() {
+        let d = win_display(1080, 1920, 48, 1.0);
+        let (size, min) = fit_to_work_area(DEFAULT, MINIMUM, (d.work_area.w, d.work_area.h));
+        assert_eq!(size, (1032.0, 800.0));
+        assert_eq!(min, (960.0, 640.0));
+    }
+
+    #[test]
+    fn a_kept_frame_comes_back_and_a_maximized_flag_survives() {
+        let d = win_display(1920, 1080, 48, 1.0);
+        let kept = KeptMain {
+            frame: LRect {
+                x: 100.0,
+                y: 80.0,
+                w: 1100.0,
+                h: 700.0,
+            },
+            maximized: true,
+        };
+        let p = plan_desktop_main_window(Some(kept), &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!((p.frame, p.maximized), (kept.frame, true));
+        // A kept frame smaller than the minimum is raised to it.
+        let tiny = KeptMain {
+            frame: LRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
+            maximized: false,
+        };
+        let p = plan_desktop_main_window(Some(tiny), &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!((p.frame.w, p.frame.h), MINIMUM);
+    }
+
+    #[test]
+    fn an_off_screen_kept_frame_falls_back_to_the_fitted_default() {
+        let d = win_display(1920, 1080, 48, 1.0);
+        let gone = KeptMain {
+            frame: LRect {
+                x: 5000.0,
+                y: 0.0,
+                w: 1280.0,
+                h: 800.0,
+            },
+            maximized: true,
+        };
+        let p = plan_desktop_main_window(Some(gone), &[d], 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!(p, plan_desktop_main_window(None, &[d], 0, DEFAULT, MINIMUM).unwrap());
+        assert!(!p.maximized);
+    }
+
+    #[test]
+    fn maximizing_keeps_the_last_ordinary_frame() {
+        let ordinary = KeptMain {
+            frame: LRect {
+                x: 10.0,
+                y: 20.0,
+                w: 1000.0,
+                h: 700.0,
+            },
+            maximized: false,
+        };
+        let now = LRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1920.0,
+            h: 1032.0,
+        };
+        assert_eq!(
+            next_kept(Some(ordinary), None, true),
+            Some(KeptMain {
+                maximized: true,
+                ..ordinary
+            })
+        );
+        assert_eq!(
+            next_kept(Some(ordinary), Some(now), false),
+            Some(KeptMain {
+                frame: now,
+                maximized: false
+            })
+        );
+        assert_eq!(next_kept(None, None, true), None);
+    }
+
+    #[test]
+    fn the_wiring_reads_the_file_and_a_corrupt_one_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MAIN_FRAME_FILENAME);
+        let d = [win_display(1920, 1080, 48, 1.0)];
+        let default = plan_from_file(&path, &d, 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!(default.frame.w, 1280.0, "no file: the default");
+        let kept = KeptMain {
+            frame: LRect {
+                x: 50.0,
+                y: 60.0,
+                w: 1000.0,
+                h: 700.0,
+            },
+            maximized: true,
+        };
+        write_kept_main(&path, &kept).unwrap();
+        assert_eq!(read_kept_main(&path), Some(kept));
+        let p = plan_from_file(&path, &d, 0, DEFAULT, MINIMUM).unwrap();
+        assert_eq!((p.frame, p.maximized), (kept.frame, true));
+        // The Mac's plain frame file (no flag) reads too, as not maximized.
+        std::fs::write(&path, r#"{"x":50,"y":60,"w":1000,"h":700}"#).unwrap();
+        assert_eq!(read_kept_main(&path).map(|k| k.maximized), Some(false));
+        for bad in ["", "not json", "{", r#"{"x":1,"y":2,"w":0,"h":5}"#, r#"{"x":"a"}"#] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(plan_from_file(&path, &d, 0, DEFAULT, MINIMUM), Some(default), "{bad:?}");
+        }
     }
 }
