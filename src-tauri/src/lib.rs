@@ -215,6 +215,7 @@ use local_state_purge::*;
 mod vault_unlock;
 use vault_unlock::*;
 mod session_reauth;
+mod account_v2; // v2 b14
 use session_reauth::*;
 mod bound_engine;
 use bound_engine::*;
