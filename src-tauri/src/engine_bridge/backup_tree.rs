@@ -111,14 +111,34 @@ impl EngineBridge {
         }
     }
 
-    /// LD-0139: the notice check a backup pass starts with (`crate::backup::stop::check_from`). Any failure is the
-    /// failed check (no pass runs), in words with no server text.
-    pub(crate) async fn backup_notice_check(&self) -> Result<crate::backup::stop::NoticeCheck, String> {
-        let (body, clock, server_now_ms) = self.backup_api().list_notifications_clocked().await.map_err(|error| {
-            let error = EngineError::from(error);
-            format!("the notices request failed ({})", error_category(&error))
-        })?;
-        crate::backup::stop::check_from(&body, clock, server_now_ms)
+    /// LD-0139 (spec Amendments 12c and 12d): the notice check a backup pass starts with: EVERY page of the backup
+    /// notices from `since_ms` on (server clock), following `next_cursor` until it is null. The clock and `Date` are
+    /// the first page's (`crate::backup::stop::first_page`). A failure on any page, or a cursor seen twice, fails the
+    /// whole check (core's `CheckFailed`: no pass runs), in words with no server text; a partial listing is never
+    /// handed to core.
+    pub(crate) async fn backup_notice_check(&self, since_ms: i64) -> Result<crate::backup::stop::NoticeCheck, String> {
+        let failed = |page: usize| {
+            move |error: anyhow::Error| {
+                let error = EngineError::from(error);
+                format!("the notices request failed on page {page} ({})", error_category(&error))
+            }
+        };
+        let api = self.backup_api();
+        let (body, clock, server_now_ms) = api.list_backup_notices_page(since_ms, None).await.map_err(failed(1))?;
+        let (mut check, mut next) = crate::backup::stop::first_page(&body, clock, server_now_ms)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut page = 1;
+        while let Some(cursor) = next {
+            page += 1;
+            if !seen.insert(cursor.clone()) {
+                return Err(format!("the notices listing repeated a page at page {page}"));
+            }
+            let (body, _, _) = api.list_backup_notices_page(since_ms, Some(&cursor)).await.map_err(failed(page))?;
+            let (notices, after) = crate::backup::stop::read_page(&body)?;
+            check.notices.extend(notices);
+            next = after;
+        }
+        Ok(check)
     }
 
     /// Whether the folder `id` is live: `GET /files/{id}`, trashed or 404/410 is gone. Any other failure is an error,

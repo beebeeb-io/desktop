@@ -53,16 +53,22 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// `GET /api/v1/notifications?limit=100` for a backup pass's notice check (LD-0139): the newest rows (the server
-    /// has no type filter), the clock of the request (`measured_clock`: no `Date`, or a clock that moved, is
-    /// unknown) and the answer's `Date` in milliseconds (server clock).
-    pub async fn list_notifications_clocked(
+    /// One page of a backup pass's notice check (LD-0139, server LD-0141): `GET /api/v1/notifications` filtered to
+    /// the two backup types, from `since_ms` (integer milliseconds, server clock, inclusive) on, newest first, at
+    /// most 500 rows; `cursor` is the previous page's `next_cursor`. With the page: the clock of the request
+    /// (`measured_clock`: no `Date`, or a clock that moved, is unknown) and the answer's `Date` in milliseconds
+    /// (server clock).
+    pub async fn list_backup_notices_page(
         &self,
+        since_ms: i64,
+        cursor: Option<&str>,
     ) -> anyhow::Result<(serde_json::Value, beebeeb_core::backup::RebuildClock, Option<i64>)> {
-        let url = self.url(&format!(
-            "/api/v1/notifications?limit={}",
-            crate::backup::stop::NOTICE_PAGE
-        ));
+        use beebeeb_types::backup::{NOTICE_BACKUP_DELETED, NOTICE_FILES_REMOVED};
+        let mut path = format!("/api/v1/notifications?type={NOTICE_FILES_REMOVED},{NOTICE_BACKUP_DELETED}&since={since_ms}");
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", encode(cursor)));
+        }
+        let url = self.url(&path);
         let sent_at_ms = chrono::Utc::now().timestamp_millis();
         let started = std::time::Instant::now();
         let response = self.send_with_retry(|| self.client.get(&url)).await?;

@@ -604,6 +604,10 @@ impl StateDb {
                  PRIMARY KEY (account_owner, category)
              );",
         )?;
+        // LD-0139 (spec Amendment 12d, core v0.2.5): the notice ids the backup's last pass acknowledged (core's
+        // `acknowledged`, a sorted JSON array of strings), written in the same transaction as its `last_pass_at_ms`
+        // and any stop, and kept by "Back up again". A column, not a table, so one row write carries both.
+        ensure_column(conn, "backup_pass_marks", "acknowledged_json", "TEXT NOT NULL DEFAULT '[]'")?;
         Ok(())
     }
 }

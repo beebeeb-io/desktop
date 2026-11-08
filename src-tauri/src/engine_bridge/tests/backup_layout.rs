@@ -53,9 +53,10 @@ use beebeeb_types::backup::{Category, Platform};
         let body = || serde_json::from_slice::<serde_json::Value>(&request.body).unwrap_or_default();
         let json = |status: &str, value: serde_json::Value| http_json(status, value).into_bytes();
         let flagged = || tree.iter().find(|(_, n)| n.flagged).map(|(id, _)| id.clone());
-        // LD-0139: every pass starts with the notice check; this account has no notices.
+        // LD-0139: every pass starts with the notice check (server LD-0141's filtered listing); this account has no
+        // notices: one page, and `next_cursor` null.
         if method == "GET" && path.starts_with("/api/v1/notifications") {
-            let empty = serde_json::json!({ "notifications": [], "unread_count": 0 });
+            let empty = serde_json::json!({ "notifications": [], "unread_count": 0, "next_cursor": null });
             return http_json_dated("200 OK", empty, 0).into_bytes();
         }
         if path == "/api/v1/backups/root" && method == "GET" {

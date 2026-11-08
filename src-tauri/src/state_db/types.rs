@@ -639,13 +639,41 @@ pub struct BackupStop {
     pub at_ms: i64,
 }
 
-/// LD-0139: a backup's marks for core's `backup_stop` (spec Amendments 12 and 12c).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// LD-0139: a backup's marks for core's `backup_pass_gate_v2` (spec Amendments 12, 12c and 12d).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackupPassMark {
     /// The `Date` (server clock) of the notices check of its last pass; `None` before its first pass.
     pub last_pass_at_ms: Option<i64>,
     /// When the person turned it on or chose "Back up again" (this device's clock); `None` when not known.
     pub setup_at_ms: Option<i64>,
+    /// The notice ids its last pass acknowledged (core's answer), sorted; empty before its first pass. A stored set
+    /// that cannot be read is empty: a notice counted twice shows a stop twice, a notice skipped refills the account.
+    pub acknowledged: Vec<String>,
+}
+
+/// LD-0139 (spec Amendment 12d): what one pass's gate leaves for a backup, in one write: its new `last_pass_at_ms`
+/// (the notices check's `Date`, server clock) and the notice ids it acknowledged (core's answer, which replaces the
+/// stored set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupPassRecord {
+    pub category: String,
+    pub last_pass_at_ms: i64,
+    pub acknowledged: Vec<String>,
+}
+
+/// LD-0139: backups that one decision turns off, written in ONE transaction ([`crate::state_db::StateDb::record_backup_stops`]).
+#[derive(Debug, Clone, Copy)]
+pub struct BackupStopWrite<'a> {
+    /// Core's `BackupStopReason` wire string.
+    pub reason: &'a str,
+    pub at_ms: i64,
+    /// The backups that turn off: each gets its stop row and forgets its category folder.
+    pub categories: &'a [String],
+    /// The device folder is gone: the layout is forgotten too.
+    pub clear_layout: bool,
+    /// When a pass's gate decided the stop, each stopped backup's marks (spec Amendment 12d: the stops, the new
+    /// `last_pass_at_ms` and the acknowledged set in the same write). Empty for a stop the pass itself found (rule 11).
+    pub marks: &'a [BackupPassRecord],
 }
 
 /// What [`StateDb::enqueue_backup_upload`] did.

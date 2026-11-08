@@ -26,6 +26,21 @@ fn owner_key_conn(conn: &Connection) -> Result<Option<String>> {
     Ok(read_owner(conn)?.as_ref().and_then(backup_owner_key))
 }
 
+/// LD-0139 (spec Amendment 12d): one backup's `last_pass_at_ms` and acknowledged set, in one row write (the setup
+/// time is kept).
+fn upsert_pass_record(conn: &Connection, owner: &str, pass: &BackupPassRecord) -> Result<()> {
+    let acknowledged = serde_json::to_string(&pass.acknowledged)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "INSERT INTO backup_pass_marks (account_owner, category, last_pass_at_ms, acknowledged_json)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_owner, category) DO UPDATE
+             SET last_pass_at_ms = excluded.last_pass_at_ms, acknowledged_json = excluded.acknowledged_json",
+        params![owner, pass.category, pass.last_pass_at_ms, acknowledged],
+    )?;
+    Ok(())
+}
+
 fn record_state_str(state: RecordState) -> &'static str {
     match state {
         RecordState::BackedUp => "backed_up",
@@ -448,7 +463,9 @@ impl StateDb {
         Ok(true)
     }
 
-    /// Forget the layout (its device folder was deleted elsewhere): "Back up again" resolves it anew.
+    /// Forget the layout (its device folder was deleted elsewhere): "Back up again" resolves it anew. Tests only: a
+    /// stop forgets it inside its own transaction ([`Self::record_backup_stops`]).
+    #[cfg(test)]
     pub fn clear_backup_layout(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
@@ -590,7 +607,9 @@ impl StateDb {
         Ok(keys.filter_map(|key| key.transpose()).collect::<Result<Vec<_>>>()?)
     }
 
-    /// Record that the backup of `category` was turned off, and why.
+    /// Record that the backup of `category` was turned off, and why. Tests only: a stop is written with its marks in
+    /// one transaction ([`Self::record_backup_stops`]).
+    #[cfg(test)]
     pub fn record_backup_stop(&self, stop: &BackupStop) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
@@ -635,7 +654,7 @@ impl StateDb {
         Ok(())
     }
 
-    /// LD-0139: the marks of `category`'s backup (all `None` when it has none).
+    /// LD-0139: the marks of `category`'s backup (all `None` and no acknowledged ids when it has none).
     pub fn backup_pass_mark(&self, category: &str) -> Result<BackupPassMark> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
@@ -643,12 +662,15 @@ impl StateDb {
         };
         let mark = conn
             .query_row(
-                "SELECT last_pass_at_ms, setup_at_ms FROM backup_pass_marks WHERE account_owner = ?1 AND category = ?2",
+                "SELECT last_pass_at_ms, setup_at_ms, acknowledged_json FROM backup_pass_marks
+                 WHERE account_owner = ?1 AND category = ?2",
                 params![owner, category],
                 |row| {
+                    let acknowledged: String = row.get(2)?;
                     Ok(BackupPassMark {
                         last_pass_at_ms: row.get(0)?,
                         setup_at_ms: row.get(1)?,
+                        acknowledged: serde_json::from_str(&acknowledged).unwrap_or_default(),
                     })
                 },
             )
@@ -656,7 +678,50 @@ impl StateDb {
         Ok(mark.unwrap_or_default())
     }
 
-    /// LD-0139: `category`'s pass checked the notices up to `at_ms` (the check's `Date`, server clock).
+    /// LD-0139 (spec Amendment 12d): a pass of `pass.category` ran past its gate: its `last_pass_at_ms` and its
+    /// acknowledged set, in one row write. The setup time is untouched.
+    pub fn record_backup_pass(&self, pass: &BackupPassRecord) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let Some(owner) = owner_key_conn(&conn)? else {
+            return Ok(());
+        };
+        upsert_pass_record(&conn, &owner, pass)
+    }
+
+    /// LD-0139 (spec Amendments 12 and 12d): the backups one decision turns off, in ONE transaction: each one's stop
+    /// row, its category folder forgotten, the layout when the device folder is gone, and (for a stop a pass's gate
+    /// decided) each one's new `last_pass_at_ms` and acknowledged set. A crash or failure anywhere leaves none of
+    /// it: the next pass decides the same stop again (never lost), and a stop that was written always has its notice
+    /// acknowledged with it (never applied twice, even after "Back up again").
+    pub fn record_backup_stops(&self, write: &BackupStopWrite<'_>) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(owner) = owner_key_conn(&tx)? else {
+            return Ok(());
+        };
+        for category in write.categories {
+            tx.execute(
+                "DELETE FROM backup_category_folders WHERE account_owner = ?1 AND category = ?2",
+                params![owner, category],
+            )?;
+            tx.execute(
+                "INSERT INTO backup_stops (account_owner, category, reason, at_ms) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(account_owner, category) DO UPDATE SET reason = excluded.reason, at_ms = excluded.at_ms",
+                params![owner, category, write.reason, write.at_ms],
+            )?;
+        }
+        if write.clear_layout {
+            tx.execute("DELETE FROM backup_layout WHERE account_owner = ?1", params![owner])?;
+        }
+        for pass in write.marks {
+            upsert_pass_record(&tx, &owner, pass)?;
+        }
+        tx.commit()
+    }
+
+    /// LD-0139: `category`'s pass checked the notices up to `at_ms` (the check's `Date`, server clock); its
+    /// acknowledged set is untouched. Tests only: a pass records both ([`Self::record_backup_pass`]).
+    #[cfg(test)]
     pub fn set_backup_last_pass(&self, category: &str, at_ms: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
@@ -673,7 +738,8 @@ impl StateDb {
     /// LD-0139: "Back up again" on `category`'s stopped backup at `setup_at_ms` (this device's clock): it starts over,
     /// with no pass yet (its first pass takes its baseline from this moment), and its records go in the same
     /// transaction, so that pass rebuilds them from what the server holds (spec rule 10) instead of taking the files
-    /// the removal took as deleted elsewhere.
+    /// the removal took as deleted elsewhere. Its acknowledged set is kept (spec Amendment 12d): the notice that
+    /// stopped it never stops it again.
     pub fn restart_backup_pass(&self, category: &str, setup_at_ms: i64) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let Some(owner) = owner_key_conn(&conn)? else {
