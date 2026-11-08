@@ -35,7 +35,8 @@ use beebeeb_types::backup::Category;
         /// LD-0139: a notices request with a `cursor` (any page after the first) answers 500.
         fail_later_pages: Arc<AtomicBool>,
         /// LD-0139 (review 2026-11-08): a folder created while the next notices request is answered (a drive that
-        /// mounts during the check).
+        /// mounts during the check). Its one test is Unix only.
+        #[cfg_attr(not(unix), allow(dead_code))]
         create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
     }
 
@@ -1314,6 +1315,11 @@ use beebeeb_types::backup::Category;
     /// the notices are read) is not passed on that check: its last pass is weeks old, the check asked from Pictures'
     /// window, and the erase notice in between is not in the listing. It keeps its last pass, uploads nothing, and is
     /// checked from its own window next time.
+    ///
+    /// Unix only: on Windows `std::path::absolute` is `GetFullPathNameW`, which resolves `..` lexically, so this
+    /// spelling is never refused there (CI run 42463708179). The single gated set does not depend on the platform, and
+    /// `stop::tests::a_check_that_does_not_cover_the_window_is_a_failed_check` covers the guard everywhere.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_source_accepted_after_the_check_started_is_not_passed_on_it() {
         let config_dir = tempfile::tempdir().unwrap();
