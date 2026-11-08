@@ -8,7 +8,7 @@ import { hasTauri } from '../../../source'
 import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, type AccountState, type Scenario } from './data'
-import { FIXTURE_BACKUP_CODES, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
+import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 
@@ -45,7 +45,8 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const [page, setPageRaw] = useState<SecurityPage>(init.page ?? 'main')
   const [dialog, setDialog] = useState(init.page ? undefined : init.dialog)
   const [codes, setCodes] = useState<string[]>(init.page === 'backup-codes' ? FIXTURE_BACKUP_CODES : [])
-  const [shredAfter, setShredAfter] = useState(FIXTURE_SHRED_AFTER)
+  const [shredAfter, setShredAfter] = useState<string | null>(FIXTURE_SHRED_AFTER)
+  const [linkExpires, setLinkExpires] = useState(FIXTURE_LINK_EXPIRES_AT)
   const [moving, setMoving] = useState<string | undefined>()
   const setPage = useCallback((p: SecurityPage) => { setPageRaw(p); if (p === 'checkup') void reload() }, [reload])
   const home = useCallback(() => setPage('main'), [setPage])
@@ -59,15 +60,16 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       onCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
     case 'backup-codes': return <BackupCodes codes={codes} onDone={() => { setCodes([]); setPage('totp') }} />
     case 'totp': return <TotpStatus state={state} onBack={home} dialog={init.dialog === 'totp-off' ? 'off' : undefined}
-      onMove={() => { setMoving('current'); setPage('totp-setup') }} onNewCodes={() => { setMoving('current'); setPage('totp-setup') }}
+      onMove={() => { setMoving('current'); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
       onTurnedOff={() => { setState((s) => ({ ...s, totp: { ...s.totp, on: false } })); home() }} />
     case 'passkeys': return <Passkeys state={state} setState={setState} onBack={home} menuOn={init.passkeyMenu ? state.passkeys.find((p) => p.name === init.passkeyMenu)?.id : undefined} removing={init.removePasskey} />
     case 'activity': return <Activity state={state} setState={setState} onBack={home} asking={init.dialog === 'activity-off'} now={now}
       onPassword={() => setPage('password')} onDevices={() => settings.go('devices')} />
     case 'delete-1': return <DeleteStep1 onBack={home} onNext={() => setPage('delete-2')} />
     case 'delete-2': return <DeleteStep2 totp={state.totp.on} initialDigits={init.digits} onBack={() => { void run('account_delete_cancel', {}, null); home() }}
-      onNext={(d) => { setShredAfter(d.shred_after); setPage(d.email_link_sent ? 'delete-3' : 'delete-4') }} />
-    case 'delete-3': return <DeleteStep3 email={state.email} onCancelled={home} onUsed={() => setPage('delete-4')} />
+      onNext={(d) => { setLinkExpires(d.link_expires_at); setPage('delete-3') }} />
+    case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home}
+      onUsed={(when) => { setShredAfter(when); setPage('delete-4') }} />
     case 'delete-4': return <DeleteStep4 shredAfter={shredAfter} onUndone={() => setPage('delete-done')} onSignOut={() => setDialog('signout')} dialog={dialog} closeDialog={() => setDialog(undefined)} />
     case 'delete-done': return <DeleteDone />
   }
@@ -263,7 +265,7 @@ function DeleteStep1({ onBack, onNext }: { onBack: () => void; onNext: () => voi
   )
 }
 
-function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boolean; initialDigits?: string; onBack: () => void; onNext: (d: { shred_after: string; email_link_sent: boolean }) => void }) {
+function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boolean; initialDigits?: string; onBack: () => void; onNext: (d: { email_link_sent: boolean; link_expires_at: string }) => void }) {
   const [backup, setBackup] = useState(false)
   const [code, setCode] = useState(initialDigits)
   const [error, setError] = useState<string | null>(null)
@@ -272,7 +274,7 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
   const next = async () => {
     const c = code
     setCode('')
-    const r = await run<{ shred_after: string; email_link_sent: boolean }>('account_delete_confirm', { code: totp ? c : null }, { shred_after: FIXTURE_SHRED_AFTER, email_link_sent: true })
+    const r = await run<{ email_link_sent: boolean; link_expires_at: string }>('account_delete_confirm', { code: totp ? c : null }, { email_link_sent: true, link_expires_at: FIXTURE_LINK_EXPIRES_AT })
     if (r.ok) onNext(r.value)
     else setError(errorText(r.code))
   }
@@ -294,45 +296,69 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
   )
 }
 
-function DeleteStep3({ email, onCancelled, onUsed }: { email: string; onCancelled: () => void; onUsed: () => void }) {
+function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void }) {
   const [wait, setWait] = useState(38)
+  const [link, setLink] = useState('')
+  const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     if (wait <= 0) return
     const t = window.setTimeout(() => setWait((w) => w - 1), 1000)
     return () => window.clearTimeout(t)
   }, [wait])
+  // Server #422: the link can also be pasted here; Rust confirms it and keeps it for Undo on step 4.
+  const confirmLink = async () => {
+    const l = link
+    setLink('')
+    const r = await run<{ shred_after: string; cancel_until: string | null }>('account_delete_confirm_link', { link: l }, { shred_after: FIXTURE_SHRED_AFTER, cancel_until: null })
+    if (r.ok) onUsed(r.value.shred_after)
+    else setError(errorText(r.code))
+  }
   return (
     <Page title="Check your email">
       <StepHead n={3} />
       <div role="status" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
         We sent a confirmation link to <span className="font-medium">{email}</span>. Nothing is deleted until you use that link.
       </div>
-      <p className="text-[13px] text-ink-2">The link works once, for 24 hours. Didn’t ask for this? Cancel the deletion here, then change your password.</p>
+      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Cancel the deletion here, then change your password.</p>
+      <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (link.trim()) void confirmLink() }}>
+        <Field label="Or paste the link from the email">
+          <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
+            className="h-8 w-full rounded-md border border-line bg-paper px-2 font-mono text-[12px] text-ink" aria-invalid={!!error} />
+        </Field>
+        <Btn disabled={!link.trim()} onClick={() => void confirmLink()}>Use this link</Btn>
+      </form>
+      {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
       <p className="text-[12px] text-ink-3">
         {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={() => { setWait(60) }} className="text-ink underline">Send again</button>}
         {' · '}This screen moves on by itself once the link is used.
       </p>
       <div className="flex justify-end gap-2">
         <Btn onClick={() => { void run('account_delete_cancel', {}, null); onCancelled() }}>Cancel deletion</Btn>
-        <Btn onClick={onUsed}>I’ve opened the link</Btn>
+        <Btn onClick={() => onUsed(null)}>I’ve opened the link</Btn>
       </div>
     </Page>
   )
 }
 
-function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: { shredAfter: string; onUndone: () => void; onSignOut: () => void; dialog?: string; closeDialog: () => void }) {
+function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: { shredAfter: string | null; onUndone: () => void; onSignOut: () => void; dialog?: string; closeDialog: () => void }) {
   const [error, setError] = useState<string | null>(null)
+  const [askLink, setAskLink] = useState(false)
+  const [link, setLink] = useState('')
+  // Undo uses the link pasted on step 3 (kept in Rust); without one, the person pastes it here.
   const undo = async () => {
-    const r = await run('account_delete_undo', {}, null)
-    if (r.ok) onUndone()
-    else setError(errorText(r.code))
+    const l = link
+    setLink('')
+    const r = await run<{ not_restored: string[] }>('account_delete_undo', { link: l || null }, { not_restored: [] })
+    if (r.ok) return onUndone()
+    if (r.code === 'link_needed') setAskLink(true)
+    setError(errorText(r.code))
   }
   return (
     <Page title="Deletion scheduled">
       <StepHead n={4} />
       <div className="rounded-[12px] border border-line bg-paper px-4 py-3">
         <div className="text-[13px] text-ink-2">Your account and every product’s data will be deleted on</div>
-        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{dateTime(shredAfter)}</div>
+        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{shredAfter ? dateTime(shredAfter) : '72 hours after the link was used'}</div>
       </div>
       <Group title="Changed your mind?">
         <Row label="Undo from this screen" />
@@ -340,8 +366,14 @@ function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: {
         <Row label="Or sign in to Beebeeb within the 72 hours" />
       </Group>
       <p className="text-[12px] text-ink-3">Until then your account works as usual on every device. After that, every product’s data is deleted and shredded within 30 days.</p>
+      {askLink ? (
+        <Field label="The link from the email">
+          <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
+            className="h-8 w-full rounded-md border border-line bg-paper px-2 font-mono text-[12px] text-ink" />
+        </Field>
+      ) : null}
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
-      <div className="flex justify-end gap-2"><Btn onClick={onSignOut}>Sign out</Btn><Btn variant="amber" onClick={() => void undo()}>Undo deletion</Btn></div>
+      <div className="flex justify-end gap-2"><Btn onClick={onSignOut}>Sign out</Btn><Btn variant="amber" disabled={askLink && !link.trim()} onClick={() => void undo()}>Undo deletion</Btn></div>
       {dialog === 'signout' ? <SignOutDialog all={false} onCancel={closeDialog} /> : null}
     </Page>
   )

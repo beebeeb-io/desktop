@@ -41,7 +41,7 @@ function fixtureState(scenario: Scenario): AccountState {
   }
 }
 
-const OS: Record<string, string> = { windows: 'Windows', macos: 'macOS', linux: 'Linux', ios: 'iOS', android: 'Android', web: 'Web', cli: 'Command line' }
+const OS: Record<string, string> = { app: 'Desktop app', windows: 'Windows', macos: 'macOS', linux: 'Linux', ios: 'iOS', android: 'Android', web: 'Web', cli: 'Command line' }
 
 /** Server sessions grouped by device name, so the products read as one list (DW-A55). */
 function groupSessions(list: AccountSessionList): DeviceGroup[] {
@@ -113,6 +113,10 @@ export const ERRORS: Record<string, string> = {
   opaque_unavailable: 'Sign out and sign in again once, then try this again.',
   network: 'Beebeeb can’t reach the server. Check the connection and try again.',
   server_unsupported: 'This isn’t available in this version of Beebeeb yet.',
+  second_factor_required: 'Enter a code from your authenticator app, or a backup code.',
+  link_invalid: 'This link doesn’t work anymore. Use the link in the newest email, or start again.',
+  link_needed: 'Paste the link from the email to undo the deletion.',
+  confirmation_required: 'Enter your password to confirm.',
 }
 export function errorText(code: string): string {
   return ERRORS[code] ?? 'Something went wrong. Nothing was changed.'

@@ -157,7 +157,6 @@ pub(super) static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic:
 #[cfg(test)]
 pub(super) static EPOCH_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-
 pub(super) fn bump_vault_epoch() {
     #[cfg(test)]
     let _shared =
@@ -531,85 +530,21 @@ pub(super) async fn desktop_login(
             return Err("Email and password are required.".to_string());
         }
 
-        let login_start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
-            .map_err(|e| format!("opaque login start: {e}"))?;
-        let client_message = encode_base64(&login_start.message);
-
-        let start_resp = client
-            .post(format!("{base_url}/api/v1/opaque/login-start"))
-            .json(&serde_json::json!({ "email": email, "client_message": client_message }))
-            .send()
-            .await
-            .map_err(|e| format!("network error: {e}"))?;
-        if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            || start_resp.status() == reqwest::StatusCode::NOT_FOUND
-        {
-            return Err("Invalid email or password".to_string());
-        }
-        if !start_resp.status().is_success() {
-            let status = start_resp.status();
-            let body = start_resp.text().await.unwrap_or_default();
-            return Err(format!("Login start failed ({status}): {body}"));
-        }
-
-        let start_body: serde_json::Value = start_resp
-            .json()
-            .await
-            .map_err(|e| format!("parse login start response: {e}"))?;
-        let server_message = start_body
-            .get("server_message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No server_message in login start response".to_string())?;
-        let server_state = start_body
-            .get("server_state")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "No server_state in login start response".to_string())?;
-        // Dual-KSF login (task 0815): the server forwards the account's OPAQUE KSF
-        // version (0 = legacy Identity, 1 = Argon2id) in the login-start response.
-        // The client must finish under the matching CipherSuite, so thread it into
-        // client_login_finish — mirrors web/iOS and the server's own call shape in
-        // beebeeb-api/tests/api_integration.rs (`as u32` from the JSON number).
-        let ksf_version = start_body
-            .get("ksf_version")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| "No ksf_version in login start response".to_string())? as u32;
-        let server_message_bytes =
-            decode_base64(server_message).map_err(|e| format!("invalid OPAQUE server message: {e}"))?;
-        let login_finish = beebeeb_core::opaque_protocol::client_login_finish(
-            &login_start.state,
-            password.as_bytes(),
-            &server_message_bytes,
-            ksf_version,
+        // B10b (crypto rule 0, Guus's ruling): the OPAQUE legs are core's `auth_flow::sign_in`, with the server's
+        // `ksf_version`; this command only sends each request. The session install below stays desktop's.
+        let legs = crate::auth_v2::password::password_legs(
+            |req| crate::auth_v2::transport::send(&client, None, req),
+            &email,
+            &password,
         )
-        .map_err(|e| format!("Invalid email or password ({e})"))?;
-
-        let finish_resp = client
-            .post(format!("{base_url}/api/v1/opaque/login-finish"))
-            .json(&serde_json::json!({
-                "email": email,
-                "client_message": encode_base64(&login_finish.message),
-                "server_state": server_state,
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("network error: {e}"))?;
-        if finish_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err("Invalid email or password".to_string());
-        }
-        if !finish_resp.status().is_success() {
-            let status = finish_resp.status();
-            let body = finish_resp.text().await.unwrap_or_default();
-            return Err(format!("Login finish failed ({status}): {body}"));
-        }
-        let finish_body: serde_json::Value = finish_resp
-            .json()
-            .await
-            .map_err(|e| format!("parse login finish response: {e}"))?;
-        if finish_body
-            .get("requires_2fa")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
+        .await?;
+        let (mut core_token, second_factor) = match legs {
+            crate::auth_v2::password::PasswordLegs::SignedIn(token) => (token, None),
+            crate::auth_v2::password::PasswordLegs::SecondFactor(pending) => {
+                (zeroize::Zeroizing::new(String::new()), Some(pending))
+            }
+        };
+        if let Some(second_factor) = second_factor {
             // Password proven, but the account has 2FA. Capture the short-lived
             // partial session token (+ email) so `desktop_login_2fa` can complete
             // the sign-in once the user enters their TOTP code. The partial token is
@@ -618,11 +553,6 @@ pub(super) async fn desktop_login(
             let _transition = SESSION_TRANSITION.lock().await;
             #[cfg(target_os = "windows")]
             AUTH_ATTEMPTS.validate(&attempt)?;
-            let partial_token = finish_body
-                .get("partial_token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "No partial_token in login finish response".to_string())?
-                .to_string();
             // A Lock or a Sign-out that completed while the password was checked clears the challenge; this one is not
             // set after it. macOS and Linux only: Windows orders this step with `SESSION_TRANSITION` and its attempt
             // fence, as before (Task 12 fix round 1, item 3).
@@ -639,21 +569,16 @@ pub(super) async fn desktop_login(
                     .lock()
                     .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
                 *guard = Some(Pending2fa {
-                    partial_token,
+                    second_factor,
                     email: email.clone(),
                 });
             }
             tracing::info!("desktop login requires 2FA; awaiting TOTP code");
             return Ok(LoginOutcome::needs_2fa());
         }
-        // Wiped when this login is done with it (it lives only as long as the sign-in handshake).
-        let session_token = zeroize::Zeroizing::new(
-            finish_body
-                .get("session_token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "No session_token in login finish response".to_string())?
-                .to_string(),
-        );
+        // Wiped when this login is done with it (it lives only as long as the sign-in handshake). Moved out of core's
+        // wiped buffer, not copied.
+        let session_token = zeroize::Zeroizing::new(std::mem::take(&mut *core_token));
 
         let profile = fetch_session_profile(&client, &base_url, &session_token).await?;
         #[cfg(target_os = "windows")]
@@ -803,9 +728,9 @@ pub(super) async fn desktop_login_2fa(
             .build()
             .map_err(|e| format!("reqwest build: {e}"))?;
 
-        // Read (don't yet consume) the pending challenge: we only clear it on
-        // success so an invalid code stays retryable within the 5-minute window.
-        let (partial_token, email) = {
+        // Read (don't yet consume) the pending challenge: we only clear it on success so an invalid code stays
+        // retryable within the 5-minute window. Core's `PendingSecondFactor` builds the request and reads the answer.
+        let (verify_req, email) = {
             let guard = state
                 .pending_2fa
                 .lock()
@@ -813,42 +738,26 @@ pub(super) async fn desktop_login_2fa(
             let pending = guard
                 .as_ref()
                 .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
-            (pending.partial_token.clone(), pending.email.clone())
+            (
+                crate::auth_v2::password::second_factor_request(&pending.second_factor, &code)?,
+                pending.email.clone(),
+            )
         };
-
-        let code = code.trim().to_string();
-        if code.is_empty() {
-            return Err("Enter your authentication code.".to_string());
-        }
-
-        let verify_resp = client
-            .post(format!("{base_url}/api/v1/auth/2fa/verify"))
-            .json(&serde_json::json!({ "partial_token": partial_token, "code": code }))
-            .send()
-            .await
-            .map_err(|e| format!("network error: {e}"))?;
-        if verify_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            // Invalid/expired code. Keep `pending_2fa` so the user can retry while
-            // the partial token is still valid.
-            return Err("Invalid authentication code".to_string());
-        }
-        if !verify_resp.status().is_success() {
-            let status = verify_resp.status();
-            let body = verify_resp.text().await.unwrap_or_default();
-            return Err(format!("Two-factor verification failed ({status}): {body}"));
-        }
-        let verify_body: serde_json::Value = verify_resp
-            .json()
-            .await
-            .map_err(|e| format!("parse 2FA verify response: {e}"))?;
-        // Wiped when this login is done with it (it lives only as long as the sign-in handshake).
-        let session_token = zeroize::Zeroizing::new(
-            verify_body
-                .get("session_token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "No session_token in 2FA verify response".to_string())?
-                .to_string(),
-        );
+        let verify_resp = crate::auth_v2::transport::send(&client, None, verify_req).await?;
+        let mut core_token = {
+            let guard = state
+                .pending_2fa
+                .lock()
+                .map_err(|_| "pending 2FA mutex poisoned".to_string())?;
+            let pending = guard
+                .as_ref()
+                .ok_or_else(|| "No pending two-factor sign-in. Start sign-in again.".to_string())?;
+            // A wrong or expired code keeps `pending_2fa` so the person can retry while the partial token is valid.
+            crate::auth_v2::password::second_factor_answer(&pending.second_factor, verify_resp)?
+        };
+        // Wiped when this login is done with it (it lives only as long as the sign-in handshake). Moved out of core's
+        // wiped buffer, not copied.
+        let session_token = zeroize::Zeroizing::new(std::mem::take(&mut *core_token));
 
         // Same post-finish setup as `desktop_login`'s no-2FA success path. The
         // cache is per-account (decision 0800); `pending_2fa` stays on `AppState`.

@@ -4,16 +4,37 @@ use super::*;
 use serde_json::Value;
 
 const FORBIDDEN: &[&str] = &[
-    "password", "phrase", "mnemonic", "secret", "prf", "master", "backup_codes", "otpauth", "fragment", "token",
+    "password",
+    "phrase",
+    "mnemonic",
+    "secret",
+    "prf",
+    "master",
+    "backup_codes",
+    "otpauth",
+    "fragment",
+    "token",
 ];
 
 /// (DTO, field, reason): the only secrets a B14 command returns, each shown once by design.
 const ALLOW: &[(&str, &str, &str)] = &[
-    ("TotpSetupDto", "secret", "DW-A69 shows the authenticator key once, in mono, for an authenticator on Windows"),
+    (
+        "TotpSetupDto",
+        "secret",
+        "DW-A69 shows the authenticator key once, in mono, for an authenticator on Windows",
+    ),
     ("TotpSetupDto", "otpauth_uri", "DW-A69 draws it as the QR code once"),
     // `qr_rows` (the same URI as QR modules) matches no forbidden name; it is listed here for the record.
-    ("TotpSetupDto", "qr_rows", "DW-A69 the QR code of otpauth_uri, shown once"),
-    ("BackupCodesDto", "backup_codes", "DW-A70 shows the 8 single-use codes once"),
+    (
+        "TotpSetupDto",
+        "qr_rows",
+        "DW-A69 the QR code of otpauth_uri, shown once",
+    ),
+    (
+        "BackupCodesDto",
+        "backup_codes",
+        "DW-A70 shows the 8 single-use codes once",
+    ),
 ];
 
 fn keys(v: &Value, out: &mut Vec<String>) {
@@ -40,12 +61,66 @@ fn offending(name: &str, dto: &impl Serialize) -> Vec<String> {
 
 #[test]
 fn b14_dtos_carry_no_secret_outside_the_allow_list() {
-    assert!(offending("TotpSetupDto", &TotpSetupDto { secret: "S".into(), otpauth_uri: "o".into(), qr_rows: vec![] }).is_empty());
-    assert!(offending("BackupCodesDto", &BackupCodesDto { backup_codes: vec!["1".into()] }).is_empty());
+    assert!(
+        offending(
+            "TotpSetupDto",
+            &TotpSetupDto {
+                secret: "S".into(),
+                otpauth_uri: "o".into(),
+                qr_rows: vec![]
+            }
+        )
+        .is_empty()
+    );
+    assert!(
+        offending(
+            "BackupCodesDto",
+            &BackupCodesDto {
+                backup_codes: vec!["1".into()]
+            }
+        )
+        .is_empty()
+    );
     assert!(offending("EmailChangedDto", &EmailChangedDto { email: "a@b.eu".into() }).is_empty());
-    assert!(offending("DisplayNameDto", &DisplayNameDto { display_name: Some("Anna".into()) }).is_empty());
+    assert!(
+        offending(
+            "DisplayNameDto",
+            &DisplayNameDto {
+                display_name: Some("Anna".into())
+            }
+        )
+        .is_empty()
+    );
     assert!(offending("ActivityLoggingDto", &ActivityLoggingDto { on: true }).is_empty());
-    assert!(offending("DeletionDto", &DeletionDto { shred_after: "t".into(), email_link_sent: false }).is_empty());
+    assert!(
+        offending(
+            "DeleteRequestedDto",
+            &DeleteRequestedDto {
+                email_link_sent: true,
+                link_expires_at: "t".into()
+            }
+        )
+        .is_empty()
+    );
+    assert!(
+        offending(
+            "DeletionScheduledDto",
+            &DeletionScheduledDto {
+                shred_after: "t".into(),
+                cancel_until: Some("c".into())
+            }
+        )
+        .is_empty()
+    );
+    assert!(
+        offending(
+            "DeletionCancelledDto",
+            &DeletionCancelledDto {
+                not_restored: vec!["sessions".into()]
+            }
+        )
+        .is_empty()
+    );
 }
 
 /// The check goes red on a planted field, and the allow-list is per DTO.
@@ -60,10 +135,50 @@ fn the_no_secret_check_fails_on_a_planted_field() {
     struct PlantedDeep {
         inner: Vec<Planted>,
     }
-    let bad = offending("EmailChangedDto", &Planted { email: "a".into(), session_token: "t".into() });
+    let bad = offending(
+        "EmailChangedDto",
+        &Planted {
+            email: "a".into(),
+            session_token: "t".into(),
+        },
+    );
     assert_eq!(bad, ["session_token"]);
-    let deep = offending("EmailChangedDto", &PlantedDeep { inner: vec![Planted { email: "a".into(), session_token: "t".into() }] });
+    let deep = offending(
+        "EmailChangedDto",
+        &PlantedDeep {
+            inner: vec![Planted {
+                email: "a".into(),
+                session_token: "t".into(),
+            }],
+        },
+    );
     assert_eq!(deep, ["session_token"], "nested fields are checked too");
     // The TOTP allow-list entry does not cover another DTO.
-    assert_eq!(offending("DeletionDto", &TotpSetupDto { secret: "S".into(), otpauth_uri: "o".into(), qr_rows: vec![] }).len(), 2);
+    assert_eq!(
+        offending(
+            "DeletionScheduledDto",
+            &TotpSetupDto {
+                secret: "S".into(),
+                otpauth_uri: "o".into(),
+                qr_rows: vec![]
+            }
+        )
+        .len(),
+        2
+    );
+}
+
+/// The delete-link routes are public: they run without a session, so Undo works after the link revoked it.
+#[test]
+fn the_delete_link_commands_need_no_session() {
+    let source = include_str!("mod.rs");
+    for signature in ["fn account_delete_confirm_link(", "fn account_delete_undo("] {
+        let start = source.find(signature).expect(signature);
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("drive(") && body.contains(", None)"), "{signature}");
+        assert!(
+            !body.contains("session_parts") && !body.contains("run_simple"),
+            "{signature} needs a session"
+        );
+    }
 }

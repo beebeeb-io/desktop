@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { AuthWindow, Field, Heading, Note, PrimaryButton, SECRET_FIELD, StepLockup, TextLink, Tile } from '../parts'
 import type { PasswordMeter } from './api'
+import { usePrivateScreen } from '../privateScreen'
 import { BREACHED, clock, hintText, needsMoreText, STRENGTH_LABEL, STRENGTH_SEGMENTS, WORDS_MISMATCH } from './model'
 
 const noopSubmit = (fn: () => void, ok: boolean) => (e: React.FormEvent) => { e.preventDefault(); if (ok) fn() }
@@ -175,6 +176,7 @@ export function PhraseStep({ words, saved, copied, onSaved, onCopy, onSave, onPr
   words: string[]; saved: boolean; copied: boolean
   onSaved: (v: boolean) => void; onCopy: () => void; onSave: () => void; onPrint: () => void; onContinue: () => void
 }) {
+  usePrivateScreen()
   return (
     <AuthWindow>
       <StepLockup /><div className="mt-4" />
