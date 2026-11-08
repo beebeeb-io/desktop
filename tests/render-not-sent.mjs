@@ -7,6 +7,9 @@
 //   bunx vite --port 5292 --strictPort &
 //   PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs node tests/render-not-sent.mjs http://localhost:5292 OUT
 //
+// Task 2414: "Not downloaded N" (a pin's files that stopped downloading) on Home and the tray, each a link to Activity ›
+// Not downloaded, which lists them with the same rows; and a failed change Try again would not send, which says why.
+//
 // What it does not prove: WebView2, the real engine, the tray window's show/hide (NATIVE rung, the lead's).
 import assert from 'node:assert/strict'
 import { mkdir, readFile } from 'node:fs/promises'
@@ -39,15 +42,31 @@ const summary = {
   startup_check: null,
 }
 const ROW_IDS = ['op-delete', 'op-edit', 'op-new']
+// Task 2414: two files a pin keeps on this PC whose downloads stopped after repeated errors (`not_downloaded`).
+const row = (patch) => ({ backup: false, retry_at: null, parked: false, retryable: false, blocked: null, sending: null, ...patch })
+const pinned = {
+  total: 2,
+  engine_state: 'idle',
+  paused: false,
+  items: [
+    row({ id: 'pin-a', file_id: 'file-a', kind: 'download', path: 'Photos/2026/IMG_0001.jpg', group: 'gave_up', queued_at: now - 2 * 86400 }),
+    row({ id: 'pin-b', file_id: 'file-b', kind: 'download', path: 'Projects/Archive/contract-2025.pdf', group: 'gave_up', queued_at: now - 5 * 3600 }),
+  ],
+}
+// Task 2414: two failed changes Try again would not send (spec D8), next to the three above.
+const blockedRows = [
+  row({ id: 'op-gone', file_id: 'file-gone', kind: 'edit', path: 'Finance/forecast.xlsx', group: 'gave_up', queued_at: now - 30 * 3600, blocked: 'copy_gone' }),
+  row({ id: 'op-old', file_id: 'file-old', kind: 'edit', path: 'Finance/budget-v3.xlsx', group: 'gave_up', queued_at: now - 28 * 3600, blocked: 'superseded' }),
+]
 
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const results = []
 
-async function open({ surface, viewport, colorScheme = 'light', locked = false, allSent = false }) {
+async function open({ surface, viewport, colorScheme = 'light', locked = false, allSent = false, notDownloaded = 0, blocked = false }) {
   const page = await browser.newPage({ viewport, colorScheme })
   const errors = []
   page.on('pageerror', (error) => errors.push(String(error)))
-  await page.addInitScript(({ caps, summary, unsent, surface, locked }) => {
+  await page.addInitScript(({ caps, summary, unsent, pinned, surface, locked }) => {
     window.calls = []
     window.fixtureUnsent = unsent
     const callbacks = new Map()
@@ -70,6 +89,11 @@ async function open({ surface, viewport, colorScheme = 'light', locked = false, 
             const { offset = 0, limit = 100 } = args ?? {}
             const u = window.fixtureUnsent
             return { ...u, items: u.items.slice(offset, offset + limit) }
+          }
+          case 'not_downloaded': {
+            if (locked) throw 'vault is locked'
+            const { offset = 0, limit = 100 } = args ?? {}
+            return { ...pinned, items: pinned.items.slice(offset, offset + limit) }
           }
           case 'retry_unsent_change': {
             const u = window.fixtureUnsent
@@ -100,8 +124,13 @@ async function open({ surface, viewport, colorScheme = 'light', locked = false, 
     }
   }, {
     caps,
-    summary: allSent ? { ...summary, transfers_active: 0, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: 0 } } : summary,
-    unsent: allSent ? { ...unsent, total: 0, items: [] } : unsent,
+    summary: allSent
+      ? { ...summary, transfers_active: 0, queue: { waiting: 0, gave_up: 0, held: [], not_downloaded: notDownloaded } }
+      : { ...summary, queue: { ...summary.queue, gave_up: summary.queue.gave_up + (blocked ? blockedRows.length : 0), not_downloaded: notDownloaded } },
+    unsent: allSent
+      ? { ...unsent, total: 0, items: [] }
+      : blocked ? { ...unsent, total: unsent.total + blockedRows.length, items: [...blockedRows, ...unsent.items] } : unsent,
+    pinned,
     surface,
     locked,
   })
@@ -134,8 +163,8 @@ async function expectSection(page) {
 }
 
 /** No Amber in the section: the brand's one accent is for encryption state and primary actions only. */
-async function amberIn(page) {
-  return page.locator('#not-sent').evaluate((root) => {
+async function amberIn(page, selector = '#not-sent') {
+  return page.locator(selector).evaluate((root) => {
     const hits = []
     for (const el of [root, ...root.querySelectorAll('*')]) {
       const s = getComputedStyle(el)
@@ -163,7 +192,9 @@ try {
     assert.equal(await link.count(), 1)
     assert.equal((await link.textContent())?.trim(), '3', 'the link is the count')
     assert.equal(await link.getAttribute('title'), 'See which changes')
-    results.push(['home-not-sent-link (an <a> reading 3)', await shot(page, 'home-not-sent-link')])
+    assert.equal(await page.locator('a[href="#not-downloaded"]').count(), 0, 'no "Not downloaded" figure while none is counted')
+    assert.equal(await page.getByText('Not downloaded', { exact: true }).count(), 0)
+    results.push(['home-not-sent-link (an <a> reading 3; no Not downloaded figure at 0)', await shot(page, 'home-not-sent-link')])
     await link.click()
     await expectSection(page)
     assert.equal(await page.getByRole('button', { name: 'Try again', exact: true }).count(), 1)
@@ -290,6 +321,90 @@ try {
     const after = await page.evaluate(() => window.calls.filter((c) => c.name === 'unsent_changes').length)
     assert.equal(after, before, 'the list is not polled once the section is gone')
     results.push([`activity-later-visit-all-sent (no section; unsent_changes reads stay ${after})`, await shot(page, 'activity-later-visit-all-sent')])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+  // ── Task 2414: Home's "Not downloaded 2" is a link to Activity › Not downloaded ─────────
+  for (const colorScheme of ['light', 'dark']) {
+    const { page, errors } = await open({ surface: 'main-app', viewport: { width: 1200, height: 860 }, colorScheme, notDownloaded: 2 })
+    await page.goto(`${base}/?window=main-app&platform=windows`)
+    await page.getByText('Everything on this PC, at a glance.', { exact: false }).waitFor()
+    const link = page.locator('a[href="#not-downloaded"]')
+    await link.waitFor({ timeout: 5000 })
+    assert.equal((await link.textContent())?.trim(), '2', 'the link is the count')
+    assert.equal(await link.getAttribute('title'), 'See which files')
+    assert.equal((await page.locator('a[href="#not-sent"]').textContent())?.trim(), '3', '"Not sent" does not count them')
+    const sfx = colorScheme === 'dark' ? '-dark' : ''
+    results.push([`home-not-downloaded-link${sfx} (an <a> reading 2 next to Not sent 3)`, await shot(page, `home-not-downloaded-link${sfx}`)])
+    await link.click()
+    const section = page.locator('#not-downloaded')
+    await section.waitFor({ timeout: 5000 })
+    await page.locator('[data-unsent-id="pin-b"]').waitFor({ timeout: 5000 })
+    assert.deepEqual(await listedIds(page), [...ROW_IDS, 'pin-a', 'pin-b'], 'Not sent, then Not downloaded, one row each')
+    const a = await rowText(page, 'pin-a')
+    for (const t of ['IMG_0001.jpg', 'Download', 'Photos/2026', 'Stopped after repeated errors']) assert.ok(a.includes(t), `pin row: ${t} in ${JSON.stringify(a)}`)
+    assert.equal(await section.getByRole('button').count(), 0, 'no Try again on a download')
+    assert.ok((await section.innerText()).includes('Files you chose to keep on this PC that didn’t finish downloading.'))
+    assert.deepEqual(await amberIn(page, '#not-downloaded'), [], 'no Amber in Not downloaded')
+    results.push([`activity-not-downloaded${sfx} (2 rows, no Try again, 0 Amber)`, await shot(page, `activity-not-downloaded${sfx}`)])
+    await section.screenshot({ path: path.join(output, `activity-not-downloaded${sfx}-section.png`) })
+    results.push([`activity-not-downloaded${sfx}-section`, path.join(output, `activity-not-downloaded${sfx}-section.png`)])
+    const reads = await page.evaluate(() => window.calls.filter((c) => c.name === 'not_downloaded').map((c) => c.args))
+    assert.ok(reads.length >= 1 && reads.every((r) => r.offset === 0 && r.limit === 100), `paged by 100: ${JSON.stringify(reads)}`)
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+  // ── Task 2414: the tray's not-downloaded line is a link ─────────────────────
+  for (const colorScheme of ['light', 'dark']) {
+    const { page, errors } = await open({ surface: 'tray', viewport: { width: 400, height: 560 }, colorScheme, notDownloaded: 2 })
+    await page.goto(`${base}/?window=tray`)
+    const link = page.locator('a[href="#not-downloaded"]')
+    await link.waitFor({ timeout: 5000 })
+    assert.equal((await link.textContent())?.trim(), '2 files not downloaded to this PC.')
+    assert.equal(await link.getAttribute('title'), 'See which files')
+    const sfx = colorScheme === 'dark' ? '-dark' : ''
+    results.push([`tray-not-downloaded-link${sfx}`, await shot(page, `tray-not-downloaded-link${sfx}`)])
+    if (colorScheme === 'light') {
+      await link.click()
+      await page.waitForFunction(() => window.calls.some((c) => c.name === 'plugin:event|emit'), null, { timeout: 5000 })
+      const emitted = await page.evaluate(() => window.calls.filter((c) => c.name === 'plugin:event|emit').map((c) => [c.args.event, c.args.payload]))
+      assert.deepEqual(emitted, [['windows-app:navigate', 'activity#not-downloaded']])
+    }
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+  // ── Task 2414: the tray with only failed downloads is never "Up to date" ─────────
+  {
+    const { page, errors } = await open({ surface: 'tray', viewport: { width: 400, height: 560 }, allSent: true, notDownloaded: 40 })
+    await page.goto(`${base}/?window=tray`)
+    await page.locator('a[href="#not-downloaded"]').waitFor({ timeout: 5000 })
+    assert.equal(await page.getByText('Your files are synced.', { exact: true }).count(), 0)
+    assert.equal((await page.locator('a[href="#not-downloaded"]').textContent())?.trim(), '40 files not downloaded to this PC.')
+    results.push(['tray-only-not-downloaded (40; never "Your files are synced.")', await shot(page, 'tray-only-not-downloaded')])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+  // ── Task 2414: a failed change Try again would not send says why ─────────────
+  {
+    const { page, errors } = await open({ surface: 'main-app', viewport: { width: 1200, height: 1000 }, blocked: true })
+    await page.goto(`${base}/?window=main-app&platform=windows`)
+    await page.getByRole('button', { name: 'Activity', exact: true }).first().click()
+    await page.locator('[data-unsent-id="op-old"]').waitFor({ timeout: 5000 })
+    const gone = await rowText(page, 'op-gone')
+    assert.ok(gone.includes('Can’t send: the copy to send is gone.'), gone)
+    const old = await rowText(page, 'op-old')
+    assert.ok(old.includes('Can’t send: a newer version of this file is already in Beebeeb. Nothing was overwritten.'), old)
+    for (const id of ['op-gone', 'op-old']) {
+      assert.equal(await page.locator(`[data-unsent-id="${id}"]`).getByRole('button').count(), 0, `${id} has no Try again`)
+    }
+    assert.equal(await page.getByRole('button', { name: 'Try again', exact: true }).count(), 1, 'only the delete that can be retried')
+    assert.deepEqual(await amberIn(page), [], 'no Amber in Not sent')
+    await page.locator('#not-sent').screenshot({ path: path.join(output, 'activity-not-sent-blocked-section.png') })
+    results.push(['activity-not-sent-blocked-section (copy gone, superseded: no Try again)', path.join(output, 'activity-not-sent-blocked-section.png')])
     assert.deepEqual(errors, [])
     await page.close()
   }
