@@ -1204,6 +1204,8 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         created = s.created,
         already_existed = s.already_existed,
         create_errors = s.create_errors,
+        name_conflicts = s.name_conflicts,
+        name_check_errors = s.name_check_errors,
         db_ms = s.db_ms,
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"

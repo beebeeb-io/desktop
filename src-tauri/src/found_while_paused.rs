@@ -307,6 +307,13 @@ pub fn keep(
                 continue;
             }
         };
+        // Task 2407 (core 2404): an item whose name reaches a different entry (a Windows 8.3 short name) is not this
+        // item on disk: that entry is never made plain or moved out. A check that cannot finish moves nothing either.
+        if !matches!(crate::name_alias::conflict_below(sync_root, &source), Ok(None)) {
+            tracing::warn!("keep: an item's name reaches a different entry or could not be checked; it stays where it is, held");
+            result.not_moved += 1;
+            continue;
+        }
         if !all_bytes_here(&source) {
             tracing::warn!("keep: an item's bytes are not all on this PC; it stays where it is, held");
             result.not_moved += 1;

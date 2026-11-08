@@ -58,6 +58,18 @@ pub(crate) fn refuse_conflict_below(base: &Path, path: &Path) -> io::Result<()> 
     }
 }
 
+/// [`refuse_conflict_below`] for a destination that one of `roots` allows: from the root it was built on (a lexical
+/// prefix), else from its own folder, which checks its name alone (as core's own writers do).
+pub(crate) fn refuse_conflict_under_roots(dest: &Path, roots: &[&Path]) -> io::Result<()> {
+    let base = roots
+        .iter()
+        .copied()
+        .find(|root| dest.starts_with(root))
+        .or_else(|| dest.parent())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the destination has no folder"))?;
+    refuse_conflict_below(base, dest)
+}
+
 /// The folders one pass has found to be their own names, so a pass over many rows looks each folder up once
 /// (`windows_cf::populate_placeholders` runs every tick, over every cloud-only row).
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -69,7 +81,10 @@ pub(crate) struct CheckedDirs<'a> {
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 impl<'a> CheckedDirs<'a> {
     pub(crate) fn new(base: &'a Path) -> Self {
-        Self { base, own: HashSet::new() }
+        Self {
+            base,
+            own: HashSet::new(),
+        }
     }
 
     /// [`conflict_below`] for the folder `dir`, looking up only the components below the deepest folder this pass has
@@ -185,17 +200,47 @@ mod tests {
         let base = dir.path();
         let _alias = stub::alias(&base.join("PHOTOS~1"));
         let _failing = stub::failing(&base.join("locked"));
-        assert_eq!(conflict_below(base, &base.join("PHOTOS~1")).unwrap(), Some(NameConflict));
-        assert_eq!(conflict_below(base, &base.join("PHOTOS~1").join("a.jpg")).unwrap(), Some(NameConflict));
+        assert_eq!(
+            conflict_below(base, &base.join("PHOTOS~1")).unwrap(),
+            Some(NameConflict)
+        );
+        assert_eq!(
+            conflict_below(base, &base.join("PHOTOS~1").join("a.jpg")).unwrap(),
+            Some(NameConflict)
+        );
         assert!(conflict_below(base, &base.join("locked").join("a.txt")).is_err());
-        assert_eq!(conflict_below(base, &base.join("Photos 2026").join("a.jpg")).unwrap(), None);
+        assert_eq!(
+            conflict_below(base, &base.join("Photos 2026").join("a.jpg")).unwrap(),
+            None
+        );
         assert_eq!(conflict_below(base, base).unwrap(), None);
-        assert!(conflict_below(base, Path::new("/elsewhere/a.txt")).is_err(), "not below the base");
-        assert!(conflict_below(base, &base.join("..").join("a.txt")).is_err(), "not a path of plain names");
+        assert!(
+            conflict_below(base, Path::new("/elsewhere/a.txt")).is_err(),
+            "not below the base"
+        );
+        assert!(
+            conflict_below(base, &base.join("..").join("a.txt")).is_err(),
+            "not a path of plain names"
+        );
         let refused = refuse_conflict_below(base, &base.join("PHOTOS~1")).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
         assert!(refused.get_ref().is_some_and(|inner| inner.is::<NameConflict>()));
-        assert!(!NameConflict.to_string().contains("PHOTOS"), "the conflict names no file");
+        assert!(
+            !NameConflict.to_string().contains("PHOTOS"),
+            "the conflict names no file"
+        );
+        let other_root = tempfile::tempdir().unwrap();
+        let under = base.join("PHOTOS~1").join("a.jpg");
+        assert!(
+            refuse_conflict_under_roots(&under, &[other_root.path(), base]).is_err(),
+            "checked from its root"
+        );
+        let _leaf = stub::alias(&base.join("REPORT~1.PDF"));
+        assert!(
+            refuse_conflict_under_roots(&base.join("REPORT~1.PDF"), &[other_root.path()]).is_err(),
+            "no root is its prefix: its own name is still checked"
+        );
+        refuse_conflict_under_roots(&base.join("new.pdf"), &[base]).unwrap();
     }
 
     /// The pass remembers a clear folder (and the folders above it) and looks below them only; a conflicting folder
@@ -222,6 +267,10 @@ mod tests {
         }
         dirs.mark_own(base.join("New"));
         let _new = stub::alias(&base.join("New"));
-        assert_eq!(dirs.check(&base.join("New")).unwrap(), None, "created by this pass under its own name");
+        assert_eq!(
+            dirs.check(&base.join("New")).unwrap(),
+            None,
+            "created by this pass under its own name"
+        );
     }
 }

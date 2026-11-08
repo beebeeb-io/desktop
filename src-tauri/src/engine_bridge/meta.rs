@@ -678,13 +678,25 @@ pub(crate) fn write_hydrated_from_reader(
     Ok(written)
 }
 
+///
+/// Task 2407 (core 2404), Windows: every component of `dest_path` below its allowed root must be its own entry, never a
+/// different one a Windows 8.3 short name reaches (`AlreadyExists`, the inner error a `NameConflict`). A destination
+/// with nothing there is created exclusively, so an entry that appeared since is never truncated; one that is its own
+/// name is written in place as before (a Cloud Files placeholder stays one, which a rename over it would not).
 #[cfg(not(unix))]
 pub(crate) fn write_hydrated_from_reader(
     dest_path: &Path,
-    _allowed_roots: &[&Path],
+    allowed_roots: &[&Path],
     reader: &mut dyn std::io::Read,
 ) -> std::io::Result<u64> {
-    std::io::copy(reader, &mut std::fs::File::create(dest_path)?)
+    crate::name_alias::refuse_conflict_under_roots(dest_path, allowed_roots)?;
+    let mut file = match std::fs::symlink_metadata(dest_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(dest_path)?
+        }
+        _ => std::fs::File::create(dest_path)?,
+    };
+    std::io::copy(reader, &mut file)
 }
 
 /// The content version the File Provider extension holds for an item

@@ -27,8 +27,15 @@ fn a_remote_deletion_never_deletes_the_entry_an_alias_reaches() {
     let _alias = stub::alias(&notes);
     let rows = db.mark_subtree_trashing("folder-docs").unwrap();
     remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
-    assert_eq!(std::fs::read(&notes).unwrap(), b"edited, never sent", "the entry the name reaches is untouched");
-    assert!(db.list_kept_copies().unwrap().is_empty(), "nothing of this file is on disk to keep");
+    assert_eq!(
+        std::fs::read(&notes).unwrap(),
+        b"edited, never sent",
+        "the entry the name reaches is untouched"
+    );
+    assert!(
+        db.list_kept_copies().unwrap().is_empty(),
+        "nothing of this file is on disk to keep"
+    );
 }
 
 #[test]
@@ -38,7 +45,10 @@ fn a_remote_deletion_never_deletes_below_a_folder_an_alias_reaches() {
     let _alias = stub::alias(&sync_root.join("docs"));
     let rows = db.mark_subtree_trashing("folder-docs").unwrap();
     remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::InSync);
-    assert_eq!(std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(), b"edited, never sent");
+    assert_eq!(
+        std::fs::read(sync_root.join("docs").join("notes.txt")).unwrap(),
+        b"edited, never sent"
+    );
 }
 
 /// A check that cannot finish never deletes: the file is kept where it is, for the retry.
@@ -63,16 +73,24 @@ fn the_kept_original_retry_never_removes_the_entry_an_alias_reaches() {
     let notes = sync_root.join("docs").join("notes.txt");
     let rows = db.mark_subtree_trashing("folder-docs").unwrap();
     remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::Unreadable);
-    assert_eq!(db.list_kept_copies().unwrap().len(), 1, "precondition: the original waits for the retry");
+    assert_eq!(
+        db.list_kept_copies().unwrap().len(),
+        1,
+        "precondition: the original waits for the retry"
+    );
     let _alias = stub::alias(&notes);
     retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::InSync);
-    assert_eq!(std::fs::read(&notes).unwrap(), b"edited, never sent", "the entry the name reaches is untouched");
+    assert_eq!(
+        std::fs::read(&notes).unwrap(),
+        b"edited, never sent",
+        "the entry the name reaches is untouched"
+    );
 }
 
 #[test]
 fn an_emptied_kept_folder_is_never_removed_through_an_alias() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let sync_root = dir.path().join("sync-root");
     let folder = sync_root.join("OLDFOL~1");
     std::fs::create_dir_all(&folder).unwrap();
@@ -146,10 +164,21 @@ async fn keep_both_never_renames_the_entry_an_alias_reaches() {
 
     let error = bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
 
-    assert!(conflict_in_chain(&error), "a name conflict, not another failure: {error:#}");
+    assert!(
+        conflict_in_chain(&error),
+        "a name conflict, not another failure: {error:#}"
+    );
     assert_eq!(std::fs::read(&original).unwrap(), b"a different file");
-    assert_eq!(names_in(&sync_root), ["CONFLI~1.TXT"], "nothing renamed, nothing written");
-    assert_eq!(bridge.db.get_file(file_id).unwrap().unwrap().status, FileStatus::Conflict, "still the person's to resolve");
+    assert_eq!(
+        names_in(&sync_root),
+        ["CONFLI~1.TXT"],
+        "nothing renamed, nothing written"
+    );
+    assert_eq!(
+        bridge.db.get_file(file_id).unwrap().unwrap().status,
+        FileStatus::Conflict,
+        "still the person's to resolve"
+    );
 }
 
 /// The conflict copy's name already holds an earlier conflict copy (a second conflict the same day): it is never
@@ -160,7 +189,9 @@ async fn keep_both_never_replaces_an_earlier_conflict_copy() {
     let sync_root = dir.path().join("sync-root");
     std::fs::create_dir_all(&sync_root).unwrap();
     std::fs::write(sync_root.join("notes.txt"), b"local conflict bytes").unwrap();
-    let host = hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "device".into());
+    let host = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "device".into());
     let date = chrono::Utc::now().format("%Y-%m-%d");
     let earlier = sync_root.join(format!("notes (conflict - {host} - {date}).txt"));
     std::fs::write(&earlier, b"the earlier conflict copy").unwrap();
@@ -171,9 +202,17 @@ async fn keep_both_never_replaces_an_earlier_conflict_copy() {
     // The remote hydrate fails (nothing listens): the local bytes stay in their copy, the row is Error.
     let _ = bridge.auto_resolve_keep_both(&sync_root, &entry).await.unwrap_err();
 
-    assert_eq!(std::fs::read(&earlier).unwrap(), b"the earlier conflict copy", "the earlier copy is never replaced");
+    assert_eq!(
+        std::fs::read(&earlier).unwrap(),
+        b"the earlier conflict copy",
+        "the earlier copy is never replaced"
+    );
     let next = sync_root.join(format!("notes (conflict - {host} - {date}) 2.txt"));
-    assert_eq!(std::fs::read(&next).unwrap(), b"local conflict bytes", "the local bytes take the next free name");
+    assert_eq!(
+        std::fs::read(&next).unwrap(),
+        b"local conflict bytes",
+        "the local bytes take the next free name"
+    );
 }
 
 // ── Hydration into the sync folder (`hydrate.rs` → `meta.rs`) ──
@@ -183,15 +222,26 @@ async fn keep_both_never_replaces_an_earlier_conflict_copy() {
 #[tokio::test]
 async fn a_hydrate_never_writes_through_an_alias() {
     let file = "11111111-2222-4333-8444-555555552407";
-    let (_dir, sync_root, _server, bridge, _local) = super::reg_1640::regression_1640_synced_file([9u8; 32], file).await;
+    let (_dir, sync_root, _server, bridge, _local) =
+        super::reg_1640::regression_1640_synced_file([9u8; 32], file).await;
     let dest = sync_root.join("REPORT~1.TXT");
     std::fs::write(&dest, b"a different file").unwrap();
     let _alias = stub::alias(&dest);
 
-    let error = bridge.hydrate_file(file, &dest, &[sync_root.as_path()]).await.unwrap_err();
+    let error = bridge
+        .hydrate_file(file, &dest, &[sync_root.as_path()])
+        .await
+        .unwrap_err();
 
-    assert!(conflict_in_chain(&error), "a name conflict, not another failure: {error:#}");
-    assert_eq!(std::fs::read(&dest).unwrap(), b"a different file", "never truncated or replaced");
+    assert!(
+        conflict_in_chain(&error),
+        "a name conflict, not another failure: {error:#}"
+    );
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"a different file",
+        "never truncated or replaced"
+    );
 }
 
 // ── A request row's edit, saved as a new sibling (`upload.rs`) ──
@@ -200,8 +250,8 @@ async fn a_hydrate_never_writes_through_an_alias() {
 /// reaches.
 #[tokio::test]
 async fn a_request_edit_is_never_copied_into_a_folder_an_alias_reaches() {
-    use beebeeb_core::kdf::{MasterKey, derive_file_key};
     use crate::owner_keys::OwnedKeyRecord;
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
     const REQUEST: &str = "0f000000-0000-4000-8000-000000002407";
     const FOLDER: &str = "40000000-0000-4000-8000-000000002407";
     let dir = tempfile::tempdir().unwrap();
@@ -209,7 +259,14 @@ async fn a_request_edit_is_never_copied_into_a_folder_an_alias_reaches() {
     std::fs::create_dir_all(sync_root.join("INBOX~1")).unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
     seed_folder_row(&bridge, FOLDER, "INBOX~1");
-    seed_bridge_row(&bridge, REQUEST, "INBOX~1/report.txt", Some(FOLDER), FileStatus::Local, 4);
+    seed_bridge_row(
+        &bridge,
+        REQUEST,
+        "INBOX~1/report.txt",
+        Some(FOLDER),
+        FileStatus::Local,
+        4,
+    );
     let derived = derive_file_key(&MasterKey::from_bytes([7; 32]), REQUEST.as_bytes());
     let name = beebeeb_core::encrypt::encrypt_name_for(
         &derived,
@@ -249,12 +306,28 @@ async fn a_request_edit_is_never_copied_into_a_folder_an_alias_reaches() {
     };
     let _alias = stub::alias(&sync_root.join("INBOX~1"));
 
-    let error = anyhow::Error::from(bridge.upload_version(&op, None, &sync_root, &mut Vec::new()).await.unwrap_err());
+    let error = anyhow::Error::from(
+        bridge
+            .upload_version(&op, None, &sync_root, &mut Vec::new())
+            .await
+            .unwrap_err(),
+    );
 
-    assert!(conflict_in_chain(&error), "a name conflict, not another failure: {error:#}");
-    assert!(names_in(&sync_root.join("INBOX~1")).is_empty(), "nothing is copied into the folder the name reaches");
     assert!(
-        bridge.db().list_files().unwrap().iter().all(|row| !row.path.contains("(edited")),
+        conflict_in_chain(&error),
+        "a name conflict, not another failure: {error:#}"
+    );
+    assert!(
+        names_in(&sync_root.join("INBOX~1")).is_empty(),
+        "nothing is copied into the folder the name reaches"
+    );
+    assert!(
+        bridge
+            .db()
+            .list_files()
+            .unwrap()
+            .iter()
+            .all(|row| !row.path.contains("(edited")),
         "no create is queued"
     );
 }

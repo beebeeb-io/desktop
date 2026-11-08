@@ -13,7 +13,11 @@ fn short_name_of(path: &Path) -> Option<String> {
     let mut buffer = vec![0u16; 1024];
     // SAFETY: `wide` is NUL-terminated; `buffer` is writable for its whole length.
     let written = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
-    assert!(written != 0 && written < buffer.len(), "GetShortPathNameW failed for {}", path.display());
+    assert!(
+        written != 0 && written < buffer.len(),
+        "GetShortPathNameW failed for {}",
+        path.display()
+    );
     let short = String::from_utf16(&buffer[..written]).expect("a short path is UTF-16");
     let last = short.rsplit('\\').next().unwrap_or(&short).to_owned();
     (last != path.file_name().expect("a file name").to_string_lossy()).then_some(last)
@@ -38,7 +42,11 @@ fn aliased(long: &str, contents: Option<&[u8]>) -> Option<(tempfile::TempDir, St
         }
         if let Some(short) = short_name_of(&path) {
             if let Some(bytes) = contents {
-                assert_eq!(std::fs::read(dir.path().join(&short)).unwrap(), bytes, "the fixture must alias");
+                assert_eq!(
+                    std::fs::read(dir.path().join(&short)).unwrap(),
+                    bytes,
+                    "the fixture must alias"
+                );
             } else {
                 assert!(dir.path().join(&short).is_dir(), "the fixture must alias");
             }
@@ -58,8 +66,14 @@ fn the_check_finds_a_real_short_name_and_passes_the_long_one() {
     let Some((dir, short)) = aliased("Report for 2026.pdf", Some(b"precious")) else {
         return;
     };
-    assert_eq!(conflict_below(dir.path(), &dir.path().join(&short)).unwrap(), Some(NameConflict));
-    assert_eq!(conflict_below(dir.path(), &dir.path().join("Report for 2026.pdf")).unwrap(), None);
+    assert_eq!(
+        conflict_below(dir.path(), &dir.path().join(&short)).unwrap(),
+        Some(NameConflict)
+    );
+    assert_eq!(
+        conflict_below(dir.path(), &dir.path().join("Report for 2026.pdf")).unwrap(),
+        None
+    );
     assert_eq!(conflict_below(dir.path(), &dir.path().join("new.pdf")).unwrap(), None);
 }
 
@@ -68,9 +82,13 @@ fn a_hydrate_write_never_truncates_the_file_a_short_name_reaches() {
     let Some((dir, short)) = aliased("Report for 2026.pdf", Some(b"precious")) else {
         return;
     };
-    let error = write_hydrated_from_reader(&dir.path().join(&short), &[dir.path()], &mut &b"server bytes"[..]).unwrap_err();
+    let error =
+        write_hydrated_from_reader(&dir.path().join(&short), &[dir.path()], &mut &b"server bytes"[..]).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
-    assert_eq!(std::fs::read(dir.path().join("Report for 2026.pdf")).unwrap(), b"precious");
+    assert_eq!(
+        std::fs::read(dir.path().join("Report for 2026.pdf")).unwrap(),
+        b"precious"
+    );
 }
 
 /// The same writer still writes a file's own name, and a new one, whole.
@@ -79,7 +97,8 @@ fn a_hydrate_write_replaces_its_own_name_and_creates_a_new_one() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("own.txt"), b"old").unwrap();
     for name in ["own.txt", "new.txt"] {
-        let written = write_hydrated_from_reader(&dir.path().join(name), &[dir.path()], &mut &b"server bytes"[..]).unwrap();
+        let written =
+            write_hydrated_from_reader(&dir.path().join(name), &[dir.path()], &mut &b"server bytes"[..]).unwrap();
         assert_eq!(written, 12);
         assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"server bytes", "{name}");
     }
@@ -117,7 +136,10 @@ fn a_remote_deletion_never_deletes_the_file_a_short_name_reaches() {
     let rows = db.mark_subtree_trashing(file_id).unwrap();
     assert_eq!(rows.len(), 1);
     remove_pruned_entries(&db, dir.path(), &rows, &|_, _| LocalEntry::InSync);
-    assert_eq!(std::fs::read(dir.path().join("Report for 2026.pdf")).unwrap(), b"precious");
+    assert_eq!(
+        std::fs::read(dir.path().join("Report for 2026.pdf")).unwrap(),
+        b"precious"
+    );
 }
 
 #[test]
@@ -130,7 +152,10 @@ fn an_office_owner_file_a_short_name_reaches_is_never_removed() {
         return;
     };
     landing::remove_office_owner_files(&dir.path().join(original));
-    assert!(dir.path().join("~$Report for 2026.docx").is_file(), "the owner file the name reaches is untouched");
+    assert!(
+        dir.path().join("~$Report for 2026.docx").is_file(),
+        "the owner file the name reaches is untouched"
+    );
 }
 
 #[test]
@@ -139,7 +164,10 @@ fn a_scaffold_folder_a_short_name_reaches_is_never_removed() {
         return;
     };
     landing::remove_scaffold_dirs(dir.path(), &[short]);
-    assert!(dir.path().join("Photos 2026").is_dir(), "the empty folder the name reaches is untouched");
+    assert!(
+        dir.path().join("Photos 2026").is_dir(),
+        "the empty folder the name reaches is untouched"
+    );
 }
 
 #[tokio::test]
@@ -168,6 +196,13 @@ async fn keep_both_never_renames_the_file_a_short_name_reaches() {
 
     let _ = bridge.auto_resolve_keep_both(dir.path(), &entry).await.unwrap_err();
 
-    assert_eq!(std::fs::read(dir.path().join("Conflict notes 2026.txt")).unwrap(), b"a different file");
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing renamed, nothing written");
+    assert_eq!(
+        std::fs::read(dir.path().join("Conflict notes 2026.txt")).unwrap(),
+        b"a different file"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "nothing renamed, nothing written"
+    );
 }

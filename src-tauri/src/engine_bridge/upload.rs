@@ -799,10 +799,17 @@ impl EngineBridge {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| local_file_path_under_sync_root(sync_root, &entry.path).unwrap_or_default());
         let dest = local_file_path_under_sync_root(sync_root, &rel)?;
+        // Task 2407 (core 2404): the copy goes beside the request row, never into a different folder that a folder's
+        // name reaches (a Windows 8.3 short name). It is written to an exclusive temp sibling, then published without
+        // replacing anything that appeared at its name meanwhile (core's `TempSibling`).
+        crate::name_alias::refuse_conflict_below(sync_root, &dest)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&source, &dest)?;
+        let (temp, mut copy) = beebeeb_core::path_safety::TempSibling::create(&dest)?;
+        std::io::copy(&mut std::fs::File::open(&source)?, &mut copy)?;
+        drop(copy);
+        temp.publish()?;
         let content_type = op
             .metadata_json
             .as_deref()
