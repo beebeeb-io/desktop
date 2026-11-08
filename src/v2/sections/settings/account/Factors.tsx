@@ -2,10 +2,10 @@
 // every product draws them the same. Passkeys call account_passkeys_* (B15 builds them; fixtures until then).
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { Btn, Dialog, Group, Page, Row, Switch } from '../shell/kit'
+import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { run, errorText, copyFor60s, type AccountState } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_TOTP, type Passkey } from '../../../source/fixtures/account'
-import { BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, TextInput, ago, day, useEscBack } from './ui'
+import { Btn, BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, TextInput, ago, day, useEscBack } from './ui'
 
 type Set = (f: (s: AccountState) => AccountState) => void
 

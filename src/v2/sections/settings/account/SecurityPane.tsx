@@ -5,12 +5,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { command } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
-import { Btn, Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
+import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, type AccountState, type Scenario } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
-import { BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
+import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 
 export type SecurityPage =
   | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity'
@@ -75,7 +75,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const t = state.totp
   const done = state.factors.filter((f) => f.satisfied).length
   return (
-    <Page title="Sign-in and security" action={<Btn onClick={() => setPage('checkup')}>Security checkup · <span className="font-mono">{done} of {state.factors.length}</span></Btn>}>
+    <Page title="Sign-in and security" action={<Btn onClick={() => setPage('checkup')}><span>Security checkup ·{'\u00a0'}<span className="font-mono">{done} of {state.factors.length}</span></span></Btn>}>
       <AppLock />
       <Group title="Sign-in">
         <Row label="Password" value={state.passwordChangedAt ? `Changed ${ago(state.passwordChangedAt)}` : undefined} onClick={() => setPage('password')} />
@@ -196,7 +196,6 @@ function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onD
     showError ? { field: 'current', text: 'Current password is incorrect. Nothing was changed.' } : null)
   const [busy, setBusy] = useState(false)
   useEscBack(onBack)
-  useEffect(() => () => { setCurrent(''); setNext(''); setAgain('') }, [])
   const s = strength(next)
   const valid = current.length > 0 && s.ok && next === again
   const submit = async () => {

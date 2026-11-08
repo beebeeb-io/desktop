@@ -1,9 +1,9 @@
 // Devices and sessions (DW-A55) and the confirm before a device is signed out (DW-A56).
 import { useEffect, useState } from 'react'
-import { Btn, Dialog, Group, Page } from '../shell/kit'
+import { Dialog, Group, Page } from '../shell/kit'
 import { useAccount, run, errorText, type Scenario } from './data'
 import type { DeviceGroup } from '../../../source/fixtures/account'
-import { Pill, relative } from './ui'
+import { Btn, Pill, relative } from './ui'
 
 type Confirm = { kind: 'one'; device: DeviceGroup } | { kind: 'others' }
 

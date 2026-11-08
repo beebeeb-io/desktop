@@ -1,7 +1,7 @@
 // B14's small parts on top of B12's kit: the sub-page frame with Back (Esc), the code boxes, the password field,
 // the checkup ring and the QR code. Secret fields carry autocomplete off, spellcheck off and autocorrect off.
 import { useEffect, useRef, type ReactNode } from 'react'
-import { Icon } from '@beebeeb/shared/design'
+import { BBButton, Icon } from '@beebeeb/shared/design'
 import { FIXTURE_NOW } from '../../../source/fixtures/account'
 import { hasTauri } from '../../../source'
 
@@ -138,4 +138,14 @@ export function Pill({ children, tone = 'neutral' }: { children: ReactNode; tone
 
 export function Check() {
   return <Icon name="check" size={14} className="shrink-0 text-ink" aria-hidden="true" />
+}
+
+/** B12's kit button, plus the dimmed disabled state the board draws ("dimmed until six digits"). */
+export function Btn({ children, variant = 'default', ...rest }: { children: ReactNode; variant?: 'amber' | 'default' | 'ghost' | 'danger'; onClick?: () => void; disabled?: boolean; 'aria-label'?: string }) {
+  return (
+    <BBButton variant={variant} size="sm" type="button"
+      className="whitespace-nowrap !px-2.5 !py-1 !text-[13px] leading-5 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100" {...rest}>
+      {children}
+    </BBButton>
+  )
 }

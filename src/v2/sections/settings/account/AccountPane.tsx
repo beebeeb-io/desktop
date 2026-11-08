@@ -1,8 +1,8 @@
 // Account (DW-A51) with change name (A64), change email (A65) and the code to the new address (A66).
 import { useCallback, useEffect, useState } from 'react'
-import { Btn, Group, Page, Row } from '../shell/kit'
+import { Group, Page, Row } from '../shell/kit'
 import { useAccount, run, errorText, type Scenario } from './data'
-import { BackLink, CodeBoxes, Field, PasswordInput, TextInput, useEscBack } from './ui'
+import { Btn, BackLink, CodeBoxes, Field, PasswordInput, TextInput, useEscBack } from './ui'
 
 export type AccountPage = 'main' | 'name' | 'email' | 'email-code'
 
@@ -80,7 +80,6 @@ function ChangeEmail({ onSent, onCancel }: { onSent: (email: string) => void; on
   const [error, setError] = useState<{ field: 'email' | 'password'; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   useEscBack(onCancel)
-  useEffect(() => () => setPassword(''), [])
   const send = async () => {
     setBusy(true)
     const pw = password
@@ -118,7 +117,6 @@ function EmailCode({ email, initialDigits, onBack, onDone }: { email: string; in
     const t = window.setTimeout(() => setWait((w) => w - 1), 1000)
     return () => window.clearTimeout(t)
   }, [wait])
-  useEffect(() => () => setCode(''), [])
   const confirm = async () => {
     const c = code
     setCode('')
