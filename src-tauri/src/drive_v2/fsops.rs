@@ -60,7 +60,9 @@ pub(crate) fn full_path(sync_root: &Path, rel: &str) -> Result<PathBuf, DriveErr
     }
     crate::file_open_commands::reject_unsafe_rel_path(rel).map_err(|_| DriveError::NotFound)?;
     let full = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let anchor = if full.exists() { full.clone() } else { full.parent().map(Path::to_path_buf).unwrap_or_default() };
+    // Not on disk yet (a new name, or a folder the engine has not placed): the nearest ancestor that
+    // is must be inside the root; the segments below it passed the string checks.
+    let anchor = full.ancestors().find(|p| p.exists()).map(Path::to_path_buf).unwrap_or_default();
     if !crate::file_open_commands::is_contained(sync_root, &anchor) {
         return Err(DriveError::NotFound);
     }
