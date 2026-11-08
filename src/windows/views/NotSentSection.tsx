@@ -19,6 +19,7 @@ import {
   UNSENT_PAGE_SIZE,
   baseName,
   folderOf,
+  isLockedRefusal,
   kindWord,
   loadUnsentChanges,
   queuedAgo,
@@ -84,7 +85,7 @@ export function NotSentSection({
       setRead({ state: 'loaded', page: result.value })
       // The read now says what a Try again did; only an action still in flight keeps its row state.
       setRows((all) => Object.fromEntries(Object.entries(all).filter(([, state]) => state === 'busy')))
-    } else if (result.reason === 'vault is locked') setRead({ state: 'locked' })
+    } else if (isLockedRefusal(result.reason)) setRead({ state: 'locked' })
     else setRead({ state: 'failed', reason: result.unsupported ? commandUnavailableLabel('unsent_changes') : result.reason })
   }, [shown])
 

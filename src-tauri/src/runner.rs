@@ -885,11 +885,21 @@ async fn run(
                 queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase).await;
             }
             // Task 2409: Try again made a failed change due; the queue step alone sends it now, as the phase's arm does,
-            // at most once a second and never while paused. Nothing is sent before this run's first pass (D11b): the
-            // next tick runs that pass and then the step.
+            // at most once a second and never while paused. A nudge inside that second is asked again once the second
+            // is out, never dropped. Nothing is sent before this run's first pass (D11b): the next tick runs that pass
+            // and then the step.
             Wake::Nudge => {
                 let now = std::time::Instant::now();
-                if !phase_step_due(true, RunMode::of_flag(sync_paused.load(Ordering::Relaxed)), last_nudge_run, now) {
+                let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
+                if !mode.is_paused() && let Some(wait) = nudge_wait(last_nudge_run, now) {
+                    let link = Arc::clone(&send_phase);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        link.nudge();
+                    });
+                    continue;
+                }
+                if !phase_step_due(true, mode, last_nudge_run, now) {
                     continue;
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -1111,7 +1121,7 @@ pub(crate) use telemetry::hostname_or_unknown;
 mod lifecycle;
 use lifecycle::*;
 pub use lifecycle::{SendPhaseLink, AttemptSignals, ResumeTicket, EngineRunner, AbortOutcome};
-pub(crate) use lifecycle::{phase_step_due, Wake, with_startup_guard};
+pub(crate) use lifecycle::{nudge_wait, phase_step_due, Wake, with_startup_guard};
 
 mod tick_loop;
 use tick_loop::*;

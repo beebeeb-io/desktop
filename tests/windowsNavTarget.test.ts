@@ -15,7 +15,9 @@ describe('a navigation target', () => {
 
   test('the tray sends the same target the main window reads', () => {
     const tray = readFileSync(new URL('../src/WindowsTray.tsx', import.meta.url), 'utf8')
-    expect(tray).toContain(`const NOT_SENT_TARGET = '${NOT_SENT_TARGET}'`)
+    // The constants are imported, not copied, so the two cannot drift (2409 self-review).
+    expect(tray).toContain("import { NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'")
+    expect(tray).not.toContain("const NOT_SENT_TARGET =")
     expect(tray).toContain('await emit(WINDOWS_APP_NAV_EVENT, NOT_SENT_TARGET)')
     expect(tray).toContain('window.localStorage.setItem(WINDOWS_APP_NAV_STORAGE_KEY, NOT_SENT_TARGET)')
     // Both status lines go through the link-or-text helper.

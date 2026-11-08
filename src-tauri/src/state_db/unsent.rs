@@ -35,8 +35,9 @@ pub struct UnsentChange {
     pub queued_at: i64,
     /// A waiting change that failed and waits out its backoff: when it is tried again (unix seconds).
     pub retry_at: Option<i64>,
-    /// Given up because it was parked (a stale base, a missing copy, a refused write: [`PARK_REASONS`]), not because
-    /// it failed again and again. Trying it again sends nothing new, so it has no Try again.
+    /// Parked (`last_error_class` set: a stale base, a missing copy, a refused write), not failed again and again. The
+    /// queue's own rule (spec D8, `held_queue::types::QueueRow::parked`, the reconcile pass): a park is never re-armed,
+    /// so it has no Try again.
     pub parked: bool,
     /// Try again applies (Guus, 13:39): it stopped after repeated errors, or it waits out a backoff after an error.
     /// Never a held row (it keeps its own action) or a parked one.
@@ -56,36 +57,6 @@ pub enum RetryOutcome {
     Held,
     /// Parked: trying it again sends nothing new.
     Parked,
-}
-
-/// Every reason an upload parks with its bytes kept (`park_claimed`, `park_unclaimed_conn`, the rekey landing):
-/// `last_error_class` holds one of these on a parked row, and NULL on a row that ran out of attempts by failing.
-const PARK_REASONS: [ParkReason; 7] = [
-    ParkReason::StaleBase,
-    ParkReason::BaseUnknown,
-    ParkReason::PayloadMissing,
-    ParkReason::PredecessorParked,
-    ParkReason::PredecessorLost,
-    ParkReason::RekeyFailed,
-    ParkReason::PermissionDenied,
-];
-
-/// Exhaustive on purpose: a new park reason fails to compile here until it is added to [`PARK_REASONS`].
-#[allow(dead_code)]
-fn park_reasons_are_all_listed(reason: ParkReason) -> bool {
-    match reason {
-        ParkReason::StaleBase
-        | ParkReason::BaseUnknown
-        | ParkReason::PayloadMissing
-        | ParkReason::PredecessorParked
-        | ParkReason::PredecessorLost
-        | ParkReason::RekeyFailed
-        | ParkReason::PermissionDenied => PARK_REASONS.contains(&reason),
-    }
-}
-
-fn is_park_class(class: Option<&str>) -> bool {
-    class.is_some_and(|class| PARK_REASONS.iter().any(|reason| reason.as_str() == class))
 }
 
 /// One page of [`UnsentChange`]s and how many there are in all.
@@ -185,13 +156,16 @@ impl StateDb {
                     let kind: String = row.get(2)?;
                     let metadata_json: Option<String> = row.get(3)?;
                     let origin: Option<String> = row.get(4)?;
-                    let group = group_label(&row.get::<_, String>(6)?);
+                    let raw_group: String = row.get(6)?;
+                    let paused = raw_group.starts_with("paused:");
+                    let group = group_label(&raw_group);
                     let attempts: i64 = row.get(8)?;
                     let next_retry_at: i64 = row.get(9)?;
                     let error_class: Option<String> = row.get(10)?;
-                    let backing_off = group == "waiting" && attempts > 0 && next_retry_at > now;
-                    let parked = group == "gave_up" && is_park_class(error_class.as_deref());
-                    let retryable = backing_off || (group == "gave_up" && !parked);
+                    // Spec D8: any class is a park, as the reconcile pass reads it; a held row keeps its own action.
+                    let parked = !paused && error_class.is_some();
+                    let backing_off = !parked && group == "waiting" && attempts > 0 && next_retry_at > now;
+                    let retryable = backing_off || (!parked && group == "gave_up");
                     Ok(UnsentChange {
                         id: row.get(0)?,
                         file_id: row.get(1)?,
@@ -261,10 +235,11 @@ impl StateDb {
         if paused.is_some() {
             return Ok(RetryOutcome::Held);
         }
-        let gave_up = attempts >= max_attempts;
-        if gave_up && is_park_class(class.as_deref()) {
+        // Spec D8: a park (any `last_error_class`) is never re-armed, whatever its attempts.
+        if class.is_some() {
             return Ok(RetryOutcome::Parked);
         }
+        let gave_up = attempts >= max_attempts;
         if claim.is_some() || (!gave_up && (attempts == 0 || next_retry_at <= now)) {
             return Ok(RetryOutcome::AlreadyQueued);
         }

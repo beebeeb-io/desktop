@@ -448,6 +448,14 @@ fn try_again_refuses_what_did_not_fail_and_changes_nothing() {
         "UPDATE operation_queue SET last_error_class = 'stale_base' WHERE op_id = 'parked'",
         [],
     );
+    // Spec D8: any `last_error_class` is a park (`held_queue::types`, the reconcile pass), not only the upload park
+    // reasons: here a pause class kept after its pause was lifted (2409 self-review).
+    queue(&db, "parked-other-class", ("rename", None), (None, 5, 0), None, 2);
+    sql(
+        &db,
+        "UPDATE operation_queue SET last_error_class = 'auth' WHERE op_id = 'parked-other-class'",
+        [],
+    );
     queue(&db, "download", ("hydrate_file", None), (None, 5, 0), None, 3);
     queue(&db, "due", ("upload_file", None), (None, 0, 0), None, 4);
     queue(
@@ -465,11 +473,14 @@ fn try_again_refuses_what_did_not_fail_and_changes_nothing() {
         [],
     );
     let items = db.unsent_changes(0, 100, NOW).unwrap().items;
-    assert!(!listed(&items, "held").retryable && !listed(&items, "parked").retryable);
-    assert!(listed(&items, "parked").parked);
+    for id in ["held", "parked", "parked-other-class"] {
+        assert!(!listed(&items, id).retryable, "{id} has no Try again");
+    }
+    assert!(listed(&items, "parked").parked && listed(&items, "parked-other-class").parked);
     let ids = [
         "held",
         "parked",
+        "parked-other-class",
         "download",
         "due",
         "due-after-a-failure",
@@ -485,6 +496,7 @@ fn try_again_refuses_what_did_not_fail_and_changes_nothing() {
         outcomes,
         [
             Held,
+            Parked,
             Parked,
             Unknown,
             AlreadyQueued,

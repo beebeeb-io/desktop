@@ -43,7 +43,7 @@ const ROW_IDS = ['op-delete', 'op-edit', 'op-new']
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) })
 const results = []
 
-async function open({ surface, viewport, colorScheme = 'light', locked = false }) {
+async function open({ surface, viewport, colorScheme = 'light', locked = false, allSent = false }) {
   const page = await browser.newPage({ viewport, colorScheme })
   const errors = []
   page.on('pageerror', (error) => errors.push(String(error)))
@@ -98,7 +98,13 @@ async function open({ surface, viewport, colorScheme = 'light', locked = false }
         }
       },
     }
-  }, { caps, summary, unsent, surface, locked })
+  }, {
+    caps,
+    summary: allSent ? { ...summary, transfers_active: 0, queue: { waiting: 0, gave_up: 0, held: [] } } : summary,
+    unsent: allSent ? { ...unsent, total: 0, items: [] } : unsent,
+    surface,
+    locked,
+  })
   return { page, errors }
 }
 
@@ -258,6 +264,32 @@ try {
     await page.goto(`${base}/?window=main-app&platform=windows`)
     await expectSection(page)
     results.push(['main-window-opened-from-tray (lands on Not sent)', await shot(page, 'main-window-opened-from-tray')])
+    assert.deepEqual(errors, [])
+    await page.close()
+  }
+
+  // ── After a link, Activity from the sidebar is Activity as before ──────────
+  // Opened on Not sent when everything has been sent meanwhile: it says so. Leave Activity and come back from the
+  // sidebar: no Not sent section (nothing is unsent), and its list is no longer read.
+  {
+    const { page, errors } = await open({ surface: 'main-app', viewport: { width: 1200, height: 860 }, allSent: true })
+    await page.addInitScript(() => {
+      try { window.localStorage.setItem('bb.windowsApp.nav', 'activity#not-sent') } catch {}
+    })
+    await page.goto(`${base}/?window=main-app&platform=windows`)
+    await page.getByText('Every change on this PC has been sent.', { exact: true }).waitFor({ timeout: 5000 })
+    await page.getByRole('button', { name: 'Home', exact: true }).first().click()
+    await page.getByText('Everything on this PC, at a glance.', { exact: false }).waitFor()
+    await page.evaluate(() => { try { window.localStorage.removeItem('bb.windowsApp.nav') } catch {} })
+    await page.getByRole('button', { name: 'Activity', exact: true }).first().click()
+    await page.getByText('Changes not sent yet, your account', { exact: false }).first().waitFor()
+    await page.waitForTimeout(500)
+    const before = await page.evaluate(() => window.calls.filter((c) => c.name === 'unsent_changes').length)
+    assert.equal(await page.locator('#not-sent').count(), 0, 'no Not sent section on a later visit with nothing unsent')
+    await page.waitForTimeout(5600)
+    const after = await page.evaluate(() => window.calls.filter((c) => c.name === 'unsent_changes').length)
+    assert.equal(after, before, 'the list is not polled once the section is gone')
+    results.push([`activity-later-visit-all-sent (no section; unsent_changes reads stay ${after})`, await shot(page, 'activity-later-visit-all-sent')])
     assert.deepEqual(errors, [])
     await page.close()
   }

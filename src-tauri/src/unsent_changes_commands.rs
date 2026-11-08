@@ -9,7 +9,8 @@
 
 use super::*;
 
-/// One page is at most this many changes; the window asks for 100 at a time.
+/// One call serves at most this many changes (`UNSENT_MAX_PER_CALL` in `src/windows/unsentChanges.ts`): the window
+/// reads the rows it shows (100, and 100 more per "Show more") in one call, so in one read transaction, up to this.
 const MAX_PAGE: u32 = 500;
 
 /// A change being sent right now: bytes done of total, from the transfer board.
@@ -36,18 +37,26 @@ pub(super) struct UnsentChangesView {
     paused: bool,
 }
 
-/// The view of one page: an upload on the board (by its file id, not failed) carries its progress.
+/// The view of one page: an upload on the board (by its file id, not failed) carries its progress. The board knows a
+/// file, not a change, so only the change being sent carries it: the first waiting upload (new file or edit) of that
+/// file on the page, as a file's changes go in order. A change of it that gave up or is held keeps its own reason.
 fn view_of(
     page: state_db::UnsentPage,
     transfers: &[(String, crate::transfer_progress::Transfer)],
     engine_state: String,
     paused: bool,
 ) -> UnsentChangesView {
-    let items =
-        page.items
-            .into_iter()
-            .map(|change| {
-                let sending = change.file_id.as_deref().and_then(|id| {
+    let mut shown = std::collections::HashSet::new();
+    let items = page
+        .items
+        .into_iter()
+        .map(|change| {
+            let sendable = change.group == "waiting" && matches!(change.kind, "new_file" | "edit");
+            let sending = change
+                .file_id
+                .as_deref()
+                .filter(|_| sendable)
+                .and_then(|id| {
                     transfers.iter().find_map(|(file_id, t)| {
                         (file_id == id && t.direction == crate::transfer_progress::Direction::Up && !t.failed)
                             .then_some(Sending {
@@ -55,10 +64,11 @@ fn view_of(
                                 total: t.total,
                             })
                     })
-                });
-                UnsentChangeView { change, sending }
-            })
-            .collect();
+                })
+                .filter(|_| shown.insert(change.file_id.clone()));
+            UnsentChangeView { change, sending }
+        })
+        .collect();
     UnsentChangesView {
         total: page.total,
         items,
@@ -225,6 +235,50 @@ mod tests {
             "the change's fields are flattened in"
         );
         assert_eq!(json["items"][0]["sending"]["done"], 34);
+    }
+
+    /// The board knows a file, not a change: of a file's changes only the one being sent carries the progress. That is
+    /// the first waiting upload of it (a file's changes go in order); a change of it that gave up keeps its reason and
+    /// its Try again, and a rename or a later edit of it waits (2409 self-review).
+    #[test]
+    fn only_the_change_being_sent_carries_its_files_progress() {
+        let gave_up = state_db::UnsentChange {
+            group: "gave_up".into(),
+            kind: "edit",
+            retryable: true,
+            ..change("old-edit", Some("fa"))
+        };
+        let rename = state_db::UnsentChange {
+            kind: "rename",
+            ..change("rename", Some("fa"))
+        };
+        let page = state_db::UnsentPage {
+            total: 4,
+            items: vec![
+                gave_up,
+                change("sending", Some("fa")),
+                rename,
+                state_db::UnsentChange {
+                    kind: "edit",
+                    ..change("later-edit", Some("fa"))
+                },
+            ],
+        };
+        let transfers = vec![(
+            "fa".to_string(),
+            Transfer {
+                direction: Direction::Up,
+                done: 40,
+                total: 100,
+                ..Transfer::default()
+            },
+        )];
+        let view = view_of(page, &transfers, "idle".into(), false);
+        let sending: Vec<_> = view.items.iter().map(|i| (i.change.id.as_str(), i.sending.is_some())).collect();
+        assert_eq!(
+            sending,
+            [("old-edit", false), ("sending", true), ("rename", false), ("later-edit", false)]
+        );
     }
 
     /// The answer is the JSON the window parses: `tests/fixtures/unsent-changes.page.json`, which

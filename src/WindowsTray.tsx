@@ -52,6 +52,7 @@ import { T, useToast } from './windows/ui'
 import { syncActivityView } from './windows/syncActivityModel'
 import { SyncActivityIcon, SyncCheckProgress, useSyncActivitySummary } from './windows/syncActivityUi'
 import { pollWhileVisible } from './windows/visiblePoll'
+import { NOT_SENT_TARGET, WINDOWS_APP_NAV_EVENT, WINDOWS_APP_NAV_STORAGE_KEY } from './WindowsApp/nav'
 
 // FileGlyph, getFileType, FILE_COLOR imported from ./windows/fileGlyph (shared with ActivityView)
 
@@ -192,10 +193,6 @@ const WARN_STATUSES = new Set(['conflict', 'error'])
 const TRAY_RECENT_LIMIT = 50
 const TRAY_VIEW_ALL_THRESHOLD = 8
 const TRAY_RECENT_ROW_HEIGHT = 48
-const WINDOWS_APP_NAV_EVENT = 'windows-app:navigate'
-const WINDOWS_APP_NAV_STORAGE_KEY = 'bb.windowsApp.nav'
-/** `NOT_SENT_TARGET` in `WindowsApp/nav.tsx`: the route and section the main window opens. */
-const NOT_SENT_TARGET = 'activity#not-sent'
 
 // ── Component ────────────────────────────────────────────────────────────────
 

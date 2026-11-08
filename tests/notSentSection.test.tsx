@@ -135,16 +135,21 @@ describe('NotSentSection', () => {
     expect(rows(locked)).toEqual({})
     expect(buttons(locked)).toEqual(['Unlock'])
     expect(textOf(locked.tree())).toContain('Beebeeb is locked. Unlock it to see which changes these are.')
+    // On Windows the session gate answers first, with its own words (`session_commands.rs`): still locked (self-review).
+    const gated = open({ unsent_changes: () => { throw 'vault is locked or stopping' } })
+    await settle(gated)
+    expect(buttons(gated)).toEqual(['Unlock'])
+    expect(textOf(gated.tree())).not.toContain('Couldn’t read')
     const empty = open({ unsent_changes: () => ({ ...fixture, total: 0, items: [] }) })
     await settle(empty)
     expect(textOf(empty.tree())).toContain('Every change on this PC has been sent.')
   })
 
-  test('"Show more" reads the next 100', async () => {
-    const page = ({ offset }: { offset: number }) => ({
+  test('"Show more" shows the next 100, read in one call with the rows already shown', async () => {
+    const page = ({ offset, limit }: { offset: number; limit: number }) => ({
       ...fixture,
       total: 150,
-      items: Array.from({ length: offset === 0 ? 100 : 50 }, (_, i) => ({ ...fixture.items[2], id: `op-${offset + i}`, sending: null })),
+      items: Array.from({ length: Math.max(0, Math.min(limit, 150 - offset)) }, (_, i) => ({ ...fixture.items[2], id: `op-${offset + i}`, sending: null })),
     })
     const m = open({ unsent_changes: page })
     await settle(m)
@@ -154,7 +159,7 @@ describe('NotSentSection', () => {
     await settle(m)
     expect(Object.keys(rows(m))).toHaveLength(150)
     expect(buttons(m)).not.toContain('Show more')
-    expect(m.calls.filter((c) => c.name === 'unsent_changes').map((c) => c.args.offset)).toContain(100)
+    expect(m.calls.filter((c) => c.name === 'unsent_changes').map((c) => c.args)).toContainEqual({ offset: 0, limit: 200 })
   })
 })
 

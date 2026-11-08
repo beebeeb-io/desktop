@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { BILLING_URL, type CommandResult } from '../src/desktopApi'
 import {
+  UNSENT_MAX_PER_CALL,
   UNSENT_PAGE_SIZE,
   baseName,
   folderOf,
@@ -148,15 +149,39 @@ describe('the loader', () => {
     return { calls, call }
   }
 
-  test('reads the rows shown a page at a time and stops at the total', async () => {
+  test('reads the rows shown in one call (one read transaction), up to the most one call serves', async () => {
     const backend = scripted(250)
     const result = await loadUnsentChanges(300, backend.call)
     expect(result.ok && result.value.items.map((i) => i.id)).toEqual(Array.from({ length: 250 }, (_, i) => `op-${i}`))
-    expect(backend.calls).toEqual([0, 100, 200].map((offset) => ({ offset, limit: UNSENT_PAGE_SIZE })))
+    expect(backend.calls).toEqual([{ offset: 0, limit: 300 }])
     const first = scripted(250)
-    const one = await loadUnsentChanges(100, first.call)
+    const one = await loadUnsentChanges(UNSENT_PAGE_SIZE, first.call)
     expect(one.ok && [one.value.items.length, one.value.total]).toEqual([100, 250])
-    expect(first.calls).toHaveLength(1)
+    expect(first.calls).toEqual([{ offset: 0, limit: 100 }])
+    // Past what one call serves (`MAX_PAGE` in unsent_changes_commands.rs), the rest in further calls, and no change
+    // twice: a change that moved between two calls shifts the order, and a row must not repeat (self-review).
+    const many = scripted(1_200)
+    const shown = await loadUnsentChanges(1_200, many.call)
+    expect(many.calls).toEqual([
+      { offset: 0, limit: UNSENT_MAX_PER_CALL },
+      { offset: 500, limit: UNSENT_MAX_PER_CALL },
+      { offset: 1_000, limit: 200 },
+    ])
+    expect(shown.ok && shown.value.items.length).toBe(1_200)
+    const shifted = (async (_name: string, args?: Record<string, unknown>) => {
+      const { offset, limit } = args as { offset: number; limit: number }
+      // The second call starts one row early: the first call's last row comes again.
+      const from = offset === 0 ? 0 : offset - 1
+      return { ok: true, value: page(600, from, Math.min(limit, 600 - from)) }
+    }) as unknown as typeof import('../src/desktopApi').command
+    const unique = await loadUnsentChanges(600, shifted)
+    const ids = unique.ok ? unique.value.items.map((i) => i.id) : []
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  test('the most one call serves is the backend’s own clamp', () => {
+    const rust = readFileSync(new URL('../src-tauri/src/unsent_changes_commands.rs', import.meta.url), 'utf8')
+    expect(rust).toContain(`const MAX_PAGE: u32 = ${UNSENT_MAX_PER_CALL};`)
   })
 
   test('a failed or malformed page fails the read', async () => {

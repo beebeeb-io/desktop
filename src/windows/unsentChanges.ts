@@ -44,8 +44,16 @@ export interface UnsentChangesPage {
   paused: boolean
 }
 
-/** How many rows the section asks for at a time, and adds per "Show more". */
+/** How many rows the section shows at first, and adds per "Show more". */
 export const UNSENT_PAGE_SIZE = 100
+
+/** The most rows one `unsent_changes` call serves (`MAX_PAGE` in `src-tauri/src/unsent_changes_commands.rs`). */
+export const UNSENT_MAX_PER_CALL = 500
+
+/** The vault is locked: `unsent_changes`'s own gate, or (Windows) the session gate before it ("… or stopping"). */
+export function isLockedRefusal(reason: string): boolean {
+  return reason.startsWith('vault is locked')
+}
 
 const KINDS: ReadonlySet<string> = new Set(['new_file', 'edit', 'folder', 'rename', 'move', 'delete', 'restore'])
 
@@ -82,8 +90,10 @@ export function parseUnsentChanges(raw: unknown): UnsentChangesPage | null {
 }
 
 /**
- * The first `count` rows, read a page at a time (the backend serves at most a few hundred per call). One answer with
- * the total and engine state of the first page; a page that fails fails the read.
+ * The first `count` rows (the rows shown). Up to `UNSENT_MAX_PER_CALL` that is one call, so one read transaction: the
+ * count and the rows agree, and no row repeats or goes missing. Past it, further calls; a change that moved between two
+ * calls can shift the order, so a row already read is not added twice (the next poll reads it right). One answer with
+ * the total and engine state of the first call; a call that fails fails the read.
  */
 export async function loadUnsentChanges(
   count: number,
@@ -91,14 +101,21 @@ export async function loadUnsentChanges(
 ): Promise<CommandResult<UnsentChangesPage>> {
   let first: UnsentChangesPage | null = null
   const items: UnsentChange[] = []
-  for (let offset = 0; offset < Math.max(count, 1); offset += UNSENT_PAGE_SIZE) {
-    const result = await call<unknown>('unsent_changes', { offset, limit: UNSENT_PAGE_SIZE })
+  const seen = new Set<string>()
+  const want = Math.max(count, 1)
+  for (let offset = 0; offset < want; offset += UNSENT_MAX_PER_CALL) {
+    const limit = Math.min(want - offset, UNSENT_MAX_PER_CALL)
+    const result = await call<unknown>('unsent_changes', { offset, limit })
     if (!result.ok) return result
     const next = parseUnsentChanges(result.value)
     if (!next) return { ok: false, reason: 'The list of changes not sent could not be read.', unsupported: false }
     first ??= next
-    items.push(...next.items)
-    if (offset + UNSENT_PAGE_SIZE >= next.total) break
+    for (const item of next.items) {
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      items.push(item)
+    }
+    if (offset + limit >= next.total) break
   }
   return { ok: true, value: { ...(first as UnsentChangesPage), items } }
 }

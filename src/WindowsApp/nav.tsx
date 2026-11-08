@@ -78,10 +78,6 @@ export function initialNavTarget(): NavTarget {
   return navTargetFromString(params.get('nav')) ?? consumeStoredNav() ?? { nav: 'home', section: null }
 }
 
-export function initialNav(): NavId {
-  return initialNavTarget().nav
-}
-
 // Nav items reachable whether or not the user is signed in. Everything else is
 // auth-gated: hidden from the sidebar and replaced by the sign-in prompt.
 export const ALWAYS_ACCESSIBLE: ReadonlySet<NavId> = new Set(['home', 'settings'])

@@ -538,19 +538,35 @@ use super::*;
         assert_eq!(woke.unwrap(), Wake::Nudge);
     }
 
+    /// Task 2409 (self-review): a nudge within the second after the last nudge step waits out the rest of that second;
+    /// it is never dropped (a second Try again would otherwise sit until the next tick). Outside it, the step runs now.
+    #[test]
+    fn a_nudge_inside_the_rate_limit_waits_out_the_second() {
+        let t0 = std::time::Instant::now();
+        assert_eq!(nudge_wait(None, t0), None, "the first nudge runs at once");
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_millis(300)), Some(Duration::from_millis(700)));
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_secs(1)), None);
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_secs(5)), None);
+    }
+
     /// Task 2409: the nudge's arm runs the queue step alone (no pull, no sweeps), at most once a second, never while
-    /// paused, and never before this run's first pass (D11b), as the phase's arm does.
+    /// paused, and never before this run's first pass (D11b), as the phase's arm does. A nudge inside the second is
+    /// deferred (asked again once the second is out), never dropped.
     #[test]
     fn the_nudge_runs_the_queue_step_alone_and_waits_for_the_first_pass() {
         use crate::source_pin::squeeze;
         let source = include_str!("../../runner.rs").replace("\r\n", "\n");
         let arm = &source[source.find("Wake::Nudge => {").expect("the nudge's arm")..];
         let arm = squeeze(&arm[..arm.find("\n            }\n").unwrap()]);
-        let due = arm
+        let deferred = arm
             .find(&squeeze(
-                "phase_step_due(true, RunMode::of_flag(sync_paused.load(Ordering::Relaxed)), last_nudge_run, now)",
+                "if !mode.is_paused() && let Some(wait) = nudge_wait(last_nudge_run, now) { let link = Arc::clone(&send_phase); tokio::spawn(async move { tokio::time::sleep(wait).await; link.nudge(); }); continue; }",
             ))
+            .unwrap_or_else(|| panic!("a nudge inside the second is asked again, not dropped:\n{arm}"));
+        let due = arm
+            .find(&squeeze("phase_step_due(true, mode, last_nudge_run, now)"))
             .unwrap_or_else(|| panic!("the arm reads the pause flag and its own last run:\n{arm}"));
+        assert!(deferred < due, "{arm}");
         let first_pass = arm
             .find(&squeeze("#[cfg(not(target_os = \"macos\"))] if !reconciled_this_run { continue; }"))
             .unwrap_or_else(|| panic!("the arm waits for the first pass:\n{arm}"));

@@ -79,6 +79,14 @@ pub(crate) fn phase_step_due(
     armed && !mode.is_paused() && last_run.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
 }
 
+/// Task 2409 (self-review): how long a Try again's nudge waits before its queue step, when it came within the second
+/// after the last one (`phase_step_due`'s rate limit). `None`: it runs now. The arm asks again once the wait is out,
+/// so a second Try again in quick succession is deferred, never dropped until the next tick.
+pub(crate) fn nudge_wait(last_run: Option<std::time::Instant>, now: std::time::Instant) -> Option<Duration> {
+    let wait = Duration::from_secs(1).saturating_sub(now.duration_since(last_run?));
+    (!wait.is_zero()).then_some(wait)
+}
+
 /// What woke the runner's loop (spec 2026-10-10 §6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Wake {

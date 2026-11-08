@@ -41,6 +41,11 @@ export default function WindowsApp() {
     setActiveNav(target.nav)
     if (target.section === 'not-sent') setNotSentFocus((n) => n + 1)
   }
+  // A link's focus lasts while Activity stays open: a later visit from the sidebar is Activity as before (the section
+  // then shows only while something is not sent, and is not scrolled to).
+  useEffect(() => {
+    if (activeNav !== 'activity') setNotSentFocus(0)
+  }, [activeNav])
   const [searchOpen, setSearchOpen] = useState(false)
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false)
   const [status, setStatus] = useState<SyncStatus | null>(null)
