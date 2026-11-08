@@ -10,6 +10,8 @@ import { FilesPane, type PaneHandlers, type Renaming } from './FilesPane'
 import { DetailsDialog, MoveDialog, NewFolderDialog, ProtectedAlert, ShareDialog, VersionsDialog, type FolderRow } from './Dialogs'
 import { NoPreview, PreviewPanel } from './Panels'
 import { backgroundMenu, fileMenu, newMenu, sortMenu } from './menus'
+import { OPEN_WITH_EDITOR, OPEN_WITH_OTHER, withOfficeOpen } from '../open/office/menu'
+import { isOfficeFile } from '../open/office'
 import { Menu, type MenuEntry } from './ui'
 import {
   arrange, BACKUPS_ID, isProtected, loadPrefs, nameProblem, nameTaken, savePrefs, takenMessage, type FolderPrefs,
@@ -115,6 +117,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const open = (item: DriveItem) => {
     if (item.isFolder) { go(item.id); return }
     if (offline && item.local === 'online-only') { setConnectionNeeded(item); return }
+    if (isOfficeFile(item)) { nav.go({ section: 'open', id: item.id, sub: 'office' }); return }
     source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: words(e) }))
   }
 
@@ -192,7 +195,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const runItem = (id: string, list: DriveItem[]) => {
     const one = list[0]
     switch (id) {
-      case 'open': list.forEach(open); break
+      case 'open': case OPEN_WITH_EDITOR: list.forEach(open); break
+      case OPEN_WITH_OTHER: if (one) void source.open(one.id); break
       case 'preview': if (one && !one.isFolder) setDialog({ kind: 'preview', item: one }); break
       case 'share': setDialog({ kind: 'share', items: list }); break
       case 'copy-link': showToast({ kind: 'failed', text: 'Sharing isn’t available in this build yet.' }); break
@@ -212,7 +216,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     if (item) {
       const list = selection.has(item.id) ? picked : [item]
       if (!selection.has(item.id)) { setSelection(new Set([item.id])); setAnchor(item.id) }
-      const entries = fileMenu(list)
+      const entries = withOfficeOpen(fileMenu(list), list)
       if (mode === 'backups' && path.length === 1 && item.name !== 'Mail Backup') entries.push({ id: 'delete-backup', label: 'Delete this backup…' })
       setMenu({ x: e.clientX, y: e.clientY, label: 'File', entries, run: (id) => runItem(id, list) })
     } else {
@@ -338,7 +342,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
           else if (id === 'upload') upload('files')
           else if (id === 'upload-folder') upload('folder')
           else if (id === 'new-file') nav.go({ section: 'open', sub: 'new-file' })
-          else if (id === 'new-document') nav.go({ section: 'open', sub: 'new-document' })
+          else if (id === 'new-document') nav.go({ section: 'open', id: nav.route.id, sub: 'new-document' })
         },
       })
     },
