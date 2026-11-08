@@ -575,6 +575,10 @@ mod name_alias_2407;
 mod name_alias_2407_windows;
 // Task 2409: Try again on a change that failed.
 mod unsent_retry;
+// Task 2413: a server row is stored only at a path of plain names; the one map onto the sync root.
+mod stored_path_2413;
+#[cfg(windows)]
+mod stored_path_2413_windows;
 
 use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
 use finder_queue_2::{capture_logs_async, fp_create};
