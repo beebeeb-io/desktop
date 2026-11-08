@@ -67,6 +67,9 @@ impl EngineBridge {
             owned_metadata_for_name(&self.db, self.api.master_key(), file_id, &file_name, content_type.as_deref())?;
 
         let local_path = local_file_path_under_sync_root(sync_root, &entry.path)?;
+        // Task 2407 (core 2404): through a name that reaches a different file (a Windows 8.3 short name), "mine" is
+        // that other file: its bytes are never uploaded as this file's version. The row stays in conflict.
+        crate::name_alias::refuse_conflict_below(sync_root, &local_path)?;
         let staged =
             crate::staged_payload::StagedPayload::copy(self.db.clone(), &local_path, self.finder_staging_root()?)?;
         let staged_path = staged.path().to_string();
@@ -441,6 +444,17 @@ impl EngineBridge {
                 };
             }
         };
+        // Task 2407 (core 2404): a name that reaches a different file (a Windows 8.3 short name) never shows that
+        // file's content as this one's.
+        if !matches!(crate::name_alias::conflict_below(sync_root, &local_path), Ok(None)) {
+            return ConflictContentSide {
+                size_bytes: None,
+                text: None,
+                unavailable_reason: Some(
+                    "On this PC the file's name leads to a different file, so it is not shown.".to_string(),
+                ),
+            };
+        }
 
         let size_bytes = match std::fs::metadata(&local_path) {
             Ok(m) => m.len(),
@@ -587,19 +601,19 @@ impl EngineBridge {
     }
 }
 
-/// Task 2407: move `from` to `to`, never over anything `to` reaches (`AlreadyExists`). Windows: `MoveFileExW` without
-/// `MOVEFILE_REPLACE_EXISTING`, which also refuses a `to` that is another entry's 8.3 short name. Elsewhere: an existing
-/// `to` is refused, then a plain rename (as before; a name there is only ever its own entry).
+/// Task 2407: move `from` to `to`, never over anything `to` reaches (`AlreadyExists`), through [`move_no_replace`]
+/// (Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, which also refuses another entry's 8.3 short name;
+/// elsewhere a hard link, then the old name is removed). Off Windows, a volume without hard links refuses a taken name
+/// and then renames, as before this task.
 fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        move_no_replace(from, to)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the conflict copy's name is taken"));
+    match move_no_replace(from, to) {
+        #[cfg(not(target_os = "windows"))]
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the conflict copy's name is taken"));
+            }
+            std::fs::rename(from, to)
         }
-        std::fs::rename(from, to)
+        result => result,
     }
 }

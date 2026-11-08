@@ -806,10 +806,17 @@ impl EngineBridge {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let (temp, mut copy) = beebeeb_core::path_safety::TempSibling::create(&dest)?;
+        // Zero-knowledge: core's errors here name the file; a conflict travels as `NameConflict`, the rest by kind.
+        let nameless = |error: std::io::Error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                std::io::Error::new(std::io::ErrorKind::AlreadyExists, crate::name_alias::NameConflict)
+            }
+            kind => std::io::Error::from(kind),
+        };
+        let (temp, mut copy) = beebeeb_core::path_safety::TempSibling::create(&dest).map_err(nameless)?;
         std::io::copy(&mut std::fs::File::open(&source)?, &mut copy)?;
         drop(copy);
-        temp.publish()?;
+        temp.publish().map_err(nameless)?;
         let content_type = op
             .metadata_json
             .as_deref()

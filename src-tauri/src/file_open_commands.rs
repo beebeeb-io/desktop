@@ -867,6 +867,12 @@ pub(super) fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::pat
             continue;
         }
         let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
+        // follow it to that file's long name). A check that cannot finish keeps the file local.
+        if !matches!(crate::name_alias::conflict_below(sync_root, &local_path), Ok(None)) {
+            tracing::debug!(file_id = %file_id, "free_up_space: the name reaches a different file or could not be checked; keeping local");
+            continue;
+        }
         // Path-safety: only dehydrate placeholders that actually resolve under
         // an allowed engine root (the sync root). A corrupt `path` row can
         // never point us at a file outside the vault.

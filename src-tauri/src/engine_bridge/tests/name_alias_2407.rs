@@ -215,6 +215,60 @@ async fn keep_both_never_replaces_an_earlier_conflict_copy() {
     );
 }
 
+/// Keep Mine uploads "the local copy": through an alias that is a different file's bytes, never uploaded as this file's
+/// version. Refused before anything is staged or sent.
+#[tokio::test]
+async fn keep_mine_never_uploads_the_file_an_alias_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync-root");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let original = sync_root.join("CONFLI~1.TXT");
+    std::fs::write(&original, b"a different file").unwrap();
+    let file_id = "bbbb0000-0000-4000-8000-000000002410";
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [15u8; 32]);
+    conflicted_row(&bridge, file_id, "CONFLI~1.TXT");
+    let _alias = stub::alias(&original);
+
+    let error = bridge.resolve_keep_mine(file_id, &sync_root).await.unwrap_err();
+
+    assert!(
+        conflict_in_chain(&error),
+        "a name conflict, not another failure: {error:#}"
+    );
+    assert_eq!(
+        bridge.db.get_file(file_id).unwrap().unwrap().status,
+        FileStatus::Conflict
+    );
+}
+
+/// The conflict window never shows a different file's content as the local side.
+#[tokio::test]
+async fn the_conflict_preview_never_shows_the_file_an_alias_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let sync_root = dir.path().join("sync-root");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let original = sync_root.join("CONFLI~1.TXT");
+    std::fs::write(&original, b"a different file").unwrap();
+    let file_id = "bbbb0000-0000-4000-8000-000000002411";
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), [15u8; 32]);
+    conflicted_row(&bridge, file_id, "CONFLI~1.TXT");
+    let _alias = stub::alias(&original);
+
+    let preview = bridge.conflict_content_preview(file_id, &sync_root).await.unwrap();
+
+    assert_eq!(
+        (preview.local.text, preview.local.size_bytes),
+        (None, None),
+        "nothing of the other file is read"
+    );
+    assert!(
+        preview
+            .local
+            .unavailable_reason
+            .is_some_and(|reason| !reason.contains("CONFLI"))
+    );
+}
+
 // ── Hydration into the sync folder (`hydrate.rs` → `meta.rs`) ──
 
 /// A download never writes through a name that reaches a different file: refused before the download, and the file

@@ -45,7 +45,15 @@ pub(crate) fn conflict_below(base: &Path, path: &Path) -> io::Result<Option<Name
     if let Some(answer) = stub::answer(base, rel) {
         return answer;
     }
-    beebeeb_core::path_safety::short_name_alias(base, rel).map(|found| found.map(|_| NameConflict))
+    beebeeb_core::path_safety::short_name_alias(base, rel)
+        .map(|found| found.map(|_| NameConflict))
+        // Zero-knowledge: core's error text can carry the plaintext path; only its kind travels on.
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                "the name could not be checked against the folder's entries",
+            )
+        })
 }
 
 /// [`conflict_below`] as one answer for a site that only proceeds when it is clear: `Ok(())` when nothing conflicts,

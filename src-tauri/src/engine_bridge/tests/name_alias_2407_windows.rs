@@ -110,6 +110,17 @@ fn a_hydrate_write_replaces_its_own_name_and_creates_a_new_one() {
     assert_eq!(names, ["new.txt", "own.txt"], "no temp file is left");
 }
 
+/// A destination that is not built on an allowed root is refused, as the Unix writer refuses it.
+#[test]
+fn a_hydrate_write_outside_every_allowed_root_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let dest = elsewhere.path().join("new.txt");
+    let error = write_hydrated_from_reader(&dest, &[root.path()], &mut &b"server bytes"[..]).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
+    assert!(!dest.exists());
+}
+
 #[test]
 fn a_remote_deletion_never_deletes_the_file_a_short_name_reaches() {
     let Some((dir, short)) = aliased("Report for 2026.pdf", Some(b"precious")) else {
