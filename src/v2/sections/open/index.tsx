@@ -11,6 +11,7 @@ import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewe
 import { PdfPreview } from '@beebeeb/shared/drive-ui'
 import { fmtBytes, hhmm, languageLabel, lineCount, parseTable, READ_ONLY_LINES, viewerKind } from './model'
 import * as player from './player'
+import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
 
 type Loaded =
   | { kind: 'text'; text: string; versionId: string }
@@ -24,6 +25,8 @@ const TEXTUAL = new Set(['code', 'text', 'markdown', 'csv'])
 export default function Section({ nav }: SectionProps) {
   const { id, sub } = nav.route
   if (sub === 'new-file') return <NewFileFlow parentId={id} nav={nav} />
+  if (sub === 'new-document') return <NewDocumentFlow parentId={id} nav={nav} />
+  if (sub === 'office' && id) return <OfficeEditor key={id} target={{ kind: 'file', id }} nav={nav} />
   if (!id) return <Centered><p className="m-0 text-[13px] text-ink-3">Nothing is open.</p></Centered>
   return <OpenFile key={id} id={id} editing={sub === 'edit'} nav={nav} />
 }
@@ -79,6 +82,8 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
   if (phase.name === 'too-large') {
     return <Frame name={phase.item.name} onBack={back}><TooLargeView name={phase.item.name} size={phase.item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'storage' })} onDownloadTo={() => void source.open(id)} /></Frame>
   }
+  // Office files open in the editor by default (DW-1562); CSV keeps its table viewer.
+  if (isOfficeFile(phase.item) && viewerKind(phase.item.name) !== 'csv') return <OfficeEditor target={{ kind: 'file', id }} nav={nav} />
   const { item, data } = phase
   const showNewer = () => { dismissNewer(); retry() }
   const banner = newer && !editing ? <NewerBanner text={`A newer version arrived from ${newer.deviceName ?? 'another device'}, ${hhmm(newer.createdAt)}.`} onShow={showNewer} /> : null
