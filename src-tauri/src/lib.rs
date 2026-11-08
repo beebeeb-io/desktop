@@ -107,6 +107,8 @@ mod sign_out;
 mod staged_payload;
 mod state_db;
 mod state_paths;
+// Task 2413: the one rule for a server row's stored path, and the one map from a stored path onto the sync root.
+mod stored_path;
 // 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
 mod sync_activity;
 mod transfer_progress;

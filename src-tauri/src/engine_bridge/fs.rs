@@ -210,31 +210,50 @@ pub(super) fn display_name_for_path(path: &str) -> String {
 /// relative path under the sync root. When nested traversal is added, this is
 /// the single place that must compose `<parent rel path>/<name>`.
 ///
-/// Fallback order (keeps legacy/test rows that DO carry a plaintext path
+/// Fallback order (keeps legacy/test rows that DO carry a plaintext name
 /// working, and degrades safely if a blob is missing/garbled):
 ///   1. decrypt `name_encrypted` (the canonical zero-knowledge path)
 ///   2. a plaintext `path`/`display_path`/`name` field if the server ever
 ///      surfaces one (older rows / test fixtures)
 ///   3. empty string — caller skips placeholder seeding for the row
-pub(super) fn resolve_relative_path(f: &serde_json::Value, file_id: &str, master_key: &[u8; 32]) -> String {
+///
+/// Task 2413: what it returns is never a server field unchecked. The name that
+/// resolves (decrypted and trimmed, as before, or the first plaintext field
+/// present, as it is) must be ONE name this host can hold
+/// ([`crate::stored_path::check_name_for`]); otherwise `Err` and the caller
+/// refuses the row. Nothing resolving is `Ok("")`, as before.
+pub(super) fn resolve_relative_path(
+    f: &serde_json::Value,
+    file_id: &str,
+    master_key: &[u8; 32],
+) -> Result<String, beebeeb_core::path_safety::UnsafeName> {
+    let one_name = |name: &str| -> Result<String, beebeeb_core::path_safety::UnsafeName> {
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+        crate::stored_path::check_name(name)?;
+        Ok(name.to_string())
+    };
     if let Some(name_enc) = f["name_encrypted"].as_str() {
         let mk_bytes: [u8; 32] = *master_key;
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(mk_bytes);
         if let Ok(name) = beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_enc) {
+            // Trimmed as before, so a row stored under the trimmed name keeps its path.
             let name = name.trim();
             if !name.is_empty() {
-                return name.to_string();
+                return one_name(name);
             }
         }
         // Decryption failed (wrong key, garbled blob, legacy envelope) —
         // fall through to any plaintext field rather than abort the sweep.
     }
-    f["path"]
-        .as_str()
-        .or_else(|| f["display_path"].as_str())
-        .or_else(|| f["name"].as_str())
-        .unwrap_or("")
-        .to_string()
+    one_name(
+        f["path"]
+            .as_str()
+            .or_else(|| f["display_path"].as_str())
+            .or_else(|| f["name"].as_str())
+            .unwrap_or(""),
+    )
 }
 
 /// Task 1640 (review N5): move `from` to `to`, never over an existing file (`AlreadyExists`).
@@ -297,26 +316,47 @@ pub(super) fn rel_under(sync_root: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Where an op puts a row, by its parent ([`parent_rel_path_by_id`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ParentPath {
+    /// Under this stored path ("" at the top level).
+    At(String),
+    /// Under a folder the store refused and does not hold (task 2413): the row is not placed either, and is recorded
+    /// as refused (`StateDb::note_refused_server_row`) so the next op under it asks for nothing.
+    Refused,
+    /// Under a folder this device does not hold yet: a re-snapshot is requested, which places the row under it.
+    Unknown,
+}
+
 /// Resolve a parent's FULL relative path from the local mirror by its `file_id`
 /// — the parent path a freshly-created/moved child must be prefixed with. This
 /// mirrors how [`apply_snapshot`] resolves nesting (it threads each parent's
 /// resolved full path into its children), so an op-driven create/move lands at
 /// the SAME path a fresh snapshot would produce.
 ///
-///   * `parent_id == None`            → "" (root child),
-///   * parent row present locally     → the parent's stored full `path` (its
+///   * `parent_id == None`            → `At("")` (root child),
+///   * parent row present locally     → `At` the parent's stored full `path` (its
 ///     leading slash trimmed so it composes cleanly as a prefix),
-///   * `parent_id == Some` but the parent row is NOT in the local mirror yet
-///     (the create/move arrived before its parent's create op landed) → "" for
-///     THIS tick AND a re-snapshot is requested, so the authoritative snapshot
-///     re-places the row under its correct prefix on the next tick rather than
-///     leaving it permanently mis-placed at the sync root.
-pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> String {
+///   * a parent the store refused and does not hold (task 2413) → `Refused`: the
+///     row is not placed either, and asks for no re-snapshot (one would refuse
+///     the parent again),
+///   * any other parent NOT in the local mirror yet (the create/move arrived
+///     before its parent's create op landed) → `Unknown`, and a re-snapshot is
+///     requested: the caller applies nothing now, and the authoritative snapshot
+///     places the row under its parent on the next tick. Task 2413: before, the
+///     row went to the top level for this tick.
+pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&str>) -> ParentPath {
     let Some(pid) = parent_id.filter(|p| !p.is_empty()) else {
-        return String::new(); // root child — no prefix
+        return ParentPath::At(String::new()); // root child — no prefix
     };
     match bridge.db().get_file(pid).ok().flatten() {
-        Some(parent) => parent.path.trim_start_matches('/').to_string(),
+        Some(parent) => ParentPath::At(parent.path.trim_start_matches('/').to_string()),
+        // Task 2413: a re-snapshot would refuse the parent again; the parent's own write asks for one once it is
+        // stored.
+        None if bridge.db().is_refused_server_row(pid).unwrap_or(false) => {
+            tracing::debug!(parent_id = %pid, "sync_tick: op under a folder not placed; not placed either");
+            ParentPath::Refused
+        }
         None => {
             // Parent not locally known — can't compute the prefix from the op
             // alone. Schedule a re-snapshot so the next tick reconciles nesting
@@ -328,7 +368,7 @@ pub(super) fn parent_rel_path_by_id(bridge: &EngineBridge, parent_id: Option<&st
                 parent_id = %pid,
                 "sync_tick: op references a parent not in the local mirror; scheduling re-snapshot"
             );
-            String::new()
+            ParentPath::Unknown
         }
     }
 }

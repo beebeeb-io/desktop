@@ -684,6 +684,11 @@ pub(crate) fn write_hydrated_from_reader(
 /// a Windows 8.3 short name reaches (`AlreadyExists`, the inner error a `NameConflict`). A destination with nothing
 /// there is created exclusively, so an entry that appeared since is never truncated; one that is its own name is
 /// written in place as before (a Cloud Files placeholder stays one, which a rename over it would not).
+///
+/// Task 2413: the root, every folder below it on the way and the destination itself must not be a link (a symlink or a
+/// junction: a name-surrogate reparse point; a Cloud Files placeholder is none), as the Unix writer's `O_NOFOLLOW`
+/// descent refuses links. A link made between this check and the open is not covered (the Unix writer's fd-anchored
+/// descent has no such window).
 #[cfg(not(unix))]
 pub(crate) fn write_hydrated_from_reader(
     dest_path: &Path,
@@ -697,6 +702,7 @@ pub(crate) fn write_hydrated_from_reader(
         .ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, "hydrate destination is not within an allowed root")
         })?;
+    crate::stored_path::refuse_links_below(root, dest_path)?;
     crate::name_alias::refuse_conflict_below(root, dest_path)?;
     let mut file = match std::fs::symlink_metadata(dest_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

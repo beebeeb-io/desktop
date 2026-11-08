@@ -125,13 +125,15 @@ use super::*;
         });
 
         assert_eq!(
-            shared_name_from_metadata(&metadata, &ItemKind::File, Some(&file_key)),
-            "Encrypted file"
+            shared_name_from_metadata(&metadata, &ItemKind::File, Some(&file_key)).as_deref(),
+            Ok("Encrypted file")
         );
     }
 
     #[test]
-    fn shared_metadata_uses_placeholder_for_authenticated_traversal_name() {
+    /// Task 2413: a decrypted name that is not one name is refused, as an own row's is (the placeholder name stays for a
+    /// name that does not decrypt; several refused names under it would share one path).
+    fn shared_metadata_refuses_an_authenticated_name_that_is_not_one_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = StateDb::open(dir.path().join("state.db")).expect("state db");
         let root = SharedRootMapping {
@@ -173,11 +175,10 @@ use super::*;
             "Shared with me/Shared folder",
             Some(&file_key),
         )
-        .expect("apply shared metadata")
-        .expect("entry");
+        .expect("apply shared metadata");
 
-        assert_eq!(entry.path, "Shared with me/Shared folder/Encrypted file");
-        crate::reject_unsafe_rel_path(&entry.path).expect("shared path must stay safe");
+        assert!(entry.is_none(), "{entry:?}");
+        assert!(db.get_file("child-file").unwrap().is_none(), "nothing is stored");
     }
 
     #[test]
@@ -337,7 +338,7 @@ use super::*;
         let db = StateDb::open(dir.path().join("state.db")).unwrap();
         let metadata = serde_json::json!({
             "id": "file-1",
-            "path": "Projects/spec.docx",
+            "path": "spec.docx",
             "parent_id": "folder-1",
             "size_bytes": 4096,
             "updated_at": 1234,
@@ -348,7 +349,8 @@ use super::*;
 
         // This fixture carries a plaintext `path` and no `name_encrypted`, so
         // it exercises the plaintext fallback in `resolve_relative_path`; the
-        // master key is unused on that branch.
+        // master key is unused on that branch. Task 2413: the fallback is the
+        // row's own name, one segment (its folders come from its parents).
         let entry = apply_metadata_file_row(
             &db,
             &metadata,

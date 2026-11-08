@@ -43,7 +43,9 @@ fn task_2240_reconcile_reads_no_attributes_per_row() {
         1,
         "the direct read appears once: in the read_direct closure"
     );
-    assert!(with.contains("|rel|placeholders::read_os_placeholder_state("));
+    // Task 2413: the row's path reaches the direct read only through the one map (`placeholder_path_under`).
+    assert!(with.contains("|rel|native(rel).and_then(|path|placeholders::read_os_placeholder_state("));
+    assert!(with.contains("EngineBridge::placeholder_path_under(sync_root,rel)"));
     let public = squeeze(&fn_text(&source, "reconcile_placeholder_state"));
     assert!(
         !public.contains("read_os_placeholder_state"),

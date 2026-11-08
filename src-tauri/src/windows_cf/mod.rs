@@ -1206,6 +1206,7 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         create_errors = s.create_errors,
         name_conflicts = s.name_conflicts,
         name_check_errors = s.name_check_errors,
+        link_skips = s.link_skips,
         db_ms = s.db_ms,
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"
@@ -1286,14 +1287,32 @@ pub(crate) fn reconcile_placeholder_state_with(
     };
     let db_ms = started.elapsed().as_millis() as u64;
 
-    // Relative '/'-joined keys map onto the sync root the SAME way `populate_placeholders` does.
-    let native = |rel: &str| sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    // Relative '/'-joined keys map onto the sync root through the one map `populate_placeholders` uses (task 2413):
+    // a stored path that is not plain names under the sync root is read nowhere, and its row keeps its state.
+    let unmapped = std::cell::Cell::new(0usize);
+    let native = |rel: &str| {
+        let mapped = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel);
+        if mapped.is_none() {
+            unmapped.set(unmapped.get() + 1);
+        }
+        mapped
+    };
     let plan = crate::os_state_reconcile::plan_reconcile(
         rows,
         cursor.load(Ordering::Relaxed),
-        |parent| placeholders::list_dir_attributes(&native(parent)),
-        |rel| placeholders::read_os_placeholder_state(&native(rel)),
+        |parent| match parent {
+            "" => placeholders::list_dir_attributes(sync_root),
+            parent => native(parent).map_or_else(
+                || Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "the folder's stored path does not map")),
+                |dir| placeholders::list_dir_attributes(&dir),
+            ),
+        },
+        |rel| native(rel).and_then(|path| placeholders::read_os_placeholder_state(&path)),
     );
+    if unmapped.get() > 0 {
+        // Zero-knowledge: a count, never a path.
+        tracing::debug!(skipped = unmapped.get(), "reconcile_placeholder_state: stored paths that do not map onto the sync folder were skipped");
+    }
     cursor.store(plan.next_cursor, Ordering::Relaxed);
 
     let now = std::time::SystemTime::now()
@@ -1516,13 +1535,16 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             break;
         }
         // Map the server-relative '/'-joined path onto the on-disk placeholder
-        // path — the same safe-join that `populate_placeholders` and
-        // `reconcile_placeholder_state` use.
+        // path — the one map that `populate_placeholders` and
+        // `reconcile_placeholder_state` use (task 2413).
         let rel = path.trim_matches('/');
         if rel.is_empty() {
             continue;
         }
-        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Some(local_path) = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, rel) else {
+            tracing::debug!(file_id = %file_id, "stamp_local_files_in_sync: the stored path does not map onto the sync folder; skipped");
+            continue;
+        };
         // Skip placeholders that don't exist on disk yet. They will be
         // minted by `refresh_placeholders` (which runs before this pass) and
         // will be stamped on the next tick once they appear.

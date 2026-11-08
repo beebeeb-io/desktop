@@ -423,7 +423,7 @@ use super::*;
         let written = db
             .upsert_server_file_row(&stale, |contract| contract.parent_id = None)
             .unwrap();
-        assert_eq!(written, "docs/b.txt");
+        assert_eq!(written, crate::stored_path::ServerRowWrite::Written("docs/b.txt".into()));
         assert_eq!(db.get_file("f").unwrap().unwrap().path, "docs/b.txt", "the rename's path stands");
         assert_eq!(
             db.get_file_contract_state("f").unwrap().unwrap().parent_id.as_deref(),

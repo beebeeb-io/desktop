@@ -465,6 +465,7 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
  "webpki-roots 0.26.11",
