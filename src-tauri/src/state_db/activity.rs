@@ -253,21 +253,26 @@ impl StateDb {
     }
     /// [`QueueHold`] for the tray and Settings › Sync (0.8.15). Reads counts only, without the name-redaction pass of
     /// [`Self::queue_diagnostics`], so a window can poll it. Changes nothing.
+    ///
+    /// Task 2409: [`Self::unsent_changes`] lists exactly the rows counted here, in the same groups. Both leave out the
+    /// downloads a pin queues ([`UNSENT_KINDS_SQL`], task 2224): they are not changes waiting to leave this computer.
     pub fn queue_hold_summary(&self) -> Result<QueueHold> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let (waiting, gave_up) = conn.query_row(
-            "SELECT COALESCE(SUM(attempts < max_attempts), 0), COALESCE(SUM(attempts >= max_attempts), 0)
-             FROM operation_queue
-             WHERE paused_reason IS NULL",
+            &format!(
+                "SELECT COALESCE(SUM(attempts < max_attempts), 0), COALESCE(SUM(attempts >= max_attempts), 0)
+                 FROM operation_queue
+                 WHERE paused_reason IS NULL AND {UNSENT_KINDS_SQL}"
+            ),
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT paused_reason, COUNT(*), MIN(created_at), MAX(created_at)
              FROM operation_queue
-             WHERE paused_reason IS NOT NULL
-             GROUP BY paused_reason",
-        )?;
+             WHERE paused_reason IS NOT NULL AND {UNSENT_KINDS_SQL}
+             GROUP BY paused_reason"
+        ))?;
         let groups = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -303,7 +308,7 @@ impl StateDb {
                     "WITH RECURSIVE {HELD_FOLDER_CTE}
                      SELECT COUNT(*), COALESCE(MIN(op.created_at), 0), COALESCE(MAX(op.created_at), 0)
                      FROM held_folder CROSS JOIN operation_queue op ON op.parent_id = held_folder.file_id
-                     WHERE op.paused_reason IS NULL AND op.attempts < op.max_attempts"
+                     WHERE op.paused_reason IS NULL AND op.attempts < op.max_attempts AND {UNSENT_KINDS_SQL}"
                 ),
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),

@@ -8,6 +8,8 @@ use super::*;
 pub struct SendPhaseLink {
     pub(super) armed: AtomicBool,
     pub(crate) wake: tokio::sync::Notify,
+    /// Task 2409: Try again on a change that failed asks for a queue step now, not at the next tick (`Wake::Nudge`).
+    pub(crate) nudge: tokio::sync::Notify,
     pub(super) link: std::sync::OnceLock<Arc<crate::link_health::LinkMonitor>>,
     pub(super) signals: Mutex<AttemptSignals>,
 }
@@ -40,6 +42,11 @@ impl SendPhaseLink {
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+    /// Task 2409: one queue step as soon as the runner is free (`Wake::Nudge`). A nudge sent while a tick runs is kept
+    /// (`notify_one` stores a permit), so the step follows that tick.
+    pub fn nudge(&self) {
+        self.nudge.notify_one();
     }
     /// §6.1 condition 3: the link monitor has a failure since its last good answer.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
@@ -78,6 +85,8 @@ pub(crate) enum Wake {
     Cancel,
     Tick,
     Phase,
+    /// Task 2409: a change was made due again (Try again): the queue step alone, as the phase runs it.
+    Nudge,
 }
 
 /// Spec D11 (task 1888): the account's resume requests, shared with the engine. `asked` counts the sign-ins that asked

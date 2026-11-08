@@ -221,8 +221,11 @@ impl StateDb {
             -- Task 2243: `queue_hold_summary`, polled by the tray every few seconds, reads this alone. It starts
             -- with `paused_reason`, so it also serves every lookup the old `idx_operation_queue_paused` did, and
             -- that index is dropped: one index to keep up to date on each queue write, not two.
-            CREATE INDEX IF NOT EXISTS idx_operation_queue_hold_summary
-                ON operation_queue(paused_reason, created_at, attempts, max_attempts);
+            -- Task 2409: the summary leaves the downloads out by `kind` (`UNSENT_KINDS_SQL`), so the index carries
+            -- it and the poll still reads no operation; it replaces `idx_operation_queue_hold_summary`.
+            DROP INDEX IF EXISTS idx_operation_queue_hold_summary;
+            CREATE INDEX IF NOT EXISTS idx_operation_queue_unsent
+                ON operation_queue(paused_reason, created_at, attempts, max_attempts, kind);
             DROP INDEX IF EXISTS idx_operation_queue_paused;
             CREATE INDEX IF NOT EXISTS idx_operation_queue_backup_source ON operation_queue(backup_source_key);
             -- Flow 7 (interrupted upload resume): the server upload session an
@@ -363,15 +366,17 @@ impl StateDb {
         // tray's poll stays inside task 2243's budget. The first holds only the folder creates; the second finds the
         // changes in a folder, and with `idx_files_parent_id` serves the reconcile pass's remaps (`REMAP_FILES_SQL`,
         // `REMAP_OPS_SQL`), which would otherwise scan every row once per remapped folder. Indexes only, no table or
-        // column change. macOS has neither the parent-first gate nor the pass.
+        // column change. macOS has neither the parent-first gate nor the pass. Task 2409: the second carries `kind`, as
+        // the summary's group leaves the downloads out (`UNSENT_KINDS_SQL`); it replaces `idx_operation_queue_parent`.
         #[cfg(not(target_os = "macos"))]
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id);
              CREATE INDEX IF NOT EXISTS idx_operation_queue_create_folder
                  ON operation_queue(parent_id, file_id, paused_reason, attempts, max_attempts)
                  WHERE kind = 'create_folder';
-             CREATE INDEX IF NOT EXISTS idx_operation_queue_parent
-                 ON operation_queue(parent_id, paused_reason, attempts, max_attempts, created_at);",
+             DROP INDEX IF EXISTS idx_operation_queue_parent;
+             CREATE INDEX IF NOT EXISTS idx_operation_queue_parent_kind
+                 ON operation_queue(parent_id, paused_reason, attempts, max_attempts, created_at, kind);",
         )?;
         // Task 1640 (review F5): why a file deleted elsewhere was kept (`KeptReason`).
         ensure_column(conn, "kept_copies", "reason", "TEXT NOT NULL DEFAULT 'copy'")?;
