@@ -34,6 +34,9 @@ use beebeeb_types::backup::Category;
         notices: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
         /// LD-0139: a notices request with a `cursor` (any page after the first) answers 500.
         fail_later_pages: Arc<AtomicBool>,
+        /// LD-0139 (review 2026-11-08): a folder created while the next notices request is answered (a drive that
+        /// mounts during the check).
+        create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
     }
 
     const PAGE: usize = 2;
@@ -97,9 +100,11 @@ use beebeeb_types::backup::Category;
             let date_ahead_s: Arc<Mutex<Option<i64>>> = Arc::default();
             let notices: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(Some(Vec::new())));
             let fail_later_pages = Arc::new(AtomicBool::new(false));
+            let create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
             let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
             let (ahead, rows, fail_later) =
                 (Arc::clone(&date_ahead_s), Arc::clone(&notices), Arc::clone(&fail_later_pages));
+            let mount = Arc::clone(&create_on_notices);
             let handle = thread::spawn(move || {
                 let started = std::time::Instant::now();
                 while !halt.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(30) {
@@ -117,6 +122,9 @@ use beebeeb_types::backup::Category;
                     let mut tree = tree.lock().unwrap();
                     let (method, path) = (request.method.as_str(), request.path.as_str());
                     let response = if method == "GET" && path.starts_with("/api/v1/notifications") {
+                        if let Some(dir) = mount.lock().unwrap().take() {
+                            std::fs::create_dir_all(dir).unwrap();
+                        }
                         let ahead_s = ahead.lock().unwrap().unwrap_or(0);
                         let later_page = query_param(path, "cursor").is_some();
                         match rows.lock().unwrap().clone() {
@@ -188,7 +196,7 @@ use beebeeb_types::backup::Category;
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
-            Self { base_url, nodes, requests, stop, handle, date_ahead_s, notices, fail_later_pages }
+            Self { base_url, nodes, requests, stop, handle, date_ahead_s, notices, fail_later_pages, create_on_notices }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
@@ -1279,4 +1287,140 @@ use beebeeb_types::backup::Category;
         assert_eq!(check.notices.len(), NOTICE_PAGE + 1);
         let requests = fx.server.finish();
         assert_eq!(notice_requests(&requests).len(), 3, "1 page, then 2");
+    }
+
+    // ── LD-0139, the lead's review of #234 (2026-11-08): coverage and stopped backups ───────────────────────────────
+
+    fn switched_on(key: &str) -> bool {
+        crate::config::DesktopConfig::load().unwrap().known_folder_enabled(key)
+    }
+
+    /// Stops Pictures the way a pass does (an erase notice a minute old: its stop row, its last pass moved to the
+    /// check's `Date` and the notice acknowledged, in one write), then switches it on again in the settings only, as
+    /// an app killed between the stop's commit and its switch-off (or a failed settings write) leaves it.
+    async fn stopped_with_switch_on(fx: &Fixture, pictures: &Path, sync_root: &Path) {
+        switch_on(&["pictures"]);
+        fx.bridge.db.set_backup_last_pass("pictures", now_ms() - 120_000).unwrap();
+        let erase_data = serde_json::json!({ "reason": "erase_request" });
+        *fx.server.notices.lock().unwrap() = Some(vec![notice_row("files_removed", erase_data, now_ms() - 60_000)]);
+        run(fx, &[(Category::Pictures, pictures)], sync_root).await;
+        assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+        assert!(!switched_on("pictures"), "the stop switched it off");
+        switch_on(&["pictures"]);
+    }
+
+    /// Review P1 (`scheduler.rs:214`): a source refused when the tick decides what it gates (here a spelling with `..`
+    /// whose folder is not there yet, as on a drive not mounted) and accepted a moment later (the folder appears while
+    /// the notices are read) is not passed on that check: its last pass is weeks old, the check asked from Pictures'
+    /// window, and the erase notice in between is not in the listing. It keeps its last pass, uploads nothing, and is
+    /// checked from its own window next time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_source_accepted_after_the_check_started_is_not_passed_on_it() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents"]);
+                let fx = Fixture::new();
+                let (pictures, drive, sync_root) = (source_with(2), source_with(0), tempfile::tempdir().unwrap());
+                let documents = drive.path().join("Documents");
+                std::fs::create_dir(&documents).unwrap();
+                for name in ["a.txt", "b.txt"] {
+                    std::fs::write(documents.join(name), b"bytes").unwrap();
+                }
+                let spelled = drive.path().join("mount").join("..").join("Documents");
+                assert!(crate::backup::sources::check_source(&spelled, sync_root.path()).is_err(), "refused at first");
+                let (recent, weeks_ago) = (now_ms() - 120_000, now_ms() - 30 * 86_400_000);
+                fx.bridge.db.set_backup_last_pass("pictures", recent).unwrap();
+                fx.bridge.db.set_backup_last_pass("documents", weeks_ago).unwrap();
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, now_ms() - 10 * 86_400_000);
+                *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+                *fx.server.create_on_notices.lock().unwrap() = Some(drive.path().join("mount"));
+
+                let sources = [(Category::Pictures, pictures.path()), (Category::Documents, spelled.as_path())];
+                let report = run(&fx, &sources, sync_root.path()).await;
+                assert!(crate::backup::sources::check_source(&spelled, sync_root.path()).is_ok(), "accepted now");
+                let kept = mark(&fx, "documents").last_pass_at_ms;
+                assert_eq!(kept, Some(weeks_ago), "Documents was not decided on a listing that misses its window");
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "only Pictures' 2 files: {:?}", report.passes);
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                let since = beebeeb_core::backup::notices_since(recent);
+                assert_eq!(query_param(&asked[0].path, "since"), Some(since.to_string().as_str()));
+            })
+            .await;
+    }
+
+    /// Review P1/P2 (`scheduler.rs:202`): when the stop rows cannot be read, no pass runs. Pictures is stopped with
+    /// its switch still on; its stop moved its last pass and acknowledged the notice, so its gate alone would answer
+    /// Run. The read failing (the table hidden from the app's connection) is a failed check: nothing is uploaded and
+    /// the card says "Couldn't check — will retry."; once the read works the stop holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_read_of_the_stops_runs_no_pass() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                let before = mark(&fx, "pictures");
+
+                let hide = rusqlite::Connection::open(fx.db_path()).unwrap();
+                hide.execute_batch("ALTER TABLE backup_stops RENAME TO backup_stops_hidden;").unwrap();
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing uploads: {:?}", report.passes);
+                assert_eq!(mark(&fx, "pictures"), before, "its marks stay");
+
+                hide.execute_batch("ALTER TABLE backup_stops_hidden RENAME TO backup_stops;").unwrap();
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "still stopped: {:?}", report.passes);
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (root of `scheduler.rs:202`): a stop row next to a switch that is still on is reconciled before the
+    /// next pass: the switch goes off, persisted, and the stop row stays (its words and "Back up again" stay on the
+    /// card).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_switches_off_a_stopped_backup_whose_switch_stayed_on() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                assert!(switched_on("pictures"));
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!switched_on("pictures"), "switched off again: {:?}", report.passes);
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (root of `scheduler.rs:202`): the scheduler reconciles when it starts, before any pass is due (its first
+    /// tick, here with nothing to pass).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_scheduler_switches_off_a_stopped_backup_when_it_starts() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                assert!(switched_on("pictures"));
+
+                let mut scheduler = scheduler::BackupScheduler::new();
+                let ticked = scheduler.tick(&fx.bridge, sync_root.path(), Vec::new(), std::time::Instant::now()).await;
+                assert!(ticked.is_none(), "nothing to pass");
+                assert!(!switched_on("pictures"), "switched off when the scheduler started");
+                fx.server.finish();
+            })
+            .await;
     }

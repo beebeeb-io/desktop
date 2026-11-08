@@ -135,7 +135,7 @@ impl EngineBridge {
         };
         let api = self.backup_api();
         let (body, clock, server_now_ms) = api.list_backup_notices_page(since_ms, None).await.map_err(failed(1))?;
-        let (mut check, mut next) = crate::backup::stop::first_page(&body, clock, server_now_ms)?;
+        let (mut check, mut next) = crate::backup::stop::first_page(&body, clock, server_now_ms, since_ms)?;
         let mut seen = std::collections::HashSet::new();
         let mut page = 1;
         while let Some(cursor) = next {

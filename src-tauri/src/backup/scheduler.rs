@@ -57,6 +57,8 @@ pub(crate) struct BackupScheduler {
     changed: Arc<Mutex<Option<Instant>>>,
     watcher: Option<notify::RecommendedWatcher>,
     watched: Vec<PathBuf>,
+    /// LD-0139: the stopped backups' switches were reconciled since this scheduler started.
+    reconciled: bool,
 }
 
 impl BackupScheduler {
@@ -67,7 +69,14 @@ impl BackupScheduler {
     pub(crate) fn with_debounce(debounce: Duration) -> Self {
         // LD-0139: a new session starts with no failed notice check to show.
         super::stop::set_check_failed(false);
-        Self { debounce, last_full: None, changed: Arc::default(), watcher: None, watched: Vec::new() }
+        Self {
+            debounce,
+            last_full: None,
+            changed: Arc::default(),
+            watcher: None,
+            watched: Vec::new(),
+            reconciled: false,
+        }
     }
 
     /// Watch exactly `sources` (a folder switched on or off changes the set). A source that cannot be watched is
@@ -129,6 +138,12 @@ impl BackupScheduler {
         sources: Vec<BackupSource>,
         now: Instant,
     ) -> Option<TickReport> {
+        // LD-0139 (review 2026-11-08): when the scheduler starts, every stopped backup's switch is off, persisted (a
+        // kill between a stop's commit and its switch-off, or a settings write that failed); a read that fails is
+        // tried again on the next tick. Each pass reconciles again (`run_passes`).
+        if !self.reconciled && super::stop::reconcile_stopped_switches(bridge.db()).is_ok() {
+            self.reconciled = true;
+        }
         self.watch(&sources);
         bridge.abandon_orphaned_backup_sessions().await;
         if sources.is_empty() || !self.due(now) {
@@ -192,39 +207,25 @@ pub(crate) async fn run_passes(
         return report;
     };
     // Review (2026-11-07): a backup with a stop row is off until "Back up again", even when its switch could not be
-    // turned off; it is never passed.
-    let stopped: Vec<String> = bridge
-        .db()
-        .backup_stops()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.category)
-        .collect();
-    let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
-    // Review (2026-11-08): only the backups this tick can gate decide how far back the check reads; a stopped or
-    // refused one (which may never get a last pass) would otherwise read every notice on every tick.
-    let gated: Vec<Category> = sources
-        .iter()
-        .filter(|s| !stopped.contains(&s.category.key()) && super::sources::check_source(&s.path, sync_root).is_ok())
-        .map(|s| s.category.clone())
-        .collect();
-    let check = if gated.is_empty() {
-        None
-    } else {
-        match bridge.backup_notice_check(super::stop::check_since(bridge.db(), &gated)).await {
-            Ok(check) => Some(check),
-            Err(error) => {
-                tracing::warn!(%error, "backup: the notices could not be checked; no pass (the next pass retries)");
-                report.check_failed = true;
-                None
+    // turned off; it is never passed. Review (2026-11-08): the stops are read first (and any switch still on next to a
+    // stop row goes off); a read that fails runs no pass, since it cannot tell a stopped backup from one that is on.
+    let stopped = match super::stop::reconcile_stopped_switches(bridge.db()) {
+        Ok(stopped) => stopped,
+        Err(error) => {
+            tracing::warn!(%error, "backup: the stopped backups could not be read; no pass (the next pass retries)");
+            report.check_failed = true;
+            for source in sources {
+                report.passes.push((source.category.clone(), Err("stops not read".into())));
             }
+            return report;
         }
     };
-    let check_clock = check
-        .as_ref()
-        .map_or(beebeeb_core::backup::RebuildClock::UNKNOWN, |check| check.clock);
-    let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
-    let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
+    let enabled: Vec<Category> = sources.iter().map(|s| s.category.clone()).collect();
+    // Review (2026-11-08): which backups this tick gates is decided ONCE, with each one's marks read once, and the
+    // check's `since` comes from exactly those marks: the loop gates this set and nothing else, so no backup is decided
+    // on a listing that started after its window (a source refused here and accepted a moment later waits for the
+    // next tick). `decide` also refuses a check that does not cover a window (`since_ms`).
+    let mut gated: Vec<(&BackupSource, crate::state_db::BackupPassMark)> = Vec::new();
     for source in sources {
         let category = source.category.clone();
         if stopped.contains(&category.key()) {
@@ -238,7 +239,31 @@ pub(crate) async fn run_passes(
             report.passes.push((category, Err(format!("source refused: {refusal:?}"))));
             continue;
         }
+        // Marks that cannot be read are the default (no pass yet, nothing acknowledged): the check then asks from 0
+        // and every notice in the window counts, which errs toward stopping, never toward an upload.
         let mark = bridge.db().backup_pass_mark(&category.key()).unwrap_or_default();
+        gated.push((source, mark));
+    }
+    let check = if gated.is_empty() {
+        None
+    } else {
+        let since = super::stop::check_since(gated.iter().map(|(_, mark)| mark));
+        match bridge.backup_notice_check(since).await {
+            Ok(check) => Some(check),
+            Err(error) => {
+                tracing::warn!(%error, "backup: the notices could not be checked; no pass (the next pass retries)");
+                report.check_failed = true;
+                None
+            }
+        }
+    };
+    let check_clock = check
+        .as_ref()
+        .map_or(beebeeb_core::backup::RebuildClock::UNKNOWN, |check| check.clock);
+    let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
+    let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
+    for (source, mark) in gated {
+        let category = source.category.clone();
         let last_pass_at = super::stop::last_pass_at(&mark, check_clock);
         let folder_id = || {
             let id = bridge.db().backup_category_folder(&category.key()).ok().flatten();

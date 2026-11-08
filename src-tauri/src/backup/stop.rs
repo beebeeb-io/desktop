@@ -45,28 +45,25 @@ pub(crate) const MAX_NOTICE_PAGES: usize = 200;
 /// page, and the device's offset from it, measured on that request.
 #[derive(Debug, Clone)]
 pub(crate) struct NoticeCheck {
-    /// Every backup notice from the check's `since` on, with its server id and server-clock time.
+    /// Every backup notice from `since_ms` on, with its server id and server-clock time.
     pub(crate) notices: Vec<ListedNotice>,
-    /// The first page's `Date` (server clock): the new `last_pass_at` of every backup that runs. The earliest of the
-    /// pages' times, so a notice written while the pages were read is inside the next pass's window.
+    /// The `since` the check asked from (server clock, inclusive): it holds every notice written at or after it, and
+    /// nothing about earlier ones. A backup whose window starts earlier is not covered ([`decide`]).
+    pub(crate) since_ms: i64,
+    /// The first page's `Date` (server clock): the new `last_pass_at` of every backup that runs. Later pages' `Date`s
+    /// are not read; a skew between API nodes or the header's one-second resolution is inside `NOTICE_OVERLAP_MS`.
     pub(crate) server_now_ms: i64,
     pub(crate) clock: RebuildClock,
 }
 
-/// The `since` of a tick's notice check: core's `notices_since` of the oldest `last_pass_at` among `categories`, so
-/// the listing holds every notice any of them can count. A backup with no pass yet (its baseline is the setup time on
-/// this device's clock, placed on the server's only by this check) or whose marks cannot be read asks from 0: every
-/// backup notice of the account.
-pub(crate) fn check_since(db: &StateDb, categories: &[Category]) -> i64 {
-    categories
-        .iter()
-        .map(|category| match db.backup_pass_mark(&category.key()) {
-            Ok(BackupPassMark {
-                last_pass_at_ms: Some(at),
-                ..
-            }) => notices_since(at),
-            _ => 0,
-        })
+/// The `since` of a tick's notice check, from the marks of the backups the tick gates (read once, the same marks the
+/// gate decides with): core's `notices_since` of the oldest `last_pass_at`, so the listing holds every notice any of
+/// them can count. A backup with no pass yet (its baseline is the setup time on this device's clock, placed on the
+/// server's only by this check) asks from 0: every backup notice of the account. No marks: 0.
+pub(crate) fn check_since<'a>(marks: impl IntoIterator<Item = &'a BackupPassMark>) -> i64 {
+    marks
+        .into_iter()
+        .map(|mark| mark.last_pass_at_ms.map_or(0, notices_since))
         .min()
         .unwrap_or(0)
 }
@@ -121,6 +118,7 @@ pub(crate) fn first_page(
     body: &serde_json::Value,
     clock: RebuildClock,
     server_now_ms: Option<i64>,
+    since_ms: i64,
 ) -> Result<(NoticeCheck, Option<String>), String> {
     let server_now_ms = server_now_ms.ok_or("the notices answer has no readable Date")?;
     if clock.offset_ms.is_none() {
@@ -130,6 +128,7 @@ pub(crate) fn first_page(
     Ok((
         NoticeCheck {
             notices,
+            since_ms,
             server_now_ms,
             clock,
         },
@@ -225,14 +224,18 @@ pub(crate) enum PassDecision {
 }
 
 /// Core's decision for one backup (`backup_pass_gate_v2`: Amendment 12's steps 1-4, 12c's failed check and 12d's
-/// overlap margin and acknowledged ids). `check` is `None` when the notices could not be read completely.
+/// overlap margin and acknowledged ids). `check` is `None` when the notices could not be read completely. A check that
+/// does not cover this backup's window (it asked from later than `notices_since(last_pass_at_ms)`) holds them only in
+/// part, so core gets `None` too: `CheckFailed` (review 2026-11-08; #233's `complete_from_ms` guard, restored).
 pub(crate) fn decide(
     check: Option<&NoticeCheck>,
     last_pass_at_ms: i64,
     acknowledged: &[String],
     listed: &ListedBackup<'_>,
 ) -> PassDecision {
-    let notices = check.map(|check| check.notices.as_slice());
+    let notices = check
+        .filter(|check| notices_since(last_pass_at_ms) >= check.since_ms)
+        .map(|check| check.notices.as_slice());
     match backup_pass_gate_v2(notices, last_pass_at_ms, acknowledged, &listed.listing()) {
         BackupPassGateV2::CheckFailed => PassDecision::CheckFailed,
         BackupPassGateV2::Run {
@@ -272,6 +275,36 @@ fn names_this_device(
         .stopped
         .first()
         .is_some_and(|stop| stop.reason == BackupStopReason::BackupDeleted)
+}
+
+/// LD-0139 (review 2026-11-08): every backup with a stop row has its switch off, persisted. A stop commits its row
+/// first and switches the backup off in the settings after (`DesktopBackupHost::stop_backups`); an app killed in
+/// between, or a settings write that failed (on Windows, another program holding `desktop.toml`), leaves the switch on.
+/// Run when the scheduler starts and before each pass. The stopped categories, or the read's error (the caller then
+/// runs no pass: a failed read must never read as "nothing is stopped"). A switch-off that fails is logged and tried
+/// again next time; the stop row alone keeps the backup from passing.
+pub(crate) fn reconcile_stopped_switches(db: &StateDb) -> rusqlite::Result<Vec<String>> {
+    let stopped: Vec<String> = db.backup_stops()?.into_iter().map(|stop| stop.category).collect();
+    if stopped.is_empty() {
+        return Ok(stopped);
+    }
+    let still_on: Vec<String> = match crate::config::DesktopConfig::load() {
+        Ok(cfg) => stopped
+            .iter()
+            .filter(|key| cfg.known_folder_enabled(key))
+            .cloned()
+            .collect(),
+        Err(_) => stopped.clone(),
+    };
+    if !still_on.is_empty() {
+        let switched = crate::backup::host::switch_off_in_settings(&still_on);
+        tracing::warn!(
+            still_on = still_on.len(),
+            switched,
+            "backup: a stopped backup's switch was on; switched off"
+        );
+    }
+    Ok(stopped)
 }
 
 /// The person turned `key`'s backup on, or chose "Back up again". "Back up again" after a stop starts it over: set
@@ -380,6 +413,7 @@ mod tests {
     fn check_of(notices: Vec<ListedNotice>) -> NoticeCheck {
         NoticeCheck {
             notices,
+            since_ms: 0,
             server_now_ms: 0,
             clock: measured(),
         }
@@ -440,40 +474,65 @@ mod tests {
     fn the_first_page_fixes_the_checks_date_and_clock() {
         let rows = [row("files_removed", serde_json::json!({}), 7)];
         let body = serde_json::json!({ "notifications": rows, "next_cursor": "n" });
-        assert!(first_page(&body, measured(), None).is_err(), "no Date");
+        assert!(first_page(&body, measured(), None, 0).is_err(), "no Date");
         assert!(
-            first_page(&body, RebuildClock::UNKNOWN, Some(1)).is_err(),
+            first_page(&body, RebuildClock::UNKNOWN, Some(1), 0).is_err(),
             "a clock that moved"
         );
-        let (check, next) = first_page(&body, measured(), Some(9_000)).unwrap();
+        let (check, next) = first_page(&body, measured(), Some(9_000), 4_000).unwrap();
         assert_eq!(
-            (check.server_now_ms, check.clock, check.notices.len()),
-            (9_000, measured(), 1)
+            (check.since_ms, check.server_now_ms, check.clock, check.notices.len()),
+            (4_000, 9_000, measured(), 1)
         );
         assert_eq!(next.as_deref(), Some("n"));
     }
 
-    /// The check asks from the oldest window among the tick's backups (core's `notices_since`); a backup with no pass
-    /// yet asks from 0.
+    /// The check asks from the oldest window among the gated backups' marks (core's `notices_since`); a backup with
+    /// no pass yet asks from 0.
     #[test]
     fn the_check_asks_from_the_oldest_backups_window_and_from_0_before_a_first_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = owned_db(&dir);
-        db.set_backup_last_pass("pictures", 2_000_000_000).unwrap();
-        db.set_backup_last_pass("music", 1_000_000_000).unwrap();
-        let (pictures, music, videos) = (Category::Pictures, Category::Music, Category::Videos);
-        assert_eq!(check_since(&db, std::slice::from_ref(&pictures)), 2_000_000_000 - NOTICE_OVERLAP_MS);
+        let passed = |at: i64| BackupPassMark {
+            last_pass_at_ms: Some(at),
+            ..BackupPassMark::default()
+        };
+        let (pictures, music) = (passed(2_000_000_000), passed(1_000_000_000));
+        let videos = BackupPassMark {
+            setup_at_ms: Some(3_000_000_000),
+            ..BackupPassMark::default()
+        };
+        assert_eq!(check_since([&pictures]), 2_000_000_000 - NOTICE_OVERLAP_MS);
+        assert_eq!(check_since([&pictures, &music]), 1_000_000_000 - NOTICE_OVERLAP_MS);
         assert_eq!(
-            check_since(&db, &[pictures.clone(), music.clone()]),
-            1_000_000_000 - NOTICE_OVERLAP_MS
-        );
-        db.note_backup_setup("videos", 3_000_000_000).unwrap();
-        assert_eq!(
-            check_since(&db, &[pictures, music, videos]),
+            check_since([&pictures, &music, &videos]),
             0,
             "no pass yet: every notice"
         );
-        assert_eq!(check_since(&db, &[]), 0);
+        assert_eq!(check_since([]), 0);
+    }
+
+    /// Review (2026-11-08): a check that asked from later than a backup's window holds its notices only in part, so
+    /// the backup's pass is core's `CheckFailed`, whatever the partial listing says; at the window's edge it runs.
+    #[test]
+    fn a_check_that_does_not_cover_the_window_is_a_failed_check() {
+        let pictures = Category::Pictures;
+        let listing = ListedBackup {
+            category: &pictures,
+            device_folder_id: None,
+            device_folder_live: true,
+            category_folder_id: None,
+            category_folder_live: Some(true),
+        };
+        let last = 10_000_000;
+        let mut check = check_of(Vec::new());
+        check.since_ms = notices_since(last) + 1;
+        assert_eq!(decide(Some(&check), last, &[], &listing), PassDecision::CheckFailed);
+        check.since_ms = notices_since(last);
+        assert_eq!(
+            decide(Some(&check), last, &[], &listing),
+            PassDecision::Run {
+                acknowledged: Vec::new()
+            }
+        );
     }
 
     #[test]
@@ -606,8 +665,11 @@ mod tests {
             serde_json::json!({ "device_folder_id": Uuid::new_v4().to_string() }),
             last - 2,
         );
-        let (new_id, old_id, elsewhere_id) =
-            (new.id.clone().unwrap(), old.id.clone().unwrap(), elsewhere.id.clone().unwrap());
+        let (new_id, old_id, elsewhere_id) = (
+            new.id.clone().unwrap(),
+            old.id.clone().unwrap(),
+            elsewhere.id.clone().unwrap(),
+        );
         let check = check_of(vec![new, old, elsewhere]);
         let mark = BackupPassMark {
             last_pass_at_ms: Some(last),

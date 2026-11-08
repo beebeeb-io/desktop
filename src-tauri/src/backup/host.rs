@@ -39,7 +39,7 @@ fn parse_id(id: &str) -> Option<Uuid> {
 /// Turn the backup of these categories off in the settings (the same switch the person uses). `Ok(false)`: the
 /// settings could not be written; the stop notice still stands and no pass runs for a folder whose category folder
 /// is forgotten.
-fn switch_off_in_settings(keys: &[String]) -> bool {
+pub(crate) fn switch_off_in_settings(keys: &[String]) -> bool {
     crate::config::DesktopConfig::update(|cfg| {
         for key in keys {
             cfg.set_known_folder(key, false);
