@@ -568,7 +568,8 @@ use super::*;
 
     /// 0.8.15: the tray's and Settings › Sync's queue summary. Waiting (due or backing off) and given-up operations are
     /// counted apart; paused ones are grouped by reason with the dates they were queued; a reason this build does not
-    /// know is `other`; nothing in it is a name, a path or an error text. It changes nothing.
+    /// know is `other`; nothing in it is a name, a path or an error text. It changes nothing. Downloads are not counted
+    /// (task 2224).
     #[test]
     fn queue_hold_summary_counts_waiting_given_up_and_held_by_reason_without_names() {
         let dir = tempdir().unwrap();
@@ -598,6 +599,15 @@ use super::*;
         given_up.attempts = 25;
         given_up.max_attempts = 25;
         db.enqueue_operation(&given_up).unwrap();
+        // Task 2224 (folded into 2409): the downloads a pin queues are not changes waiting to leave this PC, whatever
+        // state they are in. None of them is counted.
+        db.enqueue_operation(&queued_op("d1", OperationKind::HydrateFile, "d1")).unwrap();
+        let mut pin_given_up = queued_op("d2", OperationKind::PinTree, "d2");
+        pin_given_up.attempts = 25;
+        pin_given_up.max_attempts = 25;
+        db.enqueue_operation(&pin_given_up).unwrap();
+        db.enqueue_operation(&queued_op("d3", OperationKind::HydrateFile, "d3")).unwrap();
+        db.record_operation_pause("d3", OperationPauseReason::Quota, None, 5).unwrap();
         let queued_before: i64 =
             db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap();
 
@@ -616,8 +626,8 @@ use super::*;
         assert!(!json.contains("secret"), "{json}");
         let queued_after: i64 =
             db.0.lock().unwrap().query_row("SELECT COUNT(*) FROM operation_queue", [], |row| row.get(0)).unwrap();
-        assert_eq!((queued_before, queued_after), (7, 7), "a read: nothing purged");
-        assert_eq!(db.queue_diagnostics(500).unwrap().paused, 4, "and nothing resumed");
+        assert_eq!((queued_before, queued_after), (10, 10), "a read: nothing purged");
+        assert_eq!(db.queue_diagnostics(500).unwrap().paused, 5, "and nothing resumed");
     }
 
     /// 0.8.15: the Selective sync tree reads `current_version` and `remote_updated_at` (whether the server knows the

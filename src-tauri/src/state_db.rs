@@ -501,6 +501,7 @@ mod tests {
 
     mod startup_and_accepts;
     mod backup;
+    mod unsent;
 
     /// A row the server holds at version 1.
     fn seed_v1_row(db: &StateDb, file_id: &str) {
@@ -613,6 +614,10 @@ mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).
 mod system_role;
 mod test_hooks;
+// Task 2409: the changes "Not sent" counts, one row each.
+mod unsent;
+use unsent::UNSENT_KINDS_SQL;
+pub use unsent::{RetryOutcome, UnsentChange, UnsentPage};
 
 mod types;
 use types::*;

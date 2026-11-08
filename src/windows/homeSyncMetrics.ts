@@ -15,20 +15,29 @@ import { formatCount, syncActivityView, type SyncActivityOptions, type SyncActiv
 export interface HomeSyncMetric {
   k: string
   v: string
+  /** Task 2409: the figure opens Activity › Not sent, where the changes it counts are listed (only when it counts any). */
+  notSentLink?: boolean
 }
 
 /**
- * Every queued change not sent yet: waiting (due, backing off or being sent), held (paused, any reason) and given up.
- * "…" before the first read, "—" when the summary could not be read or carries no queue (`queue: null`, no state DB
- * yet): an unknown queue is never shown as 0. Note the queue also holds the downloads a pin queues, so during a pin this
- * figure counts those too.
+ * Every change not sent yet: waiting (due, backing off or being sent), held (paused, any reason) and given up. Null
+ * before the first read, when the summary could not be read, or when it carries no queue (no state DB yet). Since task
+ * 2409 the summary leaves out the downloads a pin queues (task 2224): they are not changes leaving this PC.
+ */
+export function notSentCount(summary: SyncActivitySummary | null | undefined): number | null {
+  const queue = summary?.queue ?? null
+  if (queue === null) return null
+  return queue.waiting + queue.held.reduce((sum, group) => sum + group.count, 0) + queue.gave_up
+}
+
+/**
+ * The "Not sent" figure: {@link notSentCount}, "…" before the first read, "—" when the summary could not be read or
+ * carries no queue: an unknown queue is never shown as 0.
  */
 export function notSentFigure(summary: SyncActivitySummary | null | undefined): string {
   if (summary === undefined) return '…'
-  const queue = summary?.queue ?? null
-  if (queue === null) return '—'
-  const held = queue.held.reduce((sum, group) => sum + group.count, 0)
-  return formatCount(queue.waiting + held + queue.gave_up)
+  const count = notSentCount(summary)
+  return count === null ? '—' : formatCount(count)
 }
 
 /** State, Not sent and Conflicts, in the strip's order. "In vault" is the caller's (it comes from billing usage). */
@@ -39,7 +48,7 @@ export function homeSyncMetrics(
 ): HomeSyncMetric[] {
   return [
     { k: 'State', v: syncActivityView(status, summary, options).label },
-    { k: 'Not sent', v: notSentFigure(summary) },
+    { k: 'Not sent', v: notSentFigure(summary), notSentLink: (notSentCount(summary) ?? 0) > 0 },
     { k: 'Conflicts', v: status ? String(status.conflicts) : '…' },
   ]
 }

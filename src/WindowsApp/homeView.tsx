@@ -58,7 +58,18 @@ export function homeHumanizeType(type: string): string {
 // self-fetches accountProfile + accountActivity on mount. Degrades gracefully
 // when the API is unavailable (login down in this build): metric strip stays,
 // account body shows a calm signed-out prompt.
-export function HomeView({ status, usage, storage }: { status: SyncStatus | null; usage: BillingUsage | null; storage: StorageSummary | null }) {
+export function HomeView({
+  status,
+  usage,
+  storage,
+  onOpenNotSent,
+}: {
+  status: SyncStatus | null
+  usage: BillingUsage | null
+  storage: StorageSummary | null
+  /** Task 2409: "Not sent N" opens Activity › Not sent, where those changes are listed. */
+  onOpenNotSent?: () => void
+}) {
   const platform = usePlatformName()
   // What sync is doing (0.8.15): the model Settings › Sync and the tray render, so Home never says "Up to date" over
   // held changes. Before this the strip read `status` alone and showed "Up to date · Syncing 0" next to 2,967 unsent
@@ -76,7 +87,7 @@ export function HomeView({ status, usage, storage }: { status: SyncStatus | null
   const usedBytes = usage?.used_bytes ?? storage?.used_bytes ?? null
   const quotaBytes = usage?.quota_bytes ?? storage?.quota_bytes ?? null
 
-  const metrics: Array<{ k: string; v: string }> = [
+  const metrics: Array<{ k: string; v: string; notSentLink?: boolean }> = [
     ...homeSyncMetrics(status, summary, { device: thisDeviceNoun(platform), pausedFallback }),
     { k: 'In vault', v: usedBytes != null ? formatBytes(usedBytes) : '…' },
   ]
@@ -300,10 +311,25 @@ export function HomeView({ status, usage, storage }: { status: SyncStatus | null
         gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
         gap: 20,
       }}>
-        {metrics.map(({ k, v }) => (
+        {metrics.map(({ k, v, notSentLink }) => (
           <div key={k}>
             <div style={{ fontSize: 9.5, fontFamily: T.fontMono, textTransform: 'uppercase' as const, letterSpacing: '0.07em', color: T.ink3, marginBottom: 4 }}>{k}</div>
-            <div style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink }}>{v}</div>
+            {notSentLink && onOpenNotSent ? (
+              // Task 2409: the count opens the list of what it counts. A link (it goes somewhere), underlined, in ink.
+              <a
+                href="#not-sent"
+                title="See which changes"
+                onClick={(event) => {
+                  event.preventDefault()
+                  onOpenNotSent()
+                }}
+                style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink, textDecoration: 'underline', textUnderlineOffset: 3, textDecorationColor: T.ink3 }}
+              >
+                {v}
+              </a>
+            ) : (
+              <div style={{ fontSize: 16, fontWeight: 600, fontFamily: T.fontMono, color: T.ink }}>{v}</div>
+            )}
           </div>
         ))}
         {/* Must-render row 10 (lead ruling FT-row10): why sync did not start, when the engine start

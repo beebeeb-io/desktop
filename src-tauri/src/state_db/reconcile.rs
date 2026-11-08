@@ -58,7 +58,7 @@ pub(super) fn reconcile_plan_conn(
 }
 
 /// A remap's statements, once per remapped folder: each reads through a `parent_id` index (`idx_files_parent_id`,
-/// `idx_operation_queue_parent`), never a scan of the whole table (measured on a 43k-row copy: 5.5 s per 256 remaps
+/// `idx_operation_queue_parent_kind`), never a scan of the whole table (measured on a 43k-row copy: 5.5 s per 256 remaps
 /// without them, 0.25 s with).
 pub(super) const REMAP_FILES_SQL: &str = "UPDATE files SET parent_id = ?2 WHERE parent_id = ?1";
 

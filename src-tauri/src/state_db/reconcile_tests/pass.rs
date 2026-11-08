@@ -684,6 +684,9 @@
 
     /// Task 2243's budget holds with the D7 group in it: 300 held folders and 2,700 changes waiting in them are
     /// counted from the indexes, without reading the changes themselves (about 250 pages here).
+    ///
+    /// Task 2409: both indexes carry `kind` now, so the downloads leave the count (`UNSENT_KINDS_SQL`) without a row
+    /// read; that took this read from 67 pages to 91, and the budget from 80 to 100. Reading the changes is 320.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_waiting_for_folder_group_reads_indexes_not_the_changes() {
@@ -729,7 +732,7 @@
                 HeldGroup { reason: "waiting_for_folder".to_string(), count: 2_700, oldest_at: 1_010, newest_at: 3_709 },
             ]
         );
-        assert!(reads <= 80, "the hold summary (the open and its reads) read {reads} pages from disk");
+        assert!(reads <= 100, "the hold summary (the open and its reads) read {reads} pages from disk");
     }
 
     /// D7 and the tray's activity: a change waiting for a held folder is not transfer work, or the engine would show

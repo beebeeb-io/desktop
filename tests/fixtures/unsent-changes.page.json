@@ -1,0 +1,46 @@
+{
+  "total": 3,
+  "items": [
+    {
+      "id": "op-delete",
+      "file_id": "file-plan",
+      "kind": "delete",
+      "path": "Projects/2026/old plan.docx",
+      "backup": false,
+      "group": "gave_up",
+      "queued_at": 1793000000,
+      "retry_at": null,
+      "parked": false,
+      "retryable": true,
+      "sending": null
+    },
+    {
+      "id": "op-edit",
+      "file_id": "file-budget",
+      "kind": "edit",
+      "path": "Finance/budget.xlsx",
+      "backup": false,
+      "group": "quota",
+      "queued_at": 1793000100,
+      "retry_at": null,
+      "parked": false,
+      "retryable": false,
+      "sending": null
+    },
+    {
+      "id": "op-new",
+      "file_id": "file-photo",
+      "kind": "new_file",
+      "path": "Camera Roll/IMG_0412.jpg",
+      "backup": false,
+      "group": "waiting",
+      "queued_at": 1793000200,
+      "retry_at": null,
+      "parked": false,
+      "retryable": false,
+      "sending": { "done": 34, "total": 100 }
+    }
+  ],
+  "engine_state": "running",
+  "paused": false
+}

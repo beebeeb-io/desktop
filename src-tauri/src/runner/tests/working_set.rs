@@ -254,17 +254,18 @@ use super::*;
         ] {
             assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
         }
-        // The queue step's two sites are `queue_step`'s; the tick and the phase's wake call it, once each.
+        // The queue step's two sites are `queue_step`'s; the tick, the phase's wake and (task 2409) a Try again's nudge
+        // call it, once each. The two wakes have no remote applies to merge.
         assert_eq!(
             squeezed.matches("queue_step(").count() - squeezed.matches("fnqueue_step(").count(),
-            2,
-            "the queue step's two callers"
+            3,
+            "the queue step's three callers"
         );
-        for call in [
-            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)",
-            "queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)",
+        for (call, count) in [
+            ("queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &tick.applied_item_ids, &send_phase)", 1),
+            ("queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)", 2),
         ] {
-            assert_eq!(squeezed.matches(&squeeze(call)).count(), 1, "the call {call}");
+            assert_eq!(squeezed.matches(&squeeze(call)).count(), count, "the call {call}");
         }
         // The fourth site's helper is called once, from the failed tick's arm of `run`.
         assert_eq!(
@@ -515,4 +516,68 @@ use super::*;
             !working_set_signal_needed(&[Some("namespace:my_files".into())], &materialized),
             "1701: synthetic namespace ids are no longer a Finder surface — they are not materialized parents"
         );
+    }
+
+    /// Task 2409: Try again's nudge wakes a runner that waits between ticks at once, as an arm does (on tokio's paused
+    /// clock, so a loaded machine cannot flake the bound).
+    #[tokio::test(start_paused = true)]
+    async fn a_nudge_while_the_runner_waits_wakes_it_at_once() {
+        let send_phase = Arc::new(SendPhaseLink::default());
+        let (_keep_open, mut cancel) = oneshot::channel::<()>();
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        assert_eq!(next_wake(&mut cancel, &mut tick, &send_phase).await, Wake::Tick);
+        let waiter = {
+            let send_phase = send_phase.clone();
+            tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        send_phase.nudge();
+        let woke = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("woken within a second of the nudge, not at the next tick");
+        assert_eq!(woke.unwrap(), Wake::Nudge);
+    }
+
+    /// Task 2409 (self-review): a nudge within the second after the last nudge step waits out the rest of that second;
+    /// it is never dropped (a second Try again would otherwise sit until the next tick). Outside it, the step runs now.
+    #[test]
+    fn a_nudge_inside_the_rate_limit_waits_out_the_second() {
+        let t0 = std::time::Instant::now();
+        assert_eq!(nudge_wait(None, t0), None, "the first nudge runs at once");
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_millis(300)), Some(Duration::from_millis(700)));
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_secs(1)), None);
+        assert_eq!(nudge_wait(Some(t0), t0 + Duration::from_secs(5)), None);
+    }
+
+    /// Task 2409: the nudge's arm runs the queue step alone (no pull, no sweeps), at most once a second, never while
+    /// paused, and never before this run's first pass (D11b), as the phase's arm does. A nudge inside the second is
+    /// deferred (asked again once the second is out), never dropped.
+    #[test]
+    fn the_nudge_runs_the_queue_step_alone_and_waits_for_the_first_pass() {
+        use crate::source_pin::squeeze;
+        let source = include_str!("../../runner.rs").replace("\r\n", "\n");
+        let arm = &source[source.find("Wake::Nudge => {").expect("the nudge's arm")..];
+        let arm = squeeze(&arm[..arm.find("\n            }\n").unwrap()]);
+        let deferred = arm
+            .find(&squeeze(
+                "if !mode.is_paused() && let Some(wait) = nudge_wait(last_nudge_run, now) { let link = Arc::clone(&send_phase); tokio::spawn(async move { tokio::time::sleep(wait).await; link.nudge(); }); continue; }",
+            ))
+            .unwrap_or_else(|| panic!("a nudge inside the second is asked again, not dropped:\n{arm}"));
+        let due = arm
+            .find(&squeeze("phase_step_due(true, mode, last_nudge_run, now)"))
+            .unwrap_or_else(|| panic!("the arm reads the pause flag and its own last run:\n{arm}"));
+        assert!(deferred < due, "{arm}");
+        let first_pass = arm
+            .find(&squeeze("#[cfg(not(target_os = \"macos\"))] if !reconciled_this_run { continue; }"))
+            .unwrap_or_else(|| panic!("the arm waits for the first pass:\n{arm}"));
+        let step = arm
+            .find(&squeeze("queue_step(&bridge, &sync_root, &db, &mut owed_working_set_signal, &[], &send_phase)"))
+            .unwrap_or_else(|| panic!("the arm runs the queue step:\n{arm}"));
+        assert!(due < step && first_pass < step, "{arm}");
+        for denied in ["sync_tick_outcome(", "refresh_shared_roots(", "sweep_", "backup_scheduler.tick("] {
+            assert!(!arm.contains(denied), "{denied} in the arm");
+        }
+        let wait = &source[source.find("async fn next_wake(").expect("next_wake")..];
+        let wait = &wait[..wait.find("\n}\n").unwrap()];
+        assert!(wait.contains("_ = send_phase.nudge.notified() => Wake::Nudge,"), "{wait}");
     }
