@@ -43,7 +43,8 @@ export const deviceRequestCancel = (): Promise<CommandResult<void>> => command('
 export const approveLookup = (code: string): Promise<CommandResult<ApprovalReview>> => command('auth_approve_lookup', { code })
 export const approveRequest = (code: string, password: string, approve: boolean): Promise<CommandResult<{ status: string }>> =>
   command('auth_approve_request', { code, password, approve })
-export const passkeySignIn = (): Promise<CommandResult<{ signed_in: boolean; prf_unlocked: boolean }>> => command('auth_passkey_sign_in')
+/** B15's `passkey_commands::auth_passkey_sign_in`: `vault_unlocked` false means a session only, the password follows (DW-A30). */
+export const passkeySignIn = (email: string): Promise<CommandResult<LoginOutcome>> => command('auth_passkey_sign_in', { email })
 export const windowsHelloAvailable = (): Promise<CommandResult<boolean>> => command('auth_windows_hello_available')
 export const unlockWithWindowsHello = (): Promise<CommandResult<void>> => command('auth_unlock_with_windows_hello')
 export const unknownPhraseWords = (words: string[]): Promise<CommandResult<number[]>> => command('auth_phrase_unknown_words', { words })

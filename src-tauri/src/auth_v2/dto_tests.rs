@@ -2,19 +2,16 @@
 //! field (`planted_secret_field_is_caught`).
 use super::approve::{ApprovalResult, ApprovalReview};
 use super::device::DeviceRequestView;
-use super::passkey::PasskeySignInOutcome;
 
 const FORBIDDEN: [&str; 10] =
     ["password", "phrase", "mnemonic", "secret", "prf", "master", "backup_codes", "otpauth", "fragment", "token"];
 
-/// Field names of a serialized DTO that contain a forbidden word. `prf_unlocked` is the one allow-listed flag: a
-/// boolean saying whether the passkey could unlock the vault, never PRF output (rule 6's `LoginOutcome` flags).
+/// Field names of a serialized DTO that contain a forbidden word.
 fn offending(value: &serde_json::Value) -> Vec<String> {
-    const ALLOW: [&str; 1] = ["prf_unlocked"];
     let mut out = Vec::new();
     if let Some(obj) = value.as_object() {
         for (key, v) in obj {
-            if !ALLOW.contains(&key.as_str()) && FORBIDDEN.iter().any(|f| key.to_lowercase().contains(f)) {
+            if FORBIDDEN.iter().any(|f| key.to_lowercase().contains(f)) {
                 out.push(key.clone());
             }
             out.extend(offending(v));
@@ -46,7 +43,6 @@ fn samples() -> Vec<serde_json::Value> {
         })
         .unwrap(),
         serde_json::to_value(ApprovalResult { status: "approved".into() }).unwrap(),
-        serde_json::to_value(PasskeySignInOutcome { signed_in: true, prf_unlocked: false }).unwrap(),
     ]
 }
 

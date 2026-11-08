@@ -135,12 +135,12 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   const forgot = onForgotPassword ?? (() => void openUrl(FORGOT_PASSWORD_URL))
   const passkey = useCallback(async () => {
     setPasskeyPrompt(true)
-    const r = await passkeySignIn()
+    const r = await passkeySignIn(email)
     setPasskeyPrompt(false)
     if (!r.ok) { setProblem({ kind: 'other' }); return }
-    if (r.value.signed_in && r.value.prf_unlocked) onSignedIn()
-    else if (r.value.signed_in) setScreen('passkey-password')
-  }, [onSignedIn])
+    if (r.value.vault_unlocked) onSignedIn()
+    else setScreen('passkey-password')
+  }, [email, onSignedIn])
 
   switch (screen) {
     case 'first-run':

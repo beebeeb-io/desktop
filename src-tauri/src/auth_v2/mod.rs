@@ -11,7 +11,6 @@
 pub(crate) mod approve;
 pub(crate) mod device;
 pub(crate) mod hello;
-pub(crate) mod passkey;
 pub(crate) mod phrase;
 pub(crate) mod qr;
 pub(crate) mod transport;

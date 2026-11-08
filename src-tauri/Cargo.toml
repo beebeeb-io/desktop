@@ -141,21 +141,21 @@ rand = "0.8"
 # workspace-relative path, so no `[patch]` is needed when built as a git dep.
 # Local-dev override belongs in a gitignored `.cargo/config.toml` (mirrors
 # repos/cli) — never commit a path patch here.
-# d72b37f9 = core PR #95 (`feat/v2-auth-flows`, v2 B10: `auth_flow`) on top of the v0.2.7 tag 124389a8; pinned by rev
-# until that release is tagged (BATCHES.md crypto rule 0).
+# b421ffff = core PR #97 (`feat/v2-account-flows`: `account_flows`) on top of #95 (`auth_flow`) and #96
+# (passkeys) on main; pinned by rev until a release is tagged (BATCHES.md crypto rule 0).
 # v2 B10: the QR code on "Sign in with another device" (DW-A07), drawn as SVG in Rust. The same crate and features
 # the CLI already ships (`repos/cli/Cargo.toml`); no default features, so no image dependencies.
 qrcode = { version = "0.14", default-features = false }
 # v2 B10: DW-A24 marks a recovery word that is not in the 2048-word list, in Rust. Already in the tree through core
 # (same 2.x version); a direct dependency only so this crate can name `Language::English`.
 bip39 = { version = "2", default-features = false, features = ["std"] }
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688" }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 # LD-0105 W0: the range session (`range_session`, `RangeLessor`) the Windows fetch callback streams through.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 # LD-0113: the backup filesystem pass (`fingerprint`, `walk_source`, `run_pass` over `BackupHost`), core v0.2.1.
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230" }
 
 # Unix-only liveness check; on Windows we currently fall back to a
 # conservative "always alive" — see lockfile.rs.
@@ -192,6 +192,8 @@ windows = { version = "0.58", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
+    # v2 B15: webauthn.dll (passkey ceremonies with PRF), passkey_windows.rs.
+    "Win32_Networking_WindowsWebServices",
     "Win32_System_Com",
     "Win32_Security_Credentials",
     # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
@@ -337,7 +339,7 @@ json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 # LD-0105 W2: core's scripted transport (`beebeeb_transfer::test_support`), so the streaming sink's tests run real range
 # sessions with no socket. A feature only: the crate is already a dependency, so Cargo.lock is unchanged.
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "d72b37f9a5accc557683e8508d56cf3d10ffe688", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "b421ffff0b1127f10bbf6c158d61b1d0de00b230", features = ["test-support"] }
 
 # Task 1683 slice 2: `tauri::test::mock_app` runs the real `popover_snapshot` command, the
 # real status listener and the real status pulse against a mock runtime. A feature only (no new

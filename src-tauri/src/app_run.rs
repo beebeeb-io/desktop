@@ -37,9 +37,11 @@ pub fn run() {
         // registry key on Windows, .desktop file on Linux
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
+            drive_v2::drive_list, drive_v2::drive_details, drive_v2::drive_thumbnail, drive_v2::drive_versions, drive_v2::drive_search, drive_v2::drive_recent, drive_v2::drive_shared, drive_v2::drive_photos, drive_v2::drive_trash, drive_v2::drive_storage, drive_v2::drive_sync_summary, drive_v2::drive_create_folder, drive_v2::drive_rename, drive_v2::drive_move, drive_v2::drive_duplicate, drive_v2::drive_trash_items, drive_v2::drive_undo_trash, drive_v2::drive_restore_from_trash, drive_v2::drive_upload_pick, drive_v2::drive_upload_dropped, drive_v2::drive_open, drive_v2::drive_read_text, drive_v2::drive_save_text, drive_v2::drive_read_bytes, drive_v2::drive_save_bytes, drive_v2::drive_reveal, // v2 b02
             app_version,
             crate::v2_snap::v2_set_maximize_rect, // v2 b03
-            crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::passkey::auth_passkey_sign_in, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
+            crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
+            crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
             consume_main_navigation,
             set_pending_setup,
             pending_setup,

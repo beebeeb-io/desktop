@@ -1,7 +1,7 @@
-// Owned by batch B04 (design/desktop-v2/BATCHES.md). Replace the placeholder with the section.
+// Backups (DW-0422 to DW-0425): every device's backup and every Beebeeb service, in one protected folder. Owned by batch B04.
 import type { SectionProps } from '../types'
-import { Placeholder } from '../Placeholder'
+import { FolderView } from '../files/FolderView'
 
-export default function Section(_props: SectionProps) {
-  return <Placeholder title="Backups" batch="B04" frames="DW-0420 to DW-0429" />
+export default function Section({ nav }: SectionProps) {
+  return <FolderView nav={nav} mode="backups" />
 }

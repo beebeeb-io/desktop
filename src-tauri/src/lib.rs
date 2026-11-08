@@ -224,6 +224,9 @@ mod file_open_commands;
 use file_open_commands::*;
 pub(crate) use file_open_commands::{reject_unsafe_rel_path, is_contained, FreeUpSpaceResult, free_up_space_blocking};
 mod settings_commands;
+mod passkey_commands; // v2 b15
+#[cfg(target_os = "windows")]
+mod passkey_windows; // v2 b15
 use settings_commands::*;
 // Task 2409: the "Not sent" list and its Try again.
 mod unsent_changes_commands;
@@ -231,6 +234,8 @@ use unsent_changes_commands::*;
 mod vault_tree;
 use vault_tree::*;
 mod account_commands;
+// Desktop v2 (B02): the `drive_*` commands behind the window's DriveSource.
+mod drive_v2;
 use account_commands::*;
 mod activity_conflict_commands;
 use activity_conflict_commands::*;
