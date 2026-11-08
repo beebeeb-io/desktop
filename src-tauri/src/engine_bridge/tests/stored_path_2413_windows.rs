@@ -73,6 +73,53 @@ fn task_2413_windows_the_placeholder_pass_never_makes_a_folder_outside_the_sync_
     assert!(!made.exists(), "no folder outside the sync folder");
 }
 
+/// A junction made inside the sync folder under a server folder's name: `root\Plans` reaches `outside`.
+fn plans_junction(f: &Folders) -> PathBuf {
+    let link = f.root.join("Plans");
+    f.junction(&link);
+    link
+}
+
+/// A remote delete of a server folder `Plans` and its file, where `Plans` on disk is a junction to `outside`: nothing
+/// is removed through it (not the target's file, not its Office owner file), and the junction stays as it is.
+#[test]
+fn task_2413_windows_a_remote_delete_through_a_junction_leaves_its_target() {
+    let f = Folders::new();
+    let link = plans_junction(&f);
+    let bridge = test_bridge(&f.root.parent().unwrap().join("state.db"));
+    let folder = "a1320000-0000-4000-8000-000000000001";
+    let file = "a1320000-0000-4000-8000-000000000002";
+    seed_bridge_entry(&bridge, folder, "Plans", None, FileStatus::CloudOnly, true, 0);
+    seed_bridge_entry(&bridge, file, "Plans/precious.txt", Some(folder), FileStatus::Local, false, 13);
+    let rows = bridge.db().mark_subtree_trashing(folder).unwrap();
+    assert_eq!(rows.len(), 2);
+    for local in [LocalEntry::InSync, LocalEntry::WhollyLocal] {
+        remove_pruned_entries(bridge.db(), &f.root, &rows, &|_, _| local);
+        f.outside_untouched();
+    }
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the junction is left as it is");
+    std::fs::remove_dir(&link).unwrap();
+}
+
+/// The placeholder pass over rows below `Plans`, where `Plans` on disk is a junction to `outside`: no folder is made
+/// through it, and nothing is created there.
+#[test]
+fn task_2413_windows_the_placeholder_pass_makes_no_folder_through_a_junction() {
+    let f = Folders::new();
+    let link = plans_junction(&f);
+    let bridge = test_bridge(&f.root.parent().unwrap().join("state.db"));
+    seed_bridge_entry(&bridge, "a1330000-0000-4000-8000-000000000001", "Plans/sub/f.txt", None, FileStatus::CloudOnly, false, 10);
+    seed_bridge_entry(&bridge, "a1330000-0000-4000-8000-000000000002", "Plans/g.txt", None, FileStatus::CloudOnly, false, 10);
+    crate::windows_cf::restore_placeholders(bridge.db(), &f.root);
+    assert!(!f.outside.join("sub").exists(), "no folder made through the junction");
+    let mut there: Vec<String> =
+        std::fs::read_dir(&f.outside).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    there.sort();
+    assert_eq!(there, ["precious.txt", "~$ecious.txt"], "nothing created through the junction");
+    f.outside_untouched();
+    std::fs::remove_dir(&link).unwrap();
+}
+
 #[test]
 fn task_2413_windows_the_hydrate_writer_never_writes_through_a_junction() {
     let f = Folders::new();
@@ -97,7 +144,8 @@ fn task_2413_windows_the_hydrate_writer_never_writes_through_a_junction() {
 }
 
 /// The store, with this build's Windows rules: a reserved name, a `:`, a trailing dot and a `\` are never stored; a
-/// long CJK name Windows holds (100 UTF-16 units, 300 bytes) is.
+/// long name Windows holds is (100 CJK characters; a CJK title broken by spaces; 80 emoji; exactly 255 UTF-16 units),
+/// and 256 units is not.
 #[test]
 fn task_2413_windows_the_store_refuses_names_windows_cannot_hold() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,9 +168,20 @@ fn task_2413_windows_the_store_refuses_names_windows_cannot_hold() {
         assert!(entry.is_none(), "{name:?}");
         assert!(db.get_file(&id).unwrap().is_none(), "{name:?}");
     }
-    let long = "漢".repeat(100);
-    let row = serde_json::json!({ "id": "a1310000-0000-4000-8000-0000000000ff", "name_encrypted": long, "size_bytes": 1 });
+    let held = [
+        "漢".repeat(100),
+        format!("{}報告", "第三四半期 計画 ".repeat(11)),
+        "😀".repeat(80),
+        format!("{}a", "😀".repeat(127)),
+    ];
+    for (n, long) in held.iter().enumerate() {
+        let id = format!("a1310000-0000-4000-8000-0000000001{n:02}");
+        let row = serde_json::json!({ "id": id, "name_encrypted": long, "size_bytes": 1 });
+        let entry = apply_metadata_file_row(&db, &row, Namespace::MyFiles, None, None, PERMISSION_READ, 100, &[7u8; 32], "docs");
+        assert_eq!(entry.unwrap().map(|e| e.path), Some(format!("docs/{long}")), "{} UTF-16 units", long.encode_utf16().count());
+        assert!(crate::engine_bridge::local_file_path_under_sync_root(dir.path(), &format!("docs/{long}")).is_ok());
+    }
+    let row = serde_json::json!({ "id": "a1310000-0000-4000-8000-0000000002ff", "name_encrypted": "😀".repeat(128), "size_bytes": 1 });
     let entry = apply_metadata_file_row(&db, &row, Namespace::MyFiles, None, None, PERMISSION_READ, 100, &[7u8; 32], "docs");
-    assert_eq!(entry.unwrap().unwrap().path, format!("docs/{long}"));
-    assert!(crate::engine_bridge::local_file_path_under_sync_root(dir.path(), &format!("docs/{long}")).is_ok());
+    assert!(entry.unwrap().is_none(), "256 UTF-16 units");
 }

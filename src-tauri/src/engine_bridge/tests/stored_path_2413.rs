@@ -100,6 +100,46 @@ fn task_2413_an_own_row_whose_name_is_not_one_plain_name_is_never_stored() {
     assert!(apply_own(&db, &row("a0000000-0000-4000-8000-0000000000fc", "trailing ", true, false), "docs").is_none());
 }
 
+/// Windows and macOS hold a name of up to 255 UTF-16 units, however many bytes it takes: a CJK title broken by spaces
+/// or by `、`, 80 emoji, exactly 255 units. Such a row is stored, and its path maps onto the sync folder; 256 units is
+/// refused. Linux holds 255 bytes, so there only the Windows rules store them.
+#[test]
+fn task_2413_a_long_name_the_host_holds_is_stored() {
+    let held = [
+        format!("{}報告", "第三四半期 計画 ".repeat(11)), // 101 UTF-16 units, 259 bytes
+        "東京、大阪、".repeat(17),                       // 102 units, 306 bytes
+        "😀".repeat(80),                                 // 160 units, 320 bytes
+        format!("{}a", "😀".repeat(127)),                // 255 units, 509 bytes
+        "漢".repeat(255),                                // 255 units, 765 bytes
+    ];
+    let too_long = ["😀".repeat(128), format!("{}a", "漢".repeat(255))]; // 256 units each
+    let root = tempfile::tempdir().unwrap();
+    let mut checked = 0;
+    for windows in [true, false] {
+        let _rules = HostRules::windows(windows);
+        // Without the Windows rules the build's own length applies: macOS counts UTF-16 units too, Linux bytes.
+        let holds = windows || cfg!(target_os = "macos");
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for (n, name) in held.iter().enumerate() {
+            let id = format!("a2000000-0000-4000-8000-{:02}{n:010}", u8::from(windows));
+            let entry = apply_own(&db, &row(&id, name, false, false), "docs");
+            let at = (name.encode_utf16().count(), name.len());
+            assert_eq!(entry.map(|e| e.path), holds.then(|| format!("docs/{name}")), "{at:?} (units, bytes), Windows rules: {windows}");
+            let mapped = crate::engine_bridge::local_file_path_under_sync_root(root.path(), &format!("docs/{name}"));
+            assert_eq!(mapped.is_ok(), holds, "{at:?} (units, bytes) onto the sync folder, Windows rules: {windows}");
+            checked += 1;
+        }
+        for (n, name) in too_long.iter().enumerate() {
+            let id = format!("a2100000-0000-4000-8000-{:02}{n:010}", u8::from(windows));
+            assert!(apply_own(&db, &row(&id, name, false, false), "docs").is_none(), "256 units, Windows rules: {windows}");
+            assert!(db.get_file(&id).unwrap().is_none());
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2 * (5 + 2));
+}
+
 /// Without the Windows rules (Linux, macOS) the names that are ordinary file names there are kept as they are, so
 /// they keep round-tripping; the names that are not one name anywhere are refused.
 #[test]
@@ -187,7 +227,8 @@ fn task_2413_a_refused_update_leaves_the_stored_row_as_it_was_and_unpruned() {
 }
 
 /// The rows of a folder the store refused are not placed either: not under it, and never at the top level. A child
-/// created by an op under it waits for the snapshot instead of landing at the top level.
+/// created by an op under it waits for the snapshot instead of landing at the top level. Renamed to a name this host
+/// holds, the folder asks for the snapshot, which places it with its rows.
 #[test]
 fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level() {
     let _rules = HostRules::windows(true);
@@ -202,7 +243,7 @@ fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level()
     grandchild_row["parent_id"] = serde_json::json!(child);
     let snapshot = crate::api_client::SyncSnapshot {
         seq_id: 9,
-        nodes: vec![grandchild_row, child_row, row(folder, "CON", false, true)],
+        nodes: vec![grandchild_row.clone(), child_row.clone(), row(folder, "CON", false, true)],
     };
     apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut Vec::new()).unwrap();
     for id in [folder, child, grandchild] {
@@ -237,11 +278,138 @@ fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level()
     assert!(apply_op(child_create(12, orphan, "e0000000-0000-4000-8000-0000000000ff")).is_empty());
     assert!(bridge.db().get_file(orphan).unwrap().is_none(), "not at the top level either");
     assert!(take_resnapshot(), "a parent never seen: the snapshot will place it");
-    // Renamed to a name this host holds, the folder is stored, and asks once for the snapshot that places its rows.
+    // Renamed to a name this host holds, the folder is still not placed by the rename (it names no parent), which asks
+    // for the snapshot that places it, and its rows under it.
     let applied = apply_op(op(13, "folder_rename", serde_json::json!({ "id": folder, "new_name_encrypted": "Plans" })));
-    assert_eq!(applied, [folder.to_string()]);
-    assert_eq!(bridge.db().get_file(folder).unwrap().unwrap().path, "Plans");
-    assert!(take_resnapshot(), "the folder's rows are placed by the next snapshot");
+    assert!(applied.is_empty(), "{applied:?}");
+    assert!(bridge.db().get_file(folder).unwrap().is_none());
+    assert!(take_resnapshot(), "the snapshot places the renamed folder");
+    let snapshot = crate::api_client::SyncSnapshot {
+        seq_id: 14,
+        nodes: vec![grandchild_row, child_row, row(folder, "Plans", false, true)],
+    };
+    apply_snapshot(&bridge, dir.path(), &snapshot, 300, 300, &mut Vec::new()).unwrap();
+    for (id, path) in [(folder, "Plans"), (child, "Plans/inner"), (grandchild, "Plans/inner/a.txt")] {
+        assert_eq!(bridge.db().get_file(id).unwrap().map(|row| row.path).as_deref(), Some(path));
+    }
+}
+
+fn sync_op(seq_id: i64, op_type: &str, payload: serde_json::Value) -> crate::api_client::SyncOp {
+    crate::api_client::SyncOp { seq_id, op_type: op_type.into(), payload }
+}
+
+/// Read and clear a pending re-snapshot request (the same calls on every platform).
+fn take_resnapshot(bridge: &EngineBridge) -> bool {
+    match bridge.db().peek_resnapshot_request().unwrap() {
+        Some(seen) => bridge.db().clear_resnapshot_request(seen).unwrap(),
+        None => false,
+    }
+}
+
+/// A row the store refused and never held has no stored path to keep a parent from: a rename, an update (with or
+/// without a name) or a move never places it, at the top level or with an empty path. A rename, and a move into a
+/// folder this device holds, may change the store's answer, so they ask for the snapshot that places it under its
+/// parent; the others ask for nothing. A row this device misses for another reason (a refusal from before a restart is
+/// not remembered) is placed by the snapshot too.
+#[test]
+fn task_2413_a_refused_row_stays_refused_through_a_rename_an_update_and_a_move() {
+    let _rules = HostRules::windows(true);
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let docs = "e2000000-0000-4000-8000-000000000001";
+    let other = "e2000000-0000-4000-8000-000000000002";
+    let refused_folder = "e2000000-0000-4000-8000-000000000003";
+    let file = "e2000000-0000-4000-8000-000000000004";
+    seed_bridge_entry(&bridge, docs, "docs", None, FileStatus::CloudOnly, true, 0);
+    seed_bridge_entry(&bridge, other, "other", None, FileStatus::CloudOnly, true, 0);
+    let apply_op = |op: crate::api_client::SyncOp| apply_sync_op(&bridge, dir.path(), &op, 200, &mut Vec::new()).unwrap();
+    let placed = || {
+        let mut paths: Vec<String> = bridge.db().list_files().unwrap().into_iter().map(|row| row.path).collect();
+        paths.sort();
+        paths
+    };
+    let as_seeded = ["docs".to_string(), "other".to_string()];
+    assert!(apply_op(sync_op(10, "folder_create", serde_json::json!({ "id": refused_folder, "name_encrypted": "AUX" }))).is_empty());
+    let create = serde_json::json!({ "id": file, "parent_id": docs, "name_encrypted": "CON.txt", "version_number": 1, "size_bytes": 3 });
+    assert!(apply_op(sync_op(11, "file_create", create)).is_empty());
+    assert_eq!(placed(), as_seeded, "the create is refused");
+    assert!(!take_resnapshot(&bridge));
+
+    // (op, whether it asks for a re-snapshot)
+    let ops = [
+        (sync_op(12, "file_rename", serde_json::json!({ "id": file, "new_name_encrypted": "con2.txt" })), true),
+        (sync_op(13, "file_update", serde_json::json!({ "id": file, "size_bytes": 9, "version_number": 2 })), false),
+        (sync_op(14, "file_update", serde_json::json!({ "id": file, "name_encrypted": "CON.txt", "size_bytes": 9 })), false),
+        (sync_op(15, "file_move", serde_json::json!({ "id": file, "new_parent_id": other })), true),
+        (sync_op(16, "file_move", serde_json::json!({ "id": file, "new_parent_id": refused_folder })), false),
+        (sync_op(17, "file_move", serde_json::json!({ "id": file })), false),
+    ];
+    let mut checked = 0;
+    for (op, asks) in ops {
+        let label = format!("{} {}", op.op_type, op.payload);
+        assert!(apply_op(op).is_empty(), "{label}: nothing applied");
+        assert_eq!(placed(), as_seeded, "{label}: never placed");
+        assert!(bridge.db().get_file(file).unwrap().is_none(), "{label}: no row, not even one with an empty path");
+        assert_eq!(take_resnapshot(&bridge), asks, "{label}: re-snapshot");
+        checked += 1;
+    }
+    assert_eq!(checked, 6);
+
+    // A row this device never saw (or refused before a restart): never placed by these ops either; the snapshot is.
+    let missed = "e2000000-0000-4000-8000-000000000005";
+    for (n, op) in [
+        sync_op(20, "file_rename", serde_json::json!({ "id": missed, "new_name_encrypted": "late.txt" })),
+        sync_op(21, "file_update", serde_json::json!({ "id": missed, "name_encrypted": "late.txt", "size_bytes": 4 })),
+        sync_op(22, "file_update", serde_json::json!({ "id": missed, "size_bytes": 4 })),
+        sync_op(23, "file_move", serde_json::json!({ "id": missed })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(apply_op(op).is_empty(), "op {n}");
+        assert_eq!(placed(), as_seeded, "op {n}: never placed");
+        assert!(take_resnapshot(&bridge), "op {n}: the snapshot places it");
+    }
+}
+
+/// The rows below a refused folder are recorded as refused too (by the snapshot, and by an op under a refused folder),
+/// so an op under any of them waits without asking for a re-snapshot: the snapshot it would ask for skips them again.
+#[test]
+fn task_2413_ops_below_a_refused_folder_ask_for_no_resnapshot() {
+    let _rules = HostRules::windows(true);
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge(&dir.path().join("state.db"));
+    let folder = "e3000000-0000-4000-8000-000000000001";
+    let sub = "e3000000-0000-4000-8000-000000000002";
+    let mut sub_row = row(sub, "sub", false, true);
+    sub_row["parent_id"] = serde_json::json!(folder);
+    let snapshot = crate::api_client::SyncSnapshot { seq_id: 9, nodes: vec![sub_row, row(folder, "CON", false, true)] };
+    apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut Vec::new()).unwrap();
+    assert!(bridge.db().list_files().unwrap().is_empty());
+    take_resnapshot(&bridge);
+    let apply_op = |op: crate::api_client::SyncOp| apply_sync_op(&bridge, dir.path(), &op, 200, &mut Vec::new()).unwrap();
+    let file_create = |seq_id: i64, id: &str, parent: &str| {
+        sync_op(seq_id, "file_create", serde_json::json!({
+            "id": id, "parent_id": parent, "name_encrypted": "a.txt", "version_number": 1, "size_bytes": 3,
+        }))
+    };
+    let deeper = "e3000000-0000-4000-8000-000000000010";
+    let ops = [
+        file_create(10, "e3000000-0000-4000-8000-000000000011", sub),
+        file_create(11, "e3000000-0000-4000-8000-000000000012", sub),
+        sync_op(12, "folder_create", serde_json::json!({ "id": deeper, "parent_id": sub, "name_encrypted": "deeper" })),
+        file_create(13, "e3000000-0000-4000-8000-000000000013", deeper),
+        file_create(14, "e3000000-0000-4000-8000-000000000014", deeper),
+    ];
+    let mut asked = Vec::new();
+    for (n, op) in ops.into_iter().enumerate() {
+        assert!(apply_op(op).is_empty(), "op {n}");
+        assert!(bridge.db().list_files().unwrap().is_empty(), "op {n}: not placed");
+        if take_resnapshot(&bridge) {
+            asked.push(n);
+        }
+    }
+    assert_eq!(asked, Vec::<usize>::new(), "the ops (of 5) that asked for a re-snapshot");
 }
 
 /// A refused rename of a stored folder changes nothing, reports nothing as applied, and leaves its rows in place.
