@@ -230,6 +230,8 @@ use unsent_changes_commands::*;
 mod vault_tree;
 use vault_tree::*;
 mod account_commands;
+// Desktop v2 (B02): the `drive_*` commands behind the window's DriveSource.
+mod drive_v2;
 use account_commands::*;
 mod activity_conflict_commands;
 use activity_conflict_commands::*;
