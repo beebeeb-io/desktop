@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react'
 
-export type PaneId = 'general' | 'about' | 'account' | 'security' | 'devices' | 'notifications' | 'storage' | 'backups' | 'sync' | 'thumbnails' | 'compare' | 'backup-failures' | 'device'
+export type PaneId = 'general' | 'about' | 'account' | 'security' | 'devices' | 'notifications' | 'storage' | 'backups' | 'sync' | 'thumbnails' | 'compare' | 'backup-failures' | 'device' | 'bandwidth' | 'insights' | 'recent' | 'location' | 'diagnostics'
 export interface SettingsCtx {
   pane: PaneId
   go: (pane: PaneId) => void
