@@ -218,6 +218,11 @@ fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level()
         payload,
     };
     let apply_op = |op: crate::api_client::SyncOp| apply_sync_op(&bridge, dir.path(), &op, 200, &mut Vec::new()).unwrap();
+    // Read and clear a pending re-snapshot request (the same calls on every platform).
+    let take_resnapshot = || match bridge.db().peek_resnapshot_request().unwrap() {
+        Some(seen) => bridge.db().clear_resnapshot_request(seen).unwrap(),
+        None => false,
+    };
     let applied = apply_op(op(10, "folder_create", serde_json::json!({ "id": folder, "name_encrypted": "CON" })));
     assert!(applied.is_empty(), "{applied:?}");
     let child_create = |seq_id: i64, id: &str, parent: &str| {
@@ -231,12 +236,12 @@ fn task_2413_rows_under_a_refused_new_folder_are_never_placed_at_the_top_level()
     let orphan = "e0000000-0000-4000-8000-000000000004";
     assert!(apply_op(child_create(12, orphan, "e0000000-0000-4000-8000-0000000000ff")).is_empty());
     assert!(bridge.db().get_file(orphan).unwrap().is_none(), "not at the top level either");
-    assert!(bridge.db().take_needs_resnapshot().unwrap(), "a parent never seen: the snapshot will place it");
+    assert!(take_resnapshot(), "a parent never seen: the snapshot will place it");
     // Renamed to a name this host holds, the folder is stored, and asks once for the snapshot that places its rows.
     let applied = apply_op(op(13, "folder_rename", serde_json::json!({ "id": folder, "new_name_encrypted": "Plans" })));
     assert_eq!(applied, [folder.to_string()]);
     assert_eq!(bridge.db().get_file(folder).unwrap().unwrap().path, "Plans");
-    assert!(bridge.db().take_needs_resnapshot().unwrap(), "the folder's rows are placed by the next snapshot");
+    assert!(take_resnapshot(), "the folder's rows are placed by the next snapshot");
 }
 
 /// A refused rename of a stored folder changes nothing, reports nothing as applied, and leaves its rows in place.
