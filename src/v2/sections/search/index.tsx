@@ -1,4 +1,4 @@
-// Search, live: DriveSource.search over the list on this PC, with each hit's folder from details().path. Recent
+// Search, live: DriveSource.search over the list on this PC, with every hit's folder path in one drive_paths call (B02b). Recent
 // searches stay on this PC (localStorage) and Clear removes them. Esc goes back to the view you came from.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDriveSource, type DriveItem } from '@beebeeb/shared/drive-ui'
@@ -7,10 +7,11 @@ import { Menu, type MenuEntry } from '../files/ui'
 import { fileMenu } from '../files/menus'
 import { showToast } from '../../chrome/Toast'
 import { SearchView, type Pill, type SearchHit } from './SearchView'
+import { useDriveExtras } from '../../source/extras'
 
 const RECENT_KEY = 'bb.v2.search.recent'
 const MAX_RECENT = 8
-const MAX_WHERE = 40
+const MAX_WHERE = 500
 
 function loadRecent(): string[] {
   try { const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]'); return Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, MAX_RECENT) : [] } catch { return [] }
@@ -24,6 +25,7 @@ export function searchMenu(item: DriveItem): MenuEntry[] {
 
 export default function Section({ nav }: SectionProps) {
   const source = useDriveSource()
+  const extras = useDriveExtras()
   const [query, setQuery] = useState(nav.route.sub ?? '')
   const [pill, setPill] = useState<Pill>('All')
   const [hits, setHits] = useState<SearchHit[]>([])
@@ -31,6 +33,9 @@ export default function Section({ nav }: SectionProps) {
   const [menu, setMenu] = useState<{ item: DriveItem; x: number; y: number } | null>(null)
   const seq = useRef(0)
   const now = useMemo(() => new Date(), [])
+  // The first sign-in's list check (B02b drive_status.listing): results may be incomplete while it runs.
+  const [loading, setLoading] = useState<{ done: number; total: number } | undefined>(undefined)
+  useEffect(() => { extras.status().then((s) => setLoading(s.listing), () => setLoading(undefined)) }, [extras, query])
 
   useEffect(() => {
     const q = query.trim()
@@ -41,11 +46,11 @@ export default function Section({ nav }: SectionProps) {
       if (mine !== seq.current) return
       setHits(items.map((item) => ({ item, where: '' })))
       // Where each one is: the folder path the list on this PC already has.
-      const wheres = await Promise.all(items.slice(0, MAX_WHERE).map((i) => source.details(i.id).then((d) => d.path.slice(0, -1).map((c) => c.name).filter(Boolean).join(' › ') || 'Files', () => '')))
+      const wheres = await extras.paths(items.slice(0, MAX_WHERE).map((i) => i.id)).catch(() => ({} as Record<string, string>))
       if (mine !== seq.current) return
-      setHits(items.map((item, i) => ({ item, where: wheres[i] ?? '' })))
+      setHits(items.map((item) => ({ item, where: wheres[item.id] ?? '' })))
     })()
-  }, [query, source])
+  }, [query, source, extras])
 
   const remember = (q: string) => {
     const t = q.trim()
@@ -71,7 +76,7 @@ export default function Section({ nav }: SectionProps) {
   return (
     <>
       <SearchView
-        query={query} hits={hits} pill={pill} recent={recent} now={now} menuOn={menu?.item.id}
+        query={query} hits={hits} pill={pill} recent={recent} now={now} menuOn={menu?.item.id} loading={loading}
         onQuery={setQuery} onPill={setPill} onOpen={open}
         onContext={(item, x, y) => setMenu({ item, x, y })}
         onClearRecent={() => { setRecent([]); saveRecent([]) }}

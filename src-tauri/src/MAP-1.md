@@ -10,7 +10,7 @@ Modules 1–45, sorted by path.
 | `account_binding.rs` | Ruling R10 (spec 2026-10-06 §5.6): the local data on this computer belongs to the account that created it, and a different account never reu | — |
 | `account_binding_tests.rs` | (no //! header) | — |
 | `account_commands.rs` | `account_commands` items split out of `lib.rs`. | — |
-| `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountProfile (9), Subscription (18), BillingUsage (3), AccountAccess (1), UserRegionResponse (4), SetPreferredRegionResponse (2), AccountActivity (2), SecurityScore (4), AccountSessionList (1), RevokeAllResult (1), ClientDeviceList (1), ClientSyncSessionList (1), … (+16 more) |
+| `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountProfile (9), Subscription (19), BillingUsage (3), AccountAccess (1), UserRegionResponse (4), SetPreferredRegionResponse (2), AccountActivity (2), SecurityScore (4), AccountSessionList (1), RevokeAllResult (1), ClientDeviceList (1), ClientSyncSessionList (1), … (+16 more) |
 | `activity_conflict_commands.rs` | `activity_conflict_commands` items split out of `lib.rs`. | — |
 | `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | DesktopApiError (8), Listing (2), FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, VersionId, ListFilesScope (4), SyncSnapshot (2), SyncOp (3), SyncOps (3), … (+18 more) |
 | `app_run.rs` | `app_run` items split out of `lib.rs`. | — |

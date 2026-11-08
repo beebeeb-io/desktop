@@ -122,3 +122,5 @@ export const FIXTURE_BACKUP_CODES = ['48201937', '75530218', '19087346', '633180
 
 /** DW-A82: 72 hours after the link was used. */
 export const FIXTURE_SHRED_AFTER = '2026-11-08T19:42:00Z'
+/** Server #422: the delete link works for 30 minutes after it is sent (DW-A81). */
+export const FIXTURE_LINK_EXPIRES_AT = '2026-11-05T20:12:00Z'

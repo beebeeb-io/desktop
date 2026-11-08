@@ -31,7 +31,8 @@ pub(crate) fn now_iso() -> String {
 
 /// The display name of a row: its path's leaf, or the stable id label the rest of the app uses.
 pub(crate) fn leaf_name(entry: &FileEntry) -> String {
-    crate::vault_tree::folder_leaf_name(&entry.path).unwrap_or_else(|| crate::vault_tree::folder_fallback_label(&entry.file_id))
+    crate::vault_tree::folder_leaf_name(&entry.path)
+        .unwrap_or_else(|| crate::vault_tree::folder_fallback_label(&entry.file_id))
 }
 
 fn extension(name: &str) -> Option<String> {
@@ -124,15 +125,28 @@ fn is_pinned(contract: Option<&FileContractState>) -> bool {
 }
 
 /// One row as the window shows it.
-pub(crate) fn item_from(entry: &FileEntry, contract: Option<&FileContractState>, child_count: Option<i64>) -> DriveItem {
+pub(crate) fn item_from(
+    entry: &FileEntry,
+    contract: Option<&FileContractState>,
+    child_count: Option<i64>,
+) -> DriveItem {
     let name = leaf_name(entry);
     let is_folder = entry.is_dir();
     let shared_with_me = contract.is_some_and(|c| c.namespace == Namespace::SharedWithMe);
-    let shared = match contract.and_then(|c| c.owner_email.as_deref()).filter(|_| shared_with_me) {
-        Some(owner) => SharedState::People { people: vec![Person { name: owner.to_string(), initials: initials(owner) }] },
+    let shared = match contract
+        .and_then(|c| c.owner_email.as_deref())
+        .filter(|_| shared_with_me)
+    {
+        Some(owner) => SharedState::People {
+            people: vec![Person {
+                name: owner.to_string(),
+                initials: initials(owner),
+            }],
+        },
         None => SharedState::None,
     };
-    let read_only = (shared_with_me && contract.is_some_and(|c| c.permission_bits & state_db::PERMISSION_WRITE == 0)).then_some(true);
+    let read_only = (shared_with_me && contract.is_some_and(|c| c.permission_bits & state_db::PERMISSION_WRITE == 0))
+        .then_some(true);
     let mime = if is_folder {
         None
     } else {
@@ -160,7 +174,11 @@ pub(crate) fn item_from(entry: &FileEntry, contract: Option<&FileContractState>,
 /// An item read fresh for one id (contract and child count included).
 pub(crate) fn item_for_entry(db: &StateDb, entry: &FileEntry) -> Result<DriveItem, DriveError> {
     let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
-    let count = if entry.is_dir() { Some(db.child_item_count(&entry.file_id).map_err(DriveError::db)?) } else { None };
+    let count = if entry.is_dir() {
+        Some(db.child_item_count(&entry.file_id).map_err(DriveError::db)?)
+    } else {
+        None
+    };
     Ok(item_from(entry, contract.as_ref(), count))
 }
 
@@ -171,7 +189,9 @@ pub(crate) fn resolve(db: &StateDb, id: &str) -> Result<FileEntry, DriveError> {
         Some(path) => db.get_file_by_path(path).map_err(DriveError::db)?,
         None => db.get_file(id).map_err(DriveError::db)?,
     };
-    found.filter(|e| e.status != FileStatus::Trashing).ok_or(DriveError::NotFound)
+    found
+        .filter(|e| e.status != FileStatus::Trashing)
+        .ok_or(DriveError::NotFound)
 }
 
 pub(crate) fn resolve_folder(db: &StateDb, id: Option<&str>) -> Result<Option<FileEntry>, DriveError> {
@@ -179,7 +199,11 @@ pub(crate) fn resolve_folder(db: &StateDb, id: Option<&str>) -> Result<Option<Fi
         None => Ok(None),
         Some(id) => {
             let entry = resolve(db, id)?;
-            if entry.is_dir() { Ok(Some(entry)) } else { Err(DriveError::NotFound) }
+            if entry.is_dir() {
+                Ok(Some(entry))
+            } else {
+                Err(DriveError::NotFound)
+            }
         }
     }
 }
@@ -211,7 +235,11 @@ pub(crate) struct Sort {
 }
 
 fn by_name(a: &DriveItem, b: &DriveItem) -> Ordering {
-    a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)).then_with(|| a.id.cmp(&b.id))
+    a.name
+        .to_lowercase()
+        .cmp(&b.name.to_lowercase())
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.id.cmp(&b.id))
 }
 
 /// Folders first, always; then the chosen key, ties by name.
@@ -228,13 +256,17 @@ pub(crate) fn sort_items(items: &mut [DriveItem], sort: Sort) {
             SortKey::Kind => extension(&a.name).cmp(&extension(&b.name)),
         };
         let ordered = key.then_with(|| by_name(a, b));
-        if sort.dir == SortDir::Desc { ordered.reverse() } else { ordered }
+        if sort.dir == SortDir::Desc {
+            ordered.reverse()
+        } else {
+            ordered
+        }
     });
 }
 
 /// Every live row (a row being trashed is gone), with one row per path and kind: a row the server
 /// never confirmed folds into the server's row at the same path, as Selective sync shows them.
-fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
+pub(crate) fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
     let rows = db.file_overview_rows().map_err(DriveError::db)?;
     let mut best: HashMap<(bool, String), FileEntry> = HashMap::new();
     let mut unkeyed = Vec::new();
@@ -276,13 +308,19 @@ pub(crate) fn crumbs(db: &StateDb, folder: Option<&FileEntry>) -> Result<Vec<Cru
         if !seen.insert(entry.file_id.clone()) || seen.len() > 256 {
             break;
         }
-        chain.push(Crumb { id: Some(entry.file_id.clone()), name: leaf_name(&entry) });
+        chain.push(Crumb {
+            id: Some(entry.file_id.clone()),
+            name: leaf_name(&entry),
+        });
         next = match entry.parent_id.as_deref() {
             Some(parent) => db.get_file(parent).map_err(DriveError::db)?,
             None => None,
         };
     }
-    chain.push(Crumb { id: None, name: ROOT_NAME.to_string() });
+    chain.push(Crumb {
+        id: None,
+        name: ROOT_NAME.to_string(),
+    });
     chain.reverse();
     Ok(chain)
 }
@@ -302,15 +340,32 @@ pub(crate) fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: boo
     for row in rows.iter().filter(|r| r.parent_id == want_parent) {
         let contract = db.get_file_contract_state(&row.file_id).map_err(DriveError::db)?;
         // Shared-with-me roots have no parent too; they are listed in Shared, not in Files.
-        if want_parent.is_none() && contract.as_ref().is_some_and(|c| c.namespace == Namespace::SharedWithMe) {
+        if want_parent.is_none()
+            && contract
+                .as_ref()
+                .is_some_and(|c| c.namespace == Namespace::SharedWithMe)
+        {
             continue;
         }
-        items.push(item_from(row, contract.as_ref(), counts.get(row.file_id.as_str()).copied().or(Some(0))));
+        items.push(item_from(
+            row,
+            contract.as_ref(),
+            counts.get(row.file_id.as_str()).copied().or(Some(0)),
+        ));
     }
     sort_items(&mut items, sort);
     let path = crumbs(db, folder.as_ref())?;
-    let folder_crumb = path.last().cloned().unwrap_or(Crumb { id: None, name: ROOT_NAME.to_string() });
-    Ok(Listing { folder: folder_crumb, path, items, as_of: now_iso(), stale })
+    let folder_crumb = path.last().cloned().unwrap_or(Crumb {
+        id: None,
+        name: ROOT_NAME.to_string(),
+    });
+    Ok(Listing {
+        folder: folder_crumb,
+        path,
+        items,
+        as_of: now_iso(),
+        stale,
+    })
 }
 
 /// `drive_details`. `versionCount` is the current version number the server recorded (the version
@@ -330,7 +385,12 @@ pub(crate) fn details(db: &StateDb, id: &str) -> Result<ItemDetails, DriveError>
             .map_err(DriveError::db)?
             .map_or(1, |c| c.current_version.max(1))
     };
-    Ok(ItemDetails { item, path, changed_on: None, version_count })
+    Ok(ItemDetails {
+        item,
+        path,
+        changed_on: None,
+        version_count,
+    })
 }
 
 /// `drive_recent`: the newest files, newest first.
@@ -338,7 +398,11 @@ pub(crate) fn recent(db: &StateDb, limit: usize) -> Result<Vec<DriveItem>, Drive
     let limit = limit.clamp(1, 200);
     let rows = db.newest_file_rows(limit + 16).map_err(DriveError::db)?;
     let mut out = Vec::new();
-    for (entry, _) in rows.into_iter().filter(|(e, _)| e.status != FileStatus::Trashing).take(limit) {
+    for (entry, _) in rows
+        .into_iter()
+        .filter(|(e, _)| e.status != FileStatus::Trashing)
+        .take(limit)
+    {
         out.push(item_for_entry(db, &entry)?);
     }
     Ok(out)
@@ -351,17 +415,25 @@ pub(crate) fn photos(db: &StateDb, cursor: Option<&str>) -> Result<PhotoPage, Dr
         None => 0,
         Some(c) => c.parse().map_err(|_| DriveError::Failed("cursor"))?,
     };
-    let mut rows: Vec<FileEntry> =
-        live_rows(db)?.into_iter().filter(|r| !r.is_dir() && is_photo_or_video(&leaf_name(r))).collect();
+    let mut rows: Vec<FileEntry> = live_rows(db)?
+        .into_iter()
+        .filter(|r| !r.is_dir() && is_photo_or_video(&leaf_name(r)))
+        .collect();
     rows.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| a.path.cmp(&b.path)));
     let total = rows.len();
     let mut entries = Vec::new();
     for entry in rows.into_iter().skip(start).take(PHOTOS_PAGE) {
         let item = item_for_entry(db, &entry)?;
-        entries.push(PhotoEntry { taken_at: item.modified_at.clone(), item });
+        entries.push(PhotoEntry {
+            taken_at: item.modified_at.clone(),
+            item,
+        });
     }
     let end = start + entries.len();
-    Ok(PhotoPage { entries, next: (end < total).then(|| end.to_string()) })
+    Ok(PhotoPage {
+        entries,
+        next: (end < total).then(|| end.to_string()),
+    })
 }
 
 /// `drive_search`: names from the local index (the quick-open index), matched rows only.
@@ -381,7 +453,11 @@ pub(crate) fn search(db: &StateDb, query: &str) -> Result<Vec<DriveItem>, DriveE
 }
 
 fn role_for_bits(bits: i64) -> ShareRole {
-    if bits & state_db::PERMISSION_WRITE != 0 { ShareRole::Editor } else { ShareRole::Viewer }
+    if bits & state_db::PERMISSION_WRITE != 0 {
+        ShareRole::Editor
+    } else {
+        ShareRole::Viewer
+    }
 }
 
 fn role_for_label(label: &str) -> ShareRole {
@@ -393,10 +469,14 @@ fn role_for_label(label: &str) -> ShareRole {
 
 /// `drive_shared`, the "with me" half: the shared roots in the mirror, each with its owner.
 pub(crate) fn shared_with_me(db: &StateDb) -> Result<Vec<ShareEntry>, DriveError> {
-    let contracts = db.list_contract_states_by_namespace(Namespace::SharedWithMe).map_err(DriveError::db)?;
+    let contracts = db
+        .list_contract_states_by_namespace(Namespace::SharedWithMe)
+        .map_err(DriveError::db)?;
     let mut out = Vec::new();
     for contract in contracts.into_iter().filter(|c| c.parent_id.is_none()) {
-        let Some(entry) = db.get_file(&contract.file_id).map_err(DriveError::db)? else { continue };
+        let Some(entry) = db.get_file(&contract.file_id).map_err(DriveError::db)? else {
+            continue;
+        };
         if entry.status == FileStatus::Trashing {
             continue;
         }
@@ -404,9 +484,18 @@ pub(crate) fn shared_with_me(db: &StateDb) -> Result<Vec<ShareEntry>, DriveError
         let people = contract
             .owner_email
             .iter()
-            .map(|owner| SharePerson { name: owner.clone(), email: Some(owner.clone()), role: role_for_bits(contract.permission_bits) })
+            .map(|owner| SharePerson {
+                name: owner.clone(),
+                email: Some(owner.clone()),
+                role: role_for_bits(contract.permission_bits),
+            })
             .collect();
-        out.push(ShareEntry { item, direction: ShareDirection::WithMe, people, has_link: false });
+        out.push(ShareEntry {
+            item,
+            direction: ShareDirection::WithMe,
+            people,
+            has_link: false,
+        });
     }
     Ok(out)
 }
@@ -415,7 +504,11 @@ pub(crate) fn shared_with_me(db: &StateDb) -> Result<Vec<ShareEntry>, DriveError
 /// the decrypted name (the invite's own name field is ciphertext and is never read here). Revoked
 /// and declined invites are left out; an item not in the mirror is left out.
 pub(crate) fn shared_by_me(db: &StateDb, sent: &serde_json::Value) -> Result<Vec<ShareEntry>, DriveError> {
-    let invites = sent.get("invites").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let invites = sent
+        .get("invites")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut order: Vec<String> = Vec::new();
     let mut people: HashMap<String, Vec<SharePerson>> = HashMap::new();
     for invite in &invites {
@@ -423,16 +516,21 @@ pub(crate) fn shared_by_me(db: &StateDb, sent: &serde_json::Value) -> Result<Vec
         if matches!(status, "revoked" | "declined" | "expired") {
             continue;
         }
-        let (Some(file_id), Some(email)) =
-            (invite.get("file_id").and_then(|v| v.as_str()), invite.get("recipient_email").and_then(|v| v.as_str()))
-        else {
+        let (Some(file_id), Some(email)) = (
+            invite.get("file_id").and_then(|v| v.as_str()),
+            invite.get("recipient_email").and_then(|v| v.as_str()),
+        ) else {
             continue;
         };
         let role = role_for_label(invite.get("permission").and_then(|v| v.as_str()).unwrap_or(""));
         if !people.contains_key(file_id) {
             order.push(file_id.to_string());
         }
-        people.entry(file_id.to_string()).or_default().push(SharePerson { name: email.to_string(), email: Some(email.to_string()), role });
+        people.entry(file_id.to_string()).or_default().push(SharePerson {
+            name: email.to_string(),
+            email: Some(email.to_string()),
+            role,
+        });
     }
     let mut out = Vec::new();
     for file_id in order {
@@ -440,9 +538,20 @@ pub(crate) fn shared_by_me(db: &StateDb, sent: &serde_json::Value) -> Result<Vec
         let mut item = item_for_entry(db, &entry)?;
         let list = people.remove(&file_id).unwrap_or_default();
         item.shared = SharedState::People {
-            people: list.iter().map(|p| Person { name: p.name.clone(), initials: initials(&p.name) }).collect(),
+            people: list
+                .iter()
+                .map(|p| Person {
+                    name: p.name.clone(),
+                    initials: initials(&p.name),
+                })
+                .collect(),
         };
-        out.push(ShareEntry { item, direction: ShareDirection::ByMe, people: list, has_link: false });
+        out.push(ShareEntry {
+            item,
+            direction: ShareDirection::ByMe,
+            people: list,
+            has_link: false,
+        });
     }
     Ok(out)
 }
@@ -451,14 +560,19 @@ pub(crate) fn shared_by_me(db: &StateDb, sent: &serde_json::Value) -> Result<Vec
 pub(crate) fn trash_entries(db: Option<&StateDb>, raw: Vec<crate::account_dto::DesktopTrashItem>) -> Vec<TrashEntry> {
     raw.into_iter()
         .map(|t| {
-            let parent = t.parent_id.as_deref().and_then(|p| db.and_then(|db| db.get_file(p).ok().flatten()));
+            let parent = t
+                .parent_id
+                .as_deref()
+                .and_then(|p| db.and_then(|db| db.get_file(p).ok().flatten()));
             let original_path = match &parent {
                 Some(p) if !p.path.trim_matches('/').is_empty() => format!("{ROOT_NAME}/{}", p.path.trim_matches('/')),
                 _ => ROOT_NAME.to_string(),
             };
             let item = DriveItem {
                 has_thumbnail: !t.is_folder && has_thumbnail(&t.name),
-                mime: (!t.is_folder).then(|| mime_for_name(&t.name).map(str::to_string)).flatten(),
+                mime: (!t.is_folder)
+                    .then(|| mime_for_name(&t.name).map(str::to_string))
+                    .flatten(),
                 id: t.id,
                 parent_id: t.parent_id,
                 is_folder: t.is_folder,
@@ -470,14 +584,21 @@ pub(crate) fn trash_entries(db: Option<&StateDb>, raw: Vec<crate::account_dto::D
                 read_only: None,
                 name: t.name,
             };
-            TrashEntry { item, trashed_at: t.updated_at, original_path }
+            TrashEntry {
+                item,
+                trashed_at: t.updated_at,
+                original_path,
+            }
         })
         .collect()
 }
 
 /// `drive_versions`: the server's version list (`list_file_versions`'s payload) as the window shows it.
 pub(crate) fn versions_from_payload(body: &serde_json::Value) -> Result<Vec<VersionEntry>, DriveError> {
-    let list = body.get("versions").and_then(|v| v.as_array()).ok_or(DriveError::Failed("versions"))?;
+    let list = body
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .ok_or(DriveError::Failed("versions"))?;
     let current = body.get("current_version").and_then(|v| v.as_i64());
     let mut out: Vec<VersionEntry> = list
         .iter()
@@ -486,7 +607,11 @@ pub(crate) fn versions_from_payload(body: &serde_json::Value) -> Result<Vec<Vers
             let number = v.get("version_number").and_then(|x| x.as_i64());
             Some(VersionEntry {
                 id,
-                created_at: v.get("created_at").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                created_at: v
+                    .get("created_at")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 size: v.get("size_bytes").and_then(|x| x.as_i64()).unwrap_or(0),
                 current: number.is_some() && number == current,
             })
@@ -549,7 +674,11 @@ pub(crate) fn sync_counts(db: &StateDb) -> SyncCounts {
 /// after a change.
 pub(crate) fn available_offline_count(db: &StateDb) -> u32 {
     db.file_overview_rows()
-        .map(|rows| rows.iter().filter(|(e, pinned)| *pinned && e.item_kind == ItemKind::File).count() as u32)
+        .map(|rows| {
+            rows.iter()
+                .filter(|(e, pinned)| *pinned && e.item_kind == ItemKind::File)
+                .count() as u32
+        })
         .unwrap_or(0)
 }
 

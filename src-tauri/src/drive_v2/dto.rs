@@ -29,7 +29,9 @@ pub(crate) enum SharedState {
     None,
     #[allow(dead_code)] // links are listed by B05's share commands; the local mirror does not know them
     Link,
-    People { people: Vec<Person> },
+    People {
+        people: Vec<Person>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -196,12 +198,22 @@ pub(crate) struct TextDocument {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub(crate) enum DriveEvent {
     #[serde(rename_all = "camelCase")]
-    Changed { folder_id: Option<String> },
+    Changed {
+        folder_id: Option<String>,
+    },
     #[allow(dead_code)] // part of the contract; the poller sends `changed` and `sync`
-    Item { item: DriveItem },
+    Item {
+        item: DriveItem,
+    },
     #[allow(dead_code)]
-    Removed { id: String },
-    Sync { sync: SyncSummary },
+    Removed {
+        id: String,
+    },
+    Sync {
+        sync: SyncSummary,
+    },
     #[allow(dead_code)]
-    Storage { storage: StorageSummary },
+    Storage {
+        storage: StorageSummary,
+    },
 }

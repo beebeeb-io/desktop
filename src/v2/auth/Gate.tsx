@@ -10,14 +10,16 @@ import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
+import { usePrivateScreen } from './privateScreen'
 
 type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
-/** No plan yet: the server's subscription has no plan or no quota. */
-export function hasNoPlan(sub: { plan?: string | null; status?: string | null; quota_bytes?: number | null } | null): boolean {
+/** No plan yet: the server's `plan_state` (server #422) says `none`. An older server without it: no plan or no quota. */
+export function hasNoPlan(sub: { plan_state?: string | null; plan?: string | null; status?: string | null; quota_bytes?: number | null } | null): boolean {
   if (!sub) return false
+  if (sub.plan_state) return sub.plan_state === 'none'
   const plan = (sub.plan ?? '').toLowerCase()
   return plan === '' || plan === 'none' || (sub.status ?? '').toLowerCase() === 'none' || (sub.quota_bytes ?? 1) === 0
 }
@@ -27,7 +29,7 @@ async function readGate(): Promise<GateState> {
   if (!status.ok) return 'ready'
   if (!status.value.logged_in) return 'signed-out'
   if (status.value.vault_unlocked === false) return 'locked'
-  const sub = await command<{ plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
+  const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
   return sub.ok && hasNoPlan(sub.value) ? 'no-plan' : 'ready'
 }
 
@@ -69,6 +71,7 @@ function GateWindow({ children, sidebarFooter, overlay, dimSidebar = true }: { c
 
 /** DW-0009: app lock. Windows Hello starts by itself; Cancel leaves the window locked and Unlock starts it again. */
 export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error?: string; onUnlock: () => void }) {
+  usePrivateScreen()
   return (
     <GateWindow overlay={prompt ? <HelloPrompt reason="Unlock Beebeeb" /> : undefined}>
       <section className="flex max-w-[320px] flex-col items-center text-center" aria-labelledby="locked-heading" data-locked>

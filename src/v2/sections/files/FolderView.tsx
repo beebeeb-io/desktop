@@ -1,14 +1,16 @@
 // The live Files and Backups view: reads and acts only through useDriveSource() (B01/B02); drops go through uploadDroppedPaths.
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { DriveSourceError, useDriveSource, type DriveItem, type ItemDetails, type Listing, type VersionEntry } from '@beebeeb/shared/drive-ui'
-import { EmptyFiles, NeedsConnection } from '../../chrome/EmptyStates'
+import { EmptyFiles, GettingReadyStrip, NeedsConnection } from '../../chrome/EmptyStates'
+import { backupMetaFor, uploadSummary, useLiveFolderExtras } from './liveExtras'
 import { showToast } from '../../chrome/Toast'
 import { uploadDroppedPaths } from '../../source/desktop'
+import { setSyncPaused } from '../../../desktopApi'
 import { useCommand } from '../../shortcuts'
 import type { Navigation } from '../../routes'
 import { FilesPane, type PaneHandlers, type Renaming } from './FilesPane'
-import { DetailsDialog, MoveDialog, NewFolderDialog, ProtectedAlert, ShareDialog, VersionsDialog, type FolderRow } from './Dialogs'
-import { NoPreview, PreviewPanel } from './Panels'
+import { ConflictDialog, DetailsDialog, MoveDialog, NewFolderDialog, ProtectedAlert, ShareDialog, VersionsDialog, type FolderRow } from './Dialogs'
+import { NoPreview, PreviewPanel, UploadsPanel } from './Panels'
 import { copyShareLink } from './shareLink'
 import { backgroundMenu, fileMenu, newMenu, sortMenu } from './menus'
 import { OPEN_WITH_EDITOR, OPEN_WITH_OTHER, withOfficeOpen } from '../open/office/menu'
@@ -54,6 +56,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [connectionNeeded, setConnectionNeeded] = useState<DriveItem | null>(null)
   const undo = useRef<string | null>(null)
+  const live = useLiveFolderExtras()
 
   // Backups: the protected folder is a row of the root listing.
   useEffect(() => {
@@ -371,21 +374,38 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       <span className="min-w-0 flex-1"><span className="font-medium text-ink">{service.name} manages this folder.</span> You can open and download its files.</span>
       <button type="button" onClick={() => settings('mail-backup')} className="h-7 flex-none rounded-md border border-line bg-paper px-3 text-[13px] font-medium text-ink hover:bg-paper-3 focus-visible:outline-2 focus-visible:outline-ink-3">Settings</button>
     </div>
+  ) : live.status?.listing && mode === 'files' ? (
+    <GettingReadyStrip loading={{ done: live.status.listing.done, total: live.status.listing.total, thumbnails: 'waiting' }} />
   ) : null
+  const conflict = live.conflicts[0]
 
   const emptyAndAddable = items.length === 0 && listing && canNew
   return (
-    <div role="presentation" className="flex min-h-0 flex-1" onClick={() => setMenu(null)}>
+    <div role="presentation" className="relative flex min-h-0 flex-1" onClick={() => setMenu(null)}>
       <FilesPane
         p={{
           listing: shownListing, items, prefs, selection, currentId, renaming, offline, dropTarget, details,
           columns: mode === 'backups' && path.length === 1 ? 'backups' : 'files', canNew, top,
           title: mode === 'backups' ? 'Backups' : 'Files', handlers,
+          transfers: live.transfers, backupMeta: backupMetaFor(live.status, items),
           empty: emptyAndAddable ? <EmptyFiles onAddFiles={(() => upload('files')) as () => void} /> : undefined,
         }}
       />
       {connectionNeeded && <NeedsConnection fileName={connectionNeeded.name} onTryAgain={() => load()} onClose={() => setConnectionNeeded(null)} />}
       {menu && <Menu x={menu.x} y={menu.y} label={menu.label} entries={menu.entries} onPick={menu.run} onClose={() => setMenu(null)} />}
+      {live.uploadsOpen && (
+        <UploadsPanel
+          rows={live.uploads} summary={uploadSummary(live.uploads)} onTryAgain={live.retry} onClose={live.closeUploads}
+          onPauseAll={() => { void setSyncPaused(true).then((r) => showToast(r.ok ? { kind: 'done', text: 'Uploads paused' } : { kind: 'failed', text: 'Couldn’t pause uploads' })) }}
+        />
+      )}
+      {conflict && !dialog && (
+        <ConflictDialog
+          index={1} total={live.conflicts.length} name={conflict.name}
+          mine={{ label: 'This PC', keep: 'this PC’s' }} theirs={{ label: 'In Beebeeb', keep: 'Beebeeb’s' }}
+          onKeep={(choice) => live.resolve(conflict.id, choice)} onLater={() => live.later(conflict.id)}
+        />
+      )}
       {dialog?.kind === 'share' && (
         <ShareDialog
           name={dialog.items[0].name} size={dialog.items[0].size} count={dialog.items.length}

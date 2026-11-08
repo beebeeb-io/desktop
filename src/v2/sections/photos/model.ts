@@ -66,3 +66,14 @@ export function takenLabel(c: PhotoCell, now: Date): string {
 export function fmtExt(name: string): string { return (name.split('.').pop() ?? '').toUpperCase() }
 
 export const mb1 = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`
+
+/** B02b: the engine's metadata (read from the copy on this PC) as a cell's meta; only what it found. */
+export function cellMeta(m: { camera?: string; width?: number; height?: number; durationSeconds?: number; uploading: boolean } | undefined): PhotoCell['meta'] {
+  if (!m) return undefined
+  const d = m.durationSeconds
+  return {
+    camera: m.camera, uploading: m.uploading || undefined,
+    dims: m.width && m.height ? `${m.width} × ${m.height}` : undefined,
+    duration: d !== undefined ? `${Math.floor(d / 60)}:${String(d % 60).padStart(2, '0')}` : undefined,
+  }
+}

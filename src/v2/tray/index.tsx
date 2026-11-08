@@ -8,6 +8,16 @@ import type { PopoverSnapshot } from '../../popoverContract'
 import { pollWhileVisible } from '../../windows/visiblePoll'
 import { Flyout, type FlyoutHandlers } from './Flyout'
 import { flyoutView, RECENT_LIMIT, type FlyoutCommand, type FlyoutExtras } from './model'
+import { pickExtras, type DriveStatus } from '../source/extras'
+
+/** The engine fields the snapshot lacks (B02b's drive_status). Absent stays absent: the flyout leaves that part out. */
+export function extrasFromStatus(status: DriveStatus | null): FlyoutExtras {
+  if (!status) return {}
+  return {
+    metered: status.metered, stoppedFiles: status.stoppedFiles, totalFiles: status.fileCount,
+    uploadBps: status.uploadBps ?? null, etaSeconds: status.etaSeconds ?? null,
+  }
+}
 
 const openLink = (url: string) => command<void>('plugin:opener|open_url', { url })
 
@@ -37,14 +47,18 @@ export async function runFlyoutCommand(what: FlyoutCommand, snapshot: PopoverSna
   await hideFlyout()
 }
 
+const engineExtras = pickExtras()
+
 export default function TrayApp() {
   const [snapshot, setSnapshot] = useState<PopoverSnapshot | null>(null)
+  const [status, setStatus] = useState<DriveStatus | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const result = await popoverSnapshot(RECENT_LIMIT)
+      const [result, engine] = await Promise.all([popoverSnapshot(RECENT_LIMIT), engineExtras.status().catch(() => null)])
       if (!cancelled && result.ok) setSnapshot(result.value)
+      if (!cancelled) setStatus(engine)
     }
     const stop = pollWhileVisible(refresh, 3000)
     return () => { cancelled = true; stop() }
@@ -75,7 +89,7 @@ export default function TrayApp() {
 
   const extras: FlyoutExtras = { checking: snapshot === null }
   const view = snapshot
-    ? flyoutView(snapshot, {}, Math.floor(Date.now() / 1000))
+    ? flyoutView(snapshot, extrasFromStatus(status), Math.floor(Date.now() / 1000))
     : flyoutView(EMPTY_SNAPSHOT, extras)
   return <div className="grid h-screen place-items-center bg-paper"><Flyout view={view} handlers={handlers} /></div>
 }

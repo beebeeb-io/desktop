@@ -30,9 +30,15 @@ struct Pending {
     totp: Option<TotpEnrollment>,
     /// Delete step 1 checked this password; step 2 uses it for the step-up of the delete.
     delete_password: Option<Zeroizing<String>>,
+    /// The mailed delete link, once the person pasted it here (step 3): Undo on step 4 uses it.
+    delete_link: Option<Zeroizing<String>>,
 }
 
-static PENDING: Mutex<Pending> = Mutex::new(Pending { totp: None, delete_password: None });
+static PENDING: Mutex<Pending> = Mutex::new(Pending {
+    totp: None,
+    delete_password: None,
+    delete_link: None,
+});
 
 fn pending() -> Result<std::sync::MutexGuard<'static, Pending>, String> {
     PENDING.lock().map_err(|_| "internal".to_string())
@@ -48,11 +54,22 @@ pub struct TotpSetupDto {
 }
 
 fn qr_rows(uri: &str) -> Result<Vec<String>, String> {
-    let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M).map_err(|_| "internal".to_string())?;
+    let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M)
+        .map_err(|_| "internal".to_string())?;
     let w = code.width();
     let colors = code.to_colors();
     Ok((0..w)
-        .map(|y| (0..w).map(|x| if colors[y * w + x] == qrcode::Color::Dark { '1' } else { '0' }).collect())
+        .map(|y| {
+            (0..w)
+                .map(|x| {
+                    if colors[y * w + x] == qrcode::Color::Dark {
+                        '1'
+                    } else {
+                        '0'
+                    }
+                })
+                .collect()
+        })
         .collect())
 }
 
@@ -92,7 +109,9 @@ async fn get_json(state: &State<'_, AppState>, path: &str) -> Result<serde_json:
 pub(super) async fn account_display_name(state: State<'_, AppState>) -> Result<DisplayNameDto, String> {
     session_command!(async {
         let v = get_json(&state, "/api/v1/me/profile").await?;
-        Ok(DisplayNameDto { display_name: v.get("display_name").and_then(|n| n.as_str()).map(str::to_string) })
+        Ok(DisplayNameDto {
+            display_name: v.get("display_name").and_then(|n| n.as_str()).map(str::to_string),
+        })
     })
 }
 
@@ -101,7 +120,9 @@ pub(super) async fn account_display_name(state: State<'_, AppState>) -> Result<D
 pub(super) async fn account_activity_logging(state: State<'_, AppState>) -> Result<ActivityLoggingDto, String> {
     session_command!(async {
         let v = get_json(&state, "/api/v1/me/tracking").await?;
-        Ok(ActivityLoggingDto { on: v.get("opted_in").and_then(|b| b.as_bool()).unwrap_or(false) })
+        Ok(ActivityLoggingDto {
+            on: v.get("opted_in").and_then(|b| b.as_bool()).unwrap_or(false),
+        })
     })
 }
 
@@ -138,12 +159,24 @@ pub struct EmailChangedDto {
     pub email: String,
 }
 
-/// DW-A82. `email_link_sent`: the server sent a confirmation link and has scheduled
-/// nothing yet (DW-A81). Today's server schedules at once and sends no link: false.
+/// DW-A81: the server mailed a single-use link and scheduled nothing yet.
 #[derive(Serialize)]
-pub struct DeletionDto {
-    pub shred_after: String,
+pub struct DeleteRequestedDto {
     pub email_link_sent: bool,
+    pub link_expires_at: String,
+}
+
+/// DW-A82: the link was used; the deletion is scheduled.
+#[derive(Serialize)]
+pub struct DeletionScheduledDto {
+    pub shred_after: String,
+    pub cancel_until: Option<String>,
+}
+
+/// DW-A83: the deletion is cancelled; `not_restored` names what the cancel does not bring back.
+#[derive(Serialize)]
+pub struct DeletionCancelledDto {
+    pub not_restored: Vec<String>,
 }
 
 fn code(e: AccountFlowError) -> String {
@@ -152,7 +185,9 @@ fn code(e: AccountFlowError) -> String {
 
 /// The in-memory session: its account, a copy of the token, and the public binding
 /// values derived from the master key (the key itself stays here and is wiped).
-fn session_parts(state: &State<'_, AppState>) -> Result<(Arc<account::AccountRuntime>, Zeroizing<String>, AccountBinding), String> {
+fn session_parts(
+    state: &State<'_, AppState>,
+) -> Result<(Arc<account::AccountRuntime>, Zeroizing<String>, AccountBinding), String> {
     let acct = state.active_account()?;
     let guard = acct.session.lock().map_err(|_| "internal".to_string())?;
     let session = guard.as_ref().ok_or_else(|| "vault_locked".to_string())?;
@@ -162,8 +197,8 @@ fn session_parts(state: &State<'_, AppState>) -> Result<(Arc<account::AccountRun
     Ok((acct, token, binding))
 }
 
-/// Perform each step of `flow` against the API with `token`, to the end.
-async fn drive(mut flow: AccountFlow, token: &str) -> Result<AccountOutcome, String> {
+/// Perform each step of `flow` against the API with `token` (none for the public delete-link routes), to the end.
+async fn drive(mut flow: AccountFlow, token: Option<&str>) -> Result<AccountOutcome, String> {
     let base = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
@@ -181,15 +216,17 @@ async fn drive(mut flow: AccountFlow, token: &str) -> Result<AccountOutcome, Str
                     Method::Delete => reqwest::Method::DELETE,
                 };
                 let url = format!("{}{}", base.trim_end_matches('/'), req.path);
-                let mut rb = client
-                    .request(method, url)
-                    .bearer_auth(token)
-                    .header("X-Beebeeb-Client", "desktop");
+                let mut rb = client.request(method, url).header("X-Beebeeb-Client", "desktop");
+                if let Some(token) = token {
+                    rb = rb.bearer_auth(token);
+                }
                 if let Some(t) = req.confirm_token() {
                     rb = rb.header("X-Confirm-Token", t);
                 }
                 if req.body.is_some() {
-                    rb = rb.header(reqwest::header::CONTENT_TYPE, "application/json").body(req.body_json());
+                    rb = rb
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(req.body_json());
                 }
                 drop(req);
                 let resp = rb.send().await.map_err(|_| "network".to_string())?;
@@ -203,10 +240,13 @@ async fn drive(mut flow: AccountFlow, token: &str) -> Result<AccountOutcome, Str
     }
 }
 
-async fn run_simple(state: &State<'_, AppState>, flow: Result<AccountFlow, AccountFlowError>) -> Result<AccountOutcome, String> {
+async fn run_simple(
+    state: &State<'_, AppState>,
+    flow: Result<AccountFlow, AccountFlowError>,
+) -> Result<AccountOutcome, String> {
     let flow = flow.map_err(code)?;
     let (_acct, token, _binding) = session_parts(state)?;
-    drive(flow, &token).await
+    drive(flow, Some(&token)).await
 }
 
 /// DW-A67: change the password (OPAQUE re-registration in core, a step-up per leg).
@@ -226,7 +266,7 @@ pub(super) async fn account_change_password(
         let (acct, token, binding) = session_parts(&state)?;
         let mut turn = acct.session_generation();
         let flow = AccountFlow::change_password(&current, &new_password, binding).map_err(code)?;
-        let outcome = drive(flow, &token).await?;
+        let outcome = drive(flow, Some(&token)).await?;
         let AccountOutcome::PasswordChanged { session_token } = outcome else {
             return Err("protocol".to_string());
         };
@@ -251,7 +291,11 @@ async fn install_rotated_session(
     }
     {
         let write = claim_session_write(acct, turn).map_err(String::from)?;
-        let email = acct.session.lock().ok().and_then(|g| g.as_ref().and_then(|s| s.email.clone()));
+        let email = acct
+            .session
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|s| s.email.clone()));
         persist_session_token_to_keychain(&write, acct.id.as_str(), new_token, email.as_deref())?;
         let mut guard = acct.session.lock().map_err(|_| "internal".to_string())?;
         if let Some(session) = guard.as_mut() {
@@ -276,7 +320,7 @@ pub(super) async fn account_change_email(
     session_command!(async {
         let (_acct, token, binding) = session_parts(&state)?;
         let flow = AccountFlow::change_email(&new_email, &password, binding).map_err(code)?;
-        match drive(flow, &token).await? {
+        match drive(flow, Some(&token)).await? {
             AccountOutcome::EmailChanged { email } => Ok(EmailChangedDto { email }),
             _ => Err("protocol".to_string()),
         }
@@ -293,7 +337,11 @@ pub(super) async fn account_verify_email(state: State<'_, AppState>, code: Strin
 /// DW-A64: the display name, 1 to 64 characters.
 #[tauri::command]
 pub(super) async fn account_set_name(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    session_command!(async { run_simple(&state, AccountFlow::set_display_name(&name)).await.map(|_| ()) })
+    session_command!(async {
+        run_simple(&state, AccountFlow::set_display_name(&name))
+            .await
+            .map(|_| ())
+    })
 }
 
 /// DW-A69: start TOTP set-up. With TOTP on, pass the password (step-up in core) or the
@@ -307,7 +355,10 @@ pub(super) async fn account_totp_setup(
     let password = password.map(Zeroizing::new);
     let current_code = current_code.map(Zeroizing::new);
     session_command!(async {
-        let flow = AccountFlow::totp_setup(password.as_deref().map(String::as_str), current_code.as_deref().map(String::as_str));
+        let flow = AccountFlow::totp_setup(
+            password.as_deref().map(String::as_str),
+            current_code.as_deref().map(String::as_str),
+        );
         match run_simple(&state, flow).await? {
             AccountOutcome::TotpEnrollment(enrollment) => {
                 let dto = TotpSetupDto {
@@ -330,7 +381,9 @@ pub(super) async fn account_totp_confirm(state: State<'_, AppState>, code: Strin
     session_command!(async {
         let enrollment = pending()?.totp.take().ok_or_else(|| "out_of_order".to_string())?;
         match run_simple(&state, AccountFlow::totp_confirm(enrollment, &code)).await? {
-            AccountOutcome::BackupCodes(codes) => Ok(BackupCodesDto { backup_codes: codes.to_vec() }),
+            AccountOutcome::BackupCodes(codes) => Ok(BackupCodesDto {
+                backup_codes: codes.to_vec(),
+            }),
             _ => Err("protocol".to_string()),
         }
     })
@@ -343,10 +396,40 @@ pub(super) async fn account_totp_disable(state: State<'_, AppState>, code: Strin
     session_command!(async { run_simple(&state, AccountFlow::totp_disable(&code)).await.map(|_| ()) })
 }
 
-/// DW-A77 to A79: record sign-in activity on or off.
+/// DW-A77 to A79: record sign-in activity on or off. Off takes the password: core steps up inside (server #422).
 #[tauri::command]
-pub(super) async fn account_set_activity_logging(state: State<'_, AppState>, on: bool) -> Result<(), String> {
-    session_command!(async { run_simple(&state, Ok(AccountFlow::set_activity_logging(on))).await.map(|_| ()) })
+pub(super) async fn account_set_activity_logging(
+    state: State<'_, AppState>,
+    on: bool,
+    password: Option<String>,
+) -> Result<(), String> {
+    let password = password.map(Zeroizing::new);
+    session_command!(async {
+        run_simple(
+            &state,
+            AccountFlow::set_activity_logging(on, password.as_deref().map(String::as_str)),
+        )
+        .await
+        .map(|_| ())
+    })
+}
+
+/// DW-A71 Make new backup codes: the current authenticator code; the authenticator stays, the old codes stop
+/// working. Returns the 8 new codes once (DW-A70).
+#[tauri::command]
+pub(super) async fn account_backup_codes_regenerate(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<BackupCodesDto, String> {
+    let code = Zeroizing::new(code);
+    session_command!(async {
+        match run_simple(&state, AccountFlow::regenerate_backup_codes(&code)).await? {
+            AccountOutcome::BackupCodes(codes) => Ok(BackupCodesDto {
+                backup_codes: codes.to_vec(),
+            }),
+            _ => Err("protocol".to_string()),
+        }
+    })
 }
 
 /// DW-A58, delete step 1: check the password (a step-up whose token is dropped). Nothing
@@ -361,26 +444,53 @@ pub(super) async fn account_delete_check_password(state: State<'_, AppState>, pa
     })
 }
 
-/// DW-A80, delete step 2: the second factor, then the delete (step-up inside core).
-/// `code`: 6-digit authenticator or 8-digit backup code; `None` for an account without
-/// two-factor. Today's server takes no code on delete (see the PR's decision note), so
-/// the code is checked for shape only.
+/// DW-A80, delete step 2: the second factor, then the delete request (step-up inside core,
+/// `POST /auth/account/delete-request`). `code`: 6-digit authenticator or 8-digit backup code;
+/// `None` for an account without two-factor. The server mails a single-use link and schedules
+/// nothing. A wrong or missing code keeps the checked password for another try.
 #[tauri::command]
-pub(super) async fn account_delete_confirm(state: State<'_, AppState>, code: Option<String>) -> Result<DeletionDto, String> {
+pub(super) async fn account_delete_confirm(
+    state: State<'_, AppState>,
+    code: Option<String>,
+) -> Result<DeleteRequestedDto, String> {
     let code = code.map(Zeroizing::new);
     session_command!(async {
-        if let Some(c) = code.as_deref() {
-            let digits: String = c.chars().filter(|ch| !ch.is_whitespace()).collect();
-            if !(digits.len() == 6 || digits.len() == 8) || !digits.chars().all(|ch| ch.is_ascii_digit()) {
-                return Err("invalid_code".to_string());
+        let password = pending()?
+            .delete_password
+            .clone()
+            .ok_or_else(|| "out_of_order".to_string())?;
+        let flow = AccountFlow::delete_account(&password, code.as_deref().map(String::as_str));
+        match run_simple(&state, flow).await? {
+            AccountOutcome::DeletionRequested { link_expires_at } => {
+                pending()?.delete_password = None;
+                Ok(DeleteRequestedDto {
+                    email_link_sent: true,
+                    link_expires_at,
+                })
             }
-        }
-        let password = pending()?.delete_password.take().ok_or_else(|| "out_of_order".to_string())?;
-        match run_simple(&state, AccountFlow::delete_account(&password)).await? {
-            AccountOutcome::DeletionScheduled { shred_after } => Ok(DeletionDto { shred_after, email_link_sent: false }),
             _ => Err("protocol".to_string()),
         }
     })
+}
+
+/// DW-A81 → A82: confirm with the mailed link, pasted here (the link's own page in the browser does the same).
+/// Public route: no session needed. The link stays in Rust for Undo.
+#[tauri::command]
+pub(super) async fn account_delete_confirm_link(link: String) -> Result<DeletionScheduledDto, String> {
+    let link = Zeroizing::new(link);
+    match drive(AccountFlow::delete_confirm(&link).map_err(code)?, None).await? {
+        AccountOutcome::DeletionScheduled {
+            shred_after,
+            cancel_until,
+        } => {
+            pending()?.delete_link = Some(link);
+            Ok(DeletionScheduledDto {
+                shred_after,
+                cancel_until,
+            })
+        }
+        _ => Err("protocol".to_string()),
+    }
 }
 
 /// Leave the delete flow: the checked password is wiped.
@@ -390,11 +500,25 @@ pub(super) fn account_delete_cancel() -> Result<(), String> {
     Ok(())
 }
 
-/// DW-A82 Undo deletion. The server has no undo endpoint yet (decision filed): this
-/// says so with a stable code instead of pretending.
+/// DW-A82 Undo deletion (`POST /auth/account/delete-cancel`, public): with the link the person
+/// pastes, or the one pasted on step 3. Neither: `link_needed`, and the screen asks for it.
 #[tauri::command]
-pub(super) fn account_delete_undo() -> Result<(), String> {
-    Err("server_unsupported".to_string())
+pub(super) async fn account_delete_undo(link: Option<String>) -> Result<DeletionCancelledDto, String> {
+    let given = link.filter(|l| !l.trim().is_empty()).map(Zeroizing::new);
+    let link = match given {
+        Some(l) => l,
+        None => pending()?
+            .delete_link
+            .clone()
+            .ok_or_else(|| "link_needed".to_string())?,
+    };
+    match drive(AccountFlow::delete_cancel(&link).map_err(code)?, None).await? {
+        AccountOutcome::DeletionCancelled { not_restored } => {
+            pending()?.delete_link = None;
+            Ok(DeletionCancelledDto { not_restored })
+        }
+        _ => Err("protocol".to_string()),
+    }
 }
 
 /// Leave TOTP set-up without confirming: the pending enrollment is wiped.

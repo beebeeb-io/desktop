@@ -8,7 +8,6 @@ import {
   fmtCount, fmtSize, fmtWhen, isProtected, kindOf, LOCAL_LABEL, middleShorten, sharedLabel, stemLength,
   type FolderPrefs, type ViewMode,
 } from './model'
-import { BACKUP_META } from '../../source/fixtures/files'
 import type { SortKey } from '@beebeeb/shared/drive-ui'
 
 export const ROW_H = 36
@@ -69,7 +68,13 @@ export interface PaneProps {
   videoLength?: Record<string, string>
   /** Transfers in progress, by item id (DW-0412, DW-0426). */
   transfers?: Record<string, Transfer>
+  /** Backups' "Last backup" and "Status" by item id (DW-0422); a row without one shows "—". */
+  backupMeta?: Record<string, BackupMeta>
+  /** "Now" for the relative times (frames pin the board's clock; live is the real one). */
+  now?: Date
 }
+
+export interface BackupMeta { last?: string; status: string; thisPc?: boolean }
 
 export interface Transfer { kind: 'uploading' | 'downloading' | 'waiting'; done: number; total: number }
 
@@ -144,7 +149,8 @@ function NameCell({ item, renaming, h, dim }: { item: DriveItem; renaming?: Rena
 
 function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h: PaneHandlers; selected: boolean; index: number }) {
   const dim = !!p.offline && !item.isFolder && item.local === 'online-only'
-  const meta = p.columns === 'backups' ? BACKUP_META[item.id] : undefined
+  const meta = p.columns === 'backups' ? p.backupMeta?.[item.id] : undefined
+  const now = p.now ?? new Date()
   const cols = p.columns === 'backups' ? COLS_BACKUPS : COLS_FILES
   const drop = p.dropTarget === item.id
   const refused = isProtected(item)
@@ -165,13 +171,13 @@ function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h
     >
       <NameCell item={item} renaming={p.renaming} h={h} dim={dim} />
       {p.columns === 'backups' ? (
-        <span role="gridcell" className="font-mono text-[12px] text-ink-3">{meta ? fmtWhen(meta.last, new Date('2026-11-08T12:00:00')) : '—'}</span>
+        <span role="gridcell" className="font-mono text-[12px] text-ink-3">{meta?.last ? fmtWhen(meta.last, now) : '—'}</span>
       ) : tr ? (
         <span role="gridcell" data-transfer={tr.kind} className="col-span-2 whitespace-nowrap font-mono text-[12px] text-ink-3">
           {tr.kind === 'waiting' ? 'Waiting' : `${tr.kind === 'uploading' ? 'Uploading' : 'Downloading'}, ${(tr.done / 1e6).toFixed(1)} of ${(tr.total / 1e6).toFixed(1)} MB`}
         </span>
       ) : (
-        <span role="gridcell" className={`font-mono text-[12px] ${dim ? 'text-ink-2' : 'text-ink-3'}`}>{dim ? <span className="font-sans">Needs a connection</span> : fmtWhen(item.modifiedAt, new Date('2026-11-08T12:00:00'))}</span>
+        <span role="gridcell" className={`font-mono text-[12px] ${dim ? 'text-ink-2' : 'text-ink-3'}`}>{dim ? <span className="font-sans">Needs a connection</span> : fmtWhen(item.modifiedAt, now)}</span>
       )}
       {!tr && <span role="gridcell" className={`font-mono text-[12px] text-ink-3 ${dim ? 'opacity-50' : ''}`}>{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span>}
       <span role="gridcell" className={`text-[12px] ${dim ? 'opacity-50' : ''}`}>
