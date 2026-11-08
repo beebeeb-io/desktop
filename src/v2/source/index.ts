@@ -3,11 +3,14 @@ import { createDesktopSource } from './desktop'
 import { scenarioFromSearch } from './fixtures'
 import { createBoardSource } from './fixtures/board'
 
+/** Dev server only: the v2 fixture host (../dev/host.ts) marks the window with this key; it stands in for Rust behind `invoke`. */
+export const DEV_HOST_KEY = '__bbV2DevHost'
+
 /** True inside the Tauri webview. A plain browser (headless screenshots, `bun run dev`) has no IPC bridge. */
 export function hasTauri(): boolean {
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return false
-  // Dev server only: the v2 fixture host (./dev/host.ts) stands in for Rust behind `invoke` in a plain browser; it is not Tauri.
-  return !(import.meta.env.DEV && '__bbV2DevHost' in window)
+  // The fixture host in a plain browser is not Tauri.
+  return !(import.meta.env.DEV && DEV_HOST_KEY in window)
 }
 
 /**

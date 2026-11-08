@@ -40,7 +40,9 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
   const [pane, setPane] = useState<PaneId>(initialPane)
   const [dialog, setDialog] = useState<string | null>(() => seed('settings.dialog', initialDialog))
   // The live state route (../../../seed.ts): the first pane's props, read once, so the pane keeps them until it changes.
-  const [seeded] = useState(() => ({ pane: initialPane, props: seed<Record<string, unknown> | null>('settings.paneProps', null) }))
+  // Leaving that pane drops them: coming back opens the pane plain.
+  const [seeded, setSeeded] = useState(() => ({ pane: initialPane, props: seed<Record<string, unknown> | null>('settings.paneProps', null) }))
+  useEffect(() => { if (seeded.props && pane !== seeded.pane) setSeeded({ pane: seeded.pane, props: null }) }, [pane, seeded])
   const close = useCallback(() => setDialog(null), [])
   const open = useCallback((d: string) => setDialog(d), [])
 

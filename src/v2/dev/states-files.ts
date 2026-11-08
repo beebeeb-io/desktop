@@ -1,12 +1,12 @@
 // Dev only (batch M2): live state recipes for B03 (global elements, menus, commands dialog) and B04 (Files, folders,
 // Backups, uploads). Row ids are the board's (src/v2/source/fixtures/files.ts): i-contract is Contract draft.pdf.
 import type { Recipe } from './states'
+import { menuItem } from './driver'
 
 const LIST = '[data-list-count] > div[tabindex="0"]'
 const prefs = (folder: string, p: object) => ({ 'bb.v2.folder-prefs': { [folder]: p } })
 const PANEL = prefs('root', { panel: true })
 const NO_BANNERS = 'the window draws no banners: chrome/Banners is not mounted in V2Shell or any section'
-const menuItem = (id: string) => `[data-menu-item="${id}"]`
 
 export const FILES_STATES: Record<string, Recipe> = {
   // ── B03: global elements ──────────────────────────────────────────────────────────────────────────────────────

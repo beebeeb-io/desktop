@@ -4,10 +4,9 @@
 // unavailable, exactly as a browser without the host did. No production module changes: `hasTauri()` (../source) does
 // not count this host as Tauri, and it carries no window metadata, so window and webview calls still fail as before.
 import type { CommandResult } from '../../desktopApi'
+import { DEV_HOST_KEY } from '../source'
 
 export type Answer = (name: string, args?: Record<string, unknown>) => CommandResult<unknown> | Promise<CommandResult<unknown>> | undefined
-
-export const DEV_HOST_KEY = '__bbV2DevHost'
 
 export function installHost(answer: Answer): void {
   const w = window as unknown as Record<string, unknown>

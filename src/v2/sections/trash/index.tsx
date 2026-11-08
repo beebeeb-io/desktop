@@ -10,6 +10,7 @@ import { Menu } from '../files/ui'
 import { deletePermanently, failureText } from '../shared/api'
 import { DeleteForGoodDialog, TrashView, totalBytes, trashMenu } from './TrashView'
 import { seed } from '../../seed'
+import { publishCount } from '../../chrome/counts'
 
 
 export default function Section({ nav }: SectionProps) {
@@ -26,7 +27,7 @@ export default function Section({ nav }: SectionProps) {
   const now = useMemo(() => new Date(), [])
   const removedRun = useRef<{ ids: Set<string>; done: number } | null>(null)
 
-  const load = useCallback(() => source.trash().then((t) => setEntries([...t].sort((a, b) => b.trashedAt.localeCompare(a.trashedAt))), () => setEntries([])), [source])
+  const load = useCallback(() => source.trash().then((t) => { publishCount('trash', t.length); setEntries([...t].sort((a, b) => b.trashedAt.localeCompare(a.trashedAt))) }, () => setEntries([])), [source])
   useEffect(() => {
     void load()
     void accountProfile().then((r) => { if (r.ok) setFactor(r.value.totp_enabled ? 'code' : 'password') })

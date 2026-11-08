@@ -2,10 +2,10 @@
 // and it is made of the same fixture modules the frame registry renders: B04's Files tree, B05's shares, search and
 // Trash, B06's photos, B07's open files, B08's Office documents. Names, sizes and counts are the board's, so a live
 // screen and its frame show the same rows. `?scenario=` picks a state the global frames need (see ../fixtures.ts).
-import type { DriveSource, ItemId, StorageSummary, SyncSummary } from '@beebeeb/shared/drive-ui'
+import type { DriveEvent, DriveSource, ItemId, StorageSummary, SyncSummary, TrashEntry } from '@beebeeb/shared/drive-ui'
 import type { Scenario } from '../fixtures'
 import { createFilesSource } from './files'
-import { createSharedSource } from './shared'
+import { createSharedSource, TRASH } from './shared'
 import { createPhotosSource, PHOTO_ENTRIES } from './photos'
 import { createOpenSource, OPEN_ITEMS } from './open'
 import { createOfficeSource, OFFICE_ITEMS } from './office'
@@ -42,6 +42,18 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
   const owner = (id: ItemId): DriveSource => (openIds.has(id) ? open : officeIds.has(id) || officeAlias.has(id) ? office : photoIds.has(id) ? photos : files)
   const idFor = (id: ItemId): ItemId => officeAlias.get(id) ?? id
 
+  // One Trash for every source: what Files moves there shows in Trash and its count, Undo and Restore take it back, and
+  // a move or a delete sends `removed` per item as the engine does (src-tauri drive_v2 commands.rs).
+  let trash: TrashEntry[] = empty ? [] : [...TRASH]
+  const moves = new Map<string, ItemId[]>()
+  const listeners = new Set<(e: DriveEvent) => void>()
+  const send = (e: DriveEvent) => listeners.forEach((l) => l(e))
+  const stamp = () => {
+    const d = new Date(), two = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}:00`
+  }
+  const leaveTrash = (ids: ItemId[]) => { trash = trash.filter((t) => !ids.includes(t.item.id)) }
+
   return {
     ...files,
     kind: 'fixtures',
@@ -55,17 +67,43 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     saveText: (id, text, base) => owner(id).saveText(idFor(id), text, base),
     readBytes: (id) => owner(id).readBytes(idFor(id)),
     saveBytes: (id, bytes, base) => owner(id).saveBytes(idFor(id), bytes, base),
-    search: (q) => shared.search(q),
+    // B05's search hits (DW-0520 on); a new account (DW-0114) has nothing to find.
+    search: async (q) => (empty ? [] : shared.search(q)),
     shared: () => shared.shared(),
-    trash: () => shared.trash(),
-    restoreFromTrash: (ids) => shared.restoreFromTrash(ids),
-    deletePermanently: (ids) => shared.deletePermanently(ids),
+    trash: async () => trash,
+    async moveToTrash(ids) {
+      const found = await Promise.all(ids.map((id) => files.details(id).catch(() => null)))
+      const moved = await files.moveToTrash(ids)
+      const entries = found.flatMap((d) => (d ? [{ item: d.item, trashedAt: stamp(), originalPath: d.path.slice(1).map((c) => c.name).join(' › ') || 'Files' }] : []))
+      trash = [...entries, ...trash]
+      moves.set(moved.undoToken, ids)
+      ids.forEach((id) => send({ kind: 'removed', id }))
+      return moved
+    },
+    async undoTrash(token) {
+      await files.undoTrash(token)
+      leaveTrash(moves.get(token) ?? [])
+      moves.delete(token)
+    },
+    async restoreFromTrash(ids) {
+      leaveTrash(ids)
+      // A move from Files goes back once all of it has left Trash.
+      for (const [token, moved] of moves) {
+        if (moved.every((id) => !trash.some((t) => t.item.id === id))) { moves.delete(token); await files.undoTrash(token) }
+      }
+    },
+    async deletePermanently(ids) {
+      leaveTrash(ids)
+      for (const [token, moved] of moves) if (moved.every((id) => !trash.some((t) => t.item.id === id))) moves.delete(token)
+      ids.forEach((id) => send({ kind: 'removed', id }))
+    },
     photos: (cursor) => photos.photos(cursor),
     storage: async () => boardStorage(scenario),
     sync: async () => boardSync(scenario),
     subscribe(listener) {
+      listeners.add(listener)
       const stops = [files, photos, open, office].map((s) => s.subscribe(listener))
-      return () => stops.forEach((stop) => stop())
+      return () => { listeners.delete(listener); stops.forEach((stop) => stop()) }
     },
   }
 }

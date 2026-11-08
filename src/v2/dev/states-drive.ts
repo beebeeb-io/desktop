@@ -2,8 +2,9 @@
 // offline), B07 (Open files, the editor) and B08 (Office). Ids are the board's fixtures (src/v2/source/fixtures/).
 import type { Recipe } from './states'
 import { LISBON_PEOPLE, SAFETY_NUMBER } from '../source/fixtures/shared'
+import { SCENARIOS } from '../tray/fixtures'
+import { menuItem } from './driver'
 
-const menuItem = (id: string) => `[data-menu-item="${id}"]`
 const JONAS = LISBON_PEOPLE[1]
 const NO_LISTS = { share_list: { invitations: [], links: [], requests: [], pending: [] } }
 const peopleOf = (): Recipe['steps'] => [{ context: 'row:sb-lisbon' }, { click: menuItem('people') }, { wait: '[data-people]' }]
@@ -123,6 +124,7 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-1562': { q: 'section=files&id=f-documents', steps: [{ context: 'row:d-renewal' }] },
 }
 
+/** DW-1305: the board's snapshot with nothing in it (a new account: no activity, no conflicts, nothing waiting). */
 function emptySnapshot() {
-  return { phase: 'synced', sync_phase: 'synced', generated_at: 0, account: { email: null, logged_in: true, vault_unlocked: true, auth_expired: false }, paused: false, engine: { state: 'idle', files_remaining: null, bytes_total: null, bytes_done: null, last_tick_ok_at: null }, reason: null, finder: { setup: 'ready', reason: null, reason_line: null }, storage: null, storage_full: false, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [] }
+  return { ...SCENARIOS['up-to-date'].snapshot, storage: null, pending_changes: 0, conflicts: { count: 0, files: [] }, activity: [] }
 }

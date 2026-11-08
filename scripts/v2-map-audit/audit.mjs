@@ -250,13 +250,13 @@ const GENERIC_ROWS = '[role=row]:not(:has([role=columnheader])),[role=option],[r
  * every scope, then loose ones; a generic row prefers the selected one.
  */
 async function findOnce(page, p) {
+  if (p.selector) return firstVisible(page.locator(p.selector))
   const scopes = []
   for (const sel of ['[role=menu]', '[role=alertdialog]', '[role=dialog]']) {
     const l = page.locator(sel).last()
     if ((await l.count().catch(() => 0)) && (await l.isVisible().catch(() => false))) scopes.push(l)
   }
   scopes.push(page)
-  if (p.selector) return firstVisible(page.locator(p.selector))
   if (p.name == null) {
     for (const scope of scopes) {
       const rows = scope.locator(GENERIC_ROWS)

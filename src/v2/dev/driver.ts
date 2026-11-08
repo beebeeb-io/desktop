@@ -3,6 +3,9 @@
 // Each step waits up to a few seconds for its control (lazy sections, fixtures that answer a tick later).
 
 export type Target = string
+
+/** A context or app menu's item by its id (the menus' `data-menu-item`). */
+export const menuItem = (id: string): Target => `[data-menu-item="${id}"]`
 export type Step =
   | { click: Target }
   | { dbl: Target }
