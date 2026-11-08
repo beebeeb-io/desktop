@@ -12,11 +12,12 @@ import type { Navigation } from '../../../routes'
 import { SavedMessage, UnsavedAlert } from '../Editing'
 import { EngineFrame, FormulaBar, OutlinePane } from './Canvas'
 import { engineHostUrl, engineStatus, failureDetail, prepareEngine, waitForBridge, type EngineProgress } from './engine'
+import type { RelayBridge } from './relay'
 import { AboutPanel, CommandPalette, ConflictDialog, defaultNewName, FailedView, isLegacy, LegacyNote, NewDocumentDialog, OfficeStatus, PreparingView, TableSizeDialog, type ConflictChoice, type PaletteRow } from './Parts'
 import { OFFICE_TABS, type Control } from './Ribbon'
 import { APP_LABEL, OfficeShell } from './View'
 
-type Engine = { name: 'checking' } | { name: 'preparing'; progress: EngineProgress } | { name: 'booting'; src: string } | { name: 'ready' } | { name: 'failed'; detail: string }
+type Engine = { name: 'checking' } | { name: 'preparing'; progress: EngineProgress } | { name: 'booting'; src: string } | { name: 'ready'; src: string } | { name: 'failed'; detail: string }
 
 const extOf = (n: string) => (n.lastIndexOf('.') > 0 ? n.slice(n.lastIndexOf('.') + 1).toLowerCase() : '')
 const ctrl = (s?: string) => s?.replace(/⌘/g, 'Ctrl+').replace(/⇧/g, 'Shift+').replace(/⌥/g, 'Alt+')
@@ -56,7 +57,9 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
   const source = useDriveSource()
   const { engine, setEngine, retry } = useEngine()
   const frameRef = useRef<HTMLIFrameElement>(null)
-  const bridgeRef = useRef<OfficeBridge | null>(null)
+  const bridgeRef = useRef<RelayBridge | null>(null)
+  // The relay listens on this window: stop it when the editor goes.
+  useEffect(() => () => { bridgeRef.current?.close(); bridgeRef.current = null }, [])
   const [item, setItem] = useState<DriveItem | null>(null)
   const [path, setPath] = useState<string[]>(['Files'])
   const [doc, setDoc] = useState<{ bytes: Uint8Array; versionId: string } | null>(null)
@@ -114,6 +117,8 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
     if (!frame) return
     void (async () => {
       try {
+        bridgeRef.current?.close()
+        bridgeRef.current = null
         const b = await waitForBridge(frame)
         bridgeRef.current = b
         if (target.kind === 'new') {
@@ -125,7 +130,7 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
         await b.onModifiedChange((m) => setDirty(m))
         await b.onSelectionChange(() => { void refreshDoc(b) })
         await refreshDoc(b)
-        setEngine({ name: 'ready' })
+        setEngine((e) => ('src' in e ? { name: 'ready', src: e.src } : e)) // keep the frame: it is the document
       } catch (e) {
         setEngine({ name: 'failed', detail: failureDetail(e instanceof Error ? e.message : 'boot') })
       }

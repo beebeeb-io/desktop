@@ -44,7 +44,12 @@ pub(crate) struct PinnedBundle {
     pub(crate) assets: &'static [PinnedAsset],
 }
 
-/// The bundle this build trusts. OPEN ITEM: publish the office bundle to `OFFICE_HOST` and pin its
+/// The bundle this build trusts. Its assets are the files of the office repo's engine page: `bb-office-host.html`
+/// (the frame's src), `bb-office-boot.js`, `qtloader.js`, `bb-office-api.js`, `bb-office-relay.js` (the window talks
+/// to the engine only through this postMessage relay; see `src/v2/sections/open/office/relay.ts`),
+/// `bb-office-worker.js` and the engine build (`soffice.js`, `soffice.wasm`, `soffice.data`, and whatever else the
+/// published manifest lists).
+/// OPEN ITEM: publish the office bundle to `OFFICE_HOST` and pin its
 /// version and hashes here. Until then no bundle is pinned and the editor says it can't be prepared.
 pub(crate) static PINNED: Option<PinnedBundle> = None;
 
@@ -227,6 +232,26 @@ fn content_type(bundle: &PinnedBundle, path: &str) -> &'static str {
         .unwrap_or("application/octet-stream")
 }
 
+/// The headers every `bboffice` answer carries. The engine's threads need `SharedArrayBuffer`, so its page must be
+/// cross-origin isolated: COOP `same-origin` + COEP `require-corp`, as the main window has (`tauri.conf.json` →
+/// `app.security.headers`). The engine is another origin from the window, and a COEP `require-corp` window embeds a
+/// cross-origin frame only when it answers with CORP `cross-origin`. The frame also needs
+/// `allow="cross-origin-isolated"` (`Canvas.tsx`).
+pub(crate) const ISOLATION_HEADERS: [(&str, &str); 3] = [
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Resource-Policy", "cross-origin"),
+];
+
+/// A 200 answer for an engine file, with the isolation headers.
+pub(crate) fn engine_response(content_type: &str, body: Vec<u8>) -> Option<tauri::http::Response<Vec<u8>>> {
+    let mut builder = tauri::http::Response::builder().header("Content-Type", content_type);
+    for (name, value) in ISOLATION_HEADERS {
+        builder = builder.header(name, value);
+    }
+    builder.body(body).ok()
+}
+
 /// The `bboffice` scheme: serves a cached, checked engine file, with the isolation headers the engine's
 /// threads need. Anything else is a 404.
 pub(crate) fn protocol<R: tauri::Runtime>(
@@ -252,13 +277,7 @@ pub(crate) fn protocol<R: tauri::Runtime>(
                 return None;
             }
             let body = std::fs::read(dir.join(file)).ok()?;
-            tauri::http::Response::builder()
-                .header("Content-Type", content_type(bundle, file))
-                .header("Cross-Origin-Opener-Policy", "same-origin")
-                .header("Cross-Origin-Embedder-Policy", "require-corp")
-                .header("Cross-Origin-Resource-Policy", "same-site")
-                .body(body)
-                .ok()
+            engine_response(content_type(bundle, file), body)
         })();
         responder.respond(answer.unwrap_or_else(not_found));
     });

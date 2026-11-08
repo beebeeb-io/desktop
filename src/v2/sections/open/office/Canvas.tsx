@@ -183,7 +183,7 @@ export function PresentView({ slides, index, onIndex, onExit }: { slides: SlideF
 export function EngineFrame({ src, frameRef, onLoad }: { src: string; frameRef: RefObject<HTMLIFrameElement | null>; onLoad: () => void }) {
   return (
     <div className={`relative min-w-0 flex-1 overflow-hidden ${PAGE_BG}`}>
-      <iframe ref={frameRef} src={src} onLoad={onLoad} title="Document" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 h-full w-full border-0" />
+      <iframe ref={frameRef} src={src} onLoad={onLoad} title="Document" allow="cross-origin-isolated" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 h-full w-full border-0" />
     </div>
   )
 }
