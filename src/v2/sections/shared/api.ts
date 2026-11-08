@@ -33,8 +33,8 @@ export const shareLinkUpdate = (itemId: string, change: { expiresDays?: number |
   command<void>('share_link_update', { itemId, expiresDays: change.expiresDays, setExpiry: 'expiresDays' in change, password: change.password ?? null, setPassword: 'password' in change })
 export const shareSafetyNumber = (memberId: string) => command<{ groups: string[] }>('share_safety_number', { memberId })
 export const shareMarkCompared = (memberId: string, matched: boolean) => command<void>('share_mark_compared', { memberId, matched })
-/** DW-0515 Share anyway: accept a changed key; the person reads as not compared again. */
-export const shareForgetCompared = (memberId: string) => command<void>('share_forget_compared', { memberId })
+/** DW-0515 over People, Share anyway: keep this share as it is. The person's mark stays, so later shares to them stay checked. */
+export const shareAcceptChangedKey = (memberId: string) => command<void>('share_accept_changed_key', { memberId })
 
 export interface FileRequestInput { title: string; note: string; folderName: string; expiresDays: number | null; maxFiles: number | null; maxBytes: number | null }
 export const fileRequestCreate = (input: FileRequestInput) => command<CopiedLink>('file_request_create', { input })
@@ -51,7 +51,9 @@ export const deletePermanently = (ids: string[], secret: { password?: string; co
 export function failureText(r: CommandResult<unknown>): string {
   if (r.ok) return ''
   if (r.unsupported) return commandUnavailableLabel('')
+  if (/^unsupported/.test(r.reason)) return commandUnavailableLabel('')
   if (/^offline/.test(r.reason)) return 'You’re offline. Try again when you’re connected.'
+  if (/^peer_key_changed/.test(r.reason)) return 'This person’s key has changed. Nothing was shared.'
   if (/^(invalid_credentials|wrong_code)/.test(r.reason)) return 'That didn’t work. Check it and try again.'
   return 'Something went wrong. Try again.'
 }

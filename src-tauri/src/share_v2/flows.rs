@@ -2,7 +2,7 @@
 //! double-encrypted link, revoke). Rust resolves the key that opens the row, drives the flow over
 //! `auth_v2::transport`, and puts a key-carrying link on the clipboard itself: the web view gets
 //! the display form only.
-use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method, RequestAuth};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::{
     self as sf, ShareFlowError,
@@ -44,10 +44,13 @@ pub(super) fn flow_reason(e: ShareFlowError) -> String {
     }
 }
 
-/// A server id the window sent: a canonical UUID, or nothing is sent.
+/// A server id the window sent: already a canonical lower-case hyphenated UUID, or nothing is sent.
+/// Never normalized (core v0.2.8 items 10 and 13): an id is HKDF info for the file key and the
+/// match key of the server's invite rows, so another spelling of the same UUID would derive another
+/// key. Core refuses it too; this refuses it before any request or key lookup.
 pub(super) fn item_id(id: &str) -> Answer<String> {
-    match id.parse::<uuid::Uuid>() {
-        Ok(u) if u.hyphenated().to_string() == id.to_ascii_lowercase() => Ok(u.hyphenated().to_string()),
+    match uuid::Uuid::parse_str(id) {
+        Ok(u) if u.hyphenated().to_string() == id => Ok(id.to_owned()),
         _ => Err("not-found".into()),
     }
 }
@@ -104,14 +107,18 @@ pub(super) async fn send(client: &reqwest::Client, u: &Unlocked, req: HttpReques
     transport::send(client, Some(&u.session), req).await
 }
 
+/// A request on the signed-in session with no confirm token. Core v0.2.8 keeps the token field
+/// private, so a request starts from `HttpRequest::session_post` and only a step-up inside core can
+/// put a token on it.
+pub(super) fn request(method: Method, path: String, body: Option<Value>) -> HttpRequest {
+    let mut req = HttpRequest::session_post(path, Value::Null);
+    req.method = method;
+    req.body = body;
+    req
+}
+
 pub(super) fn get(path: String) -> HttpRequest {
-    HttpRequest {
-        method: Method::Get,
-        path,
-        body: None,
-        auth: RequestAuth::Session,
-        confirm_token: None,
-    }
+    request(Method::Get, path, None)
 }
 
 pub(super) fn list<'a>(body: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
@@ -142,12 +149,12 @@ async fn my_links(client: &reqwest::Client, u: &Unlocked, id: &str) -> Answer<Ve
         .collect())
 }
 
-/// Share one file with a person. A folder answers `unsupported` (core has no folder invite yet);
-/// `can_edit` is not sent: web's invite has no permission field, so neither does this one.
-const SENT: &str = "/api/v1/shares/invites/sent";
 const FOLDER_SHARE_ANYWAY: &str =
     "unsupported: sharing a folder to a changed key needs a folder approval core does not offer yet";
 
+/// Share a file or a folder (`folder_flows`) with a person; `accept_changed_key` is DW-0515's
+/// "Share anyway" after a refused seal. `can_edit` is not sent: web's invite has no permission
+/// field, so neither does this one.
 #[tauri::command]
 #[allow(unused_variables)]
 pub(crate) async fn share_invite(
@@ -160,23 +167,29 @@ pub(crate) async fn share_invite(
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
     let own = super::safety::own_id(&u).await?;
-    // A "compared" mark for this person: core refuses to seal to any other key (DW-0515).
-    let expected = super::safety::expected_fingerprint(&super::reads::fetch(&u, SENT).await?, &own, &email);
-    if is_folder(&id)? {
-        if accept_changed_key {
+    let sent = super::reads::fetch(&u, super::reads::SENT).await?;
+    let folder = is_folder(&id)?;
+    if accept_changed_key {
+        if folder {
             return Err(FOLDER_SHARE_ANYWAY.into());
         }
+        let key = file_key(&u.master, &id)?;
+        return super::safety::share_anyway(&u, &own, &sent, &id, &email, &key).await;
+    }
+    // Core v0.2.8 item 15: every member seal states what this app knows of the person's key. A mark
+    // for them is `Compared(its fingerprint)`, and core refuses any other key before a seal byte
+    // exists (DW-0515); no mark is `NotCompared`. A mark that cannot be read stops here.
+    let expected = super::safety::expectation(&sent, &own, &email)?;
+    if folder {
         return super::folder_flows::folder_invite(&u, &own, &id, &email, expected).await;
     }
     let key = file_key(&u.master, &id)?;
-    if accept_changed_key {
-        return super::safety::share_anyway(&u, &id, &email, &key).await;
-    }
     let target = ShareTarget {
         item_id: id,
         is_folder: false,
     };
-    let (mut flow, mut req) = MemberInvite::start(&target, &email, &u.master, &key, expected).map_err(flow_reason)?;
+    let (mut flow, mut req): (MemberInvite, HttpRequest) =
+        MemberInvite::start(&target, &email, &u.master, &key, expected).map_err(flow_reason)?;
     drop(key);
     let client = transport::client()?;
     loop {
@@ -242,24 +255,41 @@ async fn file_link(
     } else {
         my_links(client, u, &id).await?
     };
-    let existing = existing.into_iter().find_map(|s| {
-        sf::link::rebuild_link(
-            app_url,
-            &u.master,
-            s.get("owner_wrapped_key").and_then(Value::as_str),
-            s.get("owner_wrapped_token").and_then(Value::as_str),
-        )
-    });
+    let had_live_link = !existing.is_empty();
+    let existing = existing.into_iter().find_map(|s| rebuilt_link(app_url, &u.master, &s));
     let link = match existing {
         Some(link) => link,
+        // Core v0.2.8 item 9: a live link is rebuilt only when its stored `wrapped_file_key` opens
+        // under the rebuilt key. One that cannot be checked is not handed out, and no second public
+        // link is minted behind the person's back: Copy link answers honestly instead.
+        None if had_live_link => return Err(LINK_NOT_REBUILT.into()),
         None => {
             let key = file_key(&u.master, &id)?;
             let (flow, req) = CreateLink::start(app_url, &id, &u.master, &key, options).map_err(flow_reason)?;
             drop(key);
-            drive_link(&client, u, flow, req).await?
+            drive_link(client, u, flow, req).await?
         }
     };
     Ok(link)
+}
+
+/// What Copy link answers for a live link this app cannot rebuild and check: the owner listing
+/// (`GET /shares/mine`) does not carry the link's `wrapped_file_key` yet.
+pub(super) const LINK_NOT_REBUILT: &str = "unsupported: this link can't be copied again in this version";
+
+/// A live file link of the owner's, rebuilt from its owner blobs and checked against its stored
+/// `wrapped_file_key` (core's `rebuild_link`; `None` when the key is absent or does not open).
+pub(super) fn rebuilt_link(app_url: &str, master: &MasterKey, share: &Value) -> Option<Zeroizing<String>> {
+    sf::link::rebuild_link(
+        app_url,
+        master,
+        share.get("owner_wrapped_key").and_then(Value::as_str),
+        share.get("owner_wrapped_token").and_then(Value::as_str),
+        share
+            .get("wrapped_file_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 /// Drive a file or bundle link to its full URL.
@@ -297,7 +327,7 @@ pub(crate) async fn share_revoke(state: State<'_, AppState>, item_id: String, me
                 let sid = share.get("id").and_then(Value::as_str).unwrap_or_default();
                 requests.push(sf::revoke_link_request(sid).map_err(flow_reason)?);
             }
-            let sent = send(&client, &u, get("/api/v1/shares/invites/sent".into())).await?;
+            let sent = send(&client, &u, get(super::reads::SENT.into())).await?;
             if !sent.ok() {
                 return Err(flow_reason(ShareFlowError::from_status(&sent)));
             }

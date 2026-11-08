@@ -17,7 +17,7 @@
 //! working command.
 
 use beebeeb_core::auth_flow::step_up::{StepUp, StepUpPurpose, StepUpStep};
-use beebeeb_core::auth_flow::{AuthFlowError, HttpRequest, Method, RequestAuth};
+use beebeeb_core::auth_flow::{AuthFlowError, HttpRequest, Method};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use zeroize::Zeroizing;
@@ -52,34 +52,36 @@ fn auth_code(e: AuthFlowError) -> String {
     e.code().to_string()
 }
 
-/// One OPAQUE step-up through core; the confirmation token comes back only as the header value
-/// for the one request that spends it, in a wiped buffer, and never leaves this module.
-async fn confirm_once(client: &reqwest::Client, session: &str, password: &[u8]) -> Answer<Zeroizing<String>> {
+/// The permanent delete of one item, on the session, without a token: core puts the token on it.
+pub(crate) fn permanent_delete_request(id: &str) -> HttpRequest {
+    flows::request(Method::Delete, format!("/api/v1/files/{id}/permanent"), None)
+}
+
+/// One OPAQUE step-up through core, and the DELETE that spends its single-use token. Core attaches
+/// the token to the request itself (`ConfirmToken::attach`); this app never holds it as a string,
+/// and the transport reads it only through `confirm_token_header()` (core v0.2.8 item 4).
+async fn delete_with_step_up(client: &reqwest::Client, session: &str, password: &[u8], id: &str) -> Answer<()> {
     let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(auth_code)?;
-    loop {
+    let token = loop {
         let resp = transport::send(client, Some(session), req).await?;
         match flow.on_response(resp).map_err(auth_code)? {
             StepUpStep::Send(next) => req = next,
-            StepUpStep::Confirmed(token) => {
-                // `ConfirmToken` has no string accessor: it only attaches to a request. Attach it to a
-                // carrier and move the header value straight onto the DELETE below.
-                let carrier = token.attach(HttpRequest {
-                    method: Method::Post,
-                    path: String::new(),
-                    body: None,
-                    auth: RequestAuth::Session,
-                    confirm_token: None,
-                });
-                return carrier.confirm_token.ok_or_else(|| "failed".to_string());
-            }
+            StepUpStep::Confirmed(token) => break token,
         }
+    };
+    let resp = transport::send(client, Some(session), token.attach(permanent_delete_request(id))).await?;
+    match resp.status {
+        200..=299 => Ok(()),
+        404 => Err("not-found".into()),
+        _ => Err("failed".into()),
     }
 }
 
-/// Checks the ids before anything is sent: non-empty, each a UUID, no repeats.
+/// Checks the ids before anything is sent: non-empty, each already a canonical lower-case UUID
+/// (never normalized, as `flows::item_id`), no repeats.
 pub(crate) fn valid_ids(ids: &[String]) -> bool {
     !ids.is_empty()
-        && ids.iter().all(|id| id.parse::<uuid::Uuid>().is_ok())
+        && ids.iter().all(|id| flows::item_id(id).is_ok())
         && ids.iter().collect::<std::collections::HashSet<_>>().len() == ids.len()
 }
 
@@ -110,21 +112,9 @@ pub(crate) async fn drive_delete_permanently(
         });
     }
     let session = session_token(&state)?;
-    let api = crate::account_commands::api_client_from_session(&state)?;
     let client = transport::client()?;
     for id in &ids {
-        let token = confirm_once(&client, &session, password.as_bytes()).await?;
-        api.permanent_delete_file(id, &token).await.map_err(|e| {
-            let t = e.to_string().to_ascii_lowercase();
-            if t.contains("404") {
-                "not-found".to_string()
-            } else if t.contains("error sending") || t.contains("timed out") {
-                transport::OFFLINE.to_string()
-            } else {
-                "failed".to_string()
-            }
-        })?;
-        drop(token);
+        delete_with_step_up(&client, &session, password.as_bytes(), id).await?;
         let _ = app.emit(EVENT, serde_json::json!({ "kind": "removed", "id": id }));
     }
     let _ = app.emit(EVENT, serde_json::json!({ "kind": "changed", "folderId": null }));

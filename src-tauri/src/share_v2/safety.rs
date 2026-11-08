@@ -1,28 +1,43 @@
 //! B05e: the share safety number and the local "compared" mark (contract: workspace
-//! `.claude/tasks/backlog/v2-b05e-safety-number-contract-ruled.md`).
+//! `.claude/tasks/backlog/v2-b05e-safety-number-contract-ruled.md`, with Amendment 1).
 //!
 //! The number comes from core (`share_flow::safety`); only its 12 groups of 5 digits go to the web
 //! view. Core derives the own key from the master key; the peer key is the exact key the share
 //! was sealed to, which this app records in the state DB when it seals (never a separate
-//! `GET /auth/public-key` call). A mark is kept per (account id, peer user id) with SHA-256 of
-//! that key; every later seal to the person passes it to core as `expected_peer_fingerprint`, and
-//! a server key that differs stops before sealing (`peer_key_changed`, DW-0515).
+//! `GET /auth/public-key` call).
+//!
+//! The seal is bound to the mark (core v0.2.8 item 15):
+//! - every member seal passes a REQUIRED `PeerKeyExpectation`: `Compared(fingerprint of the mark)`
+//!   when this app holds a mark for the person, else `NotCompared`. A server key that differs is
+//!   refused by core before a seal byte exists (`peer_key_changed`, DW-0515). A "They don't match"
+//!   mark expects no key at all, so nothing is sealed to that person until they choose; a mark
+//!   that cannot be read stops the share (it never falls back to `NotCompared`);
+//! - "Share anyway" seals to the exact bytes `peer_key_changed` carried, with
+//!   `Compared(fingerprint(those bytes))`, never to a re-fetched key, and then pins the mark to
+//!   that fingerprint ([`MarkKind::Accepted`]: pinned, never shown as compared), so a further swap
+//!   is refused again;
+//! - each share keeps the key it was sealed to, and its trust is read against the mark PER SHARE:
+//!   a mark set later never vouches for a share sealed to another key.
 use base64::Engine;
 use beebeeb_core::auth_flow::HttpRequest;
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::access::MemberPermission;
-use beebeeb_core::share_flow::member::{self, InviteOutcome};
-use beebeeb_core::share_flow::{access, safety};
+use beebeeb_core::share_flow::member::{self, InviteOutcome, PeerKeyExpectation, SealedApproval};
+use beebeeb_core::share_flow::{ShareFlowError, access, safety};
 use serde_json::{Value, json};
 use tauri::State;
 
 use super::Answer;
 use super::flows::{Unlocked, flow_reason, item_id, list, state_db, unlocked};
-use super::reads::fetch;
+use super::reads::{SENT, fetch};
 use crate::AppState;
+use crate::state_db::{MarkKind, StateDb};
 
-const SENT: &str = "/api/v1/shares/invites/sent";
 const ME: &str = "/api/v1/auth/me";
+/// The expectation of a "They don't match" mark: a fingerprint no key has (32 zero bytes is no
+/// known SHA-256 output), so core refuses every server key with `peer_key_changed` and nothing is
+/// sealed until the person chooses on DW-0515.
+const NO_KEY_MATCHES: [u8; 32] = [0; 32];
 const NO_PEER_ID: &str = "unsupported: the server does not list this person's account id yet";
 const NO_SEALED_KEY: &str = "unsupported: this share was sealed before this app kept the key it sealed to";
 
@@ -34,7 +49,7 @@ pub(super) enum Trust {
     KeyChanged,
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -55,12 +70,20 @@ pub(super) fn groups_answer(groups: &[String]) -> Value {
     json!({ "groups": groups })
 }
 
-pub(super) fn trust(mark: Option<(String, bool)>, current_fp: &str) -> Trust {
+/// One share's trust: its sealed-key fingerprint read against the person's mark, and against the
+/// key accepted for this share over People (DW-0515 "Share anyway"), if any.
+pub(super) fn trust(mark: Option<(&str, MarkKind)>, share_fp: &str, accepted_for_share: Option<&str>) -> Trust {
     match mark {
         None => Trust::NotCompared,
-        Some((fp, _)) if fp != current_fp => Trust::KeyChanged,
-        Some((_, true)) => Trust::Compared,
-        Some((_, false)) => Trust::Mismatch,
+        Some((fp, kind)) if fp == share_fp => match kind {
+            MarkKind::Matched => Trust::Compared,
+            MarkKind::NotMatched => Trust::Mismatch,
+            MarkKind::Accepted => Trust::NotCompared,
+        },
+        // An accepted, never compared key is no reference a share could differ from.
+        Some((_, MarkKind::Accepted)) => Trust::NotCompared,
+        Some(_) if accepted_for_share == Some(share_fp) => Trust::NotCompared,
+        Some(_) => Trust::KeyChanged,
     }
 }
 
@@ -107,20 +130,30 @@ fn key_hex(hex_str: &str) -> Option<[u8; 32]> {
 }
 
 /// The key invite `member_id` was sealed to, as this app recorded it when sealing.
-pub(super) fn sealed_key(own: &str, member_id: &str) -> Answer<[u8; 32]> {
-    state_db()?
-        .share_sealed_key(own, member_id)
+pub(super) fn sealed_key_in(db: &StateDb, own: &str, member_id: &str) -> Answer<[u8; 32]> {
+    db.share_sealed_key(own, member_id)
         .map_err(|_| "failed".to_string())?
         .as_deref()
         .and_then(key_hex)
         .ok_or_else(|| NO_SEALED_KEY.to_string())
 }
 
-/// The fingerprint of my "compared" mark for the person a sent invite to `email` names, if any:
-/// core refuses to seal to a different key (`peer_key_changed`).
-pub(super) fn expected_fingerprint(sent: &Value, own: &str, email: &str) -> Option<[u8; 32]> {
+/// The key a safety number is computed from for invite `member_id`: the key it was sealed to, or,
+/// for an invite a changed key stopped (DW-0515 "Compare safety numbers"), the key it was offered.
+pub(super) fn number_key_in(db: &StateDb, own: &str, member_id: &str) -> Answer<[u8; 32]> {
+    sealed_key_in(db, own, member_id).or_else(|e| {
+        db.share_offered_key(own, member_id)
+            .map_err(|_| "failed".to_string())?
+            .as_deref()
+            .and_then(key_hex)
+            .ok_or(e)
+    })
+}
+
+/// The account ids of the people my sent invites to `email` name (more than one when the address
+/// was registered again), in the server's order, without repeats.
+pub(super) fn peers_for_email(sent: &Value, email: &str) -> Vec<String> {
     let email = email.trim().to_lowercase();
-    let db = state_db().ok()?;
     list(sent, "invites")
         .filter(|i| {
             i.get("recipient_email")
@@ -134,21 +167,54 @@ pub(super) fn expected_fingerprint(sent: &Value, own: &str, email: &str) -> Opti
                 .and_then(Value::as_str)
                 .and_then(|p| item_id(p).ok())
         })
-        .find_map(|peer| db.share_mark(own, &peer).ok().flatten())
-        .and_then(|(fp, _)| key_hex(&fp))
+        .fold(Vec::new(), |mut peers, p| {
+            if !peers.contains(&p) {
+                peers.push(p);
+            }
+            peers
+        })
+}
+
+/// What this app knows of the key of the person a sent invite to `email` names: the fingerprint of
+/// their mark (`Matched` and `Accepted` pin that key), no key at all for "They don't match", or
+/// `NotCompared` when there is no mark. Fails closed: a mark that cannot be read is an error, never
+/// `NotCompared`, so a failed read can never let a swapped key through unpinned.
+pub(super) fn expectation_in(db: &StateDb, sent: &Value, own: &str, email: &str) -> Answer<PeerKeyExpectation> {
+    for peer in peers_for_email(sent, email) {
+        match db.share_mark(own, &peer).map_err(|_| "failed".to_string())? {
+            None => continue,
+            Some((_, MarkKind::NotMatched)) => return Ok(PeerKeyExpectation::Compared(NO_KEY_MATCHES)),
+            Some((fp, _)) => {
+                return key_hex(&fp)
+                    .map(PeerKeyExpectation::Compared)
+                    .ok_or_else(|| "failed".to_string());
+            }
+        }
+    }
+    Ok(PeerKeyExpectation::NotCompared)
+}
+
+pub(super) fn expectation(sent: &Value, own: &str, email: &str) -> Answer<PeerKeyExpectation> {
+    expectation_in(&state_db()?, sent, own, email)
 }
 
 /// What an invite answers, and the key record it leaves: the sealed key for a share, the offered
 /// key for a refused one (DW-0515), so "Share anyway" seals to exactly the key the user was shown.
-pub(super) fn record_outcome(own: &str, outcome: &InviteOutcome) -> Answer<Value> {
-    let db = state_db()?;
+/// A share is live once the server took the approval: a record that cannot be written then is
+/// logged and the answer stays `shared` (its safety number later answers `unsupported`), so the
+/// person is never told a live share failed and sent to make a second one.
+pub(super) fn record_outcome_in(db: &StateDb, own: &str, outcome: &InviteOutcome) -> Answer<Value> {
     match outcome {
         InviteOutcome::Shared {
             invite_id,
             recipient_public_key,
         } => {
-            db.set_share_sealed_key(own, invite_id, &hex(recipient_public_key))
-                .map_err(|_| "failed".to_string())?;
+            if db
+                .set_share_sealed_key(own, invite_id, &hex(recipient_public_key))
+                .is_err()
+            {
+                tracing::warn!("share: the sealed-key record was not written; the share is live");
+            }
             Ok(json!({ "status": "shared" }))
         }
         InviteOutcome::PeerKeyChanged {
@@ -161,6 +227,10 @@ pub(super) fn record_outcome(own: &str, outcome: &InviteOutcome) -> Answer<Value
         }
         _ => Ok(json!({ "status": "invited" })),
     }
+}
+
+pub(super) fn record_outcome(own: &str, outcome: &InviteOutcome) -> Answer<Value> {
+    record_outcome_in(&state_db()?, own, outcome)
 }
 
 /// The claimed invite of `item` to `email` that a changed key stopped.
@@ -185,29 +255,79 @@ pub(super) fn refused_invite(sent: &Value, item: &str, email: &str) -> Answer<St
         .and_then(item_id)
 }
 
-/// DW-0515 "Share anyway" for a file: seal to the key the user was shown, with no expected
-/// fingerprint, then forget the mark (the person reads as not compared again).
-pub(super) async fn share_anyway(u: &Unlocked, item: &str, email: &str, key: &FileKey) -> Answer<Value> {
-    let own = own_id(u).await?;
-    let sent = fetch(u, SENT).await?;
-    let invite = refused_invite(&sent, item, email)?;
+/// The "Share anyway" seal: the file key sealed to exactly the bytes `peer_key_changed` carried,
+/// with `Compared(fingerprint(those bytes))`. There is no input for a server key: a key fetched
+/// again can never be what is sealed to, and core checks the bytes against the expectation.
+pub(super) fn anyway_seal(
+    invite: &str,
+    item: &str,
+    carried: &[u8; 32],
+    master: &MasterKey,
+    key: &FileKey,
+) -> Result<SealedApproval, ShareFlowError> {
+    let expected = safety::key_fingerprint(carried)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(carried);
+    let sealed = member::approve_request(invite, item, &b64, master, key, PeerKeyExpectation::Compared(expected))?;
+    if sealed.recipient_public_key != *carried {
+        // Core returns the key it sealed to; anything else is not this seal.
+        return Err(ShareFlowError::PeerKeyChanged);
+    }
+    Ok(sealed)
+}
+
+/// After "Share anyway" went through: the share's sealed key, and the mark of every account id the
+/// address names (`peers`, see [`peers_for_email`]) pinned to the accepted key's fingerprint
+/// ([`MarkKind::Accepted`]), so the next seal to the person refuses another key, and an older
+/// account id's mark can never stop every later share again.
+pub(super) fn record_anyway_in(
+    db: &StateDb,
+    own: &str,
+    invite: &str,
+    peers: &[String],
+    sealed_to: &[u8; 32],
+) -> Answer<()> {
+    db.set_share_sealed_key(own, invite, &hex(sealed_to))
+        .map_err(|_| "failed".to_string())?;
+    let fp = hex(&safety::key_fingerprint(sealed_to).map_err(flow_reason)?);
+    for peer in peers {
+        db.set_share_mark(own, peer, &fp, MarkKind::Accepted)
+            .map_err(|_| "failed".to_string())?;
+    }
+    Ok(())
+}
+
+/// DW-0515 "Share anyway" for a file: seal to the key the user was shown (see [`anyway_seal`]),
+/// then pin the mark to it. `own` and `sent` are the ones `share_invite` already read.
+pub(super) async fn share_anyway(
+    u: &Unlocked,
+    own: &str,
+    sent: &Value,
+    item: &str,
+    email: &str,
+    key: &FileKey,
+) -> Answer<Value> {
+    let invite = refused_invite(sent, item, email)?;
     let db = state_db()?;
-    let offered = db
-        .share_offered_key(&own, &invite)
+    let carried = db
+        .share_offered_key(own, &invite)
         .map_err(|_| "failed".to_string())?
         .as_deref()
         .and_then(key_hex)
         .ok_or_else(|| "not-found".to_string())?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(offered);
-    let sealed = member::approve_request(&invite, item, &b64, &u.master, key, None).map_err(flow_reason)?;
+    let sealed = anyway_seal(&invite, item, &carried, &u.master, key).map_err(flow_reason)?;
     let resp = super::flows::send(&crate::auth_v2::transport::client()?, u, sealed.request).await?;
     if !resp.ok() {
         return Err("failed".into());
     }
-    db.set_share_sealed_key(&own, &invite, &hex(&sealed.recipient_public_key))
-        .map_err(|_| "failed".to_string())?;
-    if let Ok(peer) = peer_user_id(&sent, &invite) {
-        db.clear_share_mark(&own, &peer).map_err(|_| "failed".to_string())?;
+    let mut peers = peers_for_email(sent, email);
+    if let Ok(peer) = peer_user_id(sent, &invite)
+        && !peers.contains(&peer)
+    {
+        peers.push(peer);
+    }
+    // The share is live: a record that cannot be written is logged, never reported as a failed share.
+    if record_anyway_in(&db, own, &invite, &peers, &sealed.recipient_public_key).is_err() {
+        tracing::warn!("share: the Share anyway records were not written; the share is live");
     }
     Ok(json!({ "status": "shared" }))
 }
@@ -217,7 +337,7 @@ async fn resolve(u: &Unlocked, member_id: &str) -> Answer<(String, String, Vec<S
     let member_id = item_id(member_id)?;
     let peer = peer_user_id(&fetch(u, SENT).await?, &member_id)?;
     let own = own_id(u).await?;
-    let key = sealed_key(&own, &member_id)?;
+    let key = number_key_in(&state_db()?, &own, &member_id)?;
     let (groups, fp) = safety_view(&u.master, &own, &peer, &key)?;
     Ok((own, peer, groups, fp))
 }
@@ -230,29 +350,51 @@ pub(crate) async fn share_safety_number(state: State<'_, AppState>, member_id: S
     Ok(groups_answer(&groups))
 }
 
-/// They match / They don't match: a local mark against the peer's current key.
+/// They match / They don't match: a local mark against the key this share was sealed to.
 #[tauri::command]
 pub(crate) async fn share_mark_compared(state: State<'_, AppState>, member_id: String, matched: bool) -> Answer<()> {
     let u = unlocked(&state)?;
     let (own, peer, _, fp) = resolve(&u, &member_id).await?;
+    let kind = if matched {
+        MarkKind::Matched
+    } else {
+        MarkKind::NotMatched
+    };
     state_db()?
-        .set_share_mark(&own, &peer, &fp, matched)
+        .set_share_mark(&own, &peer, &fp, kind)
         .map_err(|_| "failed".to_string())
 }
 
-/// DW-0515 "Share anyway": accept the new key; the person reads as not compared again.
+/// What "Share anyway" over People records: this share's sealed key is accepted for this share.
+/// The person's mark is left as it is, so later seals to them stay guarded.
+pub(super) fn accept_share_key_in(db: &StateDb, own: &str, member_id: &str) -> Answer<()> {
+    let key = sealed_key_in(db, own, member_id)?;
+    let fp = safety::key_fingerprint(&key).map_err(flow_reason)?;
+    db.set_share_accepted_fingerprint(own, member_id, &hex(&fp))
+        .map_err(|_| "failed".to_string())
+}
+
+/// DW-0515 over People, "Share anyway": keep this share as it is. Nothing is sealed or sent.
 #[tauri::command]
-pub(crate) async fn share_forget_compared(state: State<'_, AppState>, member_id: String) -> Answer<()> {
+pub(crate) async fn share_accept_changed_key(state: State<'_, AppState>, member_id: String) -> Answer<()> {
     let u = unlocked(&state)?;
-    let peer = peer_user_id(&fetch(&u, SENT).await?, &item_id(&member_id)?)?;
+    let member_id = item_id(&member_id)?;
     let own = own_id(&u).await?;
-    state_db()?
-        .clear_share_mark(&own, &peer)
-        .map_err(|_| "failed".to_string())
+    accept_share_key_in(&state_db()?, &own, &member_id)
 }
 
-/// Adds `compared` / `mismatch` / `keyChanged` to People rows that have a mark. A key is fetched
-/// only for a person with a mark; any failure leaves the row as it was.
+/// The trust of one share of mine (`member_id`, the invite id) to `peer`, or `None` when this app
+/// has no record of the key it was sealed to (a mark never vouches for such a share).
+pub(super) fn share_trust_in(db: &StateDb, own: &str, peer: &str, member_id: &str) -> Option<Trust> {
+    let mark = db.share_mark(own, peer).ok()??;
+    let key = sealed_key_in(db, own, member_id).ok()?;
+    let fp = hex(&safety::key_fingerprint(&key).ok()?);
+    let accepted = db.share_accepted_fingerprint(own, member_id).ok().flatten();
+    Some(trust(Some((mark.0.as_str(), mark.1)), &fp, accepted.as_deref()))
+}
+
+/// Adds `compared` / `mismatch` / `keyChanged` to People rows that have a mark, per share. Any
+/// failure leaves the row as it was.
 pub(super) async fn annotate_members(u: &Unlocked, invites: &[&Value], rows: &mut [Value]) {
     let Ok(db) = state_db() else { return };
     let mut own: Option<String> = None;
@@ -271,17 +413,13 @@ pub(super) async fn annotate_members(u: &Unlocked, invites: &[&Value], rows: &mu
             }
         }
         let Some(own) = own.as_deref() else { return };
-        let Ok(Some(mark)) = db.share_mark(own, &peer) else {
-            continue;
-        };
         let Some(member) = invite.get("id").and_then(Value::as_str).and_then(|m| item_id(m).ok()) else {
             continue;
         };
-        let Ok(key) = sealed_key(own, &member) else { continue };
-        let Ok(fp) = safety::key_fingerprint(&key).map(|f| hex(&f)) else {
+        let Some(t) = share_trust_in(&db, own, &peer, &member) else {
             continue;
         };
-        if let (Some(obj), Value::Object(extra)) = (row.as_object_mut(), trust_fields(trust(Some(mark), &fp))) {
+        if let (Some(obj), Value::Object(extra)) = (row.as_object_mut(), trust_fields(t)) {
             obj.extend(extra);
         }
     }

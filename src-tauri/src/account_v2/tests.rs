@@ -182,3 +182,52 @@ fn the_delete_link_commands_need_no_session() {
         );
     }
 }
+
+/// Core v0.2.8 item 6: the password change runs sign-up's gate with the server's policy and the
+/// breach check this app made for the new password. The check is always answered (an endpoint
+/// that cannot be reached is recorded as an outage), so the policy's own fail-open rule decides.
+#[test]
+fn the_new_password_passes_sign_ups_gate_with_the_check_this_app_made() {
+    use beebeeb_core::signup_flow::SignupPolicy;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let binding = || AccountBinding::from_master_key(&MasterKey::from_bytes([1; 32]));
+    let (current, new) = ("the old password 2025", "a new long password 2026");
+
+    // No breach endpoint declared: no check is made, and the minimum still applies.
+    let plain = SignupPolicy::default();
+    assert!(rt.block_on(breach_check(&plain, new)).is_none());
+    assert!(AccountFlow::change_password(current, new, binding(), &plain, None).is_ok());
+    let short = AccountFlow::change_password(current, "short", binding(), &plain, None);
+    assert_eq!(short.err().map(code).as_deref(), Some("weak_password"));
+
+    // A declared endpoint this unit-test build cannot reach (its API base is a closed port).
+    let closed = SignupPolicy {
+        breach_endpoint: Some("/api/v1/onboarding/breach-range/{prefix}".into()),
+        breach_fail_open: false,
+        ..SignupPolicy::default()
+    };
+    let check = rt
+        .block_on(breach_check(&closed, new))
+        .expect("a declared check is made");
+    assert!(check.is_answered(), "an unreachable endpoint is recorded as an outage");
+    let refused = AccountFlow::change_password(current, new, binding(), &closed, Some(&check));
+    assert_eq!(refused.err().map(code).as_deref(), Some("breach_check_blocked"));
+    let missing = AccountFlow::change_password(current, new, binding(), &closed, None);
+    assert_eq!(missing.err().map(code).as_deref(), Some("breach_check_missing"));
+    let other = AccountFlow::change_password(current, "another long password 1", binding(), &closed, Some(&check));
+    assert_eq!(
+        other.err().map(code).as_deref(),
+        Some("breach_check_missing"),
+        "a check made for another password does not count"
+    );
+
+    // The server allows an outage: the same answered check passes the gate.
+    let open = SignupPolicy {
+        breach_fail_open: true,
+        ..closed.clone()
+    };
+    assert!(AccountFlow::change_password(current, new, binding(), &open, Some(&check)).is_ok());
+}

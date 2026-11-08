@@ -3,12 +3,16 @@
 //!
 //! Every secret goes one way, web view to Rust (rule 1): a command takes a password and returns flags, ids and
 //! names only. The PRF output, the wrap key, the escrow blob, the vault key, the session and the step-up token stay in
-//! Rust. Add and remove each do their own OPAQUE step-up here and drop the token (rules 2 and 3): there is no
-//! plaintext-password path.
+//! Rust. Add and remove hand the password to core, which runs the OPAQUE step-up inside the flow and puts the
+//! single-use token on the one request that spends it (core v0.2.8 item 2; rules 2 and 3): no token is ever held
+//! here, and there is no plaintext-password path.
+//!
+//! The relying party is this build's own ([`expected_rp`], core v0.2.8 item 1): a server answer for another one is
+//! refused before the platform prompt.
 
 use super::*;
 
-use beebeeb_core::passkey::ceremony::PasskeyError;
+use beebeeb_core::passkey::ceremony::{ExpectedRp, PasskeyError};
 use beebeeb_core::passkey::flow::{self, ApiRequest, ApiResponse, Method, PasskeyHttp};
 use zeroize::Zeroizing;
 
@@ -73,15 +77,45 @@ impl PasskeyHttp for ApiHttp {
             }
             let resp = req.send().await.map_err(|_| PasskeyError::Network)?;
             let status = resp.status().as_u16();
-            let body = resp.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or(serde_json::Value::Null);
             Ok(ApiResponse { status, body })
         }
     }
 }
 
-/// A core error as the code the web view maps to its words (rule 9). Never a server body.
+/// A core error as the code the web view maps to its words (rule 9). Never a server body. A step-up that failed
+/// inside core keeps its reason where the window has words for it (a wrong password, too many tries).
 fn code(e: PasskeyError) -> String {
-    e.code().to_string()
+    match e {
+        PasskeyError::StepUp { code } => match code {
+            "invalid_credentials" => "wrong_password".to_string(),
+            "rate_limited" | "opaque_unavailable" => code.to_string(),
+            "invalid_input" => "password_required".to_string(),
+            _ => "passkey_step_up_failed".to_string(),
+        },
+        PasskeyError::Network => "network".to_string(),
+        other => other.code().to_string(),
+    }
+}
+
+/// The production relying party (the server's `WEBAUTHN_RP_ID`).
+const PRODUCTION_RP_ID: &str = "beebeeb.io";
+
+/// The relying party this build expects, from its own build configuration: never the server's answer, never a
+/// setting. A release build always expects `beebeeb.io`. A debug build built with `BB_PASSKEY_RP_ID=localhost`
+/// expects the server's development default instead (core accepts `localhost` only in a debug build).
+pub(crate) fn expected_rp() -> ExpectedRp {
+    ExpectedRp::new(expected_rp_id(cfg!(debug_assertions), option_env!("BB_PASSKEY_RP_ID")))
+}
+
+fn expected_rp_id(debug_build: bool, build_env: Option<&str>) -> &'static str {
+    match build_env.map(str::trim) {
+        Some("localhost") if debug_build => "localhost",
+        _ => PRODUCTION_RP_ID,
+    }
 }
 
 /// The session token and vault key of the signed-in account, copied out of the lock and zeroized on drop.
@@ -89,69 +123,67 @@ fn session_secrets(state: &AppState) -> Result<(Zeroizing<String>, Zeroizing<[u8
     let acct = state.active_account()?;
     let guard = acct.session.lock().map_err(|_| "session_unavailable".to_string())?;
     let session = guard.as_ref().ok_or_else(|| "vault_locked".to_string())?;
-    Ok((Zeroizing::new(session.token.clone()), Zeroizing::new(session.master_key)))
+    Ok((
+        Zeroizing::new(session.token.clone()),
+        Zeroizing::new(session.master_key),
+    ))
 }
 
-/// The OPAQUE step-up (`/auth/confirm-opaque-*`), with `ksf_version` from the server. Returns the single-use confirm
-/// token to the CALLER IN RUST, which spends it on one request and drops it. A server that cannot do OPAQUE for this
-/// account is an error: there is no plaintext fallback (rule 2).
-pub(crate) async fn step_up(http: &ApiHttp, session: &str, password: &str) -> Result<Zeroizing<String>, String> {
+/// Add a passkey over any HTTP and platform call: core's flow with this build's relying party. The password goes
+/// into core for the step-up; the answer is the id and one flag.
+pub(crate) async fn add_with<H: PasskeyHttp, A: flow::PasskeyAuthenticator>(
+    http: &H,
+    authenticator: &A,
+    session: &str,
+    password: &str,
+    name: &str,
+    vault_key: &beebeeb_core::kdf::MasterKey,
+) -> Result<PasskeyAddedDto, String> {
     if password.is_empty() {
         return Err("password_required".into());
     }
-    let start = beebeeb_core::opaque_protocol::client_login_start(password.as_bytes())
-        .map_err(|_| "step_up_failed".to_string())?;
-    let resp = http
-        .client
-        .post(format!("{}/api/v1/auth/confirm-opaque-start", http.base_url))
-        .bearer_auth(session)
-        .json(&serde_json::json!({ "client_message": encode_base64(&start.message) }))
-        .send()
-        .await
-        .map_err(|_| "passkey_network".to_string())?;
-    match resp.status().as_u16() {
-        200..=299 => {}
-        401 => return Err("passkey_unauthorized".into()),
-        409 => return Err("step_up_unavailable".into()),
-        _ => return Err("step_up_failed".into()),
-    }
-    let body: serde_json::Value = resp.json().await.map_err(|_| "step_up_failed".to_string())?;
-    let field = |k: &str| body.get(k).and_then(|v| v.as_str()).ok_or_else(|| "step_up_failed".to_string());
-    let server_message = decode_base64(field("server_message")?).map_err(|_| "step_up_failed".to_string())?;
-    let server_state = field("server_state")?.to_string();
-    let ksf_version = body
-        .get("ksf_version")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u32::try_from(v).ok())
-        .ok_or_else(|| "step_up_failed".to_string())?;
-    let finish = beebeeb_core::opaque_protocol::client_login_finish(
-        &start.state,
+    let added = flow::add_passkey(
+        http,
+        authenticator,
+        session,
         password.as_bytes(),
-        &server_message,
-        ksf_version,
+        Some(name),
+        Some(vault_key),
+        &expected_rp(),
     )
-    .map_err(|_| "password_incorrect".to_string())?;
-    let resp = http
-        .client
-        .post(format!("{}/api/v1/auth/confirm-opaque-finish", http.base_url))
-        .bearer_auth(session)
-        .json(&serde_json::json!({
-            "client_message": encode_base64(&finish.message),
-            "server_state": server_state,
-        }))
-        .send()
-        .await
-        .map_err(|_| "passkey_network".to_string())?;
-    match resp.status().as_u16() {
-        200..=299 => {}
-        401 => return Err("password_incorrect".into()),
-        _ => return Err("step_up_failed".into()),
+    .await
+    .map_err(code)?;
+    Ok(PasskeyAddedDto {
+        id: added.id,
+        can_unlock: added.prf && added.escrowed,
+    })
+}
+
+/// Remove a passkey: core runs the step-up from the password and spends its token on the `DELETE`.
+pub(crate) async fn remove_with<H: PasskeyHttp>(
+    http: &H,
+    session: &str,
+    password: &str,
+    id: &str,
+) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("password_required".into());
     }
-    let body: serde_json::Value = resp.json().await.map_err(|_| "step_up_failed".to_string())?;
-    body.get("confirmation_token")
-        .and_then(|v| v.as_str())
-        .map(|t| Zeroizing::new(t.to_string()))
-        .ok_or_else(|| "step_up_failed".to_string())
+    flow::remove_passkey(http, session, password.as_bytes(), id)
+        .await
+        .map_err(code)
+}
+
+/// Passkey sign-in over any HTTP and platform call, against this build's relying party.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) async fn sign_in_with<H: PasskeyHttp, A: flow::PasskeyAuthenticator>(
+    http: &H,
+    authenticator: &A,
+    email: &str,
+) -> Result<flow::SignedIn, String> {
+    flow::sign_in(http, authenticator, email, &expected_rp())
+        .await
+        .map_err(code)
 }
 
 /// The account's passkeys.
@@ -192,16 +224,8 @@ pub(crate) async fn account_passkeys_add(
         let authenticator = platform_authenticator(&window)?;
         let (session, key) = session_secrets(&state)?;
         let http = ApiHttp::new()?;
-        let confirm = step_up(&http, &session, &password).await?;
         let vault_key = beebeeb_core::kdf::MasterKey::from_bytes(*key);
-        let added = flow::add_passkey(&http, &authenticator, &session, &confirm, Some(&name), Some(&vault_key))
-            .await
-            .map_err(code)?;
-        drop(confirm);
-        Ok(PasskeyAddedDto {
-            id: added.id,
-            can_unlock: added.prf && added.escrowed,
-        })
+        add_with(&http, &authenticator, &session, &password, &name, &vault_key).await
     })
 }
 
@@ -216,10 +240,7 @@ pub(crate) async fn account_passkeys_remove(
     session_command!(async {
         let (session, _key) = session_secrets(&state)?;
         let http = ApiHttp::new()?;
-        let confirm = step_up(&http, &session, &password).await?;
-        flow::remove_passkey(&http, &session, Some(&confirm), &id)
-            .await
-            .map_err(code)
+        remove_with(&http, &session, &password, &id).await
     })
 }
 
@@ -247,14 +268,23 @@ pub(crate) async fn auth_passkey_sign_in(
             }
             let authenticator = platform_authenticator(&window)?;
             let http = ApiHttp::new()?;
-            let signed = flow::sign_in(&http, &authenticator, &email).await.map_err(code)?;
+            let signed = sign_in_with(&http, &authenticator, &email).await?;
             let token = signed.session_token;
             match signed.vault.into_master_key() {
                 Some(vault_key) => {
                     let key = Zeroizing::new(vault_key.to_bytes());
                     drop(vault_key);
                     let profile = fetch_canonical_profile(&token).await;
-                    apply_session(app.clone(), &state, token.to_string(), &key, profile, &mut turn, &attempt).await?;
+                    apply_session(
+                        app.clone(),
+                        &state,
+                        token.to_string(),
+                        &key,
+                        profile,
+                        &mut turn,
+                        &attempt,
+                    )
+                    .await?;
                     Ok(LoginOutcome::browser_signed_in())
                 }
                 None => {
@@ -293,7 +323,9 @@ pub(crate) async fn auth_passkey_sign_in(
 }
 
 #[cfg(target_os = "windows")]
-fn platform_authenticator(window: &tauri::WebviewWindow) -> Result<crate::passkey_windows::WindowsAuthenticator, String> {
+fn platform_authenticator(
+    window: &tauri::WebviewWindow,
+) -> Result<crate::passkey_windows::WindowsAuthenticator, String> {
     let hwnd = window.hwnd().map_err(|_| "passkey_unavailable".to_string())?;
     Ok(crate::passkey_windows::WindowsAuthenticator::new(hwnd.0 as isize))
 }
@@ -391,11 +423,140 @@ mod tests {
     }
 
     #[test]
-    fn step_up_never_takes_the_plaintext_path() {
+    fn the_step_up_runs_inside_core_with_no_plaintext_path() {
         let src = include_str!("passkey_commands.rs");
-        let body = &src[src.find("pub(crate) async fn step_up(").unwrap()..src.find("/// The account's passkeys.").unwrap()];
-        assert!(!body.contains(concat!("confirm_action_", "plaintext")));
-        assert!(!body.contains(concat!("/auth/", "confirm\"")));
-        assert!(body.contains("ksf_version"));
+        let production = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        // Core v0.2.8 item 2: the password goes into core; this file runs no OPAQUE leg and holds no token.
+        assert!(!production.contains(concat!("confirm_action_", "plaintext")));
+        assert!(!production.contains(concat!("/auth/", "confirm\"")));
+        assert!(!production.contains(concat!("confirm-", "opaque")));
+        assert!(!production.contains(concat!("confirmation_", "token")));
+        let add = &production[production.find("pub(crate) async fn add_with").unwrap()..];
+        assert!(add[..add.find("\n}\n").unwrap()].contains("password.as_bytes()"));
+        let remove = &production[production.find("pub(crate) async fn remove_with").unwrap()..];
+        assert!(remove[..remove.find("\n}\n").unwrap()].contains("password.as_bytes()"));
+    }
+
+    #[test]
+    fn the_relying_party_comes_from_the_build_never_the_server() {
+        assert_eq!(expected_rp_id(false, None), "beebeeb.io");
+        assert_eq!(expected_rp_id(true, None), "beebeeb.io");
+        assert_eq!(expected_rp_id(true, Some("localhost")), "localhost");
+        assert_eq!(
+            expected_rp_id(false, Some("localhost")),
+            "beebeeb.io",
+            "a release build never expects localhost"
+        );
+        assert_eq!(
+            expected_rp_id(true, Some("evil.example")),
+            "beebeeb.io",
+            "only localhost overrides"
+        );
+        assert_eq!(
+            expected_rp().rp_id(),
+            "beebeeb.io",
+            "this test build was built without the override"
+        );
+    }
+
+    /// The server's answers, scripted per path; every request is counted.
+    struct Server {
+        rp_id: &'static str,
+        sent: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PasskeyHttp for Server {
+        fn send(&self, r: ApiRequest) -> impl std::future::Future<Output = Result<ApiResponse, PasskeyError>> + Send {
+            self.sent.lock().unwrap().push(r.path.clone());
+            let body = match r.path.as_str() {
+                "/api/v1/auth/passkey/login-start" => serde_json::json!({
+                    "publicKey": { "challenge": "AAAA", "rpId": self.rp_id, "allowCredentials": [] },
+                    "auth_state": "state",
+                    "user_id": "user",
+                }),
+                _ => serde_json::Value::Null,
+            };
+            std::future::ready(Ok(ApiResponse { status: 200, body }))
+        }
+    }
+
+    /// A platform call that only counts: it answers "cancelled".
+    #[derive(Default)]
+    struct Prompt {
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl flow::PasskeyAuthenticator for Prompt {
+        fn make_credential(
+            &self,
+            _: &beebeeb_core::passkey::ceremony::CreationOptions,
+        ) -> impl std::future::Future<Output = Result<flow::Registration, PasskeyError>> + Send {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err(PasskeyError::Cancelled))
+        }
+        fn get_assertion(
+            &self,
+            _: &beebeeb_core::passkey::ceremony::RequestOptions,
+        ) -> impl std::future::Future<Output = Result<flow::Assertion, PasskeyError>> + Send {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err(PasskeyError::Cancelled))
+        }
+    }
+
+    fn sign_in_against(rp_id: &'static str) -> (Result<(), String>, usize, usize) {
+        let server = Server {
+            rp_id,
+            sent: std::sync::Mutex::new(Vec::new()),
+        };
+        let prompt = Prompt::default();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let result = rt
+            .block_on(sign_in_with(&server, &prompt, "anna@example.com"))
+            .map(|_| ());
+        let sent = server.sent.lock().unwrap().len();
+        (result, sent, prompt.asked.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[test]
+    fn a_server_naming_another_relying_party_is_refused_before_the_prompt() {
+        // The expected relying party reaches the platform prompt (which this fake cancels).
+        let (ok_rp, sent, asked) = sign_in_against("beebeeb.io");
+        assert_eq!((ok_rp, sent, asked), (Err("passkey_cancelled".to_string()), 1, 1));
+        // Any other: refused by core with this build's relying party, and Windows Hello never opens.
+        let mut refused = 0;
+        for rp in [
+            "evil.example",
+            "localhost",
+            "beebeeb.io.evil.example",
+            "app.beebeeb.io",
+            "",
+        ] {
+            let (result, sent, asked) = sign_in_against(rp);
+            assert_eq!(result, Err("passkey_rp_mismatch".to_string()), "{rp}");
+            assert_eq!((sent, asked), (1, 0), "{rp}: one login-start, no prompt");
+            refused += 1;
+        }
+        assert_eq!(refused, 5);
+    }
+
+    #[test]
+    fn step_up_reasons_keep_their_words_and_never_carry_a_body() {
+        assert_eq!(
+            code(PasskeyError::StepUp {
+                code: "invalid_credentials"
+            }),
+            "wrong_password"
+        );
+        assert_eq!(code(PasskeyError::StepUp { code: "rate_limited" }), "rate_limited");
+        assert_eq!(code(PasskeyError::StepUp { code: "server" }), "passkey_step_up_failed");
+        assert_eq!(code(PasskeyError::RpMismatch), "passkey_rp_mismatch");
+        assert_eq!(code(PasskeyError::Network), "network");
+        assert_eq!(
+            code(PasskeyError::Server {
+                status: 500,
+                code: Some("anything the server said".into())
+            }),
+            "passkey_server_error"
+        );
     }
 }

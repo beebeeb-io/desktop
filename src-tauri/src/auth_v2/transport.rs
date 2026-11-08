@@ -33,8 +33,10 @@ pub(crate) async fn send(
         let token = session.ok_or_else(|| "locked".to_string())?;
         builder = builder.bearer_auth(token);
     }
-    if let Some(confirm) = req.confirm_token.as_ref() {
-        builder = builder.header("X-Confirm-Token", confirm.as_str());
+    // Core v0.2.8: the confirm token is not a field outside core; the transport reads only the header value, set on
+    // the one request that spends it.
+    if let Some(confirm) = req.confirm_token_header() {
+        builder = builder.header("X-Confirm-Token", confirm);
     }
     if let Some(body) = req.body.as_ref() {
         builder = builder.json(body);

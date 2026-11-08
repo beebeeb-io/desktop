@@ -77,26 +77,77 @@ fn ids_must_be_canonical_uuids() {
         "../x",
         "6f1c2b9e1d1a4c559a513f7a2b8c9d01",
         "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01?x=1",
+        // Core v0.2.8 items 10 and 13: another spelling of the same UUID is refused, never normalized.
+        "6F1C2B9E-1D1A-4C55-9A51-3F7A2B8C9D01",
+        "6f1c2b9e-1d1a-4c55-9a51-3F7A2B8C9D01",
+        "{6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01}",
+        "urn:uuid:6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01",
     ] {
         assert_eq!(flows::item_id(bad).unwrap_err(), "not-found", "{bad}");
+        assert!(!valid_ids(&[bad.to_string()]), "{bad}");
     }
 }
 
 #[test]
-fn folder_refusals_keep_their_code_and_server_codes_never_leak_text() {
-    use beebeeb_core::share_flow::ShareFlowError;
-    assert_eq!(
-        flows::flow_reason(ShareFlowError::FolderKeyUnverified),
-        "folder_key_unverified"
-    );
-    assert_eq!(
-        flows::flow_reason(ShareFlowError::FolderNeedsUpgrade),
-        "folder_needs_upgrade"
-    );
-    assert_eq!(flows::flow_reason(ShareFlowError::NotFound), "not-found");
-    assert_eq!(
-        flows::flow_reason(ShareFlowError::Refused("plan_required")),
-        "plan_required"
-    );
-    assert_eq!(flows::flow_reason(ShareFlowError::Server { status: 500 }), "server");
+fn a_permanent_delete_carries_no_token_until_core_attaches_one() {
+    let id = "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01";
+    let req = permanent_delete_request(id);
+    assert_eq!(req.method, beebeeb_core::auth_flow::Method::Delete);
+    assert_eq!(req.path, format!("/api/v1/files/{id}/permanent"));
+    assert_eq!(req.body, None);
+    assert_eq!(req.auth, beebeeb_core::auth_flow::RequestAuth::Session);
+    assert_eq!(req.confirm_token_header(), None);
+    // The GET and POST builders the share commands use start without a token too.
+    assert_eq!(flows::get("/x".into()).confirm_token_header(), None);
+    assert_eq!(flows::get("/x".into()).body, None);
+    assert_eq!(reads::post("/x".into()).method, beebeeb_core::auth_flow::Method::Post);
+}
+
+#[test]
+fn a_live_link_is_rebuilt_only_with_a_stored_wrapped_key_that_opens() {
+    use beebeeb_core::kdf::{FileKey, MasterKey};
+    use beebeeb_core::share_flow::link::{CreateLink, LinkOptions};
+    use serde_json::json;
+    let master = MasterKey::from_bytes([3; 32]);
+    let id = "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01";
+    let options = LinkOptions {
+        expires_in_hours: None,
+        max_opens: None,
+        passphrase: None,
+    };
+    // A real link's blobs, as core makes them and the server stores them.
+    let (_, req) = CreateLink::start(
+        "https://app.example",
+        id,
+        &master,
+        &FileKey::from_bytes([5; 32]),
+        &options,
+    )
+    .unwrap();
+    let body = req.body.unwrap();
+    let field = |k: &str| body[k].as_str().unwrap().to_string();
+    let row = |wrapped: Option<String>| {
+        let mut row = json!({ "owner_wrapped_key": field("owner_wrapped_key"), "owner_wrapped_token": field("owner_wrapped_token") });
+        if let Some(w) = wrapped {
+            row["wrapped_file_key"] = json!(w);
+        }
+        row
+    };
+    let rebuilt = flows::rebuilt_link("https://app.example", &master, &row(Some(field("wrapped_file_key")))).unwrap();
+    assert!(rebuilt.starts_with(&format!("https://app.example/s/{}", field("token"))));
+    // Core v0.2.8 item 9: without the stored wrapped key (today's owner listing) or with one that
+    // does not open under the rebuilt key, nothing is handed out.
+    assert!(flows::rebuilt_link("https://app.example", &master, &row(None)).is_none());
+    assert!(flows::rebuilt_link("https://app.example", &master, &row(Some(String::new()))).is_none());
+    let (_, other) = CreateLink::start(
+        "https://app.example",
+        id,
+        &master,
+        &FileKey::from_bytes([6; 32]),
+        &options,
+    )
+    .unwrap();
+    let foreign = other.body.unwrap()["wrapped_file_key"].as_str().unwrap().to_string();
+    assert!(flows::rebuilt_link("https://app.example", &master, &row(Some(foreign))).is_none());
+    assert!(flows::LINK_NOT_REBUILT.starts_with("unsupported"));
 }

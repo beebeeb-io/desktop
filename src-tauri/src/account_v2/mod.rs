@@ -16,6 +16,8 @@ use beebeeb_core::account_flows::{
     AccountBinding, AccountFlow, AccountFlowError, AccountOutcome, ApiResponse, Method, Step, TotpEnrollment,
 };
 use beebeeb_core::kdf::MasterKey;
+use beebeeb_core::onboarding::{BreachCheck, BreachResponse};
+use beebeeb_core::signup_flow::SignupPolicy;
 use serde::Serialize;
 use tauri::State;
 use zeroize::{Zeroize, Zeroizing};
@@ -250,7 +252,37 @@ async fn run_simple(
     drive(flow, Some(&token)).await
 }
 
+/// The server's password policy (`GET /api/v1/onboarding`), the one sign-up reads. No fallback policy: an answer
+/// that cannot be read stops the change.
+async fn password_policy() -> Result<SignupPolicy, String> {
+    let client = crate::auth_v2::transport::client().map_err(|_| "network".to_string())?;
+    let resp = crate::auth_v2::transport::send(&client, None, SignupPolicy::request())
+        .await
+        .map_err(|_| "network".to_string())?;
+    SignupPolicy::from_response(&resp).map_err(|_| "policy_unavailable".to_string())
+}
+
+/// Sign-up's k-anonymity breach check for `password`, made and answered, when the policy declares one (only the
+/// 5-character prefix of its hash leaves this PC). An outage is recorded as one: core's gate then applies the
+/// policy's own fail-open rule.
+async fn breach_check(policy: &SignupPolicy, password: &str) -> Option<BreachCheck> {
+    let endpoint = policy.breach_endpoint.as_deref()?;
+    let mut check = BreachCheck::new(password);
+    let prefix = check.prefix().to_owned();
+    let (status, body) = crate::auth_v2::signup_v2::breach_answer_at(&endpoint.replace("{prefix}", &prefix)).await;
+    let response = match status {
+        Some(s) if (200..300).contains(&s) => BreachResponse::Body(&body),
+        _ => BreachResponse::Unavailable,
+    };
+    if check.record(&prefix, response).is_err() {
+        let _ = check.record(&prefix, BreachResponse::Unavailable);
+    }
+    Some(check)
+}
+
 /// DW-A67: change the password (OPAQUE re-registration in core, a step-up per leg).
+/// The new password passes sign-up's gate first (core v0.2.8 item 6): the server's
+/// minimum, and the breach check when the server declares one.
 /// The server ends every other session and mints a new one for this device: it is
 /// stored in the credential store and swapped into memory in one session turn, and the
 /// engine restarts with it. No master-key wrap (the key stays in the credential store).
@@ -266,7 +298,10 @@ pub(super) async fn account_change_password(
     session_command!(async {
         let (acct, token, binding) = session_parts(&state)?;
         let mut turn = acct.session_generation();
-        let flow = AccountFlow::change_password(&current, &new_password, binding).map_err(code)?;
+        let policy = password_policy().await?;
+        let breach = breach_check(&policy, &new_password).await;
+        let flow =
+            AccountFlow::change_password(&current, &new_password, binding, &policy, breach.as_ref()).map_err(code)?;
         let outcome = drive(flow, Some(&token)).await?;
         let AccountOutcome::PasswordChanged { session_token } = outcome else {
             return Err("protocol".to_string());

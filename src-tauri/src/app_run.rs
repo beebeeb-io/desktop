@@ -56,7 +56,7 @@ pub fn run() {
             account_v2::account_backup_codes_regenerate, account_v2::account_delete_confirm_link, crate::auth_v2::private_screen::auth_screen_private, crate::auth_v2::signup_v2::auth_signup_phrase_copy, // v2 b10b
             crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
             crate::share_v2::drive_delete_permanently, crate::share_v2::reads::share_list, crate::share_v2::reads::share_accept, crate::share_v2::reads::share_decline, crate::share_v2::reads::share_leave, crate::share_v2::reads::share_people, crate::share_v2::flows::share_invite, crate::share_v2::reads::share_set_access, crate::share_v2::flows::share_revoke, crate::share_v2::flows::share_link_copy, crate::share_v2::reads::share_link_update,  crate::share_v2::requests::file_request_create, crate::share_v2::requests::file_request_copy, crate::share_v2::requests::file_request_update, crate::share_v2::reads::file_request_remove, // v2 b05
-            crate::share_v2::safety::share_safety_number, crate::share_v2::safety::share_mark_compared, crate::share_v2::safety::share_forget_compared, // v2 b05e
+            crate::share_v2::safety::share_safety_number, crate::share_v2::safety::share_mark_compared, crate::share_v2::safety::share_accept_changed_key, // v2 b05e
             consume_main_navigation,
             set_pending_setup,
             pending_setup,

@@ -6,7 +6,7 @@
 //! link's expiry or passphrase) and `file_request_remove` (no server route). The safety number, the
 //! "compared" mark and the access PATCH through core are B05e (`super::safety`).
 use base64::Engine as _;
-use beebeeb_core::auth_flow::{HttpRequest, Method, RequestAuth};
+use beebeeb_core::auth_flow::{HttpRequest, Method};
 use beebeeb_core::share_flow::{ShareFlowError, request::FILE_REQUESTS_PATH};
 use serde_json::{Value, json};
 use tauri::State;
@@ -17,7 +17,7 @@ use crate::AppState;
 use crate::auth_v2::transport;
 
 const INCOMING: &str = "/api/v1/shares/invites/incoming";
-const SENT: &str = "/api/v1/shares/invites/sent";
+pub(super) const SENT: &str = "/api/v1/shares/invites/sent";
 const MINE: &str = "/api/v1/shares/mine";
 
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -30,13 +30,7 @@ pub(super) fn invite_path(id: &str, tail: &str) -> Answer<String> {
 }
 
 pub(super) fn post(path: String) -> HttpRequest {
-    HttpRequest {
-        method: Method::Post,
-        path,
-        body: None,
-        auth: RequestAuth::Session,
-        confirm_token: None,
-    }
+    super::flows::request(Method::Post, path, None)
 }
 
 /// The window's label for the grant the server enforces (`read` | `write`).

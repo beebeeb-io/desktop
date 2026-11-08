@@ -157,7 +157,7 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'mark-changed' && <><PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members} />
         <KeyChangedAlert member={d.member}
           onCompare={() => void safety(d.itemId, d.member)}
-          onShareAnyway={async () => { const r = await api.shareForgetCompared(d.member.id); if (!r.ok) return toast(r); await openPeople(d.itemId) }}
+          onShareAnyway={async () => { const r = await api.shareAcceptChangedKey(d.member.id); if (!r.ok) return toast(r); await openPeople(d.itemId) }}
           onCancel={() => { dismissed.current.add(d.member.id); setDialog({ kind: 'people', itemId: d.itemId }) }} /></>}
       {d?.kind === 'people' && <PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members}
         onPerson={(m) => setDialog({ kind: 'person', itemId: d.itemId, member: m })} onInvite={() => setDialog({ kind: 'invite', itemId: d.itemId })} onClose={() => setDialog(null)} />}

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { command, type AccountProfile, type AccountActivity, type AccountSessionList, type SecurityScore } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
+import { BREACHED, BREACH_BLOCKED } from '../../../auth/create/model'
 import {
   FIXTURE_ACCOUNT, FIXTURE_ACTIVITY, FIXTURE_DEVICES, FIXTURE_FACTORS, FIXTURE_PASSKEYS, FIXTURE_PRODUCTS,
   type ActivityEvent, type DeviceGroup, type Factor, type Passkey, type ProductRow,
@@ -117,7 +118,21 @@ export const ERRORS: Record<string, string> = {
   link_invalid: 'This link doesn’t work anymore. Use the link in the newest email, or start again.',
   link_needed: 'Paste the link from the email to undo the deletion.',
   confirmation_required: 'Enter your password to confirm.',
+  // The password change runs sign-up's gate (core v0.2.8): DW-A38's words for a breached password.
+  password_breached: BREACHED,
+  breach_check_blocked: BREACH_BLOCKED,
+  breach_check_missing: 'We could not check this password against known breaches. Try again.',
+  policy_unavailable: 'Beebeeb can’t read the password rules from the server right now. Nothing was changed.',
+  password_required: 'Enter your password to confirm.',
+  // Passkeys: no board frame names these; the words follow the board's voice.
+  passkey_rp_mismatch: 'The server asked for a passkey for another site, so Beebeeb stopped. Nothing was changed.',
+  passkey_cancelled: 'Windows Hello was cancelled. Nothing was changed.',
+  passkey_unavailable: 'Passkeys aren’t available on this PC.',
+  passkey_step_up_failed: 'Beebeeb couldn’t confirm your password. Nothing was changed.',
 }
+
+/** The codes that are about the new password, so the error shows under that field. */
+export const NEW_PASSWORD_ERRORS = ['weak_password', 'same_password', 'password_breached', 'breach_check_blocked', 'breach_check_missing']
 export function errorText(code: string): string {
   return ERRORS[code] ?? 'Something went wrong. Nothing was changed.'
 }
