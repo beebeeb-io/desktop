@@ -7,6 +7,7 @@ import type { SectionProps } from '../types'
 import { DetailsRail, FindBar, MoreButton, NewerBanner, OpenToolbar, ToolbarButton } from './Chrome'
 import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nameError, FILE_TYPES, SaveButton, SavedMessage, TextEditor, UnsavedAlert, type FileType } from './Editing'
 import { DecryptFailedView, DecryptingView, OpenInAppNote, TooLargeView } from './States'
+import { useDriveExtras } from '../../source/extras'
 import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, type Track } from './Viewers'
 import { PdfPreview } from '@beebeeb/shared/drive-ui'
 import { fmtBytes, hhmm, languageLabel, lineCount, parseTable, READ_ONLY_LINES, viewerKind } from './model'
@@ -80,7 +81,7 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
   if (phase.name === 'loading') return <DecryptingView name="" onCancel={back} />
   if (phase.name === 'failed') return <Frame name="" onBack={back}><DecryptFailedView onRetry={retry} onReport={() => nav.go({ section: 'settings', sub: 'report' })} /></Frame>
   if (phase.name === 'too-large') {
-    return <Frame name={phase.item.name} onBack={back}><TooLargeView name={phase.item.name} size={phase.item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'storage' })} onDownloadTo={() => void source.open(id)} /></Frame>
+    return <Frame name={phase.item.name} onBack={back}><TooLargeLive name={phase.item.name} size={phase.item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'storage' })} onDownloadTo={() => void source.open(id)} /></Frame>
   }
   // Office files open in the editor by default (DW-1562); CSV keeps its table viewer.
   if (isOfficeFile(phase.item) && viewerKind(phase.item.name) !== 'csv') return <OfficeEditor target={{ kind: 'file', id }} nav={nav} />
@@ -312,4 +313,13 @@ function NewFileFlow({ parentId, nav }: { parentId: string | null; nav: SectionP
   return step === 'type'
     ? <NewFileTypeDialog selected={type} onSelect={setType} onContinue={pick} onCancel={cancel} />
     : <NewFileNameDialog markdown={type === 'md'} name={name} ext={ext} error={error} onName={setName} onExt={setExt} onCreate={() => void create()} onCancel={cancel} />
+}
+
+/** DW-1517 live: the free space on the sync folder's disk from B02b's drive_status; absent, the sentence leaves it out. */
+function TooLargeLive(p: Omit<Parameters<typeof TooLargeView>[0], 'free'>) {
+  const extras = useDriveExtras()
+  const [free, setFree] = useState<number | undefined>(undefined)
+  useEffect(() => { extras.status().then((s) => setFree(s.freeSpaceBytes), () => setFree(undefined)) }, [extras])
+  // The window's own status line stays (V2App draws it); the sentence carries the free-space figure.
+  return <TooLargeView {...p} free={free} />
 }

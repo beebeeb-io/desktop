@@ -1,11 +1,13 @@
 // Photos, live: DriveSource.photos / thumbnail / upload(mode 'photos') / setAvailableOffline / moveToTrash.
-// Fields PhotoEntry does not carry (device, video length, uploading, camera) stay absent here, so the device pills and
-// backup lines do not show on a source that cannot say them: never invented (see the PR's gap list).
+// B02b: date taken, camera, dimensions, video length and the uploading flag come from drive_photo_meta (read from the
+// copy on this PC; an online-only photo keeps its modified time), the folders from drive_photo_sources. The device
+// that took a photo is in no command, so the device pills and backup lines stay absent: never invented.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDriveSource, type PhotoEntry } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
-import { loadAcross, saveAcross, ACROSS, idOf, isVideo, groupByDay, type Across, type PhotoCell } from './model'
+import { loadAcross, saveAcross, ACROSS, cellMeta, idOf, isVideo, groupByDay, type Across, type PhotoCell } from './model'
+import { useDriveExtras, type PhotoMeta, type PhotoSource } from '../../source/extras'
 import { PhotosView } from './PhotosView'
 import { PhotoViewer } from './Viewer'
 import { DetailsDialog, ShareDialog, SourcesDialog } from './Dialogs'
@@ -21,6 +23,9 @@ export default function Section(_props: SectionProps) {
   const [dialog, setDialog] = useState<'sources' | 'share' | 'details' | null>(null)
   const [kept, setKept] = useState<Set<string>>(new Set())
   const now = useMemo(() => new Date(), [])
+  const extras = useDriveExtras()
+  const [metas, setMetas] = useState<Record<string, PhotoMeta>>({})
+  const [sources, setSources] = useState<PhotoSource[]>([])
 
   const load = useCallback(async () => {
     const all: PhotoEntry[] = []
@@ -32,7 +37,10 @@ export default function Section(_props: SectionProps) {
       cursor = r.next
     }
     setEntries(all)
-  }, [source])
+    const ids = all.map((e) => e.item.id)
+    const pages = await Promise.all(Array.from({ length: Math.ceil(ids.length / 200) }, (_, i) => extras.photoMeta(ids.slice(i * 200, i * 200 + 200)).catch(() => ({}))))
+    setMetas(Object.assign({}, ...pages))
+  }, [source, extras])
 
   useEffect(() => {
     load().catch(() => setEntries([]))
@@ -51,7 +59,11 @@ export default function Section(_props: SectionProps) {
     return () => window.removeEventListener('keydown', on)
   }, [across, viewing])
 
-  const cells: PhotoCell[] = useMemo(() => (entries ?? []).map((entry) => ({ entry })), [entries])
+  // Date taken over modified time where the file says it.
+  const cells: PhotoCell[] = useMemo(() => (entries ?? []).map((entry) => {
+    const m = metas[entry.item.id]
+    return { entry: m?.takenAt ? { ...entry, takenAt: m.takenAt } : entry, meta: cellMeta(m) }
+  }), [entries, metas])
   const ordered = useMemo(() => groupByDay(cells).flatMap((d) => d.cells), [cells])
   const totals = entries ? { photos: cells.filter((c) => !isVideo(c)).length, videos: cells.filter(isVideo).length, bytes: cells.reduce((n, c) => n + (c.entry.item.size ?? 0), 0) } : null
   const index = viewing ? ordered.findIndex((c) => idOf(c) === viewing) : -1
@@ -88,7 +100,7 @@ export default function Section(_props: SectionProps) {
   const chosen = ordered.find((c) => selected.has(idOf(c))) ?? current
   const dialogs = (
     <>
-      {dialog === 'sources' && <SourcesDialog devices={[]} folders={[]} onAddFolder={() => showToast({ kind: 'failed', text: 'Choosing folders for Photos isn’t available in this build yet' })} onCancel={() => setDialog(null)} onDone={() => setDialog(null)} />}
+      {dialog === 'sources' && <SourcesDialog devices={[]} folders={sources.map((f) => ({ name: f.name, items: f.count, note: f.path || undefined, on: true }))} onAddFolder={() => showToast({ kind: 'failed', text: 'Choosing folders for Photos isn’t available in this build yet' })} onCancel={() => setDialog(null)} onDone={() => setDialog(null)} />}
       {dialog === 'share' && chosen && <ShareDialog cell={chosen} onClose={() => setDialog(null)} onCopyLink={() => { showToast({ kind: 'done', text: 'Link copied' }); setDialog(null) }} onSendCopy={() => setDialog(null)} />}
       {dialog === 'details' && chosen && <DetailsDialog cell={chosen} now={now} onClose={() => setDialog(null)} />}
     </>
@@ -117,7 +129,7 @@ export default function Section(_props: SectionProps) {
         cells={cells} now={now} across={across} devices={[]} device={null} totals={totals} backups={[]}
         selecting={selecting} selected={selected} loading={entries === null} canUpload={source.capabilities.nativePickers}
         onOpen={(id) => setViewing(id)} onToggle={toggle} onAcross={setAcross}
-        onSources={() => setDialog('sources')} onSelect={() => { setSelecting((s) => !s); setSelected(new Set()) }}
+        onSources={() => { extras.photoSources().then(setSources, () => setSources([])); setDialog('sources') }} onSelect={() => { setSelecting((s) => !s); setSelected(new Set()) }}
         onSelectAll={() => setSelected(new Set(cells.map(idOf)))} onDone={() => { setSelecting(false); setSelected(new Set()) }}
         onUpload={upload} onShare={() => setDialog('share')} onOffline={() => keep([...selected])}
         onMove={() => showToast({ kind: 'failed', text: 'Choose where to move them in Files' })} onTrash={() => trash([...selected])}
