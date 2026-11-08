@@ -17,6 +17,7 @@ use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
 mod account;
+mod v2_snap; // v2 b03
 mod account_binding;
 mod account_dto;
 mod api_client;

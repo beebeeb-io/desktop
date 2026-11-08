@@ -27,9 +27,9 @@ const THIS_PC: Item[] = [
 ]
 
 const GB = 1024 ** 3
-const gb = (bytes: number) => (bytes >= 1024 * GB ? `${(bytes / (1024 * GB)).toFixed(0)} TB` : `${Math.round(bytes / GB)} GB`)
+const gb = (bytes: number) => (bytes === 0 ? '0 B' : bytes >= 1024 * GB ? `${(bytes / (1024 * GB)).toFixed(0)} TB` : `${Math.round(bytes / GB)} GB`)
 
-function NavLink({ item, active, onGo }: { item: Item; active: boolean; onGo: (s: SectionId) => void }) {
+function NavLink({ item, active, onGo, count }: { item: Item; active: boolean; onGo: (s: SectionId) => void; count?: number }) {
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault()
     onGo(item.section)
@@ -42,7 +42,8 @@ function NavLink({ item, active, onGo }: { item: Item; active: boolean; onGo: (s
       className={`flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] ${active ? 'bg-paper-3 font-medium text-ink' : 'text-ink-2 hover:bg-paper-2'}`}
     >
       <Icon name={item.icon} size={16} />
-      <span className="truncate">{item.label}</span>
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      {count !== undefined && <span className="font-mono text-[11px] text-ink-3">{count}</span>}
     </a>
   )
 }
@@ -52,21 +53,24 @@ export function Sidebar({
   onGo,
   storage,
   accountName,
+  counts,
 }: {
   active: SectionId
   onGo: (section: SectionId) => void
   storage: StorageSummary | null
   accountName: string
+  /** Item counts shown at the right of a row (DW-0114: zero for a new account). */
+  counts?: Partial<Record<SectionId, number>>
 }) {
   const pct = storage ? Math.min(100, (storage.usedBytes / storage.quotaBytes) * 100) : 0
   return (
     <nav aria-label="Sections" className="flex w-[232px] flex-none flex-col border-r border-line bg-paper-2 px-2 py-3">
       <div className="flex flex-col gap-0.5">
-        {MAIN.map((item) => <NavLink key={item.section} item={item} active={active === item.section} onGo={onGo} />)}
+        {MAIN.map((item) => <NavLink key={item.section} item={item} active={active === item.section} onGo={onGo} count={counts?.[item.section]} />)}
       </div>
       <div className="mt-5 px-2.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-ink-3">This PC</div>
       <div className="flex flex-col gap-0.5">
-        {THIS_PC.map((item) => <NavLink key={item.section} item={item} active={active === item.section} onGo={onGo} />)}
+        {THIS_PC.map((item) => <NavLink key={item.section} item={item} active={active === item.section} onGo={onGo} count={counts?.[item.section]} />)}
       </div>
       <div className="mt-auto px-2.5">
         {storage && (

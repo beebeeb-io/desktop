@@ -36,6 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
         .invoke_handler(tauri::generate_handler![
             app_version,
+            crate::v2_snap::v2_set_maximize_rect, // v2 b03
             consume_main_navigation,
             set_pending_setup,
             pending_setup,
