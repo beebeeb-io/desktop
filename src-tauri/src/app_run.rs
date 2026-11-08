@@ -2,6 +2,11 @@
 
 use super::*;
 
+// v2 b08: declared here, not in lib.rs, because lib.rs on `v2` is not rustfmt-clean and the pre-commit hook refuses any
+// staged edit to it; the lead may move this line to lib.rs at merge.
+#[path = "office_v2/mod.rs"]
+pub(crate) mod office_v2;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
@@ -28,6 +33,8 @@ pub fn run() {
         // Native folder picker for the first-launch sync-root chooser.
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // v2 b08: the cached, hash-checked Office engine, served to the window (never fetched by it).
+        .register_asynchronous_uri_scheme_protocol(crate::app_run::office_v2::SCHEME, crate::app_run::office_v2::protocol)
         // Native OS notifications — Task 11. The first conflict
         // notification on macOS triggers Apple's "allow notifications?"
         // permission prompt; we surface that, not a custom UI.
@@ -41,6 +48,7 @@ pub fn run() {
             drive_v2::drive_list, drive_v2::drive_details, drive_v2::drive_thumbnail, drive_v2::drive_versions, drive_v2::drive_search, drive_v2::drive_recent, drive_v2::drive_shared, drive_v2::drive_photos, drive_v2::drive_trash, drive_v2::drive_storage, drive_v2::drive_sync_summary, drive_v2::drive_create_folder, drive_v2::drive_rename, drive_v2::drive_move, drive_v2::drive_duplicate, drive_v2::drive_trash_items, drive_v2::drive_undo_trash, drive_v2::drive_restore_from_trash, drive_v2::drive_upload_pick, drive_v2::drive_upload_dropped, drive_v2::drive_open, drive_v2::drive_read_text, drive_v2::drive_save_text, drive_v2::drive_read_bytes, drive_v2::drive_save_bytes, drive_v2::drive_reveal, // v2 b02
             app_version,
             crate::v2_snap::v2_set_maximize_rect, // v2 b03
+            crate::app_run::office_v2::office_engine_status, crate::app_run::office_v2::office_engine_prepare, // v2 b08
             account_v2::account_change_password, account_v2::account_change_email, account_v2::account_verify_email, account_v2::account_set_name, account_v2::account_totp_setup, account_v2::account_totp_confirm, account_v2::account_totp_disable, account_v2::account_totp_abandon, account_v2::account_set_activity_logging, account_v2::account_delete_check_password, account_v2::account_delete_confirm, account_v2::account_delete_cancel, account_v2::account_delete_undo, account_v2::account_display_name, account_v2::account_activity_logging, account_v2::account_save_backup_codes, // v2 b14
             crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
             crate::auth_v2::signup_v2::auth_signup_begin, crate::auth_v2::signup_v2::auth_signup_send_code, crate::auth_v2::signup_v2::auth_signup_verify_code, crate::auth_v2::signup_v2::auth_signup_password_meter, crate::auth_v2::signup_v2::auth_signup_breach_check, crate::auth_v2::signup_v2::auth_signup_set_password, crate::auth_v2::signup_v2::auth_signup_phrase_words, crate::auth_v2::signup_v2::auth_signup_phrase_save, crate::auth_v2::signup_v2::auth_signup_phrase_challenge, crate::auth_v2::signup_v2::auth_signup_confirm_phrase, crate::auth_v2::signup_v2::auth_signup_default_device_name, crate::auth_v2::signup_v2::auth_signup_create, crate::auth_v2::signup_v2::auth_signup_cancel, crate::auth_v2::signup_v2::auth_recover_with_phrase, crate::auth_v2::signup_v2::auth_recover_set_password, crate::auth_v2::signup_v2::auth_phrase_suggest, // v2 b11
