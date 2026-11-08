@@ -18,7 +18,7 @@ use beebeeb_types::backup::{BackupStopReason, Category};
 use uuid::Uuid;
 
 use crate::engine_bridge::{BackupChild, BackupFolderState, EngineBridge};
-use crate::state_db::{BackupEnqueue, BackupLayout, BackupStop};
+use crate::state_db::{BackupEnqueue, BackupLayout, BackupPassRecord, BackupStopWrite};
 
 /// A failure in the host's words: a kind and never a name or a path (core's rule for `HostError`).
 fn host_error(kind: &str) -> impl Fn(crate::engine_bridge::EngineError) -> HostError + '_ {
@@ -39,7 +39,7 @@ fn parse_id(id: &str) -> Option<Uuid> {
 /// Turn the backup of these categories off in the settings (the same switch the person uses). `Ok(false)`: the
 /// settings could not be written; the stop notice still stands and no pass runs for a folder whose category folder
 /// is forgotten.
-fn switch_off_in_settings(keys: &[String]) -> bool {
+pub(crate) fn switch_off_in_settings(keys: &[String]) -> bool {
     crate::config::DesktopConfig::update(|cfg| {
         for key in keys {
             cfg.set_known_folder(key, false);
@@ -220,9 +220,17 @@ impl BackupHost for DesktopBackupHost {
     /// the check before the pass catches the usual case), so it stops as `unknown`: a folder gone with no notice.
     async fn turn_off(&self, c: &Category, why: FolderPresence) -> Result<(), HostError> {
         let device_gone = why == FolderPresence::DeviceDeleted;
-        self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone)
+        // No gate decided it: the backups' last pass and acknowledged notices stay as their gate wrote them.
+        self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone, None)
             .await
     }
+}
+
+/// LD-0139 (spec Amendment 12d): a stop a pass's gate decided: the notices check it read, and the acknowledged set core
+/// answered for the backup it decided.
+pub(crate) struct GateStop<'a> {
+    pub(crate) check: &'a crate::backup::stop::NoticeCheck,
+    pub(crate) acknowledged: Vec<String>,
 }
 
 impl DesktopBackupHost {
@@ -230,12 +238,19 @@ impl DesktopBackupHost {
     /// shows with "Back up again") and never uploads again by itself. With `every_backup` (a removal of the account's
     /// files, a device folder that is gone, or a notice naming it) every backup of this device turns off at once; a
     /// device folder that is gone also forgets the layout.
+    ///
+    /// LD-0139 (Amendment 12d): each backup's queued uploads are dropped first (idempotent); then its stop row, its
+    /// forgotten category folder, the forgotten layout and, for a stop `gate` decided, each stopped backup's new
+    /// `last_pass_at` and acknowledged set go in ONE state-DB transaction. A crash before it commits leaves no stop and
+    /// no acknowledgement (the next pass decides the same stop again); after it, both (the stop is never applied
+    /// twice).
     pub(crate) async fn stop_backups(
         &self,
         c: &Category,
         reason: BackupStopReason,
         device_gone: bool,
         every_backup: bool,
+        gate: Option<GateStop<'_>>,
     ) -> Result<(), HostError> {
         let db = self.bridge.db();
         let categories: Vec<Category> = if every_backup || device_gone || reason.files_removed() {
@@ -262,15 +277,37 @@ impl DesktopBackupHost {
         };
         let at_ms = chrono::Utc::now().timestamp_millis();
         let keys: Vec<String> = categories.iter().map(Category::key).collect();
+        // The queued uploads go first, before the marks are read (review 2026-11-08): a failed read below must not
+        // leave a backup that turns off with uploads still queued.
         for key in &keys {
             self.bridge.turn_off_backup_uploads(key).await.map_err(host_error("turn_off"))?;
-            db.set_backup_category_folder(key, None).map_err(db_error("turn_off"))?;
-            db.record_backup_stop(&BackupStop { category: key.clone(), reason: reason.as_str().into(), at_ms })
-                .map_err(db_error("turn_off"))?;
         }
-        if device_gone {
-            db.clear_backup_layout().map_err(db_error("turn_off"))?;
+        // Amendment 12d: every stopped backup stores core's set for it in the stop's write: the decided one its gate's
+        // answer, each other one (a stop that covers every backup) its own window's ids.
+        let mut marks = Vec::new();
+        if let Some(gate) = gate {
+            for category in &categories {
+                let acknowledged = if category == c {
+                    gate.acknowledged.clone()
+                } else {
+                    let mark = db.backup_pass_mark(&category.key()).map_err(db_error("turn_off"))?;
+                    crate::backup::stop::acknowledged_after(gate.check, &mark, category)
+                };
+                marks.push(BackupPassRecord {
+                    category: category.key(),
+                    last_pass_at_ms: gate.check.server_now_ms,
+                    acknowledged,
+                });
+            }
         }
+        db.record_backup_stops(&BackupStopWrite {
+            reason: reason.as_str(),
+            at_ms,
+            categories: &keys,
+            clear_layout: device_gone,
+            marks: &marks,
+        })
+        .map_err(db_error("turn_off"))?;
         let switched = switch_off_in_settings(&keys);
         tracing::info!(turned_off = keys.len(), switched, reason = reason.as_str(), "backup: turned off");
         Ok(())

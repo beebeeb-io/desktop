@@ -373,8 +373,8 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beebeeb-backup"
-version = "0.2.3"
-source = "git+https://github.com/beebeeb-io/core?rev=df930110b048ab8bdca6c408a37e142f26f460bd#df930110b048ab8bdca6c408a37e142f26f460bd"
+version = "0.2.5"
+source = "git+https://github.com/beebeeb-io/core?rev=f9257d7362376e77b9a04fc0a014d0d2b8a84987#f9257d7362376e77b9a04fc0a014d0d2b8a84987"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -385,8 +385,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-core"
-version = "0.2.3"
-source = "git+https://github.com/beebeeb-io/core?rev=df930110b048ab8bdca6c408a37e142f26f460bd#df930110b048ab8bdca6c408a37e142f26f460bd"
+version = "0.2.5"
+source = "git+https://github.com/beebeeb-io/core?rev=f9257d7362376e77b9a04fc0a014d0d2b8a84987#f9257d7362376e77b9a04fc0a014d0d2b8a84987"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -417,7 +417,7 @@ dependencies = [
  "webp",
  "x25519-dalek",
  "zeroize",
- "zip 8.6.0",
+ "zip 9.4.1",
 ]
 
 [[package]]
@@ -477,8 +477,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-sync"
-version = "0.2.3"
-source = "git+https://github.com/beebeeb-io/core?rev=df930110b048ab8bdca6c408a37e142f26f460bd#df930110b048ab8bdca6c408a37e142f26f460bd"
+version = "0.2.5"
+source = "git+https://github.com/beebeeb-io/core?rev=f9257d7362376e77b9a04fc0a014d0d2b8a84987#f9257d7362376e77b9a04fc0a014d0d2b8a84987"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -495,8 +495,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-transfer"
-version = "0.2.3"
-source = "git+https://github.com/beebeeb-io/core?rev=df930110b048ab8bdca6c408a37e142f26f460bd#df930110b048ab8bdca6c408a37e142f26f460bd"
+version = "0.2.5"
+source = "git+https://github.com/beebeeb-io/core?rev=f9257d7362376e77b9a04fc0a014d0d2b8a84987#f9257d7362376e77b9a04fc0a014d0d2b8a84987"
 dependencies = [
  "beebeeb-core",
  "bytes",
@@ -507,8 +507,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-types"
-version = "0.2.3"
-source = "git+https://github.com/beebeeb-io/core?rev=df930110b048ab8bdca6c408a37e142f26f460bd#df930110b048ab8bdca6c408a37e142f26f460bd"
+version = "0.2.5"
+source = "git+https://github.com/beebeeb-io/core?rev=f9257d7362376e77b9a04fc0a014d0d2b8a84987#f9257d7362376e77b9a04fc0a014d0d2b8a84987"
 dependencies = [
  "serde",
 ]
@@ -1846,7 +1846,7 @@ dependencies = [
  "libc",
  "log",
  "memchr",
- "nix",
+ "nix 0.29.0",
  "page_size",
  "smallvec",
  "zerocopy",
@@ -3232,7 +3232,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.19",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3287,6 +3287,18 @@ name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
@@ -5180,7 +5192,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6313,7 +6325,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.19",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6344,9 +6356,9 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typeid"
@@ -6368,7 +6380,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7730,15 +7742,19 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "23f17fbc870bfac28c6228aed7d6e6df352e26bf7015c4313727e16a7a01ce5e"
 dependencies = [
  "crc32fast",
  "flate2",
+ "getrandom 0.4.3",
  "indexmap 2.14.0",
+ "libc",
  "memchr",
+ "nix 0.31.3",
  "typed-path",
+ "windows-sys 0.61.2",
  "zopfli",
 ]
 

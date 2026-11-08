@@ -29,11 +29,53 @@ use beebeeb_types::backup::Category;
         /// LD-0123: when set, every listing answers with a `Date` header this many seconds ahead of the device's
         /// clock (a device clock that runs behind the server's).
         date_ahead_s: Arc<Mutex<Option<i64>>>,
-        /// LD-0139: the rows `GET /api/v1/notifications` answers with (always with a `Date`); `None` answers 500.
+        /// LD-0139: the rows `GET /api/v1/notifications` lists, as server LD-0141 does ([`notices_answer`], always
+        /// with a `Date`); `None` answers 500.
         notices: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
+        /// LD-0139: a notices request with a `cursor` (any page after the first) answers 500.
+        fail_later_pages: Arc<AtomicBool>,
+        /// LD-0139 (review 2026-11-08): a folder created while the next notices request is answered (a drive that
+        /// mounts during the check). Its one test is Unix only.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
     }
 
     const PAGE: usize = 2;
+
+    /// Server LD-0141's page size for the filtered notifications listing.
+    const NOTICE_PAGE: usize = 500;
+
+    /// `GET /api/v1/notifications` over `rows` as server LD-0141 answers it (`routes/notifications.rs`,
+    /// `list_filtered`): with `type`, `since` or `cursor`, every matching row newest first (`created_at`, then `id`)
+    /// in pages of 500, `since` inclusive, each page with `next_cursor` (null on the last); without any of them the
+    /// original listing: the newest `limit` rows (default 50, at most 100) of every type and no cursor. `None`: a
+    /// malformed `since` or `cursor` (400).
+    fn notices_answer(path: &str, mut rows: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+        let micros = |row: &serde_json::Value| {
+            chrono::DateTime::parse_from_rfc3339(row["created_at"].as_str().unwrap()).unwrap().timestamp_micros()
+        };
+        rows.sort_by(|a, b| micros(b).cmp(&micros(a)).then_with(|| b["id"].as_str().cmp(&a["id"].as_str())));
+        if !["type", "since", "cursor"].iter().any(|name| query_param(path, name).is_some()) {
+            let limit = query_param(path, "limit").and_then(|l| l.parse().ok()).unwrap_or(50).min(100);
+            rows.truncate(limit);
+            return Some(serde_json::json!({ "notifications": rows, "unread_count": 0 }));
+        }
+        if let Some(types) = query_param(path, "type") {
+            let types = urlencoding::decode(types).ok()?.into_owned();
+            rows.retain(|row| types.split(',').any(|t| row["type"].as_str() == Some(t)));
+        }
+        if let Some(since) = query_param(path, "since") {
+            let since_us = since.parse::<i64>().ok()?.checked_mul(1000)?;
+            rows.retain(|row| micros(row) >= since_us);
+        }
+        let offset: usize = match query_param(path, "cursor") {
+            Some(cursor) => cursor.strip_prefix('n')?.parse().ok()?,
+            None => 0,
+        };
+        let page: Vec<serde_json::Value> = rows.iter().skip(offset).take(NOTICE_PAGE).cloned().collect();
+        let next = (offset + NOTICE_PAGE < rows.len()).then(|| format!("n{}", offset + NOTICE_PAGE));
+        Some(serde_json::json!({ "notifications": page, "unread_count": 0, "next_cursor": next }))
+    }
 
     fn node_json(id: &str, node: &Node) -> serde_json::Value {
         let uploaded_at = node.uploaded_at.as_deref().unwrap_or("2026-11-06T10:00:00Z");
@@ -58,8 +100,12 @@ use beebeeb_types::backup::Category;
             let stop = Arc::new(AtomicBool::new(false));
             let date_ahead_s: Arc<Mutex<Option<i64>>> = Arc::default();
             let notices: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(Some(Vec::new())));
+            let fail_later_pages = Arc::new(AtomicBool::new(false));
+            let create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
             let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
-            let (ahead, rows) = (Arc::clone(&date_ahead_s), Arc::clone(&notices));
+            let (ahead, rows, fail_later) =
+                (Arc::clone(&date_ahead_s), Arc::clone(&notices), Arc::clone(&fail_later_pages));
+            let mount = Arc::clone(&create_on_notices);
             let handle = thread::spawn(move || {
                 let started = std::time::Instant::now();
                 while !halt.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(30) {
@@ -77,11 +123,19 @@ use beebeeb_types::backup::Category;
                     let mut tree = tree.lock().unwrap();
                     let (method, path) = (request.method.as_str(), request.path.as_str());
                     let response = if method == "GET" && path.starts_with("/api/v1/notifications") {
+                        if let Some(dir) = mount.lock().unwrap().take() {
+                            std::fs::create_dir_all(dir).unwrap();
+                        }
                         let ahead_s = ahead.lock().unwrap().unwrap_or(0);
+                        let later_page = query_param(path, "cursor").is_some();
                         match rows.lock().unwrap().clone() {
-                            Some(rows) => {
-                                http_json_dated("200 OK", serde_json::json!({ "notifications": rows }), ahead_s)
+                            Some(_) if later_page && fail_later.load(Ordering::SeqCst) => {
+                                http_json("500 Internal Server Error", serde_json::json!({ "error": "down" }))
                             }
+                            Some(rows) => match notices_answer(path, rows) {
+                                Some(answer) => http_json_dated("200 OK", answer, ahead_s),
+                                None => http_json("400 Bad Request", serde_json::json!({ "error": "bad query" })),
+                            },
                             None => http_json("500 Internal Server Error", serde_json::json!({ "error": "down" })),
                         }
                     } else if method == "GET" && path.starts_with("/api/v1/files?") {
@@ -143,7 +197,7 @@ use beebeeb_types::backup::Category;
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
-            Self { base_url, nodes, requests, stop, handle, date_ahead_s, notices }
+            Self { base_url, nodes, requests, stop, handle, date_ahead_s, notices, fail_later_pages, create_on_notices }
         }
 
         fn finish(self) -> Vec<RecordedRequest> {
@@ -212,6 +266,16 @@ use beebeeb_types::backup::Category;
 
         fn host(&self, enabled: Vec<Category>) -> DesktopBackupHost {
             DesktopBackupHost::new(Arc::clone(&self.bridge), self.layout(), enabled)
+        }
+
+        /// LD-0139: the state DB file, for a restart (a new bridge on it) or a test's own connection.
+        fn db_path(&self) -> std::path::PathBuf {
+            self._dir.path().join("state.db")
+        }
+
+        /// LD-0139: the app restarts: a new bridge (and state DB connection) on the same state.db.
+        fn restart(&mut self) {
+            self.bridge = Arc::new(test_bridge_with_api(&self.db_path(), self.server.base_url.clone(), [42u8; 32]));
         }
 
         fn creates(requests: &[RecordedRequest]) -> usize {
@@ -658,8 +722,9 @@ use beebeeb_types::backup::Category;
             .await;
     }
 
-    /// A notice older than the backup's last pass counts for nothing: the pass runs, and its `last_pass_at` moves to
-    /// the check's `Date` (server clock, here 3 minutes ahead of this machine).
+    /// A notice older than the backup's last pass by the overlap margin counts for nothing (the server lists it, from
+    /// core's inclusive `notices_since`; core's window is strict): the pass runs, its `last_pass_at` moves to the
+    /// check's `Date` (server clock, here 3 minutes ahead of this machine) and its acknowledged set holds no id.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_notice_older_than_the_last_pass_changes_nothing_and_the_pass_moves_its_mark() {
         let config_dir = tempfile::tempdir().unwrap();
@@ -670,17 +735,20 @@ use beebeeb_types::backup::Category;
                 let (pictures, sync_root) = (source_with(3), tempfile::tempdir().unwrap());
                 let last = now_ms() - 60_000;
                 fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
-                let old = notice_row("files_removed", serde_json::json!({ "reason": "account_lapsed" }), last - 1);
+                let at = last - beebeeb_core::backup::NOTICE_OVERLAP_MS;
+                let old = notice_row("files_removed", serde_json::json!({ "reason": "account_lapsed" }), at);
                 *fx.server.notices.lock().unwrap() = Some(vec![old]);
                 *fx.server.date_ahead_s.lock().unwrap() = Some(180);
 
                 let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
                 assert_eq!(count_backup_ops(&fx.bridge), 3, "{:?}", report.passes);
                 assert!(stops(&fx.bridge).is_empty());
-                let mark = fx.bridge.db.backup_pass_mark("pictures").unwrap().last_pass_at_ms.unwrap();
-                let ahead = mark - now_ms();
+                let mark = fx.bridge.db.backup_pass_mark("pictures").unwrap();
+                let ahead = mark.last_pass_at_ms.unwrap() - now_ms();
                 assert!((170_000..=181_000).contains(&ahead), "the mark is the server's Date: {ahead} ms ahead");
-                fx.server.finish();
+                assert!(mark.acknowledged.is_empty(), "{:?}", mark.acknowledged);
+                let requests = fx.server.finish();
+                assert_eq!(notice_requests(&requests).len(), 1, "it was listed");
             })
             .await;
     }
@@ -886,6 +954,478 @@ use beebeeb_types::backup::Category;
                 );
                 assert!(fx.bridge.db.backup_layout().unwrap().is_some(), "the device folder is there: the layout stays");
                 assert_eq!(count_backup_ops(&fx.bridge), 0);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    // ── LD-0139 on core v0.2.5: every page, the overlap margin and the acknowledged ids (spec Amendment 12d) ─────────
+
+    /// The notices requests of a run, in order.
+    fn notice_requests(requests: &[RecordedRequest]) -> Vec<&RecordedRequest> {
+        requests.iter().filter(|r| r.method == "GET" && r.path.starts_with("/api/v1/notifications")).collect()
+    }
+
+    fn mark(fx: &Fixture, key: &str) -> crate::state_db::BackupPassMark {
+        fx.bridge.db.backup_pass_mark(key).unwrap()
+    }
+
+    fn id_of(row: &serde_json::Value) -> String {
+        row["id"].as_str().unwrap().to_string()
+    }
+
+    /// `n` `backup_deleted` notices naming another device's folder (they count for nothing on this one), written
+    /// `from_ms`, `from_ms + 1`, …
+    fn other_devices_notices(n: usize, from_ms: i64) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                let data = serde_json::json!({ "device_folder_id": uuid::Uuid::new_v4() });
+                notice_row("backup_deleted", data, from_ms + i64::try_from(i).unwrap())
+            })
+            .collect()
+    }
+
+    /// Amendment 12d: a notice whose transaction started before the previous pass's `last_pass_at` but committed
+    /// after that pass read the notices (its `created_at` inside the overlap margin, and not acknowledged) stops the
+    /// backup on the next pass. The check asks from core's `notices_since(last_pass_at)`, filtered to the two types.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notice_committed_during_the_previous_pass_stops_the_backup_on_the_next_pass() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, last - 60_000);
+                let erase_id = id_of(&erase);
+                *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                let erased = [("pictures".to_string(), "erase_request".to_string())];
+                assert_eq!(stops(&fx.bridge), erased, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                assert_eq!(mark(&fx, "pictures").acknowledged, [erase_id], "stored with the stop");
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                assert_eq!(asked.len(), 1);
+                let since = beebeeb_core::backup::notices_since(last);
+                assert_eq!(query_param(&asked[0].path, "since"), Some(since.to_string().as_str()));
+                assert_eq!(query_param(&asked[0].path, "type"), Some("files_removed,backup_deleted"));
+            })
+            .await;
+    }
+
+    /// Amendment 12d: a notice this backup already acknowledged (inside the margin) does not stop it again; the pass
+    /// runs and the notice stays acknowledged while it is in the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_notice_already_acknowledged_does_not_stop_the_backup_again() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, last - 60_000);
+                let erase_id = id_of(&erase);
+                let pass = crate::state_db::BackupPassRecord {
+                    category: "pictures".into(),
+                    last_pass_at_ms: last,
+                    acknowledged: vec![erase_id.clone()],
+                };
+                fx.bridge.db.record_backup_pass(&pass).unwrap();
+                *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(stops(&fx.bridge).is_empty(), "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                let after = mark(&fx, "pictures");
+                assert!(after.last_pass_at_ms.unwrap() > last, "the pass moved its mark");
+                assert_eq!(after.acknowledged, [erase_id], "still in the window: still acknowledged");
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// More than one page (server LD-0141 lists 500 per page, newest first): the removal notice, the oldest, is on page
+    /// 2, and the device reads it by following `next_cursor` until it is null.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_page_of_the_notices_is_read() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let mut rows = other_devices_notices(NOTICE_PAGE, last + 2_000);
+                let lapsed_data = serde_json::json!({ "reason": "account_lapsed" });
+                let lapsed = notice_row("files_removed", lapsed_data, last + 1_000);
+                let lapsed_id = id_of(&lapsed);
+                rows.push(lapsed);
+                *fx.server.notices.lock().unwrap() = Some(rows);
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                let lapsed_stop = [("pictures".to_string(), "account_lapsed".to_string())];
+                assert_eq!(stops(&fx.bridge), lapsed_stop, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                let acknowledged = mark(&fx, "pictures").acknowledged;
+                assert_eq!(acknowledged.len(), NOTICE_PAGE + 1, "every id in the window, from both pages");
+                assert!(acknowledged.contains(&lapsed_id));
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                assert_eq!(asked.len(), 2, "two pages");
+                assert_eq!(query_param(&asked[0].path, "cursor"), None);
+                assert_eq!(query_param(&asked[1].path, "cursor"), Some("n500"));
+                assert_eq!(query_param(&asked[1].path, "since"), query_param(&asked[0].path, "since"));
+            })
+            .await;
+    }
+
+    /// Amendment 12c through core's `CheckFailed`: a failure on page 2 fails the whole check. Page 1 alone would let
+    /// the pass run; instead nothing is uploaded or turned off, the last pass and the acknowledged set stay, and the
+    /// next pass (page 2 answering again) runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failure_on_page_2_is_a_failed_check() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                let before = crate::state_db::BackupPassRecord {
+                    category: "pictures".into(),
+                    last_pass_at_ms: last,
+                    acknowledged: vec!["earlier".into()],
+                };
+                fx.bridge.db.record_backup_pass(&before).unwrap();
+                *fx.server.notices.lock().unwrap() = Some(other_devices_notices(NOTICE_PAGE + 1, last + 1_000));
+                fx.server.fail_later_pages.store(true, Ordering::SeqCst);
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing is uploaded unchecked");
+                assert!(stops(&fx.bridge).is_empty(), "nothing is turned off");
+                let kept = mark(&fx, "pictures");
+                assert_eq!((kept.last_pass_at_ms, kept.acknowledged), (Some(last), vec!["earlier".to_string()]));
+                // The card's "Couldn't check — will retry." follows `check_failed` (the tick's `set_check_failed`;
+                // `stop::tests::a_stop_says_why_in_cores_words_and_offers_back_up_again` checks the words).
+
+                fx.server.fail_later_pages.store(false, Ordering::SeqCst);
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                let requests = fx.server.finish();
+                assert_eq!(notice_requests(&requests).len(), 4, "two pages, twice");
+            })
+            .await;
+    }
+
+    /// Amendment 12d: the acknowledged set survives a restart and "Back up again". The removal notice is a minute old,
+    /// inside the overlap margin of the restarted backup's new baseline (the moment of "Back up again"), so only its
+    /// acknowledgement keeps it from stopping the backup a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_acknowledged_set_survives_a_restart_and_back_up_again() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures"]);
+                let mut fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let reset_data = serde_json::json!({ "reason": "account_reset" });
+                let reset = notice_row("files_removed", reset_data, now_ms() - 60_000);
+                let reset_id = id_of(&reset);
+                *fx.server.notices.lock().unwrap() = Some(vec![reset]);
+                run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "account_reset".to_string())]);
+
+                fx.restart();
+                assert_eq!(mark(&fx, "pictures").acknowledged, std::slice::from_ref(&reset_id), "after a restart");
+                // The card's "Back up again" is `set_known_folder_backup(key, true)`: the switch on, then `restart`.
+                switch_on(&["pictures"]);
+                crate::backup::stop::restart(&fx.bridge.db, "pictures").unwrap();
+                assert_eq!(mark(&fx, "pictures").acknowledged, std::slice::from_ref(&reset_id), "after Back up again");
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(stops(&fx.bridge).is_empty(), "the acknowledged notice stops nothing: {:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "{:?}", report.passes);
+                assert_eq!(mark(&fx, "pictures").acknowledged, [reset_id], "still in the window");
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Amendment 12d: a crash between the gate's answer and its write neither loses nor repeats a stop. The crash is
+    /// a trigger that aborts the write at one of its two tables (a process killed mid-write commits nothing either):
+    /// - at `backup_pass_marks`: a stop committed apart from its acknowledgement would be applied again after "Back up
+    ///   again";
+    /// - at `backup_stops`: an acknowledgement committed apart from its stop would hide the notice, and the stop would
+    ///   be lost.
+    ///
+    /// In both, nothing of the stop is written and both switches stay on; after the restart (the trigger gone) the
+    /// next pass applies the stop once, and after "Back up again" it is not applied again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_crash_between_the_gate_and_its_write_neither_loses_nor_repeats_the_stop() {
+        for table in ["backup_pass_marks", "backup_stops"] {
+            let config_dir = tempfile::tempdir().unwrap();
+            crate::config::CONFIG_DIR_OVERRIDE
+                .scope(config_dir.path().to_path_buf(), async {
+                    switch_on(&["pictures", "documents"]);
+                    let mut fx = Fixture::new();
+                    let (pictures, documents) = (source_with(2), source_with(1));
+                    let sync_root = tempfile::tempdir().unwrap();
+                    let sources = [(Category::Pictures, pictures.path()), (Category::Documents, documents.path())];
+                    let last = now_ms() - 120_000;
+                    fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                    fx.bridge.db.set_backup_last_pass("documents", last).unwrap();
+                    let erase_data = serde_json::json!({ "reason": "erase_request" });
+                    let erase = notice_row("files_removed", erase_data, now_ms() - 60_000);
+                    let erase_id = id_of(&erase);
+                    *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+
+                    let crash = rusqlite::Connection::open(fx.db_path()).unwrap();
+                    crash
+                        .execute_batch(&format!(
+                            "CREATE TRIGGER crash_insert BEFORE INSERT ON {table}
+                                 BEGIN SELECT RAISE(ABORT, 'crash'); END;
+                             CREATE TRIGGER crash_update BEFORE UPDATE ON {table}
+                                 BEGIN SELECT RAISE(ABORT, 'crash'); END;"
+                        ))
+                        .unwrap();
+                    let report = run(&fx, &sources, sync_root.path()).await;
+                    let unstopped = stops(&fx.bridge).is_empty();
+                    assert!(unstopped, "{table}: no stop without its acknowledgement: {:?}", report.passes);
+                    for key in ["pictures", "documents"] {
+                        let crashed = mark(&fx, key);
+                        let marks = (crashed.last_pass_at_ms, crashed.acknowledged);
+                        assert_eq!(marks, (Some(last), Vec::new()), "{table}: {key}");
+                    }
+                    let on = crate::config::DesktopConfig::load().unwrap().known_folder_backup;
+                    assert_eq!(on.len(), 2, "{table}: both switches stay on: {on:?}");
+                    assert_eq!(count_backup_ops(&fx.bridge), 0, "{table}: nothing uploaded");
+
+                    crash.execute_batch("DROP TRIGGER crash_insert; DROP TRIGGER crash_update;").unwrap();
+                    drop(crash);
+                    fx.restart();
+                    run(&fx, &sources, sync_root.path()).await;
+                    assert_eq!(
+                        stops(&fx.bridge),
+                        [("documents", "erase_request"), ("pictures", "erase_request")]
+                            .map(|(c, r)| (c.to_string(), r.to_string())),
+                        "{table}: the stop is not lost"
+                    );
+                    for key in ["pictures", "documents"] {
+                        let acknowledged = mark(&fx, key).acknowledged;
+                        let expected = std::slice::from_ref(&erase_id);
+                        assert_eq!(acknowledged, expected, "{table}: {key} acknowledged with its stop");
+                    }
+
+                    switch_on(&["pictures"]);
+                    crate::backup::stop::restart(&fx.bridge.db, "pictures").unwrap();
+                    let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                    assert_eq!(
+                        stops(&fx.bridge),
+                        [("documents".to_string(), "erase_request".to_string())],
+                        "{table}: not applied again: {:?}",
+                        report.passes
+                    );
+                    assert_eq!(count_backup_ops(&fx.bridge), 2, "{table}: {:?}", report.passes);
+                    fx.server.finish();
+                })
+                .await;
+        }
+    }
+
+    /// Review (2026-11-08): only the backups this tick can gate set how far back the check reads. A stopped backup and
+    /// one refused because it sits inside the sync root have no last pass; neither pulls `since` down to 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_or_refused_backup_does_not_widen_the_notice_check() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents", "music"]);
+                let fx = Fixture::new();
+                let (pictures, music, sync_root) = (source_with(1), source_with(1), tempfile::tempdir().unwrap());
+                let inside = sync_root.path().join("Documents");
+                std::fs::create_dir(&inside).unwrap();
+                let last = now_ms() - 120_000;
+                fx.bridge.db.set_backup_last_pass("pictures", last).unwrap();
+                let stop = crate::state_db::BackupStop { category: "music".into(), reason: "unknown".into(), at_ms: 1 };
+                fx.bridge.db.record_backup_stop(&stop).unwrap();
+
+                let sources = [
+                    (Category::Pictures, pictures.path()),
+                    (Category::Documents, inside.as_path()),
+                    (Category::Music, music.path()),
+                ];
+                let report = run(&fx, &sources, sync_root.path()).await;
+                assert_eq!(count_backup_ops(&fx.bridge), 1, "Pictures ran: {:?}", report.passes);
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                assert_eq!(asked.len(), 1);
+                let since = beebeeb_core::backup::notices_since(last);
+                assert_eq!(query_param(&asked[0].path, "since"), Some(since.to_string().as_str()));
+            })
+            .await;
+    }
+
+    /// Review (2026-11-08): the check reads at most its page cap; a listing that goes on past it fails the check
+    /// (core's `CheckFailed`), and one within it is read whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_past_the_page_cap_fails_the_check() {
+        let fx = Fixture::new();
+        *fx.server.notices.lock().unwrap() = Some(other_devices_notices(NOTICE_PAGE + 1, now_ms() - 60_000));
+        let error = fx.bridge.backup_notice_check_capped(0, 1).await.unwrap_err();
+        assert!(error.contains("more than 1 pages"), "{error}");
+        let check = fx.bridge.backup_notice_check_capped(0, 2).await.unwrap();
+        assert_eq!(check.notices.len(), NOTICE_PAGE + 1);
+        let requests = fx.server.finish();
+        assert_eq!(notice_requests(&requests).len(), 3, "1 page, then 2");
+    }
+
+    // ── LD-0139, the lead's review of #234 (2026-11-08): coverage and stopped backups ───────────────────────────────
+
+    fn switched_on(key: &str) -> bool {
+        crate::config::DesktopConfig::load().unwrap().known_folder_enabled(key)
+    }
+
+    /// Stops Pictures the way a pass does (an erase notice a minute old: its stop row, its last pass moved to the
+    /// check's `Date` and the notice acknowledged, in one write), then switches it on again in the settings only, as
+    /// an app killed between the stop's commit and its switch-off (or a failed settings write) leaves it.
+    async fn stopped_with_switch_on(fx: &Fixture, pictures: &Path, sync_root: &Path) {
+        switch_on(&["pictures"]);
+        fx.bridge.db.set_backup_last_pass("pictures", now_ms() - 120_000).unwrap();
+        let erase_data = serde_json::json!({ "reason": "erase_request" });
+        *fx.server.notices.lock().unwrap() = Some(vec![notice_row("files_removed", erase_data, now_ms() - 60_000)]);
+        run(fx, &[(Category::Pictures, pictures)], sync_root).await;
+        assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+        assert!(!switched_on("pictures"), "the stop switched it off");
+        switch_on(&["pictures"]);
+    }
+
+    /// Review P1 (`scheduler.rs:214`): a source refused when the tick decides what it gates (here a spelling with `..`
+    /// whose folder is not there yet, as on a drive not mounted) and accepted a moment later (the folder appears while
+    /// the notices are read) is not passed on that check: its last pass is weeks old, the check asked from Pictures'
+    /// window, and the erase notice in between is not in the listing. It keeps its last pass, uploads nothing, and is
+    /// checked from its own window next time.
+    ///
+    /// Unix only: on Windows `std::path::absolute` is `GetFullPathNameW`, which resolves `..` lexically, so this
+    /// spelling is never refused there (CI run 42463708179). The single gated set does not depend on the platform, and
+    /// `stop::tests::a_check_that_does_not_cover_the_window_is_a_failed_check` covers the guard everywhere.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_source_accepted_after_the_check_started_is_not_passed_on_it() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                switch_on(&["pictures", "documents"]);
+                let fx = Fixture::new();
+                let (pictures, drive, sync_root) = (source_with(2), source_with(0), tempfile::tempdir().unwrap());
+                let documents = drive.path().join("Documents");
+                std::fs::create_dir(&documents).unwrap();
+                for name in ["a.txt", "b.txt"] {
+                    std::fs::write(documents.join(name), b"bytes").unwrap();
+                }
+                let spelled = drive.path().join("mount").join("..").join("Documents");
+                assert!(crate::backup::sources::check_source(&spelled, sync_root.path()).is_err(), "refused at first");
+                let (recent, weeks_ago) = (now_ms() - 120_000, now_ms() - 30 * 86_400_000);
+                fx.bridge.db.set_backup_last_pass("pictures", recent).unwrap();
+                fx.bridge.db.set_backup_last_pass("documents", weeks_ago).unwrap();
+                let erase_data = serde_json::json!({ "reason": "erase_request" });
+                let erase = notice_row("files_removed", erase_data, now_ms() - 10 * 86_400_000);
+                *fx.server.notices.lock().unwrap() = Some(vec![erase]);
+                *fx.server.create_on_notices.lock().unwrap() = Some(drive.path().join("mount"));
+
+                let sources = [(Category::Pictures, pictures.path()), (Category::Documents, spelled.as_path())];
+                let report = run(&fx, &sources, sync_root.path()).await;
+                assert!(crate::backup::sources::check_source(&spelled, sync_root.path()).is_ok(), "accepted now");
+                let kept = mark(&fx, "documents").last_pass_at_ms;
+                assert_eq!(kept, Some(weeks_ago), "Documents was not decided on a listing that misses its window");
+                assert_eq!(count_backup_ops(&fx.bridge), 2, "only Pictures' 2 files: {:?}", report.passes);
+                let requests = fx.server.finish();
+                let asked = notice_requests(&requests);
+                let since = beebeeb_core::backup::notices_since(recent);
+                assert_eq!(query_param(&asked[0].path, "since"), Some(since.to_string().as_str()));
+            })
+            .await;
+    }
+
+    /// Review P1/P2 (`scheduler.rs:202`): when the stop rows cannot be read, no pass runs. Pictures is stopped with
+    /// its switch still on; its stop moved its last pass and acknowledged the notice, so its gate alone would answer
+    /// Run. The read failing (the table hidden from the app's connection) is a failed check: nothing is uploaded and
+    /// the card says "Couldn't check — will retry."; once the read works the stop holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_read_of_the_stops_runs_no_pass() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                let before = mark(&fx, "pictures");
+
+                let hide = rusqlite::Connection::open(fx.db_path()).unwrap();
+                hide.execute_batch("ALTER TABLE backup_stops RENAME TO backup_stops_hidden;").unwrap();
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "nothing uploads: {:?}", report.passes);
+                assert_eq!(mark(&fx, "pictures"), before, "its marks stay");
+
+                hide.execute_batch("ALTER TABLE backup_stops_hidden RENAME TO backup_stops;").unwrap();
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!report.check_failed, "{:?}", report.passes);
+                assert_eq!(count_backup_ops(&fx.bridge), 0, "still stopped: {:?}", report.passes);
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (root of `scheduler.rs:202`): a stop row next to a switch that is still on is reconciled before the
+    /// next pass: the switch goes off, persisted, and the stop row stays (its words and "Back up again" stay on the
+    /// card).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_switches_off_a_stopped_backup_whose_switch_stayed_on() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                assert!(switched_on("pictures"));
+
+                let report = run(&fx, &[(Category::Pictures, pictures.path())], sync_root.path()).await;
+                assert!(!switched_on("pictures"), "switched off again: {:?}", report.passes);
+                assert_eq!(stops(&fx.bridge), [("pictures".to_string(), "erase_request".to_string())]);
+                assert_eq!(count_backup_ops(&fx.bridge), 0);
+                fx.server.finish();
+            })
+            .await;
+    }
+
+    /// Review (root of `scheduler.rs:202`): the scheduler reconciles when it starts, before any pass is due (its first
+    /// tick, here with nothing to pass).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_scheduler_switches_off_a_stopped_backup_when_it_starts() {
+        let config_dir = tempfile::tempdir().unwrap();
+        crate::config::CONFIG_DIR_OVERRIDE
+            .scope(config_dir.path().to_path_buf(), async {
+                let fx = Fixture::new();
+                let (pictures, sync_root) = (source_with(2), tempfile::tempdir().unwrap());
+                stopped_with_switch_on(&fx, pictures.path(), sync_root.path()).await;
+                assert!(switched_on("pictures"));
+
+                let mut scheduler = scheduler::BackupScheduler::new();
+                let ticked = scheduler.tick(&fx.bridge, sync_root.path(), Vec::new(), std::time::Instant::now()).await;
+                assert!(ticked.is_none(), "nothing to pass");
+                assert!(!switched_on("pictures"), "switched off when the scheduler started");
                 fx.server.finish();
             })
             .await;
