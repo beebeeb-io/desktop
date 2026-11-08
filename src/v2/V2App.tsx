@@ -14,6 +14,7 @@ import { useShortcuts, type CommandId } from './shortcuts'
 import { pickSource } from './source'
 import { useDriveExtras } from './source/extras'
 import { shareList } from './sections/shared/api'
+import { throttled } from './throttle'
 import type { SectionProps } from './sections/types'
 
 const SECTION_COMPONENTS: Record<SectionId, ComponentType<SectionProps>> = {
@@ -96,16 +97,22 @@ function useSidebarCounts(): Partial<Record<SectionId, number>> {
   const [counts, setCounts] = useState<Partial<Record<SectionId, number>>>({})
   useEffect(() => {
     let live = true
-    const read = () => {
-      void Promise.all([
-        shareList().then((r) => (r.ok ? r.value.invitations.length : undefined)),
-        source.trash().then((t) => t.length, () => undefined),
-        extras.syncProblems().then((p) => p.length, () => undefined),
-      ]).then(([shared, trash, problems]) => { if (live) setCounts({ shared, trash, 'sync-history': problems }) })
-    }
-    read()
-    const stop = source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'removed' || e.kind === 'sync') read() })
-    return () => { live = false; stop() }
+    const set = (patch: Partial<Record<SectionId, number | undefined>>) => { if (live) setCounts((c) => ({ ...c, ...patch })) }
+    const shares = () => void shareList().then((r) => set({ shared: r.ok ? r.value.invitations.length : undefined }), () => set({ shared: undefined }))
+    const trash = () => void source.trash().then((t) => set({ trash: t.length }), () => set({ trash: undefined }))
+    const problems = () => void extras.syncProblems().then((p) => set({ 'sync-history': p.length }), () => set({ 'sync-history': undefined }))
+    shares(); trash(); problems()
+    // The engine sends drive events in bursts while it syncs: each count re-reads only on the event that can change it,
+    // at most once a second (the first event at once, the rest once at the end), so a long sync never floods share_list.
+    const onChanged = throttled(() => { shares(); trash() })
+    const onRemoved = throttled(trash)
+    const onSync = throttled(problems)
+    const stop = source.subscribe((e) => {
+      if (e.kind === 'changed') onChanged()
+      else if (e.kind === 'removed') onRemoved()
+      else if (e.kind === 'sync') onSync()
+    })
+    return () => { live = false; onChanged.cancel(); onRemoved.cancel(); onSync.cancel(); stop() }
   }, [source, extras])
   return counts
 }
