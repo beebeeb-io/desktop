@@ -1,0 +1,17 @@
+/* Desktop v2's token file: the board-only tokens (board.html .kit-screen), each with a light and a dark value.
+   Like src/design.css for the legacy windows, this is the one place a v2 colour literal belongs
+   (tests/noHardcodedThemeColors.test.ts exempts token files by this name). Everything else uses
+   @beebeeb/shared/tokens.css through Tailwind. */
+:root {
+  --color-red-text: oklch(0.48 0.19 25);
+  --color-green-text: oklch(0.46 0.13 155);
+  --card-r: 12px;
+  --row2: 60px;
+  --pad: 16px;
+  --fs-cap: 12px;
+  --lh-cap: 16px;
+}
+.dark {
+  --color-red-text: oklch(0.70 0.19 25);
+  --color-green-text: oklch(0.72 0.16 155);
+}

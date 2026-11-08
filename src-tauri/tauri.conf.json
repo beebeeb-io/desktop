@@ -48,7 +48,7 @@
         "fullscreen": false,
         "visible": false,
         "center": true,
-        "decorations": true,
+        "decorations": false,
         "minWidth": 880,
         "minHeight": 560
       }

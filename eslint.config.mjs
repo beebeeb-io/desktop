@@ -36,4 +36,18 @@ export default [
       'beebeeb/no-ad-hoc-error-surface': 'error',
     },
   },
+  {
+    // Desktop v2: the web view never holds a session token or key (desktop v2 spec, "Data and crypto boundary").
+    files: ['src/v2/**/*.{ts,tsx}'],
+    languageOptions: { parser: tseslint.parser },
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: [
+          { name: '@beebeeb/shared', message: 'Import a subpath: @beebeeb/shared/design or @beebeeb/shared/drive-ui.' },
+          { name: '@beebeeb/shared/api', message: 'The desktop web view never calls the API; go through the DriveSource.' },
+          { name: 'beebeeb-wasm', message: 'Crypto runs in Rust on desktop; go through the DriveSource.' },
+        ],
+      }],
+    },
+  },
 ]

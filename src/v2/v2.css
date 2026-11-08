@@ -1,0 +1,17 @@
+/* Desktop v2: Tailwind 4 with the board's tokens. The board is built on @beebeeb/shared's tokens.css
+   (design/desktop-v2/board.html declares the same --color-* values); the few board-only values are in ./design.css. */
+@import "tailwindcss";
+@import "../../packages/shared/src/tokens.css";
+@import "./design.css";
+
+@source "../../packages/shared/src";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+html.v2, html.v2 body, html.v2 #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}

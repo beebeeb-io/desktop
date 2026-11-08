@@ -17,6 +17,11 @@
  *   • ?window=main-app&platform=windows
  *                                  → Windows main app shell (WindowsApp.tsx) —
  *                                    sidebar + content router hosting the data views
+ *   • desktop v2 (branch v2): ?window=main-app&platform=windows mounts src/v2 (V2App) instead; the
+ *                                    legacy shell stays reachable at ?window=legacy-main-app&platform=windows
+ *                                    until batch B13 retires it. The tray and the Windows first run move
+ *                                    to v2 when src/v2/tray/enabled.ts / src/v2/onboarding/enabled.ts flip.
+ *                                    A plain browser gets the fixtures DriveSource (?frame=DW-xxxx, ?scenario=).
  *   • ?window=main&platform=macos  → the Beebeeb window on a Mac (MacApp.tsx, task 1683
  *                                    slice 1): Home and Settings in one window, label `main`,
  *                                    built on demand from tauri.macos.conf.json.
@@ -28,7 +33,7 @@
  * See docs/superpowers/plans/2026-05-07-desktop-sync-client.md (Task 8 + 12).
  */
 
-import { StrictMode, type ReactElement } from 'react'
+import { StrictMode, useEffect, useState, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import AccountSessionBoundary from './AccountSessionBoundary'
@@ -42,6 +47,8 @@ import PopoverApp from './PopoverApp'
 import { initializeDesktopThemeFromConfig } from './windows/theme'
 import { ToastProvider } from './windows/ui'
 import { CapabilityProvider, CapabilityGate, useCapabilities } from './capabilities'
+import { TRAY_V2 } from './v2/tray/enabled'
+import { ONBOARDING_V2 } from './v2/onboarding/enabled'
 import './design.css'
 import './macSettings.css'
 import './macApp.css'
@@ -66,8 +73,29 @@ function HostOnboarding() {
   return <CapabilityGate route="onboarding">{caps?.host_os === 'windows' ? <WindowsFirstRun /> : <Onboarding mode={params.get('mode') === 'reauth' ? 'reauth' : 'setup'} />}</CapabilityGate>
 }
 
+const v2Target =
+  which === 'main-app' && platform === 'windows' ? 'main'
+  : which === 'tray' && TRAY_V2 ? 'tray'
+  : which === 'onboarding' && platform === 'windows' && ONBOARDING_V2 ? 'onboarding'
+  : null
+
+function V2Window({ target }: { target: 'main' | 'tray' | 'onboarding' }) {
+  const [loaded, setLoaded] = useState<ReactElement | null>(null)
+  useEffect(() => {
+    let live = true
+    void import('./v2/entry').then((m) => {
+      m.followTheme()
+      if (live) setLoaded(target === 'main' ? <m.V2App /> : target === 'tray' ? <m.TrayApp /> : <m.OnboardingApp />)
+    })
+    return () => { live = false }
+  }, [target])
+  return loaded
+}
+
 let component: ReactElement
-if (which === 'conflict') {
+if (v2Target) {
+  component = <V2Window target={v2Target} />
+} else if (which === 'conflict') {
   component = <ConflictWindow />
 } else if (which === 'tray') {
   // The tray webview is frameless + opaque. Tag <html> so design.css can
@@ -78,7 +106,7 @@ if (which === 'conflict') {
   component = <HostOnboarding />
 } else if (which === 'onboarding') {
   component = <HostOnboarding />
-} else if (which === 'main-app' && platform === 'windows') {
+} else if (which === 'legacy-main-app' && platform === 'windows') {
   component = <WindowsApp />
 } else if (which === 'popover' && platform === 'macos') {
   document.documentElement.classList.add('popover-window')
@@ -99,7 +127,14 @@ if (which === 'conflict') {
   component = <App />
 }
 
-createRoot(container).render(
+// A v2 window in a plain browser (headless frames, fixtures) has no IPC: the session boundary and the
+// capability provider would wait forever, so it mounts bare. Inside Tauri it keeps both.
+const bareV2 = v2Target != null && !('__TAURI_INTERNALS__' in window)
+
+const root = createRoot(container)
+if (bareV2) {
+  root.render(<StrictMode>{component}</StrictMode>)
+} else root.render(
   <StrictMode>
     {which === 'onboarding' ? (
       <ToastProvider><CapabilityProvider>{component}</CapabilityProvider></ToastProvider>
