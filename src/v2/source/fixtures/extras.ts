@@ -1,5 +1,6 @@
 // B02b's fixtures: the board's numbers for the extras (../extras.ts), so every frame renders headless. Owned by B02b.
-// `scenario` follows ?scenario=: `syncing` gives the flyout's moving state (DW-1203); `default` is up to date.
+// `scenario` follows ?scenario=: `syncing` gives the flyout's moving state (DW-1203); `problems` the sync banner
+// (DW-0103's "3 items can't sync"); `listing` the getting-ready strip (DW-1107); `default` is up to date.
 import type { DriveExtras, DriveStatus, PhotoMeta, SyncProblem, TransferRow } from '../extras'
 import { HISTORY, OFFLINE_ENTRIES, PHOTO_ENTRIES, PHOTO_META } from './photos'
 
@@ -29,6 +30,8 @@ export function fixtureStatus(scenario: string): DriveStatus {
     backup: { state: 'on', lastBackupAt: '2026-11-08T11:52:00', deviceFolder: 'Anna-Laptop', foldersOn: 3, foldersGettingReady: 0 },
     conflicts: [],
     ...(scenario === 'syncing' ? { uploadBps: 1_400_000, etaSeconds: 60 } : {}),
+    ...(scenario === 'problems' ? { syncProblems: 3, stoppedFiles: 1 } : {}),
+    ...(scenario === 'listing' ? { listing: { done: 18_240, total: 40_112 } } : {}),
   }
 }
 
