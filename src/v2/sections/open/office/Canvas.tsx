@@ -9,7 +9,7 @@ import { Glyph } from './Ribbon'
 
 const PAGE_BG = 'bg-paper-3'
 /** Document ink: the page is white paper in both themes. */
-const PAPER = { background: 'oklch(1 0 0)', color: 'oklch(0.22 0.01 70)' }
+const PAPER = { background: 'var(--color-page)', color: 'var(--color-page-ink)' }
 
 /** Outline: the document's headings; a click goes there. */
 export function OutlinePane({ items, current, onGo, onCollapse }: { items: [string, number][]; current?: number; onGo?: (i: number) => void; onCollapse?: () => void }) {
@@ -39,10 +39,10 @@ export function DocPage({ doc, selection, table, children }: { doc: DocFixture; 
         {doc.sections.map((s, i) => (
           <section key={s.heading}>
             <h3 className="m-0 mt-2 text-[14px] font-semibold">{s.heading}</h3>
-            <p className="m-0 text-[12.5px] leading-5">{s.text}{s.selected && <span data-selection={selection || undefined} className={selection ? 'rounded-sm bg-[oklch(0.22_0.01_70/0.14)]' : ''}>{s.selected}</span>}</p>
+            <p className="m-0 text-[12.5px] leading-5">{s.text}{s.selected && <span data-selection={selection || undefined} className={selection ? 'rounded-sm bg-page-ink/14' : ''}>{s.selected}</span>}</p>
             {table && i === 1 && (
               <table data-inserted-table className="mt-2 w-full border-collapse text-[11px]">
-                <tbody>{table.map((row, r) => <tr key={r}>{row.map((c, j) => <td key={j} className={`border border-[oklch(0.22_0.01_70/0.3)] px-2 py-1 ${r === 0 ? 'font-semibold' : ''}`}>{c}</td>)}</tr>)}</tbody>
+                <tbody>{table.map((row, r) => <tr key={r}>{row.map((c, j) => <td key={j} className={`border border-page-ink/30 px-2 py-1 ${r === 0 ? 'font-semibold' : ''}`}>{c}</td>)}</tr>)}</tbody>
               </table>
             )}
           </section>
@@ -128,7 +128,7 @@ function SlideBody({ slide, scale }: { slide: SlideFixture; scale: number }) {
       <div className="font-bold leading-tight tracking-tight" style={{ fontSize: 26 * scale }}>{slide.title}</div>
       {slide.sub && <div style={{ fontSize: 13 * scale, opacity: 0.65 }}>{slide.sub}</div>}
       {slide.points.length > 0 && <ul className="m-0 list-disc" style={{ paddingLeft: '1.1em', fontSize: 13.5 * scale, lineHeight: 1.5 }}>{slide.points.map((p) => <li key={p}>{p}</li>)}</ul>}
-      {slide.photo && <span aria-label="Photo" role="img" className="min-h-[14px] flex-1 rounded bg-[linear-gradient(135deg,oklch(0.78_0.04_230),oklch(0.62_0.05_200)_55%,oklch(0.82_0.06_80))]" />}
+      {slide.photo && <span aria-label="Photo" role="img" className="min-h-[14px] flex-1 rounded bg-(image:--sample-photo-slide)" />}
     </>
   )
 }
@@ -141,7 +141,7 @@ export function Filmstrip({ slides, current, onPick, onMenu }: { slides: SlideFi
       {slides.map((s, i) => (
         <button key={s.title} type="button" data-slide-thumb aria-current={i === current ? 'true' : undefined} aria-label={`Slide ${i + 1}: ${s.title}`} onClick={() => onPick?.(i)} onContextMenu={(e) => { e.preventDefault(); onMenu?.(i, e.clientX, e.clientY) }} className={`flex items-start gap-2 text-left ${FOCUS}`}>
           <span className="w-3 pt-1 font-mono text-[11px] text-ink-3">{i + 1}</span>
-          <span className="flex h-[79px] w-[140px] flex-col gap-0.5 overflow-hidden rounded p-2" style={{ ...PAPER, boxShadow: i === current ? '0 0 0 2px var(--color-ink)' : '0 1px 4px oklch(0 0 0 / 0.14)' }}>
+          <span className="flex h-[79px] w-[140px] flex-col gap-0.5 overflow-hidden rounded p-2" style={{ ...PAPER, boxShadow: i === current ? '0 0 0 2px var(--color-ink)' : '0 1px 4px var(--color-page-shadow)' }}>
             <SlideBody slide={s} scale={0.33} />
           </span>
         </button>

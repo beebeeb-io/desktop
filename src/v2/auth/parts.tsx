@@ -110,7 +110,7 @@ export function PrimaryButton({ children, disabled, onClick, amber = true, type 
       disabled={disabled}
       onClick={onClick}
       className={`flex h-8 w-full items-center justify-center gap-2 rounded-md text-[13px] font-medium disabled:cursor-default ${
-        amber ? 'bg-amber text-[oklch(0.22_0.01_70)] disabled:opacity-50' : 'border border-line bg-paper text-ink hover:bg-paper-2 disabled:opacity-60'
+        amber ? 'bg-amber text-amber-ink disabled:opacity-50' : 'border border-line bg-paper text-ink hover:bg-paper-2 disabled:opacity-60'
       }`}
     >
       <span className="inline-flex items-center gap-2 font-sans text-[13px] font-medium">{children}</span>
@@ -196,7 +196,7 @@ export function HelloGlyph({ size = 16 }: { size?: number }) {
  */
 export function HelloPrompt({ title = 'Making sure it’s you', reason, state = 'looking', detail }: { title?: string; reason: string; state?: 'looking' | 'failed'; detail?: string }) {
   return (
-    <div className="absolute inset-0 z-50 grid place-items-center bg-[oklch(0_0_0/0.32)]" data-system-prompt>
+    <div className="absolute inset-0 z-50 grid place-items-center bg-win-scrim" data-system-prompt>
       <div role="dialog" aria-label="Windows Security" className="w-[456px] rounded-lg border border-[#d0d0d0] bg-[#f3f3f3] font-sans text-[#1a1a1a] shadow-2xl">
         <div className="px-6 pb-2 pt-5">
           <div className="text-[12px] text-[#5c5c5c]">Windows Security</div>

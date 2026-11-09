@@ -51,7 +51,7 @@ export function NoPreview({ name, size, onOpenElsewhere, onKeep, onClose }: { na
 /** A page of a document, drawn from text, for the preview body. */
 export function Page({ lines, title, compact }: { lines: string[]; title: string; compact?: boolean }) {
   return (
-    <article aria-label="Page 1" data-page className={`${compact ? 'w-full p-4' : 'w-[520px] max-w-full flex-none p-10'} rounded-sm border border-line bg-white text-[12px] leading-5 text-[oklch(0.25_0.01_70)] shadow-sm`}>
+    <article aria-label="Page 1" data-page className={`${compact ? 'w-full p-4' : 'w-[520px] max-w-full flex-none p-10'} rounded-sm border border-line bg-page text-[12px] leading-5 text-page-ink shadow-sm`}>
       <h3 className="m-0 mb-4 text-[16px] font-semibold">{title}</h3>
       {lines.map((l, i) => <p key={i} className="m-0 mb-2">{l}</p>)}
     </article>
@@ -140,28 +140,28 @@ export function SystemPicker({ kind, title, button }: { kind: PickerKind; title:
   const picked = kind === 'files' ? 3 : kind === 'folder' ? 1 : 3
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-ink/25">
-      <div role="dialog" aria-label={title} data-system-ui={kind} className="flex h-[480px] w-[800px] flex-col overflow-hidden rounded-lg border border-line bg-[oklch(0.96_0_0)] text-[12px] text-[oklch(0.25_0_0)] shadow-2xl">
-        <div className="flex h-8 flex-none items-center justify-between bg-white px-3"><span>{title}</span><span className="text-[oklch(0.5_0_0)]">✕</span></div>
-        <div className="flex h-10 flex-none items-center gap-2 border-b border-[oklch(0.9_0_0)] bg-white px-3">
-          <span className="flex h-7 flex-1 items-center gap-1.5 rounded border border-[oklch(0.88_0_0)] px-2">{where.map((w, i) => <span key={w} className="flex items-center gap-1.5">{i > 0 && '›'}{w}</span>)}</span>
-          <span className="flex h-7 w-52 items-center rounded border border-[oklch(0.88_0_0)] px-2 text-[oklch(0.55_0_0)]">Search {where[1]}</span>
+      <div role="dialog" aria-label={title} data-system-ui={kind} className="flex h-[480px] w-[800px] flex-col overflow-hidden rounded-lg border border-line bg-win-surface text-[12px] text-win-ink shadow-2xl">
+        <div className="flex h-8 flex-none items-center justify-between bg-white px-3"><span>{title}</span><span className="text-win-ink-2">✕</span></div>
+        <div className="flex h-10 flex-none items-center gap-2 border-b border-win-line bg-white px-3">
+          <span className="flex h-7 flex-1 items-center gap-1.5 rounded border border-win-field px-2">{where.map((w, i) => <span key={w} className="flex items-center gap-1.5">{i > 0 && '›'}{w}</span>)}</span>
+          <span className="flex h-7 w-52 items-center rounded border border-win-field px-2 text-win-ink-2">Search {where[1]}</span>
         </div>
         <div className="flex min-h-0 flex-1 bg-white">
-          <ul className="m-0 w-44 flex-none list-none border-r border-[oklch(0.92_0_0)] p-2">
-            {NAV.map((n) => <li key={n} className={`rounded px-2 py-1.5 ${n === where[1] ? 'bg-[oklch(0.93_0_0)]' : ''}`}>{n}</li>)}
+          <ul className="m-0 w-44 flex-none list-none border-r border-win-line p-2">
+            {NAV.map((n) => <li key={n} className={`rounded px-2 py-1.5 ${n === where[1] ? 'bg-win-selected' : ''}`}>{n}</li>)}
           </ul>
           <div className={`min-w-0 flex-1 p-3 ${kind === 'photos' ? 'grid grid-cols-3 content-start gap-3' : ''}`}>
             {files.map((f, i) => {
               const on = i < picked && kind !== 'folder' ? true : kind === 'folder' && i === 0
               return kind === 'photos'
-                ? <div key={f} data-picker-item className={`flex flex-col items-center gap-1 rounded p-2 ${on ? 'bg-[oklch(0.93_0_0)] outline outline-1 outline-[oklch(0.8_0_0)]' : ''}`}><div className="aspect-[4/3] w-full rounded bg-[oklch(0.82_0.02_240)]" /><span className="truncate">{f}</span></div>
-                : <div key={f} data-picker-item className={`flex h-8 items-center gap-2 rounded px-2 ${on ? 'bg-[oklch(0.93_0_0)]' : ''}`}><FileIcon type={getFileType(f, kind === 'folder')} size={18} />{f}</div>
+                ? <div key={f} data-picker-item className={`flex flex-col items-center gap-1 rounded p-2 ${on ? 'bg-win-selected outline outline-1 outline-win-selected-line' : ''}`}><div className="aspect-[4/3] w-full rounded bg-sample-thumb" /><span className="truncate">{f}</span></div>
+                : <div key={f} data-picker-item className={`flex h-8 items-center gap-2 rounded px-2 ${on ? 'bg-win-selected' : ''}`}><FileIcon type={getFileType(f, kind === 'folder')} size={18} />{f}</div>
             })}
           </div>
         </div>
-        <div className="flex flex-none flex-col gap-2 border-t border-[oklch(0.9_0_0)] bg-[oklch(0.96_0_0)] p-3">
-          <div className="flex items-center gap-2"><span className="w-20">{kind === 'folder' ? 'Folder:' : 'File name:'}</span><span className="flex h-7 flex-1 items-center rounded border border-[oklch(0.85_0_0)] bg-white px-2">{kind === 'folder' ? 'Projects' : files.slice(0, picked).map((f) => `"${f}"`).join(' ')}</span></div>
-          <div className="flex justify-end gap-2"><span data-picker-ok className="inline-flex h-7 min-w-24 items-center justify-center rounded border border-[oklch(0.7_0_0)] bg-[oklch(0.93_0_0)] px-3">{button}</span><span className="inline-flex h-7 min-w-24 items-center justify-center rounded border border-[oklch(0.85_0_0)] bg-white px-3">Cancel</span></div>
+        <div className="flex flex-none flex-col gap-2 border-t border-win-line bg-win-surface p-3">
+          <div className="flex items-center gap-2"><span className="w-20">{kind === 'folder' ? 'Folder:' : 'File name:'}</span><span className="flex h-7 flex-1 items-center rounded border border-win-field bg-white px-2">{kind === 'folder' ? 'Projects' : files.slice(0, picked).map((f) => `"${f}"`).join(' ')}</span></div>
+          <div className="flex justify-end gap-2"><span data-picker-ok className="inline-flex h-7 min-w-24 items-center justify-center rounded border border-win-button-line bg-win-selected px-3">{button}</span><span className="inline-flex h-7 min-w-24 items-center justify-center rounded border border-win-field bg-white px-3">Cancel</span></div>
         </div>
       </div>
     </div>

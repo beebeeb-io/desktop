@@ -11,21 +11,21 @@ import { fmtBytes, fmtClock, isNumeric, parseTable } from './model'
 // ---- Photos: a RAW shows the camera's own preview, and says so (DW-1501) ----
 export function RawViewer({ src, strip, onPrev, onNext, onOpenElsewhere }: { src: string | null; strip: { id: string; src: string | null; current?: boolean }[]; onPrev?: () => void; onNext?: () => void; onOpenElsewhere?: () => void }) {
   return (
-    <div data-viewer="raw" className="relative flex min-h-0 flex-1 flex-col bg-[oklch(0.16_0.01_70)]">
+    <div data-viewer="raw" className="relative flex min-h-0 flex-1 flex-col bg-viewer">
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
         <div className="absolute left-4 top-4 flex gap-2">
           <span data-pill className="rounded-full bg-black/55 px-3 py-1 text-[12px] text-white">Camera preview · Sony ARW</span>
           <span className="rounded-full bg-black/55 px-3 py-1 font-mono text-[12px] text-white">RAW · 61.4 MB</span>
         </div>
         <button type="button" aria-label="Previous photo" onClick={onPrev} className={`absolute left-3 grid h-9 w-9 place-items-center rounded-full bg-black/45 text-white ${FOCUS}`}><span className="inline-flex rotate-180"><Icon name="chevron-right" size={16} /></span></button>
-        {src ? <img src={src} alt="Camera preview of DSC04182.ARW" className="max-h-full max-w-full object-contain" /> : <div className="h-64 w-96 rounded bg-[oklch(0.3_0.02_70)]" />}
+        {src ? <img src={src} alt="Camera preview of DSC04182.ARW" className="max-h-full max-w-full object-contain" /> : <div className="h-64 w-96 rounded bg-viewer-placeholder" />}
         <button type="button" aria-label="Next photo" onClick={onNext} className={`absolute right-3 grid h-9 w-9 place-items-center rounded-full bg-black/45 text-white ${FOCUS}`}><Icon name="chevron-right" size={16} /></button>
         <button type="button" onClick={onOpenElsewhere} className={`absolute bottom-3 right-3 rounded-md bg-black/55 px-3 py-1.5 text-[12px] text-white ${FOCUS}`}>Open in another app…</button>
       </div>
       <div data-strip className="flex h-20 flex-none items-center justify-center gap-2 bg-black/40 px-4">
         {strip.map((s) => (
           <div key={s.id} data-strip-item className={`h-14 w-20 flex-none overflow-hidden rounded ${s.current ? 'outline outline-2 outline-white' : 'opacity-70'}`}>
-            {s.src ? <img src={s.src} alt="" className="h-full w-full object-cover" /> : <div className="h-full w-full bg-[oklch(0.3_0.02_70)]" />}
+            {s.src ? <img src={s.src} alt="" className="h-full w-full object-cover" /> : <div className="h-full w-full bg-viewer-placeholder" />}
           </div>
         ))}
       </div>
@@ -55,7 +55,7 @@ export function AudioPlayer({ tracks, index, playing, elapsed, onToggle, onPrev,
         <div className="text-center"><div data-title className="text-[16px] font-semibold text-ink">{title}</div>{t.artist && <div className="text-[13px] text-ink-3">{t.artist}</div>}</div>
         <div className="flex w-full items-center gap-2 font-mono text-[11px] text-ink-3">
           <span>{fmtClock(elapsed)}</span>
-          <input type="range" aria-label="Position" min={0} max={t.length} value={elapsed} onChange={(e) => onSeek?.(Number(e.target.value))} className="h-1 flex-1 accent-[oklch(0.35_0.01_70)]" />
+          <input type="range" aria-label="Position" min={0} max={t.length} value={elapsed} onChange={(e) => onSeek?.(Number(e.target.value))} className="h-1 flex-1 accent-ink-2" />
           <span>{`−${fmtClock(t.length - elapsed)}`}</span>
         </div>
         <div className="flex items-center gap-3">
@@ -86,11 +86,11 @@ export function AudioPlayer({ tracks, index, playing, elapsed, onToggle, onPrev,
 /** Windows draws Quick Settings (DW-1504): system greys, not ours. Beebeeb only supplies the media session. */
 export function QuickSettingsMedia({ title, artist, tracks }: { title: string; artist: string; tracks?: number }) {
   void tracks
-  const tile = 'h-12 flex-1 rounded-lg bg-[oklch(0.3_0.005_250)]'
+  const tile = 'h-12 flex-1 rounded-lg bg-win-dark-tile'
   return (
-    <div data-quick-settings className="absolute bottom-12 right-3 z-30 w-[360px] rounded-xl border border-[oklch(0.35_0.005_250)] bg-[oklch(0.22_0.005_250)] p-4 font-sans text-white shadow-2xl">
-      <div className="mb-3 flex items-center gap-3 rounded-lg bg-[oklch(0.3_0.005_250)] p-3">
-        <div className="grid h-16 w-16 flex-none place-items-center rounded bg-[oklch(0.4_0.005_250)]"><Icon name="file-audio" size={26} /></div>
+    <div data-quick-settings className="absolute bottom-12 right-3 z-30 w-[360px] rounded-xl border border-win-dark-line bg-win-dark-surface p-4 font-sans text-white shadow-2xl">
+      <div className="mb-3 flex items-center gap-3 rounded-lg bg-win-dark-tile p-3">
+        <div className="grid h-16 w-16 flex-none place-items-center rounded bg-win-dark-art"><Icon name="file-audio" size={26} /></div>
         <div className="min-w-0 flex-1">
           <div className="text-[11px] text-white/60">Beebeeb</div>
           <a href="#open" data-media-title className="block truncate text-[13px] font-semibold text-white no-underline">{title}</a>
