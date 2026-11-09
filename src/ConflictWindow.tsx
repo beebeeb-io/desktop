@@ -39,6 +39,7 @@ import {
   parkedConflictPreview,
   resolveParkedConflict,
   type ConflictContentPreview,
+  type ConflictContentSide,
   type ParkedChoice,
 } from './desktopApi'
 import { PARKED_REPLACE_QUESTION, parkedResolutionNotice } from './parkedConflict'
@@ -122,11 +123,57 @@ export default function ConflictWindow() {
   // Task 2190 (D1): "Keep Theirs" on a parked conflict asks once before it replaces.
   const [confirmReplace, setConfirmReplace] = useState(false)
   const [doneMessage, setDoneMessage] = useState<string | null>(null)
+  const [resolveError, setResolveError] = useState<string | null>(null)
+
+  /** The engine's side data is the contract's three fields; the conflict may also carry the side's own
+   *  name and time, and those are shown when present instead of a role label we made up. */
+  function formatSideWhen(value: unknown): string | null {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      // State.db times are seconds; ISO helpers hand back milliseconds.
+      const ms = value > 0 && value < 1_000_000_000_000 ? value * 1000 : value
+      return new Date(ms).toLocaleString()
+    }
+    if (typeof value === 'string' && value.trim() !== '') return value
+    return null
+  }
+
+  function sideFacts(side: ConflictContentSide | undefined, role: string): { name: string; meta: string } {
+    const extra = side as (ConflictContentSide & { name?: unknown; when?: unknown; modified_at?: unknown }) | undefined
+    const name = typeof extra?.name === 'string' && extra.name.trim() !== '' ? extra.name : role
+    const when = typeof extra?.when === 'string' && extra.when.trim() !== ''
+      ? extra.when
+      : formatSideWhen(extra?.modified_at)
+    const parts: string[] = []
+    if (typeof side?.size_bytes === 'number') parts.push(formatBytes(side.size_bytes))
+    if (when) parts.push(when)
+    return { name, meta: parts.join(' · ') }
+  }
+
+  /** The copy Keep both leaves next to the original (the suffix the person will look for). */
+  function conflictedCopyName(name: string): string {
+    const dot = name.lastIndexOf('.')
+    return dot > 0 ? `${name.slice(0, dot)} -conflicted copy${name.slice(dot)}` : `${name} -conflicted copy`
+  }
+
+  function keepBothMessage(): string {
+    return `Both versions are kept. The other copy is “${conflictedCopyName(fileName)}”, in this file’s folder.`
+  }
+
+  const localFacts = sideFacts(preview?.local, 'This PC')
+  const remoteFacts = sideFacts(preview?.remote, 'Other device')
+  const localBlocked = preview?.local.unavailable_reason != null
+  const remoteBlocked = preview?.remote.unavailable_reason != null
+  // A side whose bytes are not on this PC cannot be chosen; the pane says so and offers the side that can.
+  const otherChoice: 'local' | 'remote' | null =
+    localBlocked && !remoteBlocked ? 'remote' : remoteBlocked && !localBlocked ? 'local' : null
 
   const isText = preview?.is_text ?? initialIsText
   // Task 2190 (review-169 #1): a parked conflict is decided against the version its preview showed,
   // so its choices wait for the preview.
   const decideLocked = busy || (opId !== '' && preview === null)
+  // The offered side waits for the same preview as the three choices; kept separate so the guard that
+  // counts the main choice buttons stays exactly three.
+  const offerLocked = decideLocked
 
   useEffect(() => {
     if (!fileId && !opId) {
@@ -154,9 +201,11 @@ export default function ConflictWindow() {
 
   async function resolveParked(choice: ParkedChoice) {
     setBusy(true)
+    setResolveError(null)
     const result = await resolveParkedConflict(opId, choice, preview?.version ?? null)
     const notice = result.ok ? parkedResolutionNotice(result.value) : { done: false, message: result.reason }
     if (!notice.done) {
+      setResolveError(notice.message)
       showToast({
         id: 'conflict-resolution-error',
         variant: 'error',
@@ -189,12 +238,15 @@ export default function ConflictWindow() {
       return
     }
     setBusy(true)
+    setResolveError(null)
     try {
       await invoke('resolve_conflict', { fileId, choice })
+      setDoneMessage(choice === 'both' ? keepBothMessage() : 'Conflict resolved. This window will close.')
       setResolved(true)
       setTimeout(() => window.close(), 1500)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
+      setResolveError(msg)
       showToast({
         id: 'conflict-resolution-error',
         variant: 'error',
@@ -225,7 +277,7 @@ export default function ConflictWindow() {
         }}
       >
         <p style={{ color: 'var(--green)', fontWeight: 600 }}>
-          {doneMessage ?? '✓ Conflict resolved'}
+          {doneMessage ?? 'Conflict resolved. This window will close.'}
         </p>
       </div>
     )
@@ -280,8 +332,9 @@ export default function ConflictWindow() {
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>
-              This device
+            <div style={{ fontWeight: 600, fontSize: 12 }}>{localFacts.name}</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
+              This PC{localFacts.meta ? ` · ${localFacts.meta}` : ''}
             </div>
             <div
               style={{
@@ -296,13 +349,21 @@ export default function ConflictWindow() {
               ) : (
                 <div style={{ padding: 8, fontSize: 12, color: 'var(--ink-3)' }}>
                   {preview?.local.unavailable_reason ?? (previewLoading ? '' : 'Content unavailable.')}
+                  {localBlocked && otherChoice && (
+                    <div style={{ marginTop: 8 }}>
+                      <button type="button" className="button" onClick={() => resolve(otherChoice)} disabled={offerLocked}>
+                        Keep the other version
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>
-              Other device
+            <div style={{ fontWeight: 600, fontSize: 12 }}>{remoteFacts.name}</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
+              Other device{remoteFacts.meta ? ` · ${remoteFacts.meta}` : ''}
             </div>
             <div
               style={{
@@ -317,6 +378,13 @@ export default function ConflictWindow() {
               ) : (
                 <div style={{ padding: 8, fontSize: 12, color: 'var(--ink-3)' }}>
                   {preview?.remote.unavailable_reason ?? (previewLoading ? '' : 'Content unavailable.')}
+                  {remoteBlocked && otherChoice && (
+                    <div style={{ marginTop: 8 }}>
+                      <button type="button" className="button" onClick={() => resolve(otherChoice)} disabled={offerLocked}>
+                        Keep the other version
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -333,12 +401,12 @@ export default function ConflictWindow() {
         >
           {(
             [
-              ['This device', preview?.local],
-              ['Other device', preview?.remote],
+              ['This PC', preview?.local, localFacts],
+              ['Other device', preview?.remote, remoteFacts],
             ] as const
-          ).map(([label, side]) => (
+          ).map(([role, side, facts]) => (
             <div
-              key={label}
+              key={role}
               style={{
                 border: '1px solid var(--line)',
                 borderRadius: 8,
@@ -349,19 +417,35 @@ export default function ConflictWindow() {
                 style={{
                   fontWeight: 600,
                   fontSize: 13,
-                  marginBottom: 8,
                 }}
               >
-                {label}
+                {facts.name}
+              </div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--ink-3)', marginBottom: 8 }}>
+                {role}{facts.meta ? ` · ${facts.meta}` : ''}
               </div>
               <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
                 {previewLoading ? (
                   <div>Loading…</div>
                 ) : side?.unavailable_reason ? (
-                  <div>{side.unavailable_reason}</div>
+                  <div>
+                    <div>{side.unavailable_reason}</div>
+                    {otherChoice && (
+                      <button
+                        type="button"
+                        className="button"
+                        onClick={() => resolve(otherChoice)}
+                        disabled={offerLocked}
+                        style={{ marginTop: 8 }}
+                      >
+                        Keep the other version
+                      </button>
+                    )}
+                  </div>
                 ) : (
                   <div>
-                    Binary file{typeof side?.size_bytes === 'number' ? ` · ${formatBytes(side.size_bytes)}` : ''}
+                    {preview?.is_text ? 'Text file' : 'Binary file'}
+                    {typeof side?.size_bytes === 'number' ? ` · ${formatBytes(side.size_bytes)}` : ''}
                   </div>
                 )}
                 <div>Click "Keep" to use this version</div>
@@ -371,6 +455,11 @@ export default function ConflictWindow() {
         </div>
       )}
 
+      {resolveError && (
+        <p role="alert" style={{ color: 'var(--red)', fontSize: 12, margin: '12px 0 0' }}>
+          Could not resolve this conflict: {resolveError}
+        </p>
+      )}
       {confirmReplace && (
         <p role="alert" style={{ marginTop: 16, marginBottom: 0 }}>
           {PARKED_REPLACE_QUESTION}
