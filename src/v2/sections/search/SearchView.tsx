@@ -5,6 +5,7 @@ import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType, type DriveItem } from '@beebeeb/shared/drive-ui'
 import { FOCUS } from '../files/ui'
 import { fmtCount, fmtSize, fmtWhen, LOCAL_LABEL } from '../files/model'
+import { BannerSlot } from '../../chrome/Banners'
 
 export interface SearchHit { item: DriveItem; where: string }
 export const PILLS = ['All', 'Folders', 'Photos', 'Documents'] as const
@@ -85,6 +86,8 @@ export function SearchView(p: SearchViewProps) {
           <button type="button" aria-label="Close search (Esc)" title="Close search (Esc)" onClick={p.onEnd} className={`grid h-6 w-6 place-items-center rounded text-ink-3 hover:bg-paper-3 ${FOCUS}`}><Icon name="x" size={12} /></button>
         </div>
       </div>
+      {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+      <BannerSlot />
 
       {!typed ? (
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3">

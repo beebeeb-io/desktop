@@ -6,6 +6,7 @@ import { FileIcon, getFileType } from '@beebeeb/shared/drive-ui'
 import { BTN, BTN_AMBER, FOCUS } from '../files/ui'
 import { fmtCount, fmtSize, fmtWhen } from '../files/model'
 import { isPast, linkExpiry, peopleLabel, requestLine, type FileRequestRow, type Invitation, type LinkShare, type PeopleShare, type SharedTab, type WithMeRow } from './model'
+import { BannerSlot } from '../../chrome/Banners'
 
 export type RowKind = 'with-me' | 'people' | 'link' | 'request'
 export interface SharedHandlers {
@@ -49,6 +50,11 @@ function Toolbar({ tab, h, sortable }: { tab: SharedTab; h?: SharedHandlers; sor
       {tab === 'requests' && <button type="button" data-new-request className={BTN_AMBER} onClick={h?.onNewRequest}>New request</button>}
     </div>
   )
+}
+
+/** The toolbar, then the window's banner under it, as on every view (DW-0101 to DW-0106). */
+function ToolbarWithBanner(p: Parameters<typeof Toolbar>[0]) {
+  return <><Toolbar {...p} /><BannerSlot /></>
 }
 
 function Heading({ children, count }: { children: ReactNode; count: number }) {
@@ -169,7 +175,7 @@ export function SharedView(p: SharedViewProps) {
   }
   return (
     <section aria-label="Shared" data-shared={tab} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <Toolbar tab={tab} h={h} sortable={sortable} />
+      <ToolbarWithBanner tab={tab} h={h} sortable={sortable} />
       {body}
     </section>
   )

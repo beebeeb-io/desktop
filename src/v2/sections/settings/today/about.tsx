@@ -13,6 +13,17 @@ import { useSettings } from '../shell/context'
 import { CHANNEL_NEWEST, RELEASE_NOTES } from '../../../source/fixtures/settings-today'
 import type { ReleaseChannel } from '../../../../desktopApi'
 import { BackLink, InfoBanner } from './ui'
+import { openExternal } from '../../../external'
+
+/** The website's release notes: the OS opens them, never this window (#274 review). */
+const RELEASES_URL = 'https://beebeeb.io/releases'
+
+/** A new release channel: saved first, then checked, because Rust's check reads the channel from disk (#274 review);
+ *  a write that failed checks nothing. */
+export async function pickThenCheck(save: () => Promise<boolean>, check: () => Promise<void>, refuse: () => void): Promise<void> {
+  if (await save()) await check()
+  else refuse()
+}
 
 const VERSION = '0.9.1', BUILD = '311', CORE = '2084927', RUNNING_FROM: ReleaseChannel = 'stable'
 const CHANNELS: { value: ReleaseChannel; label: string; sub: string }[] = [
@@ -40,7 +51,9 @@ export function AboutToday({ runningFrom = RUNNING_FROM }: { runningFrom?: Relea
   const newest = live ? (down?.version ?? version) : CHANNEL_NEWEST[channel]
   const behind = live ? down !== null : older(newest, VERSION)
   const from = live ? (down?.from ?? channel) : runningFrom
-  const pickChannel = (c: ReleaseChannel) => { update({ release_channel: c }); void doCheck() }
+  const pickChannel = (c: ReleaseChannel) => {
+    void pickThenCheck(() => update({ release_channel: c }), doCheck, () => setRefusal(actionFailure('change the release channel', 'failed').text))
+  }
   // Check now asks the updater (DW-0751#1): a newer version shows on General with its update button (DW-0781) and in
   // the flyout; an older one on the channel picked shows here; none says when it checked; a check that fails says so.
   const doCheck = async () => {
@@ -50,6 +63,8 @@ export function AboutToday({ runningFrom = RUNNING_FROM }: { runningFrom?: Relea
     setCheck('idle')
     if (!r.ok) { setRefusal(actionFailure('check for updates', r.unsupported ? 'unsupported' : 'failed').text); return }
     if (r.value.status === 'update_available') { noteUpdate(r.value.version); go('general'); return }
+    // A later answer of none (or an older one) ends an offer an earlier check made (another channel's).
+    noteUpdate(null)
     setDown(r.value.status === 'downgrade_available' ? { version: r.value.version, from: r.value.current_channel } : null)
     setCheckedAt(new Date().toTimeString().slice(0, 5))
   }
@@ -87,7 +102,7 @@ export function AboutToday({ runningFrom = RUNNING_FROM }: { runningFrom?: Relea
       </Group>
       {behind ? (
         <InfoBanner title={`The ${label(channel)} channel is at version ${newest}`}>
-          This PC runs {version}, from the {label(from)} channel. Read the <a href="https://beebeeb.io/releases" className="underline">release notes</a> before you go back to an older version. Nothing is installed.
+          This PC runs {version}, from the {label(from)} channel. Read the <a href={RELEASES_URL} onClick={(e) => { e.preventDefault(); void openExternal(RELEASES_URL).then((r) => { if (!r.ok) setRefusal(actionFailure('open the release notes', r.unsupported ? 'unsupported' : 'failed').text) }) }} className="underline">release notes</a> before you go back to an older version. Nothing is installed.
         </InfoBanner>
       ) : null}
       <Group title="Open source">

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { command, openUrl } from '../../../desktopApi'
 import * as api from './api'
-import { emailErrorText, NEW_CODE_LINE, TICKET_EXPIRED, type CreateStep } from './model'
+import { emailErrorText, NEW_CODE_LINE, stepFailureText, TICKET_EXPIRED, type CreateStep } from './model'
 import { ConfirmStep, CreatingStep, DeviceStep, DoneStep, EmailStep, PasswordStep, PhraseStep, TermsStep, useCountdown, VerifyStep } from './views'
 import { seed } from '../../seed'
 
@@ -46,6 +46,8 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
   const [device, setDevice] = useState('')
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A43: the failure replaces the progress screen and gates the way on
   const [problem, setProblem] = useState<'failed' | 'finish-failed' | null>(() => seed('create.problem', null))
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A36/A39: the line sits under the button it is about, which works again; the sign-up window has no toast host
+  const [stepError, setStepError] = useState<string | null>(null)
   /** Where a verified code leads: Terms, or straight back to creating after DW-A43's expired code. */
   const [afterVerify, setAfterVerify] = useState<CreateStep>('terms')
   const secondsLeft = useCountdown(policy?.resend_after_secs ?? 60, sentAt)
@@ -98,29 +100,44 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
     return v === 'clean'
   }
 
+  // A failed step says so under its button, which works again; nothing moves on (M3b's leftovers: these handlers dropped
+  // their failure, so the button did nothing visible).
   const continuePassword = async () => {
+    setStepError(null)
     setBusy(true)
     const clean = await runBreach()
     const r = clean ? await api.setPassword(pw.password, pw.confirm) : null
-    setBusy(false)
-    if (!r?.ok) return
-    setPw({ password: '', confirm: '', show: false })
+    // A breach verdict says itself (its own note); only a failed step gets the line.
+    if (r && !r.ok) { setBusy(false); setStepError(stepFailureText(r.reason)); return }
+    if (!r) { setBusy(false); return }
     const w = await api.phraseWords()
-    if (w.ok) { setWords(w.value); setStep('phrase') }
+    setBusy(false)
+    if (!w.ok) { setStepError(stepFailureText(w.reason)); return }
+    setPw({ password: '', confirm: '', show: false })
+    setWords(w.value)
+    setStep('phrase')
   }
 
   // B11 ruling: Rust puts the words on the clipboard and clears them after 60 s; the web view never runs the copy.
   const copyPhrase = async () => {
+    setStepError(null)
     const r = await api.copyPhrase()
-    if (!r.ok) return
+    if (!r.ok) { setStepError(stepFailureText(r.reason)); return }
     setCopied(true)
     window.clearTimeout(clipboardTimer.current)
     clipboardTimer.current = window.setTimeout(() => setCopied(false), 60_000)
   }
 
+  const savePhrase = async () => {
+    setStepError(null)
+    const r = await api.savePhrase()
+    if (!r.ok) setStepError(stepFailureText(r.reason))
+  }
+
   const toConfirm = async () => {
+    setStepError(null)
     const r = await api.phraseChallenge()
-    if (!r.ok) return
+    if (!r.ok) { setStepError(stepFailureText(r.reason)); return }
     setPositions(r.value)
     setAnswers(r.value.map(() => ''))
     setWrongWords(false)
@@ -183,12 +200,12 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
         <PasswordStep password={pw.password} confirm={pw.confirm} meter={meter} breach={breach === 'breached' ? 'breached' : null} blocked={breach === 'blocked'}
           show={pw.show} busy={busy} canContinue={passwordOk}
           onPassword={(v) => { setPw((p) => ({ ...p, password: v })); setBreach(null) }} onConfirm={(v) => setPw((p) => ({ ...p, confirm: v }))}
-          onShow={() => setPw((p) => ({ ...p, show: !p.show }))} onBlur={() => void runBreach()} onContinue={() => void continuePassword()} />
+          onShow={() => setPw((p) => ({ ...p, show: !p.show }))} onBlur={() => void runBreach()} onContinue={() => void continuePassword()} error={stepError} />
       )
     case 'phrase':
       return (
         <PhraseStep words={words} saved={saved} copied={copied} onSaved={setSaved} onCopy={() => void copyPhrase()}
-          onSave={() => void api.savePhrase()} onPrint={() => window.print()} onContinue={() => void toConfirm()} />
+          onSave={() => void savePhrase()} onPrint={() => window.print()} onContinue={() => void toConfirm()} error={stepError} />
       )
     case 'confirm':
       return (

@@ -8,10 +8,10 @@ import { useCapabilities, type DesktopCapabilities } from '../../capabilities'
 import type { PopoverSnapshot } from '../../popoverContract'
 import { pollWhileVisible } from '../../windows/visiblePoll'
 import { Flyout, type FlyoutHandlers } from './Flyout'
-import { flyoutView, RECENT_LIMIT, type FlyoutCommand, type FlyoutExtras, type FlyoutRow } from './model'
+import { flyoutView, planReset, RECENT_LIMIT, type FlyoutCommand, type FlyoutExtras, type FlyoutRow } from './model'
 import { pickExtras, type DriveExtras, type DriveStatus } from '../source/extras'
 import { hasTauri } from '../source'
-import { hasNoPlan } from '../auth/Gate'
+import { hasNoPlan } from '../auth/plan'
 import { actionFailure } from '../sections/files/model'
 import { openExternal } from '../external'
 import { runUpdate, updateCopyFor } from '../update'
@@ -90,9 +90,12 @@ export async function revealRow(row: FlyoutRow, path?: string): Promise<Done> {
   return shown
 }
 
-/** The footer's "Open in File Explorer": the sync folder in File Explorer (DW-1180). */
-async function openFileExplorer(): Promise<Done> {
-  const r = await command<void>('open_finder_location', { path: null })
+/** The footer's "Open in File Explorer": the sync folder in File Explorer (DW-1180). It sends the folder the config holds,
+ *  as v1 does (src/pages/SyncFolder.tsx): Rust refuses a null path on Windows, and the refusal is shown (#271 review). */
+export async function openFileExplorer(): Promise<Done> {
+  const root = await command<string | null>('get_sync_root')
+  if (!root.ok) return root
+  const r = await command<void>('open_finder_location', { path: root.value })
   if (r.ok) await hideFlyout()
   return r
 }
@@ -115,15 +118,23 @@ export default function TrayApp() {
   useEffect(() => {
     let cancelled = false
     let planAt = 0
+    let planFor: string | null = null
     const refresh = async () => {
       const [result, engine] = await Promise.all([popoverSnapshot(RECENT_LIMIT), engineExtrasNow().status().catch(() => null)])
       if (!cancelled && result.ok) setSnapshot(result.value)
       if (!cancelled) setStatus(engine)
+      if (result.ok) {
+        const next = planReset(planFor, result.value.account)
+        if (next.reset) { planAt = 0; if (!cancelled) setNoPlan(false) }
+        planFor = next.for
+      }
       if (result.ok && result.value.account.logged_in && Date.now() - planAt >= PLAN_EVERY_MS) {
         planAt = Date.now()
+        const readFor = planFor
         const sub = await command<Parameters<typeof hasNoPlan>[0]>('account_subscription')
-        // An answer that didn't come leaves the state as it was: no plan is said only when the server says so.
-        if (!cancelled && sub.ok) setNoPlan(hasNoPlan(sub.value))
+        // An answer that didn't come leaves the state as it was: no plan is said only when the server says so. An answer
+        // about an account that has since signed out or changed is dropped.
+        if (!cancelled && sub.ok && planFor === readFor) setNoPlan(hasNoPlan(sub.value))
       }
     }
     const stop = pollWhileVisible(refresh, 3000)
@@ -132,12 +143,12 @@ export default function TrayApp() {
 
   // Closes on Esc and when it loses focus; a second click on the b is the shell's.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') void hideFlyout() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setNotice(null); void hideFlyout() } }
     window.addEventListener('keydown', onKey)
     let unlisten: (() => void) | undefined
     if (hasTauri()) {
       void import('@tauri-apps/api/window').then(async ({ getCurrentWindow }) => {
-        unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => { if (!focused) void getCurrentWindow().hide() })
+        unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => { if (!focused) { setNotice(null); void getCurrentWindow().hide() } })
       })
     }
     return () => { window.removeEventListener('keydown', onKey); unlisten?.() }

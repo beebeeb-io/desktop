@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Navigation, SectionId } from '../routes'
 import { seed } from '../seed'
-import { findTarget, GUIDE_EVENT, GuideTip, guideDue, markGuideSeen, TIPS, TrayTipCard } from './Guide'
+import { GUIDE_EVENT, GuideTip, guideDue, markGuideSeen, TIPS, TrayTipCard } from './Guide'
 
 /** The section each step shows: 0 the tray tip over Files, 1 to 5 the tips (TIPS order). */
 export const GUIDE_SECTIONS: readonly SectionId[] = ['files', 'files', 'files', 'shared', 'photos', 'files']
@@ -54,7 +54,10 @@ export function GuideHost({ nav }: { nav: Navigation }) {
     show(null)
     if (toFiles && at.current.section !== 'files') go({ section: 'files' })
   }
-  const next = () => { if (step != null) show(nextGuideStep(step, findTarget('file-menu') != null)) }
+  // Whether Files has a file is decided by the file tip itself once Files is shown and loaded (GuideTip's onMissing),
+  // never from whatever the window showed when Next was pressed (#271 review).
+  const next = () => { if (step != null) show(nextGuideStep(step, true)) }
+  const pastMissing = () => { if (step != null) show(nextGuideStep(step, true)) }
 
   if (step == null) return null
   if (step === 0) {
@@ -66,5 +69,5 @@ export function GuideHost({ nav }: { nav: Navigation }) {
   }
   // Done on the last tip ends the guide on Files (DW-0305).
   const last = step === GUIDE_LAST
-  return <GuideTip key={step} index={step - 1} onNext={last ? () => end(true) : next} onSkip={() => end(false)} />
+  return <GuideTip key={step} index={step - 1} onNext={last ? () => end(true) : next} onSkip={() => end(false)} onMissing={pastMissing} />
 }

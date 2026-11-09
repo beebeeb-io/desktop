@@ -301,3 +301,12 @@ export function flyoutView(snapshot: PopoverSnapshot, extras: FlyoutExtras = {},
   const when = lastChange(snapshot, nowSeconds)
   return { ...base, kind: 'up-to-date', tone: 'good', icon: 'check', title: 'Up to date', line: [files, when].filter(Boolean).join(' · ') || null }
 }
+
+/**
+ * Whose plan the flyout's "No plan yet" is (#274 review): signing out, or another account signing in, drops the last
+ * account's answer and reads again at once, never after the minute's wait. `for` is the account the answer is about.
+ */
+export function planReset(prev: string | null, account: { logged_in: boolean; email: string | null }): { reset: boolean; for: string | null } {
+  const now = account.logged_in ? account.email : null
+  return { reset: now !== prev, for: now }
+}

@@ -9,7 +9,7 @@ import { rowsFromActivity } from '../src/v2/sections/sync-history/model'
 import { errorFrom, isTooLarge } from '../src/v2/source/desktop'
 import { createFailure, needsRoom } from '../src/v2/sections/open'
 import { noRoomWords } from '../src/v2/sections/open/States'
-import { keyBelongsElsewhere, OWN_SAVE_MS, versionNews } from '../src/v2/sections/open/model'
+import { keyBelongsElsewhere, versionNews } from '../src/v2/sections/open/model'
 import { OPEN_ITEMS, silentWav } from '../src/v2/source/fixtures/open'
 import { createFixtureExtras } from '../src/v2/source/fixtures/extras'
 import type { ActivityRow } from '../src/popoverContract'
@@ -114,17 +114,18 @@ describe('the audio fixture is a real WAV (DW-1503 plays it)', () => {
   })
 })
 
+// P1a (desktop #273 finding 3): the 60 s "own save" window is gone. A version is this window's save when it moved past the
+// version the save was made over and the file holds the save's content; tests/v2P1aPolish.test.ts pins the new cases.
 describe('a newer version while a file is open (DW-1519)', () => {
-  const now = 1_000_000
   test('the version already shown is not news', () => {
-    expect(versionNews({ base: 'v3', ours: null }, 'v3', now)).toBe('same')
+    expect(versionNews({ base: 3, pending: null }, { version: 3 })).toBe('same')
   })
-  test('this window’s own save landing is not news, within the window after the save', () => {
-    expect(versionNews({ base: 'v3', ours: { from: 'v3', at: now - 5_000 } }, 'v4', now)).toBe('ours')
+  test('this window’s own save landing is not news', () => {
+    expect(versionNews({ base: 3, pending: { kind: 'save', from: 3, content: 'abc' } }, { version: 4, content: 'abc' })).toBe('saved')
   })
-  test('another device’s version is news, also once our save has long landed', () => {
-    expect(versionNews({ base: 'v4', ours: null }, 'v5', now)).toBe('news')
-    expect(versionNews({ base: 'v3', ours: { from: 'v3', at: now - OWN_SAVE_MS - 1 } }, 'v5', now)).toBe('news')
+  test('another device’s version is news, also once our save has landed', () => {
+    expect(versionNews({ base: 4, pending: null }, { version: 5 })).toBe('news')
+    expect(versionNews({ base: 3, pending: { kind: 'save', from: 3, content: 'abc' } }, { version: 4, content: 'xyz' })).toBe('news')
   })
 })
 

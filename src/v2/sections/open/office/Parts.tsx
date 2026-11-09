@@ -10,13 +10,18 @@ import { Glyph } from './Ribbon'
 const dot = <span aria-hidden="true">·</span>
 
 /** The editor's status bar, in the window's status-line place. */
-export function OfficeStatus({ left, dirty, conflict, version, time, loading, zoom = 100, onZoom, onAbout }: {
-  left: ReactNode[]; dirty?: boolean; conflict?: boolean; version: number; time: string; loading?: boolean; zoom?: number; onZoom?: (z: number) => void; onAbout?: () => void
+/** The editor's status bar (DW-1507). `uploading`: the last save is on this PC and the engine has not uploaded it yet
+ *  (the honest save state, #273 finding 12). `failed`: the editor could not be prepared, so nothing is being prepared
+ *  any more: the bar keeps "Encrypted · read-only for now" and drops "Preparing…" (DW-1556, the lead's M3d ruling 4). */
+export function OfficeStatus({ left, dirty, conflict, version, time, loading, failed, uploading, zoom = 100, onZoom, onAbout }: {
+  left: ReactNode[]; dirty?: boolean; conflict?: boolean; version: number; time: string; loading?: boolean; failed?: boolean; uploading?: boolean; zoom?: number; onZoom?: (z: number) => void; onAbout?: () => void
 }) {
-  const right = loading ? 'read-only for now' : conflict ? 'not saved · conflict' : dirty ? 'unsaved changes' : <>saved as version {version} {'·'} <span className="font-mono">{time}</span></>
+  const right = loading || failed ? 'read-only for now' : conflict ? 'not saved · conflict' : dirty ? 'unsaved changes'
+    : uploading ? <>saved on this PC {'·'} encrypting… {'·'} <span className="font-mono">{time}</span></>
+    : <>saved as version {version} {'·'} <span className="font-mono">{time}</span></>
   return (
     <footer role="status" data-office-status className="flex h-7 flex-none items-center gap-1.5 border-t border-line bg-paper-2 px-3 text-[12px] text-ink-3">
-      {loading
+      {failed ? null : loading
         ? <><span className="h-1.5 w-1.5 rounded-full bg-ink-3" /><b className="font-medium text-ink-2">Preparing the editor on this PC…</b></>
         : left.map((l, i) => <span key={i} className="flex items-center gap-1.5">{i > 0 && dot}<span>{l}</span></span>)}
       <span className="flex-1" />

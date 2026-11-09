@@ -76,6 +76,8 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     saveText: (id, text, base) => owner(id).saveText(idFor(id), text, base),
     readBytes: (id) => owner(id).readBytes(idFor(id)),
     saveBytes: (id, bytes, base) => owner(id).saveBytes(idFor(id), bytes, base),
+    // A restore from an open file goes to the source that keeps that file's versions (P1a: Open's lands as the engine's would).
+    restoreVersion: (id, versionId) => owner(id).restoreVersion(idFor(id), versionId),
     // B05's search hits (DW-0520 on); a new account (DW-0114) has nothing to find.
     search: async (q) => (empty ? [] : shared.search(q)),
     shared: () => shared.shared(),

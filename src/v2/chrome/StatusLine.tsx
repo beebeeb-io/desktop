@@ -35,7 +35,13 @@ export function uploadingLine(rows: TransferRow[]): string | null {
   return [`Uploading ${moving} of ${up.length}`, known ? `${fmtSize(left)} left` : null].filter(Boolean).join(' · ')
 }
 
-function useUploading(sync: SyncSummary | null): string | null {
+/** Where a click on the line goes (#274 review): the Uploads panel while an upload moves or one has stopped (its
+ *  failed rows are there), otherwise the b's flyout. */
+export function lineOpens(rows: TransferRow[]): 'uploads' | 'flyout' {
+  return rows.some((r) => r.direction === 'up' && (r.state === 'moving' || r.state === 'stopped')) ? 'uploads' : 'flyout'
+}
+
+function useUploading(sync: SyncSummary | null): { line: string | null; rows: TransferRow[] } {
   const extras = useDriveExtras()
   const [rows, setRows] = useState<TransferRow[]>([])
   // The moving rows arrive on their own event (one subscription); the whole queue is read again with each summary.
@@ -45,7 +51,7 @@ function useUploading(sync: SyncSummary | null): string | null {
     extras.transfers().then((r) => { if (live) setRows(r) }, () => { if (live) setRows([]) })
     return () => { live = false }
   }, [extras, sync])
-  return uploadingLine(rows)
+  return { line: uploadingLine(rows), rows }
 }
 
 /** B02b's drive_status, read with each sync summary: a session that ended (DW-1109), the first list (DW-1107). */
@@ -79,7 +85,7 @@ export function statusWords(sync: SyncSummary, o: { signedOut?: boolean; uploadi
 
 export function StatusLine({ sync }: { sync: SyncSummary | null }) {
   const { signedOut, listing } = useEngine(sync)
-  const uploading = useUploading(sync)
+  const { line: uploading, rows } = useUploading(sync)
   const [refused, setRefused] = useState<string | null>(null)
   useEffect(() => {
     if (!refused) return
@@ -89,11 +95,17 @@ export function StatusLine({ sync }: { sync: SyncSummary | null }) {
   // A section's own words (a save, DW-1524) stand in for the sync words, never for Signed out or Offline.
   const note = useStatusNote()
   if (!sync) return <footer className="h-7 flex-none border-t border-line bg-paper-2" />
-  // While files upload the line opens the Uploads panel over it (DW-0426 → DW-0427, B02b; Files listens for the event);
-  // otherwise it shows the b's flyout (DW-0401#10 → DW-1201, M3e: `show_tray_flyout`). A refusal shows in the line.
+  // While files upload, or one has stopped, the line opens the Uploads panel over it (DW-0426 → DW-0427, B02b; Files
+  // listens for the event); otherwise it shows the b's flyout (DW-0401#10 → DW-1201, M3e: `show_tray_flyout`). A host
+  // without the flyout (a Mac, the dev host) opens the Uploads panel, as before M3e; a refusal shows in the line.
+  const openUploads = () => window.dispatchEvent(new CustomEvent('bb:uploads-open'))
   const open = () => {
-    if (uploading) { window.dispatchEvent(new CustomEvent('bb:uploads-open')); return }
-    void command<void>('show_tray_flyout').then((r) => setRefused(r.ok ? null : actionFailure('show the flyout', r.unsupported ? 'unsupported' : 'failed').text))
+    if (lineOpens(rows) === 'uploads') { openUploads(); return }
+    void command<void>('show_tray_flyout').then((r) => {
+      if (r.ok) { setRefused(null); return }
+      if (r.unsupported) { setRefused(null); openUploads(); return }
+      setRefused(actionFailure('show the flyout', 'failed').text)
+    })
   }
   return (
     <footer role="status" className="flex h-7 flex-none items-center border-t border-line bg-paper-2 px-3 text-[12px] text-ink-3">

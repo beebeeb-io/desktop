@@ -8,7 +8,7 @@ import { loadSyncActivitySummary } from '../../../desktopApi'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
 import { HistoryView } from './HistoryView'
-import { gaveUp, problemId, rowsFromActivity, rowsFromProblems, withinWindow, type Filter, type HistoryRow } from './model'
+import { gaveUp, problemId, routeFilter, rowsFromActivity, rowsFromProblems, withinWindow, type Filter, type HistoryRow } from './model'
 import { useDriveExtras } from '../../source/extras'
 
 export default function Section({ nav }: SectionProps) {
@@ -16,8 +16,10 @@ export default function Section({ nav }: SectionProps) {
   const extras = useDriveExtras()
   const [rows, setRows] = useState<HistoryRow[]>([])
   // The sync problem banner's View lands on Problems (DW-0102 → DW-0428): `sub=problems`, also while already here.
-  const [filter, setFilter] = useState<Filter>(nav.route.sub === 'problems' ? 'problems' : 'all')
-  useEffect(() => { if (nav.route.sub === 'problems') setFilter('problems') }, [nav.route])
+  // The route sets it both ways: arriving with `sub=problems` shows Problems, and a route without it (Back, the sidebar)
+  // shows All again, so the filter never sticks on Problems after leaving (#268).
+  const [filter, setFilter] = useState<Filter>(routeFilter(nav.route.sub))
+  useEffect(() => { setFilter(routeFilter(nav.route.sub)) }, [nav.route])
   const [query, setQuery] = useState('')
   const [queued, setQueued] = useState(0)
   const now = useMemo(() => new Date(), [])

@@ -86,9 +86,14 @@ export function devicesOf(cells: PhotoCell[]): { name: string; photos: number }[
 }
 
 /** What Photos shows (DW-0604): every cell but those of a hidden device or a hidden folder. */
+/** A folder source's key in the hidden set. Photos directly in Files (drive_photo_sources answers a null id) have one
+ *  too, so switching that source off hides them (desktop #273 finding 6). */
+export const folderKey = (id: string | null | undefined) => `folder:${id ?? ROOT_KEY}`
+const ROOT_KEY = '(files)'
+
 export function shown(cells: PhotoCell[], hidden: ReadonlySet<string>): PhotoCell[] {
   if (hidden.size === 0) return cells
-  return cells.filter((c) => !(c.meta?.device && hidden.has(`device:${c.meta.device}`)) && !(c.entry.item.parentId && hidden.has(`folder:${c.entry.item.parentId}`)))
+  return cells.filter((c) => !(c.meta?.device && hidden.has(`device:${c.meta.device}`)) && !hidden.has(folderKey(c.entry.item.parentId)))
 }
 
 const HIDDEN_KEY = 'bb.v2.photos.hidden'
@@ -104,4 +109,13 @@ export function saveHidden(hidden: ReadonlySet<string>): void {
 
 export function totalsOf(cells: PhotoCell[]): { photos: number; videos: number; bytes: number } {
   return { photos: cells.filter((c) => !isVideo(c)).length, videos: cells.filter(isVideo).length, bytes: cells.reduce((n, c) => n + (c.entry.item.size ?? 0), 0) }
+}
+
+/** Whether the window can read a video to play it (DW-0611), decided before any byte is read: over Rust's read cap it
+ *  is too large, and a video not on this PC needs its size free to be decrypted here (#273 finding 7). */
+export function videoReadable(item: { size: number | null; local?: string | null }, free: number | undefined, cap: number): 'ok' | 'too-large' | 'no-room' {
+  const size = item.size ?? 0
+  if (size > cap) return 'too-large'
+  if (item.local === 'online-only' && free !== undefined && size > free) return 'no-room'
+  return 'ok'
 }

@@ -158,7 +158,7 @@ function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h
   const tr = p.transfers?.[item.id]
   return (
     <div
-      role="row" aria-selected={selected} aria-rowindex={index + 2} data-row={item.id} data-selected={selected || undefined} tabIndex={-1}
+      role="row" aria-selected={selected} aria-rowindex={index + 2} data-row={item.id} data-kind={item.isFolder ? 'folder' : 'file'} data-selected={selected || undefined} tabIndex={-1}
       draggable={!isProtected(item) && p.renaming?.id !== item.id}
       onDragStart={(e) => { e.dataTransfer.setData('application/x-bb-ids', JSON.stringify(selected ? [...p.selection] : [item.id])); h.onDragRows?.(selected ? [...p.selection] : [item.id]) }}
       onDragOver={(e) => { if (item.isFolder && !refused) e.preventDefault() }}
@@ -225,7 +225,7 @@ function Grid({ p, h }: { p: PaneProps; h: PaneHandlers }) {
         const selected = p.selection.has(item.id)
         return (
           <div
-            key={item.id} role="row" tabIndex={-1} aria-selected={selected} data-tile={item.id} onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey) h.onOpen?.(item) }} data-selected={selected || undefined}
+            key={item.id} role="row" tabIndex={-1} aria-selected={selected} data-tile={item.id} data-kind={item.isFolder ? 'folder' : 'file'} onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey) h.onOpen?.(item) }} data-selected={selected || undefined}
             onClick={(e) => { e.stopPropagation(); h.onSelect?.(item.id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }) }}
             onDoubleClick={() => h.onOpen?.(item)}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); h.onContext?.(e, item) }}

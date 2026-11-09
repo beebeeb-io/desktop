@@ -308,12 +308,16 @@ html.macos-flyout .app-shell {
   grid-template-columns: 228px minmax(0, 1fr);
 }
 
-button,
-input {
+/* The legacy windows only. Unlayered, this rule beat every layered v2 rule (Tailwind's text, font and weight
+   utilities on a button or field), so a v2 button drew its parent's font (B10, #248). :where() keeps its specificity at
+   one element, as before, so the legacy windows' class rules still win over it; v2 gets the same reset from Tailwind's
+   preflight, in its base layer. */
+:where(html:not(.v2)) button,
+:where(html:not(.v2)) input {
   font: inherit;
 }
 
-button {
+:where(html:not(.v2)) button {
   letter-spacing: 0;
 }
 

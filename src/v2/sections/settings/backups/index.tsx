@@ -1,12 +1,13 @@
 // Drive › Backups on Windows (DW-0737, DW-1411, DW-0738, DW-1410, DW-0739, DW-0742, DW-0741).
 // Folder state comes from the existing engine commands (get/set_known_folder_backup).
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Btn, Dialog, Group, Meter, Page, Row, Switch, mono } from '../shell/kit'
 import { FIXTURE_DEVICES, useKnownFolders } from '../shell/data'
 import { useSettings } from '../shell/context'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type SyncProblem } from '../../../source/extras'
 import { actionFailure } from '../../files/model'
+import { newestOnly, throttled } from '../../../throttle'
 
 export type BackupState = 'idle' | 'running'
 
@@ -81,17 +82,24 @@ export function BackupFailures({ problems }: { problems?: SyncProblem[] } = {}) 
   // The ids whose Try again is on its way (until the list has been read again).
   const [trying, setTrying] = useState<ReadonlySet<string>>(new Set())
   const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
+  // Each read is the newest until a later one starts; an older answer never replaces a newer list (#274 review).
+  const newestRead = useRef(newestOnly())
   const load = useCallback(async () => {
     if (problems) return
+    const newest = newestRead.current()
     try {
-      setList((await extras.syncProblems()).filter((p) => p.backup))
+      const all = await extras.syncProblems()
+      if (newest()) setList(all.filter((p) => p.backup))
     } catch {
-      setNote({ text: actionFailure('load the list', 'failed').text, failed: true })
+      if (newest()) setNote({ text: actionFailure('load the list', 'failed').text, failed: true })
     }
   }, [extras, problems])
   useEffect(() => {
     void load()
-    return source.subscribe((e) => { if (e.kind === 'sync') void load() })
+    // At most one read a second: the engine sends a `sync` summary on every change while it works.
+    const soon = throttled(() => void load())
+    const stop = source.subscribe((e) => { if (e.kind === 'sync') soon() })
+    return () => { soon.cancel(); stop() }
   }, [source, load])
   const retry = async (ids: string[]) => {
     setNote(null)

@@ -68,7 +68,8 @@ describe('the no-plan screen\'s sign-out', () => {
 describe('the gate holds the warning until OK', () => {
   test('a later check that finds the session gone (a focus brings one) does not drop it', async () => {
     let loggedIn = true
-    const bindings = { command, hasNoPlan: loadComponent('v2/auth/Gate.tsx', 'hasNoPlan', {}) }
+    // hasNoPlan moved to its own module (#274 review: the flyout imported the gate's chrome for it).
+    const bindings = { command, hasNoPlan: loadComponent('v2/auth/plan.ts', 'hasNoPlan', {}) }
     const readGate = loadComponent('v2/auth/Gate.tsx', 'readGate', bindings)
     const SignedOutWarning = loadComponent('v2/auth/Gate.tsx', 'SignedOutWarning', { GateWindow: 'gate-window', BBButton: 'bb-button', React: { createElement } })
     const m = mount('v2/auth/Gate.tsx', 'AuthGate', {

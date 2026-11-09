@@ -14,6 +14,10 @@
   /* The dimming behind Beebeeb's own dialogs: the board's --kit-scrim, 28% black in light, 55% in dark. */
   --color-scrim: oklch(0 0 0 / 0.28);
 
+  /* A solid red surface that carries white text (the sidebar's problem count): the board's --color-red-fill (board.html,
+     Guus 2026-11-06 "fix the red buttons"). White on it is 5.4:1 in both tones, so it is the same in both themes. */
+  --color-red-fill: oklch(0.55 0.2 25);
+
   /* Text on a solid Amber fill (the primary button). Amber does not change with the theme, so neither does the ink
      on it: the board's literal on every Amber fill, the same contract as src/design.css's --amber-ink. */
   --color-amber-ink: oklch(0.22 0.01 70);

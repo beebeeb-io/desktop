@@ -1,7 +1,8 @@
 // Search, live: DriveSource.search over the list on this PC, with every hit's folder path in one drive_paths call (B02b). Recent
 // searches stay on this PC (localStorage) and Clear removes them. Esc goes back to the view you came from.
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useDriveSource, type DriveItem } from '@beebeeb/shared/drive-ui'
+import { useDriveSource, type DriveItem, type DriveSource } from '@beebeeb/shared/drive-ui'
+import { throttled } from '../../throttle'
 import type { SectionProps } from '../types'
 import { Menu, type MenuEntry } from '../files/ui'
 import { fileMenu } from '../files/menus'
@@ -19,6 +20,25 @@ function loadRecent(): string[] {
 }
 function saveRecent(list: string[]) { try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)) } catch { /* private mode: recent searches are not kept */ } }
 
+export type ListingProgress = { done: number; total: number }
+
+/** The list check's progress, live: read now, then again (at most once a second) whenever the engine says something
+ *  changed (`changed`, `sync`), until the check has finished (a read with no progress) or the caller stops. drive_status
+ *  counts the state DB, so it is not read for as long as Search is open (self-review). A failed read reads as "not
+ *  listing". */
+export function followListing(source: Pick<DriveSource, 'subscribe'>, read: () => Promise<ListingProgress | undefined>, onProgress: (p: ListingProgress | undefined) => void, ms = 1000): () => void {
+  let live = true
+  let stop: (() => void) | null = null
+  const done = () => { again.cancel(); stop?.(); stop = null }
+  const once = () => {
+    read().then((p) => { if (!live) return; onProgress(p); if (!p) done() }, () => { if (!live) return; onProgress(undefined); done() })
+  }
+  const again = throttled(once, ms)
+  stop = source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'sync') again() })
+  once()
+  return () => { live = false; done() }
+}
+
 /** DW-0802: the usual file menu, plus Show in enclosing folder. */
 export function searchMenu(item: DriveItem): MenuEntry[] {
   return [{ id: 'enclosing', label: 'Show in enclosing folder', dividerAfter: true }, ...fileMenu([item])]
@@ -35,9 +55,10 @@ export default function Section({ nav }: SectionProps) {
   const [selected, setSelected] = useState<string | null>(null)
   const seq = useRef(0)
   const now = useMemo(() => new Date(), [])
-  // The first sign-in's list check (B02b drive_status.listing): results may be incomplete while it runs.
-  const [loading, setLoading] = useState<{ done: number; total: number } | undefined>(undefined)
-  useEffect(() => { extras.status().then((s) => setLoading(s.listing), () => setLoading(undefined)) }, [extras, query])
+  // The first sign-in's list check (B02b drive_status.listing): results may be incomplete while it runs. The count follows
+  // the engine's progress, not the query: re-read on each change the engine reports (M3c's leftovers).
+  const [loading, setLoading] = useState<ListingProgress | undefined>(undefined)
+  useEffect(() => followListing(source, () => extras.status().then((s) => s.listing), setLoading), [source, extras])
 
   useEffect(() => {
     const q = query.trim()

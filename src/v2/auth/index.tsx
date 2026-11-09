@@ -168,6 +168,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
           onCode={(code) => setTwoFactor((t) => ({ ...t, code, state: t.state === 'wrong' ? 'idle' : t.state }))}
           onSubmit={(code) => { if (code.length === 6 || code.length === 8) void verify(code) }}
           onSwitch={() => setTwoFactor((t) => ({ mode: t.mode === 'totp' ? 'backup' : 'totp', code: '', state: 'idle' }))}
+          onBackupCode={(code) => setTwoFactor({ mode: 'backup', code, state: 'idle' })}
           onBack={() => { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('sign-in') }}
         />
       )
@@ -186,7 +187,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
       )
     case 'passkey-password':
       // A failed Unlock is said here, in the sign-in screen's words (the view takes the error; it was never passed).
-      return <PasskeyPasswordView email={email} password={password} busy={busy} error={problem ? problemText(problem) : undefined} onPassword={setPassword} onUnlock={() => void submit()} />
+      return <PasskeyPasswordView email={email} password={password} busy={busy} error={problem ? problemText(problem) : undefined} waitSeconds={wait} onPassword={setPassword} onUnlock={() => void submit()} />
     default:
       return (
         <SignInView

@@ -8,8 +8,12 @@ import { Btn, Group, Meter, Page, Row, fmtBytes, mono } from '../shell/kit'
 import type { Kind } from '../../../source/fixtures/settings-today'
 import { BackLink, ErrorBanner, Skeleton } from './ui'
 
+/** A path as the state DB stores it may start with a separator ("/docs/a.pdf" and "docs/a.pdf" are the same file,
+ *  #274 review): the page shows it and routes it without one. */
+const drivePath = (path: string) => path.replace(/^[\\/]+/, '').replace(/\\/g, '/')
 /** Cut a path in the middle so the file name stays readable. */
-export function cutPath(path: string, max = 44): string {
+export function cutPath(stored: string, max = 44): string {
+  const path = drivePath(stored)
   if (path.length <= max) return path
   const parts = path.split('/')
   const name = parts[parts.length - 1]
@@ -32,7 +36,7 @@ export function kindOf(path: string, category: StorageCategory): string {
 /** The section a largest file is in: the Backups folder at the top of Beebeeb is its own section (DW-0422), the
  *  rest is Files. */
 export function sectionOfPath(path: string): 'backups' | 'files' {
-  return /^Backups(\/|$)/.test(path) ? 'backups' : 'files'
+  return /^Backups(\/|$)/.test(drivePath(path)) ? 'backups' : 'files'
 }
 /** How many of the largest files the page lists; the rest of the top 50 are counted. */
 const LISTED = 10

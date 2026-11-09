@@ -160,15 +160,31 @@ export function silentWav(seconds: number): Uint8Array {
  *  is open (DW-1519). `edit-conflict`: the first save of Meeting notes meets her newer version (DW-1526). */
 export type OpenScenario = 'default' | 'decrypting' | 'newer' | 'edit-conflict'
 
+/** A stand-in for the content part of Rust's tag (fsops::version_tag hashes the plaintext in Rust). Fixtures only: it
+ *  tells two texts apart, nothing more, and no window code computes one. */
+const contentOf = (text: string) => {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0
+  return h.toString(16).padStart(8, '0')
+}
+
+/** How long the fixture engine takes to encrypt and upload a save, or to land a restore. */
+export const FIXTURE_UPLOAD_MS = 600
+
 /**
- * The files source plus the Open fixtures. `saveText` keeps the one rule of the real one: a save that names an
- * older version than the current one fails with 'conflict', never an overwrite. `remote` plants a newer version.
+ * The files source plus the Open fixtures. They keep the real one's rules: a save names the content it was read from
+ * and a changed file is a 'conflict', never an overwrite. Rust writes a save on this PC at once and answers its tag
+ * with the server's number unchanged; the engine uploads it a moment later, which raises the version (drive_details'
+ * versionCount) and says `changed`, as desktop's engine poller does. A restore is queued the same way.
+ * `remote` plants a newer version.
  */
 export function createOpenSource(opts: { remoteText?: string; scenario?: OpenScenario } = {}): DriveSource {
   const items = [...FILES_TREE, ...OPEN_TREE.filter((i) => i.isFolder), ...OPEN_ITEMS]
   const base = createFilesSource({ items })
   const texts = new Map(Object.entries(TEXTS))
   const version = new Map<string, number>()
+  const devices = new Map<string, string>()
+  const moving = new Set<string>()
   let remote = opts.remoteText
   const scenario = opts.scenario ?? 'default'
   let conflictPlanted = false
@@ -176,15 +192,31 @@ export function createOpenSource(opts: { remoteText?: string; scenario?: OpenSce
   const made = Date.now()
   const listeners = new Set<Parameters<DriveSource['subscribe']>[0]>()
   const current = (id: string) => version.get(id) ?? 3
-  /** Anna's iPhone saves version 4 of Meeting notes: her text, the current version, and the engine's item event. */
+  const tag = (id: string) => `v${current(id)}-${contentOf(texts.get(id) ?? '')}`
+  const changed = () => listeners.forEach((l) => l({ kind: 'changed', folderId: null }))
+  /** A new version on the server: its number, who made it, and the engine's `changed`. */
+  const land = (id: string, device: string) => {
+    version.set(id, current(id) + 1)
+    devices.set(`${id}:${current(id)}`, device)
+    moving.delete(id)
+    changed()
+  }
+  /** Anna's iPhone saves version 4 of Meeting notes: her text, the current version, and the engine's events. */
   const herSave = (id: string) => {
     version.set(id, 4)
+    devices.set(`${id}:4`, 'Anna’s iPhone')
     texts.set(id, `${MD_TEXT}3. Book the terrace\n`)
     const item = items.find((i) => i.id === id)
     if (item) listeners.forEach((l) => l({ kind: 'item', item }))
+    changed()
   }
   return {
     ...base,
+    async details(id) {
+      const d = await base.details(id)
+      if (d.item.isFolder) return d
+      return { ...d, item: moving.has(id) ? { ...d.item, local: 'syncing' } : d.item, versionCount: current(id) }
+    },
     async readText(id): Promise<TextDocument> {
       // server.log has no text here: its read fails, as a download that is cut off does. The window's first read fails
       // at once (DW-1518); a later Try again downloads again first, so it decrypts for a moment before it fails (DW-1516).
@@ -193,21 +225,27 @@ export function createOpenSource(opts: { remoteText?: string; scenario?: OpenSce
       if (text === undefined) throw new DriveSourceError('not-found')
       if (remote !== undefined) { version.set(id, 4); texts.set(id, remote); remote = undefined }
       if (scenario === 'newer' && id === 'o-md' && !newerPlanted) { newerPlanted = true; setTimeout(() => herSave(id), 300) }
-      return { text: texts.get(id)!, versionId: `v${current(id)}` }
+      return { text: texts.get(id)!, versionId: tag(id) }
     },
     async saveText(id, text, baseVersionId): Promise<TextDocument> {
       if (scenario === 'edit-conflict' && id === 'o-md' && !conflictPlanted) { conflictPlanted = true; herSave(id) }
-      if (baseVersionId !== `v${current(id)}`) throw new DriveSourceError('conflict')
-      version.set(id, current(id) + 1)
+      if (baseVersionId.slice(baseVersionId.indexOf('-') + 1) !== contentOf(texts.get(id) ?? '')) throw new DriveSourceError('conflict')
       texts.set(id, text)
-      return { text, versionId: `v${current(id)}` }
+      moving.add(id)
+      setTimeout(() => land(id, 'This PC'), FIXTURE_UPLOAD_MS)
+      return { text, versionId: tag(id) }
+    },
+    async restoreVersion(id) {
+      // Queued, as restore_file_version is: the server's restore lands a moment later as the next version.
+      moving.add(id)
+      setTimeout(() => land(id, 'This PC'), FIXTURE_UPLOAD_MS)
     },
     async readBytes(id) {
       if (scenario === 'decrypting' && id === 'o-pdf') return new Promise<never>(() => {})
       const item = OPEN_ITEMS.find((i) => i.id === id)
-      if (item?.mime === 'audio/wav') return { bytes: silentWav(30), versionId: `v${current(id)}` }
+      if (item?.mime === 'audio/wav') return { bytes: silentWav(30), versionId: tag(id) }
       const text = texts.get(id)
-      return { bytes: new TextEncoder().encode(text ?? ''), versionId: `v${current(id)}` }
+      return { bytes: new TextEncoder().encode(text ?? ''), versionId: tag(id) }
     },
     async thumbnail(id, size) {
       const item = OPEN_ITEMS.find((i) => i.id === id)
@@ -221,7 +259,8 @@ export function createOpenSource(opts: { remoteText?: string; scenario?: OpenSce
     async versions(id): Promise<VersionEntry[]> {
       const n = current(id)
       return Array.from({ length: n }, (_, i) => ({
-        id: `v${n - i}`, createdAt: i === 0 ? '2026-11-08T09:14:00' : `2026-11-0${Math.max(1, 6 - i)}T10:00:00`, size: 612, current: i === 0, deviceName: i === 0 && n > 3 ? 'Anna’s iPhone' : 'Anna-Laptop',
+        id: `v${n - i}`, createdAt: i === 0 ? '2026-11-08T09:14:00' : `2026-11-0${Math.max(1, 6 - i)}T10:00:00`, size: 612, current: i === 0,
+        deviceName: devices.get(`${id}:${n - i}`) ?? 'Anna-Laptop',
       }))
     },
   }

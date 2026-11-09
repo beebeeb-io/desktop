@@ -3,8 +3,10 @@
 import { useRef, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from '@beebeeb/shared/drive-ui'
+import { EditorView } from '@codemirror/view'
+import { openSearchPanel } from '@codemirror/search'
 import { BTN, BTN_AMBER, FOCUS, Modal } from '../files/ui'
-import { editorLanguage } from './model'
+import { editorLanguage, saveNoteText, type SaveNote } from './model'
 import { focusOnMount } from './Chrome'
 
 export function TextEditor({ name, initialDoc, wrap = false, onChange, onSave, onCursor }: { name: string; initialDoc: string; wrap?: boolean; onChange: (doc: string) => void; onSave: () => void; onCursor?: (line: number, col: number) => void }) {
@@ -19,6 +21,14 @@ export function TextEditor({ name, initialDoc, wrap = false, onChange, onSave, o
   )
 }
 
+/** Open the editor's own find panel (CodeMirror's, which the shared editor's search keymap opens on Ctrl+F inside the
+ *  text): from anywhere in the window, Ctrl+F finds in the text (DW-1523). */
+export function openEditorFind(root: HTMLElement | null): boolean {
+  const cm = root?.querySelector<HTMLElement>('.cm-editor')
+  const view = cm ? EditorView.findFromDOM(cm) : null
+  return view ? openSearchPanel(view) : false
+}
+
 /** "Changes not saved yet · version 3": the toolbar's meta in each state. */
 export const editMeta = (dirty: boolean, version: number, saving?: boolean) =>
   saving ? 'Saving…' : dirty ? `Changes not saved yet · version ${version}` : `Saved · version ${version}`
@@ -31,12 +41,15 @@ export function SaveButton({ onClick, disabled }: { onClick?: () => void; disabl
   )
 }
 
-/** The saved message under the toolbar (DW-1524). */
-export function SavedMessage({ version, onVersions }: { version: number; onVersions?: () => void }) {
+/** The saved message under the toolbar (DW-1524). A save is "Saved on this PC · encrypting…" until the engine has
+ *  uploaded it, then "Saved · encrypted · version N" with Rust's number (the lead's ruling on #273 finding 12).
+ *  `version` alone is the board's drawing of the encrypted state. */
+export function SavedMessage({ version, note, onVersions }: { version?: number; note?: SaveNote; onVersions?: () => void }) {
+  const n: SaveNote = note ?? { kind: 'encrypted', version: version ?? 1 }
   return (
-    <div role="status" data-saved className="flex h-10 flex-none items-center gap-3 border-b border-line bg-paper-2 px-4 text-[13px] text-ink">
-      <span className="text-ink-2"><Icon name="lock" size={13} /></span>
-      <span className="flex-1">Saved {'·'} encrypted {'·'} version {version}</span>
+    <div role="status" data-saved={n.kind} className="flex h-10 flex-none items-center gap-3 border-b border-line bg-paper-2 px-4 text-[13px] text-ink">
+      <span className="text-ink-2"><Icon name={n.kind === 'local' ? 'upload' : 'lock'} size={13} /></span>
+      <span className="flex-1">{saveNoteText(n)}</span>
       <a href="#versions" onClick={(e) => { e.preventDefault(); onVersions?.() }} className="text-[13px] text-ink underline">Versions</a>
     </div>
   )

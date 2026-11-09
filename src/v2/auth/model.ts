@@ -96,6 +96,18 @@ export function digitsOnly(raw: string, max: number): string {
   return raw.replace(/\D/g, '').slice(0, max)
 }
 
+/** What the two-factor field got: up to six digits are a code; more (an 8-digit backup code pasted into it) go to the
+ *  backup field, so they never use up a try as the first six digits of a code (#271 review). */
+export function totpEntry(raw: string): { kind: 'code' | 'backup'; code: string } {
+  const digits = raw.replace(/\D/g, '')
+  return digits.length > 6 ? { kind: 'backup', code: digits.slice(0, 8) } : { kind: 'code', code: digits }
+}
+
+/** A recovery phrase is 12 words. */
+export const PHRASE_WORDS = 12
+/** Every one of the 12 boxes holds a word: an empty list is not a filled phrase (`[].every` is true; #271 review). */
+export const phraseFilled = (words: readonly string[]) => words.length === PHRASE_WORDS && words.every(Boolean)
+
 /** The 12 words: lowercase letters only, trimmed (DW-A23). Pasting 12 words into any box fills them all. */
 export function normalizeWord(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z]/g, '')
@@ -112,4 +124,17 @@ export function spreadPaste(words: string[], index: number, pasted: string): str
 /** Initials for the Continue-as avatar. */
 export function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('')
+}
+
+/** A country as people read it: Rust's two-letter code ("DE") becomes its English name ("Germany", as the board says),
+ *  through the platform's own list (Intl.DisplayNames). A storage or sign-in place is a country, never a city (LD-0021);
+ *  a code the list does not know reads "Unknown", and anything else is shown as it came. */
+export function countryName(code: string | null | undefined): string {
+  const c = (code ?? '').trim()
+  if (!c) return 'Unknown'
+  if (!/^[A-Za-z]{2}$/.test(c)) return c
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'region', fallback: 'none' }).of(c.toUpperCase())
+    return name && name !== 'Unknown Region' ? name : 'Unknown'
+  } catch { return 'Unknown' }
 }

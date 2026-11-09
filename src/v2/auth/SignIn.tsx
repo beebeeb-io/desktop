@@ -94,20 +94,24 @@ export function SignInView(p: SignInViewProps) {
 }
 
 /** DW-A30: the passkey proved who you are; this passkey cannot unlock the vault, so the password does. */
-export function PasskeyPasswordView({ email, password, busy, error, onPassword, onUnlock }: {
-  email: string; password: string; busy: boolean; error?: string; onPassword: (v: string) => void; onUnlock: () => void
+export function PasskeyPasswordView({ email, password, busy, error, waitSeconds = 0, onPassword, onUnlock }: {
+  email: string; password: string; busy: boolean; error?: string
+  /** After a rate-limited answer, the seconds left: Unlock waits and counts down, as Sign in does (#271 review). */
+  waitSeconds?: number
+  onPassword: (v: string) => void; onUnlock: () => void
 }) {
+  const waiting = waitSeconds > 0
   return (
     <AuthWindow>
       <StepLockup />
       <div className="mt-4" />
       <Heading sub={<span className="font-mono text-[12px]">{email}</span>}>Enter your password</Heading>
       <Note tone="green" title="Identity confirmed with your passkey">Passkey verified. Enter your password to decrypt your files on this device.</Note>
-      <form onSubmit={(e) => { e.preventDefault(); if (password && !busy) onUnlock() }} noValidate>
+      <form onSubmit={(e) => { e.preventDefault(); if (password && !busy && !waiting) onUnlock() }} noValidate>
         {/* Focus lands on the password: the one thing left to do on this screen (DW-A30). */}
         {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
         <Field label="Password" icon="lock" secret autoFocus value={password} disabled={busy} error={error} onChange={(e) => onPassword(e.target.value)} />
-        <PrimaryButton type="submit" disabled={!password || busy}>{busy ? 'Unlocking vault…' : 'Unlock'}</PrimaryButton>
+        <PrimaryButton type="submit" disabled={!password || busy || waiting}>{busy ? 'Unlocking vault…' : waiting ? `Try again in ${waitSeconds} s` : 'Unlock'}</PrimaryButton>
       </form>
     </AuthWindow>
   )

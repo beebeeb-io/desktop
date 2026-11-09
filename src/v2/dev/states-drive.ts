@@ -107,7 +107,8 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-1521': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }, { click: menuItem('new-file') }, { wait: '[data-type="md"]' }] },
   'DW-1522': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }, { click: menuItem('new-file') }, { click: '[data-type="txt"]' }, { click: 'btn:Continue' }] },
   'DW-1523': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { key: 'Ctrl+End' }, { type: '.cm-content', text: '\n3. Send the notes round' }] },
-  'DW-1524': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { key: 'Ctrl+s' }] },
+  // P1a: the save is "Saved on this PC · encrypting…" until the fixture engine has uploaded it; the board draws the end.
+  'DW-1524': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { key: 'Ctrl+s' }, { wait: '[data-saved="encrypted"]' }] },
   // M3d: the editor's own back ("Back to the folder"); `btn:Back` matched the sidebar's Backups first.
   'DW-1525': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { click: 'btn:Back to the folder' }, { wait: 'btn:Keep editing' }] },
   // M3d: in the `edit-conflict` world Anna's iPhone saves version 4 while the note is edited: the save meets it.

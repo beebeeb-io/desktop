@@ -7,8 +7,9 @@ import { showToast } from '../../chrome/Toast'
 import { ShareDialog, VersionsDialog } from '../files/Dialogs'
 import { copyShareLink } from '../files/shareLink'
 
-/** Version history over the open file (DW-1524's Versions → DW-0413): Files' dialog, its restore. */
-export function VersionsHost({ item, onClose }: { item: DriveItem; onClose: () => void }) {
+/** Version history over the open file (DW-1524's Versions → DW-0413): Files' dialog, its restore. The restore is queued
+ *  for the engine; `onRestored` lets the open file reload when it lands, as a restore (#273 finding 8). */
+export function VersionsHost({ item, onClose, onRestored }: { item: DriveItem; onClose: () => void; onRestored?: () => void }) {
   const source = useDriveSource()
   const [versions, setVersions] = useState<VersionEntry[] | null>(null)
   useEffect(() => {
@@ -19,7 +20,11 @@ export function VersionsHost({ item, onClose }: { item: DriveItem; onClose: () =
     <VersionsDialog
       name={item.name} versions={versions} onClose={onClose}
       onRestore={(versionId) => source.restoreVersion(item.id, versionId).then(
-        () => { onClose(); showToast({ kind: 'done', text: 'Version restored' }) },
+        () => {
+          onClose()
+          // The open file says when it lands; elsewhere Files' words stand.
+          if (onRestored) { onRestored(); showToast({ kind: 'done', text: 'Restoring that version. The file reloads when it’s back.' }) } else showToast({ kind: 'done', text: 'Version restored' })
+        },
         () => showToast({ kind: 'failed', text: 'Couldn’t restore that version. Nothing was changed.' }),
       )}
     />

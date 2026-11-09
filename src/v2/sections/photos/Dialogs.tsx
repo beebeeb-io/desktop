@@ -101,6 +101,7 @@ export function failedWords(e: unknown, what: string): string {
   if (code === 'unsupported') return `Couldn’t ${what}. This isn’t available in this version of Beebeeb.`
   if (code === 'offline') return `Couldn’t ${what}. Check your connection.`
   if (code === 'read-only') return `Couldn’t ${what}. It’s read-only.`
+  if (code === 'name-taken') return `Couldn’t ${what}. There’s already a file with that name here.`
   return `Couldn’t ${what}. Try again.`
 }
 

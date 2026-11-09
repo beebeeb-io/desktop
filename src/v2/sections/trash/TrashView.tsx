@@ -5,6 +5,7 @@ import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS, Modal, type MenuEntry } from '../files/ui'
 import { fmtCount, fmtSize, fmtWhen, kindOf } from '../files/model'
+import { BannerSlot } from '../../chrome/Banners'
 
 const COLS = 'grid-cols-[minmax(0,2.4fr)_minmax(130px,1fr)_96px_minmax(0,1.4fr)]'
 const BTN_RED = `inline-flex h-8 items-center justify-center rounded-md bg-red px-4 text-[13px] font-medium text-white hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS}`
@@ -46,6 +47,8 @@ export function TrashView(p: TrashViewProps) {
         <span className="flex-1" />
         {n > 0 && <button type="button" className={BTN} disabled={!!p.emptying} onClick={p.onEmpty} aria-disabled={!!p.emptying} style={p.emptying ? { opacity: 0.45 } : undefined}>Empty Trash…</button>}
       </div>
+      {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+      <BannerSlot />
       {p.emptying && (
         <div role="status" data-emptying className="mx-4 mt-3 rounded-lg border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink-2">
           <p className="m-0">Emptying Trash. <span className="font-mono">{p.emptying.done}</span> of <span className="font-mono">{p.emptying.total}</span> items deleted for good. You can leave this view; it carries on.</p>

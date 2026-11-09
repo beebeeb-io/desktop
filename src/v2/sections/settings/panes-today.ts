@@ -11,7 +11,6 @@ import { Diagnostics } from './today/diagnostics'
 import { AboutToday, ReleaseNotesDialog } from './today/about'
 import { SyncToday, RepairAlert } from './today/sync'
 import { KeepDialog, KeepConfirm } from './today/keep'
-import { InterceptLinks } from './today/intercept'
 
 export const PANES_TODAY: Partial<Record<PaneId, ComponentType>> = {
   bandwidth: Bandwidth,
@@ -21,9 +20,8 @@ export const PANES_TODAY: Partial<Record<PaneId, ComponentType>> = {
   diagnostics: Diagnostics,
   about: AboutToday,
   sync: SyncToday,
-  // B12's own panes, with their links to today's pages wired (Recent notifications, Diagnostics).
-  general: InterceptLinks.general,
-  notifications: InterceptLinks.notifications,
+  // General and Notifications are B12's own panes (shell/panes.ts): their rows to Diagnostics and Recent notifications
+  // follow through the kit Row's followHref, the one way a Settings link goes (#274 review).
 }
 
 /** A B12 dialog that is really a page now (Storage insights, Storage location): open the page instead. */

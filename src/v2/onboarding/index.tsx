@@ -60,6 +60,16 @@ export function needsFirstRegistration(v: ShellIntegrationView | null): boolean 
   return v != null && !v.installed && v.status === 'missing'
 }
 
+/** Whether setup reads the File Explorer state again every 2 s: on its own step, or while a try runs (#271 review). */
+export const shellPolls = (step: string, trying: boolean) => step === 'explorer' || trying
+
+/** "Show in File Explorer" before the config names a folder: nothing to open yet. */
+export const NO_FOLDER_YET = 'Beebeeb doesn’t know this PC’s Beebeeb folder yet. Try again in a moment.'
+/** "Show in File Explorer" refused (the folder could not be opened). */
+export const SHOW_FAILED = 'Couldn’t open the Beebeeb folder in File Explorer. Try again in a moment.'
+/** Try again when the state can't be read: it does not guess which folder to add. */
+export const NO_STATE = 'Beebeeb couldn’t read this PC’s settings, so nothing was tried. Try again in a moment.'
+
 const SAMPLE: PreviewSample = { label: '4K HEIC', size: '1.0 MB', original: '30.9 MB', photos: 0, local: '0 GB', cloud: '0 GB', space: '20 GB' }
 
 async function signedIn(): Promise<boolean> {
@@ -116,9 +126,34 @@ export function SetupFlow() {
     })
     void getKnownFolderBackup().then((r) => { if (r.ok) setKnown(r.value) })
     void command<boolean>('autostart_enabled').then((r) => { if (r.ok) setLogin(r.value) })
+  }, [readShell, addToExplorer])
+  // The state is read again every 2 s only while it can change on screen: the File Explorer step, or a try running
+  // (each read loads the config from disk; a try's own answer already brings the new state). #271 review.
+  useEffect(() => {
+    if (!shellPolls(step, trying)) return
     const t = window.setInterval(() => void readShell(), 2000)
     return () => { window.clearInterval(t) }
-  }, [readShell, addToExplorer])
+  }, [step, trying, readShell])
+
+  // "Show in File Explorer" opens this PC's sync folder, as v1 does (src/pages/SyncFolder.tsx): Rust refuses a null path
+  // on Windows. A refusal is shown, never dropped (#271 P2); the setup window has no toast host, so it stays under the
+  // button it is about.
+  const [showError, setShowError] = useState<string | null>(null)
+  const showInExplorer = async () => {
+    const path = shell?.path ?? (await readShell())?.path ?? null
+    if (!path) { setShowError(NO_FOLDER_YET); return }
+    const r = await command<void>('open_finder_location', { path })
+    // Our words, never the command's text (the Finder family's rule, tests/finderSetupSourceContract.test.ts).
+    setShowError(r.ok || r.unsupported ? null : SHOW_FAILED)
+  }
+  // Try again registers the folder the config holds: the state is read first, and without a read it does not guess
+  // (Rust would fall back to its default folder, not the configured one). #271 review.
+  const tryAgain = async () => {
+    setShowError(null)
+    const v = await readShell()
+    if (!v) { setShowError(NO_STATE); return }
+    await addToExplorer(v.path ?? null)
+  }
 
   const explorer = explorerStatus(shell, trying, refused)
   const skip = () => setStep('done')
@@ -181,8 +216,8 @@ export function SetupFlow() {
       body = <CompareView mode={compareMode} onMode={setCompareMode} onChoose={() => {}} onDone={() => setStep('photos')} />
       break
     case 'explorer':
-      body = <ExplorerStep status={explorer.status} errorCode={explorer.code} onShow={() => void command('open_finder_location', { path: null })}
-        onTryAgain={() => void addToExplorer(shell?.path ?? null)} onContinue={() => setStep('notifications')} />
+      body = <ExplorerStep status={explorer.status} errorCode={explorer.code} showError={showError} onShow={() => void showInExplorer()}
+        onTryAgain={() => void tryAgain()} onContinue={() => setStep('notifications')} />
       break
     case 'notifications':
       body = <NotificationsStep onAllow={() => { note('notifications', 'On'); setStep('login') }} onNotNow={() => { note('notifications', 'Off'); setStep('login') }} />

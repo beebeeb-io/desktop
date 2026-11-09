@@ -4,7 +4,7 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { BBProductIcon, Icon } from '@beebeeb/shared/design'
 import { approveLookup, approveRequest, type ApprovalReview } from './api'
-import { approveErrorText, formatDeviceCode, isDeviceCode, type ApproveStage } from './model'
+import { approveErrorText, countryName, formatDeviceCode, isDeviceCode, type ApproveStage } from './model'
 import { Field, HelloGlyph, HelloPrompt, Note, PrimaryButton, SecondaryButton, TextLink, Tile } from './parts'
 
 /** DW-A11: the toast Windows draws bottom-right over whatever is open. Only its content is the app's. */
@@ -112,7 +112,8 @@ function Review(p: ApproveDialogProps & { device: string }) {
     document.addEventListener('keydown', onKey, true)
     return () => document.removeEventListener('keydown', onKey, true)
   }, [onDeny, busy])
-  const country = p.review.country ?? 'Unknown'
+  // Rust answers a country code; the board says the country's name (M3b's leftovers).
+  const country = countryName(p.review.country)
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); if (matches && p.password && !p.busy) p.onApprove() }}

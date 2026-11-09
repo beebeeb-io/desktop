@@ -16,14 +16,25 @@ export function directives(csp: string | Record<string, string | string[]>): Map
   return new Map(entries.map(([name, sources]) => [name.toLowerCase(), sources]))
 }
 
-const configs = readdirSync(TAURI)
+const files = readdirSync(TAURI)
   .filter((f) => /^tauri(\.[\w-]+)?\.conf\.json$/.test(f))
   .map((file) => ({ file, csp: JSON.parse(readFileSync(join(TAURI, file), 'utf8'))?.app?.security?.csp }))
-  .filter((c) => c.csp !== undefined && c.csp !== null)
+// A platform file without a `csp` inherits the base's. One that sets it to null deletes it: Tauri merges a platform file
+// into the base with JSON Merge Patch, where null removes the key (desktop #273 finding 13).
+const configs = files.filter((c) => c.csp !== undefined && c.csp !== null)
 
 describe('the window’s CSP (M3d fork 5)', () => {
   test('the base config sets it', () => {
     expect(configs.map((c) => c.file)).toContain('tauri.conf.json')
+  })
+  test('no config turns it off: a `csp` of null in any file is refused', () => {
+    expect(files.length).toBeGreaterThan(0)
+    expect(files.filter((c) => c.csp === null).map((c) => c.file)).toEqual([])
+  })
+  test('scripts come only from the app itself: script-src is exactly \'self\' (only its scripts can mint a blob: URL)', () => {
+    for (const { file, csp } of configs) {
+      expect({ file, scriptSrc: directives(csp).get('script-src') }).toEqual({ file, scriptSrc: ["'self'"] })
+    }
   })
   test('nothing decrypted is framed: frame-src is set and has no blob:, and neither has default-src', () => {
     for (const { file, csp } of configs) {

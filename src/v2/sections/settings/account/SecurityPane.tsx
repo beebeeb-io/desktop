@@ -1,7 +1,7 @@
 // Sign-in and security (DW-A52) with the checkup (A84, A84a), change password (A67, A68), the two sign-out confirms
 // (A57, A57a) and the four-step delete (A58, A80 to A83). Two-factor, passkeys and activity are in Factors.tsx.
 // Drive's App lock sits above the shared rows (the securityExtra slot, DW-0716).
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { clearSession } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
@@ -117,6 +117,9 @@ function AppLock() {
   )
 }
 
+/** The v2 window (`platform=windows` loads it; without it the legacy window loads, #270). Its gate checks the session. */
+export const V2_WINDOW = '?window=main-app&platform=windows'
+
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
@@ -126,12 +129,20 @@ function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }
   // The window again, without the Settings route: its gate reads the signed-out session and shows the sign-in. (It went to
   // `frame=DW-A02/A03` without `platform=windows`, which loaded the legacy window, and a frame is a drawing anyway.)
   const signedOut = () => window.location.assign('?window=main-app&platform=windows')
+  // One sign-out at a time: a double click sends one clear_session, and the button waits (#270 follow-up).
+  const busy = useRef(false)
+  const [signingOut, setSigningOut] = useState(false)
   const signOut = async () => {
+    if (busy.current) return
     if (!hasTauri()) return onCancel()
-    const r = await clearSession()
-    if (!r.ok) setError(r.reason)
-    else if (r.value.warning) setWarning(r.value.warning.sentence)
-    else signedOut()
+    busy.current = true
+    setSigningOut(true)
+    try {
+      const r = await clearSession()
+      if (!r.ok) setError(r.reason)
+      else if (r.value.warning) setWarning(r.value.warning.sentence)
+      else signedOut()
+    } finally { busy.current = false; setSigningOut(false) }
   }
   if (warning) {
     return (
@@ -142,7 +153,7 @@ function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }
   }
   return (
     <Dialog labelId="signout-h" title={all ? 'Sign out of all Beebeeb apps on this PC?' : 'Sign out of Drive?'} onCancel={onCancel}
-      actions={<><Btn onClick={onCancel}>Cancel</Btn><Btn variant="danger" onClick={() => void signOut()}>{all ? 'Sign out of all' : 'Sign out'}</Btn></>}>
+      actions={<><Btn onClick={onCancel}>Cancel</Btn><Btn variant="danger" disabled={signingOut} onClick={() => void signOut()}>{all ? 'Sign out of all' : 'Sign out'}</Btn></>}>
       {all ? (
         <>
           <p>Drive, Pass, VPN, Chat and Mail on this PC are signed out, and none of them offers Continue as until someone signs in again.</p>
@@ -410,7 +421,7 @@ function DeleteDone() {
         <span className="grid h-12 w-12 place-items-center rounded-full bg-green-bg text-green-text"><Icon name="check" size={22} /></span>
         <h1 className="text-[20px] font-semibold text-ink">Deletion cancelled</h1>
         <p className="max-w-[380px] text-[13px] text-ink-2">Your account is as it was. Nothing was deleted. We sent an email to say so.</p>
-        <a href="?window=main-app&section=files" className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-amber-ink">Continue to Drive</a>
+        <a href={`${V2_WINDOW}&section=files`} className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-amber-ink">Continue to Drive</a>
       </div>
     </Page>
   )

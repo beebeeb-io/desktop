@@ -279,7 +279,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     if (problem) { setDialog({ ...dialog, error: problem }); return }
     source.createFolder(folderId, name).then((created) => { setDialog(null); go(created.id) }, (e: unknown) => {
       if (e instanceof DriveSourceError && e.code === 'name-taken') setDialog({ ...dialog, error: takenMessage(name, true) })
-      else { setDialog(null); fail(e) }
+      // What failed, with Try again reopening the dialog (a new name may be wanted), never a bare "Couldn't do that" (#268).
+      else { setDialog(null); fail(e, undefined, { action: 'create the folder', again: openNewFolder }) }
     })
   }
 
@@ -296,8 +297,9 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     const token = undo.current
     if (!token) return
     undo.current = null
-    source.undoTrash(token).catch((e: unknown) => fail(e))
-  }, [source]))
+    // As the toast's Undo: what failed, and Try again with the same token (#268).
+    putBack(token)
+  }, [source])) // eslint-disable-line react-hooks/exhaustive-deps -- putBack reads only the source and the token
 
   // Row keys: arrows move the selection, Ctrl+Down opens, Ctrl+Up goes up, Space previews, Esc ends the selection.
   useEffect(() => {
@@ -425,7 +427,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
 
   const emptyAndAddable = items.length === 0 && listing && canNew
   return (
-    <div role="presentation" className="relative flex min-h-0 flex-1" onClick={() => setMenu(null)}>
+    <div role="presentation" className="relative flex min-h-0 flex-1" data-listing={listing ? 'loaded' : 'loading'} onClick={() => setMenu(null)}>
       <FilesPane
         p={{
           listing: shownListing, items, prefs, selection, currentId, renaming, offline, dropTarget, details,
