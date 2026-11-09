@@ -19,6 +19,7 @@ import * as player from './player'
 import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
 import { findGoesTo, useOwnFind } from './find'
 import { useVersionWatch } from './versionWatch'
+import { rawThumbCache } from './thumbCache'
 
 type Loaded =
   | { kind: 'text'; text: string; versionId: string }
@@ -291,18 +292,21 @@ function RawView({ item, nav, onOpenElsewhere }: { item: DriveItem; nav: Section
   const siblings = useSiblings(item, ['raw', 'image'])
   const at = siblings.findIndex((i) => i.id === item.id)
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({})
-  // The strip shows the photos near this one; each thumbnail is a blob URL this view owns and frees.
+  // The strip shows the photos near this one. Their blob URLs live in a bounded cache by id (thumbCache.ts), so a step
+  // fetches only what is new, and a URL is freed when replaced or pushed out, never while it is shown.
   const near = useMemo(() => siblings.slice(Math.max(0, at - STRIP_REACH), at + STRIP_REACH + 1), [siblings, at])
   useEffect(() => {
     let live = true
-    const made: string[] = []
-    for (const s of near) {
-      source.thumbnail(s.id, s.id === item.id ? 'large' : 'small').then((u) => {
-        if (u) made.push(u)
-        if (live) setThumbs((t) => ({ ...t, [s.id]: u })); else if (u) URL.revokeObjectURL(u)
-      }, () => {})
+    const cache = rawThumbCache(source)
+    const want = near.map((s) => [s.id, s.id === item.id ? 'large' : 'small'] as const)
+    const held: Record<string, string | null> = {}
+    for (const [id, size] of want) { const u = cache.get(id, size); if (u !== undefined) held[id] = u }
+    setThumbs((t) => ({ ...t, ...held }))
+    for (const [id, size] of want) {
+      if (id in held) continue
+      source.thumbnail(id, size).then((u) => { cache.put(id, size, u); if (live) setThumbs((t) => ({ ...t, [id]: cache.get(id, size) ?? u })) }, () => {})
     }
-    return () => { live = false; made.forEach((u) => URL.revokeObjectURL(u)) }
+    return () => { live = false }
   }, [source, near, item.id])
   const step = useCallback((d: number) => { const n = siblings[at + d]; if (n) nav.go({ section: 'open', id: n.id }) }, [siblings, at, nav])
   useEffect(() => {

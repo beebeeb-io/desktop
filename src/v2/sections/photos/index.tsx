@@ -9,7 +9,7 @@ import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
 import { copyShareLink } from '../files/shareLink'
 import {
-  loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
+  loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, folderKey, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
 } from './model'
 import { useDriveExtras, type PhotoMeta, type PhotoSource } from '../../source/extras'
 import { PhotosView } from './PhotosView'
@@ -126,12 +126,12 @@ export default function Section(_props: SectionProps) {
   const deviceChoices: SourceChoice[] = devicesOf(all).map((d) => ({ name: d.name, photos: d.photos, on: !hidden.has(`device:${d.name}`) }))
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
   const folderChoices: FolderChoice[] = sources.filter((f) => !backupFolders.has(f.id)).map((f) => ({
-    id: f.id ?? undefined, name: f.name, items: f.count, note: f.path && f.path !== f.name ? f.path : undefined, on: !(f.id && hidden.has(`folder:${f.id}`)),
+    id: f.id ?? undefined, name: f.name, items: f.count, note: f.path && f.path !== f.name ? f.path : undefined, on: !hidden.has(folderKey(f.id)),
   }))
   const applySources = (d: SourceChoice[], f: FolderChoice[]) => {
     const next = new Set<string>()
     d.forEach((x) => { if (!x.on) next.add(`device:${x.name}`) })
-    f.forEach((x) => { if (!x.on && x.id) next.add(`folder:${x.id}`) })
+    f.forEach((x) => { if (!x.on) next.add(folderKey(x.id)) })
     setHiddenState(next)
     saveHidden(next)
     if (device && next.has(`device:${device}`)) setDevice(null)

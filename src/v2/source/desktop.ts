@@ -16,6 +16,9 @@ const CODES: DriveSourceErrorCode[] = [
 /** Rust's answer for a file over the read cap (fsops::read_capped), and the detail its DriveSourceError carries. */
 const TOO_LARGE = 'unsupported: too large'
 export const TOO_LARGE_DETAIL = 'too large'
+/** Rust's read cap for drive_read_bytes (drive_v2 fsops::BYTES_LIMIT): a larger file is refused as too large. */
+export const READ_CAP_BYTES = 256 * 1024 * 1024
+
 /** A read refused because the file is over the cap: the viewer's too-large state, never "couldn't decrypt" (DW-1517). */
 export const isTooLarge = (e: unknown) => e instanceof DriveSourceError && e.code === 'unsupported' && e.message === TOO_LARGE_DETAIL
 

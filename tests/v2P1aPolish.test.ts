@@ -9,6 +9,9 @@ import { DriveSourceError } from '@beebeeb/shared/drive-ui'
 import { officeSave } from '../src/v2/sections/open/office/save'
 import { NOT_INDEXED, saveFailure } from '../src/v2/sections/open/office'
 import { isProvisional } from '../src/v2/sections/open'
+import { folderKey, shown, videoReadable, type PhotoCell } from '../src/v2/sections/photos/model'
+import { READ_CAP_BYTES } from '../src/v2/source/desktop'
+import { ThumbCache } from '../src/v2/sections/open/thumbCache'
 
 const src = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
@@ -154,5 +157,83 @@ describe('#273 finding 1: until the page view is drawn in the window, a PDF open
     expect(open).toContain("useBlobUrl(kind === 'pdf' ? null : bytes")
     expect(open).toContain(`{kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} />`)
     expect(open).not.toMatch(/else if \(kind === 'pdf'\) body =/)
+  })
+})
+
+describe('#273 finding 6: switching off the photos directly in Files hides them (DW-0604)', () => {
+  const cell = (id: string, parentId: string | null): PhotoCell => ({ entry: { item: { id, parentId, name: `${id}.jpg`, isFolder: false, size: 1, modifiedAt: '2026-11-01T10:00:00', shared: { kind: 'none' }, local: 'online-only', hasThumbnail: true } } }) as PhotoCell
+  test('the root folder has its own key, so its switch hides its photos and nothing else', () => {
+    const cells = [cell('a', null), cell('b', null), cell('c', 'f-lisbon')]
+    expect(shown(cells, new Set([folderKey(null)])).map((c) => c.entry.item.id)).toEqual(['c'])
+    expect(shown(cells, new Set([folderKey('f-lisbon')])).map((c) => c.entry.item.id)).toEqual(['a', 'b'])
+    expect(folderKey(undefined)).toBe(folderKey(null))
+    expect(folderKey('f-lisbon')).toBe('folder:f-lisbon')
+  })
+  test('the dialog’s choice is saved for the root too, and read back as off', () => {
+    const photos = src('v2/sections/photos/index.tsx')
+    expect(photos).toContain('if (!x.on) next.add(folderKey(x.id))')
+    expect(photos).toContain('on: !hidden.has(folderKey(f.id))')
+  })
+})
+
+describe('#273 finding 7: a video the window cannot read is said so before any byte is read (DW-0611)', () => {
+  const GB = 1024 ** 3
+  test('over Rust’s read cap it is too large; a video not on this PC needs its size free; else it plays', () => {
+    expect(videoReadable({ size: 4 * GB, local: 'online-only' }, 100 * GB, READ_CAP_BYTES)).toBe('too-large')
+    expect(videoReadable({ size: 200 * 1024 ** 2, local: 'online-only' }, 100 * 1024 ** 2, READ_CAP_BYTES)).toBe('no-room')
+    expect(videoReadable({ size: 200 * 1024 ** 2, local: 'downloaded' }, 100 * 1024 ** 2, READ_CAP_BYTES)).toBe('ok')
+    expect(videoReadable({ size: 200 * 1024 ** 2, local: 'online-only' }, undefined, READ_CAP_BYTES)).toBe('ok')
+  })
+  test('the window’s cap is Rust’s (fsops::BYTES_LIMIT)', () => {
+    const fsops = readFileSync(new URL('../src-tauri/src/drive_v2/fsops.rs', import.meta.url), 'utf8')
+    const m = /pub\(crate\) const BYTES_LIMIT: u64 = ([\d *]+);/.exec(fsops)
+    expect(m).not.toBeNull()
+    expect(m![1].split('*').reduce((n, x) => n * Number(x.trim()), 1)).toBe(READ_CAP_BYTES)
+  })
+  test('the player checks first, and keeps only the Blob', () => {
+    const viewer = src('v2/sections/photos/Viewer.tsx')
+    expect(viewer).toMatch(/videoReadable\(\{ size, local \}, free, READ_CAP_BYTES\)[\s\S]{0,300}source\.readBytes\(id\)/)
+  })
+})
+
+describe('#273 finding 4: the RAW strip frees a thumbnail only when it is replaced or pushed out, never while shown', () => {
+  test('a later run that needs the same thumbnails reads them from the cache and frees none', () => {
+    const freed: string[] = []
+    const c = new ThumbCache(4, (u) => freed.push(u))
+    c.put('a', 'large', 'blob:A'); c.put('b', 'small', 'blob:B')
+    // The siblings arrive and the strip's set changes: the same items are read back, nothing is freed.
+    expect([c.get('a', 'large'), c.get('a', 'small'), c.get('b', 'small'), c.get('c', 'small')]).toEqual(['blob:A', 'blob:A', 'blob:B', undefined])
+    expect(freed).toEqual([])
+  })
+  test('a small thumbnail never replaces a large one; a replaced URL and the least recently used are freed', () => {
+    const freed: string[] = []
+    const c = new ThumbCache(2, (u) => freed.push(u))
+    c.put('a', 'large', 'blob:A')
+    c.put('a', 'small', 'blob:a')
+    expect([c.get('a', 'large'), freed]).toEqual(['blob:A', ['blob:a']])
+    expect(c.get('b', 'large')).toBeUndefined()
+    c.put('b', 'small', 'blob:b1'); c.put('b', 'large', 'blob:B')
+    expect(freed).toEqual(['blob:a', 'blob:b1'])
+    c.get('a', 'small') // a is used again, so b is the least recently used
+    c.put('c', 'small', 'blob:C')
+    expect([freed, c.size, c.get('b', 'small')]).toEqual([['blob:a', 'blob:b1', 'blob:B'], 2, undefined])
+  })
+  test('the strip keeps its URLs across runs: no cleanup revokes them', () => {
+    const open = src('v2/sections/open/index.tsx')
+    expect(open).toContain('const cache = rawThumbCache(source)')
+    expect(open).not.toContain('made.forEach((u) => URL.revokeObjectURL(u))')
+  })
+})
+
+describe('#273 findings 5 and 9: opening a file reads only what it needs, and a stale read never lands', () => {
+  const open = () => src('v2/sections/open/index.tsx')
+  test('the free space is read only for a file not on this PC, and the too-large view takes that figure', () => {
+    expect(open()).toMatch(/if \(item\.local === 'online-only'\) \{\n\s+const free = await extras\.status\(\)/)
+    expect(open()).not.toContain('Promise.all([source.details(id), extras.status()')
+    expect(open()).toContain('known={phase.free}')
+    expect(open()).toContain('if (known === undefined) extras.status()')
+  })
+  test('a run that a newer one replaced stops after its second details read', () => {
+    expect(open()).toMatch(/const \{ item \} = await source\.details\(id\)\.catch\(\(\) => \(\{ item: null \}\)\)\n\s+if \(!live\) return\n\s+if \(item\) return setPhase\(\{ name: 'too-large', item \}\)/)
   })
 })

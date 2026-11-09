@@ -4,7 +4,10 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS, IconButton } from '../files/ui'
-import { fmtExt, idOf, mb1, isVideo, takenLabel, type PhotoCell } from './model'
+import { fmtExt, idOf, mb1, isVideo, takenLabel, videoReadable, type PhotoCell } from './model'
+import { useDriveExtras } from '../../source/extras'
+import { READ_CAP_BYTES } from '../../source/desktop'
+import { noRoomWords } from '../open/States'
 import { useThumb } from './PhotosView'
 import { keyBelongsElsewhere } from '../open/model'
 
@@ -101,7 +104,7 @@ export function PhotoViewer(p: ViewerProps) {
 
       <div className="relative flex min-h-0 flex-1 items-center justify-center bg-paper-2">
         {video && !p.referencePlayer
-          ? <VideoPlayer id={idOf(cell)} poster={big} name={cell.entry.item.name} onOpen={p.onOpen} />
+          ? <VideoPlayer id={idOf(cell)} item={cell.entry.item} poster={big} name={cell.entry.item.name} onOpen={p.onOpen} />
           : big ? <img src={big} alt={cell.entry.item.name} draggable={false} className="max-h-full max-w-full object-contain" /> : <div className="h-2/3 w-2/3 animate-pulse rounded-md bg-paper-3" />}
         {p.progress && original && (
           <div className="absolute inset-x-0 top-0 h-1 bg-ink/10" role="progressbar" aria-label="Downloading the original" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
@@ -154,22 +157,34 @@ export function PhotoViewer(p: ViewerProps) {
  * Space plays and pauses. A video the window cannot read (too large, a codec WebView2 lacks) says so and opens in
  * Windows' player instead.
  */
-function VideoPlayer({ id, poster, name, onOpen }: { id: string; poster: string | null; name: string; onOpen?: () => void }) {
+function VideoPlayer({ id, item, poster, name, onOpen }: { id: string; item: { size: number | null; local?: string | null }; poster: string | null; name: string; onOpen?: () => void }) {
   const source = useDriveSource()
+  const extras = useDriveExtras()
   const [url, setUrl] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
+  const [failed, setFailed] = useState<null | 'cant-play' | 'too-large' | { needed: number; free: number }>(null)
   const ref = useRef<HTMLVideoElement>(null)
+  const { size, local } = item
   useEffect(() => {
     let live = true
     let made: string | null = null
-    setUrl(null); setFailed(false)
-    source.readBytes(id).then((r) => {
-      if (!live || r.bytes.byteLength === 0) { if (live) setFailed(true); return }
-      made = URL.createObjectURL(new Blob([r.bytes as BlobPart]))
+    setUrl(null); setFailed(null)
+    ;(async () => {
+      // Decided before a byte is read: over the read cap, or without the room to decrypt a video not on this PC, the
+      // window would hydrate part of it and fail (#273 finding 7). Free space is read only for a video not on this PC.
+      const free = local === 'online-only' ? await extras.status().then((s) => s.freeSpaceBytes, () => undefined) : undefined
+      const can = videoReadable({ size, local }, free, READ_CAP_BYTES)
+      if (!live) return
+      if (can === 'too-large') return setFailed('too-large')
+      if (can === 'no-room') return setFailed({ needed: size ?? 0, free: free ?? 0 })
+      const blob = await source.readBytes(id).then((r) => (r.bytes.byteLength > 0 ? new Blob([r.bytes as BlobPart]) : null))
+      // The bytes are copied into the Blob and not kept: only the Blob holds the video while it plays.
+      if (!live) return
+      if (!blob) return setFailed('cant-play')
+      made = URL.createObjectURL(blob)
       setUrl(made)
-    }, () => { if (live) setFailed(true) })
+    })().catch(() => { if (live) setFailed('cant-play') })
     return () => { live = false; if (made) URL.revokeObjectURL(made) }
-  }, [source, id])
+  }, [source, extras, id, size, local])
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       const v = ref.current
@@ -183,13 +198,15 @@ function VideoPlayer({ id, poster, name, onOpen }: { id: string; poster: string 
   }, [])
   // A person's own video from their phone: there is no caption file to load with it.
   // eslint-disable-next-line jsx-a11y/media-has-caption
-  if (url) return <video ref={ref} src={url} poster={poster ?? undefined} controls onError={() => setFailed(true)} aria-label={name} className="max-h-full max-w-full" data-video />
+  if (url) return <video ref={ref} src={url} poster={poster ?? undefined} controls onError={() => setFailed('cant-play')} aria-label={name} className="max-h-full max-w-full" data-video />
   return (
     <div className="flex flex-col items-center gap-3">
       {poster ? <img src={poster} alt={name} draggable={false} className="max-h-[60vh] max-w-full object-contain" /> : <div className="h-64 w-96 animate-pulse rounded-md bg-paper-3" />}
-      {failed
-        ? <p role="status" className="m-0 text-[13px] text-ink-2">This video can’t play in the window. <button type="button" onClick={onOpen} className="text-ink underline">Open it in Windows’ player</button></p>
-        : <p role="status" className="m-0 text-[13px] text-ink-3">Decrypting on this PC…</p>}
+      {failed === null
+        ? <p role="status" className="m-0 text-[13px] text-ink-3">Decrypting on this PC…</p>
+        : typeof failed === 'object'
+          ? <p role="status" data-video-state="no-room" className="m-0 text-[13px] text-ink-2">{noRoomWords(failed.needed, failed.free)}</p>
+          : <p role="status" data-video-state={failed} className="m-0 text-[13px] text-ink-2">{failed === 'too-large' ? 'This video is too large to play in the window.' : 'This video can’t play in the window.'} <button type="button" onClick={onOpen} className="text-ink underline">Open it in Windows’ player</button></p>}
     </div>
   )
 }
