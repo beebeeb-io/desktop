@@ -1,6 +1,7 @@
 // Settings kit for desktop v2 (B12): the page, group card, row, switch, pop-up and dialog every pane is drawn with.
 // One accent: Amber only on the primary action and on encryption state. Sizes, times and codes are mono.
-import { useContext, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { BBButton, BBToggle, Icon } from '@beebeeb/shared/design'
 import { Ctx } from './context'
 import { followHref } from './links'
@@ -87,6 +88,15 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
   return <BBToggle on={on} onChange={onChange} disabled={disabled} aria-label={label} />
 }
 
+export interface PopoverRect { top: number; right: number; bottom: number; left: number; width: number; height: number }
+
+/** Where a choice menu opens: under the button, kept on screen. The test calls this, not a copy. */
+export function popoverPlace(buttonRect: PopoverRect, view: { width: number; height: number }): { top: number; left: number } {
+  const width = Math.max(140, buttonRect.width)
+  const left = Math.max(8, Math.min(buttonRect.right - width, Math.max(8, view.width - width - 8)))
+  return { top: buttonRect.bottom + 4, left }
+}
+
 /** A pop-up choice (Theme, Release channel, the lock delay). Closes on pick, Esc or a click outside. */
 export function Choice<T extends string>({ value, options, onPick, label, open: openProp }: {
   value: T
@@ -97,35 +107,49 @@ export function Choice<T extends string>({ value, options, onPick, label, open: 
 }) {
   const [open, setOpen] = useState(!!openProp)
   const ref = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLUListElement>(null)
+  const [place, setPlace] = useState<{ top: number; left: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!open || !buttonRef.current) { setPlace(null); return }
+    const r = buttonRef.current.getBoundingClientRect()
+    const view = { width: window.innerWidth || 800, height: window.innerHeight || 600 }
+    setPlace(popoverPlace({ top: r.top, right: r.right, bottom: r.bottom, left: r.left, width: r.width, height: r.height }, view))
+  }, [open])
   useEffect(() => {
     if (!open) return
-    const off = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false) }
+    const off = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return
+      setOpen(false)
+    }
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false) } }
     document.addEventListener('mousedown', off)
     document.addEventListener('keydown', key, true)
     return () => { document.removeEventListener('mousedown', off); document.removeEventListener('keydown', key, true) }
   }, [open])
   const current = options.find((o) => o.value === value)
+  const menu = open && place ? (
+    <ul ref={menuRef} role="listbox" aria-label={label} className="z-30 min-w-[140px] rounded-lg border border-line bg-paper py-1 text-[13px] shadow-lg" style={{ position: 'fixed', top: place.top, left: place.left }}>
+      {options.map((o) => (
+        <li key={o.value} role="option" aria-selected={o.value === value}>
+          <button type="button" onClick={() => { onPick(o.value); setOpen(false) }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink hover:bg-paper-2">
+            <span className="w-3">{o.value === value ? <Icon name="check" size={12} /> : null}</span>
+            {o.label}
+          </button>
+        </li>
+      ))}
+    </ul>
+  ) : null
   return (
     <div ref={ref} className="relative">
-      <button type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}
+      <button ref={buttonRef} type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}
         className="flex h-7 items-center gap-1 rounded-md border border-line bg-paper px-2 text-[13px] text-ink hover:bg-paper-2">
         {current?.label ?? value}
         <Icon name="chevron-down" size={12} className="text-ink-3" />
       </button>
-      {open ? (
-        <ul role="listbox" aria-label={label} className="absolute right-0 top-8 z-30 min-w-[140px] rounded-lg border border-line bg-paper py-1 shadow-lg">
-          {options.map((o) => (
-            <li key={o.value} role="option" aria-selected={o.value === value}>
-              <button type="button" onClick={() => { onPick(o.value); setOpen(false) }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink hover:bg-paper-2">
-                <span className="w-3">{o.value === value ? <Icon name="check" size={12} /> : null}</span>
-                {o.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {menu ? createPortal(menu, document.body) : null}
     </div>
   )
 }
