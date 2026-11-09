@@ -2,6 +2,7 @@
 import { Btn, Dialog, Group, Page, Row, Switch, fmtBytes } from '../shell/kit'
 import { FIXTURE_LOCAL, useConfig } from '../shell/data'
 import { useSettings } from '../shell/context'
+import { actionFailure } from '../../files/model'
 import { useState } from 'react'
 
 export function SyncPane() {
@@ -36,11 +37,14 @@ export function SyncPane() {
   )
 }
 
+/** DW-0746b. Blocked (M3e): no command takes Beebeeb out of File Explorer; Turn off says so and changes nothing. */
 export function ExplorerOffDialog() {
   const { close } = useSettings()
+  const [refused, setRefused] = useState<string | null>(null)
   return (
     <Dialog labelId="exp-h" title="Turn off Beebeeb in File Explorer?" onCancel={close}
-      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="danger" onClick={close}>Turn off</Btn></>}>
+      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="danger" onClick={() => setRefused(`${actionFailure('turn off Beebeeb in File Explorer', 'unsupported').text} Nothing was changed.`)}>Turn off</Btn></>}>
+      {refused ? <p role="alert" className="mb-2 text-[12px] text-red-text">{refused}</p> : null}
       <p>2 files, 14 MB, made in File Explorer have not uploaded yet and would be lost.</p>
       <p className="mt-2">Files that have uploaded are safe. The window keeps working.</p>
     </Dialog>

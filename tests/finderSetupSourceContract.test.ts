@@ -251,6 +251,8 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       // notification-area flyout (a `tray` window, which tauri.macos.conf.json does not build) discards what opening the
       // sync folder answers. None renders a reason or the warnings (the leak table below stays the three exemptions).
       'v2/onboarding/index.tsx | open_finder_location': 1,
+      // v2 M3e: Settings › Sync's "Show in File Explorer" (DW-1180); v2 is the Windows app, and a refusal says the one line.
+      'v2/sections/settings/today/sync.tsx | open_finder_location': 1,
       'v2/tray/index.tsx | open_finder_location': 1,
       'windows/views/SettingsView/integrationPanels.tsx | finder.run': 1,
     })
@@ -272,6 +274,7 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'pages/SyncFolder.tsx': { open_finder_location: 2, open_login_items_and_extensions_settings: 2, reset_macos_integration: 2 },
       // Desktop v2 (R1f): one literal per call site above, none reached through a variable.
       'v2/onboarding/index.tsx': { open_finder_location: 1 },
+      'v2/sections/settings/today/sync.tsx': { open_finder_location: 1 },
       'v2/tray/index.tsx': { open_finder_location: 1 },
     })
   })

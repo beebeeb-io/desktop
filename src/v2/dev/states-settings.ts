@@ -4,17 +4,19 @@
 // the frames use, so the live pane is the real one with its real handlers.
 import type { Recipe } from './states'
 import { TEST_STATES } from '../sections/settings/today/bandwidth'
+import { FIXTURE_BACKUP_PROBLEMS } from '../sections/settings/shell/data'
 
-const pane = (sub: string, o: { dialog?: string; props?: Record<string, unknown>; steps?: Recipe['steps']; gap?: string; native?: string } = {}): Recipe => {
+const pane = (sub: string, o: { dialog?: string; props?: Record<string, unknown>; steps?: Recipe['steps']; gap?: string; native?: string; reads?: Recipe['reads'] } = {}): Recipe => {
   const seeds: Record<string, unknown> = {}
   if (o.dialog) seeds['settings.dialog'] = o.dialog
   if (o.props) seeds['settings.paneProps'] = o.props
   return {
-    q: `section=settings&sub=${sub}`, seeds, gap: o.gap, native: o.native,
+    q: `section=settings&page=${sub}`, seeds, gap: o.gap, native: o.native, reads: o.reads,
     // Wait for the pane, so the seeds are read before they are cleared.
     steps: [{ wait: '[data-testid="settings-view"]' }, ...(o.steps ?? [])],
   }
 }
+const APP_LOCK = 'App lock has no setting and no Windows Hello step yet: the pane shows it off, and its switch and delay can’t be changed'
 const security = (init: Record<string, unknown>) => pane('security', { props: { init } })
 const account = (initial: string, codeDigits?: string) => pane('account', { props: { initial, codeDigits } })
 
@@ -22,15 +24,24 @@ export const SETTINGS_STATES: Record<string, Recipe> = {
   // ── B12: the settings shell ───────────────────────────────────────────────────────────────────────────────────
   'DW-0701': pane('general'),
   'DW-0781': pane('general', { props: { updateAvailable: true } }),
-  'DW-0751': pane('about'),
-  'DW-0782': pane('general', { dialog: 'report' }),
-  'DW-0708': pane('general', { dialog: 'plan' }),
+  // About says 0.9.1 is the newest (Back → General without a banner, DW-0751#5 → DW-0701); Check now finds 0.9.2
+  // (DW-0751#1 → DW-0781): the updater's answer, a read, which General's banner then shows.
+  'DW-0751': pane('about', { reads: {
+    check_for_updates_now: { status: 'update_available', current_version: '0.9.1', channel: 'stable', version: '0.9.2', body: '', release_notes_url: 'https://beebeeb.io/releases' },
+  } }),
+  // Save and write email (DW-0782#0 → DW-0790b): report_problem's answer, the path it saved and whether the email opened.
+  'DW-0782': pane('general', { dialog: 'report', reads: { report_problem: { path: '%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\beebeeb-diagnostics-1793956320.json', email_opened: true } } }),
+  // The plan dialog's Done returns to Account (DW-0708#1 → DW-A51): it is opened over Account.
+  'DW-0708': pane('account', { dialog: 'plan' }),
   'DW-0712': pane('storage'),
   'DW-0713': pane('storage', { dialog: 'limit-previews' }),
   'DW-0714': pane('storage', { dialog: 'limit-downloads' }),
-  'DW-0780': pane('storage', { dialog: 'free-up' }),
-  'DW-0716': pane('security', { steps: [{ click: 'btn:Lock again after' }] }),
-  'DW-0716b': pane('security', { steps: [{ click: '[role=switch][aria-label="Lock Beebeeb"]' }, { click: 'btn:Continue' }] }),
+  // Free up space and Cancel return to Sync and File Explorer (DW-0780#0/#1 → DW-0746): opened from there (DW-0746#6).
+  'DW-0780': pane('sync', { dialog: 'free-up' }),
+  // App lock is stored nowhere and no command asks Windows Hello before it changes (blocked, M3e): the live pane shows
+  // it off and unchangeable, never the board's lock that isn't there.
+  'DW-0716': pane('security', { gap: APP_LOCK }),
+  'DW-0716b': pane('security', { gap: APP_LOCK }),
   'DW-0750': pane('notifications'),
   'DW-0750b': pane('notifications', { props: { offInWindows: true } }),
   // ── B12: Drive's own sections ─────────────────────────────────────────────────────────────────────────────────
@@ -46,7 +57,8 @@ export const SETTINGS_STATES: Record<string, Recipe> = {
   'DW-1410': pane('backups', { dialog: 'stop:Projects' }),
   'DW-0739': pane('device'),
   'DW-0742': pane('device', { dialog: 'delete-backup' }),
-  'DW-0741': pane('backup-failures'),
+  // The engine's list in a browser is the fixtures' (no backup problems there): the board's list is the pane's first state.
+  'DW-0741': pane('backup-failures', { props: { problems: FIXTURE_BACKUP_PROBLEMS } }),
 
   // ── B13: bandwidth and the speed test ─────────────────────────────────────────────────────────────────────────
   'DW-0785': pane('bandwidth', { props: { hover: 44 } }),

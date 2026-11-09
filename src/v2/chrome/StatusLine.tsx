@@ -4,7 +4,8 @@
 import { useEffect, useState } from 'react'
 import type { SyncSummary } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type TransferRow } from '../source/extras'
-import { fmtSize } from '../sections/files/model'
+import { actionFailure, fmtSize } from '../sections/files/model'
+import { command } from '../../desktopApi'
 import { mergeMoving } from '../sections/files/liveExtras'
 import { useStatusNote } from './statusNote'
 
@@ -79,16 +80,27 @@ export function statusWords(sync: SyncSummary, o: { signedOut?: boolean; uploadi
 export function StatusLine({ sync }: { sync: SyncSummary | null }) {
   const { signedOut, listing } = useEngine(sync)
   const uploading = useUploading(sync)
+  const [refused, setRefused] = useState<string | null>(null)
+  useEffect(() => {
+    if (!refused) return
+    const t = setTimeout(() => setRefused(null), 5000)
+    return () => clearTimeout(t)
+  }, [refused])
   // A section's own words (a save, DW-1524) stand in for the sync words, never for Signed out or Offline.
   const note = useStatusNote()
   if (!sync) return <footer className="h-7 flex-none border-t border-line bg-paper-2" />
-  // B02b: the status line opens the Uploads panel over it (DW-0427); Files listens for the event.
+  // While files upload the line opens the Uploads panel over it (DW-0426 → DW-0427, B02b; Files listens for the event);
+  // otherwise it shows the b's flyout (DW-0401#10 → DW-1201, M3e: `show_tray_flyout`). A refusal shows in the line.
+  const open = () => {
+    if (uploading) { window.dispatchEvent(new CustomEvent('bb:uploads-open')); return }
+    void command<void>('show_tray_flyout').then((r) => setRefused(r.ok ? null : actionFailure('show the flyout', r.unsupported ? 'unsupported' : 'failed').text))
+  }
   return (
     <footer role="status" className="flex h-7 flex-none items-center border-t border-line bg-paper-2 px-3 text-[12px] text-ink-3">
-      <button type="button" data-open-uploads onClick={() => window.dispatchEvent(new CustomEvent('bb:uploads-open'))}
+      <button type="button" data-open-uploads data-status-line onClick={open}
         className="inline-flex items-center gap-1.5 rounded-sm text-left hover:text-ink focus-visible:outline-2 focus-visible:outline-ink-3">
         {signedOut && <span aria-hidden="true" className="h-1.5 w-1.5 flex-none rounded-full bg-red" />}
-        {note && !signedOut && sync.phase !== 'offline' ? note : statusWords(sync, { signedOut, uploading, listing })}
+        {refused ?? (note && !signedOut && sync.phase !== 'offline' ? note : statusWords(sync, { signedOut, uploading, listing }))}
       </button>
     </footer>
   )

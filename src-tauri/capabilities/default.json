@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Beebeeb desktop windows. Targets the compact settings/app window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers the Windows onboarding webview (`windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work in all webviews. The macOS Beebeeb window (`main`) has its own macOS-only capability, `macos-main.json`; the retired macOS Settings window (`macos-settings`) is granted nowhere (task 1683 slice 1). Desktop v2: the main-app window draws its own caption bar (decorations off), so it also needs `core:window:allow-toggle-maximize` (the maximize button and a double-click on the bar).",
+  "description": "Default capability for the Beebeeb desktop windows. Targets the compact settings/app window, the first-launch onboarding window, the Windows main app window (`main-app`), and all on-demand conflict-resolution windows (label `conflict-<file_id>`, opened by the `open_conflict_window` IPC). Also covers the Windows onboarding webview (`windows-onboarding`) and the tray popup (`tray`) so that event listeners and IPC commands work in all webviews. The macOS Beebeeb window (`main`) has its own macOS-only capability, `macos-main.json`; the retired macOS Settings window (`macos-settings`) is granted nowhere (task 1683 slice 1). Desktop v2: the main-app window draws its own caption bar (decorations off), so it also needs `core:window:allow-toggle-maximize` (the maximize button and a double-click on the bar). Desktop v2 M3e: Settings › Notifications' \"Open Windows Settings\" (DW-0750b) opens Windows' own notification page, `ms-settings:notifications`, which the opener's default web and mail addresses don't cover: that one address only.",
   "windows": [
     "settings",
     "onboarding",
@@ -17,6 +17,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "ms-settings:notifications" }]
+    },
     "window-state:default",
     "updater:default",
     "autostart:default",

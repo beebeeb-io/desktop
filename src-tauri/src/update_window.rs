@@ -628,6 +628,28 @@ pub(super) fn windows_tray_flyout_position(
     }
 }
 
+/// Where the flyout opens when it is not opened from the b (desktop v2: the main window's status line, DW-0401#10 →
+/// DW-1201): the bottom-right corner of the work area (the display without its taskbar) of the display the window is
+/// on, where Windows 11 opens its own Quick Settings. Kept inside the work area on a display smaller than the flyout.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+pub(super) fn windows_flyout_position_in_work_area(
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+    scale_factor: f64,
+) -> tauri::PhysicalPosition<i32> {
+    let scale_factor = valid_windows_tray_scale_factor(scale_factor);
+    let physical_width = (WINDOWS_TRAY_FLYOUT_WIDTH as f64 * scale_factor).round() as i32;
+    let physical_height = (WINDOWS_TRAY_FLYOUT_HEIGHT as f64 * scale_factor).round() as i32;
+    let right = work_x.saturating_add(i32::try_from(work_width).unwrap_or(i32::MAX));
+    let bottom = work_y.saturating_add(i32::try_from(work_height).unwrap_or(i32::MAX));
+    tauri::PhysicalPosition {
+        x: right.saturating_sub(physical_width).max(work_x),
+        y: bottom.saturating_sub(physical_height).max(work_y),
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(super) fn valid_windows_tray_scale_factor(scale_factor: f64) -> f64 {
     if scale_factor.is_finite() && scale_factor > 0.0 {
