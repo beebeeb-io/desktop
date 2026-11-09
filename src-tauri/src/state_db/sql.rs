@@ -191,7 +191,8 @@ pub(super) fn now_secs() -> i64 {
 }
 
 /// The `operation_queue` columns [`pending_operation_from_row`] reads, in order.
-pub(super) const PENDING_OPERATION_COLUMNS: &str = "op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
+pub(super) const PENDING_OPERATION_COLUMNS: &str =
+    "op_id, kind, file_id, parent_id, target_path, metadata_json, payload_path,
     base_version, base_object_version_id, attempts, max_attempts, next_retry_at,
     last_error, backup_source_key, created_at, updated_at";
 
@@ -237,7 +238,8 @@ pub(super) const PENDING_LOCAL_RENAME_SQL: &str = "kind IN ('rename_file', 'move
        AND claim_id IS NULL AND attempts < max_attempts AND paused_reason IS NULL";
 
 /// The columns [`file_overview_row`] reads.
-pub(super) const FILE_OVERVIEW_COLUMNS: &str = "file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+pub(super) const FILE_OVERVIEW_COLUMNS: &str =
+    "file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
      parent_id, item_kind, pin_state, inherited_pin_state";
 
 /// A [`FILE_OVERVIEW_COLUMNS`] row and whether it is pinned.
@@ -267,7 +269,8 @@ pub(super) fn file_overview_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Fi
 /// Task 2229: the row at a path. The Windows enumeration scan runs this for every file and
 /// folder on disk on every pass, so it must reach the row through `idx_files_path`: a full read
 /// of `files` per lookup burned a core on a 43k-file tree (0.8.13 to 0.8.15).
-pub(super) const FILE_BY_PATH_SQL: &str = "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+pub(super) const FILE_BY_PATH_SQL: &str =
+    "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
             parent_id, item_kind
      FROM files WHERE path = ?1";
 
@@ -365,7 +368,9 @@ pub(super) const LIST_HELD_EDITS_SQL: &str = "SELECT held.file_id, file.path, he
 
 pub(super) fn decidable_parked_conn(conn: &Connection, op_id: &str) -> Result<bool> {
     conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM operation_queue AS this WHERE this.op_id = ?1 AND {DECIDABLE_PARKED_SQL})"),
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue AS this WHERE this.op_id = ?1 AND {DECIDABLE_PARKED_SQL})"
+        ),
         params![op_id],
         |row| row.get(0),
     )
@@ -467,7 +472,8 @@ pub(super) const FOLD_AGREED_INTO_CANDIDATE: &str = "
         ELSE MIN(fetched_min_version, local_base_version) END,
     local_hash = NULL";
 
-pub(super) const KEPT_COPY_COLUMNS: &str = "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at";
+pub(super) const KEPT_COPY_COLUMNS: &str =
+    "id, original_file_id, original_path, copy_path, copied_hash, original_removed, reason, kept_at";
 
 pub(super) fn kept_copy_from_row(row: &rusqlite::Row<'_>) -> Result<KeptCopy> {
     Ok(KeptCopy {
@@ -485,7 +491,10 @@ pub(super) fn kept_copy_from_row(row: &rusqlite::Row<'_>) -> Result<KeptCopy> {
 /// [`StateDb::poison_local_content`] on an existing connection.
 pub(super) fn poison_local_content_conn(conn: &Connection, file_id: &str) -> Result<()> {
     fold_agreed_into_candidate_conn(conn, file_id)?;
-    conn.execute("UPDATE files SET fetched_hash = NULL WHERE file_id = ?1", params![file_id])?;
+    conn.execute(
+        "UPDATE files SET fetched_hash = NULL WHERE file_id = ?1",
+        params![file_id],
+    )?;
     Ok(())
 }
 
@@ -558,7 +567,6 @@ pub(crate) fn tree_holds_a_file(dir: &Path) -> bool {
     }
     false
 }
-
 
 /// One injected landing failure, if this thread has one left.
 #[cfg(test)]
@@ -803,11 +811,15 @@ pub(super) fn write_owner(conn: &Connection, owner: &crate::account_binding::Ide
 /// owner record, the device keys (the Finder removal debt, the domain-gone mark, closed Finder accepts) and the
 /// custody memory (`shared_folder_custody_seen:%`, task 2279 N1). That memory is device-wide and survives every
 /// local-state wipe, so counting it would keep `has_account_data` true after a completed sign-out — permanently,
-/// because the set only grows — and the next engine start would want a reset or refuse on Windows.
+/// because the set only grows — and the next engine start would want a reset or refuse on Windows. B05e's share
+/// rows (`share_marks::SHARE_TRUST_ROWS`) survive a sign-out for the same reason and are not counted either.
 pub(super) fn account_rows(conn: &Connection) -> Result<i64> {
     let mut rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sync_state
-         WHERE key NOT IN (?1, ?2, ?3, ?4, ?5) AND key NOT LIKE 'shared_folder_custody_seen:%'",
+        &format!(
+            "SELECT COUNT(*) FROM sync_state
+             WHERE key NOT IN (?1, ?2, ?3, ?4, ?5) AND key NOT LIKE 'shared_folder_custody_seen:%'{}",
+            super::share_marks::keep_share_trust_rows_sql()
+        ),
         params![
             OWNER_USER_ID_KEY,
             OWNER_EMAIL_KEY,

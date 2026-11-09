@@ -3,10 +3,10 @@
 //! here: an incoming item's name is opened with core's `share_flow::open_member_file_key`, and
 //! nothing that carries a key, a token or a link fragment is returned to the web view.
 //! Kept `unsupported` (named in the PR): `share_link_update` (the server has no route that changes a
-//! link's expiry or passphrase), `share_safety_number` and `share_mark_compared` (neither core nor
-//! the server has a safety number), and `file_request_remove` (no server route).
+//! link's expiry or passphrase) and `file_request_remove` (no server route). The safety number, the
+//! "compared" mark and the access PATCH through core are B05e (`super::safety`).
 use base64::Engine as _;
-use beebeeb_core::auth_flow::{HttpRequest, Method, RequestAuth};
+use beebeeb_core::auth_flow::{HttpRequest, Method};
 use beebeeb_core::share_flow::{ShareFlowError, request::FILE_REQUESTS_PATH};
 use serde_json::{Value, json};
 use tauri::State;
@@ -17,7 +17,7 @@ use crate::AppState;
 use crate::auth_v2::transport;
 
 const INCOMING: &str = "/api/v1/shares/invites/incoming";
-const SENT: &str = "/api/v1/shares/invites/sent";
+pub(super) const SENT: &str = "/api/v1/shares/invites/sent";
 const MINE: &str = "/api/v1/shares/mine";
 
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -30,20 +30,10 @@ pub(super) fn invite_path(id: &str, tail: &str) -> Answer<String> {
 }
 
 pub(super) fn post(path: String) -> HttpRequest {
-    HttpRequest {
-        method: Method::Post,
-        path,
-        body: None,
-        auth: RequestAuth::Session,
-        confirm_token: None,
-    }
+    super::flows::request(Method::Post, path, None)
 }
 
-/// Access as the window names it, to the grant the server enforces (`read` | `write`).
-pub(super) fn permission_body(can_edit: bool) -> Value {
-    json!({ "permission": if can_edit { "write" } else { "read" } })
-}
-
+/// The window's label for the grant the server enforces (`read` | `write`).
 fn access_label(permission: &str) -> &'static str {
     if permission == "read" { "Can view" } else { "Can edit" }
 }
@@ -123,7 +113,7 @@ pub(super) fn member_row(invite: &Value) -> Option<Value> {
     }))
 }
 
-async fn fetch(u: &Unlocked, path: &str) -> Answer<Value> {
+pub(super) async fn fetch(u: &Unlocked, path: &str) -> Answer<Value> {
     let client = transport::client()?;
     let resp = send(&client, u, get(path.to_string())).await?;
     if !resp.ok() {
@@ -212,11 +202,12 @@ pub(crate) async fn share_people(state: State<'_, AppState>, item_id: String) ->
         .flatten()
         .unwrap_or_default();
     let mut members = vec![json!({ "id": "owner", "name": me, "email": me, "you": true, "owner": true })];
-    members.extend(
-        list(&sent, "invites")
-            .filter(|i| text(i, "file_id") == Some(item.as_str()))
-            .filter_map(member_row),
-    );
+    let (invites, mut rows): (Vec<&Value>, Vec<Value>) = list(&sent, "invites")
+        .filter(|i| text(i, "file_id") == Some(item.as_str()))
+        .filter_map(|i| member_row(i).map(|row| (i, row)))
+        .unzip();
+    super::safety::annotate_members(&u, &sent, &invites, &mut rows).await;
+    members.extend(rows);
     Ok(members)
 }
 
@@ -226,21 +217,13 @@ pub(crate) async fn share_set_access(
     state: State<'_, AppState>,
     item_id: String,
     member_id: String,
-    can_edit: bool,
+    permission: String,
 ) -> Answer<()> {
     let u = unlocked(&state)?;
     self::item_id(&item_id)?;
-    let path = invite_path(&member_id, "")?;
-    let url = format!("{}{path}", crate::runner::api_base_url());
-    let token = u.session_token();
-    let resp = transport::client()?
-        .patch(url)
-        .bearer_auth(token.as_str())
-        .json(&permission_body(can_edit))
-        .send()
-        .await
-        .map_err(|_| transport::OFFLINE.to_string())?;
-    match resp.status().as_u16() {
+    let req = super::safety::set_access_request(&member_id, &permission)?;
+    let resp = send(&transport::client()?, &u, req).await?;
+    match resp.status {
         200..=299 => Ok(()),
         404 => Err("not-found".into()),
         401 | 403 => Err("signed-out".into()),
@@ -261,7 +244,5 @@ macro_rules! not_yet {
 
 not_yet! {
     fn share_link_update(item_id: String, expires_days: Option<u32>, set_expiry: bool, password: Option<String>, set_password: bool) -> ();
-    fn share_safety_number(member_id: String) -> Value;
-    fn share_mark_compared(member_id: String, matched: bool) -> ();
     fn file_request_remove(id: String) -> ();
 }

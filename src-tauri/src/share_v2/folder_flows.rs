@@ -6,7 +6,7 @@
 //!   goes in, and every id the flow asks to remember is written BEFORE its request is sent.
 //! - `share_link_copy` on a folder rebuilds the owner's live folder link, else runs
 //!   `FolderShare::link`; on several items it makes one bundle link.
-use beebeeb_core::auth_flow::HttpRequest;
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::share_flow::{
     ShareFlowError,
     bundle::BundleItem,
@@ -16,7 +16,7 @@ use beebeeb_core::share_flow::{
     },
     folder_keys::CustodyMemory,
     link::{CreateLink, LinkOptions},
-    member::InviteOutcome,
+    member::{InviteOutcome, PeerKeyExpectation},
 };
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -71,7 +71,19 @@ async fn drive_folder(
     loop {
         match step {
             FolderStep::Send(s) => {
-                let resp = send_folder(client, u, s).await?;
+                // A request that got no answer after the approval was sent ends as `AwaitingApproval`, so the
+                // claimed invite is withdrawn (`flows::unanswered_invite`); otherwise the transport's reason.
+                let resp = match send_folder(client, u, s).await {
+                    Ok(resp) => resp,
+                    Err(reason) => {
+                        return match flow.on_response(HttpResponse::new(0, Value::Null)) {
+                            Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => {
+                                Ok(FolderStep::Done(outcome))
+                            }
+                            _ => Err(reason),
+                        };
+                    }
+                };
                 step = flow.on_response(resp).map_err(flow_reason)?;
             }
             done => return Ok(done),
@@ -79,18 +91,24 @@ async fn drive_folder(
     }
 }
 
-pub(super) async fn folder_invite(u: &Unlocked, id: &str, email: &str) -> Answer<Value> {
+pub(super) async fn folder_invite(
+    u: &Unlocked,
+    own: &str,
+    id: &str,
+    email: &str,
+    peer_key: PeerKeyExpectation,
+) -> Answer<Value> {
     let client = crate::auth_v2::transport::client()?;
     let input = FolderInviteInput {
         folder_id: id,
         email,
         shared_folders_write: shared_folders_write(&client, u).await?,
         custody: custody_memory()?,
+        peer_key,
     };
     let (flow, first) = FolderShare::invite(input, &u.master).map_err(flow_reason)?;
     match drive_folder(&client, u, flow, first).await? {
-        FolderStep::Done(InviteOutcome::Shared { .. }) => Ok(serde_json::json!({ "status": "shared" })),
-        FolderStep::Done(_) => Ok(serde_json::json!({ "status": "invited" })),
+        FolderStep::Done(outcome) => super::safety::finish_invite(u, own, &outcome).await,
         _ => Err(flow_reason(ShareFlowError::WrongState)),
     }
 }

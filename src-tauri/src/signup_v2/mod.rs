@@ -164,10 +164,16 @@ pub(crate) fn auth_signup_password_meter(password: String) -> Result<PasswordVie
 }
 
 async fn breach_answer(req: beebeeb_core::auth_flow::HttpRequest) -> (Option<u16>, Zeroizing<String>) {
+    breach_answer_at(&req.path).await
+}
+
+/// The breach endpoint's answer for one prefix path (no session: the endpoint is public). `None` is a network
+/// failure; a body over 256 KiB reads as empty. Shared with the password change (`account_v2`).
+pub(crate) async fn breach_answer_at(path: &str) -> (Option<u16>, Zeroizing<String>) {
     let Ok(client) = transport::client() else {
         return (None, Zeroizing::new(String::new()));
     };
-    let url = format!("{}{}", crate::runner::api_base_url(), req.path);
+    let url = format!("{}{}", crate::runner::api_base_url(), path);
     match client.get(&url).send().await {
         Ok(r) => {
             let status = r.status().as_u16();
