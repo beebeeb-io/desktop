@@ -6,7 +6,7 @@ import { Icon } from '@beebeeb/shared/design'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { run, errorText, copyFor60s, COPY_DONE, COPY_FAILED, type AccountState } from './data'
 import type { Passkey } from './types'
-import { Btn, BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, TextInput, ago, day, useEscBack } from './ui'
+import { Btn, BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, ago, day, useEscBack } from './ui'
 
 type Set = (f: (s: AccountState) => AccountState) => void
 
@@ -88,30 +88,63 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
   )
 }
 
-export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dialog }: {
+export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dialog, read, onRetry }: {
   /** `onMove(code)`: the current code the person typed, for the new set-up's step-up (DW-A71 → A69). */
-  state: AccountState; onBack: () => void; onNewCodes: (codes: string[]) => void; onMove: (code: string) => void; onTurnedOff: () => void; dialog?: 'off' | 'new-codes' | 'move'
+  state: AccountState
+  onBack: () => void
+  onNewCodes: (codes: string[]) => void
+  onMove: (code: string) => void
+  onTurnedOff: () => void
+  dialog?: 'off' | 'new-codes' | 'move'
+  /** The authenticator read. Absent: `state.totp`. A failed read offers no backup-code action. */
+  read?: { ok: true; value: { on: boolean; addedAt: string | null; lastUsedAt: string | null; codesLeft: number | null; codesTotal: number | null } } | { ok: false; code: string }
+  onRetry?: () => void
 }) {
-  const [ask, setAsk] = useState<'off' | 'new-codes' | 'move' | null>(dialog ?? null)
+  const facts = read ? (read.ok ? read.value : null) : {
+    on: state.totp.on,
+    addedAt: state.totp.addedAt,
+    lastUsedAt: state.totp.lastUsedAt,
+    codesLeft: state.totp.codesLeft,
+    // The default total is not a count the server reported.
+    codesTotal: state.totp.codesLeft == null ? null : state.totp.codesTotal,
+  }
+  const [ask, setAsk] = useState<'off' | 'new-codes' | 'move' | null>(facts?.on ? (dialog ?? null) : null)
   useEscBack(onBack, !ask)
-  const t = state.totp
-  const low = t.codesLeft != null && t.codesLeft <= 2
+  if (read && !read.ok) {
+    return (
+      <Page title="Two-factor authentication" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
+        <p role="alert" className="text-[13px] text-red">{errorText(read.code)}</p>
+        <div><Btn onClick={onRetry}>Try again</Btn></div>
+      </Page>
+    )
+  }
+  if (!facts || !facts.on) {
+    return (
+      <Page title="Two-factor authentication" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
+        <Group>
+          <Row label="Authenticator app" value="Off" />
+        </Group>
+      </Page>
+    )
+  }
+  const low = facts.codesLeft != null && facts.codesLeft <= 2
+  const codes = facts.codesLeft == null ? 'Not reported' : facts.codesTotal == null ? String(facts.codesLeft) : `${facts.codesLeft} of ${facts.codesTotal}`
   return (
     <Page title="Two-factor authentication" back={<BackLink label="Sign-in and security" onBack={onBack} />}
       action={<Pill tone="green">Two-factor on</Pill>}>
       <Group>
-        <Row label="Authenticator app" sub={t.addedAt ? `Added ${day(t.addedAt)} · last used ${ago(t.lastUsedAt)}` : 'On'} value="On" />
+        <Row label="Authenticator app" sub={`Added ${facts.addedAt ? day(facts.addedAt) : 'Not reported'} · Last used ${facts.lastUsedAt ? ago(facts.lastUsedAt) : 'Not reported'}`} value="On" />
       </Group>
       <Group title="Backup codes" note="Each backup code works once.">
         <Row label={<span className={low ? 'text-red' : undefined}>Codes left</span>} sub={low ? <span className="text-red">Make new codes before you run out.</span> : undefined}
-          value={t.codesLeft != null ? <span className={`font-mono ${low ? 'text-red' : ''}`}>{t.codesLeft} of {t.codesTotal}</span> : undefined} />
+          value={facts.codesLeft == null ? 'Not reported' : <span className={`font-mono ${low ? 'text-red' : ''}`}>{codes}</span>} />
         <Row label="Make new backup codes" sub="The old codes stop working" onClick={() => setAsk('new-codes')} />
       </Group>
       <Group note="Without your authenticator you can still get in with a backup code, another signed-in device, or your 12 words.">
         <Row label="Move to a new authenticator" onClick={() => setAsk('move')} />
         <Row label={<span className="text-red">Turn off two-factor</span>} onClick={() => setAsk('off')} />
       </Group>
-      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={(c, codes) => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(c); else onNewCodes(codes ?? []) }} /> : null}
+      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={(c, codesBack) => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(c); else onNewCodes(codesBack ?? []) }} /> : null}
     </Page>
   )
 }
@@ -125,12 +158,12 @@ function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'mov
     setCode('')
     if (kind === 'off') {
       const r = await run('account_totp_disable', { code: c })
-      if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
+      if (!r.ok) return setError(errorText(r.code))
     }
     if (kind === 'new-codes') {
       // Server #422: new codes with the current code; the authenticator stays (no new set-up).
       const r = await run<{ backup_codes: string[] }>('account_backup_codes_regenerate', { code: c })
-      if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
+      if (!r.ok) return setError(errorText(r.code))
       return onOk(c, r.value.backup_codes)
     }
     onOk(c)
@@ -143,7 +176,7 @@ function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'mov
           aria-label={kind === 'off' ? 'Turn off two-factor, destructive' : undefined}>{kind === 'off' ? 'Turn off' : 'Continue'}</Btn></>}>
       <p className="mb-3">{kind === 'off'
         ? 'Enter your current authenticator code to turn off 2FA. Signing in then needs only your password, and your other devices get an alert.'
-        : kind === 'move' ? 'Enter the current code from your authenticator. Then scan a new QR code.' : 'Enter the current code from your authenticator. You get 8 new codes and the old ones stop working.'}</p>
+        : kind === 'move' ? 'Enter the current code from your authenticator. Then scan a new QR code.' : 'Enter the current code from your authenticator. You get new codes and the old ones stop working.'}</p>
       <CodeBoxes length={6} label="6-digit code" value={code} onChange={(v) => { setCode(v); setError(null) }} error={!!error} focus />
       {error ? <p role="alert" className="mt-2 text-[12px] text-red">{error}</p> : null}
       {kind === 'off' ? <p className="mt-3 text-[12px] text-ink-3">Lost your authenticator? Don’t turn it off here: sign in with a backup code, another device or your 12 words first.</p> : null}
@@ -153,18 +186,43 @@ function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'mov
 
 // ── Passkeys ────────────────────────────────────────────────────────────────
 
-export function Passkeys({ state, setState, onBack, menuOn, removing: initialRemoving }: { state: AccountState; setState: Set; onBack: () => void; menuOn?: string; removing?: string }) {
-  const [menu, setMenu] = useState<string | null>(menuOn ?? null)
-  const [removing, setRemoving] = useState<Passkey | null>(() => state.passkeys.find((p) => p.name === initialRemoving) ?? null)
-  const [renaming, setRenaming] = useState<Passkey | null>(null)
+/** What the list actually said about unlocking. `null` is not "signs in only". */
+function passkeyCapability(prf: boolean | null | undefined): string {
+  if (prf === true) return 'Signs in and unlocks your data'
+  if (prf === false) return 'Signs in only'
+  return 'Not reported'
+}
+
+export function Passkeys({ state, setState, onBack, menuOn, removing: initialRemoving, read, onRetry }: {
+  state: AccountState
+  setState: Set
+  onBack: () => void
+  menuOn?: string
+  removing?: string
+  /** The passkey list read. Absent: `state.passkeys`. A name that is not in the list cannot be removed. */
+  read?: { ok: true; value: Passkey[] } | { ok: false; code: string }
+  onRetry?: () => void
+}) {
+  const list = read ? (read.ok ? read.value : []) : state.passkeys
+  const [menu, setMenu] = useState<string | null>(list.some((p) => p.id === menuOn) ? (menuOn ?? null) : null)
+  const [removing, setRemoving] = useState<Passkey | null>(() => list.find((p) => p.name === initialRemoving) ?? null)
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  useEscBack(onBack, !menu && !removing && !adding && !renaming)
-  const list = state.passkeys
+  useEscBack(onBack, !menu && !removing && !adding)
+  if (read && !read.ok) {
+    return (
+      <Page title="Passkeys" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
+        <p role="alert" className="text-[13px] text-red">{errorText(read.code)}</p>
+        <div><Btn onClick={onRetry}>Try again</Btn></div>
+      </Page>
+    )
+  }
+  const count = `${list.length} ${list.length === 1 ? 'passkey' : 'passkeys'}`
   return (
     <Page title="Passkeys" back={<BackLink label="Sign-in and security" onBack={onBack} />}
       sub="An extra way to confirm it’s you and to unlock your data on a new device. It doesn’t replace your 12 words."
       action={list.length ? <Btn variant="amber" onClick={() => setAdding(true)}>Add a passkey</Btn> : undefined}>
+      <p className="text-[13px] text-ink">{count}</p>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
       {list.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-[12px] border border-line bg-paper px-6 py-10 text-center" data-testid="passkeys-empty">
@@ -175,32 +233,42 @@ export function Passkeys({ state, setState, onBack, menuOn, removing: initialRem
         </div>
       ) : (
         <Group note="Whether a passkey can unlock your data depends on the password manager that keeps it.">
-          {list.map((p) => (
-            <div key={p.id} className="relative flex min-h-[44px] items-center gap-3 px-4 py-2" data-testid="passkey-row"
-              onContextMenu={(e) => { e.preventDefault(); setMenu(p.id) }}
-              aria-label={`${p.name}, added ${day(p.created_at)}, ${p.prf ? 'can unlock your data' : 'signs in only'}`}>
-              <Icon name="key" size={15} className="shrink-0 text-ink-3" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] leading-5 text-ink">{p.name}</div>
-                <div className="text-[12px] leading-4 text-ink-3">Added {day(p.created_at)}{p.last_used_at ? ` · last used ${ago(p.last_used_at)}` : ''} · {p.prf ? 'Signs in and unlocks your data' : 'Signs in only'}</div>
+          {list.map((p) => {
+            const capability = passkeyCapability(p.prf)
+            const addedOn = p.created_at ? day(p.created_at) : 'Not reported'
+            const lastUsed = p.last_used_at ? ago(p.last_used_at) : 'Not reported'
+            return (
+              <div key={p.id} className="relative flex min-h-[44px] items-center gap-3 px-4 py-2" data-testid="passkey-row"
+                onContextMenu={(e) => { e.preventDefault(); setMenu(p.id) }}
+                aria-label={`${p.name}, added ${addedOn}, last used ${lastUsed}, ${capability}`}>
+                <Icon name="key" size={15} className="shrink-0 text-ink-3" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] leading-5 text-ink">{p.name}</div>
+                  <div className="text-[12px] leading-4 text-ink-3">Added {addedOn} · Last used {lastUsed} · {capability}</div>
+                </div>
+                <button type="button" aria-label={`More for ${p.name}`} aria-haspopup="menu" onClick={() => setMenu(menu === p.id ? null : p.id)}
+                  className="grid h-7 w-7 place-items-center rounded-md text-ink-3 hover:bg-paper-2"><Icon name="more" size={15} /></button>
+                {menu === p.id ? <PasskeyMenu onClose={() => setMenu(null)} onRemove={() => { setMenu(null); setRemoving(p) }} /> : null}
               </div>
-              <button type="button" aria-label={`More for ${p.name}`} aria-haspopup="menu" onClick={() => setMenu(menu === p.id ? null : p.id)}
-                className="grid h-7 w-7 place-items-center rounded-md text-ink-3 hover:bg-paper-2"><Icon name="more" size={15} /></button>
-              {menu === p.id ? <PasskeyMenu onClose={() => setMenu(null)} onRename={() => { setMenu(null); setRenaming(p) }} onRemove={() => { setMenu(null); setRemoving(p) }} /> : null}
-            </div>
-          ))}
+            )
+          })}
         </Group>
       )}
-      {adding ? <AddPasskey onCancel={() => setAdding(false)} onAdded={(p) => { setAdding(false); setState((s) => ({ ...s, passkeys: [...s.passkeys, p] })) }} /> : null}
-      {renaming ? <RenamePasskey passkey={renaming} onCancel={() => setRenaming(null)} onDone={(name) => { const id = renaming.id; setRenaming(null); setState((s) => ({ ...s, passkeys: s.passkeys.map((p) => (p.id === id ? { ...p, name } : p)) })) }} /> : null}
-      {removing ? <RemovePasskey passkey={removing} others={list.filter((p) => p.id !== removing.id)} onCancel={() => setRemoving(null)}
+      {adding ? <AddPasskey onCancel={() => setAdding(false)} onAdded={() => {
+        setAdding(false)
+        void run<Passkey[]>('account_passkeys_list', {}).then((listed) => {
+          if (!listed.ok) { setError(errorText(listed.code)); return }
+          setState((s) => ({ ...s, passkeys: listed.value }))
+        })
+      }} /> : null}
+      {removing && list.some((p) => p.id === removing.id) ? <RemovePasskey passkey={removing} others={list.filter((p) => p.id !== removing.id)} onCancel={() => setRemoving(null)}
         onRemoved={() => { const id = removing.id; setRemoving(null); setState((s) => ({ ...s, passkeys: s.passkeys.filter((p) => p.id !== id) })) }}
-        onError={() => { setRemoving(null); setError('Failed to remove passkey. Nothing was changed.') }} /> : null}
+        onError={(code) => { setRemoving(null); setError(errorText(code)) }} /> : null}
     </Page>
   )
 }
 
-function PasskeyMenu({ onClose, onRename, onRemove }: { onClose: () => void; onRename: () => void; onRemove: () => void }) {
+function PasskeyMenu({ onClose, onRemove }: { onClose: () => void; onRemove: () => void }) {
   const ref = useRef<HTMLUListElement>(null)
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('button')?.focus()
@@ -213,13 +281,12 @@ function PasskeyMenu({ onClose, onRename, onRemove }: { onClose: () => void; onR
   const item = 'flex w-full px-3 py-1.5 text-left text-[13px] hover:bg-paper-2'
   return (
     <ul ref={ref} role="menu" className="absolute right-4 top-10 z-30 min-w-[140px] rounded-lg border border-line bg-paper py-1 shadow-lg" data-testid="passkey-menu">
-      <li role="none"><button type="button" role="menuitem" className={`${item} text-ink`} onClick={onRename}>Rename</button></li>
       <li role="none"><button type="button" role="menuitem" className={`${item} text-red`} onClick={onRemove} aria-label="Remove, destructive">Remove</button></li>
     </ul>
   )
 }
 
-function AddPasskey({ onCancel, onAdded }: { onCancel: () => void; onAdded: (p: Passkey) => void }) {
+function AddPasskey({ onCancel, onAdded }: { onCancel: () => void; onAdded: () => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const add = async () => {
@@ -228,7 +295,7 @@ function AddPasskey({ onCancel, onAdded }: { onCancel: () => void; onAdded: (p: 
     const name = 'Windows Hello'
     const r = await run<{ id: string }>('account_passkeys_add', { name, password: pw })
     if (!r.ok) return setError(errorText(r.code))
-    onAdded({ id: r.value.id, name, created_at: new Date().toISOString(), last_used_at: null, prf: true })
+    onAdded()
   }
   return (
     <Dialog labelId="pk-add-h" title="Add a passkey" onCancel={onCancel}
@@ -239,18 +306,7 @@ function AddPasskey({ onCancel, onAdded }: { onCancel: () => void; onAdded: (p: 
   )
 }
 
-function RenamePasskey({ passkey, onCancel, onDone }: { passkey: Passkey; onCancel: () => void; onDone: (name: string) => void }) {
-  const [name, setName] = useState(passkey.name)
-  return (
-    <Dialog labelId="pk-rename-h" title="Rename passkey" onCancel={onCancel}
-      actions={<><Btn onClick={onCancel}>Cancel</Btn><Btn variant="amber" disabled={!name.trim()} onClick={() => onDone(name.trim())}>Save</Btn></>}>
-      <p className="mb-3">The name is Beebeeb’s only: your password manager keeps its own.</p>
-      <Field label="Name"><TextInput label="Name" value={name} onChange={setName} focus /></Field>
-    </Dialog>
-  )
-}
-
-function RemovePasskey({ passkey, others, onCancel, onRemoved, onError }: { passkey: Passkey; others: Passkey[]; onCancel: () => void; onRemoved: () => void; onError: () => void }) {
+function RemovePasskey({ passkey, others, onCancel, onRemoved, onError }: { passkey: Passkey; others: Passkey[]; onCancel: () => void; onRemoved: () => void; onError: (code: string) => void }) {
   const [password, setPassword] = useState('')
   const lastUnlock = passkey.prf && !others.some((p) => p.prf)
   const remove = async () => {
@@ -258,7 +314,7 @@ function RemovePasskey({ passkey, others, onCancel, onRemoved, onError }: { pass
     setPassword('')
     const r = await run('account_passkeys_remove', { id: passkey.id, password: pw })
     if (r.ok) onRemoved()
-    else onError()
+    else onError(r.code)
   }
   return (
     <Dialog labelId="pk-remove-h" title={`Remove ${passkey.name}?`} onCancel={onCancel}
@@ -279,14 +335,33 @@ function period(iso: string, now: number): string {
   return days < 1 ? 'Today' : days < 7 ? 'This week' : days < 31 ? 'This month' : 'Earlier'
 }
 
-export function Activity({ state, setState, onBack, onPassword, onDevices, asking, now }: {
-  state: AccountState; setState: Set; onBack: () => void; onPassword: () => void; onDevices: () => void; asking?: boolean; now: number
+export function Activity({ state, setState, onBack, onPassword, onDevices, asking, now, read, onRetry }: {
+  state: AccountState
+  setState: Set
+  onBack: () => void
+  onPassword: () => void
+  onDevices: () => void
+  asking?: boolean
+  now: number
+  /** The logging read and its events. Absent: `state`. A failed read offers Try again and no switch. */
+  read?: { ok: true; value: { on: boolean; events: AccountState['activity'] } } | { ok: false; code: string }
+  onRetry?: () => void
 }) {
-  const [ask, setAsk] = useState(!!asking)
+  const reported = !read ? { on: state.activityLogging, events: state.activity } : read.ok ? read.value : null
+  const [ask, setAsk] = useState(!!asking && !!reported?.on)
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   useEscBack(onBack, !ask)
-  const on = state.activityLogging
+  if (read && !read.ok) {
+    return (
+      <Page title="Sign-in activity" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
+        <p role="alert" className="text-[13px] text-red">{errorText(read.code)}</p>
+        <div><Btn onClick={onRetry}>Try again</Btn></div>
+      </Page>
+    )
+  }
+  const shown = reported ?? { on: state.activityLogging, events: state.activity }
+  const on = shown.on
   const toggle = async (next: boolean) => {
     if (!next) return setAsk(true)
     const r = await run('account_set_activity_logging', { on: true, password: null })
@@ -298,11 +373,12 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
     setPassword('')
     const r = await run('account_set_activity_logging', { on: false, password: pw })
     setAsk(false)
-    if (r.ok) setState((s) => ({ ...s, activityLogging: false, activity: [] }))
+    if (r.ok) setState((s) => ({ ...s, activityLogging: false }))
     else setError(errorText(r.code))
   }
   const groups = new Map<string, typeof state.activity>()
-  for (const e of state.activity) groups.set(period(e.at, now), [...(groups.get(period(e.at, now)) ?? []), e])
+  const newest = [...shown.events].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+  for (const e of newest) groups.set(period(e.at, now), [...(groups.get(period(e.at, now)) ?? []), e])
   return (
     <Page title="Sign-in activity" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
@@ -327,7 +403,7 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
                 <div className="text-[13px] leading-5 text-ink">{e.what}</div>
                 <div className="font-mono text-[11px] leading-4 text-ink-3">
                   {new Date(e.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Amsterdam' })}
-                  {e.country ? ` · ${e.country}` : ''}{e.address ? ` · ${e.address}` : ''}
+                  {' · '}{e.country ? e.country : 'Not reported'}{e.address ? ` · ${e.address}` : ''}
                 </div>
               </div>
             ))}
