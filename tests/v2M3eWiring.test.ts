@@ -109,7 +109,7 @@ describe('a settings link never navigates the web view (DW-0712#0, DW-0739, DW-0
 describe('the flyout’s actions (B09)', () => {
   test('a refusal reads in the app’s one wording, never the host’s text', () => {
     expect(flyoutFailure('pause', { ok: false, reason: 'This action belongs to the menu-bar popover.', unsupported: false })).toBe('Couldn’t pause syncing.')
-    expect(flyoutFailure('settings', { ok: false, reason: 'x', unsupported: true })).toBe('Couldn’t open Settings. This isn’t available in this build yet.')
+    expect(flyoutFailure('settings', { ok: false, reason: 'x', unsupported: true })).toBe('Couldn’t open Settings. Not in this version.')
     expect(flyoutFailure('open', { ok: true, value: undefined })).toBeNull()
   })
   test('Sync anyway is refused, never a retry dressed up as it (DW-1222, blocked on metered detection)', async () => {
@@ -119,7 +119,7 @@ describe('the flyout’s actions (B09)', () => {
   })
   test('a refused action leaves the flyout open so its line can be read; a done one hides it', async () => {
     const refused = await runFlyoutCommand('unlock')
-    expect(flyoutFailure('unlock', refused)).toBe('Couldn’t open Beebeeb to unlock. This isn’t available in this build yet.')
+    expect(flyoutFailure('unlock', refused)).toBe('Couldn’t open Beebeeb to unlock. Not in this version.')
     expect(hid()).toBe(0)
     answers.popover_unlock = null
     expect((await runFlyoutCommand('unlock')).ok).toBe(true)

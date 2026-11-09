@@ -30,7 +30,7 @@ describe('Shared and Search › a failed open, Details or offline switch says wh
   test('each DriveSource code reads as Files reads it (files/model.ts actionFailure), never the host text', () => {
     const cases: [string, string][] = [
       ['offline', 'Couldn’t open it. Check your connection.'],
-      ['unsupported', 'Couldn’t open it. This isn’t available in this build yet.'],
+      ['unsupported', 'Couldn’t open it. Open it from File Explorer.'],
       ['not-found', 'Couldn’t open it.'],
       ['failed', 'Couldn’t open it.'],
     ]
