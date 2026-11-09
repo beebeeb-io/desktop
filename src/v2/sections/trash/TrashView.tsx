@@ -33,6 +33,12 @@ export interface TrashViewProps {
   onDelete?: () => void
   onPreview?: (entry: TrashEntry) => void
   onEmpty?: () => void
+  /** False while the first listing is still out. An empty list is not "nothing" until it has arrived. */
+  ready?: boolean
+  /** The listing failed and there is no list to show. */
+  failed?: boolean
+  onRetry?: () => void
+  onFiles?: () => void
 }
 
 export function TrashView(p: TrashViewProps) {
@@ -58,11 +64,21 @@ export function TrashView(p: TrashViewProps) {
         </div>
       )}
       {n === 0 ? (
-        <div data-empty="trash" className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
-          <div className="mb-1 grid h-16 w-16 place-items-center rounded-2xl border border-line bg-paper-2 text-ink-3"><Icon name="trash" size={26} /></div>
-          <h2 className="m-0 text-[15px] font-semibold text-ink">Trash is empty</h2>
-          <p className="m-0 max-w-[380px] text-[13px] leading-5 text-ink-2">Files you delete stay here until you delete them for good.</p>
-        </div>
+        p.ready === false ? (
+          <div role="status" className="flex flex-1 items-center justify-center text-[13px] text-ink-3">Loading</div>
+        ) : p.failed ? (
+          <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+            <h2 className="m-0 text-[15px] font-semibold text-ink">Couldn’t load the trash</h2>
+            <button type="button" className={BTN} onClick={p.onRetry}>Try again</button>
+          </div>
+        ) : (
+          <div data-empty="trash" className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
+            <div className="mb-1 grid h-16 w-16 place-items-center rounded-2xl border border-line bg-paper-2 text-ink-3"><Icon name="trash" size={26} /></div>
+            <h2 className="m-0 text-[15px] font-semibold text-ink">Nothing in the trash</h2>
+            <p className="m-0 max-w-[380px] text-[13px] leading-5 text-ink-2">Files you delete stay here until you delete them for good.</p>
+            <a href="?section=files" onClick={(e) => { e.preventDefault(); p.onFiles?.() }} className={`${BTN} no-underline`}>Back to Files</a>
+          </div>
+        )
       ) : (
         <div role="grid" tabIndex={0} aria-label="Trash" aria-multiselectable="true" data-list-count={n} className="flex min-h-0 flex-1 flex-col focus-visible:outline-none"
           onKeyDown={(e) => { if (e.key === 'Delete' && sel.size > 0) p.onDelete?.() }}>
