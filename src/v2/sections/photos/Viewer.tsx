@@ -6,6 +6,7 @@ import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS, IconButton } from '../files/ui'
 import { fmtExt, idOf, mb1, isVideo, takenLabel, type PhotoCell } from './model'
 import { useThumb } from './PhotosView'
+import { keyBelongsElsewhere } from '../open/model'
 
 export interface ViewerProps {
   cells: PhotoCell[]
@@ -59,6 +60,8 @@ export function PhotoViewer(p: ViewerProps) {
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if (e.key === 'Escape') p.onBack?.()
+      // The video's own controls take the arrows (seeking) while they have the focus; a dialog over the photo keeps its keys.
+      else if (keyBelongsElsewhere(e)) return
       else if (e.key === 'ArrowLeft') p.onStep?.(-1)
       else if (e.key === 'ArrowRight') p.onStep?.(1)
     }
@@ -170,7 +173,7 @@ function VideoPlayer({ id, poster, name, onOpen }: { id: string; poster: string 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       const v = ref.current
-      if (e.key !== ' ' || !v || (e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|BUTTON)$/.test(e.target.tagName))) return
+      if (e.key !== ' ' || !v || keyBelongsElsewhere(e)) return
       e.preventDefault()
       if (v.paused) void v.play().catch(() => {})
       else v.pause()

@@ -14,7 +14,7 @@ import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLarge
 import { useDriveExtras } from '../../source/extras'
 import { isTooLarge } from '../../source/desktop'
 import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
-import { fmtBytes, hhmm, languageLabel, lineCount, READ_ONLY_LINES, viewerKind } from './model'
+import { fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, versionNews, viewerKind } from './model'
 import * as player from './player'
 import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
 
@@ -28,7 +28,20 @@ type Phase = { name: 'loading'; item: DriveItem | null } | { name: 'ready'; item
 
 const TEXTUAL = new Set(['code', 'text', 'markdown', 'csv'])
 
+/** How many mounted views own Ctrl+F (the PDF's find bar). V2App leaves Find to this section: with no owner it is Search,
+ *  as everywhere else. */
+let findOwners = 0
+function useOwnFind(own: boolean, handler: () => void) {
+  useEffect(() => {
+    if (!own) return
+    findOwners += 1
+    return () => { findOwners -= 1 }
+  }, [own])
+  useCommand('find', useCallback(() => { if (own) handler() }, [own, handler]))
+}
+
 export default function Section({ nav }: SectionProps) {
+  useCommand('find', useCallback(() => { if (findOwners === 0) nav.go({ section: 'search' }) }, [nav]))
   const { id, sub } = nav.route
   if (sub === 'new-file') return <NewFileFlow parentId={id} nav={nav} />
   if (sub === 'new-document') return <NewDocumentFlow parentId={id} nav={nav} />
@@ -55,7 +68,8 @@ function useLoad(id: string) {
         if (needsRoom(item, free)) return setPhase({ name: 'too-large', item })
         setPhase({ name: 'loading', item })
         const kind = viewerKind(item.name)
-        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
+        // A RAW shows the camera's preview (its thumbnail): the file itself is not read.
+        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
         if (live) setPhase({ name: 'ready', item, data })
       } catch (e) {
         if (!live) return
@@ -84,24 +98,32 @@ export const needsRoom = (item: Pick<DriveItem, 'local' | 'size'>, free: number 
  */
 function useNewer(source: DriveSource, id: string, ready: boolean) {
   const [newer, setNewer] = useState<VersionEntry | null>(null)
-  const base = useRef<string | null>(null)
-  const ours = useRef(false)
-  const rebase = useCallback(() => { source.versions(id).then((v) => { base.current = v.find((x) => x.current)?.id ?? null }, () => {}) }, [source, id])
+  const state = useRef<{ base: string | null; ours: { from: string | null; at: number } | null }>({ base: null, ours: null })
+  const rebase = useCallback(() => {
+    source.versions(id).then((v) => {
+      const cur = v.find((x) => x.current)?.id ?? null
+      // Our save has landed once the current version is no longer the one it was saved over.
+      if (state.current.ours && cur !== state.current.ours.from) state.current.ours = null
+      state.current.base = cur
+    }, () => {})
+  }, [source, id])
   useEffect(() => { if (ready) rebase() }, [ready, rebase])
   useEffect(() => source.subscribe((e) => {
     if (e.kind !== 'item' || e.item.id !== id) return
     void source.versions(id).then((v) => {
       const cur = v.find((x) => x.current)
-      if (!cur || cur.id === base.current) return
-      if (ours.current) { ours.current = false; base.current = cur.id; return }
-      setNewer(cur)
+      if (!cur) return
+      const news = versionNews(state.current, cur.id, Date.now())
+      if (news === 'same') return
+      state.current = { base: cur.id, ours: null }
+      if (news === 'news') setNewer(cur)
     }, () => {})
   }), [source, id])
   return {
     newer,
     dismiss: () => setNewer(null),
-    /** This window saved a new version: that is not news, and what was announced before it is settled. */
-    savedHere: () => { ours.current = true; setNewer(null); rebase() },
+    /** This window saved a new version: its landing is not news, and what was announced before it is settled. */
+    savedHere: () => { state.current.ours = { from: state.current.base, at: Date.now() }; setNewer(null); rebase() },
   }
 }
 
@@ -113,6 +135,8 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
   const [panel, setPanel] = useState(false)
   // DW-1524: after a save the note shows rendered, with "Saved · encrypted · version N".
   const [savedVersion, setSavedVersion] = useState<number | null>(null)
+  // The last version this window saved: Rust's tag keeps the server's number until the engine has uploaded the save.
+  const lastSaved = useRef(0)
   // The window's status line says the save too, until the file is left or edited again (DW-1524).
   useEffect(() => () => setStatusNote(null), [])
   useEffect(() => { if (editing || savedVersion === null) setStatusNote(null) }, [editing, savedVersion])
@@ -144,6 +168,7 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
     : savedVersion !== null && !editing ? <SavedMessage version={savedVersion} onVersions={() => setVersionsOpen(true)} /> : null
   const aside = panel ? <DetailsAside id={id} onClose={() => setPanel(false)} /> : null
   const saved = (d: { text: string; versionId: string }, version: number) => {
+    lastSaved.current = version
     setPhase({ name: 'ready', item, data: { kind: 'text', ...d } })
     setSavedVersion(version)
     savedHere()
@@ -151,7 +176,7 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
     nav.go({ section: 'open', id: item.id, sub: null })
   }
   const body = editing && data.kind === 'text'
-    ? <Editor item={item} initial={data} onSaved={saved} onLeave={(reload) => { nav.go({ section: 'open', id: item.id, sub: null }); if (reload) { dismissNewer(); retry() } }} />
+    ? <Editor item={item} initial={data} savedBefore={lastSaved.current} onSaved={saved} onLeave={(reload) => { nav.go({ section: 'open', id: item.id, sub: null }); if (reload) { dismissNewer(); retry() } }} />
     : <Viewer item={item} data={data} nav={nav} banner={banner} onBack={() => toFolder(item)} onDetails={() => setPanel((p) => !p)} onEdit={() => setSavedVersion(null)} />
   return (
     <div className="flex min-h-0 flex-1">
@@ -206,7 +231,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   const pictures = kind === 'raw' || kind === 'image' || kind === 'audio'
   const zoomBy = (d: number) => setZoom((z) => Math.min(3, Math.max(0.5, +(z + d).toFixed(2))))
   // Ctrl+F finds in the document; Ctrl+Plus and Ctrl+− zoom the page (DW-1505).
-  useCommand('find', useCallback(() => { if (kind === 'pdf') setFind('') }, [kind]))
+  useOwnFind(kind === 'pdf', useCallback(() => setFind(''), []))
   useCommand('zoom-in', useCallback(() => { if (kind === 'pdf') zoomBy(0.25) }, [kind]))
   useCommand('zoom-out', useCallback(() => { if (kind === 'pdf') zoomBy(-0.25) }, [kind]))
   useCommand('edit', useCallback(() => { if (editable) edit(); else if (kind === 'csv') nav.go({ section: 'open', id: item.id, sub: 'office' }) }, [editable, kind])) // eslint-disable-line react-hooks/exhaustive-deps
@@ -283,21 +308,32 @@ function useSiblings(item: DriveItem, kinds: string[]): DriveItem[] {
   return rows
 }
 
+/** How many photos on each side of the open one the strip shows. */
+const STRIP_REACH = 8
+
 /** DW-1501: a RAW shows the preview the camera stored in it (the item's thumbnail), and says so; ← → step through the folder. */
 function RawView({ item, nav, onOpenElsewhere }: { item: DriveItem; nav: SectionProps['nav']; onOpenElsewhere: () => void }) {
   const source = useDriveSource()
   const siblings = useSiblings(item, ['raw', 'image'])
   const at = siblings.findIndex((i) => i.id === item.id)
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({})
+  // The strip shows the photos near this one; each thumbnail is a blob URL this view owns and frees.
+  const near = useMemo(() => siblings.slice(Math.max(0, at - STRIP_REACH), at + STRIP_REACH + 1), [siblings, at])
   useEffect(() => {
     let live = true
-    for (const s of siblings) source.thumbnail(s.id, s.id === item.id ? 'large' : 'small').then((u) => { if (live) setThumbs((t) => ({ ...t, [s.id]: u })) }, () => {})
-    return () => { live = false }
-  }, [source, siblings, item.id])
+    const made: string[] = []
+    for (const s of near) {
+      source.thumbnail(s.id, s.id === item.id ? 'large' : 'small').then((u) => {
+        if (u) made.push(u)
+        if (live) setThumbs((t) => ({ ...t, [s.id]: u })); else if (u) URL.revokeObjectURL(u)
+      }, () => {})
+    }
+    return () => { live = false; made.forEach((u) => URL.revokeObjectURL(u)) }
+  }, [source, near, item.id])
   const step = useCallback((d: number) => { const n = siblings[at + d]; if (n) nav.go({ section: 'open', id: n.id }) }, [siblings, at, nav])
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (e.altKey || e.ctrlKey || e.metaKey || isTyping(e.target)) return
+      if (e.altKey || e.ctrlKey || e.metaKey || keyBelongsElsewhere(e)) return
       if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1) } else if (e.key === 'ArrowRight') { e.preventDefault(); step(1) }
     }
     window.addEventListener('keydown', on)
@@ -306,7 +342,7 @@ function RawView({ item, nav, onOpenElsewhere }: { item: DriveItem; nav: Section
   return (
     <RawViewer
       src={thumbs[item.id] ?? null} label={`Camera preview · ${rawMaker(item.name)}`} size={`RAW · ${fmtBytes(item.size ?? 0)}`}
-      strip={siblings.map((s) => ({ id: s.id, src: thumbs[s.id] ?? null, current: s.id === item.id }))}
+      strip={near.map((s) => ({ id: s.id, src: thumbs[s.id] ?? null, current: s.id === item.id }))}
       onPrev={at > 0 ? () => step(-1) : undefined} onNext={at < siblings.length - 1 ? () => step(1) : undefined}
       onPick={(id: string) => nav.go({ section: 'open', id })} onOpenElsewhere={onOpenElsewhere}
     />
@@ -340,7 +376,7 @@ function AudioView({ item, bytes, nav }: { item: DriveItem; bytes: Uint8Array | 
   const go = useCallback((d: number) => { const n = queue[at + d]; if (n) nav.go({ section: 'open', id: n.id }) }, [queue, at, nav])
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || e.altKey || e.metaKey) return
+      if (keyBelongsElsewhere(e) || e.altKey || e.metaKey) return
       if (e.key === ' ' && !e.ctrlKey) { e.preventDefault(); player.toggle() }
       else if (e.ctrlKey && e.key === 'ArrowRight') { e.preventDefault(); go(1) }
       else if (e.ctrlKey && e.key === 'ArrowLeft') { e.preventDefault(); go(-1) }
@@ -361,7 +397,6 @@ function AudioView({ item, bytes, nav }: { item: DriveItem; bytes: Uint8Array | 
 }
 
 const titleOf = (name: string) => name.replace(/\.[^.]+$/, '')
-const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 /** "Sunday 14:20" within the week, else "8 Nov 2026". */
 function whenLabel(iso: string): string {
@@ -377,8 +412,10 @@ const rawMaker = (name: string) => RAW_MAKERS[name.slice(name.lastIndexOf('.') +
 // ---- The editor: Ctrl+S saves a new encrypted version; leaving with changes asks first ----
 /** Ctrl+S saves a new encrypted version and shows the note with "Saved · encrypted · version N" (DW-1523 → DW-1524);
  *  leaving with changes asks first (DW-1525); a newer version saved elsewhere is a choice, never an overwrite (DW-1526). */
-function Editor({ item, initial, onSaved, onLeave }: {
+function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
   item: DriveItem; initial: { text: string; versionId: string }
+  /** The version this window saved last, when the tag has not caught up with it yet. */
+  savedBefore?: number
   onSaved: (d: { text: string; versionId: string }, version: number) => void
   /** Back to the viewer; `reload` reads the file again (another device's version replaced this one). */
   onLeave: (reload: boolean) => void
@@ -388,7 +425,7 @@ function Editor({ item, initial, onSaved, onLeave }: {
   const doc = useRef(initial.text)
   const base = useRef(initial)
   const [dirty, setDirty] = useState(false)
-  const version = Number(initial.versionId.replace(/^v(\d+).*$/, '$1')) || 1
+  const version = Math.max(Number(initial.versionId.replace(/^v(\d+).*$/, '$1')) || 1, savedBefore)
   const [saving, setSaving] = useState(false)
   const [leave, setLeave] = useState(false)
   const [conflict, setConflict] = useState<{ theirs: { text: string; versionId: string }; entry: VersionEntry | undefined } | null>(null)

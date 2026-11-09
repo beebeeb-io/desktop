@@ -92,3 +92,25 @@ export function lineDelta(mine: string, theirs: string): string {
   const n = Math.abs(d)
   return d === 0 ? 'edited' : `${d > 0 ? '+' : '−'}${n} line${n === 1 ? '' : 's'}`
 }
+
+/** A window-level key handler leaves a key alone while a field or a media element has it, while Space or Enter would
+ *  press a focused button or link, and while a dialog is open over the view (its own keys come first). */
+export function keyBelongsElsewhere(e: Pick<KeyboardEvent, 'key' | 'target'>, doc: Pick<Document, 'querySelector'> | undefined = globalThis.document): boolean {
+  const t = e.target as { tagName?: string; isContentEditable?: boolean } | null
+  if (t && typeof t.tagName === 'string') {
+    if (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|VIDEO|AUDIO)$/.test(t.tagName)) return true
+    if ((e.key === ' ' || e.key === 'Enter') && /^(BUTTON|A)$/.test(t.tagName)) return true
+  }
+  return !!doc?.querySelector('[role="dialog"], [role="alertdialog"], dialog[open]')
+}
+
+/** How long after this window's own save a new version is taken to be that save landing (DW-1519). */
+export const OWN_SAVE_MS = 60_000
+
+/** What a version change means while a file is open (DW-1519): the one already shown, this window's own save landing
+ *  (saved over `ours.from` within OWN_SAVE_MS), or news from another device. */
+export function versionNews(s: { base: string | null; ours: { from: string | null; at: number } | null }, current: string, now: number): 'same' | 'ours' | 'news' {
+  if (current === s.base) return 'same'
+  if (s.ours && now - s.ours.at < OWN_SAVE_MS) return 'ours'
+  return 'news'
+}

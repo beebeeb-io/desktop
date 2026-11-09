@@ -9,6 +9,7 @@ import { rowsFromActivity } from '../src/v2/sections/sync-history/model'
 import { errorFrom, isTooLarge } from '../src/v2/source/desktop'
 import { createFailure, needsRoom } from '../src/v2/sections/open'
 import { noRoomWords } from '../src/v2/sections/open/States'
+import { keyBelongsElsewhere, OWN_SAVE_MS, versionNews } from '../src/v2/sections/open/model'
 import { OPEN_ITEMS, silentWav } from '../src/v2/source/fixtures/open'
 import { createFixtureExtras } from '../src/v2/source/fixtures/extras'
 import type { ActivityRow } from '../src/popoverContract'
@@ -112,3 +113,37 @@ describe('the audio fixture is a real WAV (DW-1503 plays it)', () => {
     expect([v.getUint32(24, true), v.getUint16(34, true), v.getUint32(40, true), w.length]).toEqual([4000, 8, 120_000, 44 + 120_000])
   })
 })
+
+describe('a newer version while a file is open (DW-1519)', () => {
+  const now = 1_000_000
+  test('the version already shown is not news', () => {
+    expect(versionNews({ base: 'v3', ours: null }, 'v3', now)).toBe('same')
+  })
+  test('this window’s own save landing is not news, within the window after the save', () => {
+    expect(versionNews({ base: 'v3', ours: { from: 'v3', at: now - 5_000 } }, 'v4', now)).toBe('ours')
+  })
+  test('another device’s version is news, also once our save has long landed', () => {
+    expect(versionNews({ base: 'v4', ours: null }, 'v5', now)).toBe('news')
+    expect(versionNews({ base: 'v3', ours: { from: 'v3', at: now - OWN_SAVE_MS - 1 } }, 'v5', now)).toBe('news')
+  })
+})
+
+describe('the viewers’ window keys leave other owners alone', () => {
+  const el = (tagName: string, isContentEditable = false) => ({ tagName, isContentEditable }) as unknown as EventTarget
+  const noDialog = { querySelector: () => null }
+  const dialog = { querySelector: () => ({}) as Element }
+  test('Space on a focused button presses the button, not play', () => {
+    expect(keyBelongsElsewhere({ key: ' ', target: el('BUTTON') }, noDialog)).toBe(true)
+    expect(keyBelongsElsewhere({ key: ' ', target: el('BODY') }, noDialog)).toBe(false)
+  })
+  test('arrows still step from a focused strip button, but not from a field or the video’s own controls', () => {
+    expect(keyBelongsElsewhere({ key: 'ArrowRight', target: el('BUTTON') }, noDialog)).toBe(false)
+    expect(keyBelongsElsewhere({ key: 'ArrowRight', target: el('INPUT') }, noDialog)).toBe(true)
+    expect(keyBelongsElsewhere({ key: 'ArrowRight', target: el('VIDEO') }, noDialog)).toBe(true)
+    expect(keyBelongsElsewhere({ key: 'ArrowRight', target: el('DIV', true) }, noDialog)).toBe(true)
+  })
+  test('a dialog over the view keeps every key', () => {
+    expect(keyBelongsElsewhere({ key: 'ArrowRight', target: el('BODY') }, dialog)).toBe(true)
+  })
+})
+

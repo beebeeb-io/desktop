@@ -99,7 +99,8 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
         const [{ item: it, path: p }, bytes, versions] = await Promise.all([source.details(target.id), source.readBytes(target.id), source.versions(target.id)])
         if (!live) return
         setItem(it)
-        setPath(['Files', ...p.map((c) => c.name)])
+        // The path starts at the root crumb (Files), as drive_details gives it.
+        setPath(p.length ? p.map((c) => c.name) : ['Files'])
         setDoc(bytes)
         setVersionNumber(Math.max(1, versions.findIndex((v) => v.id === bytes.versionId) >= 0 ? versions.length - versions.findIndex((v) => v.id === bytes.versionId) : versions.length))
         setSavedAt(new Date(it.modifiedAt))

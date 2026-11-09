@@ -181,7 +181,13 @@ pub(crate) fn create_file(
         .create_new(true)
         .open(&path)
         .map_err(DriveError::io)?;
-    std::io::Write::write_all(&mut file, bytes).map_err(DriveError::io)?;
+    // A write that fails part way (the disk filled) leaves nothing behind: a half file would be uploaded, and would take
+    // the name the retry needs. The file is ours: create_new made it a moment ago.
+    if let Err(error) = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(DriveError::io(error));
+    }
     Ok(rel)
 }
 

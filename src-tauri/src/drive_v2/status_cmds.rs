@@ -261,12 +261,11 @@ pub(crate) async fn drive_photo_meta(
         let Some((db, root)) = local()? else {
             return Ok(HashMap::new());
         };
+        // The device is extra: a failed read of the Backups roots leaves it out, never the rest of the page.
         let roots: Vec<String> = db
             .backups_roots()
-            .map_err(DriveError::db)?
-            .into_iter()
-            .map(|(_, path)| path)
-            .collect();
+            .map(|roots| roots.into_iter().map(|(_, path)| path).collect())
+            .unwrap_or_default();
         let mut out = HashMap::new();
         for id in ids.iter().take(model::PHOTOS_PAGE) {
             let Ok(entry) = model::resolve(&db, id) else { continue };
