@@ -74,14 +74,35 @@ export function rowsFromActivity(activity: ActivityRow[]): HistoryRow[] {
 /** Problems the queue gave up on beyond the rows listed: counts only, never a file name (sync_activity_summary). */
 export const gaveUp = (s: SyncActivitySummary | null): number => s?.queue?.gave_up ?? 0
 
+/** The command's ISO time, normalised so it sorts with the flyout's rows; a missing or unreadable one is `now`. */
+function isoAt(raw: string | undefined, now: Date): string {
+  if (!raw) return now.toISOString()
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? now.toISOString() : d.toISOString()
+}
+
 /** Live (B02b): the queue's problems, each with why in plain words. A stopped backup change names its source. */
 export function rowsFromProblems(problems: SyncProblem[], now: Date): HistoryRow[] {
   return problems.map((p) => ({
     id: `problem:${p.id}`, name: p.name, device: 'This PC', scope: 'this-pc' as const, kind: 'file' as const,
-    at: p.at ?? now.toISOString(), itemId: p.fileId,
+    at: isoAt(p.at, now), itemId: p.fileId,
     what: p.backup ? 'Didn’t back up' : `Didn’t sync · ${p.folder || 'Beebeeb'}`,
     problem: p.reason.endsWith('Nothing was lost.') ? p.reason : `${p.reason} Nothing was lost.`,
   }))
+}
+
+/** One failure's identity across the two commands: the same file, failing the same way. */
+const failureKey = (r: HistoryRow) => `${r.name}\u0000${r.what}`
+
+/**
+ * The rows the screen shows: the queue's problems first (each with its reason), then the flyout's finished rows with
+ * the failures the queue already explains left out (the problem row wins), inside the 30-day window, newest first.
+ */
+export function mergeHistory(activity: ActivityRow[], problems: SyncProblem[], now: Date): HistoryRow[] {
+  const fromQueue = rowsFromProblems(problems, now)
+  const explained = new Set(fromQueue.map(failureKey))
+  const fromFlyout = rowsFromActivity(activity).filter((r) => !r.problem || !explained.has(failureKey(r)))
+  return withinWindow([...fromQueue, ...fromFlyout], now)
 }
 
 /** The queue's change id behind a problem row, or null for a row with nothing to retry. */

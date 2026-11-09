@@ -8,7 +8,7 @@ import { loadSyncActivitySummary } from '../../../desktopApi'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
 import { HistoryView } from './HistoryView'
-import { gaveUp, problemId, routeFilter, rowsFromActivity, rowsFromProblems, withinWindow, type Filter, type HistoryRow } from './model'
+import { gaveUp, mergeHistory, problemId, routeFilter, type Filter, type HistoryRow } from './model'
 import { useDriveExtras } from '../../source/extras'
 
 export default function Section({ nav }: SectionProps) {
@@ -22,15 +22,21 @@ export default function Section({ nav }: SectionProps) {
   useEffect(() => { setFilter(routeFilter(nav.route.sub)) }, [nav.route])
   const [query, setQuery] = useState('')
   const [queued, setQueued] = useState(0)
+  // A failed read says so; the rows it already had stay (never a blank history).
+  const [failed, setFailed] = useState(false)
   const now = useMemo(() => new Date(), [])
 
   const load = useCallback(async () => {
-    const [snap, summary, problems] = await Promise.all([popoverSnapshot(200), loadSyncActivitySummary(), extras.syncProblems().catch(() => [])])
-    const at = new Date()
-    // The queue's rows say why; the flyout's failed rows are the same failures without a reason, so they give way.
-    const activity = snap.ok ? rowsFromActivity(snap.value.activity).filter((r) => !(problems.length > 0 && r.problem)) : []
-    setRows(withinWindow([...rowsFromProblems(problems, at), ...activity], at))
-    setQueued(gaveUp(summary))
+    try {
+      const [snap, summary, problems] = await Promise.all([popoverSnapshot(200), loadSyncActivitySummary(), extras.syncProblems()])
+      if (!snap.ok) throw new Error(snap.reason)
+      // The queue's rows say why; the flyout's copies of those same failures give way.
+      setRows(mergeHistory(snap.value.activity, problems, new Date()))
+      setQueued(gaveUp(summary))
+      setFailed(false)
+    } catch {
+      setFailed(true)
+    }
   }, [extras])
   useEffect(() => {
     load().catch(() => {})
@@ -38,10 +44,14 @@ export default function Section({ nav }: SectionProps) {
   }, [source, load])
 
   const retry = async (only?: HistoryRow) => {
+    // Only a row the queue knows a change id for can be retried; the toast says how many it actually took.
     const ids = (only ? [only] : rows.filter((r) => r.problem)).map(problemId).filter((id): id is string => id !== null)
+    if (ids.length === 0) return
     try {
       const { retried } = await extras.retry(ids)
-      showToast(retried > 0 ? { kind: 'done', text: 'Trying again' } : { kind: 'failed', text: 'Beebeeb is already trying again' })
+      showToast(retried > 0
+        ? { kind: 'done', text: `Trying again · ${retried} ${retried === 1 ? 'item' : 'items'}` }
+        : { kind: 'failed', text: 'Beebeeb is already trying again' })
     } catch {
       showToast({ kind: 'failed', text: 'Couldn’t try again' })
     }
@@ -62,6 +72,13 @@ export default function Section({ nav }: SectionProps) {
   }
   return (
     <>
+      {failed && (
+        <div role="alert" data-error="sync-history" className="flex flex-none items-center gap-2 border-b border-line bg-paper-2 px-4 py-2 text-[12px] text-ink-2">
+          {rows.length > 0
+            ? 'Beebeeb couldn’t load your sync history. Showing what it last knew.'
+            : 'Beebeeb couldn’t load your sync history.'}
+        </div>
+      )}
       <HistoryView
         rows={rows} now={now} filter={filter} query={query} onFilter={setFilter} onQuery={setQuery} onTry={(id) => { void retry(rows.find((r) => r.id === id)) }} onTryAll={() => { void retry() }}
         onOpen={(r) => { void open(r) }}
