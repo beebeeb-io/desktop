@@ -23,8 +23,13 @@ describe('the account panes start from the app’s own empty state (P1c, slice 0
     expect(s.products).toEqual([{ name: 'Drive', state: 'This app' }])
   })
 
-  test('none of the four account modules reaches the board’s fixtures', () => {
+  test('none of the four account modules reaches the board’s fixtures or a browser answer', () => {
     const hits = FILES.filter((f) => readFileSync(new URL(`../src/v2/sections/settings/account/${f}`, import.meta.url), 'utf8').includes('source/fixtures'))
     expect(hits).toEqual([])
+    // Review round 1: a `null` third argument makes run() answer ok in a plain browser, so the pane claims the
+    // password changed or verified when no command ran. Every call in these files must go through the command.
+    const security = readFileSync(new URL('../src/v2/sections/settings/account/SecurityPane.tsx', import.meta.url), 'utf8')
+    expect(security).not.toContain("'account_change_password', { current: c, newPassword: next }, null")
+    expect(security).not.toContain("'account_delete_check_password', { password: pw }, null")
   })
 })

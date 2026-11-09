@@ -225,7 +225,7 @@ function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onD
     setBusy(true)
     const c = current
     setCurrent('')
-    const r = await run('account_change_password', { current: c, newPassword: next }, null)
+    const r = await run('account_change_password', { current: c, newPassword: next })
     setBusy(false)
     if (r.ok) { setNext(''); setAgain(''); return onDone() }
     if (r.code === 'wrong_password') return setError({ field: 'current', text: 'Current password is incorrect. Nothing was changed.' })
@@ -263,7 +263,7 @@ function DeleteStep1({ onBack, onNext }: { onBack: () => void; onNext: () => voi
   const next = async () => {
     const pw = password
     setPassword('')
-    const r = await run('account_delete_check_password', { password: pw }, null)
+    const r = await run('account_delete_check_password', { password: pw })
     if (r.ok) onNext()
     else setError(r.code === 'wrong_password' ? 'Incorrect password. Nothing was deleted.' : errorText(r.code))
   }
