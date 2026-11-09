@@ -21,12 +21,12 @@ const KEEP = 20
 const ACTIVITY_SOURCE = 'app_activity_snapshot'
 const REPORT_SOURCE = 'report_problem'
 
-/** Clock time of a read, in Europe/Amsterdam. `iso` is when the command answered. */
+/** Clock time of a read, on this PC. `iso` is when the command answered. */
 export function formatReadAt(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return 'Not read yet'
   const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(d)
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
   const day = get('day')

@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { commandUnavailableLabel, type AppActivitySnapshot } from '../src/desktopApi'
 import type { ProblemReportResult } from '../src/diagnosticsCopy'
 import { Ctx, type SettingsCtx } from '../src/v2/sections/settings/shell/context'
-import { Diagnostics } from '../src/v2/sections/settings/today/diagnostics'
+import { Diagnostics, formatReadAt } from '../src/v2/sections/settings/today/diagnostics'
 
 const ctx: SettingsCtx = { pane: 'diagnostics', go() {}, dialog: null, open() {}, close() {} }
 
@@ -20,9 +20,9 @@ const textOf = (html: string) => html
   .trim()
 
 const ACTIVITY_AT = '2026-11-09T08:12:00.000Z'
-const ACTIVITY_CLOCK = '9 Nov 2026, 09:12'
+const ACTIVITY_CLOCK = formatReadAt(ACTIVITY_AT)
 const REPORT_AT = '2026-11-09T09:13:00.000Z'
-const REPORT_CLOCK = '9 Nov 2026, 10:13'
+const REPORT_CLOCK = formatReadAt(REPORT_AT)
 
 const snapshot: AppActivitySnapshot = {
   pid: 4242,
@@ -129,7 +129,7 @@ describe('Diagnostics shows what it read', () => {
     })
     for (const name of ['CPU', 'Memory', 'Upload', 'Download']) expect(view.text).toContain(name)
     expect(view.text.match(/app_activity_snapshot/g)).toHaveLength(4)
-    expect(view.text.match(/9 Nov 2026, 09:12/g)).toHaveLength(4)
+    expect(view.text.match(new RegExp(ACTIVITY_CLOCK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(4)
     expect(view.text).toContain('3.5 %')
     expect(view.text).toContain('50 MB')
     expect(view.text).toContain('2 KB/s')
