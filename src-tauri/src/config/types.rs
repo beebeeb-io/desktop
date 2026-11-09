@@ -128,6 +128,15 @@ pub struct DesktopConfig {
     /// A backup on this PC needs attention. On when the key is missing.
     #[serde(default = "default_true")]
     pub notify_backup_attention: bool,
+    /// Photo previews on this PC. An older file with no such key reads as on.
+    #[serde(default = "default_true")]
+    pub photo_previews: bool,
+    /// Preview long edge (`720p`, `1080p`, `2K`, `4K`). Missing reads as 4K.
+    #[serde(default = "default_preview_size")]
+    pub preview_size: String,
+    /// Preview format (`HEIC` or `JPEG`). Missing reads as HEIC.
+    #[serde(default = "default_preview_format")]
+    pub preview_format: String,
 
     // ── Task 0090 — selective sync (SelectiveSync.tsx) ─────────────
     //
@@ -336,6 +345,14 @@ pub(super) fn default_local_cache_limit_bytes() -> i64 {
     DEFAULT_LOCAL_CACHE_LIMIT_BYTES
 }
 
+pub(super) fn default_preview_size() -> String {
+    "4K".to_string()
+}
+
+pub(super) fn default_preview_format() -> String {
+    "HEIC".to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -416,6 +433,9 @@ impl Default for DesktopConfig {
             notify_local_space: true,
             notify_backup_finished: true,
             notify_backup_attention: true,
+            photo_previews: true,
+            preview_size: default_preview_size(),
+            preview_format: default_preview_format(),
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
             known_folder_source: std::collections::BTreeMap::new(),

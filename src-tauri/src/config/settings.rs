@@ -64,6 +64,15 @@ pub struct DesktopSettings {
     pub notify_backup_finished: Option<bool>,
     #[serde(default)]
     pub notify_backup_attention: Option<bool>,
+    /// Photo previews on this PC. `None` means this write did not touch the switch.
+    #[serde(default)]
+    pub photo_previews: Option<bool>,
+    /// Preview long edge. `None` means this write did not change it.
+    #[serde(default)]
+    pub preview_size: Option<String>,
+    /// Preview format. `None` means this write did not change it.
+    #[serde(default)]
+    pub preview_format: Option<String>,
     /// Sync mode chosen in the Windows first-run wizard. `None` when not
     /// yet set (first run). One of `"everything"`, `"smart"`, `"custom"`,
     /// `"online_only"`.
@@ -107,6 +116,9 @@ impl From<&DesktopConfig> for DesktopSettings {
             notify_local_space: Some(c.notify_local_space),
             notify_backup_finished: Some(c.notify_backup_finished),
             notify_backup_attention: Some(c.notify_backup_attention),
+            photo_previews: Some(c.photo_previews),
+            preview_size: Some(c.preview_size.clone()),
+            preview_format: Some(c.preview_format.clone()),
             sync_mode: c.sync_mode.clone(),
             metered: c.metered,
             files_on_demand: c.files_on_demand,
@@ -162,6 +174,15 @@ impl DesktopConfig {
         }
         if let Some(notify) = s.notify_backup_attention {
             self.notify_backup_attention = notify;
+        }
+        if let Some(on) = s.photo_previews {
+            self.photo_previews = on;
+        }
+        if let Some(size) = s.preview_size {
+            self.preview_size = size;
+        }
+        if let Some(preview_format) = s.preview_format {
+            self.preview_format = preview_format;
         }
         // Only overwrite sync_mode if the incoming settings carries one;
         // a plain bandwidth/notification save should not clear a persisted mode.
