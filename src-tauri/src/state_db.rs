@@ -609,7 +609,7 @@ mod ops;
 mod removals;
 mod schema;
 mod share_marks;
-pub use share_marks::{MarkKind, normalized_email};
+pub use share_marks::{MarkKind, is_unreadable_mark, normalized_email};
 mod signout;
 mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).

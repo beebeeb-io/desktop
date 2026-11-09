@@ -119,7 +119,12 @@ export default function Section({ nav }: SectionProps) {
     setBusy(true)
     const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey, memberId)
     setBusy(false)
-    if (!r.ok) return toast(r)
+    if (!r.ok) {
+      toast(r)
+      // A folder's Share anyway: Rust withdrew the refused invite, so the dialog about it closes and People reloads.
+      if (acceptChangedKey && /sharing a folder to a changed key/.test(r.reason)) await openPeople(itemId)
+      return
+    }
     if (r.value.status === 'key-changed') {
       const member = members.find((m) => m.id === (r.value as { memberId: string }).memberId) ?? { id: r.value.memberId, name: email, email }
       return setDialog({ kind: 'key-changed', itemId, member, email, canEdit })
@@ -182,7 +187,8 @@ export default function Section({ nav }: SectionProps) {
           const r = await api.shareMarkCompared(d.member.id, true)
           // A refused invite is not shared yet: They match seals it now, to the key just compared.
           if (d.refused) return r.ok ? void invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id) : toast(r)
-          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: { ...d.member, compared: r.ok } })
+          // Rust wrote They match to every mark of the person: no earlier state of theirs stands.
+          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: r.ok ? { ...d.member, compared: true, mismatch: false, keyChanged: false, markUnreadable: false } : d.member })
         }}
         onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: d.member, groups: d.groups, refused: d.refused }) }}
         // A refused invite holds no key: every way out of its comparison but They match withdraws it (as DW-0515 Cancel).

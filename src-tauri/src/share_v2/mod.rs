@@ -76,11 +76,12 @@ async fn delete_with_step_up(client: &reqwest::Client, session: &str, password: 
 }
 
 /// What the permanent DELETE's status answers: the window's signed-out and rate-limit words for an
-/// ended session and a rate limit, as the other Shared and Trash commands answer them.
+/// ended session (401) and a rate limit (429). A 403 here is the server's `confirmation_required` or
+/// `step_up_required` (a Backups folder needs a password step-up), never an ended session: `failed`.
 pub(crate) fn delete_answer(status: u16) -> Answer<()> {
     match status {
         200..=299 => Ok(()),
-        401 | 403 => Err("signed-out".into()),
+        401 => Err("signed-out".into()),
         404 => Err("not-found".into()),
         429 => Err("rate_limited".into()),
         _ => Err("failed".into()),

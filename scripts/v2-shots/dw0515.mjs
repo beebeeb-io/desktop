@@ -54,7 +54,7 @@ await page.addInitScript(({ invite, plant }) => {
         case 'share_people':
           return [
             { id: 'me', name: 'Anna Visser', email: 'anna@example.com', you: true, owner: true },
-            { id: invite, name: 'Jonas Meier', email: 'jonas@northwind.studio', access: 'Can edit', ...(keyChanged ? { keyChanged: true } : {}) },
+            { id: invite, name: 'Jonas Meier', email: 'jonas@northwind.studio', access: 'Can edit', ...(window.__bbMarkUnreadable ? { markUnreadable: true } : keyChanged ? { keyChanged: true } : {}) },
           ]
         case 'share_accept_changed_key':
           keyChanged = false
@@ -65,6 +65,8 @@ await page.addInitScript(({ invite, plant }) => {
         case 'share_safety_number':
           return { groups: Array.from({ length: 12 }, () => '12345') }
         case 'share_invite':
+          // A folder's Share anyway: Rust withdraws the refused invite and answers this (flows.rs).
+          if (!plant && a?.acceptChangedKey && window.__bbFolderRefusal) throw 'unsupported: sharing a folder to a changed key needs a folder approval core does not offer yet'
           if (plant || a?.acceptChangedKey) return { status: 'shared' }
           return { status: 'key-changed', memberId: invite }
         default:
@@ -195,6 +197,35 @@ try {
   check('no match, remove: withdrew the refused invite', withdrawn[0]?.args?.memberId ?? null, INVITE)
   check('no match, remove: no "Remove access?" alert', await page.getByText(/Remove Jonas’s access\?/).count(), 0)
   check('no match, remove: back on People', await page.getByRole('button', { name: 'Invite someone…' }).count(), 1)
+
+  // 2g. A folder's Share anyway (Rust withdrew the refused invite): the alert closes and People reloads.
+  await page.evaluate(() => { window.__bbFolderRefusal = true })
+  const peopleBefore = (await calls('share_people')).length
+  await inviteJonas()
+  if (!PLANT) await page.getByRole('button', { name: 'Share anyway' }).click()
+  await settle()
+  check('folder anyway: the words', await page.getByText(/Sharing a folder after a key change isn’t available/).count(), 1)
+  check('folder anyway: alert gone', await title.count(), 0)
+  check('folder anyway: People reloaded', (await calls('share_people')).length - peopleBefore, 1)
+  check('folder anyway: back on People', await page.getByRole('button', { name: 'Invite someone…' }).count(), 1)
+  await page.evaluate(() => { window.__bbFolderRefusal = false })
+
+  // 2h. A comparison this PC cannot read is said on the person; They match then shows Compared, nothing older.
+  await page.evaluate((plant) => { window.__bbMarkUnreadable = !plant }, PLANT)
+  await page.keyboard.press('Escape')
+  await settle()
+  await page.getByRole('button', { name: 'Jonas Meier, Mia de Vries' }).click()
+  await settle()
+  await page.locator(`[data-person="${INVITE}"]`).click()
+  await settle()
+  check('unreadable: "Couldn’t be read"', await page.getByText('Couldn’t be read').count(), 1)
+  await page.screenshot({ path: join(OUT, PLANT ? 'DW-0512-unreadable-planted.png' : 'DW-0512-unreadable.png') })
+  await page.locator('[data-safety]').click()
+  await settle()
+  await page.getByRole('button', { name: 'They match' }).click()
+  await settle()
+  check('unreadable, They match: "Compared"', await page.getByText('Compared', { exact: true }).count(), 1)
+  check('unreadable, They match: no "Couldn’t be read"', await page.getByText('Couldn’t be read').count(), 0)
 
 } catch (e) {
   fails += 1

@@ -941,6 +941,19 @@ fn b05e_share_rows_survive_a_sign_out_and_a_reset_of_local_data_removes_them() {
         fill(&db);
         sign_out(&db);
         assert_eq!(kept(&db), 5, "{name}: a sign-out keeps every share row");
+        let rows: Vec<String> =
+            db.0.lock()
+                .unwrap()
+                .prepare("SELECT key || ' ' || value FROM sync_state")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+        assert!(
+            !rows.iter().any(|r| r.contains("northwind")),
+            "{name}: no kept row holds the address: {rows:?}"
+        );
         assert_eq!(db.owner().unwrap(), None, "{name}: and still forgets the owner");
         assert!(
             !db.has_account_data().unwrap(),

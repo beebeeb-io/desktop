@@ -1,9 +1,10 @@
 //! v2 B05e: the local "compared" marks for share safety numbers. One `sync_state` row per
 //! (account id, person), each `{sha256(peer key) hex}:{1|0|a}`, under two keys:
 //! - `share_compared:{account}:{peer user id}`, the person's account id;
-//! - `share_compared_email:{account}:{normalized email}`, the address itself: the server's sent list
-//!   names an account id only while an invite to it exists, so the address is what a later share to
-//!   the same person can always find (task 2437 item 2 adds peer ids to more of the server's lists).
+//! - `share_compared_email:{account}:{sha256("{account}:{normalized email}") hex}`, the address: the
+//!   server's sent list names an account id only while an invite to it exists, so the address is what
+//!   a later share to the same person can always find (task 2437 item 2 adds peer ids to more of the
+//!   server's lists). Only a digest of it is kept, so a row a sign-out keeps never holds the address.
 //!
 //! Local only (the server never learns who compared whom). A sign-out keeps them, as it keeps the
 //! custody ids (lead ruling 2026-11-09, `state_db/signout.rs`); a reset of local data removes them.
@@ -41,8 +42,11 @@ pub fn normalized_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
-fn email_mark_key(account_id: &str, email: &str) -> String {
-    format!("{EMAIL_PREFIX}:{account_id}:{}", normalized_email(email))
+/// The address row's key: a digest of the account id and the normalized address, never the address.
+pub(super) fn email_mark_key(account_id: &str, email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{account_id}:{}", normalized_email(email)));
+    format!("{EMAIL_PREFIX}:{account_id}:{}", crate::hexfmt::encode(&digest))
 }
 
 /// What a mark says about the key it was made against. Every kind pins that key: the next member
@@ -93,30 +97,99 @@ fn decode_mark(value: &str) -> Result<(String, MarkKind)> {
         })
 }
 
+/// Whether a read failed on the mark itself (a row this build cannot decode, or a value that is not
+/// text), not on the database (busy, locked, I/O).
+pub fn is_unreadable_mark(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::FromSqlConversionFailure(..) | rusqlite::Error::InvalidColumnType(..)
+    )
+}
+
+/// Every key a mark of one person is kept under: their address (when known) and each account id.
+fn person_keys<'a>(
+    account_id: &'a str,
+    email: Option<&'a str>,
+    peers: &'a [String],
+) -> impl Iterator<Item = String> + 'a {
+    email
+        .map(|e| email_mark_key(account_id, e))
+        .into_iter()
+        .chain(peers.iter().map(move |p| mark_key(account_id, p)))
+}
+
+fn mark_in(conn: &Connection, key: &str) -> Result<Option<(String, MarkKind)>> {
+    let value: Option<String> = conn
+        .query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    value.as_deref().map(decode_mark).transpose()
+}
+
+fn set_mark_in(conn: &Connection, key: &str, fingerprint_hex: &str, kind: MarkKind) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, format!("{fingerprint_hex}:{}", kind.encode())],
+    )?;
+    Ok(())
+}
+
 impl StateDb {
-    fn mark_at(&self, key: &str) -> Result<Option<(String, MarkKind)>> {
+    /// Every mark of one person (their address and each account id), read in one go. A row that
+    /// cannot be decoded is an error ([`is_unreadable_mark`]), never "no mark".
+    pub fn person_marks(
+        &self,
+        account_id: &str,
+        email: Option<&str>,
+        peers: &[String],
+    ) -> Result<Vec<(String, MarkKind)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let value: Option<String> = conn
-            .query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        value.as_deref().map(decode_mark).transpose()
+        let mut marks = Vec::new();
+        for key in person_keys(account_id, email, peers) {
+            marks.extend(mark_in(&conn, &key)?);
+        }
+        Ok(marks)
     }
 
-    fn set_mark_at(&self, key: &str, fingerprint_hex: &str, kind: MarkKind) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, format!("{fingerprint_hex}:{}", kind.encode())],
-        )?;
-        Ok(())
+    /// One mark written to every key of a person in one transaction, so a failure leaves every key
+    /// as it was and no two keys can pin different fingerprints. With `keep_matched`, a key that
+    /// already holds "They match" on this same fingerprint keeps it (DW-0515 Compare, then Share
+    /// anyway); reading such a key that cannot be decoded is an error and nothing is written.
+    pub fn set_person_marks(
+        &self,
+        account_id: &str,
+        email: Option<&str>,
+        peers: &[String],
+        fingerprint_hex: &str,
+        kind: MarkKind,
+        keep_matched: bool,
+    ) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        for key in person_keys(account_id, email, peers) {
+            if keep_matched
+                && mark_in(&tx, &key)?.is_some_and(|(fp, k)| fp == fingerprint_hex && k == MarkKind::Matched)
+            {
+                continue;
+            }
+            set_mark_in(&tx, &key, fingerprint_hex, kind)?;
+        }
+        tx.commit()
     }
+}
 
+/// One key at a time: the tests' view of the rows [`StateDb::person_marks`] and
+/// [`StateDb::set_person_marks`] read and write together.
+#[cfg(test)]
+impl StateDb {
     /// The mark under a person's account id: the peer key fingerprint (hex) it was made against and
     /// what it says. A row that cannot be decoded is an error.
     pub fn share_mark(&self, account_id: &str, peer_user_id: &str) -> Result<Option<(String, MarkKind)>> {
-        self.mark_at(&mark_key(account_id, peer_user_id))
+        mark_in(
+            &self.0.lock().expect("state_db mutex poisoned"),
+            &mark_key(account_id, peer_user_id),
+        )
     }
 
     pub fn set_share_mark(
@@ -126,12 +199,16 @@ impl StateDb {
         fingerprint_hex: &str,
         kind: MarkKind,
     ) -> Result<()> {
-        self.set_mark_at(&mark_key(account_id, peer_user_id), fingerprint_hex, kind)
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        set_mark_in(&conn, &mark_key(account_id, peer_user_id), fingerprint_hex, kind)
     }
 
     /// The mark under a person's address (normalized here). A row that cannot be decoded is an error.
     pub fn share_email_mark(&self, account_id: &str, email: &str) -> Result<Option<(String, MarkKind)>> {
-        self.mark_at(&email_mark_key(account_id, email))
+        mark_in(
+            &self.0.lock().expect("state_db mutex poisoned"),
+            &email_mark_key(account_id, email),
+        )
     }
 
     pub fn set_share_email_mark(
@@ -141,7 +218,13 @@ impl StateDb {
         fingerprint_hex: &str,
         kind: MarkKind,
     ) -> Result<()> {
-        self.set_mark_at(&email_mark_key(account_id, email), fingerprint_hex, kind)
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        set_mark_in(&conn, &email_mark_key(account_id, email), fingerprint_hex, kind)
+    }
+
+    /// Test hook: the key the address row of `email` is kept under.
+    pub(crate) fn email_mark_key_for_test(account_id: &str, email: &str) -> String {
+        email_mark_key(account_id, email)
     }
 }
 

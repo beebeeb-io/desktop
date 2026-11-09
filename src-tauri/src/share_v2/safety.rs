@@ -35,7 +35,7 @@ use super::flows::{Unlocked, flow_reason, item_id, list, state_db, unlocked};
 use super::reads::{SENT, fetch};
 use crate::AppState;
 use crate::hexfmt::{decode32, encode as hex};
-use crate::state_db::{MarkKind, StateDb, normalized_email};
+use crate::state_db::{MarkKind, StateDb, is_unreadable_mark, normalized_email};
 
 const ME: &str = "/api/v1/auth/me";
 /// The expectation of a "They don't match" mark: a fingerprint no key has (32 zero bytes is no
@@ -189,55 +189,33 @@ pub(super) fn peers_for_email(sent: &Value, email: &str) -> Vec<String> {
         })
 }
 
-/// Where one mark of a person is kept: under their address, or under one of their account ids.
-#[derive(Clone, Copy)]
-enum Slot<'a> {
-    Email(&'a str),
-    Peer(&'a str),
-}
-
-impl Slot<'_> {
-    fn read(self, db: &StateDb, own: &str) -> Answer<Option<(String, MarkKind)>> {
-        match self {
-            Self::Email(email) => db.share_email_mark(own, email),
-            Self::Peer(peer) => db.share_mark(own, peer),
-        }
-        .map_err(|_| "failed".to_string())
+/// The person one of my sent invites names: the normalized address, and every account id my sent
+/// invites to that address name, with the invite's own id last when the address does not list it.
+/// The seal, a comparison and People read and write the same marks through it.
+pub(super) fn person_of(sent: &Value, invite: &Value) -> (Option<String>, Vec<String>) {
+    let text = |k: &str| invite.get(k).and_then(Value::as_str);
+    let email = text("recipient_email").map(normalized_email);
+    let mut peers = email.as_deref().map(|e| peers_for_email(sent, e)).unwrap_or_default();
+    if let Some(peer) = text("recipient_id").and_then(|p| item_id(p).ok())
+        && !peers.contains(&peer)
+    {
+        peers.push(peer);
     }
-
-    fn write(self, db: &StateDb, own: &str, fp: &str, kind: MarkKind) -> Answer<()> {
-        match self {
-            Self::Email(email) => db.set_share_email_mark(own, email, fp, kind),
-            Self::Peer(peer) => db.set_share_mark(own, peer, fp, kind),
-        }
-        .map_err(|_| "failed".to_string())
-    }
+    (email, peers)
 }
 
-/// Every place a mark of the person is kept: their address (when known) and each account id.
-fn slots<'a>(email: Option<&'a str>, peers: &'a [String]) -> impl Iterator<Item = Slot<'a>> {
-    email
-        .map(Slot::Email)
-        .into_iter()
-        .chain(peers.iter().map(|p| Slot::Peer(p)))
-}
-
-/// Every mark this app holds for a person, read from every slot. A mark that cannot be read is an
-/// error, never "no mark".
+/// Every mark this app holds for a person (their address and each account id). A mark that cannot
+/// be read is an error, never "no mark".
 pub(super) fn person_marks_in(
     db: &StateDb,
     own: &str,
     email: Option<&str>,
     peers: &[String],
 ) -> Answer<Vec<(String, MarkKind)>> {
-    let mut marks = Vec::new();
-    for slot in slots(email, peers) {
-        marks.extend(slot.read(db, own)?);
-    }
-    Ok(marks)
+    db.person_marks(own, email, peers).map_err(|_| "failed".to_string())
 }
 
-/// Writes one mark to every slot of the person, so no slot can pin another key.
+/// Writes one mark to every key of the person in one transaction, so no key can pin another key.
 pub(super) fn write_person_mark_in(
     db: &StateDb,
     own: &str,
@@ -246,7 +224,8 @@ pub(super) fn write_person_mark_in(
     fp: &str,
     kind: MarkKind,
 ) -> Answer<()> {
-    slots(email, peers).try_for_each(|slot| slot.write(db, own, fp, kind))
+    db.set_person_marks(own, email, peers, fp, kind, false)
+        .map_err(|_| "failed".to_string())
 }
 
 /// What a person's marks expect of the key a seal goes to: `NotCompared` with no mark; no key at
@@ -421,13 +400,8 @@ pub(super) fn record_anyway_in(
     db.set_share_sealed_key(own, invite, &hex(sealed_to))
         .map_err(|_| "failed".to_string())?;
     let fp = hex(&safety::key_fingerprint(sealed_to).map_err(flow_reason)?);
-    for slot in slots(email, peers) {
-        if slot.read(db, own)? == Some((fp.clone(), MarkKind::Matched)) {
-            continue;
-        }
-        slot.write(db, own, &fp, MarkKind::Accepted)?;
-    }
-    Ok(())
+    db.set_person_marks(own, email, peers, &fp, MarkKind::Accepted, true)
+        .map_err(|_| "failed".to_string())
 }
 
 /// DW-0515 "Share anyway" on a folder: core has no folder approval for a changed key yet, so the
@@ -491,17 +465,13 @@ async fn resolve(u: &Unlocked, member_id: &str) -> Answer<Resolved> {
     let member_id = item_id(member_id)?;
     let sent = fetch(u, SENT).await?;
     let peer = peer_user_id(&sent, &member_id)?;
-    let email = list(&sent, "invites")
+    let invite = list(&sent, "invites")
         .find(|i| i.get("id").and_then(Value::as_str) == Some(member_id.as_str()))
-        .and_then(|i| i.get("recipient_email").and_then(Value::as_str))
-        .map(normalized_email);
+        .ok_or_else(|| "not-found".to_string())?;
+    let (email, peers) = person_of(&sent, invite);
     let own = own_id(u).await?;
     let (key, which) = number_key_in(&state_db()?, &own, &member_id)?;
     let (groups, fp) = safety_view(&u.master, &own, &peer, &key)?;
-    let mut peers = email.as_deref().map(|e| peers_for_email(&sent, e)).unwrap_or_default();
-    if !peers.contains(&peer) {
-        peers.push(peer);
-    }
     Ok(Resolved {
         own,
         email,
@@ -590,9 +560,13 @@ pub(super) fn share_trust_in(
     peers: &[String],
     member_id: &str,
 ) -> Option<Trust> {
-    let marks = match person_marks_in(db, own, email, peers) {
+    let marks = match db.person_marks(own, email, peers) {
         Ok(marks) if marks.iter().all(|(fp, _)| decode32(fp).is_some()) => marks,
-        _ => return Some(Trust::Unreadable),
+        Ok(_) => return Some(Trust::Unreadable),
+        Err(e) if is_unreadable_mark(&e) => return Some(Trust::Unreadable),
+        // A read that failed on the database (busy, locked) says nothing about the mark: the row
+        // stays as it was, and the seal path still stops on any failed read.
+        Err(_) => return None,
     };
     if marks.is_empty() {
         return None;
@@ -607,23 +581,16 @@ pub(super) fn share_trust_in(
 }
 
 /// Adds `compared` / `mismatch` / `keyChanged` / `markUnreadable` to People rows whose person has a
-/// mark, per share. `sent` is my whole sent list (a person's other account ids). Without the state
-/// DB or my id, the rows stay as they were.
+/// mark, per share. `sent` is my whole sent list (a person's other account ids, [`person_of`]).
+/// Without the state DB or my id, the rows stay as they were.
 pub(super) async fn annotate_members(u: &Unlocked, sent: &Value, invites: &[&Value], rows: &mut [Value]) {
     let Ok(db) = state_db() else { return };
     let mut own: Option<String> = None;
     for (invite, row) in invites.iter().zip(rows.iter_mut()) {
-        let text = |k: &str| invite.get(k).and_then(Value::as_str);
-        let Some(member) = text("id").and_then(|m| item_id(m).ok()) else {
+        let Some(member) = invite.get("id").and_then(Value::as_str).and_then(|m| item_id(m).ok()) else {
             continue;
         };
-        let email = text("recipient_email").map(normalized_email);
-        let mut peers = email.as_deref().map(|e| peers_for_email(sent, e)).unwrap_or_default();
-        if let Some(peer) = text("recipient_id").and_then(|p| item_id(p).ok())
-            && !peers.contains(&peer)
-        {
-            peers.push(peer);
-        }
+        let (email, peers) = person_of(sent, invite);
         if email.is_none() && peers.is_empty() {
             continue;
         }

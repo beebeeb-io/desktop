@@ -7,7 +7,7 @@ use beebeeb_core::kdf::{FileKey, MasterKey};
 use beebeeb_core::share_flow::{
     self as sf, ShareFlowError,
     link::{CreateLink, LinkOptions, LinkStep},
-    member::{InviteStep, MemberInvite, ShareTarget},
+    member::{InviteOutcome, InviteStep, MemberInvite, ShareTarget},
 };
 use serde_json::Value;
 use tauri::State;
@@ -208,11 +208,31 @@ pub(crate) async fn share_invite(
     drop(key);
     let client = transport::client()?;
     loop {
-        let resp = send(&client, &u, req).await?;
+        let resp = match send(&client, &u, req).await {
+            Ok(resp) => resp,
+            Err(reason) => {
+                return match unanswered_invite(&mut flow) {
+                    Some(outcome) => super::safety::finish_invite(&u, &own, &outcome).await,
+                    None => Err(reason),
+                };
+            }
+        };
         match flow.on_response(resp).map_err(flow_reason)? {
             InviteStep::Send(next) => req = next,
             InviteStep::Done(outcome) => return super::safety::finish_invite(&u, &own, &outcome).await,
         }
+    }
+}
+
+/// An invite request that got no answer (the network dropped, or the request never left): core
+/// ends the flow as if the server had refused it. After the approval was sent, that is
+/// `AwaitingApproval`, a claimed invite with no key the other side can open, which
+/// [`super::safety::finish_invite`] withdraws. Before it nothing was claimed: `None`, and the
+/// transport's reason is answered.
+pub(super) fn unanswered_invite(flow: &mut MemberInvite) -> Option<InviteOutcome> {
+    match flow.on_response(HttpResponse::new(0, Value::Null)) {
+        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Some(outcome),
+        _ => None,
     }
 }
 

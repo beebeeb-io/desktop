@@ -173,7 +173,7 @@ fn a_mark_row_that_cannot_be_decoded_stops_the_share() {
         ),
         (
             "the address row",
-            format!("share_compared_email:{OWN}:{EMAIL}"),
+            StateDb::email_mark_key_for_test(OWN, EMAIL),
             format!("{fp}:?"),
         ),
     ] {
@@ -466,4 +466,108 @@ fn share_anyway_on_a_folder_withdraws_the_named_refused_invite() {
         refused += 1;
     }
     assert_eq!(refused, 3);
+}
+
+/// Review of delta 1 (`flows.rs:211`): the approval request got no answer (the network dropped after
+/// the invite was claimed). Core's flow ends as `AwaitingApproval`, which is withdrawn; before the
+/// approval, nothing was claimed and the transport's reason stands.
+#[test]
+fn an_approval_that_got_no_answer_ends_as_a_withdrawal() {
+    let k2 = key(BOB_PK);
+    let target = ShareTarget {
+        item_id: FILE.into(),
+        is_folder: false,
+    };
+    let master = MasterKey::from_bytes([1; 32]);
+    let start = || {
+        MemberInvite::start(
+            &target,
+            EMAIL,
+            &master,
+            &FileKey::from_bytes([7; 32]),
+            PeerKeyExpectation::NotCompared,
+        )
+        .unwrap()
+        .0
+    };
+    let mut before = start();
+    assert_eq!(
+        super::flows::unanswered_invite(&mut before),
+        None,
+        "nothing claimed yet"
+    );
+
+    let mut flow = start();
+    let claimed = HttpResponse::new(
+        200,
+        json!({ "invite_id": INVITE, "status": "claimed", "recipient_public_key": b64(&k2) }),
+    );
+    let InviteStep::Send(_) = flow.on_response(claimed).unwrap() else {
+        panic!("the approval is sent");
+    };
+    let outcome = super::flows::unanswered_invite(&mut flow).expect("the claimed invite is withdrawn");
+    let (_dir, db) = db();
+    assert_eq!(
+        record_outcome_in(Some(&db), OWN, &outcome),
+        Finish::Withdraw {
+            invite_id: INVITE.into(),
+            then: NOT_SHARED
+        }
+    );
+}
+
+/// Review of delta 1 (`safety.rs:595`): a read that fails on the database (here: the table is gone)
+/// says nothing about the mark. People leaves the row as it was; the seal still stops.
+#[test]
+fn a_failed_database_read_is_not_shown_as_an_unreadable_mark() {
+    let (_dir, db) = db();
+    let peers = ids(&[UID_B]);
+    db.set_share_sealed_key(OWN, INVITE, &hex(&key(ALICE_PK))).unwrap();
+    db.set_share_mark(OWN, UID_B, &fp_hex(&key(ALICE_PK)), MarkKind::Matched)
+        .unwrap();
+    db.hold_lock_for_test()
+        .execute("ALTER TABLE sync_state RENAME TO sync_state_elsewhere", [])
+        .unwrap();
+    assert_eq!(share_trust_in(&db, OWN, Some(EMAIL), &peers, INVITE), None);
+    assert_eq!(
+        expectation_in(&db, &json!({ "invites": [] }), OWN, EMAIL),
+        Err("failed".to_string()),
+        "the seal still stops"
+    );
+}
+
+/// Review of delta 1 (`safety.rs:241`): the marks of one person are written in one transaction. A
+/// write that fails partway (here: the last key holds a row this build cannot read) leaves every key
+/// as it was, so no two keys pin different fingerprints.
+#[test]
+fn a_mark_write_that_fails_partway_changes_no_key() {
+    let (_dir, db) = db();
+    let (k1, k2) = (key(ALICE_PK), key(BOB_PK));
+    let peers = ids(&[UID_B, UID_B2]);
+    mark_compared_in(
+        &db,
+        OWN,
+        Some(EMAIL),
+        &ids(&[UID_B]),
+        &fp_hex(&k1),
+        true,
+        NumberKey::Sealed,
+    )
+    .unwrap();
+    plant(&db, &format!("share_compared:{OWN}:{UID_B2}"), "not a mark");
+    assert_eq!(
+        record_anyway_in(&db, OWN, INVITE, Some(EMAIL), &peers, &k2),
+        Err("failed".to_string())
+    );
+    let k1_matched = Some((fp_hex(&k1), MarkKind::Matched));
+    assert_eq!(
+        db.share_email_mark(OWN, EMAIL).unwrap(),
+        k1_matched,
+        "the address row is as it was"
+    );
+    assert_eq!(
+        db.share_mark(OWN, UID_B).unwrap(),
+        k1_matched,
+        "the first id is as it was"
+    );
 }

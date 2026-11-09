@@ -11,7 +11,8 @@ fn display_form_drops_the_key_part() {
 }
 
 /// P3 (review r4508300968): an ended session and a rate limit on the permanent DELETE answer the
-/// window's signed-out and rate-limit words, never "Something went wrong".
+/// window's signed-out and rate-limit words, never "Something went wrong". A 403 on this route is the
+/// server's `confirmation_required` / `step_up_required` (server `trash/erase.rs`), so it stays `failed`.
 #[test]
 fn the_permanent_delete_answers_an_ended_session_and_a_rate_limit_by_name() {
     let mut checked = 0;
@@ -19,7 +20,7 @@ fn the_permanent_delete_answers_an_ended_session_and_a_rate_limit_by_name() {
         (200, Ok(())),
         (204, Ok(())),
         (401, Err("signed-out")),
-        (403, Err("signed-out")),
+        (403, Err("failed")),
         (404, Err("not-found")),
         (429, Err("rate_limited")),
         (500, Err("failed")),

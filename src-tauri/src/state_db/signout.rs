@@ -674,12 +674,14 @@ impl StateDb {
         Ok(())
     }
     /// B05e: a reset of local data (R10's `reset`) removes the share marks, sealed, offered and accepted keys that a
-    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC.
+    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC, in one statement.
     pub fn forget_share_trust_rows(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        for pattern in share_marks::SHARE_TRUST_ROWS {
-            conn.execute("DELETE FROM sync_state WHERE key LIKE ?1", params![pattern])?;
-        }
+        let any = vec!["key LIKE ?"; share_marks::SHARE_TRUST_ROWS.len()].join(" OR ");
+        conn.execute(
+            &format!("DELETE FROM sync_state WHERE {any}"),
+            rusqlite::params_from_iter(share_marks::SHARE_TRUST_ROWS),
+        )?;
         Ok(())
     }
     pub fn finder_domain_gone(&self) -> Result<bool> {
