@@ -883,6 +883,104 @@ fn sf2279_the_kept_custody_row_is_not_account_data_after_every_wipe() {
     });
 }
 
+/// B05e (lead ruling 2026-11-09, desktop #265 delta 1): the share marks, the sealed and offered keys
+/// and the accepted fingerprints survive a sign-out (macOS/Linux and Windows), like the custody
+/// memory; a reset of local data (R10's `reset`, the real one) removes them. They are not account
+/// data, so a completed sign-out still leaves no account data and no owner (the R10 binding's
+/// rule), and the next start keeps.
+#[test]
+fn b05e_share_rows_survive_a_sign_out_and_a_reset_of_local_data_removes_them() {
+    const OWN: &str = "0b3c7a52-5d0e-4f1a-9d2e-1c6f3a8b9e01";
+    const PEER: &str = "7f9e2d14-3a6b-4c8d-8e1f-2b4a6c8d0e12";
+    const INVITE: &str = "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01";
+    const REFUSED: &str = "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d";
+    const KEY: &str = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+    const FP: &str = "f35e5616160a30bf3c6e79fa73c576d40205e8fc3ba4e1c6dcf93e6b98e857b4";
+    let fill = |db: &StateDb| {
+        db.set_owner(&crate::account_binding::Identity::new(
+            Some(OWN),
+            Some("anna@example.com"),
+        ))
+        .unwrap();
+        db.set_share_mark(OWN, PEER, FP, MarkKind::Matched).unwrap();
+        db.set_share_email_mark(OWN, "jonas@northwind.studio", FP, MarkKind::Matched)
+            .unwrap();
+        db.set_share_sealed_key(OWN, INVITE, KEY).unwrap();
+        db.set_share_offered_key(OWN, REFUSED, KEY).unwrap();
+        db.set_share_accepted_fingerprint(OWN, INVITE, FP).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute("INSERT INTO sync_state(key, value) VALUES ('cursor', '12')", [])
+            .unwrap();
+        assert!(db.has_account_data().unwrap(), "fixture: the cursor is account data");
+    };
+    let kept = |db: &StateDb| {
+        [
+            db.share_mark(OWN, PEER).unwrap().is_some(),
+            db.share_email_mark(OWN, " Jonas@Northwind.Studio").unwrap().is_some(),
+            db.share_sealed_key(OWN, INVITE).unwrap().is_some(),
+            db.share_offered_key(OWN, REFUSED).unwrap().is_some(),
+            db.share_accepted_fingerprint(OWN, INVITE).unwrap().is_some(),
+        ]
+        .iter()
+        .filter(|k| **k)
+        .count()
+    };
+    // macOS/Linux: `purge_local_data_for_sign_out` purges, then `clear_account_data`; Windows: one call.
+    type Wipe<'a> = &'a dyn Fn(&StateDb);
+    let sign_outs: [(&str, Wipe); 2] = [
+        ("purge_all_local_state + clear_account_data", &|db| {
+            db.purge_all_local_state().unwrap();
+            db.clear_account_data(false).unwrap();
+        }),
+        ("finish_windows_signout", &|db| db.finish_windows_signout().unwrap()),
+    ];
+    for (name, sign_out) in sign_outs {
+        let dir = tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        fill(&db);
+        sign_out(&db);
+        assert_eq!(kept(&db), 5, "{name}: a sign-out keeps every share row");
+        assert_eq!(db.owner().unwrap(), None, "{name}: and still forgets the owner");
+        assert!(
+            !db.has_account_data().unwrap(),
+            "{name}: the kept share rows are not account data"
+        );
+    }
+
+    // The R10 reset itself (macOS and Linux reset another account's data before an engine starts).
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    fill(&db);
+    let local = crate::session_reauth::StateDbLocalData {
+        db,
+        sync_root: None,
+        staging_dirs: Vec::new(),
+        kept: Default::default(),
+    };
+    crate::account_binding::LocalData::reset(&local).unwrap();
+    assert_eq!(kept(&local.db), 0, "a reset of local data removes them");
+    assert_eq!(local.db.owner().unwrap(), None);
+    assert!(!local.db.has_account_data().unwrap());
+}
+
+/// The pin under the ruling above: share rows on their own are not account data (as the custody row, task
+/// 2279 N1). Counted, they would keep `has_account_data` true after every completed sign-out: the next engine
+/// start would want a reset on macOS/Linux and be refused as another account's data on Windows.
+#[test]
+fn b05e_share_rows_alone_are_not_account_data() {
+    let dir = tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    let id = "7f9e2d14-3a6b-4c8d-8e1f-2b4a6c8d0e12";
+    db.set_share_mark(id, id, "ab", MarkKind::Accepted).unwrap();
+    db.set_share_email_mark(id, "jonas@northwind.studio", "ab", MarkKind::NotMatched)
+        .unwrap();
+    db.set_share_sealed_key(id, id, "cd").unwrap();
+    db.set_share_offered_key(id, "other", "cd").unwrap();
+    db.set_share_accepted_fingerprint(id, id, "ab").unwrap();
+    assert!(!db.has_account_data().unwrap());
+}
+
 /// L7d: the set stores canonical lowercase hyphenated UUIDs only. A write
 /// with any other form is refused, so an id shape the server reports can
 /// never create a second entry for a folder this device has seen. A read

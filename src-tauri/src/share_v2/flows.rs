@@ -180,10 +180,14 @@ pub(crate) async fn share_invite(
     let sent = super::reads::fetch(&u, super::reads::SENT).await?;
     let folder = is_folder(&id)?;
     if accept_changed_key {
+        let member = self::item_id(member_id.as_deref().unwrap_or_default())?;
         if folder {
+            // The refused folder invite holds no key and core cannot seal a folder to a changed key
+            // yet: it is withdrawn, never left waiting as an invitation that cannot open.
+            let withdrawal = super::safety::folder_anyway_withdrawal(&sent, &member, &id, &email)?;
+            super::safety::send_withdrawal(&u, withdrawal).await?;
             return Err(FOLDER_SHARE_ANYWAY.into());
         }
-        let member = self::item_id(member_id.as_deref().unwrap_or_default())?;
         let key = file_key(&u.master, &id)?;
         return super::safety::share_anyway(&u, &own, &sent, &member, &id, &email, &key).await;
     }
@@ -207,7 +211,7 @@ pub(crate) async fn share_invite(
         let resp = send(&client, &u, req).await?;
         match flow.on_response(resp).map_err(flow_reason)? {
             InviteStep::Send(next) => req = next,
-            InviteStep::Done(outcome) => return super::safety::record_outcome(&own, &outcome),
+            InviteStep::Done(outcome) => return super::safety::finish_invite(&u, &own, &outcome).await,
         }
     }
 }

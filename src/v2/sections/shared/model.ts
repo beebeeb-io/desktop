@@ -2,7 +2,7 @@
 // hand the views these shapes.
 import type { ShareEntry } from '@beebeeb/shared/drive-ui'
 import type { MenuEntry } from '../files/ui'
-import type { FileRequestRow, LinkShare, PeopleShare, WithMeRow } from '../../source/fixtures/shared'
+import type { FileRequestRow, LinkShare, Member, PeopleShare, WithMeRow } from '../../source/fixtures/shared'
 
 export type { FileRequestRow, Invitation, LinkShare, PeopleShare, WithMeRow, Member, Access } from '../../source/fixtures/shared'
 export type SharedTab = 'with-me' | 'by-me' | 'requests'
@@ -31,6 +31,12 @@ export function requestLine(r: FileRequestRow, now: Date): { files: string; stat
   if (isPast(r.expiresAt, now)) return { files, state: `Expired ${dayMonth(new Date(r.expiresAt!))}`, open: false }
   if (r.expiresAt) return { files, state: `Expires ${dayMonth(new Date(r.expiresAt))}`, open: true }
   return { files, state: r.into ? `Into ${r.into}` : null, open: true }
+}
+
+/** The safety number's state on a person (DW-0512). A comparison this PC cannot read is said, never shown as none. */
+export function safetyState(m: Pick<Member, 'compared' | 'mismatch' | 'markUnreadable'>): string {
+  if (m.markUnreadable) return 'Couldn’t be read'
+  return m.mismatch ? 'Didn’t match' : m.compared ? 'Compared' : 'Not compared'
 }
 
 export const peopleLabel = (people: string[]) => (people.length <= 2 ? people.join(', ') : `${people[0]}, ${people[1]} and ${people.length - 2} more`)

@@ -68,7 +68,8 @@ export const REQUESTS: FileRequestRow[] = [
 // ── People with access, a person, the safety number ──────────────────────────
 
 export type Access = 'Can view' | 'Can edit'
-export interface Member { id: string; name: string; email: string; you?: boolean; owner?: boolean; access?: Access; invited?: boolean; compared?: boolean; mismatch?: boolean; keyChanged?: boolean }
+/** `markUnreadable`: this PC holds a comparison for the person it cannot read (Rust stops every new share to them). */
+export interface Member { id: string; name: string; email: string; you?: boolean; owner?: boolean; access?: Access; invited?: boolean; compared?: boolean; mismatch?: boolean; keyChanged?: boolean; markUnreadable?: boolean }
 
 export const LISBON = { id: 'sb-lisbon', name: 'Lisbon trip', items: 212 }
 export const LISBON_PEOPLE: Member[] = [

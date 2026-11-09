@@ -65,6 +65,9 @@ export function failureText(r: CommandResult<unknown>): string {
   if (/^unsupported/.test(r.reason)) return UNSUPPORTED_WORDS.find(([re]) => re.test(r.reason))?.[1] ?? commandUnavailableLabel('')
   if (/^offline/.test(r.reason)) return 'You’re offline. Try again when you’re connected.'
   if (/^peer_key_changed/.test(r.reason)) return 'This person’s key has changed. Nothing was shared.'
+  if (/^not-shared/.test(r.reason)) return 'Couldn’t finish sharing. Nothing was shared. Try again.'
+  if (/^signed-out/.test(r.reason)) return 'You’re signed out. Sign in again, then try again.'
+  if (/^rate_limited/.test(r.reason)) return 'Too many attempts. Wait a minute, then try again.'
   if (/^(invalid_credentials|wrong_code)/.test(r.reason)) return 'That didn’t work. Check it and try again.'
   return 'Something went wrong. Try again.'
 }

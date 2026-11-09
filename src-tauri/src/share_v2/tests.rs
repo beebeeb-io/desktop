@@ -10,6 +10,27 @@ fn display_form_drops_the_key_part() {
     assert!(shown.ends_with("/s/tok123"));
 }
 
+/// P3 (review r4508300968): an ended session and a rate limit on the permanent DELETE answer the
+/// window's signed-out and rate-limit words, never "Something went wrong".
+#[test]
+fn the_permanent_delete_answers_an_ended_session_and_a_rate_limit_by_name() {
+    let mut checked = 0;
+    for (status, want) in [
+        (200, Ok(())),
+        (204, Ok(())),
+        (401, Err("signed-out")),
+        (403, Err("signed-out")),
+        (404, Err("not-found")),
+        (429, Err("rate_limited")),
+        (500, Err("failed")),
+        (409, Err("failed")),
+    ] {
+        assert_eq!(delete_answer(status), want.map_err(str::to_string), "{status}");
+        checked += 1;
+    }
+    assert_eq!(checked, 8);
+}
+
 #[test]
 fn ids_are_checked_before_anything_is_sent() {
     let a = "6f1c2b9e-1d1a-4c55-9a51-3f7a2b8c9d01".to_string();

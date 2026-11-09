@@ -96,7 +96,7 @@ pub(super) async fn folder_invite(
     };
     let (flow, first) = FolderShare::invite(input, &u.master).map_err(flow_reason)?;
     match drive_folder(&client, u, flow, first).await? {
-        FolderStep::Done(outcome) => super::safety::record_outcome(own, &outcome),
+        FolderStep::Done(outcome) => super::safety::finish_invite(u, own, &outcome).await,
         _ => Err(flow_reason(ShareFlowError::WrongState)),
     }
 }

@@ -11,6 +11,7 @@ use beebeeb_core::share_flow::safety::key_fingerprint;
 use serde_json::json;
 
 use super::safety::*;
+use crate::hexfmt::encode as hex;
 use crate::state_db::{MarkKind, StateDb};
 
 const ALICE_PK: &str = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
@@ -43,6 +44,11 @@ fn b64(k: &[u8; 32]) -> String {
 
 fn fp_hex(k: &[u8; 32]) -> String {
     hex(&key_fingerprint(k).unwrap())
+}
+
+/// Jonas's account id, as the slots a mark of his is kept in.
+fn bob() -> Vec<String> {
+    vec![UID_B.to_string()]
 }
 
 fn db() -> (tempfile::TempDir, StateDb) {
@@ -160,26 +166,12 @@ fn a_they_match_on_the_offered_key_survives_the_seal() {
     // DW-0515 Compare on the refused invite, They match, then the seal of that invite.
     db.set_share_mark(UID_A, UID_B, &fp_hex(&k2), MarkKind::Matched)
         .unwrap();
-    record_anyway_in(&db, UID_A, INVITE, &[UID_B.to_string()], &k2).unwrap();
+    record_anyway_in(&db, UID_A, INVITE, None, &[UID_B.to_string()], &k2).unwrap();
     assert_eq!(
         db.share_mark(UID_A, UID_B).unwrap(),
         Some((fp_hex(&k2), MarkKind::Matched))
     );
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE), Some(Trust::Compared));
-}
-
-#[test]
-fn stored_keys_are_read_as_exactly_64_hex_digits() {
-    assert_eq!(key_hex(BOB_PK), Some(key(BOB_PK)));
-    for bad in [
-        "+a".repeat(32),
-        format!("{} ", &BOB_PK[..63]),
-        BOB_PK[..62].to_string(),
-        format!("{BOB_PK}00"),
-        "zz".repeat(32),
-    ] {
-        assert_eq!(key_hex(&bad), None, "{bad}");
-    }
+    assert_eq!(share_trust_in(&db, UID_A, None, &bob(), INVITE), Some(Trust::Compared));
 }
 
 #[test]
@@ -282,7 +274,7 @@ fn share_anyway_pins_every_account_id_the_address_names() {
     db.set_share_mark(own, UID_B, &fp_hex(&k1), MarkKind::Matched).unwrap();
     let peers = peers_for_email(&sent, EMAIL);
     assert_eq!(peers, [UID_B, UID_A]);
-    record_anyway_in(&db, own, INVITE_2, &peers, &k2).unwrap();
+    record_anyway_in(&db, own, INVITE_2, None, &peers, &k2).unwrap();
     for peer in [UID_B, UID_A] {
         assert_eq!(
             db.share_mark(own, peer).unwrap(),
@@ -309,13 +301,13 @@ fn a_refused_invite_compares_the_key_it_was_offered() {
     db.set_share_offered_key(UID_A, INVITE, &hex(&k2)).unwrap();
     assert_eq!(
         number_key_in(&db, UID_A, INVITE).unwrap(),
-        k2,
+        (k2, NumberKey::Offered),
         "DW-0515 Compare: the offered key"
     );
     db.set_share_sealed_key(UID_A, INVITE, &hex(&k1)).unwrap();
     assert_eq!(
         number_key_in(&db, UID_A, INVITE).unwrap(),
-        k1,
+        (k1, NumberKey::Sealed),
         "a sealed share: the key it was sealed to"
     );
 }
@@ -345,8 +337,8 @@ fn share_anyway_seals_to_the_carried_bytes_and_a_further_swap_is_refused() {
         panic!("a changed key is never sealed to");
     };
     assert_eq!(
-        record_outcome_in(&db, UID_A, &outcome).unwrap(),
-        json!({ "status": "key-changed", "memberId": INVITE })
+        record_outcome_in(Some(&db), UID_A, &outcome),
+        Finish::Answer(json!({ "status": "key-changed", "memberId": INVITE }))
     );
     assert_eq!(db.share_offered_key(UID_A, INVITE).unwrap(), Some(hex(&k2)));
 
@@ -367,14 +359,17 @@ fn share_anyway_seals_to_the_carried_bytes_and_a_further_swap_is_refused() {
     assert_eq!(refused.unwrap_err(), ShareFlowError::PeerKeyChanged);
 
     // The approval went through: the share keeps k2, and the mark is pinned to k2 (not compared).
-    record_anyway_in(&db, UID_A, INVITE, &[UID_B.to_string()], &sealed.recipient_public_key).unwrap();
+    record_anyway_in(&db, UID_A, INVITE, None, &bob(), &sealed.recipient_public_key).unwrap();
     assert_eq!(db.share_sealed_key(UID_A, INVITE).unwrap(), Some(hex(&k2)));
     assert_eq!(db.share_offered_key(UID_A, INVITE).unwrap(), None);
     assert_eq!(
         db.share_mark(UID_A, UID_B).unwrap(),
         Some((fp_hex(&k2), MarkKind::Accepted))
     );
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE), Some(Trust::NotCompared));
+    assert_eq!(
+        share_trust_in(&db, UID_A, None, &bob(), INVITE),
+        Some(Trust::NotCompared)
+    );
 
     // The server swaps again (k3) on the next share: refused before any seal byte, DW-0515 again.
     let expected = expectation_in(&db, &sent(), UID_A, EMAIL).unwrap();
@@ -404,21 +399,24 @@ fn a_mark_set_later_never_vouches_for_a_share_sealed_earlier() {
     db.set_share_sealed_key(UID_A, INVITE, &hex(&k1)).unwrap();
     db.set_share_sealed_key(UID_A, INVITE_2, &hex(&k2)).unwrap();
     assert_eq!(
-        share_trust_in(&db, UID_A, UID_B, INVITE),
+        share_trust_in(&db, UID_A, None, &bob(), INVITE),
         None,
         "no mark: nothing to say"
     );
     // Later, the numbers of INVITE_2 are compared and match.
     db.set_share_mark(UID_A, UID_B, &fp_hex(&k2), MarkKind::Matched)
         .unwrap();
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE_2), Some(Trust::Compared));
     assert_eq!(
-        share_trust_in(&db, UID_A, UID_B, INVITE),
+        share_trust_in(&db, UID_A, None, &bob(), INVITE_2),
+        Some(Trust::Compared)
+    );
+    assert_eq!(
+        share_trust_in(&db, UID_A, None, &bob(), INVITE),
         Some(Trust::KeyChanged),
         "the earlier share was sealed to another key"
     );
     // A share sealed before this app kept the key (no record): the mark never vouches for it.
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE_3), None);
+    assert_eq!(share_trust_in(&db, UID_A, None, &bob(), INVITE_3), None);
 }
 
 #[test]
@@ -429,16 +427,22 @@ fn share_anyway_over_people_keeps_the_mark() {
     db.set_share_sealed_key(UID_A, INVITE_2, &hex(&k3)).unwrap();
     db.set_share_mark(UID_A, UID_B, &fp_hex(&k2), MarkKind::Matched)
         .unwrap();
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE), Some(Trust::KeyChanged));
+    assert_eq!(
+        share_trust_in(&db, UID_A, None, &bob(), INVITE),
+        Some(Trust::KeyChanged)
+    );
     accept_share_key_in(&db, UID_A, INVITE).unwrap();
-    assert_eq!(share_trust_in(&db, UID_A, UID_B, INVITE), Some(Trust::NotCompared));
+    assert_eq!(
+        share_trust_in(&db, UID_A, None, &bob(), INVITE),
+        Some(Trust::NotCompared)
+    );
     assert_eq!(
         db.share_mark(UID_A, UID_B).unwrap(),
         Some((fp_hex(&k2), MarkKind::Matched)),
         "the mark still guards the next seal"
     );
     assert_eq!(
-        share_trust_in(&db, UID_A, UID_B, INVITE_2),
+        share_trust_in(&db, UID_A, None, &bob(), INVITE_2),
         Some(Trust::KeyChanged),
         "only that share was accepted"
     );

@@ -206,7 +206,7 @@ pub(crate) async fn share_people(state: State<'_, AppState>, item_id: String) ->
         .filter(|i| text(i, "file_id") == Some(item.as_str()))
         .filter_map(|i| member_row(i).map(|row| (i, row)))
         .unzip();
-    super::safety::annotate_members(&u, &invites, &mut rows).await;
+    super::safety::annotate_members(&u, &sent, &invites, &mut rows).await;
     members.extend(rows);
     Ok(members)
 }

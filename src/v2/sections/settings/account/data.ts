@@ -103,7 +103,8 @@ export function useAccount(scenario: Scenario = 'default') {
 export const ERRORS: Record<string, string> = {
   wrong_password: 'Incorrect password.',
   invalid_code: 'Invalid code. Try again.',
-  weak_password: 'Use at least 12 characters.',
+  // Any rule of the server's password policy (its minimum length can be above core's 12), so no number here.
+  weak_password: 'This password doesn’t meet the password rules. Use a longer one.',
   same_password: 'Choose a password you haven’t used for this account.',
   name_empty: 'A name can’t be empty.',
   name_too_long: 'Use 64 characters or fewer.',

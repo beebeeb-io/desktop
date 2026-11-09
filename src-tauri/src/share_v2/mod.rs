@@ -32,6 +32,8 @@ const NOT_YET: &str = "unsupported: not implemented in this build";
 
 pub(crate) mod flows;
 pub(crate) mod folder_flows;
+#[cfg(test)]
+mod marks_tests;
 pub(crate) mod reads;
 pub(crate) mod requests;
 pub(crate) mod safety;
@@ -70,9 +72,17 @@ async fn delete_with_step_up(client: &reqwest::Client, session: &str, password: 
         }
     };
     let resp = transport::send(client, Some(session), token.attach(permanent_delete_request(id))).await?;
-    match resp.status {
+    delete_answer(resp.status)
+}
+
+/// What the permanent DELETE's status answers: the window's signed-out and rate-limit words for an
+/// ended session and a rate limit, as the other Shared and Trash commands answer them.
+pub(crate) fn delete_answer(status: u16) -> Answer<()> {
+    match status {
         200..=299 => Ok(()),
+        401 | 403 => Err("signed-out".into()),
         404 => Err("not-found".into()),
+        429 => Err("rate_limited".into()),
         _ => Err("failed".into()),
     }
 }

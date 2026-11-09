@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// The `sync_state` purge of a sign-out and of an account's rows: every row but the device's custody memory (L7d)
+/// and B05e's share rows (`share_marks::SHARE_TRUST_ROWS`; lead ruling 2026-11-09). A reset of local data removes
+/// the share rows first ([`StateDb::forget_share_trust_rows`]).
+fn sign_out_sync_state_purge() -> String {
+    format!(
+        "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'{}",
+        share_marks::keep_share_trust_rows_sql()
+    )
+}
+
 impl StateDb {
     /// Task 1640 (review F4): the kept entry of `rel_path` whose original still waits to be
     /// removed, if any.
@@ -220,15 +230,13 @@ impl StateDb {
         // next sign-in on this PC finds no account data and no owner. The device tables are cleared on purpose, the same
         // as `clear_account_data` does: a sign-out starts this PC's statistics afresh for the next account.
         //
-        // L7d: the custody memory is the one exception. It belongs to the device, so a sign-out (user-started or
-        // forced) keeps it; removing it would let a server 404 downgrade this PC to the legacy reader.
+        // L7d: the custody memory is kept. It belongs to the device, so a sign-out (user-started or forced) keeps it;
+        // removing it would let a server 404 downgrade this PC to the legacy reader. B05e's share rows are kept too
+        // (`sign_out_sync_state_purge`).
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute(
-            "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'",
-            [],
-        )?;
+        tx.execute(&sign_out_sync_state_purge(), [])?;
         tx.commit()?;
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
@@ -412,10 +420,11 @@ impl StateDb {
         // Lead review of round 2, P3-2: whatever the pause (quota, permission, a locked file …): queued again, an op
         // loses its pause, and an unproven one would then be sent unjudged.
         let candidates: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason != ?1",
-            )?;
-            let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| row.get::<_, String>(0))?;
+            let mut stmt =
+                tx.prepare("SELECT op_id FROM operation_queue WHERE paused_reason IS NULL OR paused_reason != ?1")?;
+            let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], |row| {
+                row.get::<_, String>(0)
+            })?;
             rows.collect::<Result<Vec<String>>>()?
         };
         let mut held = 0;
@@ -437,7 +446,10 @@ impl StateDb {
             "SELECT op_id, file_id, parent_id, kind FROM operation_queue WHERE paused_reason = ?1
              ORDER BY created_at ASC, rowid ASC",
         )?;
-        let rows = stmt.query_map(params![OperationPauseReason::FoundWhilePaused.as_str()], proof_op_from_row)?;
+        let rows = stmt.query_map(
+            params![OperationPauseReason::FoundWhilePaused.as_str()],
+            proof_op_from_row,
+        )?;
         rows.collect()
     }
     /// Task 2267 (fix round 2), "Keep on this PC only": the rows whose upload has begun, so the server may already
@@ -459,8 +471,12 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn keep_journal(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY], |row| row.get(0))
-            .optional()
+        conn.query_row(
+            "SELECT value FROM sync_state WHERE key = ?1",
+            params![KEEP_JOURNAL_KEY],
+            |row| row.get(0),
+        )
+        .optional()
     }
     #[cfg(any(target_os = "windows", test))]
     pub fn set_keep_journal(&self, journal: &str) -> Result<()> {
@@ -513,8 +529,12 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn last_kept_dir(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", params![KEPT_DIR_KEY], |row| row.get(0))
-            .optional()
+        conn.query_row(
+            "SELECT value FROM sync_state WHERE key = ?1",
+            params![KEPT_DIR_KEY],
+            |row| row.get(0),
+        )
+        .optional()
     }
     /// Task 2267 (lead review round 3, P2-2): every change held as `found_while_paused`, by kind, for the card,
     /// oldest first. A change is in a shared folder when its row, or any folder up the parent links from its row or
@@ -580,8 +600,12 @@ impl StateDb {
     #[cfg(any(target_os = "windows", test))]
     pub fn staged_payload_source(&self, path: &str) -> Result<Option<Option<String>>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row("SELECT source_path FROM staged_payloads WHERE path = ?1", params![path], |row| row.get(0))
-            .optional()
+        conn.query_row(
+            "SELECT source_path FROM staged_payloads WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()
     }
     /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has
     /// no owner, AT MOST ONCE per database, in one transaction. Once means the first startup after the upgrade:
@@ -617,11 +641,15 @@ impl StateDb {
         }
         conn.pragma_update(None, "user_version", ADOPTION_CLOSED)
     }
-    /// R10 reset, after `purge_all_local_state` has handed back the files to delete: every row of the
-    /// previous account, the sync cursor and the owner record included, in one transaction.
+    /// The sign-out's clear (macOS and Linux; Windows has `finish_windows_signout`) and the last step of the R10
+    /// reset, after `purge_all_local_state` has handed back the files to delete: every row of the previous account,
+    /// the sync cursor and the owner record included, in one transaction.
     ///
     /// L7d: the custody memory survives, because it belongs to the device and an account switch must not
-    /// shrink it. Only `shared_folder_custody_seen:%` is kept; every other `sync_state` row is cleared.
+    /// shrink it. B05e's share rows survive too (lead ruling 2026-11-09): the person's compared marks and the keys
+    /// their shares were sealed to, public keys and fingerprints only, keyed by the own account id, so signing in
+    /// again keeps the safety-number pin, and another account on this PC never reads them. A reset of local data
+    /// removes them first ([`Self::forget_share_trust_rows`]). Every other `sync_state` row is cleared.
     ///
     /// `owe_finder_removal` is written in the SAME transaction: a Mac whose previous account's Finder domain is
     /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
@@ -634,10 +662,7 @@ impl StateDb {
         for table in ACCOUNT_TABLES.iter().chain(DEVICE_TABLES.iter()) {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        tx.execute(
-            "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'",
-            [],
-        )?;
+        tx.execute(&sign_out_sync_state_purge(), [])?;
         let mark = if owe_finder_removal.as_bool() {
             FINDER_REMOVAL_OWED_KEY
         } else {
@@ -648,7 +673,15 @@ impl StateDb {
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
-    /// Did the last clear leave the Finder domain known gone (a sign-out whose removal was confirmed)?
+    /// B05e: a reset of local data (R10's `reset`) removes the share marks, sealed, offered and accepted keys that a
+    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC.
+    pub fn forget_share_trust_rows(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        for pattern in share_marks::SHARE_TRUST_ROWS {
+            conn.execute("DELETE FROM sync_state WHERE key LIKE ?1", params![pattern])?;
+        }
+        Ok(())
+    }
     pub fn finder_domain_gone(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let gone: Option<String> = conn

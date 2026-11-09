@@ -1,14 +1,48 @@
 //! v2 B05e: the local "compared" marks for share safety numbers. One `sync_state` row per
-//! (account id, peer user id): `share_compared:{account}:{peer}` = `{sha256(peer key) hex}:{1|0|a}`.
-//! Local only (the server never learns who compared whom); a sign-out purge removes them with the
-//! rest of `sync_state`.
+//! (account id, person), each `{sha256(peer key) hex}:{1|0|a}`, under two keys:
+//! - `share_compared:{account}:{peer user id}`, the person's account id;
+//! - `share_compared_email:{account}:{normalized email}`, the address itself: the server's sent list
+//!   names an account id only while an invite to it exists, so the address is what a later share to
+//!   the same person can always find (task 2437 item 2 adds peer ids to more of the server's lists).
+//!
+//! Local only (the server never learns who compared whom). A sign-out keeps them, as it keeps the
+//! custody ids (lead ruling 2026-11-09, `state_db/signout.rs`); a reset of local data removes them.
 
 use super::*;
 
 const PREFIX: &str = "share_compared";
+const EMAIL_PREFIX: &str = "share_compared_email";
+
+/// The `sync_state` rows of B05e (the marks, and the sealed, offered and accepted keys below), as
+/// `LIKE` patterns. A sign-out keeps them; a reset of local data removes them.
+pub(super) const SHARE_TRUST_ROWS: [&str; 5] = [
+    "share_compared:%",
+    "share_compared_email:%",
+    "share_sealed:%",
+    "share_offered:%",
+    "share_accepted:%",
+];
+
+/// ` AND key NOT LIKE '…'` for each of [`SHARE_TRUST_ROWS`]: appended to a `sync_state` statement that
+/// leaves them alone (the sign-out's purge, and the count of account rows they are not part of).
+pub(super) fn keep_share_trust_rows_sql() -> String {
+    SHARE_TRUST_ROWS
+        .iter()
+        .map(|pattern| format!(" AND key NOT LIKE '{pattern}'"))
+        .collect()
+}
 
 fn mark_key(account_id: &str, peer_user_id: &str) -> String {
     format!("{PREFIX}:{account_id}:{peer_user_id}")
+}
+
+/// The form an address is kept and compared in: no surrounding space, lower case.
+pub fn normalized_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+fn email_mark_key(account_id: &str, email: &str) -> String {
+    format!("{EMAIL_PREFIX}:{account_id}:{}", normalized_email(email))
 }
 
 /// What a mark says about the key it was made against. Every kind pins that key: the next member
@@ -44,21 +78,45 @@ impl MarkKind {
     }
 }
 
+/// A stored mark: `{fingerprint}:{kind}`. A row that is there but cannot be decoded (no `:`, or a
+/// kind this build does not know, for example one a newer build wrote) is an error, never "no mark".
+fn decode_mark(value: &str) -> Result<(String, MarkKind)> {
+    value
+        .split_once(':')
+        .and_then(|(fp, kind)| Some((fp.to_owned(), MarkKind::decode(kind)?)))
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                "a share mark this build cannot read".into(),
+            )
+        })
+}
+
 impl StateDb {
-    /// The stored mark: the peer key fingerprint (hex) it was made against and what it says.
-    pub fn share_mark(&self, account_id: &str, peer_user_id: &str) -> Result<Option<(String, MarkKind)>> {
+    fn mark_at(&self, key: &str) -> Result<Option<(String, MarkKind)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = ?1",
-                params![mark_key(account_id, peer_user_id)],
-                |row| row.get(0),
-            )
+            .query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |row| {
+                row.get(0)
+            })
             .optional()?;
-        Ok(value.and_then(|v| {
-            let (fp, kind) = v.split_once(':')?;
-            Some((fp.to_owned(), MarkKind::decode(kind)?))
-        }))
+        value.as_deref().map(decode_mark).transpose()
+    }
+
+    fn set_mark_at(&self, key: &str, fingerprint_hex: &str, kind: MarkKind) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, format!("{fingerprint_hex}:{}", kind.encode())],
+        )?;
+        Ok(())
+    }
+
+    /// The mark under a person's account id: the peer key fingerprint (hex) it was made against and
+    /// what it says. A row that cannot be decoded is an error.
+    pub fn share_mark(&self, account_id: &str, peer_user_id: &str) -> Result<Option<(String, MarkKind)>> {
+        self.mark_at(&mark_key(account_id, peer_user_id))
     }
 
     pub fn set_share_mark(
@@ -68,15 +126,22 @@ impl StateDb {
         fingerprint_hex: &str,
         kind: MarkKind,
     ) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![
-                mark_key(account_id, peer_user_id),
-                format!("{fingerprint_hex}:{}", kind.encode())
-            ],
-        )?;
-        Ok(())
+        self.set_mark_at(&mark_key(account_id, peer_user_id), fingerprint_hex, kind)
+    }
+
+    /// The mark under a person's address (normalized here). A row that cannot be decoded is an error.
+    pub fn share_email_mark(&self, account_id: &str, email: &str) -> Result<Option<(String, MarkKind)>> {
+        self.mark_at(&email_mark_key(account_id, email))
+    }
+
+    pub fn set_share_email_mark(
+        &self,
+        account_id: &str,
+        email: &str,
+        fingerprint_hex: &str,
+        kind: MarkKind,
+    ) -> Result<()> {
+        self.set_mark_at(&email_mark_key(account_id, email), fingerprint_hex, kind)
     }
 }
 
