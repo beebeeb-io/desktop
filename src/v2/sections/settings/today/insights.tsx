@@ -5,8 +5,10 @@ import { command, type StorageBreakdown, type StorageCategory } from '../../../.
 import { navigateTo } from '../../../routes'
 import { openFailureText } from '../../shared/api'
 import { Btn, Group, Meter, Page, Row, fmtBytes, mono } from '../shell/kit'
-import type { Kind } from '../../../source/fixtures/settings-today'
 import { BackLink, ErrorBanner, Skeleton } from './ui'
+
+/** The three kinds the breakdown answers in (`account_storage_breakdown`'s category). */
+export type Kind = 'Media' | 'Documents' | 'Other'
 
 /** A path as the state DB stores it may start with a separator ("/docs/a.pdf" and "docs/a.pdf" are the same file,
  *  #274 review): the page shows it and routes it without one. */

@@ -1,21 +1,52 @@
 // Keep on this PC (DW-0784 family): choose which folders stay on this PC, many at once, and see what each choice
 // does before it happens. Checked = kept (everything inside, also what is added later); nothing changes until Apply.
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { command } from '../../../../desktopApi'
+import { command, type VaultItem } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { Btn, Dialog, mono } from '../shell/kit'
 import { useSettings } from '../shell/context'
-import { KEEP_AFTER, KEEP_BEFORE, KEEP_TREE, type KeepNode } from '../../../source/fixtures/settings-today'
 import { Check, ErrorBanner, Skeleton } from './ui'
 
+/** The dialog's tree row: the folder's id and name, its subtree size in GB, and the folders inside it. */
+export interface KeepNode { id: string; name: string; gb: number; children?: KeepNode[] }
+
+/**
+ * The dialog's tree from the app's own reads: `list_vault_folders` (id, name, subtree size, children) and
+ * `get_selective_sync` (the ids of folders that are online only). A folder is kept when it is not excluded and no
+ * ancestor is; a node is added to `checked` only when its whole subtree stays, so a folder holding an excluded
+ * descendant is "some folders kept" and its kept children are listed one by one. `size_bytes` is decimal GB here.
+ */
+export function keepTreeFrom(folders: VaultItem[], excluded: string[]): { tree: KeepNode[]; checked: Set<string> } {
+  const ex = new Set(excluded)
+  const toNode = (f: VaultItem): KeepNode => {
+    const kids = (f.children ?? []).map(toNode)
+    return { id: f.id, name: f.name, gb: f.size_bytes / 1e9, ...(kids.length ? { children: kids } : {}) }
+  }
+  const tree = folders.map(toNode)
+  const hasExclusion = (n: KeepNode): boolean => ex.has(n.id) || (n.children ?? []).some(hasExclusion)
+  const checked = new Set<string>()
+  const walk = (n: KeepNode, underExcluded: boolean) => {
+    if (underExcluded || ex.has(n.id)) return
+    if (!hasExclusion(n)) { checked.add(n.id); return }
+    ;(n.children ?? []).forEach((c) => walk(c, false))
+  }
+  tree.forEach((n) => walk(n, false))
+  return { tree, checked }
+}
+
 interface KeepStore { checked: Set<string>; initial: Set<string> }
-let store: KeepStore = { checked: new Set(KEEP_BEFORE), initial: new Set(KEEP_BEFORE) }
+/** The tree the last successful read answered; the dialog's helpers work on it, never on a board tree. */
+let tree: KeepNode[] = []
+let store: KeepStore = { checked: new Set(), initial: new Set() }
 const subs = new Set<() => void>()
 const put = (s: KeepStore) => { store = s; subs.forEach((f) => f()) }
 const useKeep = () => useSyncExternalStore((f) => { subs.add(f); return () => { subs.delete(f) } }, () => store)
-export const resetKeep = () => put({ checked: new Set(KEEP_BEFORE), initial: new Set(KEEP_BEFORE) })
-export const presetKeep = () => put({ checked: new Set(KEEP_AFTER), initial: new Set(KEEP_BEFORE) })
+/** Back to the trees as the app last read them. */
+export const resetKeep = () => put({ checked: new Set(store.initial), initial: new Set(store.initial) })
+/** Frame helper only (DW-0784's "changed" state): the board's preset tree has no live counterpart, so this never
+ *  touches the app's data. The board's drawn state returns in M4's board-data pass. */
+export const presetKeep = () => undefined
 
 const ids = (n: KeepNode): string[] => [n.id, ...(n.children ?? []).flatMap(ids)]
 const contains = (n: KeepNode, id: string): boolean => ids(n).includes(id)
@@ -28,7 +59,7 @@ function stateOf(n: KeepNode, set: Set<string>, inherited = false): 'on' | 'mixe
   const kids = (n.children ?? []).map((c) => stateOf(c, set))
   return kids.some((k) => k !== 'off') ? 'mixed' : 'off'
 }
-const leafOn = (leaf: KeepNode, set: Set<string>, nodes = KEEP_TREE, inherited = false): boolean => {
+const leafOn = (leaf: KeepNode, set: Set<string>, nodes = tree, inherited = false): boolean => {
   for (const n of nodes) {
     const on = inherited || set.has(n.id)
     if (n.id === leaf.id) return on
@@ -50,11 +81,11 @@ function uncheck(nodes: KeepNode[], target: string, set: Set<string>, on: boolea
 }
 function toggle(n: KeepNode) {
   const set = new Set(store.checked)
-  if (stateOf(n, set, ancestorOn(n.id, set)) === 'on') uncheck(KEEP_TREE, n.id, set, false)
+  if (stateOf(n, set, ancestorOn(n.id, set)) === 'on') uncheck(tree, n.id, set, false)
   else { ids(n).forEach((i) => set.delete(i)); set.add(n.id) }
   put({ ...store, checked: set })
 }
-const ancestorOn = (id: string, set: Set<string>, nodes = KEEP_TREE, inherited = false): boolean => {
+const ancestorOn = (id: string, set: Set<string>, nodes = tree, inherited = false): boolean => {
   for (const n of nodes) {
     const on = inherited || set.has(n.id)
     if (n.id === id) return inherited
@@ -65,7 +96,7 @@ const ancestorOn = (id: string, set: Set<string>, nodes = KEEP_TREE, inherited =
 
 const gb = (v: number) => (v < 0.1 ? `${Math.round(v * 1024)} MB` : `${v.toFixed(1)} GB`)
 export function plan(s: KeepStore) {
-  const ls = leaves(KEEP_TREE)
+  const ls = leaves(tree)
   const was = (l: KeepNode) => leafOn(l, s.initial)
   const now = (l: KeepNode) => leafOn(l, s.checked)
   const leaving = ls.filter((l) => was(l) && !now(l))
@@ -109,16 +140,36 @@ function Tree({ nodes, depth, openSet, flip }: { nodes: KeepNode[]; depth: numbe
 
 async function apply(s: KeepStore) {
   if (!hasTauri()) return
-  const excluded = leaves(KEEP_TREE).filter((l) => !leafOn(l, s.checked)).map((l) => l.id)
+  const excluded = leaves(tree).filter((l) => !leafOn(l, s.checked)).map((l) => l.id)
   await command('set_selective_sync', { excluded })
 }
 
+/** The app's own answers, mapped onto the dialog's tree; null when either read fails. */
+async function readTree(): Promise<{ tree: KeepNode[]; checked: Set<string> } | null> {
+  const [folders, excluded] = await Promise.all([command<VaultItem[]>('list_vault_folders'), command<string[]>('get_selective_sync')])
+  if (!folders.ok || !excluded.ok) return null
+  return keepTreeFrom(folders.value, excluded.value)
+}
+
+type Phase = 'loading' | 'ready' | 'error' | 'empty'
 export function KeepDialog({ arg }: { arg?: string }) {
   const { close, open } = useSettings()
-  useState(() => { if (arg === 'changed') presetKeep(); else if (!arg) resetKeep() })
   const s = useKeep()
-  const [openSet, setOpenSet] = useState(new Set(['lisbon']))
-  const [phase, setPhase] = useState(arg === 'error' ? 'error' : arg === 'empty' ? 'empty' : arg === 'loading' ? 'loading' : 'ready')
+  const [openSet, setOpenSet] = useState(new Set<string>())
+  const [phase, setPhase] = useState<Phase>(arg === 'error' ? 'error' : arg === 'empty' ? 'empty' : 'loading')
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    if (arg === 'error' || arg === 'empty') return
+    let live = true
+    void readTree().then((read) => {
+      if (!live) return
+      if (!read) { setPhase('error'); return }
+      tree = read.tree
+      put({ checked: new Set(read.checked), initial: new Set(read.checked) })
+      setPhase(read.tree.length === 0 ? 'empty' : 'ready')
+    })
+    return () => { live = false }
+  }, [arg, attempt])
   const p = plan(s)
   const go = () => { if (p.leaving.length) open('keep-confirm'); else { void apply(s); close() } }
   return (
@@ -126,7 +177,7 @@ export function KeepDialog({ arg }: { arg?: string }) {
       actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="amber" onClick={go} disabled={!p.changed || phase !== 'ready'}>Apply</Btn></>}>
       <p>Folders you choose stay on this PC. Everything else downloads when you open it.</p>
       {phase === 'error' ? (
-        <div className="mt-3"><ErrorBanner title="Couldn't load your folders." action={<Btn onClick={() => setPhase('loading')}>Try again</Btn>}>Nothing was changed. The folders you keep stay on this PC.</ErrorBanner></div>
+        <div className="mt-3"><ErrorBanner title="Couldn't load your folders." action={<Btn onClick={() => { setPhase('loading'); setAttempt((a) => a + 1) }}>Try again</Btn>}>Nothing was changed. The folders you keep stay on this PC.</ErrorBanner></div>
       ) : phase === 'empty' ? (
         <div className="mt-3 rounded-lg border border-line px-4 py-6 text-center"><div className="text-[14px] font-medium text-ink">No folders yet</div><p className="text-[12px] text-ink-3">Single files you keep offline are in Available offline.</p></div>
       ) : phase === 'loading' ? (
@@ -134,7 +185,7 @@ export function KeepDialog({ arg }: { arg?: string }) {
       ) : (
         <>
           <div className="mt-3 max-h-[300px] overflow-y-auto rounded-lg border border-line py-1">
-            <Tree nodes={KEEP_TREE} depth={0} openSet={openSet} flip={(id) => setOpenSet((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n })} />
+            <Tree nodes={tree} depth={0} openSet={openSet} flip={(id) => setOpenSet((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n })} />
           </div>
           <div className="mt-2 flex gap-4 text-[12px] text-ink-3">
             <span className="flex items-center gap-1.5"><Check state="on" label="Key: kept" onChange={() => undefined} />Kept</span>
@@ -151,10 +202,10 @@ export function KeepDialog({ arg }: { arg?: string }) {
 
 export function KeepConfirm({ arg }: { arg?: string }) {
   const { close, open } = useSettings()
-  useState(() => { if (arg === 'changed') presetKeep() })
+  if (arg === 'changed') presetKeep()
   const s = useKeep()
   const p = plan(s)
-  const names = p.leaving.length === 1 ? find(KEEP_TREE, p.leaving[0].id)?.name ?? '' : `${p.leaving.length} folders`
+  const names = p.leaving.length === 1 ? find(tree, p.leaving[0].id)?.name ?? '' : `${p.leaving.length} folders`
   return (
     <Dialog labelId="keepc-h" title={`Stop keeping ${names} on this PC?`} onCancel={() => open('keep')}
       actions={<><Btn onClick={() => open('keep')}>Cancel</Btn><Btn variant="amber" onClick={() => { void apply(s); close() }}>Apply</Btn></>}>
