@@ -6,6 +6,7 @@ import { actionFailure, fmtWhen, typeahead, TYPEAHEAD_MS } from '../src/v2/secti
 import { BANNER_ROUTE, bannerCopy, listAge } from '../src/v2/chrome/Banners'
 import { statusWords, uploadingLine } from '../src/v2/chrome/StatusLine'
 import { createFixtureExtras, FIXTURE_TRANSFERS } from '../src/v2/source/fixtures/extras'
+import { keepVersion } from '../src/v2/sections/files/liveExtras'
 
 describe('the sidebar counts', () => {
   test('Sync history counts problems only: none at zero, red above it (DW-0401, DW-1301)', () => {
@@ -118,5 +119,21 @@ describe('calendar days across a DST change (run under TZ=Europe/Lisbon too)', (
     expect(listAge('2026-10-25T22:00:00', now)).toBe('yesterday at 22:00')
     expect(fmtWhen('2026-10-25T22:00:00', now)).toBe('Yesterday, 22:00')
     expect(fmtWhen('2026-10-24T22:00:00', now)).toBe('24 Oct 2026')
+  })
+})
+
+describe('a conflict choice counts only when Rust kept it (DW-0429)', () => {
+  const calls: { name: string; args?: Record<string, unknown> }[] = []
+  const answering = (answer: { ok: true; value: undefined } | { ok: false; reason: string; unsupported: boolean }) =>
+    async <T,>(name: string, args?: Record<string, unknown>) => { calls.push({ name, args }); return answer as never as import('../src/desktopApi').CommandResult<T> }
+  test('kept: the dialog may close', async () => {
+    expect(await keepVersion('i-contract', 'both', answering({ ok: true, value: undefined }))).toBe(true)
+    expect(calls.at(-1)).toEqual({ name: 'resolve_conflict', args: { fileId: 'i-contract', choice: 'both' } })
+  })
+  test('a failure or a build without the command is not a kept version (no fake success)', async () => {
+    expect(await keepVersion('i-contract', 'mine', answering({ ok: false, reason: 'unavailable', unsupported: true }))).toBe(false)
+    expect(calls.at(-1)?.args).toEqual({ fileId: 'i-contract', choice: 'local' })
+    expect(await keepVersion('i-contract', 'theirs', answering({ ok: false, reason: 'network', unsupported: false }))).toBe(false)
+    expect(calls.at(-1)?.args).toEqual({ fileId: 'i-contract', choice: 'remote' })
   })
 })

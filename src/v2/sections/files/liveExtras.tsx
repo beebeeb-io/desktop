@@ -2,12 +2,26 @@
 // per-row transfer progress, the Uploads panel (DW-0427), the getting-ready strip (DW-1107) and the conflict dialog
 // (DW-0429). Values the engine can't know stay absent; nothing here is invented.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { command } from '../../../desktopApi'
+import { command, type CommandResult } from '../../../desktopApi'
 import { showToast } from '../../chrome/Toast'
 import { useDriveExtras, type BackupView, type DriveStatus, type TransferRow } from '../../source/extras'
 import type { BackupMeta, Transfer } from './FilesPane'
 import type { UploadRow } from './Panels'
 import { fmtSize } from './model'
+
+export type KeepChoice = 'mine' | 'theirs' | 'both'
+type Call = <T>(name: string, args?: Record<string, unknown>) => Promise<CommandResult<T>>
+
+/**
+ * DW-0429's Keep buttons: a choice counts only when Rust says it was kept. `command` answers a failure (or a build
+ * without the command) as `{ ok: false }` instead of throwing, so the dialog only closes on `ok` (M3a: it used to
+ * close on any answer, which read as kept when nothing was).
+ */
+export async function keepVersion(id: string, choice: KeepChoice, call: Call = command): Promise<boolean> {
+  const wire = choice === 'mine' ? 'local' : choice === 'theirs' ? 'remote' : 'both'
+  const r = await call<void>('resolve_conflict', { fileId: id, choice: wire })
+  return r.ok
+}
 
 /** The status line asks for the Uploads panel with this window event (DW-0427: "a panel over the status line"). */
 export const UPLOADS_OPEN_EVENT = 'bb:uploads-open'
@@ -89,12 +103,11 @@ export function useLiveFolderExtras() {
     extras.retry([id]).then(({ retried }) => { showToast(retried > 0 ? { kind: 'done', text: 'Trying again' } : { kind: 'failed', text: 'Beebeeb is already trying again' }); refresh() },
       () => showToast({ kind: 'failed', text: 'Couldn’t try again' }))
   }
-  const resolve = (id: string, choice: 'mine' | 'theirs' | 'both') => {
-    const wire = choice === 'mine' ? 'local' : choice === 'theirs' ? 'remote' : 'both'
-    command<void>('resolve_conflict', { fileId: id, choice: wire }).then(
-      () => { setDismissed((d) => new Set(d).add(id)); refresh() },
-      () => showToast({ kind: 'failed', text: 'Couldn’t keep that version. Nothing was changed.' }),
-    )
+  const resolve = (id: string, choice: KeepChoice) => {
+    void keepVersion(id, choice).then((kept) => {
+      if (kept) { setDismissed((d) => new Set(d).add(id)); refresh() }
+      else showToast({ kind: 'failed', text: 'Couldn’t keep that version. Nothing was changed.' })
+    })
   }
   return {
     status, rows, uploads, uploadsOpen, closeUploads: () => setUploadsOpen(false), retry,
