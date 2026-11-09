@@ -10,10 +10,11 @@ import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
+import { ApproveSignIn } from '../../../auth/Approve'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 
 export type SecurityPage =
-  | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity'
+  | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity' | 'approve'
   | 'delete-1' | 'delete-2' | 'delete-3' | 'delete-4' | 'delete-done'
 
 export interface SecurityInit {
@@ -56,19 +57,20 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   switch (page) {
     case 'checkup': return <Checkup state={state} onBack={home} go={go} />
     case 'password': return <ChangePassword onBack={home} onDone={() => { setState((s) => ({ ...s, passwordChangedAt: new Date().toISOString() })); home() }} showError={init.passwordError} />
-    case 'totp-setup': return <TotpSetup moving={moving} initialDigits={init.digits} onBack={() => (state.totp.on ? setPage('totp') : home())}
-      onCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
+    case 'totp-setup': return <TotpSetup moving={moving} initialDigits={init.digits} onBack={() => { setMoving(undefined); if (state.totp.on) setPage('totp'); else home() }}
+      onCodes={(c) => { setMoving(undefined); setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
     case 'backup-codes': return <BackupCodes codes={codes} onDone={() => { setCodes([]); setPage('totp') }} />
     case 'totp': return <TotpStatus state={state} onBack={home} dialog={init.dialog === 'totp-off' ? 'off' : undefined}
-      onMove={() => { setMoving('current'); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
+      onMove={(code) => { setMoving(code); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
       onTurnedOff={() => { setState((s) => ({ ...s, totp: { ...s.totp, on: false } })); home() }} />
     case 'passkeys': return <Passkeys state={state} setState={setState} onBack={home} menuOn={init.passkeyMenu ? state.passkeys.find((p) => p.name === init.passkeyMenu)?.id : undefined} removing={init.removePasskey} />
+    case 'approve': return <ApprovePage onBack={home} onSeeSessions={() => settings.go('devices')} />
     case 'activity': return <Activity state={state} setState={setState} onBack={home} asking={init.dialog === 'activity-off'} now={now}
       onPassword={() => setPage('password')} onDevices={() => settings.go('devices')} />
     case 'delete-1': return <DeleteStep1 onBack={home} onNext={() => setPage('delete-2')} />
     case 'delete-2': return <DeleteStep2 totp={state.totp.on} initialDigits={init.digits} onBack={() => { void run('account_delete_cancel', {}, null); home() }}
       onNext={(d) => { setLinkExpires(d.link_expires_at); setPage('delete-3') }} />
-    case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home}
+    case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home} onSendAgain={() => setPage('delete-1')}
       onUsed={(when) => { setShredAfter(when); setPage('delete-4') }} />
     case 'delete-4': return <DeleteStep4 shredAfter={shredAfter} onUndone={() => setPage('delete-done')} onSignOut={() => setDialog('signout')} dialog={dialog} closeDialog={() => setDialog(undefined)} />
     case 'delete-done': return <DeleteDone />
@@ -87,7 +89,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       </Group>
       <Group title="Devices">
         <Row label="Devices and sessions" value={<span className="font-mono">{state.devices.length}</span>} onClick={() => settings.go('devices')} />
-        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" href="?window=main-app&frame=DW-A12" />
+        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" onClick={() => setPage('approve')} />
       </Group>
       <Group title="Sign out" note="Sign out of Drive signs out this app only. Your other devices stay signed in: use Devices and sessions for those.">
         <Row label={<span className="text-red">Sign out of Drive</span>} onClick={() => setDialog('signout')} />
@@ -98,6 +100,31 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       </Group>
       {dialog === 'signout' || dialog === 'signout-all' ? <SignOutDialog all={dialog === 'signout-all'} onCancel={() => setDialog(undefined)} /> : null}
     </Page>
+  )
+}
+
+/**
+ * DW-A12 to A17: Approve a sign-in, B10's screens (auth/Approve.tsx), mounted here (DW-A52 › Approve a sign-in). Esc on
+ * the code page goes back to Sign-in and security; in the review it is the review's own Esc (Deny), and Settings stays.
+ */
+function ApprovePage({ onBack, onSeeSessions }: { onBack: () => void; onSeeSessions: () => void }) {
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      // Taken here, so Settings' own Esc (Back to Drive) does not fire under the review.
+      e.preventDefault()
+      if (document.querySelector('[data-approve-dialog]')) return
+      e.stopPropagation()
+      onBack()
+    }
+    document.addEventListener('keydown', key, true)
+    return () => document.removeEventListener('keydown', key, true)
+  }, [onBack])
+  return (
+    <div className="mx-auto w-full max-w-[640px] pt-6" data-testid="pane">
+      <div className="px-8"><BackLink label="Sign-in and security" onBack={onBack} /></div>
+      <div className="px-2"><ApproveSignIn onSeeSessions={onSeeSessions} /></div>
+    </div>
   )
 }
 
@@ -123,14 +150,32 @@ function AppLock() {
   )
 }
 
+/**
+ * After a sign-out the window opens again as itself: its gate (auth/Gate.tsx) finds no session and shows sign-in
+ * (DW-A02, or DW-A03 with no Continue as), and nothing of the signed-out account stays in this page's memory. Never a
+ * board frame (`?frame=`): that is a drawing with no handlers.
+ */
+export function windowAfterSignOut(search: string): string {
+  const now = new URLSearchParams(search)
+  const next = new URLSearchParams()
+  for (const k of ['window', 'platform', 'theme']) { const v = now.get(k); if (v) next.set(k, v) }
+  return `?${next.toString()}`
+}
+
+/** clear_session refuses as `<code>: <Rust's own sentence>` (sign_out/copy.rs); those sentences are the app's words. */
+export function signOutRefusal(reason: string): string {
+  const m = /^(unsent_changes|unsent_copy_failed|unsent_count_failed): (.+)$/.exec(reason)
+  return m ? m[2]! : errorText(reason)
+}
+
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
   const signOut = async () => {
     if (!hasTauri()) return onCancel()
     const r = await command('clear_session')
-    if (r.ok) window.location.assign(`?window=main-app&frame=${all ? 'DW-A03' : 'DW-A02'}`)
-    else setError(r.reason)
+    if (r.ok) window.location.replace(windowAfterSignOut(window.location.search))
+    else setError(signOutRefusal(r.reason))
   }
   return (
     <Dialog labelId="signout-h" title={all ? 'Sign out of all Beebeeb apps on this PC?' : 'Sign out of Drive?'} onCancel={onCancel}
@@ -296,7 +341,13 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
   )
 }
 
-function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void }) {
+/**
+ * Step 3. Honest about what this build can see (M3c): it cannot yet tell that the link was used (the server's
+ * GET /auth/account/deletion has no core read yet), so it does not claim to move on by itself; a new link takes the
+ * password and code again (the server's delete-request), so Send again goes back to step 1; and the mailed link keeps
+ * working until it expires (no signed-in cancel in core yet), which the page says.
+ */
+function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void; onSendAgain: () => void }) {
   const [wait, setWait] = useState(38)
   const [link, setLink] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -319,7 +370,7 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: strin
       <div role="status" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
         We sent a confirmation link to <span className="font-medium">{email}</span>. Nothing is deleted until you use that link.
       </div>
-      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Cancel the deletion here, then change your password.</p>
+      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, then change your password. Cancel deletion leaves this screen; the link keeps working until then.</p>
       <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (link.trim()) void confirmLink() }}>
         <Field label="Or paste the link from the email">
           <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
@@ -329,8 +380,8 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: strin
       </form>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
       <p className="text-[12px] text-ink-3">
-        {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={() => { setWait(60) }} className="text-ink underline">Send again</button>}
-        {' · '}This screen moves on by itself once the link is used.
+        {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={onSendAgain} className="text-ink underline">Send again</button>}
+        {' · '}A new link asks for your password again.
       </p>
       <div className="flex justify-end gap-2">
         <Btn onClick={() => { void run('account_delete_cancel', {}, null); onCancelled() }}>Cancel deletion</Btn>
@@ -358,7 +409,8 @@ function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: {
       <StepHead n={4} />
       <div className="rounded-[12px] border border-line bg-paper px-4 py-3">
         <div className="text-[13px] text-ink-2">Your account and every product’s data will be deleted on</div>
-        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{shredAfter ? dateTime(shredAfter) : '72 hours after the link was used'}</div>
+        {/* Without the server's date (the link was opened in the browser), the page the link opened shows it: never a guessed duration (decision 2436). */}
+        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{shredAfter ? dateTime(shredAfter) : 'the date the link’s page showed'}</div>
       </div>
       <Group title="Changed your mind?">
         <Row label="Undo from this screen" />
