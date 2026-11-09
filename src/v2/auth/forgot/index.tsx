@@ -12,24 +12,23 @@ import { seed } from '../../seed'
 
 // ── Views ────────────────────────────────────────────────────────────────────
 
+/** DW-A45, as the board draws it: three option cards, each with its own button; the phrase is the one amber action. */
 export function OptionsView({ onPhrase, onDevice, onNeither, onBack }: { onPhrase: () => void; onDevice: () => void; onNeither: () => void; onBack: () => void }) {
-  const card = (icon: 'key' | 'users' | 'info', title: string, detail: string, on: () => void, primary = false) => (
-    <li>
-      <button type="button" onClick={on} data-option
-        className={`flex w-full gap-3 rounded-md border bg-paper px-3 py-2.5 text-left hover:bg-paper-2 ${primary ? 'border-ink-3' : 'border-line'}`}>
-        <Icon name={icon} size={16} className="mt-0.5 flex-none text-ink-2" />
-        <span><span className="block text-[13px] font-medium text-ink">{title}</span><span className="block text-[12px] leading-4 text-ink-3">{detail}</span></span>
-      </button>
+  const card = (icon: 'key' | 'scan' | 'x', title: string, detail: string, cta: string, on: () => void, primary = false) => (
+    <li data-option className="flex flex-col gap-2 rounded-lg border border-line bg-paper px-3.5 py-3">
+      <div className="flex items-center gap-2 text-[13px] font-semibold text-ink"><Icon name={icon} size={16} className="flex-none text-ink-2" />{title}</div>
+      <p className="m-0 text-[12px] leading-4 text-ink-3">{detail}</p>
+      {primary ? <PrimaryButton onClick={on}>{cta}</PrimaryButton> : <SecondaryButton onClick={on}>{cta}</SecondaryButton>}
     </li>
   )
   return (
     <AuthWindow>
       <StepLockup /><div className="mt-4" />
-      <Heading sub="Beebeeb can’t reset your password: your files are encrypted with keys only you hold. You can set a new password with one of these.">Forgot your password?</Heading>
+      <Heading sub="Choose the option that applies to you.">Trouble signing in?</Heading>
       <ul className="m-0 mb-4 flex list-none flex-col gap-2 p-0">
-        {card('key', 'Use your recovery phrase', 'Type your 12 words, then set a new password. Your files stay as they are.', onPhrase, true)}
-        {card('users', 'Sign in with another device', 'Approve this PC from a phone or computer that is still signed in.', onDevice)}
-        {card('info', 'I have neither', 'What can and can’t be done.', onNeither)}
+        {card('key', 'I have my recovery phrase', 'The 12 words from account setup. Use them to set a new password.', 'Recover with phrase', onPhrase, true)}
+        {card('scan', 'I have another device signed in', 'Approve this PC from a device where you’re already signed in. No phrase needed.', 'Sign in with another device', onDevice)}
+        {card('x', 'I have neither', 'We’ll explain what that means for your data.', 'Show my options', onNeither)}
       </ul>
       <div className="text-center"><TextLink onClick={onBack}>Back to sign in</TextLink></div>
     </AuthWindow>
@@ -135,7 +134,10 @@ export function ForgotPasswordFlow({ initialEmail = '', onBack, onAnotherDevice,
   const [problem, setProblem] = useState<string | null>(null)
   const [signInNext, setSignInNext] = useState(false)
 
-  useEffect(() => () => { setWords([]); setPw({ password: '', confirm: '', show: false }); void api.cancelSignup() }, [])
+  // Leaving the flow forgets the recovery in Rust. The typed words and passwords go with this component's state: a
+  // set-state in an unmount cleanup does nothing in a build, and under React's dev StrictMode re-mount it emptied the
+  // live screen (the word boxes vanished, `[].every` then let Verify phrase through with no words).
+  useEffect(() => () => { void api.cancelSignup() }, [])
   useEffect(() => {
     if (screen !== 'password') return
     void api.passwordMeter(pw.password).then((r) => { if (r.ok) setMeter(r.value) })

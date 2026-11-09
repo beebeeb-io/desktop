@@ -1,8 +1,10 @@
 // Batch B11's frames (design/desktop-v2/BATCHES.md). Owned by B11 only. Each renders the whole window state against the
 // fixtures in ../source/fixtures/signup.ts; the live flows are ../auth/create, ../auth/forgot, ../onboarding, ../guide.
-import { useState, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
 import type { FrameRegistry } from './types'
-import { FrameWindow, ListBackdrop } from '../chrome/FrameWindow'
+import { FRAMES as FILES_FRAMES } from './b04'
+import { FRAMES as SHARED_FRAMES } from './b05'
+import { FRAMES as PHOTOS_FRAMES } from './b06'
 import {
   ConfirmStep, CreatingStep, DeviceStep, DoneStep as AccountReady, EmailStep, PasswordStep, PhraseStep, TermsStep, VerifyStep,
 } from '../auth/create/views'
@@ -48,22 +50,15 @@ function setup(step: SetupStep | 'done' | 'compare', body: ReactElement, explore
   return () => <SetupWindow step={step} explorer={explorer} onSkip={step === 'done' || step === 'compare' ? undefined : noop}>{body}</SetupWindow>
 }
 
-const FILES = ['Contracts', 'Photos 2026', 'Contract draft.pdf', 'Budget 2027.xlsx', 'Notes.md', 'Holiday plan.docx']
-function FileList() {
-  return (
-    <ul className="m-0 flex-1 list-none overflow-hidden p-0">
-      {FILES.map((n) => <li key={n} data-row className="flex h-10 items-center gap-3 border-b border-line px-4 text-[13px] text-ink">{n}</li>)}
-    </ul>
-  )
+/** The guide's tips sit over the real window (DW-0301 to DW-0305): the window each tip shows is that section's own frame. */
+const BACKDROP: Record<'files' | 'shared' | 'photos', () => ReactElement> = {
+  files: () => FILES_FRAMES['DW-1101']!(),
+  shared: () => SHARED_FRAMES['DW-0501']!(),
+  photos: () => PHOTOS_FRAMES['DW-0601']!(),
 }
 
 function Tip({ index, section }: { index: number; section: 'files' | 'shared' | 'photos' }) {
-  const [, setN] = useState(0)
-  return (
-    <FrameWindow section={section} overlay={<GuideTip index={index} onNext={() => setN((n) => n + 1)} onSkip={noop} />}>
-      {section === 'files' ? <FileList /> : <ListBackdrop />}
-    </FrameWindow>
-  )
+  return <>{BACKDROP[section]()}<GuideTip index={index} onNext={noop} onSkip={noop} /></>
 }
 
 export const FRAMES: FrameRegistry = {
@@ -108,7 +103,7 @@ export const FRAMES: FrameRegistry = {
   'DW-0208': setup('done', <DoneStep summary={SUMMARY} onRow={noop} onOpen={noop} />),
   'DW-0209': setup('compare', <CompareView mode="Stacked" onMode={noop} onChoose={noop} onDone={noop} />),
   // The first-time guide
-  'DW-0380': () => <TrayTipScene window={<FrameWindow section="files"><FileList /></FrameWindow>} onGotIt={noop} />,
+  'DW-0380': () => <TrayTipScene window={BACKDROP.files()} onGotIt={noop} />,
   'DW-0301': () => <Tip index={0} section="files" />,
   'DW-0302': () => <Tip index={1} section="files" />,
   'DW-0303': () => <Tip index={2} section="shared" />,

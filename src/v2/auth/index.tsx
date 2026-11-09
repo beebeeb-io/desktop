@@ -164,7 +164,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
         <TwoFactorView
           mode={twoFactor.mode} code={twoFactor.code} state={twoFactor.state}
           onCode={(code) => setTwoFactor((t) => ({ ...t, code, state: t.state === 'wrong' ? 'idle' : t.state }))}
-          onSubmit={() => void verify(twoFactor.code.length === 6 || twoFactor.code.length === 8 ? twoFactor.code : '')}
+          onSubmit={(code) => { if (code.length === 6 || code.length === 8) void verify(code) }}
           onSwitch={() => setTwoFactor((t) => ({ mode: t.mode === 'totp' ? 'backup' : 'totp', code: '', state: 'idle' }))}
           onBack={() => { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('sign-in') }}
         />

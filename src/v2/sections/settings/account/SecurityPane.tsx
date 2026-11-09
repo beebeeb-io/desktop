@@ -11,10 +11,11 @@ import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, typ
 import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
+import { ApproveSignIn } from '../../../auth/Approve'
 
 export type SecurityPage =
   | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity'
-  | 'delete-1' | 'delete-2' | 'delete-3' | 'delete-4' | 'delete-done'
+  | 'delete-1' | 'delete-2' | 'delete-3' | 'delete-4' | 'delete-done' | 'approve'
 
 export interface SecurityInit {
   page?: SecurityPage
@@ -72,6 +73,8 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       onUsed={(when) => { setShredAfter(when); setPage('delete-4') }} />
     case 'delete-4': return <DeleteStep4 shredAfter={shredAfter} onUndone={() => setPage('delete-done')} onSignOut={() => setDialog('signout')} dialog={dialog} closeDialog={() => setDialog(undefined)} />
     case 'delete-done': return <DeleteDone />
+    // B10's approval (DW-A12 to A17), mounted here by M3b: the code, the review dialog, the results.
+    case 'approve': return <ApproveSignIn back={<BackLink label="Sign-in and security" onBack={home} />} onSeeSessions={() => settings.go('devices')} onDone={() => settings.go('account')} />
   }
 
   const t = state.totp
@@ -87,7 +90,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       </Group>
       <Group title="Devices">
         <Row label="Devices and sessions" value={<span className="font-mono">{state.devices.length}</span>} onClick={() => settings.go('devices')} />
-        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" href="?window=main-app&frame=DW-A12" />
+        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" onClick={() => setPage('approve')} />
       </Group>
       <Group title="Sign out" note="Sign out of Drive signs out this app only. Your other devices stay signed in: use Devices and sessions for those.">
         <Row label={<span className="text-red">Sign out of Drive</span>} onClick={() => setDialog('signout')} />

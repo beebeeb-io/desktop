@@ -8,6 +8,7 @@ import { CaptionBar } from './chrome/CaptionBar'
 import { Sidebar } from './chrome/Sidebar'
 import { StatusLine } from './chrome/StatusLine'
 import { AuthGate } from './auth/Gate'
+import { GuideHost } from './guide/GuideHost'
 import { FRAMES } from './frames/registry'
 import { useNavigation, type SectionId } from './routes'
 import { useShortcuts, type CommandId } from './shortcuts'
@@ -84,6 +85,7 @@ export function V2Shell() {
         </main>
       </div>
       <StatusLine sync={sync} />
+      <GuideHost nav={nav} />
     </div>
   )
 }
