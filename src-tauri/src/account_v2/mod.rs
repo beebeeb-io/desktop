@@ -274,12 +274,18 @@ pub(super) async fn account_change_password(
     })
 }
 
-/// Stop the engine (it holds the ended token), store and swap the new token in one
-/// session turn, then start the engine again with it, on every platform. macOS and Linux
-/// start it as after a naming (`start_engine_unless_running`). Windows does all three in
-/// one session transition, as a sign-in does (`apply_session`): a Lock or a sign-out waits
-/// for it, and the engine comes back through `start_engine_if_possible`, with the session
-/// gate, its generation and the binding's Windows rules of every other Windows start.
+/// Store and swap the new token in one session turn, then start the engine again with it,
+/// on every platform; the engine holds the ended token. macOS and Linux stop the engine
+/// first and start it as after a naming (`start_engine_unless_running`).
+///
+/// Windows stores the token before its first await: a Lock or a sign-out cancels a Windows
+/// session command at an await (`SessionCommands::within`), and the server has already ended
+/// the old token, so nothing may come between its answer and the store. The engine then comes
+/// back under the session-transition lock through `start_engine_if_possible`, which stops the
+/// old engine (refusing when that stop is unconfirmed) and starts with the session gate, its
+/// generation and the binding's Windows rules, like every other Windows start. A running R10
+/// ownership proof holds the ended token too: it is stopped under the lock first, as a Lock
+/// and a sign-out stop it.
 async fn install_rotated_session(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -287,8 +293,7 @@ async fn install_rotated_session(
     turn: &mut account::SessionGeneration,
     new_token: &str,
 ) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let transition = SESSION_TRANSITION.lock().await;
+    #[cfg(not(target_os = "windows"))]
     {
         let mut slot = acct.engine.lock().await;
         if let Some(engine) = slot.take() {
@@ -317,6 +322,8 @@ async fn install_rotated_session(
     }
     #[cfg(target_os = "windows")]
     {
+        let transition = SESSION_TRANSITION.lock().await;
+        stop_own_data_proofs();
         start_engine_if_possible(app, state, &transition).await
     }
 }
