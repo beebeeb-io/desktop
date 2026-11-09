@@ -5,8 +5,9 @@ import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType, useDriveSource, type DriveItem, type ItemDetails, type Listing } from '@beebeeb/shared/drive-ui'
 import { IconButton, BTN, BTN_AMBER, FOCUS } from './ui'
 import { BannerSlot } from '../../chrome/Banners'
+import { fileCommandState, NOT_IN_THIS_VERSION, rowMenuActions, useCapabilities } from '../../../capabilities'
 import {
-  fmtCount, fmtSize, fmtWhen, isProtected, kindOf, LOCAL_LABEL, middleShorten, sharedLabel, stemLength, typeahead, TYPEAHEAD_MS,
+  fmtCount, fmtSize, fmtWhen, isProtected, kindOf, LOCAL_LABEL, middleShorten, rowName, sharedLabel, stemLength, typeahead, TYPEAHEAD_MS,
   type FolderPrefs, type ViewMode,
 } from './model'
 import type { SortKey } from '@beebeeb/shared/drive-ui'
@@ -111,6 +112,21 @@ function SharedCell({ item }: { item: DriveItem }) {
   return <span className="text-ink-3">—</span>
 }
 
+/** Actions this host cannot run, disabled with one plain line. Omitted when every action can run. */
+function RowMenu({ item }: { item: DriveItem }) {
+  const blocked = rowMenuActions(useCapabilities(), item.local === 'available-offline').filter((a) => a.disabled)
+  if (blocked.length === 0) return null
+  return (
+    <span role="menu" aria-label="File" className="flex flex-none items-center gap-2">
+      {blocked.map((a) => (
+        <button key={a.id} type="button" role="menuitem" disabled data-menu-item={a.id} className="inline-flex items-center gap-1 text-[12px] text-ink-3">
+          {a.label}<span className="text-[11px]">{a.sub}</span>
+        </button>
+      ))}
+    </span>
+  )
+}
+
 function PcCell({ item }: { item: DriveItem }) {
   const l = item.local
   if (!l) return null
@@ -142,13 +158,17 @@ function NameCell({ item, renaming, h, dim }: { item: DriveItem; renaming?: Rena
           {renaming.error && <span id="rename-error" role="alert" className="mt-1 block text-[12px] leading-4 text-red">{renaming.error}</span>}
         </span>
       ) : (
-        <span className="truncate text-ink" title={item.name}>{middleShorten(item.name)}</span>
+        <>
+          <span className="truncate text-ink" title={rowName(item.name)}>{middleShorten(rowName(item.name))}</span>
+          <RowMenu item={item} />
+        </>
       )}
     </span>
   )
 }
 
 function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h: PaneHandlers; selected: boolean; index: number }) {
+  const openBlocked = fileCommandState(useCapabilities(), 'file_open') === 'unavailable'
   const dim = !!p.offline && !item.isFolder && item.local === 'online-only'
   const meta = p.columns === 'backups' ? p.backupMeta?.[item.id] : undefined
   const now = p.now ?? new Date()
@@ -164,8 +184,8 @@ function Row({ item, p, h, selected, index }: { item: DriveItem; p: PaneProps; h
       onDragOver={(e) => { if (item.isFolder && !refused) e.preventDefault() }}
       onDrop={(e) => { if (item.isFolder && !refused) { e.preventDefault(); h.onDropOnFolder?.(item, e) } }}
       onClick={(e) => { e.stopPropagation(); h.onSelect?.(item.id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }) }}
-      onDoubleClick={() => h.onOpen?.(item)}
-      onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey) h.onOpen?.(item) }}
+      onDoubleClick={() => { if (!openBlocked) h.onOpen?.(item) }}
+      onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey && !openBlocked) h.onOpen?.(item) }}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); h.onContext?.(e, item) }}
       style={{ height: ROW_H }}
       className={`relative grid ${cols} cursor-default items-center gap-3 px-4 text-[13px] ${selected ? 'bg-paper-3' : 'hover:bg-paper-2'} ${drop ? 'outline outline-2 -outline-offset-2 outline-ink-3' : ''}`}
@@ -219,15 +239,17 @@ function Header({ p, h }: { p: PaneProps; h: PaneHandlers }) {
 }
 
 function Grid({ p, h }: { p: PaneProps; h: PaneHandlers }) {
+  const openBlocked = fileCommandState(useCapabilities(), 'file_open') === 'unavailable'
   return (
     <div role="grid" tabIndex={0} aria-label="Files" data-grid onKeyDown={noopKey} className="grid min-h-0 flex-1 content-start gap-3 overflow-auto p-4 [grid-template-columns:repeat(auto-fill,minmax(148px,1fr))]" onClick={() => h.onClear?.()} onContextMenu={(e) => { e.preventDefault(); h.onContext?.(e, null) }}>
       {p.items.map((item) => {
         const selected = p.selection.has(item.id)
         return (
           <div
-            key={item.id} role="row" tabIndex={-1} aria-selected={selected} data-tile={item.id} data-kind={item.isFolder ? 'folder' : 'file'} onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey) h.onOpen?.(item) }} data-selected={selected || undefined}
+            key={item.id} role="row" tabIndex={-1} aria-selected={selected} data-tile={item.id} data-kind={item.isFolder ? 'folder' : 'file'} data-selected={selected || undefined}
             onClick={(e) => { e.stopPropagation(); h.onSelect?.(item.id, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }) }}
-            onDoubleClick={() => h.onOpen?.(item)}
+            onDoubleClick={() => { if (!openBlocked) h.onOpen?.(item) }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.altKey && !openBlocked) h.onOpen?.(item) }}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); h.onContext?.(e, item) }}
             className={`flex cursor-default flex-col gap-2 rounded-xl border p-2 ${selected ? 'border-ink-3 bg-paper-3' : 'border-line bg-paper hover:bg-paper-2'}`}
           >
@@ -238,7 +260,8 @@ function Grid({ p, h }: { p: PaneProps; h: PaneHandlers }) {
               {p.videoLength?.[item.id] && <span className="absolute bottom-1.5 right-1.5 rounded bg-ink/75 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-paper">{p.videoLength[item.id]}</span>}
             </div>
             <div role="gridcell" className="min-w-0 px-1 pb-1">
-              <div className="line-clamp-2 break-words text-[13px] leading-[18px] text-ink" title={item.name}>{item.name}</div>
+              <div className="line-clamp-2 break-words text-[13px] leading-[18px] text-ink" title={rowName(item.name)}>{rowName(item.name)}</div>
+              <RowMenu item={item} />
               <div className="font-mono text-[11px] leading-4 text-ink-3">{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</div>
             </div>
           </div>
@@ -348,13 +371,14 @@ export function Toolbar({ p, h }: { p: PaneProps; h: PaneHandlers }) {
 export function SelectionBar({ p, h }: { p: PaneProps; h: PaneHandlers }) {
   const picked = p.items.filter((i) => p.selection.has(i.id))
   const blocked = picked.some(isProtected)
+  const keepOff = fileCommandState(useCapabilities(), 'file_keep_offline') === 'unavailable'
   return (
     <div role="toolbar" aria-label="Selection" data-selection-bar className="flex h-11 flex-none items-center gap-2 border-b border-line bg-paper-2 px-4 text-[13px]">
       <span className="font-medium text-ink">{picked.length} selected</span>
       <button type="button" onClick={() => h.onBulk?.('select-all')} className={`rounded-md px-2 py-1 text-ink-2 underline-offset-2 hover:bg-paper-3 ${FOCUS}`}>Select all</button>
       <span className="flex-1" />
       <button type="button" className={BTN} onClick={() => h.onBulk?.('share')}>Share…</button>
-      <button type="button" className={BTN} onClick={() => h.onBulk?.('offline')}>Make available offline</button>
+      <button type="button" className={BTN} disabled={keepOff} title={keepOff ? NOT_IN_THIS_VERSION : undefined} onClick={() => { if (!keepOff) h.onBulk?.('offline') }}>Make available offline</button>
       <button type="button" className={BTN} disabled={blocked} title={blocked ? 'Backups is protected, so it stays out of a bulk action.' : undefined} onClick={() => h.onBulk?.('move')}>Move…</button>
       <button type="button" className={BTN} disabled={blocked} title={blocked ? 'Backups is protected, so it stays out of a bulk action.' : undefined} onClick={() => h.onBulk?.('trash')}>Move to Trash <span className="ml-2 font-mono text-[11px] text-ink-3">Delete</span></button>
       <button type="button" className={BTN} onClick={() => h.onBulk?.('done')}>Done</button>
@@ -408,7 +432,7 @@ export function DetailsPanel({ p, h }: { p: PaneProps; h: PaneHandlers }) {
         {item.isFolder
           ? <div className="grid aspect-[4/3] place-items-center rounded-lg bg-paper-2"><FileIcon type="folder" size={56} /></div>
           : <Thumb item={item} className="aspect-[4/3] w-full rounded-lg" />}
-        <h2 className="m-0 mt-3 break-words text-[15px] font-semibold leading-5 text-ink">{item.name}</h2>
+        <h2 className="m-0 mt-3 break-words text-[15px] font-semibold leading-5 text-ink">{rowName(item.name)}</h2>
         <div className="mt-0.5 text-[12px] text-ink-3">{kindOf(item)} · <span className="font-mono">{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span></div>
         <div className="mt-2"><EncryptedMark /></div>
       </div>

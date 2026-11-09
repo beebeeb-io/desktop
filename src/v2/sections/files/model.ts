@@ -85,6 +85,15 @@ export function sharedLabel(s: SharedState): string {
   return s.kind === 'link' ? 'Link' : s.kind === 'people' ? s.people.map((p) => p.name).join(', ') : '—'
 }
 
+/**
+ * The name a row shows. The engine's blocked label (`Unavailable file` plus 16 hex digits) is not a name:
+ * the row keeps the short id so two such files stay distinct.
+ */
+export function rowName(name: string): string {
+  const blocked = /^Unavailable file ([0-9a-f]{16})$/i.exec(name.trim())
+  return blocked ? `File ${blocked[1]}` : name
+}
+
 /** Shortens a long name in the middle so the start, the number and the extension stay (DW-0420b). */
 export function middleShorten(name: string, max = 46): string {
   if (name.length <= max) return name
@@ -154,13 +163,25 @@ export function savePrefs(folderId: string | null, prefs: FolderPrefs): void {
 }
 
 /**
+ * What to say when this version cannot run an action. Names the action in plain words and says what to do next.
+ * Never a build word or an internal code.
+ */
+export function unavailableWords(action: string): string {
+  const key = action.trim().toLowerCase()
+  if (key === 'open' || key === 'open it') return 'Couldn’t open it. Open it from File Explorer.'
+  if (key === 'reveal' || key === 'show it in file explorer') return 'Couldn’t show it in File Explorer. Try again.'
+  if (key === 'keep offline' || key === 'keep it on this pc') return 'Couldn’t keep it on this PC. Try again.'
+  return `Couldn’t ${action}. Not in this version.`
+}
+
+/**
  * A failed action's message (DW-0109): what failed and how to fix it, never a raw error code. `retry` says whether
- * Try again can help: not for a build that lacks the command, a full account or a name already used.
+ * Try again can help: not when this version lacks the action, the account is full, or the name is already used.
  */
 export function actionFailure(action: string, code: string): { text: string; retry: boolean } {
   if (code === 'offline') return { text: `Couldn’t ${action}. Check your connection.`, retry: true }
   if (code === 'quota') return { text: `Couldn’t ${action}. Not enough space.`, retry: false }
-  if (code === 'unsupported') return { text: `Couldn’t ${action}. This isn’t available in this build yet.`, retry: false }
+  if (code === 'unsupported') return { text: unavailableWords(action), retry: false }
   if (code === 'signed-out') return { text: `Couldn’t ${action}. Sign in to continue.`, retry: false }
   if (code === 'name-taken') return { text: `Couldn’t ${action}. That name is already used here.`, retry: false }
   return { text: `Couldn’t ${action}.`, retry: true }

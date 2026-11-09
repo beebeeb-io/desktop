@@ -20,6 +20,47 @@ export interface DesktopCapabilities {
   sync_overlay_control: boolean
   hydrate_all_control: boolean
   cache_limit_control: boolean
+  /**
+   * Per-command marks. The Rust snapshot omits this; a host or a test may set one.
+   * Absent means the booleans above decide, and an unknown host does not hide an action.
+   */
+  commands?: Partial<Record<FileHostCommand, CommandMark>>
+}
+
+export type FileHostCommand = 'file_open' | 'file_reveal' | 'file_keep_offline'
+export type CommandMark = 'available' | 'unavailable' | 'unknown'
+
+/** Whether one file action can run on this host. A mark wins; otherwise the snapshot's booleans decide. */
+export function fileCommandState(caps: DesktopCapabilities | null, command: FileHostCommand): CommandMark {
+  const marked = caps?.commands?.[command]
+  if (marked) return marked
+  if (!caps) return 'unknown'
+  if (command === 'file_keep_offline') return caps.on_demand ? 'available' : 'unavailable'
+  return caps.filesystem_integration === 'none' ? 'unavailable' : 'available'
+}
+
+export interface RowMenuAction {
+  id: 'open' | 'reveal' | 'offline'
+  label: string
+  disabled: boolean
+  /** Plain reason under a disabled action. */
+  sub?: string
+}
+
+export const NOT_IN_THIS_VERSION = 'Not in this version'
+
+/** The row menu for open, reveal and keep-offline. An action this host cannot run is disabled, not failed into a toast. */
+export function rowMenuActions(caps: DesktopCapabilities | null, keeping: boolean): RowMenuAction[] {
+  const one = (id: RowMenuAction['id'], command: FileHostCommand, label: string): RowMenuAction => (
+    fileCommandState(caps, command) === 'unavailable'
+      ? { id, label, disabled: true, sub: NOT_IN_THIS_VERSION }
+      : { id, label, disabled: false }
+  )
+  return [
+    one('open', 'file_open', 'Open'),
+    one('reveal', 'file_reveal', 'Show in File Explorer'),
+    one('offline', 'file_keep_offline', keeping ? 'Remove from this PC' : 'Make available offline'),
+  ]
 }
 
 export const CapabilityContext = createContext<DesktopCapabilities | null>(null)
