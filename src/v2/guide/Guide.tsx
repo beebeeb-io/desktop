@@ -47,6 +47,22 @@ export function findTarget(id: TipId): Element | null {
 
 interface Box { top: number; left: number; width: number; height: number }
 
+/** Neutral ink over the window, with a hole so the measured target stays bright. Clicks pass through. */
+function GuideScrim({ box }: { box: Box | null }) {
+  if (!box) return <div data-guide-scrim className="pointer-events-none absolute inset-0 bg-ink/35" />
+  const right = box.left + box.width
+  const bottom = box.top + box.height
+  const band = 'pointer-events-none absolute bg-ink/35'
+  return (
+    <div data-guide-scrim className="pointer-events-none absolute inset-0">
+      <div className={band} style={{ top: 0, left: 0, right: 0, height: Math.max(0, box.top) }} />
+      <div className={band} style={{ top: box.top, left: 0, width: Math.max(0, box.left), height: box.height }} />
+      <div className={band} style={{ top: box.top, left: right, right: 0, height: box.height }} />
+      <div className={band} style={{ top: bottom, left: 0, right: 0, bottom: 0 }} />
+    </div>
+  )
+}
+
 /** Where the card goes: under the outlined target, or above it when it would not fit under it (the gear, DW-0305). */
 export function cardPlace(box: Box | null, cardHeight: number, view: { width: number; height: number }): { top: number; left: number } {
   if (!box) return { top: 120, left: 260 }
@@ -109,8 +125,9 @@ export function GuideTip({ index, onNext, onSkip, onMissing }: {
   const place = cardPlace(box, cardHeight, { width: window.innerWidth, height: window.innerHeight })
   return (
     <div className="pointer-events-none absolute inset-0 z-40" data-guide-tip={tip.id} data-screen={`guide-${tip.id}`}>
+      <GuideScrim box={box} />
       {box && <div data-outline className="absolute rounded-md border-2 border-ink ring-4 ring-paper/60" style={box} />}
-      <div role="dialog" data-guide-card aria-label={`Tip ${index + 1} of ${TIPS.length}`} aria-describedby={`guide-tip-${tip.id}`} ref={card} className="pointer-events-auto absolute w-[320px] rounded-lg border border-line bg-paper p-4 shadow-xl" style={place}>
+      <div role="dialog" data-guide-card aria-label={`Tip ${index + 1} of ${TIPS.length}`} aria-describedby={`guide-tip-${tip.id}`} ref={card} className="pointer-events-auto absolute w-[320px] rounded-xl border border-line bg-paper p-4 shadow-xl" style={place}>
         <p id={`guide-tip-${tip.id}`} className="m-0 text-[13px] leading-[19px] text-ink">{tip.text}</p>
         <div className="mt-3 flex items-center justify-between">
           <span className="font-mono text-[11px] text-ink-3" data-tip-count>{index + 1} of {TIPS.length}</span>
