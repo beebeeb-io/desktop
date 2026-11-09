@@ -54,7 +54,10 @@ function NavLink({ item, active, onGo, count }: { item: Item; active: boolean; o
     >
       <Icon name={item.icon} size={16} />
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
-      {shown && <span className={`font-mono text-[11px] ${shown.problems ? 'font-medium text-red' : 'text-ink-3'}`}>{shown.text}</span>}
+      {shown && (shown.problems
+        // The problem count is the board's red badge (DW-1301 "a red 3"): a white number on the red fill, a pill.
+        ? <span data-badge="problems" className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-full bg-red-fill px-[5px] text-[10.5px] font-semibold leading-none tabular-nums text-white">{shown.text}</span>
+        : <span className="font-mono text-[11px] text-ink-3">{shown.text}</span>)}
     </a>
   )
 }

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { BTN, FOCUS, Menu, type MenuEntry } from '../files/ui'
 import { applyFilter, FILTERS, groupDays, isProblem, problemCount, timeLabel, type Filter, type HistoryRow } from './model'
+import { BannerSlot } from '../../chrome/Banners'
 
 export interface HistoryViewProps {
   rows: HistoryRow[]
@@ -69,6 +70,8 @@ export function HistoryView(p: HistoryViewProps) {
             className={`h-8 w-56 rounded-md border border-line bg-paper pl-8 pr-2 text-[13px] text-ink placeholder:text-ink-3 ${FOCUS}`} />
         </label>
       </div>
+      {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+      <BannerSlot />
 
       {p.filter === 'problems' && problems > 0 && (
         <div role="status" data-bar="cant-sync" className="flex flex-none items-center gap-3 border-b border-line bg-paper-2 px-4 py-2.5">

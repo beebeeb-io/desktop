@@ -383,3 +383,24 @@ describe('M3c’s leftovers: Search’s list-loading count follows the loader’
     expect(search).not.toContain('[extras, query])')
   })
 })
+
+describe('base item 2: the brand slips outside the shared package', () => {
+  test('the banner sits under the toolbar on every view with one (DW-0101 to DW-0106): each puts a BannerSlot after it', () => {
+    const views = ['v2/sections/files/FilesPane.tsx', 'v2/sections/shared/SharedView.tsx', 'v2/sections/photos/PhotosView.tsx', 'v2/sections/trash/TrashView.tsx',
+      'v2/sections/search/SearchView.tsx', 'v2/sections/sync-history/HistoryView.tsx', 'v2/sections/available-offline/OfflineView.tsx', 'v2/sections/open/Chrome.tsx']
+    const without = views.filter((v) => !src(v).includes('<BannerSlot />'))
+    expect(without).toEqual([])
+    expect(views.length).toBe(8)
+  })
+  test('the problem count is the board’s red badge: white on the red fill, a pill (DW-1301)', () => {
+    const side = src('v2/chrome/Sidebar.tsx')
+    expect(side).toContain('data-badge="problems"')
+    expect(side).toMatch(/data-badge="problems" className="[^"]*\brounded-full\b[^"]*\bbg-red-fill\b[^"]*\btext-white\b/)
+    expect(src('v2/design.css')).toContain('--color-red-fill: oklch(0.55 0.2 25);')
+  })
+  test('the legacy `button, input { font: inherit }` reset no longer reaches the v2 window (B10), at one element’s specificity', () => {
+    const legacy = src('design.css')
+    expect(legacy).not.toMatch(/^button,\s*\ninput\s*\{/m)
+    expect(legacy).toContain(':where(html:not(.v2)) button,\n:where(html:not(.v2)) input {\n  font: inherit;\n}')
+  })
+})

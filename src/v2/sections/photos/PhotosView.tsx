@@ -6,6 +6,7 @@ import { PhotoTileSkeleton } from '@beebeeb/shared/design'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { BTN, BTN_AMBER, FOCUS } from '../files/ui'
 import { ACROSS, ACROSS_LABEL, dayHeading, fmtMB, fmtN, groupByDay, idOf, isVideo, type Across, type PhotoCell } from './model'
+import { BannerSlot } from '../../chrome/Banners'
 
 /** The decrypted thumbnail URL for a photo, from the source; null until it arrives (or when there is none). */
 export function useThumb(id: string, size: 'small' | 'large'): string | null {
@@ -96,12 +97,16 @@ function Pill({ label, on, onClick }: { label: string; on: boolean; onClick?: ()
 
 export function Toolbar({ children, subtitle }: { children?: ReactNode; subtitle?: string }) {
   return (
-    <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4">
-      <h1 className="m-0 flex-none text-[15px] font-semibold text-ink">Photos</h1>
-      {subtitle && <span className="min-w-0 truncate font-mono text-[12px] text-ink-3" data-totals>{subtitle}</span>}
-      <span className="flex-1" />
-      {children}
-    </div>
+    <>
+      <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4">
+        <h1 className="m-0 flex-none text-[15px] font-semibold text-ink">Photos</h1>
+        {subtitle && <span className="min-w-0 truncate font-mono text-[12px] text-ink-3" data-totals>{subtitle}</span>}
+        <span className="flex-1" />
+        {children}
+      </div>
+      {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+      <BannerSlot />
+    </>
   )
 }
 

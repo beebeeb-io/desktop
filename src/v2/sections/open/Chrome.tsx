@@ -3,12 +3,14 @@
 import type { ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { BTN, FOCUS, IconButton } from '../files/ui'
+import { BannerSlot } from '../../chrome/Banners'
 
 /** Focus on mount without the autoFocus prop (dialogs and find open with focus in them). */
 export const focusOnMount = (el: HTMLElement | null) => { if (el) setTimeout(() => el.focus(), 0) }
 
 export function OpenToolbar({ name, dirty, meta, onBack, children }: { name: string; dirty?: boolean; meta?: ReactNode; onBack?: () => void; children?: ReactNode }) {
   return (
+    <>
     <div data-open-toolbar className="flex h-12 flex-none items-center gap-2 border-b border-line px-3">
       <IconButton icon="chevron-right" label="Back to the folder" flip onClick={onBack} />
       <h1 className="m-0 flex min-w-0 items-center gap-2 truncate text-[15px] font-semibold text-ink">
@@ -19,6 +21,9 @@ export function OpenToolbar({ name, dirty, meta, onBack, children }: { name: str
       <span className="flex-1" />
       {children}
     </div>
+    {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+    <BannerSlot />
+    </>
   )
 }
 

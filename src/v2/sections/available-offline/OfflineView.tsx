@@ -4,6 +4,7 @@ import { Icon } from '@beebeeb/shared/design'
 import { FileIcon } from '@beebeeb/shared/drive-ui'
 import { BTN, Menu, type MenuEntry } from '../files/ui'
 import { fmtCount, fmtSize } from '../files/model'
+import { BannerSlot } from '../../chrome/Banners'
 
 export interface OfflineRow { id: string; name: string; isFolder: boolean; items?: number; bytes: number | null; mime?: string; status: string }
 export const OFFLINE_MENU: MenuEntry[] = [
@@ -53,6 +54,8 @@ export function OfflineView({ rows, menuOn, onOpen, onMenu, onRemoveAll }: {
           </>
         ) : <button type="button" className={BTN} onClick={() => setAsking(true)}>Remove all from this PC</button>)}
       </div>
+      {/* The window's banner sits under the toolbar on every view (DW-0101 to DW-0106). */}
+      <BannerSlot />
       {rows.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center" data-empty="offline">
           <div className="grid h-14 w-14 place-items-center rounded-2xl border border-line bg-paper-2 text-ink-3"><Icon name="pin" size={26} /></div>
