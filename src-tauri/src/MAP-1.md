@@ -24,7 +24,7 @@ Modules 1–45, sorted by path.
 | `cf_keepalive.rs` | LD-0105 S0: when a Windows Cloud Files fetch tells Windows how far it got. | — |
 | `cf_range.rs` | LD-0105 W2: the rules of the Windows fetch callback's streaming path, pure and compiled on every platform so they are tested everywhere (the | — |
 | `cf_range_tests.rs` | Tests of `cf_range` (LD-0105 W2, contract Amendment 4). | — |
-| `config.rs` | Persistent desktop config — `~/.config/beebeeb/desktop.toml`. | default_sync_root_suggestion, ensure_directory, DesktopSettings (13), DesktopConfig (33), DesktopTheme (3), KnownFolderSource (2), LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel (3) |
+| `config.rs` | Persistent desktop config — `~/.config/beebeeb/desktop.toml`. | default_sync_root_suggestion, ensure_directory, DesktopSettings (20), DesktopConfig (40), DesktopTheme (3), KnownFolderSource (2), LOCAL_CACHE_LIMIT_100_GB_BYTES, ReleaseChannel (3) |
 | `config_write_pin_tests.rs` | (no //! header) | — |
 | `conflict.rs` | Conflict detection primitives — pure functions over `VersionInfo`s, plus the policy timestamps Task 13's auto-resolution timer reads. | — |
 | `desktop_capabilities.rs` | Host support, deliberately independent of WebView layout/query parameters. | — |

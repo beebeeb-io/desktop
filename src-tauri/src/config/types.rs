@@ -106,6 +106,28 @@ pub struct DesktopConfig {
     /// Unlimited (`local_cache_limit_bytes == 0`).
     #[serde(default = "default_true")]
     pub notify_quota_warnings: bool,
+    /// Allow notifications on this PC. Off hides the other switches; the choice itself stays stored.
+    /// An older file with no such key reads as on, which is what the pane did before the key existed.
+    #[serde(default = "default_true")]
+    pub notify_allow: bool,
+    /// Someone shared a file or folder with this account. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_shared: bool,
+    /// Sync on this PC stopped. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_sync_stopped: bool,
+    /// A file on this PC needs a decision. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_needs_decision: bool,
+    /// Downloaded files on this PC are near their limit. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_local_space: bool,
+    /// A backup on this PC finished. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_backup_finished: bool,
+    /// A backup on this PC needs attention. On when the key is missing.
+    #[serde(default = "default_true")]
+    pub notify_backup_attention: bool,
 
     // ── Task 0090 — selective sync (SelectiveSync.tsx) ─────────────
     //
@@ -387,6 +409,13 @@ impl Default for DesktopConfig {
             notify_conflicts: true,
             notify_sync_complete: false,
             notify_quota_warnings: true,
+            notify_allow: true,
+            notify_shared: true,
+            notify_sync_stopped: true,
+            notify_needs_decision: true,
+            notify_local_space: true,
+            notify_backup_finished: true,
+            notify_backup_attention: true,
             excluded_folder_ids: None,
             known_folder_backup: Vec::new(),
             known_folder_source: std::collections::BTreeMap::new(),

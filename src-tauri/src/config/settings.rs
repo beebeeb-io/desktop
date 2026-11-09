@@ -49,6 +49,21 @@ pub struct DesktopSettings {
     pub notify_sync_complete: Option<bool>,
     #[serde(default)]
     pub notify_quota_warnings: Option<bool>,
+    /// The rest of Settings › Notifications. `None` means this write did not touch the switch.
+    #[serde(default)]
+    pub notify_allow: Option<bool>,
+    #[serde(default)]
+    pub notify_shared: Option<bool>,
+    #[serde(default)]
+    pub notify_sync_stopped: Option<bool>,
+    #[serde(default)]
+    pub notify_needs_decision: Option<bool>,
+    #[serde(default)]
+    pub notify_local_space: Option<bool>,
+    #[serde(default)]
+    pub notify_backup_finished: Option<bool>,
+    #[serde(default)]
+    pub notify_backup_attention: Option<bool>,
     /// Sync mode chosen in the Windows first-run wizard. `None` when not
     /// yet set (first run). One of `"everything"`, `"smart"`, `"custom"`,
     /// `"online_only"`.
@@ -85,6 +100,13 @@ impl From<&DesktopConfig> for DesktopSettings {
             notify_conflicts: Some(c.notify_conflicts),
             notify_sync_complete: Some(c.notify_sync_complete),
             notify_quota_warnings: Some(c.notify_quota_warnings),
+            notify_allow: Some(c.notify_allow),
+            notify_shared: Some(c.notify_shared),
+            notify_sync_stopped: Some(c.notify_sync_stopped),
+            notify_needs_decision: Some(c.notify_needs_decision),
+            notify_local_space: Some(c.notify_local_space),
+            notify_backup_finished: Some(c.notify_backup_finished),
+            notify_backup_attention: Some(c.notify_backup_attention),
             sync_mode: c.sync_mode.clone(),
             metered: c.metered,
             files_on_demand: c.files_on_demand,
@@ -119,6 +141,27 @@ impl DesktopConfig {
         }
         if let Some(notify) = s.notify_quota_warnings {
             self.notify_quota_warnings = notify;
+        }
+        if let Some(notify) = s.notify_allow {
+            self.notify_allow = notify;
+        }
+        if let Some(notify) = s.notify_shared {
+            self.notify_shared = notify;
+        }
+        if let Some(notify) = s.notify_sync_stopped {
+            self.notify_sync_stopped = notify;
+        }
+        if let Some(notify) = s.notify_needs_decision {
+            self.notify_needs_decision = notify;
+        }
+        if let Some(notify) = s.notify_local_space {
+            self.notify_local_space = notify;
+        }
+        if let Some(notify) = s.notify_backup_finished {
+            self.notify_backup_finished = notify;
+        }
+        if let Some(notify) = s.notify_backup_attention {
+            self.notify_backup_attention = notify;
         }
         // Only overwrite sync_mode if the incoming settings carries one;
         // a plain bandwidth/notification save should not clear a persisted mode.
