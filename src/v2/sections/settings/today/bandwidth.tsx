@@ -5,7 +5,8 @@
 // page says that instead of the board's devices; the board's page stays in its frames.
 import { useEffect, useRef, useState } from 'react'
 import { useDriveSource, type SyncSummary } from '@beebeeb/shared/drive-ui'
-import { command, type AppActivitySnapshot, type BandwidthSample } from '../../../../desktopApi'
+import { command, commandUnavailableLabel, type AppActivitySnapshot, type BandwidthSample } from '../../../../desktopApi'
+import { usePlatform } from '../../../../platform'
 import { Btn, Choice, Group, Meter, Page, Row, Switch, fmtBytes, mono } from '../shell/kit'
 import { useConfig } from '../shell/data'
 import { useSettings } from '../shell/context'
@@ -19,7 +20,7 @@ export type BwVariant = 'normal' | 'idle' | 'limited' | 'empty' | 'metered'
 
 export interface BwDevice {
   id: string; name: string; platform: string
-  status: 'Syncing' | 'Up to date' | 'Paused' | "Couldn't sync"
+  status: 'Syncing' | 'Up to date' | 'Paused' | "Couldn't sync" | 'Not read yet'
   files?: number; doneBytes?: number; totalBytes?: number; speedBps?: number | null; reported: string
 }
 
@@ -37,6 +38,10 @@ export interface BwView {
   /** Other devices' sync isn't reported to this PC: the running app says so under This PC. */
   othersUnknown: boolean
   chart: Bucket[] | null
+  /** Empty history, or the history read's own error. Null while a series is drawn or the read has not answered. */
+  chartNote: string | null
+  /** The history read failed: the chart offers Try again and does not draw a line. */
+  chartRetry: boolean
   /** The chart's first bucket's start, in ms (bucket i covers 20 minutes from start + i × 20 min). */
   chartStart: number
 }
@@ -47,17 +52,22 @@ export type BoardBandwidth = (variant: BwVariant, o: { upLimit: number; meteredO
 const BUCKETS = 60
 const BUCKET_MS = 20 * 60 * 1000
 
-/** The last 20 hours in 60 buckets of 20 minutes, oldest first, from the state DB's samples (MB = 10^6 bytes). */
+/** The last 20 hours in 60 buckets of 20 minutes, oldest first, from the state DB's samples (MB = 10^6 bytes).
+ *  No sample inside the window, or none that moved a megabyte, is an empty series: not 60 zeros. */
 export function bucketsFrom(samples: BandwidthSample[], now: number): Bucket[] {
   const start = now - BUCKETS * BUCKET_MS
   const out = Array.from({ length: BUCKETS }, () => ({ up: 0, down: 0 }))
+  let kept = false
   for (const s of samples) {
     const i = Math.floor((s.sampled_at * 1000 - start) / BUCKET_MS)
     if (i < 0 || i >= BUCKETS) continue
+    kept = true
     out[i].up += s.up_bytes / 1_000_000
     out[i].down += s.down_bytes / 1_000_000
   }
-  return out.map((b) => ({ up: Math.round(b.up), down: Math.round(b.down) }))
+  if (!kept) return []
+  const rounded = out.map((b) => ({ up: Math.round(b.up), down: Math.round(b.down) }))
+  return rounded.some((b) => b.up > 0 || b.down > 0) ? rounded : []
 }
 
 const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
@@ -67,9 +77,11 @@ export function bucketSpan(start: number, i: number, now: number): string {
   const day = new Date(from).toDateString() === new Date(now).toDateString() ? 'Today' : 'Yesterday'
   return `${day} ${hhmm(from)} – ${hhmm(from + BUCKET_MS)}`
 }
-/** The smallest round top the chart's tallest bar fits under (the board's is 400 MB). */
+/** The smallest round top the chart's tallest bar fits under. An empty series has no scale. */
 export function chartTop(data: Bucket[]): number {
-  const peak = Math.max(1, ...data.map((d) => Math.max(d.up, d.down)))
+  if (data.length === 0) return 0
+  const peak = Math.max(0, ...data.map((d) => Math.max(d.up, d.down)))
+  if (peak <= 0) return 0
   return [10, 20, 50, 100, 200, 400, 1000, 2000, 5000, 10_000, 20_000, 50_000].find((t) => t >= peak) ?? Math.ceil(peak / 10_000) * 10_000
 }
 
@@ -83,11 +95,11 @@ function limitOptions(kbps: number) {
   return opts
 }
 
-function Chart({ data, start, now, hover: hoverProp }: { data: Bucket[] | null; start: number; now: number; hover?: number }) {
+function Chart({ data, start, now, hover: hoverProp }: { data: Bucket[]; start: number; now: number; hover?: number }) {
   const [hover, setHover] = useState<number | null>(hoverProp ?? null)
-  if (data === null) return <div className="grid h-[140px] place-items-center px-6 text-center text-[13px] text-ink-3">Beebeeb couldn’t read the traffic recorded on this PC.</div>
-  if (!data.length || data.every((d) => d.up === 0 && d.down === 0)) return <div className="grid h-[140px] place-items-center px-6 text-center text-[13px] text-ink-3">Nothing recorded yet. Beebeeb records traffic from when it starts syncing on this PC.</div>
-  const W = 600, H = 140, max = chartTop(data), bw = W / data.length
+  const max = chartTop(data)
+  if (max <= 0) return null
+  const W = 600, H = 140, bw = W / data.length
   const up = data.reduce((s, d) => s + d.up, 0), down = data.reduce((s, d) => s + d.down, 0)
   const total = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`)
   const busiest = data.reduce((b, d, i) => (d.up + d.down > data[b].up + data[b].down ? i : b), 0)
@@ -123,6 +135,30 @@ function Chart({ data, start, now, hover: hoverProp }: { data: Bucket[] | null; 
   )
 }
 
+const quiet = 'grid h-[140px] place-items-center px-6 text-center text-[13px] text-ink-3'
+
+/** The chart, or the words for a read that has no series. No flat line of zeros. */
+export function HistoryChart({ chart, note, retry, onRetry, start, now, hover }: {
+  chart: Bucket[] | null
+  note: string | null
+  retry: boolean
+  onRetry: () => void
+  start: number
+  now: number
+  hover?: number
+}) {
+  if (retry) {
+    return (
+      <ErrorBanner title="Couldn’t read the transfers recorded on this PC." action={<Btn onClick={onRetry}>Try again</Btn>}>
+        {note}
+      </ErrorBanner>
+    )
+  }
+  if (chart == null) return <div className={quiet}>{note ?? 'Reading the transfers recorded on this PC.'}</div>
+  if (!chart.some((d) => d.up > 0 || d.down > 0)) return <div className={quiet}>{note ?? 'No transfers yet. Last write: none yet.'}</div>
+  return <Chart data={chart} start={start} now={now} hover={hover} />
+}
+
 function Live({ label, figure, line }: { label: string; figure: string; line: string }) {
   return (
     <div className="flex-1 px-4 py-3" data-testid="live">
@@ -139,14 +175,14 @@ function DeviceRow({ d }: { d: BwDevice }) {
   return (
     <button type="button" onClick={() => go('devices')} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-paper-2" data-testid="device-row">
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-[13px] text-ink">{d.name}<span className="text-[12px] text-ink-3">{d.platform}</span></div>
+        <div className="flex items-center gap-2 text-[13px] text-ink">{d.name}{d.platform ? <span className="text-[12px] text-ink-3">{d.platform}</span> : null}</div>
         {d.status === 'Syncing' ? (
           <>
             <div className="my-1.5"><Meter label={`${d.name} sync`} fraction={frac} amber /></div>
             <div className={`text-[12px] text-ink-3 ${mono}`}>{d.files} files · {fmtBytes(d.doneBytes ?? 0)} of {fmtBytes(d.totalBytes ?? 0)} · {fmtSpeed(d.speedBps)}</div>
           </>
         ) : null}
-        <div className="text-[12px] text-ink-3">Reported {d.reported}</div>
+        {d.reported ? <div className="text-[12px] text-ink-3">Reported {d.reported}</div> : null}
       </div>
       <Pill tone={d.status === "Couldn't sync" ? 'red' : 'neutral'}>{d.status}</Pill>
     </button>
@@ -205,54 +241,112 @@ const PHASE_STATUS: Record<SyncSummary['phase'], BwDevice['status']> = {
   checking: 'Up to date', 'up-to-date': 'Up to date', syncing: 'Syncing', paused: 'Paused', offline: 'Paused', 'needs-decision': 'Syncing', stopped: "Couldn't sync",
 }
 
+/** What an empty history says: no transfers, and when a sample was last written, or that none was. */
+function emptyHistory(activity: AppActivitySnapshot | null, now: number): string {
+  const age = activity?.throughput_sample_age_ms
+  if (age == null || !Number.isFinite(age) || age < 0) return 'No transfers yet. Last write: none yet.'
+  return `No transfers yet. Last write ${hhmm(now - age)}.`
+}
+
+/** A sample age as the device row's "Reported" time. Nothing, when the snapshot has no sample. */
+function reportedAt(activity: AppActivitySnapshot | null, now: number): string {
+  const age = activity?.throughput_sample_age_ms
+  if (age == null || !Number.isFinite(age) || age < 0) return ''
+  return age < 45_000 ? 'just now' : hhmm(now - age)
+}
+
+/** The refusal a person can read. A missing command stays the shared sentence, not the host's internal text. */
+function readError(reason: string, unsupported: boolean, commandName: string): string {
+  if (unsupported) return commandUnavailableLabel(commandName)
+  return reason.trim() || 'The read did not answer.'
+}
+
 /** The page's figures in the running app, from the reads. */
-export function liveView(o: { activity: AppActivitySnapshot | null; transfers: TransferRow[]; sync: SyncSummary | null; history: Bucket[] | null; start: number }): BwView {
+export function liveView(o: {
+  activity: AppActivitySnapshot | null
+  transfers: TransferRow[]
+  sync: SyncSummary | null
+  history: Bucket[] | null
+  start: number
+  now?: number
+  historyError?: string | null
+  platform?: string
+}): BwView {
   const { activity, transfers, sync } = o
+  const now = o.now ?? o.start + BUCKETS * BUCKET_MS
   const downloads = transfers.filter((t) => t.direction === 'down' && t.state !== 'stopped')
   const moving = transfers.filter((t) => t.state === 'moving')
   const upBps = activity?.upload_bps ?? null
   const downBps = activity?.download_bps ?? null
-  const status = sync ? PHASE_STATUS[sync.phase] : 'Up to date'
+  const status = sync ? PHASE_STATUS[sync.phase] : 'Not read yet'
   const live = transfers.filter((t) => t.state !== 'stopped')
   const known = live.every((t) => (t.total ?? 0) > 0)
   const thisPc: BwDevice = {
-    id: 'pc', name: 'This PC', platform: 'Windows', status, reported: 'just now', speedBps: upBps,
+    id: 'pc', name: 'This PC', platform: o.platform ?? '', status, reported: reportedAt(activity, now), speedBps: upBps,
     ...(status === 'Syncing' && live.length && known ? { files: live.length, doneBytes: live.reduce((n, t) => n + t.bytes, 0), totalBytes: live.reduce((n, t) => n + (t.total ?? 0), 0) } : {}),
   }
+  const failed = o.historyError != null && o.historyError !== ''
+  const chart = failed || o.history == null ? null : o.history.some((b) => b.up > 0 || b.down > 0) ? o.history : []
+  const movingNow = moving.length > 0 || (upBps ?? 0) > 0 || (downBps ?? 0) > 0
   return {
     upBps, downBps,
-    upLine: uploadingLine(transfers) ?? (sync?.phase === 'paused' ? 'Paused' : sync?.phase === 'syncing' ? 'Syncing' : 'Up to date'),
+    upLine: uploadingLine(transfers) ?? (sync == null ? 'Not read yet' : sync.phase === 'paused' ? 'Paused' : sync.phase === 'syncing' ? 'Syncing' : 'Up to date'),
     downLine: downloads.length ? `${downloads.length.toLocaleString('en')} ${downloads.length === 1 ? 'file' : 'files'} downloading` : 'Files download when you open them',
-    footer: moving.length ? 'This PC is syncing' : 'Nothing is moving',
+    footer: movingNow ? 'This PC is syncing' : sync == null && activity == null ? 'Not read yet' : 'Nothing is moving',
     devices: [thisPc],
     othersUnknown: true,
-    chart: o.history,
+    chart,
+    chartNote: failed ? o.historyError! : chart != null && chart.length === 0 ? emptyHistory(activity, now) : null,
+    chartRetry: failed,
     chartStart: o.start,
   }
 }
 
-/** The reads behind the page: the speeds once a second, the engine's queue and summary, and the 20 hours once. */
-function useBandwidth(): BwView {
+/** The reads behind the page: speeds, the queue and the 20 hours, again each second while it is open. */
+function useBandwidth(): { view: BwView; retry: () => void; activityError: string | null } {
   const source = useDriveSource()
   const extras = useDriveExtras()
   const [activity, setActivity] = useState<AppActivitySnapshot | null>(null)
+  const [activityError, setActivityError] = useState<string | null>(null)
   const [transfers, setTransfers] = useState<TransferRow[]>([])
   const [sync, setSync] = useState<SyncSummary | null>(null)
-  const [history, setHistory] = useState<Bucket[] | null>([])
-  const [now] = useState(() => Date.now())
+  const [history, setHistory] = useState<Bucket[] | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+  const [nonce, setNonce] = useState(0)
   useEffect(() => {
     let live = true
-    const tick = () => { void command<AppActivitySnapshot>('app_activity_snapshot').then((r) => { if (live && r.ok) setActivity(r.value) }) }
-    tick()
-    const t = setInterval(tick, 1000)
-    void command<BandwidthSample[]>('get_bandwidth_history', { hours: 20 }).then((r) => { if (live) setHistory(r.ok ? bucketsFrom(r.value, now) : null) })
+    let busy = false
+    const read = () => {
+      if (!live || busy) return
+      busy = true
+      const at = Date.now()
+      setNow(at)
+      const speeds = command<AppActivitySnapshot>('app_activity_snapshot').then((r) => {
+        if (!live) return
+        if (r.ok) { setActivity(r.value); setActivityError(null) }
+        else { setActivity(null); setActivityError(readError(r.reason, r.unsupported, 'app_activity_snapshot')) }
+      })
+      const hist = command<BandwidthSample[]>('get_bandwidth_history', { hours: 20 }).then((r) => {
+        if (!live) return
+        if (r.ok) { setHistory(bucketsFrom(r.value, at)); setHistoryError(null) }
+        else { setHistory(null); setHistoryError(readError(r.reason, r.unsupported, 'get_bandwidth_history')) }
+      })
+      void Promise.all([speeds, hist]).finally(() => { busy = false })
+    }
+    read()
+    const t = setInterval(read, 1000)
     const readQueue = () => extras.transfers().then((rows) => { if (live) setTransfers(rows) }, () => { if (live) setTransfers([]) })
     void readQueue()
-    source.sync().then((s) => { if (live) setSync(s) }, () => undefined)
+    source.sync().then((s) => { if (live) setSync(s) }, () => { if (live) setSync(null) })
     const off = source.subscribe((e) => { if (e.kind === 'sync' && live) { setSync(e.sync); void readQueue() } })
     return () => { live = false; clearInterval(t); off() }
-  }, [source, extras, now])
-  return liveView({ activity, transfers, sync, history, start: now - BUCKETS * BUCKET_MS })
+  }, [source, extras, nonce])
+  return {
+    view: liveView({ activity, transfers, sync, history, start: now - BUCKETS * BUCKET_MS, now, historyError }),
+    retry: () => setNonce((n) => n + 1),
+    activityError,
+  }
 }
 
 export function Bandwidth({ variant = 'normal', hover, limitPopup, test, scrollTo }: BandwidthProps = {}) {
@@ -263,7 +357,10 @@ export function Bandwidth({ variant = 'normal', hover, limitPopup, test, scrollT
   const syncOnMetered = config.metered !== false && !metered
   const [meteredOn, setMeteredOn] = useState(syncOnMetered)
   const upLimit = kbpsToMbps(config.upload_kbps_limit || 0)
-  const live = useBandwidth()
+  const host = usePlatform()
+  const os = host.name === 'windows' ? 'Windows' : host.name === 'macos' ? 'macOS' : host.name === 'linux' ? 'Linux' : ''
+  const { view: read, retry, activityError } = useBandwidth()
+  const live = os ? { ...read, devices: read.devices.map((d) => (d.id === 'pc' ? { ...d, platform: os } : d)) } : read
   const drawn = board<BoardBandwidth>('bandwidth')?.(variant, { upLimit, meteredOn })
   const v = drawn ?? live
   const pick = (dir: 'upload' | 'download') => (val: string) => update(dir === 'upload' ? { upload_kbps_limit: Number(val) * 1000 } : { download_kbps_limit: Number(val) * 1000 })
@@ -275,8 +372,9 @@ export function Bandwidth({ variant = 'normal', hover, limitPopup, test, scrollT
           <Live label="Download" figure={fmtSpeed(v.downBps)} line={v.downLine} />
         </div>
         <div className="px-4 py-2 text-[12px] text-ink-3" data-testid="live-footer">{v.footer}</div>
+        {!drawn && activityError ? <div className="px-4 pb-3"><ErrorBanner title="Couldn’t read what is moving right now." action={<Btn onClick={retry}>Try again</Btn>}>{activityError}</ErrorBanner></div> : null}
       </Group>
-      <Group title="Last 20 hours"><div className="px-4 py-3"><Chart data={v.chart} start={v.chartStart} now={v.chartStart + BUCKETS * BUCKET_MS} hover={hover} /></div></Group>
+      <Group title="Last 20 hours"><div className="px-4 py-3"><HistoryChart chart={v.chart} note={v.chartNote} retry={v.chartRetry} onRetry={retry} start={v.chartStart} now={v.chartStart + BUCKETS * BUCKET_MS} hover={hover} /></div></Group>
       <Group title="Your devices right now">
         {v.devices.length ? v.devices.map((d) => <DeviceRow key={d.id} d={d} />) : <div className="px-4 py-3 text-[13px] text-ink-3">Devices show here once they have synced.</div>}
         {v.othersUnknown ? <div className="px-4 py-3 text-[12px] text-ink-3" data-testid="others-unknown">Your other devices don’t report their sync to this PC in this build yet.</div> : null}
