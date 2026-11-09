@@ -402,7 +402,7 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
               <div key={e.id} className="flex min-h-[44px] flex-col justify-center px-4 py-2" data-testid="event-row">
                 <div className="text-[13px] leading-5 text-ink">{e.what}</div>
                 <div className="font-mono text-[11px] leading-4 text-ink-3">
-                  {new Date(e.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Amsterdam' })}
+                  {new Date(e.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
                   {' · '}{e.country ? e.country : 'Not reported'}{e.address ? ` · ${e.address}` : ''}
                 </div>
               </div>
