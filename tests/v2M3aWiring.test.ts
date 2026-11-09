@@ -3,8 +3,9 @@
 import { describe, expect, test } from 'bun:test'
 import { rowCount } from '../src/v2/chrome/Sidebar'
 import { failureText, typeahead, TYPEAHEAD_MS } from '../src/v2/sections/files/model'
-import { BANNER_ROUTE } from '../src/v2/chrome/Banners'
-import { createFixtureExtras } from '../src/v2/source/fixtures/extras'
+import { BANNER_ROUTE, bannerCopy, listAge } from '../src/v2/chrome/Banners'
+import { statusWords, uploadingLine } from '../src/v2/chrome/StatusLine'
+import { createFixtureExtras, FIXTURE_TRANSFERS } from '../src/v2/source/fixtures/extras'
 
 describe('the sidebar counts', () => {
   test('Sync history counts problems only: none at zero, red above it (DW-0401, DW-1301)', () => {
@@ -71,5 +72,36 @@ describe('the banners’ buttons (DW-0102 to DW-0106)', () => {
     expect(BANNER_ROUTE['storage-full']).toEqual({ section: 'settings', sub: 'storage' })
     expect(BANNER_ROUTE['backup-problem']).toEqual({ section: 'settings', sub: 'backup-failures' })
     expect(BANNER_ROUTE['signed-out']).toBeUndefined()
+  })
+})
+
+describe('the status line says the state that needs attention (DW-0401, DW-0426, DW-1107 to DW-1109)', () => {
+  const sync = { phase: 'up-to-date' as const, onDevice: 4, availableOffline: 3, onlineOnly: 4, pending: 0 }
+  test('up to date: the counts', () => {
+    expect(statusWords(sync)).toBe('Up to date · 4 on this PC · 3 available offline · 4 online only')
+  })
+  test('each attention state alone, in the board’s words', () => {
+    expect(statusWords({ ...sync, phase: 'offline' })).toBe('Offline')
+    expect(statusWords(sync, { signedOut: true, uploading: 'Uploading 2 of 4' })).toBe('Signed out')
+    expect(statusWords(sync, { uploading: 'Uploading 2 of 4 · 42.4 MB left' })).toBe('Uploading 2 of 4 · 42.4 MB left')
+    expect(statusWords(sync, { listing: true })).toBe('Getting your files ready')
+  })
+  test('uploads: moving of all, the bytes left of those not stopped; nothing moving is no line', () => {
+    expect(uploadingLine(FIXTURE_TRANSFERS)).toBe('Uploading 2 of 4 · 52.7 MB left')
+    expect(uploadingLine(FIXTURE_TRANSFERS.filter((r) => r.state === 'stopped'))).toBeNull()
+    expect(uploadingLine([])).toBeNull()
+  })
+})
+
+describe('the offline banner says how old the list is (DW-0101, DW-1108)', () => {
+  const now = new Date('2026-11-08T12:00:00')
+  test('today, yesterday, a date', () => {
+    expect(listAge('2026-11-08T09:12:00', now)).toBe('today at 09:12')
+    expect(listAge('2026-11-07T22:40:00', now)).toBe('yesterday at 22:40')
+    expect(listAge('2026-11-03T08:00:00', now)).toBe('on 3 Nov at 08:00')
+    expect(listAge('not a time', now)).toBe('before the connection dropped')
+  })
+  test('DW-1108’s sentence', () => {
+    expect(bannerCopy('offline', { asOf: 'today at 09:12' }).detail).toBe('This list is from today at 09:12. Changes you make will upload when you’re back.')
   })
 })
