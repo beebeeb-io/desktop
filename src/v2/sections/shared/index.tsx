@@ -1,21 +1,24 @@
 // Shared, live: DriveSource.shared() for the lists it can fill; share_list (Rust) for invitations, link expiry,
 // pending and file requests; the share_* and file_request_* commands for every action (sections/shared/api.ts).
 // A command this build lacks shows the honest "isn't available" toast, never invented data.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useDriveSource, type ItemDetails, type VersionEntry } from '@beebeeb/shared/drive-ui'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useDriveSource, type DriveItem, type ItemDetails, type ShareEntry, type VersionEntry } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
-import { Menu } from '../files/ui'
+import { BannerSlot } from '../../chrome/Banners'
+import { BTN, BTN_AMBER, Menu } from '../files/ui'
+import { fmtWhen } from '../files/model'
 import { DetailsDialog, VersionsDialog } from '../files/Dialogs'
-import { SharedView, type RowKind } from './SharedView'
 import {
   InviteDialog, KeyChangedAlert, LeaveAlert, LinkPasswordDialog, MismatchDialog, NewRequestDialog, PeopleDialog, PersonDialog, RemoveAccessAlert, SafetyNumberDialog,
   type NewRequestInput,
 } from './Dialogs'
-import { byMeMenu, EXPIRY_CHOICES, requestLine, requestMenu, rowsFromEntries, withMeMenu, type Member, type SharedTab } from './model'
+import { byMeMenu, EXPIRY_CHOICES, linkExpiry, requestLine, requestMenu, withMeMenu, type Member } from './model'
 import * as api from './api'
 import { seed } from '../../seed'
 import type { ShareLists } from './api'
+
+type RowKind = 'with-me' | 'people' | 'link' | 'request'
 
 type Dialog =
   | { kind: 'new-request' }
@@ -33,9 +36,68 @@ type Dialog =
   | { kind: 'details'; details: ItemDetails }
   | { kind: 'versions'; details: ItemDetails; versions: VersionEntry[] }
 
+type WithYou = { id: string; name: string; isFolder: boolean; owner: string; when: string }
+type ByYou = { id: string; name: string; isFolder: boolean; people: string; when: string }
+type Classified = {
+  withYou: WithYou[]
+  removed: { id: string; name: string }[]
+  byYou: ByYou[]
+  folder: Record<string, boolean>
+  name: Record<string, string>
+  items: Record<string, number>
+}
+
 const EMPTY_LISTS: ShareLists = { invitations: [], links: [], requests: [], pending: [] }
+const EMPTY_SHARES: Classified = { withYou: [], removed: [], byYou: [], folder: {}, name: {}, items: {} }
 const days = (label: string) => (label === 'Never' ? null : Number(label.replace(/\D/g, '')) || null)
 const bytes = (label: string) => (label === 'No limit' ? null : Number(label.replace(/\D/g, '')) * 1024 ** 3)
+
+/** Names on the item's own shared state. The share entry's people list is not a source. */
+function peopleNames(item: DriveItem): string[] {
+  if (item.shared.kind !== 'people') return []
+  return item.shared.people.map((p) => p.name).filter((n) => n.trim() !== '')
+}
+
+/**
+ * With you and by you come only from `item.shared`. A with-me item that is no longer shared with people had its
+ * access removed. A link on the mirror (`kind: 'link'` or `hasLink`) is not a row: share_list lists link shares.
+ */
+function classifyShares(entries: ShareEntry[]): Classified {
+  const withYou: WithYou[] = []
+  const removed: { id: string; name: string }[] = []
+  const byYou: ByYou[] = []
+  const folder: Record<string, boolean> = {}
+  const name: Record<string, string> = {}
+  const items: Record<string, number> = {}
+  for (const e of entries) {
+    folder[e.item.id] = e.item.isFolder
+    name[e.item.id] = e.item.name
+    if (typeof e.item.childCount === 'number') items[e.item.id] = e.item.childCount
+    const names = peopleNames(e.item)
+    const live = e.item.shared.kind === 'people' && names.length > 0
+    if (e.direction === 'with-me') {
+      if (live) withYou.push({ id: e.item.id, name: e.item.name, isFolder: e.item.isFolder, owner: names.join(', '), when: e.item.modifiedAt })
+      else if (e.item.shared.kind !== 'link') removed.push({ id: e.item.id, name: e.item.name })
+    } else if (e.direction === 'by-me' && live) {
+      byYou.push({ id: e.item.id, name: e.item.name, isFolder: e.item.isFolder, people: names.join(', '), when: e.item.modifiedAt })
+    }
+  }
+  return { withYou, removed, byYou, folder, name, items }
+}
+
+function Heading({ children }: { children: ReactNode }) {
+  return <h2 className="m-0 flex h-9 items-end px-4 pb-1.5 text-[12px] font-semibold text-ink-2">{children}</h2>
+}
+
+function EmptyAccount() {
+  return (
+    <div data-empty="shared" className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
+      <h2 className="m-0 text-[15px] font-semibold text-ink">Nothing shared yet</h2>
+      <p className="m-0 max-w-[420px] text-[13px] leading-5 text-ink-2">When someone shares a file or folder with you, it shows here with their name and the date.</p>
+      <p className="m-0 max-w-[420px] text-[13px] leading-5 text-ink-2">What you share with people, or by a link, shows here as well.</p>
+    </div>
+  )
+}
 
 function toast(r: { ok: boolean }, done?: string) {
   if (r.ok) { if (done) showToast({ kind: 'done', text: done }) } else showToast({ kind: 'failed', text: api.failureText(r as never) })
@@ -43,9 +105,9 @@ function toast(r: { ok: boolean }, done?: string) {
 
 export default function Section({ nav }: SectionProps) {
   const source = useDriveSource()
-  const tab = (['with-me', 'by-me', 'requests'].includes(nav.route.sub ?? '') ? nav.route.sub : 'with-me') as SharedTab
-  const [rows, setRows] = useState(() => rowsFromEntries([]))
+  const [shares, setShares] = useState<Classified>(EMPTY_SHARES)
   const [lists, setLists] = useState<ShareLists>(EMPTY_LISTS)
+  const [linksUnlisted, setLinksUnlisted] = useState(false)
   const [members, setMembers] = useState<Member[]>(() => seed('shared.members', []))
   const [menu, setMenu] = useState<{ kind: RowKind; id: string; x: number; y: number } | null>(null)
   const [dialog, setDialog] = useState<Dialog | null>(() => seed('shared.dialog', null))
@@ -55,21 +117,27 @@ export default function Section({ nav }: SectionProps) {
 
   const load = useCallback(async () => {
     const entries = await source.shared().catch(() => [])
-    setRows(rowsFromEntries(entries))
+    setShares(classifyShares(entries))
     const l = await api.shareList()
-    if (l.ok) setLists(l.value)
+    if (l.ok) {
+      setLists(l.value)
+      setLinksUnlisted(false)
+    } else {
+      // Link shares are the share command's list. A miss stays on screen as one line; the mirror is not a stand-in.
+      setLinksUnlisted(true)
+      setLists((cur) => ({ ...cur, links: [] }))
+    }
   }, [source])
   useEffect(() => {
     void load()
     return source.subscribe((e) => { if (e.kind === 'changed') void load() })
   }, [source, load])
 
-  // Links: DriveSource knows which items have one; share_list adds expiry and password.
-  const links = rows.links.map((l) => ({ ...l, ...lists.links.find((x) => x.id === l.id) }))
-  const people = rows.people.map((p) => ({ ...p, pending: lists.pending.includes(p.id) }))
-  const nameOf = (id: string) => [...rows.people, ...rows.links, ...rows.withMe].find((r) => r.id === id)?.name ?? ''
-  // DriveSource knows what each row is: a link's row carries it too (share_list's link rows do not).
-  const isFolder = (id: string) => [...rows.people, ...rows.withMe, ...rows.links].find((r) => r.id === id)?.isFolder ?? false
+  const nameOf = (id: string) => shares.name[id] ?? lists.links.find((l) => l.id === id)?.name ?? lists.requests.find((r) => r.id === id)?.title ?? ''
+  const isFolder = (id: string) => shares.folder[id] ?? lists.links.find((l) => l.id === id)?.isFolder ?? false
+  const empty = shares.withYou.length === 0 && shares.removed.length === 0 && shares.byYou.length === 0
+    && lists.links.length === 0 && !linksUnlisted && lists.invitations.length === 0 && lists.requests.length === 0
+  const menuAt = (kind: RowKind, id: string, x: number, y: number) => setMenu({ kind, id, x, y })
 
   // DW-0501 Rules: shared folders and files open as in Files. A folder opens in Files; a file opens in its app.
   const openItem = (id: string) => {
@@ -165,35 +233,112 @@ export default function Section({ nav }: SectionProps) {
     await openPeople(itemId)
   }
 
-  const go = (t: SharedTab) => nav.go({ section: 'shared', id: null, sub: t })
+  const onAccept = async (inv: { id: string; name: string }) => { toast(await api.shareAccept(inv.id), `${inv.name} added`); void load() }
+  const onDecline = async (inv: { id: string }) => { toast(await api.shareDecline(inv.id)); void load() }
+  const showWithYou = shares.withYou.length > 0 || shares.removed.length > 0
+  const showByYou = shares.byYou.length > 0 || lists.links.length > 0 || linksUnlisted
   const d = dialog
   return (
     <>
-      <SharedView
-        tab={tab} now={now} invitations={lists.invitations} withMe={rows.withMe} people={people} links={links} requests={lists.requests} menuOn={menu?.id}
-        h={{
-          onTab: go,
-          onAccept: async (inv) => { toast(await api.shareAccept(inv.id), `${inv.name} added`); void load() },
-          onDecline: async (inv) => { toast(await api.shareDecline(inv.id)); void load() },
-          onOpen: (kind, id) => { if (kind === 'with-me' || kind === 'link' || kind === 'people') openItem(id) },
-          onContext: (kind, id, x, y) => setMenu({ kind, id, x, y }),
-          onPeople: (id) => void openPeople(id),
-          onNewRequest: () => setDialog({ kind: 'new-request' }),
-          onFiles: () => nav.go({ section: 'files' }),
-        }}
-      />
+      <section aria-label="Shared" className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div role="toolbar" aria-label="Shared" className="flex h-12 flex-none items-center gap-3 border-b border-line px-4">
+          <h1 className="m-0 text-[15px] font-semibold text-ink">Shared</h1>
+          <span className="flex-1" />
+          {!empty && <button type="button" data-new-request className={BTN_AMBER} onClick={() => setDialog({ kind: 'new-request' })}>New request</button>}
+        </div>
+        <BannerSlot />
+        {empty ? <EmptyAccount /> : (
+          <div className="min-h-0 flex-1 overflow-auto pb-4">
+            {lists.invitations.map((inv) => (
+              <div key={inv.id} data-invitation={inv.id} className="mx-4 mt-3 flex items-center gap-3 rounded-lg border border-line bg-paper-2 px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium text-ink">{inv.name}</span>
+                  <span className="block text-[12px] text-ink-2">{inv.from} wants to share this {inv.isFolder ? 'folder' : 'file'}</span>
+                </span>
+                <button type="button" className={BTN} onClick={() => void onDecline(inv)}>Decline</button>
+                <button type="button" className={BTN} onClick={() => void onAccept(inv)}>Accept</button>
+              </div>
+            ))}
+            {showWithYou && (
+              <section aria-label="Shared with you">
+                <Heading>Shared with you</Heading>
+                {shares.withYou.map((r) => (
+                  <div key={r.id} role="row" data-row={r.id} data-kind="with-me" data-open="yes" tabIndex={-1}
+                    onDoubleClick={() => openItem(r.id)} onKeyDown={(e) => { if (e.key === 'Enter') openItem(r.id) }}
+                    onContextMenu={(e) => { e.preventDefault(); menuAt('with-me', r.id, e.clientX, e.clientY) }}
+                    className="grid h-11 grid-cols-[minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_96px] items-center gap-3 px-4 text-[13px]">
+                    <span className="truncate text-ink">{r.name}</span>
+                    <span className="truncate text-ink-2">{r.owner}</span>
+                    <span className="font-mono text-[12px] text-ink-3">{fmtWhen(r.when, now)}</span>
+                    <button type="button" className={BTN} onClick={() => openItem(r.id)}>Open</button>
+                  </div>
+                ))}
+                {shares.removed.map((r) => (
+                  <div key={r.id} role="row" data-row={r.id} data-removed="true" className="grid h-11 grid-cols-[minmax(0,2.2fr)_minmax(0,1.6fr)] items-center gap-3 px-4 text-[13px]">
+                    <span className="truncate text-ink">{r.name}</span>
+                    <span className="text-ink-2">No longer shared</span>
+                  </div>
+                ))}
+              </section>
+            )}
+            {showByYou && (
+              <section aria-label="Shared by you">
+                <Heading>Shared by you</Heading>
+                {shares.byYou.map((r) => (
+                  <div key={r.id} role="row" data-row={r.id} data-kind="people" data-open="yes" tabIndex={-1}
+                    onDoubleClick={() => openItem(r.id)} onKeyDown={(e) => { if (e.key === 'Enter') openItem(r.id) }}
+                    onContextMenu={(e) => { e.preventDefault(); menuAt('people', r.id, e.clientX, e.clientY) }}
+                    className="grid h-11 grid-cols-[minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_96px] items-center gap-3 px-4 text-[13px]">
+                    <span className="truncate text-ink">{r.name}</span>
+                    <span className="truncate text-ink-2">{r.people}{lists.pending.includes(r.id) ? ' · Pending' : ''}</span>
+                    <span className="font-mono text-[12px] text-ink-3">{fmtWhen(r.when, now)}</span>
+                    <button type="button" className={BTN} onClick={() => openItem(r.id)}>Open</button>
+                  </div>
+                ))}
+                {lists.links.map((r) => (
+                  <div key={r.id} role="row" data-row={r.id} data-kind="link" data-open="yes" tabIndex={-1}
+                    onDoubleClick={() => openItem(r.id)} onContextMenu={(e) => { e.preventDefault(); menuAt('link', r.id, e.clientX, e.clientY) }}
+                    className="grid h-11 grid-cols-[minmax(0,2.2fr)_minmax(0,1.6fr)_96px] items-center gap-3 px-4 text-[13px]">
+                    <span className="truncate text-ink">{r.name}</span>
+                    <span className="truncate text-[12px] text-ink-2">{linkExpiry(r.expiresAt, now)}</span>
+                    <button type="button" className={BTN} onClick={() => openItem(r.id)}>Open</button>
+                  </div>
+                ))}
+                {linksUnlisted && <p className="m-0 px-4 py-2 text-[13px] text-ink-2">Link shares can’t be listed yet.</p>}
+              </section>
+            )}
+            {lists.requests.length > 0 && (
+              <section aria-label="File requests">
+                <Heading>File requests</Heading>
+                {lists.requests.map((r) => {
+                  const line = requestLine(r, now)
+                  return (
+                    <div key={r.id} role="row" data-row={r.id} data-kind="request" tabIndex={-1}
+                      onContextMenu={(e) => { e.preventDefault(); menuAt('request', r.id, e.clientX, e.clientY) }}
+                      className="grid h-11 grid-cols-[minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)] items-center gap-3 px-4 text-[13px]">
+                      <span className="truncate text-ink">{r.title}</span>
+                      <span className="font-mono text-[12px] text-ink-3">{line.files}</span>
+                      <span className="text-[12px] text-ink-2">{line.state ?? ''}</span>
+                    </div>
+                  )
+                })}
+              </section>
+            )}
+          </div>
+        )}
+      </section>
       {menu && <Menu x={menu.x} y={menu.y} entries={entries} label="Shared item" onPick={(id) => void pick(id)} onClose={() => setMenu(null)} />}
       {d?.kind === 'leave' && <LeaveAlert name={nameOf(d.itemId)} onCancel={() => setDialog(null)}
         onLeave={async () => { setDialog(null); toast(await api.shareLeave(d.itemId), 'Left'); void load() }} />}
-      {d?.kind === 'password' && <LinkPasswordDialog name={nameOf(d.itemId)} hasPassword={!!links.find((l) => l.id === d.itemId)?.password} onClose={() => setDialog(null)}
+      {d?.kind === 'password' && <LinkPasswordDialog name={nameOf(d.itemId)} hasPassword={!!lists.links.find((l) => l.id === d.itemId)?.password} onClose={() => setDialog(null)}
         onSave={async (pw) => { setDialog(null); toast(await api.shareLinkUpdate(d.itemId, { password: pw }), pw ? 'Password set' : 'Password removed'); void load() }} />}
       {d?.kind === 'new-request' && <NewRequestDialog folders={['Files', 'Documents', 'Photos']} busy={busy} onCreate={(r) => void createRequest(r)} onClose={() => setDialog(null)} />}
-      {d?.kind === 'mark-changed' && <><PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members} />
+      {d?.kind === 'mark-changed' && <><PeopleDialog name={nameOf(d.itemId)} items={shares.items[d.itemId] ?? 0} members={members} />
         <KeyChangedAlert member={d.member}
           onCompare={() => void safety(d.itemId, d.member)}
           onShareAnyway={async () => { const r = await api.shareAcceptChangedKey(d.member.id); if (!r.ok) return toast(r); await openPeople(d.itemId) }}
           onCancel={() => { dismissed.current.add(d.member.id); setDialog({ kind: 'people', itemId: d.itemId }) }} /></>}
-      {d?.kind === 'people' && <PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members}
+      {d?.kind === 'people' && <PeopleDialog name={nameOf(d.itemId)} items={shares.items[d.itemId] ?? 0} members={members}
         onPerson={(m) => setDialog({ kind: 'person', itemId: d.itemId, member: m })} onInvite={() => setDialog({ kind: 'invite', itemId: d.itemId })} onClose={() => setDialog(null)} />}
       {d?.kind === 'person' && <PersonDialog member={d.member}
         onAccess={async (a) => { const r = await api.shareSetAccess(d.itemId, d.member.id, a); toast(r); if (r.ok) setDialog({ ...d, member: { ...d.member, access: a } }) }}
