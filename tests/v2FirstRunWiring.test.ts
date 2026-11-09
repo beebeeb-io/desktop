@@ -91,22 +91,28 @@ describe('review fixes (M3b self-review)', () => {
     }
   })
 
+  // P1a (#271 review): a row says whether it is a file (`data-kind`, from item.isFolder); the name's extension decided it
+  // before, which took a folder named `v1.2` for a file and missed `README`.
   test('the file-menu tip finds a file row or tile, and nothing in a list of folders', async () => {
     const { findTarget } = await import('../src/v2/guide/Guide')
-    const cell = (text: string, title?: string) => ({ textContent: text, querySelector: (s: string) => (s === '[title]' && title ? { getAttribute: () => title } : null) })
-    const row = (cells: unknown[]) => ({ querySelectorAll: () => cells, querySelector: () => cells[0] ?? null, textContent: '' })
+    const row = (name: string, kind: 'file' | 'folder') => ({ name, kind })
     const g = globalThis as Record<string, unknown>
     const before = g.document
-    const show = (rows: unknown[]) => { g.document = { querySelectorAll: (s: string) => (s.includes('[role="row"]') ? rows : []) } }
+    const show = (rows: { name: string; kind: string }[]) => {
+      g.document = {
+        querySelectorAll: () => [],
+        querySelector: (s: string) => (s === 'main [role="row"][data-kind="file"]' ? rows.find((r) => r.kind === 'file') ?? null : null),
+      }
+    }
     try {
-      show([row([cell('Documents')]), row([cell('Photos 2026')])])
+      show([row('Documents', 'folder'), row('v1.2', 'folder')])
       expect(findTarget('file-menu')).toBeNull()
-      const file = row([cell('Budget 2026.xlsx')])
-      show([row([cell('Documents')]), file])
+      const file = row('Budget 2026.xlsx', 'file')
+      show([row('Documents', 'folder'), file])
       expect(findTarget('file-menu')).toBe(file as never)
-      const tile = row([cell(''), cell('Harbour.heic', 'Harbour.heic')])
-      show([row([cell(''), cell('Documents', 'Documents')]), tile])
-      expect(findTarget('file-menu')).toBe(tile as never)
+      const readme = row('README', 'file')
+      show([row('node.js', 'folder'), readme])
+      expect(findTarget('file-menu')).toBe(readme as never)
     } finally {
       g.document = before
     }

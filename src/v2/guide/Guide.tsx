@@ -14,14 +14,17 @@ export const TIPS: { id: TipId; text: string }[] = [
   { id: 'settings', text: 'Storage, devices, backups and app lock. Ctrl+, opens them, and you can see this guide again there.' },
 ]
 
-/** The first file in the list or the grid (a name with an extension): what "Right-click a file" points at. None when the
- *  window shows no file (only folders, or nothing): the guide then skips that tip (DW-0302). */
-function firstFileRow(): Element | null {
-  const rows = Array.from(document.querySelectorAll('main [role="row"][data-row], main [role="row"][data-tile]'))
-  // A list row's first cell is its name; a tile's name sits in a cell's title (its first cell is the picture).
-  const name = (r: Element) => Array.from(r.querySelectorAll('[role="gridcell"]'))
-    .map((c) => (c.querySelector('[title]')?.getAttribute('title') ?? c.textContent ?? '').trim()).find(Boolean) ?? ''
-  return rows.find((r) => /\.[a-z0-9]{1,5}$/i.test(name(r))) ?? null
+/** The first file in the list or the grid: what "Right-click a file" points at. The row says what it is (`data-kind`),
+ *  so a folder named `v1.2` is never taken for a file, and `README` is one (#271 review). None when the window shows no
+ *  file: once the listing has loaded, the guide skips that tip (DW-0302). */
+export function firstFileRow(root: Pick<ParentNode, 'querySelector'> = document): Element | null {
+  return root.querySelector('main [role="row"][data-kind="file"]')
+}
+
+/** Whether a tip's missing target means "skip it": only the file tip, and only once Files' listing has loaded (a list
+ *  still loading on first run may have files yet). */
+export function tipMissing(id: TipId, root: Pick<ParentNode, 'querySelector'> = document): boolean {
+  return id === 'file-menu' && !firstFileRow(root) && !!root.querySelector('main [data-listing="loaded"]')
 }
 
 /** Where each tip points: found by what the person sees, so the guide follows the real window. */
@@ -48,35 +51,54 @@ export function cardPlace(box: Box | null, cardHeight: number, view: { width: nu
   return { top: Math.max(8, box.top - 10 - cardHeight), left }
 }
 
-export function GuideTip({ index, onNext, onSkip }: { index: number; onNext: () => void; onSkip: () => void }) {
+export function GuideTip({ index, onNext, onSkip, onMissing }: {
+  index: number; onNext: () => void; onSkip: () => void
+  /** The tip's target is not in the window and will not come (no file once Files has loaded): go past this tip. */
+  onMissing?: () => void
+}) {
   const tip = TIPS[index]
   const [box, setBox] = useState<Box | null>(null)
   const card = useRef<HTMLDivElement>(null)
   const [cardHeight, setCardHeight] = useState(140)
-  // Measured when the tip opens, again for a target that draws a moment later (a section still loading), and on resize.
+  const missing = useRef(onMissing)
+  missing.current = onMissing
+  // Measured when the tip opens, whenever the window's content changes (a section that loads late, however late), and
+  // on resize: one observer and one pending frame, both stopped when the tip goes (#271 review: a 2 s retry missed slow
+  // listings, and a resize started a second retry chain the cleanup never stopped).
   useLayoutEffect(() => {
-    let tries = 0
-    let timer = 0
+    let frame = 0
+    let passed = false
     const measure = () => {
+      frame = 0
       if (card.current) setCardHeight(card.current.offsetHeight)
       const el = findTarget(tip.id)
       if (!el) {
         setBox(null)
-        if (tries++ < 20) timer = window.setTimeout(measure, 100)
+        if (!passed && tipMissing(tip.id)) { passed = true; missing.current?.() }
         return
       }
       const r = el.getBoundingClientRect()
       const left = Math.max(2, r.left - 4)
       setBox({ top: r.top - 4, left, width: Math.min(r.width + 8, window.innerWidth - left - 2), height: r.height + 8 })
     }
+    const later = () => { if (!frame) frame = window.requestAnimationFrame(measure) }
     measure()
-    window.addEventListener('resize', measure)
-    return () => { window.clearTimeout(timer); window.removeEventListener('resize', measure) }
+    const watch = typeof MutationObserver === 'function' ? new MutationObserver(later) : null
+    watch?.observe(document.querySelector('main') ?? document.body, { childList: true, subtree: true, attributes: true })
+    window.addEventListener('resize', later)
+    return () => { watch?.disconnect(); if (frame) window.cancelAnimationFrame(frame); window.removeEventListener('resize', later) }
   }, [tip.id])
+  // Esc is the guide's while a tip shows: taken first (capture) and stopped, so it never also leaves Settings or clears a
+  // selection in Files under the tip (#271 review).
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onSkip() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      onSkip()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [onSkip])
   const last = index === TIPS.length - 1
   const place = cardPlace(box, cardHeight, { width: window.innerWidth, height: window.innerHeight })

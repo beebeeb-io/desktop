@@ -424,7 +424,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
 
   const emptyAndAddable = items.length === 0 && listing && canNew
   return (
-    <div role="presentation" className="relative flex min-h-0 flex-1" onClick={() => setMenu(null)}>
+    <div role="presentation" className="relative flex min-h-0 flex-1" data-listing={listing ? 'loaded' : 'loading'} onClick={() => setMenu(null)}>
       <FilesPane
         p={{
           listing: shownListing, items, prefs, selection, currentId, renaming, offline, dropTarget, details,

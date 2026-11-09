@@ -14,6 +14,9 @@ import { READ_CAP_BYTES } from '../src/v2/source/desktop'
 import { ThumbCache } from '../src/v2/sections/open/thumbCache'
 import { actionFailure } from '../src/v2/sections/files/model'
 import { routeFilter } from '../src/v2/sections/sync-history/model'
+import { phraseFilled, totpEntry } from '../src/v2/auth/model'
+import { firstFileRow, tipMissing } from '../src/v2/guide/Guide'
+import { shellPolls } from '../src/v2/onboarding'
 
 const src = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
@@ -262,5 +265,61 @@ describe('#268 review: failures say what failed, the Problems filter follows the
     const live = src('v2/sections/files/liveExtras.tsx')
     expect(live).toContain('const closeUploads = useCallback(() => setUploadsOpen(false), [])')
     expect(live).not.toContain('closeUploads: () =>')
+  })
+})
+
+describe('#271 review: two-factor paste, the passkey wait, the phrase guard, the guide', () => {
+  test('a pasted "123 456" keeps its six digits; a pasted 8-digit backup code goes to the backup field, never a try', () => {
+    expect(totpEntry('123 456')).toEqual({ kind: 'code', code: '123456' })
+    expect(totpEntry('12345')).toEqual({ kind: 'code', code: '12345' })
+    expect(totpEntry('1234 5678')).toEqual({ kind: 'backup', code: '12345678' })
+    const steps = src('v2/auth/Steps.tsx')
+    expect(steps).not.toMatch(/maxLength=\{[68]\}/)
+    expect(steps).toContain("if (typed.kind === 'backup') { onBackupCode?.(typed.code); return }")
+  })
+  test('the passkey password screen waits after a rate-limited answer, as Sign in does', () => {
+    expect(src('v2/auth/index.tsx')).toContain('waitSeconds={wait} onPassword={setPassword}')
+    expect(src('v2/auth/SignIn.tsx')).toContain("disabled={!password || busy || waiting}>{busy ? 'Unlocking vault…' : waiting ? `Try again in ${waitSeconds} s` : 'Unlock'}")
+  })
+  test('an empty word list is not a filled phrase', () => {
+    expect(phraseFilled([])).toBe(false)
+    expect(phraseFilled(Array(12).fill('word'))).toBe(true)
+    expect(phraseFilled([...Array(11).fill('word'), ''])).toBe(false)
+    expect(src('v2/auth/forgot/index.tsx')).toContain("const filled = phraseFilled(words) && email.includes('@')")
+  })
+  test('the guide’s file is a row that says it is a file; a missing one is skipped only once Files has loaded', () => {
+    const row = (kind: string) => ({ querySelector: (q: string) => (q === 'main [role="row"][data-kind="file"]' ? (kind === 'file' ? ({}) as Element : null) : q === 'main [data-listing="loaded"]' ? (kind === 'loading' ? null : ({}) as Element) : null) })
+    expect(firstFileRow(row('file'))).not.toBeNull()
+    expect(firstFileRow(row('folder'))).toBeNull()
+    expect(tipMissing('file-menu', row('folder'))).toBe(true)
+    expect(tipMissing('file-menu', row('loading'))).toBe(false)
+    expect(tipMissing('file-menu', row('file'))).toBe(false)
+    expect(tipMissing('shared', row('folder'))).toBe(false)
+    expect(src('v2/sections/files/FilesPane.tsx').match(/data-kind=\{item\.isFolder \? 'folder' : 'file'\}/g)?.length).toBe(2)
+  })
+  test('the guide waits for a late target by watching the window, not a 2 s retry; Esc is taken first and stopped', () => {
+    const guide = src('v2/guide/Guide.tsx')
+    expect(guide).not.toContain('tries++ < 20')
+    expect(guide).toContain('new MutationObserver(later)')
+    expect(guide).toContain("window.addEventListener('keydown', onKey, true)")
+    expect(guide).toMatch(/e\.preventDefault\(\)\n\s+e\.stopPropagation\(\)\n\s+onSkip\(\)/)
+    expect(src('v2/guide/GuideHost.tsx')).not.toContain("findTarget('file-menu') != null")
+  })
+})
+
+describe('#271 P2 and review: setup’s File Explorer step', () => {
+  test('Show in File Explorer opens the sync folder and shows a refusal; Try again reads the state first', () => {
+    const ob = src('v2/onboarding/index.tsx')
+    expect(ob).not.toContain("command('open_finder_location', { path: null })")
+    expect(ob).toContain("const r = await command<void>('open_finder_location', { path })")
+    expect(ob).toContain('setShowError(r.ok || r.unsupported ? null : r.reason)')
+    expect(ob).toMatch(/const tryAgain = async \(\) => \{\n\s+const v = await readShell\(\)\n\s+if \(!v\) \{ setRefused\(NO_STATE\); return \}/)
+    expect(src('v2/onboarding/views.tsx')).toContain('{showError && <p role="alert" data-show-error')
+  })
+  test('the state is polled only on the File Explorer step or while a try runs', () => {
+    expect(shellPolls('explorer', false)).toBe(true)
+    expect(shellPolls('backup', true)).toBe(true)
+    expect(shellPolls('backup', false)).toBe(false)
+    expect(shellPolls('done', false)).toBe(false)
   })
 })

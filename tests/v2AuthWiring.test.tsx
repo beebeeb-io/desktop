@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { createElement, Fragment } from 'react'
-import { digitsOnly } from '../src/v2/auth/model'
+import { digitsOnly, totpEntry } from '../src/v2/auth/model'
 import { elementsOf, expand, loadComponent } from './fixtures/componentHarness'
 
 const pass = ({ children }: { children?: unknown }) => createElement(Fragment, null, children as never)
@@ -16,7 +16,8 @@ const AUTH_PARTS = {
 }
 
 describe('DW-A26: the sixth digit submits the whole code', () => {
-  const TwoFactorView = loadComponent('v2/auth/Steps.tsx', 'TwoFactorView', { ...AUTH_PARTS, useRef: () => ({ current: null }), digitsOnly })
+  // P1a (#271 review): the field reads its input through totpEntry (a pasted backup code goes to the backup field).
+  const TwoFactorView = loadComponent('v2/auth/Steps.tsx', 'TwoFactorView', { ...AUTH_PARTS, useRef: () => ({ current: null }), digitsOnly, totpEntry })
   const totpInput = (props: Record<string, unknown>) =>
     elementsOf(expand(TwoFactorView(props))).find((e) => e.type === 'input' && e.props.id === 'totp')!
 

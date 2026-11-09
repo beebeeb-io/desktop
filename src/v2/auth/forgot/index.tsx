@@ -2,7 +2,7 @@
 // re-derive the same master key in Rust, and only the password wrapper changes. Copy never says "reset".
 import { useEffect, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { normalizeWord, spreadPaste } from '../model'
+import { normalizeWord, phraseFilled, spreadPaste } from '../model'
 import { AuthWindow, Field, Heading, Note, PrimaryButton, SECRET_FIELD, SecondaryButton, StepLockup, TextLink, Tile } from '../parts'
 import { unknownPhraseWords } from '../api'
 import * as api from '../create/api'
@@ -53,7 +53,7 @@ export function RecoverPhraseView({ email, words, focus, unknown, state, onEmail
   state: 'idle' | 'verifying' | 'wrong' | 'too-many' | 'offline'
   onEmail: (v: string) => void; onWords: (w: string[]) => void; onVerify: () => void; onLost: () => void
 }) {
-  const filled = words.every(Boolean) && email.includes('@')
+  const filled = phraseFilled(words) && email.includes('@')
   return (
     <AuthWindow>
       <StepLockup /><div className="mt-4" />

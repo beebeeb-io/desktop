@@ -2,7 +2,7 @@
 // (two-factor: authenticator code, wrong code, backup code).
 import { useRef } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { digitsOnly, normalizeWord, spreadPaste } from './model'
+import { digitsOnly, normalizeWord, spreadPaste, totpEntry } from './model'
 import { AuthWindow, Field, Heading, Note, PrimaryButton, SECRET_FIELD, SecondaryButton, StepLockup, TextLink } from './parts'
 
 export function FirstRunView({ onCreate, onSignIn }: { onCreate: () => void; onSignIn: () => void }) {
@@ -19,7 +19,7 @@ export function FirstRunView({ onCreate, onSignIn }: { onCreate: () => void; onS
 
 // ── Two-factor ───────────────────────────────────────────────────────────────
 
-export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, onBack }: {
+export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, onBackupCode, onBack }: {
   mode: 'totp' | 'backup'
   code: string
   state: 'idle' | 'verifying' | 'wrong'
@@ -27,6 +27,8 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
   /** Gets the code itself: the sixth digit's change submits before the parent has re-rendered with it (DW-A26). */
   onSubmit: (code: string) => void
   onSwitch: () => void
+  /** More digits than a code has were pasted (an 8-digit backup code): the backup field takes them, never a try. */
+  onBackupCode?: (code: string) => void
   onBack: () => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
@@ -37,7 +39,8 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
         <Heading sub="Use one of the backup codes you saved when you turned on two-factor. Each works once.">Use a backup code</Heading>
         {state === 'wrong' && <Note tone="red" title="That backup code isn’t right">Nothing was signed in.</Note>}
         <form onSubmit={(e) => { e.preventDefault(); if (code.length === 8 && state !== 'verifying') onSubmit(code) }} noValidate>
-          <Field label="Backup code" mono {...SECRET_FIELD} inputMode="numeric" maxLength={8} placeholder="12345678" value={code}
+          {/* No maxLength: a pasted "1234 5678" is cut to digits by digitsOnly, not to its first 8 characters (#271 review). */}
+          <Field label="Backup code" mono {...SECRET_FIELD} inputMode="numeric" placeholder="12345678" value={code}
             disabled={state === 'verifying'} onChange={(e) => onCode(digitsOnly(e.target.value, 8))} />
           <PrimaryButton type="submit" disabled={code.length !== 8 || state === 'verifying'}>{state === 'verifying' ? 'Verifying…' : 'Verify backup code'}</PrimaryButton>
         </form>
@@ -63,9 +66,15 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
           ))}
         </div>
         <input
-          id="totp" ref={inputRef} {...SECRET_FIELD} type="text" inputMode="numeric" maxLength={6} value={code}
+          id="totp" ref={inputRef} {...SECRET_FIELD} type="text" inputMode="numeric" value={code}
           disabled={state === 'verifying'}
-          onChange={(e) => { const v = digitsOnly(e.target.value, 6); onCode(v); if (v.length === 6) onSubmit(v) }}
+          onChange={(e) => {
+            // No maxLength: a pasted "123 456" keeps its six digits, and a pasted backup code is never sent as a code.
+            const typed = totpEntry(e.target.value)
+            if (typed.kind === 'backup') { onBackupCode?.(typed.code); return }
+            onCode(typed.code)
+            if (typed.code.length === 6) onSubmit(typed.code)
+          }}
           onKeyDown={(e) => { if (e.key === 'Enter' && code.length === 6) onSubmit(code) }}
           className="absolute inset-0 opacity-0"
         />

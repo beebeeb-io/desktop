@@ -96,6 +96,18 @@ export function digitsOnly(raw: string, max: number): string {
   return raw.replace(/\D/g, '').slice(0, max)
 }
 
+/** What the two-factor field got: up to six digits are a code; more (an 8-digit backup code pasted into it) go to the
+ *  backup field, so they never use up a try as the first six digits of a code (#271 review). */
+export function totpEntry(raw: string): { kind: 'code' | 'backup'; code: string } {
+  const digits = raw.replace(/\D/g, '')
+  return digits.length > 6 ? { kind: 'backup', code: digits.slice(0, 8) } : { kind: 'code', code: digits }
+}
+
+/** A recovery phrase is 12 words. */
+export const PHRASE_WORDS = 12
+/** Every one of the 12 boxes holds a word: an empty list is not a filled phrase (`[].every` is true; #271 review). */
+export const phraseFilled = (words: readonly string[]) => words.length === PHRASE_WORDS && words.every(Boolean)
+
 /** The 12 words: lowercase letters only, trimmed (DW-A23). Pasting 12 words into any box fills them all. */
 export function normalizeWord(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z]/g, '')
