@@ -284,7 +284,9 @@ describe('source contract: every caller reads the warning', () => {
     expect(offenders).toEqual([])
     // forceReauth, AccountSwitchStep (Linux's onboarding window), SwitchScreen (the same step in the Beebeeb window, task
     // 1683 slice 2: it reads `.warning`, so the census still finds no caller that drops it), MacSettings (lock), the
-    // Settings sign-out flow, pages/Account (lock, sign-out), AccountView.
-    expect(sites).toBe(8)
+    // Settings sign-out flow, pages/Account (lock, sign-out), AccountView; and desktop v2 (R1f: both called the raw
+    // command and dropped the warning): its Settings sign-out confirm (`SignOutDialog`) and the no-plan screen's sign-out
+    // (`NoPlanWindow`).
+    expect(sites).toBe(10)
   })
 })

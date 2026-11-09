@@ -3,7 +3,7 @@
 // window renders with the fixtures, as before.
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
-import { command } from '../../desktopApi'
+import { clearSession, command } from '../../desktopApi'
 import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/FrameWindow'
 import { Sidebar } from '../chrome/Sidebar'
@@ -130,12 +130,32 @@ export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { ch
 
 function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void; onSignedOut: () => void }) {
   const [checking, setChecking] = useState(false)
+  // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
+  // neutral line, before the sign-in shows. Only through desktopApi's wrapper, which parses the outcome. A sign-out that did not
+  // happen checks again, as before: the window stays on this screen.
+  const [warning, setWarning] = useState<string | null>(null)
+  const signOut = async () => {
+    const r = await clearSession()
+    if (r.ok && r.value.warning) setWarning(r.value.warning.sentence)
+    else onSignedOut()
+  }
+  if (warning) {
+    return (
+      <GateWindow>
+        <section className="flex max-w-[380px] flex-col items-center text-center" aria-labelledby="signed-out-heading" data-signed-out-warning>
+          <h1 id="signed-out-heading" className="m-0 text-[18px] font-semibold">Signed out</h1>
+          <p role="status" className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">{warning}</p>
+          <BBButton onClick={onSignedOut}><span className="text-[13px] font-medium">OK</span></BBButton>
+        </section>
+      </GateWindow>
+    )
+  }
   return (
     <NoPlanView
       checking={checking}
       onChoose={() => void command('plugin:opener|open_url', { url: PLANS_URL })}
       onCheckAgain={() => { setChecking(true); onCheckAgain(); window.setTimeout(() => setChecking(false), 800) }}
-      onSignOut={() => void command('clear_session').then(onSignedOut)}
+      onSignOut={() => void signOut()}
     />
   )
 }
