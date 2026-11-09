@@ -40,10 +40,14 @@ const toReview: NonNullable<Recipe['steps']> = [
 const approve = (o: Recipe = {}): Recipe => ({ q: SECURITY, ...o, answers: { auth_approve_lookup: [REVIEW], ...o.answers } })
 
 // ── B11 ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+/** `auth_signup_password_meter` for the board's three passwords (DW-A36 strong, DW-A37 short, DW-A38 good). A table of
+ *  the frames' answers, not an evaluator (core evaluates): any other password is not in the fixture and gets no meter. */
+const METERS: Record<string, unknown> = { 'Winter-harbour-lantern-42': METER_STRONG, 'Winter-har': METER_SHORT, 'Password123456789012345': METER_GOOD }
+const meterRead = (a?: Record<string, unknown>) => METERS[String(a?.password)] ?? { error: 'the fixture holds no meter for this password' }
 const create = (step: string, seeds: Record<string, unknown> = {}): Recipe =>
-  signIn({ reads: { auth_signup_begin: POLICY, auth_signup_default_device_name: THIS_PC }, seeds: { 'entry.mode': { kind: 'create' }, 'create.step': step, ...seeds } })
+  signIn({ reads: { auth_signup_begin: POLICY, auth_signup_default_device_name: THIS_PC, auth_signup_password_meter: meterRead }, seeds: { 'entry.mode': { kind: 'create' }, 'create.step': step, ...seeds } })
 const forgot = (screen: string, seeds: Record<string, unknown> = {}): Recipe =>
-  signIn({ seeds: { 'entry.mode': { kind: 'forgot' }, 'forgot.screen': screen, ...seeds } })
+  signIn({ reads: { auth_signup_password_meter: meterRead }, seeds: { 'entry.mode': { kind: 'forgot' }, 'forgot.screen': screen, ...seeds } })
 const SIGNED_IN = { sync_status: { logged_in: true, vault_unlocked: true }, get_known_folder_backup: KNOWN_FOLDERS, autostart_enabled: true }
 /** `windows_shell_integration_state`: registered, never tried on this PC (setup then adds it), or the last try failed. */
 const shell = (setup: 'ready' | 'adding' | 'failed') => ({

@@ -101,3 +101,90 @@ describe('DW-A13: deny is sent once', () => {
     }
   })
 })
+
+/**
+ * - DW-A36/A37 (and DW-A49): the strength meter shows only what core evaluated for the password now in the field. Found
+ *   while proving DW-A36#1: typing a short password after a strong one kept "Strong." when the evaluation did not answer.
+ */
+describe('DW-A37: the meter follows the latest password, and a failed evaluation claims no strength', () => {
+  const STRONG = { length: 25, min_length: 12, missing: 0, strength: 'strong', hint: 'none' } as const
+  const SHORT = { length: 10, min_length: 12, missing: 2, strength: 'too_short', hint: 'more' } as const
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+
+  test('a failed evaluation clears the meter', async () => {
+    const { followMeter } = await import('../src/v2/auth/create/api')
+    const seen: unknown[] = []
+    followMeter('Winter-har', (m) => seen.push(m), async () => ({ ok: false, reason: 'no signup in progress' }))
+    await flush()
+    expect(seen).toEqual([null])
+  })
+
+  test('an answer for an older keystroke is dropped once a newer one asked', async () => {
+    const { followMeter } = await import('../src/v2/auth/create/api')
+    const seen: unknown[] = []
+    let answerOld: (v: unknown) => void = () => {}
+    const old = followMeter('Winter-harbour-lantern-42', (m) => seen.push(m), () => new Promise((r) => { answerOld = r as never }))
+    old()
+    followMeter('Winter-har', (m) => seen.push(m), async () => ({ ok: true, value: SHORT }))
+    await flush()
+    answerOld({ ok: true, value: STRONG })
+    await flush()
+    expect(seen).toEqual([SHORT])
+  })
+})
+
+/**
+ * - DW-A30: Unlock after a passkey says what went wrong. The screen took an `error` the flow never passed, so a wrong
+ *   password (or a sign-in that did not finish) left the button doing nothing visible.
+ */
+describe('DW-A30: a failed Unlock after the passkey is said on the screen', () => {
+  test('the password screen gets the board’s words for the failure', async () => {
+    const api = await import('../src/v2/auth/api')
+    const model = await import('../src/v2/auth/model')
+    const { mount } = await import('./fixtures/componentHarness')
+    let signInView: Record<string, any> | null = null
+    let passkeyView: Record<string, any> | null = null
+    const m = mount('v2/auth/index.tsx', 'SignInFlow', {
+      backend: {
+        last_signed_in_email: () => 'anna@northwind.studio',
+        auth_passkey_sign_in: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }),
+        desktop_login: () => { throw 'invalid_credentials' },
+      },
+      bindings: {
+        ...api, ...model, CREATE_ACCOUNT_URL: '', FORGOT_PASSWORD_URL: '', openUrl() {}, EMPTY_WORDS: Array.from({ length: 12 }, () => ''),
+        SignInView: (p: Record<string, any>) => { signInView = p; return null },
+        PasskeyPasswordView: (p: Record<string, any>) => { passkeyView = p; return null },
+        AnotherDeviceView: () => null, ContinueAsView: () => null, FirstRunView: () => null, LostPhraseView: () => null, PhraseView: () => null, TwoFactorView: () => null,
+      },
+      props: { onSignedIn() {}, startAt: 'sign-in' },
+      expand: true,
+    })
+    try {
+      await m.flush()
+      m.elements()
+      // A wrong password first, on the sign-in screen: its words belong to that try, not to the passkey's screen.
+      signInView!.onPassword('a typo')
+      await m.flush()
+      m.elements()
+      await signInView!.onSubmit()
+      await m.flush()
+      m.elements()
+      expect(signInView!.problem).toEqual({ kind: 'invalid' })
+      await signInView!.onPasskey()
+      await m.flush()
+      m.elements()
+      expect(passkeyView).not.toBeNull()
+      expect(passkeyView!.error).toBeUndefined()
+      passkeyView!.onPassword('not my password')
+      await m.flush()
+      m.elements()
+      await passkeyView!.onUnlock()
+      await m.flush()
+      m.elements()
+      expect(m.calls.filter((c) => c.name === 'desktop_login').length).toBe(2)
+      expect(passkeyView!.error).toBe('That email and password don’t match. Nothing was unlocked.')
+    } finally {
+      m.close()
+    }
+  })
+})

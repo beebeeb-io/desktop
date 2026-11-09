@@ -140,7 +140,7 @@ export function ForgotPasswordFlow({ initialEmail = '', onBack, onAnotherDevice,
   useEffect(() => () => { void api.cancelSignup() }, [])
   useEffect(() => {
     if (screen !== 'password') return
-    void api.passwordMeter(pw.password).then((r) => { if (r.ok) setMeter(r.value) })
+    return api.followMeter(pw.password, setMeter)
   }, [pw.password, screen])
 
   const verify = async () => {

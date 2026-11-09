@@ -65,7 +65,7 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
   // The meter follows each keystroke (core's evaluator).
   useEffect(() => {
     if (step !== 'password') return
-    void api.passwordMeter(pw.password).then((r) => { if (r.ok) setMeter(r.value) })
+    return api.followMeter(pw.password, setMeter)
   }, [pw.password, step])
 
   const send = async (resend: boolean) => {

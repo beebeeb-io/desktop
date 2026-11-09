@@ -8,7 +8,7 @@ import {
   signIn, unknownPhraseWords, verifySecondFactor,
 } from './api'
 import { AnotherDeviceView } from './AnotherDevice'
-import { problemFrom, type DeviceStatus, type SignInProblem } from './model'
+import { problemFrom, problemText, type DeviceStatus, type SignInProblem } from './model'
 import { ContinueAsView, PasskeyPasswordView, SignInView, type ContinueAsAccount } from './SignIn'
 import { FirstRunView, LostPhraseView, PhraseView, TwoFactorView } from './Steps'
 
@@ -138,8 +138,10 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
     const r = await passkeySignIn(email)
     setPasskeyPrompt(false)
     if (!r.ok) { setProblem({ kind: 'other' }); return }
-    if (r.value.vault_unlocked) onSignedIn()
-    else setScreen('passkey-password')
+    if (r.value.vault_unlocked) { onSignedIn(); return }
+    // The password screen starts clean: an earlier try's words belong to that try (DW-A30).
+    setProblem(null)
+    setScreen('passkey-password')
   }, [email, onSignedIn])
 
   switch (screen) {
@@ -183,7 +185,8 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
           onDelete={() => void openUrl('https://app.beebeeb.io/settings')} />
       )
     case 'passkey-password':
-      return <PasskeyPasswordView email={email} password={password} busy={busy} onPassword={setPassword} onUnlock={() => void submit()} />
+      // A failed Unlock is said here, in the sign-in screen's words (the view takes the error; it was never passed).
+      return <PasskeyPasswordView email={email} password={password} busy={busy} error={problem ? problemText(problem) : undefined} onPassword={setPassword} onUnlock={() => void submit()} />
     default:
       return (
         <SignInView
