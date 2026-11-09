@@ -186,7 +186,9 @@ export const FRAMES: FrameRegistry = {
   'DW-1101': () => <Win p={pane()} />,
   'DW-1102': () => <Win p={pane({ folder: 'f-lisbon', sel: ['p-alfama'], prefs: { ...GRID, ...PANEL } })} />,
   'DW-1103': () => <Win p={pane()} overlay={<Menu x={700} y={330} label="List" entries={backgroundMenu(DEFAULT_PREFS, true, true)} onPick={noop} onClose={noop} />} />,
-  'DW-1104': () => <Win p={pane({ sel: ['i-harbour'] })} overlay={<RowMenu rowId="i-harbour" label="File" entries={fileMenu([FILES_TREE.find((i) => i.id === 'i-harbour')!])} />} />,
+  // Ruled (lead, 2026-11-09, item 3; M3d): the menu on a photo that is downloaded but not kept, Alfama.heic in Lisbon
+  // trip, so its Make available offline is there. Harbour.heic is kept (DW-0401), so its menu reads Remove from this PC.
+  'DW-1104': () => <Win p={pane({ folder: 'f-lisbon', sel: ['p-alfama'] })} overlay={<RowMenu rowId="p-alfama" label="File" entries={fileMenu([FILES_TREE.find((i) => i.id === 'p-alfama')!])} />} />,
   'DW-1105': () => {
     const hits = FILES_TREE.filter((i) => i.name.toLowerCase().includes('contr')).map((item) => ({ item, where: item.parentId ? `Files › ${FILES_TREE.find((f) => f.id === item.parentId)!.name}` : 'Files' }))
     return <Win body={<SearchView query="Contr" hits={hits} />} />

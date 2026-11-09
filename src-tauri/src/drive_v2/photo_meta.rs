@@ -27,6 +27,26 @@ pub(crate) struct PhotoMeta {
     pub(crate) duration_seconds: Option<u64>,
     /// The file is uploading from this PC now.
     pub(crate) uploading: bool,
+    /// The device whose backup holds it: the device folder under the Backups root (LD-0113 lays Backups out one folder
+    /// per device). Absent for a photo outside Backups: no command knows which device took it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<String>,
+}
+
+/// The device folder a state DB `path` sits in under one of the Backups `roots` (their state DB paths): the first
+/// segment below the root, when the item is inside it (`Backups/Anna's iPhone/IMG_1.heic` → `Anna's iPhone`). A file
+/// directly in the root, or outside every root, has none. Names compare exactly, as the state DB stores them.
+pub(crate) fn backup_device(roots: &[String], path: &str) -> Option<String> {
+    let path = path.trim_matches('/');
+    roots.iter().find_map(|root| {
+        let root = root.trim_matches('/');
+        if root.is_empty() {
+            return None;
+        }
+        let below = path.strip_prefix(root)?.strip_prefix('/')?;
+        let (device, rest) = below.split_once('/')?;
+        (!device.is_empty() && !rest.is_empty()).then(|| device.to_string())
+    })
 }
 
 fn u16_at(b: &[u8], at: usize, le: bool) -> Option<u16> {

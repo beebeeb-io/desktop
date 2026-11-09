@@ -318,3 +318,42 @@ fn image_header_gives_dimensions() {
     let meta = photo_meta::from_head(&png, false);
     assert_eq!((meta.width, meta.height, meta.taken_at), (Some(3), Some(2), None));
 }
+
+#[test]
+fn photo_meta_device_is_the_backups_device_folder() {
+    let roots = vec!["Backups".to_string(), "/Old backups/".to_string()];
+    assert_eq!(
+        photo_meta::backup_device(&roots, "Backups/Anna’s iPhone/Camera uploads/IMG_1.heic").as_deref(),
+        Some("Anna’s iPhone")
+    );
+    assert_eq!(
+        photo_meta::backup_device(&roots, "/Backups/iPad/IMG_2.heic").as_deref(),
+        Some("iPad"),
+        "a leading slash in the stored path"
+    );
+    assert_eq!(
+        photo_meta::backup_device(&roots, "Old backups/Old iPhone/IMG_3.heic").as_deref(),
+        Some("Old iPhone"),
+        "a second Backups root"
+    );
+    assert_eq!(
+        photo_meta::backup_device(&roots, "Backups/IMG_4.heic"),
+        None,
+        "directly in the root"
+    );
+    assert_eq!(
+        photo_meta::backup_device(&roots, "Lisbon trip/IMG_5.heic"),
+        None,
+        "outside Backups"
+    );
+    assert_eq!(
+        photo_meta::backup_device(&roots, "Backups old/x/IMG_6.heic"),
+        None,
+        "a sibling with the root's prefix"
+    );
+    assert_eq!(
+        photo_meta::backup_device(&[], "Backups/iPad/IMG_7.heic"),
+        None,
+        "no Backups root yet"
+    );
+}

@@ -9,24 +9,27 @@ import { HighlightedLine } from './Highlight'
 import { fmtBytes, fmtClock, isNumeric, parseTable } from './model'
 
 // ---- Photos: a RAW shows the camera's own preview, and says so (DW-1501) ----
-export function RawViewer({ src, strip, onPrev, onNext, onOpenElsewhere }: { src: string | null; strip: { id: string; src: string | null; current?: boolean }[]; onPrev?: () => void; onNext?: () => void; onOpenElsewhere?: () => void }) {
+export function RawViewer({ src, strip, label = 'Camera preview · Sony ARW', size = 'RAW · 61.4 MB', onPrev, onNext, onPick, onOpenElsewhere }: {
+  src: string | null; strip: { id: string; src: string | null; current?: boolean }[]; label?: string; size?: string
+  onPrev?: () => void; onNext?: () => void; onPick?: (id: string) => void; onOpenElsewhere?: () => void
+}) {
   return (
     <div data-viewer="raw" className="relative flex min-h-0 flex-1 flex-col bg-viewer">
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
         <div className="absolute left-4 top-4 flex gap-2">
-          <span data-pill className="rounded-full bg-black/55 px-3 py-1 text-[12px] text-white">Camera preview · Sony ARW</span>
-          <span className="rounded-full bg-black/55 px-3 py-1 font-mono text-[12px] text-white">RAW · 61.4 MB</span>
+          <span data-pill className="rounded-full bg-black/55 px-3 py-1 text-[12px] text-white">{label}</span>
+          <span className="rounded-full bg-black/55 px-3 py-1 font-mono text-[12px] text-white">{size}</span>
         </div>
         <button type="button" aria-label="Previous photo" onClick={onPrev} className={`absolute left-3 grid h-9 w-9 place-items-center rounded-full bg-black/45 text-white ${FOCUS}`}><span className="inline-flex rotate-180"><Icon name="chevron-right" size={16} /></span></button>
-        {src ? <img src={src} alt="Camera preview of DSC04182.ARW" className="max-h-full max-w-full object-contain" /> : <div className="h-64 w-96 rounded bg-viewer-placeholder" />}
+        {src ? <img src={src} alt={label} className="max-h-full max-w-full object-contain" /> : <div className="h-64 w-96 rounded bg-viewer-placeholder" />}
         <button type="button" aria-label="Next photo" onClick={onNext} className={`absolute right-3 grid h-9 w-9 place-items-center rounded-full bg-black/45 text-white ${FOCUS}`}><Icon name="chevron-right" size={16} /></button>
         <button type="button" onClick={onOpenElsewhere} className={`absolute bottom-3 right-3 rounded-md bg-black/55 px-3 py-1.5 text-[12px] text-white ${FOCUS}`}>Open in another app…</button>
       </div>
       <div data-strip className="flex h-20 flex-none items-center justify-center gap-2 bg-black/40 px-4">
         {strip.map((s) => (
-          <div key={s.id} data-strip-item className={`h-14 w-20 flex-none overflow-hidden rounded ${s.current ? 'outline outline-2 outline-white' : 'opacity-70'}`}>
+          <button key={s.id} type="button" data-strip-item aria-label={s.current ? 'This photo' : 'Show this photo'} aria-current={s.current || undefined} onClick={() => onPick?.(s.id)} className={`h-14 w-20 flex-none overflow-hidden rounded ${s.current ? 'outline outline-2 outline-white' : 'opacity-70'} ${FOCUS}`}>
             {s.src ? <img src={s.src} alt="" className="h-full w-full object-cover" /> : <div className="h-full w-full bg-viewer-placeholder" />}
-          </div>
+          </button>
         ))}
       </div>
     </div>

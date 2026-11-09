@@ -9,7 +9,7 @@ import type { PopoverSnapshot } from '../../popoverContract'
 import { pollWhileVisible } from '../../windows/visiblePoll'
 import { Flyout, type FlyoutHandlers } from './Flyout'
 import { flyoutView, RECENT_LIMIT, type FlyoutCommand, type FlyoutExtras, type FlyoutRow } from './model'
-import { pickExtras, type DriveStatus } from '../source/extras'
+import { pickExtras, type DriveExtras, type DriveStatus } from '../source/extras'
 import { hasTauri } from '../source'
 import { hasNoPlan } from '../auth/Gate'
 import { actionFailure } from '../sections/files/model'
@@ -100,7 +100,10 @@ async function openFileExplorer(): Promise<Done> {
 /** No plan yet (DW-1213): the server's answer, read when the flyout shows and at most once a minute (a server call). */
 const PLAN_EVERY_MS = 60_000
 
-const engineExtras = pickExtras()
+// Picked on first use, never at module load: a module evaluated while `window` is not the page's (a test that stubs
+// it) would read `window.location` from the stub.
+let engineExtras: DriveExtras | null = null
+const engineExtrasNow = (): DriveExtras => (engineExtras ??= pickExtras())
 
 export default function TrayApp() {
   const caps = useCapabilities()
@@ -113,7 +116,7 @@ export default function TrayApp() {
     let cancelled = false
     let planAt = 0
     const refresh = async () => {
-      const [result, engine] = await Promise.all([popoverSnapshot(RECENT_LIMIT), engineExtras.status().catch(() => null)])
+      const [result, engine] = await Promise.all([popoverSnapshot(RECENT_LIMIT), engineExtrasNow().status().catch(() => null)])
       if (!cancelled && result.ok) setSnapshot(result.value)
       if (!cancelled) setStatus(engine)
       if (result.ok && result.value.account.logged_in && Date.now() - planAt >= PLAN_EVERY_MS) {

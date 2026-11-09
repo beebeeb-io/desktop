@@ -12,6 +12,8 @@ export interface SettingsPage { pane: PaneId; dialog?: string; props?: Record<st
 const ALIASES: Record<string, SettingsPage> = {
   // Help and report a problem: the dialog over General (DW-0782; Cancel returns to General, DW-0782#1).
   report: { pane: 'general', dialog: 'report' },
+  // Free up space… from a file too large to preview (DW-1517 → DW-0780, M3d): the dialog over Storage.
+  'free-up': { pane: 'storage', dialog: 'free-up' },
   // Mail Backup's own page is a proposal the board leaves out (DW-0740); its row and its switch are in Backups.
   'mail-backup': { pane: 'backups' },
   // Sign-in activity is Security's page (DW-A77), reached from Recent notifications (DW-0791#3).

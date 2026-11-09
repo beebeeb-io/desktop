@@ -45,6 +45,9 @@ const TITLES: Record<SectionId, string> = {
   open: 'Beebeeb',
 }
 
+/** The sidebar row a section lights: a file open in its viewer or editor is still in Files (M3d). */
+const sidebarRow = (section: SectionId): SectionId => (section === 'open' ? 'files' : section)
+
 /** The window with its chrome, for the app and for frames that show the whole window. */
 export function V2Shell() {
   const source = useDriveSource()
@@ -67,7 +70,7 @@ export function V2Shell() {
 
   const onCommand = useCallback((command: CommandId) => {
     if (command === 'settings') nav.go({ section: 'settings' })
-    else if (command === 'find') nav.go({ section: 'search' })
+    else if (command === 'find' && nav.route.section !== 'open') nav.go({ section: 'search' })
     else if (command === 'back') nav.back()
     else if (command === 'forward') nav.forward()
   }, [nav])
@@ -80,7 +83,7 @@ export function V2Shell() {
     <div className="flex h-screen flex-col bg-paper font-sans text-ink">
       <CaptionBar title={title} />
       <div className="flex min-h-0 flex-1">
-        <Sidebar active={nav.route.section === 'search' ? searchFrom : nav.route.section} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
+        <Sidebar active={sidebarRow(nav.route.section === 'search' ? searchFrom : nav.route.section)} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
         <main className="flex min-w-0 flex-1 flex-col">
           <Suspense fallback={null}>
             <Section nav={nav} />

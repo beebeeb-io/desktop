@@ -4,6 +4,7 @@
 //   default | empty (DW-0114) | offline (DW-0101) | nearly-full (DW-0103) | full (DW-0104) | syncing (DW-1203)
 //   | rename-fails (DW-0109: the first rename fails for the connection; Try again goes through)
 //   | no-shares (DW-0508 to DW-0510: nothing shared yet, the rest of the account as DW-0401 draws it)
+//   | decrypting (DW-1516) | newer (DW-1519) | edit-conflict (DW-1526): the Open fixtures' states (./fixtures/open.ts)
 // Batches add fixture data in src/v2/source/fixtures/<area>.ts (their own files), never by editing this one's rows.
 
 import {
@@ -19,7 +20,7 @@ import {
 } from '@beebeeb/shared/drive-ui'
 import { childrenIn, FILES_TREE } from './fixtures/files'
 
-export type Scenario = 'default' | 'empty' | 'offline' | 'nearly-full' | 'full' | 'syncing' | 'rename-fails' | 'no-shares'
+export type Scenario = 'default' | 'empty' | 'offline' | 'nearly-full' | 'full' | 'syncing' | 'rename-fails' | 'no-shares' | 'decrypting' | 'newer' | 'edit-conflict'
 
 const GB = 1024 ** 3
 const NOW = '2026-11-08T10:00:00Z'
@@ -204,6 +205,6 @@ export function createFixtureSource(scenario: Scenario = 'default'): DriveSource
 
 export function scenarioFromSearch(search: string): Scenario {
   const value = new URLSearchParams(search).get('scenario')
-  const known: Scenario[] = ['default', 'empty', 'offline', 'nearly-full', 'full', 'syncing', 'rename-fails', 'no-shares']
+  const known: Scenario[] = ['default', 'empty', 'offline', 'nearly-full', 'full', 'syncing', 'rename-fails', 'no-shares', 'decrypting', 'newer', 'edit-conflict']
   return known.includes(value as Scenario) ? (value as Scenario) : 'default'
 }

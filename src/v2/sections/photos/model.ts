@@ -68,12 +68,40 @@ export function fmtExt(name: string): string { return (name.split('.').pop() ?? 
 export const mb1 = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`
 
 /** B02b: the engine's metadata (read from the copy on this PC) as a cell's meta; only what it found. */
-export function cellMeta(m: { camera?: string; width?: number; height?: number; durationSeconds?: number; uploading: boolean } | undefined): PhotoCell['meta'] {
+export function cellMeta(m: { camera?: string; width?: number; height?: number; durationSeconds?: number; uploading: boolean; device?: string } | undefined): PhotoCell['meta'] {
   if (!m) return undefined
   const d = m.durationSeconds
   return {
-    camera: m.camera, uploading: m.uploading || undefined,
+    camera: m.camera, uploading: m.uploading || undefined, device: m.device,
     dims: m.width && m.height ? `${m.width} × ${m.height}` : undefined,
     duration: d !== undefined ? `${Math.floor(d / 60)}:${String(d % 60).padStart(2, '0')}` : undefined,
   }
+}
+
+/** The devices the photos came from, most photos first (the pills, DW-0601), with how many each. */
+export function devicesOf(cells: PhotoCell[]): { name: string; photos: number }[] {
+  const counts = new Map<string, number>()
+  for (const c of cells) if (c.meta?.device) counts.set(c.meta.device, (counts.get(c.meta.device) ?? 0) + 1)
+  return [...counts].map(([name, photos]) => ({ name, photos })).sort((a, b) => b.photos - a.photos || a.name.localeCompare(b.name))
+}
+
+/** What Photos shows (DW-0604): every cell but those of a hidden device or a hidden folder. */
+export function shown(cells: PhotoCell[], hidden: ReadonlySet<string>): PhotoCell[] {
+  if (hidden.size === 0) return cells
+  return cells.filter((c) => !(c.meta?.device && hidden.has(`device:${c.meta.device}`)) && !(c.entry.item.parentId && hidden.has(`folder:${c.entry.item.parentId}`)))
+}
+
+const HIDDEN_KEY = 'bb.v2.photos.hidden'
+export function loadHidden(): Set<string> {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(HIDDEN_KEY) ?? '[]')
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+  } catch { return new Set() }
+}
+export function saveHidden(hidden: ReadonlySet<string>): void {
+  try { window.localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hidden])) } catch { /* the choice just is not remembered */ }
+}
+
+export function totalsOf(cells: PhotoCell[]): { photos: number; videos: number; bytes: number } {
+  return { photos: cells.filter((c) => !isVideo(c)).length, videos: cells.filter(isVideo).length, bytes: cells.reduce((n, c) => n + (c.entry.item.size ?? 0), 0) }
 }

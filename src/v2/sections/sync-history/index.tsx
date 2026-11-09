@@ -45,11 +45,24 @@ export default function Section({ nav }: SectionProps) {
     }
     await load()
   }
+  /** Double-click (DW-1301): the file in the window, in its folder; a trashed one opens Trash; a problem, which never
+   *  reached Beebeeb, is shown in File Explorer when Beebeeb knows it (DW-0428). */
+  const open = async (r: HistoryRow) => {
+    if (r.trashed) return nav.go({ section: 'trash' })
+    if (!r.itemId) return showToast({ kind: 'failed', text: 'This one isn’t in Beebeeb: it didn’t sync.' })
+    if (r.problem) return source.revealInFileManager(r.itemId).catch(() => showToast({ kind: 'failed', text: 'Couldn’t show it in File Explorer' }))
+    try {
+      const { item } = await source.details(r.itemId)
+      nav.go({ section: 'files', id: item.isFolder ? item.id : item.parentId })
+    } catch {
+      showToast({ kind: 'failed', text: 'Couldn’t find it in Beebeeb. It may have moved or gone to Trash.' })
+    }
+  }
   return (
     <>
       <HistoryView
         rows={rows} now={now} filter={filter} query={query} onFilter={setFilter} onQuery={setQuery} onTry={(id) => { void retry(rows.find((r) => r.id === id)) }} onTryAll={() => { void retry() }}
-        onOpen={(r) => { if (r.trashed) nav.go({ section: 'trash' }); else if (r.itemId) nav.go({ section: 'files', id: null }) }}
+        onOpen={(r) => { void open(r) }}
         onMenu={(id, r) => {
           if (id === 'copy') void navigator.clipboard?.writeText(r.name)
           else if (id === 'reveal' && r.itemId) source.revealInFileManager(r.itemId).catch(() => showToast({ kind: 'failed', text: 'Couldn’t show it in File Explorer' }))

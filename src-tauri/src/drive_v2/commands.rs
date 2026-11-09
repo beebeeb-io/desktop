@@ -304,6 +304,37 @@ pub(crate) async fn drive_create_folder(
     Ok(item)
 }
 
+/// A new file in a folder (New file, DW-1522; the editors' "Keep both"). The body is a frame whose header is
+/// `{ "parentId": string | null, "name" }` and whose bytes are the content (raw IPC bytes, never base64 JSON). The
+/// file is written into the sync root and the engine uploads it; a taken name is refused, never overwritten.
+#[tauri::command]
+pub(crate) async fn drive_create_file(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Answer<DriveItem> {
+    require_session(&state)?;
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err(DriveError::Failed("frame").into());
+    };
+    let body = body.clone();
+    let item = blocking(move || {
+        let (header, bytes) = unframe(&body)?;
+        let name = header
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or(DriveError::Failed("frame"))?;
+        let parent_id = header.get("parentId").and_then(|v| v.as_str());
+        let (db, root) = local_required()?;
+        let parent = model::resolve_folder(&db, parent_id)?;
+        let rel = fsops::create_file(&db, &root, parent.as_ref(), name, bytes)?;
+        item_at_path(&db, &rel, false, parent.map(|p| p.file_id))
+    })
+    .await?;
+    events::changed(&app, item.parent_id.clone());
+    Ok(item)
+}
+
 #[tauri::command]
 pub(crate) async fn drive_rename(
     app: tauri::AppHandle,

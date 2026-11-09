@@ -145,6 +145,52 @@ pub(crate) fn create_folder(
     Ok(rel)
 }
 
+/// `drive_create_file`: a new file named `name` in `parent` holding `bytes` (New file, DW-1522; the editors' "Keep
+/// both"). The engine uploads it as any new file in the folder. A taken name is refused, never overwritten: the file
+/// is opened `create_new`, after the name was checked against the folder and against what else it reaches on Windows
+/// (an 8.3 short name, task 2407). Returns its state DB path.
+pub(crate) fn create_file(
+    db: &StateDb,
+    sync_root: &Path,
+    parent: Option<&FileEntry>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<String, DriveError> {
+    let name = validate_name(name)?;
+    if bytes.len() as u64 > BYTES_LIMIT {
+        return Err(DriveError::TooLarge);
+    }
+    refuse_if_shared_read_only(db, parent)?;
+    let parent_rel = folder_rel(parent);
+    let rel = join_rel(&parent_rel, &name);
+    if crate::backup_protect::protected_destination(db, &rel).is_some() {
+        return Err(DriveError::ReadOnly);
+    }
+    if name_taken(db, sync_root, parent.map(|p| p.file_id.as_str()), &parent_rel, &name) {
+        return Err(DriveError::NameTaken);
+    }
+    let path = full_path(sync_root, &rel)?;
+    match crate::name_alias::conflict_below(sync_root, &path) {
+        Ok(None) => {}
+        Ok(Some(_)) => return Err(DriveError::NameTaken),
+        Err(_) => return Err(DriveError::Failed("name check")),
+    }
+    // `create_new`: an entry that appeared since the checks is a taken name (AlreadyExists), never truncated.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(DriveError::io)?;
+    // A write that fails part way (the disk filled) leaves nothing behind: a half file would be uploaded, and would take
+    // the name the retry needs. The file is ours: create_new made it a moment ago.
+    if let Err(error) = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(DriveError::io(error));
+    }
+    Ok(rel)
+}
+
 /// `drive_rename`: a new name in the same folder. Returns the new state DB path.
 pub(crate) fn rename(db: &StateDb, sync_root: &Path, entry: &FileEntry, name: &str) -> Result<String, DriveError> {
     let name = validate_name(name)?;

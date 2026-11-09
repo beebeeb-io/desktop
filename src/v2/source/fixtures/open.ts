@@ -1,20 +1,33 @@
 // Fixtures for the Open section (B07): the files the viewers, states and the editor show on the board.
 import { DriveSourceError, type DriveItem, type DriveSource, type TextDocument, type VersionEntry } from '@beebeeb/shared/drive-ui'
-import { createFilesSource, FILES_TREE } from './files'
+import { createFilesSource, FILES_TREE, thumbnailFor } from './files'
 
 const file = (id: string, name: string, size: number, mime: string, extra: Partial<DriveItem> = {}): DriveItem => ({
   id, parentId: null, name, isFolder: false, size, modifiedAt: '2026-11-08T09:14:00', mime, shared: { kind: 'none' }, local: 'downloaded', hasThumbnail: false, ...extra,
 })
 
+// M3d: the RAW sits in Shoot selects with the shoot's other RAWs (DW-1501's strip, ← →), the recording in Studio
+// demos with the folder's other audio (DW-1503's Up next), and Studio plan.pdf in Lisbon trip (DW-1516's Cancel goes
+// back to that folder, DW-0420).
+const raw = (id: string, name: string) => file(id, name, 61.4 * 1024 ** 2, 'image/x-sony-arw', { parentId: 'f-shoot', hasThumbnail: true })
+const wav = (id: string, name: string, mb: number) => file(id, name, mb * 1024 ** 2, 'audio/wav', { parentId: 'f-studio-demos' })
+
 export const OPEN_ITEMS: DriveItem[] = [
-  file('o-raw', 'DSC04182.ARW', 61.4 * 1024 ** 2, 'image/x-sony-arw', { hasThumbnail: true }),
-  file('o-audio', 'Harbour sessions, take 3.wav', 38 * 1024 ** 2, 'audio/wav'),
-  file('o-pdf', 'Studio plan.pdf', 1.2 * 1024 ** 2, 'application/pdf'),
+  raw('o-raw-1', 'DSC04181.ARW'),
+  raw('o-raw', 'DSC04182.ARW'),
+  raw('o-raw-3', 'DSC04183.ARW'),
+  wav('o-audio', 'Harbour sessions, take 3.wav', 38),
+  wav('o-audio-4', 'Harbour sessions, take 4.wav', 36),
+  wav('o-audio-tone', 'Room tone.wav', 9),
+  wav('o-audio-terrace', 'Terrace ambience.wav', 27),
+  file('o-pdf', 'Studio plan.pdf', 1.2 * 1024 ** 2, 'application/pdf', { parentId: 'f-lisbon' }),
   file('o-py', 'export_invoices.py', 812, 'text/x-python'),
   file('o-md', 'Meeting notes 4 Nov.md', 612, 'text/markdown'),
   file('o-csv', 'Invoices Q3.csv', 3400, 'text/csv'),
   file('o-zip', 'Raw footage 2024.zip', 1.4 * 1024 ** 3, 'application/zip'),
   file('o-log', 'server.log', 3.1 * 1024 ** 2, 'text/plain'),
+  // DW-1517: online only, and more than the 12.4 GB this PC has free (fixtures/extras.ts).
+  file('o-walkthrough', 'Studio walkthrough 4K.mov', 18.2 * 1024 ** 3, 'video/quicktime', { parentId: 'f-studio-demos', local: 'online-only' }),
 ]
 
 export const PY_TEXT = `import csv
@@ -52,7 +65,7 @@ Attendees: Anna, Bram, Guus
 
 - Desktop v2 ships **Windows first**, macOS on the same code
 - Passkeys run in Rust, never in the web view
-- Alpha date: see [the plan](beebeeb://file/Studio plan.pdf)
+- Alpha date: see [the plan](beebeeb://file/Studio%20plan.pdf)
 
 ## Next
 
@@ -124,34 +137,86 @@ export const AUDIO_QUEUE = [
 
 const TEXTS: Record<string, string> = { 'o-py': PY_TEXT, 'o-md': MD_TEXT, 'o-csv': CSV_TEXT }
 
+/** Studio demos, inside Shoot selects: a folder no board frame lists, so the Files frames keep their rows. */
+const STUDIO_DEMOS: DriveItem = { ...file('f-studio-demos', 'Studio demos', 0, ''), parentId: 'f-shoot', isFolder: true, size: null, childCount: 5, mime: undefined }
+/** The Open fixtures that Files lists too (the RAW's and the recording's folders), merged into the board's tree. */
+export const OPEN_TREE: DriveItem[] = [STUDIO_DEMOS, ...OPEN_ITEMS.filter((i) => i.parentId === 'f-shoot' || i.parentId === 'f-studio-demos')]
+
+/** A silent mono WAV (8-bit, 4 kHz) of `seconds`: the recordings' bytes, so the player really plays and pauses. */
+export function silentWav(seconds: number): Uint8Array {
+  const rate = 4000
+  const n = rate * seconds
+  const out = new Uint8Array(44 + n)
+  const v = new DataView(out.buffer)
+  const ascii = (at: number, t: string) => [...t].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)))
+  ascii(0, 'RIFF'); v.setUint32(4, 36 + n, true); ascii(8, 'WAVE'); ascii(12, 'fmt ')
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true)
+  v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); ascii(36, 'data'); v.setUint32(40, n, true)
+  out.fill(128, 44)
+  return out
+}
+
+/** `decrypting`: Studio plan.pdf's read stays in flight (DW-1516). `newer`: Anna's iPhone saves Meeting notes while it
+ *  is open (DW-1519). `edit-conflict`: the first save of Meeting notes meets her newer version (DW-1526). */
+export type OpenScenario = 'default' | 'decrypting' | 'newer' | 'edit-conflict'
+
 /**
  * The files source plus the Open fixtures. `saveText` keeps the one rule of the real one: a save that names an
  * older version than the current one fails with 'conflict', never an overwrite. `remote` plants a newer version.
  */
-export function createOpenSource(opts: { remoteText?: string } = {}): DriveSource {
-  const items = [...FILES_TREE, ...OPEN_ITEMS]
+export function createOpenSource(opts: { remoteText?: string; scenario?: OpenScenario } = {}): DriveSource {
+  const items = [...FILES_TREE, ...OPEN_TREE.filter((i) => i.isFolder), ...OPEN_ITEMS]
   const base = createFilesSource({ items })
   const texts = new Map(Object.entries(TEXTS))
   const version = new Map<string, number>()
   let remote = opts.remoteText
+  const scenario = opts.scenario ?? 'default'
+  let conflictPlanted = false
+  let newerPlanted = false
+  const made = Date.now()
+  const listeners = new Set<Parameters<DriveSource['subscribe']>[0]>()
   const current = (id: string) => version.get(id) ?? 3
+  /** Anna's iPhone saves version 4 of Meeting notes: her text, the current version, and the engine's item event. */
+  const herSave = (id: string) => {
+    version.set(id, 4)
+    texts.set(id, `${MD_TEXT}3. Book the terrace\n`)
+    const item = items.find((i) => i.id === id)
+    if (item) listeners.forEach((l) => l({ kind: 'item', item }))
+  }
   return {
     ...base,
     async readText(id): Promise<TextDocument> {
+      // server.log has no text here: its read fails, as a download that is cut off does. The window's first read fails
+      // at once (DW-1518); a later Try again downloads again first, so it decrypts for a moment before it fails (DW-1516).
+      if (id === 'o-log' && Date.now() - made > 1500) await new Promise((r) => setTimeout(r, 2000))
       const text = texts.get(id)
       if (text === undefined) throw new DriveSourceError('not-found')
       if (remote !== undefined) { version.set(id, 4); texts.set(id, remote); remote = undefined }
+      if (scenario === 'newer' && id === 'o-md' && !newerPlanted) { newerPlanted = true; setTimeout(() => herSave(id), 300) }
       return { text: texts.get(id)!, versionId: `v${current(id)}` }
     },
     async saveText(id, text, baseVersionId): Promise<TextDocument> {
+      if (scenario === 'edit-conflict' && id === 'o-md' && !conflictPlanted) { conflictPlanted = true; herSave(id) }
       if (baseVersionId !== `v${current(id)}`) throw new DriveSourceError('conflict')
       version.set(id, current(id) + 1)
       texts.set(id, text)
       return { text, versionId: `v${current(id)}` }
     },
     async readBytes(id) {
+      if (scenario === 'decrypting' && id === 'o-pdf') return new Promise<never>(() => {})
+      const item = OPEN_ITEMS.find((i) => i.id === id)
+      if (item?.mime === 'audio/wav') return { bytes: silentWav(30), versionId: `v${current(id)}` }
       const text = texts.get(id)
       return { bytes: new TextEncoder().encode(text ?? ''), versionId: `v${current(id)}` }
+    },
+    async thumbnail(id, size) {
+      const item = OPEN_ITEMS.find((i) => i.id === id)
+      return item?.hasThumbnail ? thumbnailFor(item.name) : base.thumbnail(id, size)
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      const stop = base.subscribe(listener)
+      return () => { listeners.delete(listener); stop() }
     },
     async versions(id): Promise<VersionEntry[]> {
       const n = current(id)

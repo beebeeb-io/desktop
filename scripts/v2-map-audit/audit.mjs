@@ -382,7 +382,9 @@ const browser = await chromium.launch()
 const fresh = async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } })
   const page = await ctx.newPage()
-  page.on('dialog', (d) => d.dismiss().catch(() => {}))
+  // The editors guard unsaved changes with beforeunload; leaving one state for the next must not be refused by it (M3d:
+  // a dismissed beforeunload kept the worker on the last editor state, so its next rows read that page).
+  page.on('dialog', (d) => (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => {}))
   return { ctx, page }
 }
 

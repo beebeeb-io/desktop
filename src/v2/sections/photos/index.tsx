@@ -1,16 +1,22 @@
 // Photos, live: DriveSource.photos / thumbnail / upload(mode 'photos') / setAvailableOffline / moveToTrash.
 // B02b: date taken, camera, dimensions, video length and the uploading flag come from drive_photo_meta (read from the
-// copy on this PC; an online-only photo keeps its modified time), the folders from drive_photo_sources. The device
-// that took a photo is in no command, so the device pills and backup lines stay absent: never invented.
+// copy on this PC; an online-only photo keeps its modified time), the folders from drive_photo_sources. M3d: the
+// device a photo came from is its backup's device folder (drive_photo_meta `device`), so the pills and Photo sources'
+// devices are live; the devices' backup progress is in no command, so that line stays absent: never invented.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDriveSource, type PhotoEntry } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
-import { loadAcross, saveAcross, ACROSS, cellMeta, idOf, isVideo, groupByDay, type Across, type PhotoCell } from './model'
+import { copyShareLink } from '../files/shareLink'
+import {
+  loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
+} from './model'
 import { useDriveExtras, type PhotoMeta, type PhotoSource } from '../../source/extras'
 import { PhotosView } from './PhotosView'
 import { PhotoViewer } from './Viewer'
-import { DetailsDialog, ShareDialog, SourcesDialog } from './Dialogs'
+import { DetailsDialog, failedWords, PhotoMove, RenameDialog, ShareDialog, SourcesDialog, type FolderChoice, type SourceChoice } from './Dialogs'
+
+type Dialog = 'sources' | 'share' | 'details' | 'move' | 'rename'
 
 export default function Section(_props: SectionProps) {
   const source = useDriveSource()
@@ -20,8 +26,12 @@ export default function Section(_props: SectionProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [viewing, setViewing] = useState<string | null>(null)
   const [mode, setMode] = useState<'preview' | 'original'>('preview')
-  const [dialog, setDialog] = useState<'sources' | 'share' | 'details' | null>(null)
+  const [dialog, setDialog] = useState<Dialog | null>(null)
   const [kept, setKept] = useState<Set<string>>(new Set())
+  // DW-0608: the message after Offline, for the photo it was asked on.
+  const [keeping, setKeeping] = useState<string | null>(null)
+  const [device, setDevice] = useState<string | null>(null)
+  const [hidden, setHiddenState] = useState<Set<string>>(loadHidden)
   const now = useMemo(() => new Date(), [])
   const extras = useDriveExtras()
   const [metas, setMetas] = useState<Record<string, PhotoMeta>>({})
@@ -37,6 +47,8 @@ export default function Section(_props: SectionProps) {
       cursor = r.next
     }
     setEntries(all)
+    // What is already kept on this PC reads "On this PC" (DW-0608).
+    setKept(new Set(all.filter((e) => e.item.local === 'available-offline').map((e) => e.item.id)))
     const ids = all.map((e) => e.item.id)
     const pages = await Promise.all(Array.from({ length: Math.ceil(ids.length / 200) }, (_, i) => extras.photoMeta(ids.slice(i * 200, i * 200 + 200)).catch(() => ({}))))
     setMetas(Object.assign({}, ...pages))
@@ -50,22 +62,29 @@ export default function Section(_props: SectionProps) {
   const setAcross = (n: Across) => { setAcrossState(n); saveAcross(n) }
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || viewing) return
+      if (viewing || dialog) return
+      // Esc ends selecting (DW-0602).
+      if (e.key === 'Escape' && selecting) { e.preventDefault(); setSelecting(false); setSelected(new Set()); return }
+      if (!e.ctrlKey) return
       const i = ACROSS.indexOf(across)
       if (e.key === '+' || e.key === '=') { e.preventDefault(); setAcross(ACROSS[Math.max(0, i - 1)]) }
       else if (e.key === '-') { e.preventDefault(); setAcross(ACROSS[Math.min(ACROSS.length - 1, i + 1)]) }
     }
     window.addEventListener('keydown', on)
     return () => window.removeEventListener('keydown', on)
-  }, [across, viewing])
+  }, [across, viewing, dialog, selecting])
 
   // Date taken over modified time where the file says it.
-  const cells: PhotoCell[] = useMemo(() => (entries ?? []).map((entry) => {
+  const all: PhotoCell[] = useMemo(() => (entries ?? []).map((entry) => {
     const m = metas[entry.item.id]
     return { entry: m?.takenAt ? { ...entry, takenAt: m.takenAt } : entry, meta: cellMeta(m) }
   }), [entries, metas])
-  const ordered = useMemo(() => groupByDay(cells).flatMap((d) => d.cells), [cells])
-  const totals = entries ? { photos: cells.filter((c) => !isVideo(c)).length, videos: cells.filter(isVideo).length, bytes: cells.reduce((n, c) => n + (c.entry.item.size ?? 0), 0) } : null
+  // Photo sources' choices apply first; the pills filter what is left (DW-0601, DW-0604).
+  const cells = useMemo(() => shown(all, hidden), [all, hidden])
+  const devices = useMemo(() => devicesOf(cells), [cells])
+  const visible = useMemo(() => (device ? cells.filter((c) => c.meta?.device === device) : cells), [cells, device])
+  const ordered = useMemo(() => groupByDay(visible).flatMap((d) => d.cells), [visible])
+  const totals = entries ? totalsOf(visible) : null
   const index = viewing ? ordered.findIndex((c) => idOf(c) === viewing) : -1
 
   const toggle = (id: string, on?: boolean) => setSelected((s) => {
@@ -86,38 +105,89 @@ export default function Section(_props: SectionProps) {
         setViewing(next ? idOf(next) : null)
       }
       await load()
-    } catch { showToast({ kind: 'failed', text: 'Couldn’t move to Trash' }) }
+    } catch (e) { showToast({ kind: 'failed', text: failedWords(e, 'move it to Trash') }) }
   }
-  const keep = async (ids: string[]) => {
+  /** Keep the originals on this PC (Offline), or stop keeping one (On this PC › Remove from this PC). */
+  const keep = async (ids: string[], on: boolean) => {
     try {
-      await Promise.all(ids.map((id) => source.setAvailableOffline(id, !kept.has(id) || ids.length > 1)))
-      setKept((k) => { const n = new Set(k); ids.forEach((id) => (ids.length === 1 && n.has(id) ? n.delete(id) : n.add(id))); return n })
-    } catch { showToast({ kind: 'failed', text: 'Couldn’t keep it on this PC' }) }
+      await Promise.all(ids.map((id) => source.setAvailableOffline(id, on)))
+      setKept((k) => { const n = new Set(k); ids.forEach((id) => (on ? n.add(id) : n.delete(id))); return n })
+      setKeeping(on && ids.length === 1 ? ids[0] : null)
+      if (!on) showToast({ kind: 'done', text: 'Removed from this PC. It stays in Beebeeb.' })
+      else if (ids.length > 1) showToast({ kind: 'done', text: `Keeping ${ids.length} originals on this PC` })
+    } catch (e) { showToast({ kind: 'failed', text: failedWords(e, on ? 'keep it on this PC' : 'remove it from this PC') }) }
   }
-  const upload = () => { source.upload(null, { kind: 'pick', mode: 'photos' }).catch(() => showToast({ kind: 'failed', text: 'Couldn’t start the upload' })) }
+  const upload = () => { source.upload(null, { kind: 'pick', mode: 'photos' }).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'start the upload') })) }
+  const openSources = () => { extras.photoSources().then(setSources, () => setSources([])); setDialog('sources') }
+
+  // Photo sources (DW-0604): the devices from the photos' backups, the folders from Files that hold photos. A folder
+  // that holds a device's backup is that device, not a folder from Files.
+  const backupFolders = new Set(all.filter((c) => c.meta?.device).map((c) => c.entry.item.parentId))
+  const deviceChoices: SourceChoice[] = devicesOf(all).map((d) => ({ name: d.name, photos: d.photos, on: !hidden.has(`device:${d.name}`) }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  const folderChoices: FolderChoice[] = sources.filter((f) => !backupFolders.has(f.id)).map((f) => ({
+    id: f.id ?? undefined, name: f.name, items: f.count, note: f.path && f.path !== f.name ? f.path : undefined, on: !(f.id && hidden.has(`folder:${f.id}`)),
+  }))
+  const applySources = (d: SourceChoice[], f: FolderChoice[]) => {
+    const next = new Set<string>()
+    d.forEach((x) => { if (!x.on) next.add(`device:${x.name}`) })
+    f.forEach((x) => { if (!x.on && x.id) next.add(`folder:${x.id}`) })
+    setHiddenState(next)
+    saveHidden(next)
+    if (device && next.has(`device:${device}`)) setDevice(null)
+    setDialog(null)
+  }
 
   const current = index >= 0 ? ordered[index] : null
   const chosen = ordered.find((c) => selected.has(idOf(c))) ?? current
   const dialogs = (
     <>
-      {dialog === 'sources' && <SourcesDialog devices={[]} folders={sources.map((f) => ({ name: f.name, items: f.count, note: f.path || undefined, on: true }))} onAddFolder={() => showToast({ kind: 'failed', text: 'Choosing folders for Photos isn’t available in this build yet' })} onCancel={() => setDialog(null)} onDone={() => setDialog(null)} />}
-      {dialog === 'share' && chosen && <ShareDialog cell={chosen} onClose={() => setDialog(null)} onCopyLink={() => { showToast({ kind: 'done', text: 'Link copied' }); setDialog(null) }} onSendCopy={() => setDialog(null)} />}
+      {dialog === 'sources' && (
+        <SourcesDialog
+          devices={deviceChoices} folders={folderChoices}
+          onAddFolder={() => showToast({ kind: 'failed', text: 'Choosing folders for Photos isn’t available in this version of Beebeeb.' })}
+          onCancel={() => setDialog(null)} onDone={applySources}
+        />
+      )}
+      {dialog === 'share' && chosen && (
+        <ShareDialog
+          cell={chosen} onClose={() => setDialog(null)}
+          // Copy link keeps it encrypted: Rust makes the link and puts it on the clipboard (as Files' Copy link, DW-0407).
+          onCopyLink={() => { const ids = selecting && selected.size > 0 ? [...selected] : [idOf(chosen)]; setDialog(null); void copyShareLink(ids, { expires: 'In 30 days', password: null }, showToast) }}
+          onSendCopy={() => { setDialog(null); showToast({ kind: 'failed', text: 'Sending a copy through the Windows Share menu isn’t available in this version of Beebeeb. Copy link keeps it encrypted.' }) }}
+        />
+      )}
       {dialog === 'details' && chosen && <DetailsDialog cell={chosen} now={now} onClose={() => setDialog(null)} />}
+      {dialog === 'move' && (current || selected.size > 0) && (
+        <PhotoMove
+          items={current ? [current.entry.item] : visible.filter((c) => selected.has(idOf(c))).map((c) => c.entry.item)}
+          onDone={(moved) => { setDialog(null); if (moved) { setSelected(new Set()); setSelecting(false); void load() } }}
+        />
+      )}
+      {dialog === 'rename' && current && <RenameDialog item={current.entry.item} siblings={all.map((c) => c.entry.item).filter((i) => i.parentId === current.entry.item.parentId)} onDone={(renamed) => { setDialog(null); if (renamed) void load() }} />}
     </>
   )
 
   if (current) {
+    const id = idOf(current)
     return (
       <>
         <PhotoViewer
-          cells={ordered} index={index} now={now} mode={mode} kept={kept.has(idOf(current))}
-          onBack={() => { setViewing(null); setMode('preview') }}
-          onStep={(d) => { const n = ordered[index + d]; if (n) setViewing(idOf(n)) }}
-          onJump={(i) => setViewing(idOf(ordered[i]))}
-          onMode={(m) => { setMode(m); if (m === 'original') source.open(idOf(current)).catch(() => showToast({ kind: 'failed', text: 'Couldn’t open the original' })) }}
-          onMore={(a) => { if (a === 'duplicate') source.duplicate([idOf(current)]).then(load, () => showToast({ kind: 'failed', text: 'Couldn’t duplicate it' })) }}
+          cells={ordered} index={index} now={now} mode={mode} kept={kept.has(id)} keeping={keeping === id && kept.has(id)}
+          onBack={() => { if (dialog) return; setViewing(null); setMode('preview'); setKeeping(null) }}
+          onStep={(d) => { if (dialog) return; const n = ordered[index + d]; if (n) { setViewing(idOf(n)); setKeeping(null) } }}
+          onJump={(i) => { setViewing(idOf(ordered[i])); setKeeping(null) }}
+          onMode={(m) => { setMode(m); if (m === 'original') source.open(id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open the original') })) }}
+          onMore={(a) => {
+            if (a === 'duplicate') source.duplicate([id]).then(() => { showToast({ kind: 'done', text: 'Duplicated' }); return load() }, (e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'duplicate it') }))
+            else if (a === 'move') setDialog('move')
+            else if (a === 'rename') setDialog('rename')
+            // A save panel that writes a plain decrypted copy needs a command this version does not have: say so.
+            else showToast({ kind: 'failed', text: 'Saving a copy to this PC isn’t available in this version of Beebeeb.' })
+          }}
           onShare={() => setDialog('share')} onDetails={() => setDialog('details')}
-          onOffline={() => keep([idOf(current)])} onTrash={() => trash([idOf(current)])} onOpen={() => { source.open(idOf(current)).catch(() => {}) }}
+          onOffline={() => keep([id], true)} onRemoveLocal={() => keep([id], false)} onTrash={() => trash([id])}
+          onOpen={() => { source.open(id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open it') })) }}
         />
         {dialogs}
       </>
@@ -126,13 +196,13 @@ export default function Section(_props: SectionProps) {
   return (
     <>
       <PhotosView
-        cells={cells} now={now} across={across} devices={[]} device={null} totals={totals} backups={[]}
+        cells={visible} now={now} across={across} devices={devices.map((d) => d.name)} device={device} totals={totals} backups={[]}
         selecting={selecting} selected={selected} loading={entries === null} canUpload={source.capabilities.nativePickers}
-        onOpen={(id) => setViewing(id)} onToggle={toggle} onAcross={setAcross}
-        onSources={() => { extras.photoSources().then(setSources, () => setSources([])); setDialog('sources') }} onSelect={() => { setSelecting((s) => !s); setSelected(new Set()) }}
-        onSelectAll={() => setSelected(new Set(cells.map(idOf)))} onDone={() => { setSelecting(false); setSelected(new Set()) }}
-        onUpload={upload} onShare={() => setDialog('share')} onOffline={() => keep([...selected])}
-        onMove={() => showToast({ kind: 'failed', text: 'Choose where to move them in Files' })} onTrash={() => trash([...selected])}
+        onDevice={setDevice} onOpen={(id) => setViewing(id)} onToggle={toggle} onAcross={setAcross}
+        onSources={openSources} onSelect={() => { setSelecting((s) => !s); setSelected(new Set()) }}
+        onSelectAll={() => setSelected(new Set(visible.map(idOf)))} onDone={() => { setSelecting(false); setSelected(new Set()) }}
+        onUpload={upload} onShare={() => setDialog('share')} onOffline={() => keep([...selected], true)}
+        onMove={() => setDialog('move')} onTrash={() => trash([...selected])}
       />
       {dialogs}
     </>

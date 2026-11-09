@@ -172,11 +172,14 @@ export function PhotosView(p: PhotosViewProps) {
             <Pill label="All" on={p.device === null} onClick={() => p.onDevice?.(null)} />
             {p.devices.map((d) => <Pill key={d} label={d} on={p.device === d} onClick={() => p.onDevice?.(d)} />)}
           </div>
-          <p className="m-0 text-[12px] text-ink-3" data-backup-status>
-            {backing.length > 0
-              ? backing.map((b) => `${b.name} ${b.status}`).join(' · ')
-              : 'Every device is backed up.'}
-          </p>
+          {/* The devices' backup state comes from no command on this PC yet: without it, no line (never "backed up"). */}
+          {p.backups.length > 0 && (
+            <p className="m-0 text-[12px] text-ink-3" data-backup-status>
+              {backing.length > 0
+                ? backing.map((b) => `${b.name} ${b.status}`).join(' · ')
+                : 'Every device is backed up.'}
+            </p>
+          )}
         </div>
       )}
 

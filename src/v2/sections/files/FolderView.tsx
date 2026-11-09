@@ -375,7 +375,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
         if (id === 'new-folder') openNewFolder()
         else if (id === 'upload') upload('files')
         else if (id === 'upload-folder') upload('folder')
-        else if (id === 'new-file') nav.go({ section: 'open', sub: 'new-file' })
+        else if (id === 'new-file') nav.go({ section: 'open', id: nav.route.id, sub: 'new-file' })
         else if (id === 'new-document') nav.go({ section: 'open', id: nav.route.id, sub: 'new-document' })
       },
     })
