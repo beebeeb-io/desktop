@@ -7,6 +7,11 @@ use super::*;
 #[path = "office_v2/mod.rs"]
 pub(crate) mod office_v2;
 
+// The one notification gate and the one hop to the OS toast (slice 39). Declared here, not in lib.rs, for the same
+// reason as `office_v2`: lib.rs is not rustfmt-clean on `v2` and the pre-commit hook refuses a staged edit to it.
+#[path = "notifications.rs"]
+pub(crate) mod notifications;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
@@ -48,6 +53,7 @@ pub fn run() {
             drive_v2::drive_list, drive_v2::drive_details, drive_v2::drive_thumbnail, drive_v2::drive_versions, drive_v2::drive_search, drive_v2::drive_recent, drive_v2::drive_shared, drive_v2::drive_photos, drive_v2::drive_trash, drive_v2::drive_storage, drive_v2::drive_sync_summary, drive_v2::drive_create_folder, drive_v2::drive_create_file, drive_v2::drive_rename, drive_v2::drive_move, drive_v2::drive_duplicate, drive_v2::drive_trash_items, drive_v2::drive_undo_trash, drive_v2::drive_restore_from_trash, drive_v2::drive_upload_pick, drive_v2::drive_upload_dropped, drive_v2::drive_open, drive_v2::drive_read_text, drive_v2::drive_save_text, drive_v2::drive_read_bytes, drive_v2::drive_save_bytes, drive_v2::drive_reveal, // v2 b02
             drive_v2::drive_status, drive_v2::drive_transfers, drive_v2::drive_sync_problems, drive_v2::drive_sync_retry, drive_v2::drive_offline_list, drive_v2::drive_photo_meta, drive_v2::drive_photo_sources, drive_v2::drive_paths, // v2 b02b
             app_version,
+            crate::app_run::notifications::notify_event, // slice 39: the one notification hop
             crate::v2_snap::v2_set_maximize_rect, // v2 b03
             crate::app_run::office_v2::office_engine_status, crate::app_run::office_v2::office_engine_prepare, // v2 b08
             account_v2::account_change_password, account_v2::account_change_email, account_v2::account_verify_email, account_v2::account_set_name, account_v2::account_totp_setup, account_v2::account_totp_confirm, account_v2::account_totp_disable, account_v2::account_totp_abandon, account_v2::account_set_activity_logging, account_v2::account_delete_check_password, account_v2::account_delete_confirm, account_v2::account_delete_cancel, account_v2::account_delete_undo, account_v2::account_display_name, account_v2::account_activity_logging, account_v2::account_save_backup_codes, // v2 b14
@@ -297,6 +303,7 @@ pub fn run() {
                 place_desktop_main_window(&app.handle().clone(), &w);
             }
             attach_tray_status_listener(&app.handle().clone());
+            notifications::attach_engine_status_listener(&app.handle().clone());
             {
                 let app_state = app.state::<AppState>();
                 if let Ok(mut guard) = app_state.auth_present.lock() {
