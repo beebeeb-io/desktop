@@ -201,10 +201,8 @@
   "why": "↓ pressed in the search field"
  },
  "DW-0802b#0": {
-  "verb": "fill",
-  "selector": "[data-search-field]",
-  "value": "Contract",
-  "why": "keep typing: two more letters in the field"
+  "notAutomatable": "an event: DW-0802 is the list with the note gone, and the note goes when the list has loaded (DW-0802b's rule). Each letter searches again and re-reads the progress, but the fixture host's list never finishes loading",
+  "why": "typing works (it searches again with each letter); the target needs the first sign-in's list to finish, which only a real sign-in does: native smoke"
  },
  "DW-0803#0": {
   "verb": "fill",
