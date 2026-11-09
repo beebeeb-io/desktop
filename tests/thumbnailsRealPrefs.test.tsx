@@ -272,5 +272,5 @@ test('an empty read renders none of the board sizes, and compare says which valu
   const src = readFileSync(new URL('../src/v2/sections/settings/drive/thumbnails.tsx', import.meta.url), 'utf8')
   expect(src).not.toMatch(/\bboard\b/)
   expect(src).not.toMatch(/from ['"][^'"]*fixtures/)
-  for (const banned of ['3.1 GB', '2.4 GB', '30.9 MB', '213 KB', '420 KB', '640 KB', '1.0 MB', '2,431']) expect(src).not.toContain(banned)
+  for (const banned of ['3.1 GB', '2.4 GB', '30.9 MB', '213 KB', '420 KB', '640 KB', '1.0 MB', '2,431', 'Rebuilding previews']) expect(src).not.toContain(banned)
 })

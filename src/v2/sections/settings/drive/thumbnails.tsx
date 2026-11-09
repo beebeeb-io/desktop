@@ -157,7 +157,7 @@ export function Thumbnails() {
         <Row label="Fallback previews" value={reported(usage.fallback)} mono />
         <Row label="Grid thumbnails" value={reported(usage.grid)} mono />
         <Row label="On this PC" value={onPcValue(usage.onPc, usage.limit)} mono onClick={() => go('storage')} />
-        <Row label="Made automatically" right={<Btn onClick={() => setRebuild('Rebuilding previews in the background.')}>Rebuild previews</Btn>} sub={rebuild ?? undefined} />
+        <Row label="Made automatically" right={<Btn onClick={() => setRebuild(actionFailure('rebuild the previews', 'unsupported').text)}>Rebuild previews</Btn>} sub={rebuild ?? undefined} />
       </Group>
       {dialog?.startsWith('apply:') ? (
         <ApplyDialog arg={dialog} bytes={usage.previews} photos={usage.photos} onApply={(s, f) => {
@@ -165,7 +165,6 @@ export function Thumbnails() {
           if (s !== savedSize) patch.preview_size = s
           if (f !== savedFmt) patch.preview_format = f
           if (Object.keys(patch).length) void update(patch as Partial<DesktopConfig>)
-          setRebuild('Rebuilding previews in the background.')
         }} />
       ) : null}
     </Page>
