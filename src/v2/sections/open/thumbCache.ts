@@ -18,11 +18,11 @@ export class ThumbCache {
     return e.url
   }
 
-  /** Keep `url` for `id`. A larger one already held stays; the one it replaces is freed; past the cap the least recently
-   *  used is freed. */
+  /** Keep `url` for `id`. One already held at this size or larger stays (a late answer frees its own URL, never the one
+   *  on screen); a small one is replaced by a large one and freed; past the cap the least recently used is freed. */
   put(id: string, size: ThumbSize, url: string | null): void {
     const old = this.map.get(id)
-    if (old && old.size === 'large' && size === 'small') { if (url && url !== old.url) this.revoke(url); return }
+    if (old && (old.size === 'large' || size === 'small')) { if (url && url !== old.url) this.revoke(url); return }
     this.map.delete(id)
     this.map.set(id, { url, size })
     if (old?.url && old.url !== url) this.revoke(old.url)

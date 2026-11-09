@@ -146,8 +146,9 @@ export function SetupFlow() {
   // Try again registers the folder the config holds: the state is read first, and without a read it does not guess
   // (Rust would fall back to its default folder, not the configured one). #271 review.
   const tryAgain = async () => {
+    setShowError(null)
     const v = await readShell()
-    if (!v) { setRefused(NO_STATE); return }
+    if (!v) { setShowError(NO_STATE); return }
     await addToExplorer(v.path ?? null)
   }
 

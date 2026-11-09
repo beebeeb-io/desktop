@@ -21,6 +21,11 @@ export function firstFileRow(root: Pick<ParentNode, 'querySelector'> = document)
   return root.querySelector('main [role="row"][data-kind="file"]')
 }
 
+/** A menu or dialog the person opened under a tip (the right-click menu the file tip asks for) takes its own Esc. */
+export function escBelongsElsewhere(root: Pick<ParentNode, 'querySelector'> = document): boolean {
+  return !!root.querySelector('[role="menu"], [role="listbox"], [role="alertdialog"], [role="dialog"]:not([data-guide-card]):not([data-tray-tip])')
+}
+
 /** Whether a tip's missing target means "skip it": only the file tip, and only once Files' listing has loaded (a list
  *  still loading on first run may have files yet). */
 export function tipMissing(id: TipId, root: Pick<ParentNode, 'querySelector'> = document): boolean {
@@ -92,7 +97,7 @@ export function GuideTip({ index, onNext, onSkip, onMissing }: {
   // selection in Files under the tip (#271 review).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || escBelongsElsewhere()) return
       e.preventDefault()
       e.stopPropagation()
       onSkip()
@@ -105,7 +110,7 @@ export function GuideTip({ index, onNext, onSkip, onMissing }: {
   return (
     <div className="pointer-events-none absolute inset-0 z-40" data-guide-tip={tip.id} data-screen={`guide-${tip.id}`}>
       {box && <div data-outline className="absolute rounded-md border-2 border-ink ring-4 ring-paper/60" style={box} />}
-      <div role="dialog" aria-label={`Tip ${index + 1} of ${TIPS.length}`} aria-describedby={`guide-tip-${tip.id}`} ref={card} className="pointer-events-auto absolute w-[320px] rounded-lg border border-line bg-paper p-4 shadow-xl" style={place}>
+      <div role="dialog" data-guide-card aria-label={`Tip ${index + 1} of ${TIPS.length}`} aria-describedby={`guide-tip-${tip.id}`} ref={card} className="pointer-events-auto absolute w-[320px] rounded-lg border border-line bg-paper p-4 shadow-xl" style={place}>
         <p id={`guide-tip-${tip.id}`} className="m-0 text-[13px] leading-[19px] text-ink">{tip.text}</p>
         <div className="mt-3 flex items-center justify-between">
           <span className="font-mono text-[11px] text-ink-3" data-tip-count>{index + 1} of {TIPS.length}</span>

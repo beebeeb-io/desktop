@@ -163,8 +163,12 @@ function VideoPlayer({ id, item, poster, name, onOpen }: { id: string; item: { s
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState<null | 'cant-play' | 'too-large' | { needed: number; free: number }>(null)
   const ref = useRef<HTMLVideoElement>(null)
-  const { size, local } = item
+  // Read when the video opens: a change to its local state while it plays (the read itself hydrates it) never reads it
+  // again or frees what is playing (self-review).
+  const at = useRef(item)
+  at.current = item
   useEffect(() => {
+    const { size, local } = at.current
     let live = true
     let made: string | null = null
     setUrl(null); setFailed(null)
@@ -184,7 +188,7 @@ function VideoPlayer({ id, item, poster, name, onOpen }: { id: string; item: { s
       setUrl(made)
     })().catch(() => { if (live) setFailed('cant-play') })
     return () => { live = false; if (made) URL.revokeObjectURL(made) }
-  }, [source, extras, id, size, local])
+  }, [source, extras, id])
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       const v = ref.current

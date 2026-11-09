@@ -9,7 +9,7 @@ import { DriveSourceError, type DriveEvent } from '@beebeeb/shared/drive-ui'
 import { followListing, type ListingProgress } from '../src/v2/sections/search'
 import { officeSave } from '../src/v2/sections/open/office/save'
 import { NOT_INDEXED, saveFailure } from '../src/v2/sections/open/office'
-import { isProvisional } from '../src/v2/sections/open'
+import { INDEX_WAITS, isProvisional } from '../src/v2/sections/open'
 import { folderKey, shown, videoReadable, type PhotoCell } from '../src/v2/sections/photos/model'
 import { READ_CAP_BYTES } from '../src/v2/source/desktop'
 import { ThumbCache } from '../src/v2/sections/open/thumbCache'
@@ -17,7 +17,7 @@ import { actionFailure } from '../src/v2/sections/files/model'
 import { routeFilter } from '../src/v2/sections/sync-history/model'
 import { countryName, phraseFilled, totpEntry } from '../src/v2/auth/model'
 import { STEP_FAILED, stepFailureText } from '../src/v2/auth/create/model'
-import { firstFileRow, tipMissing } from '../src/v2/guide/Guide'
+import { escBelongsElsewhere, firstFileRow, tipMissing } from '../src/v2/guide/Guide'
 import { shellPolls } from '../src/v2/onboarding'
 
 const src = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
@@ -152,8 +152,8 @@ describe('#273 finding 11 (New file): a file this window just made opens once th
     expect(isProvisional('local:Documents/Untitled.md')).toBe(true)
     expect(isProvisional('f-documents')).toBe(false)
     const open = src('v2/sections/open/index.tsx')
-    expect(open).toContain("if (isProvisional(id) && e instanceof DriveSourceError && e.code === 'not-found') return setUnindexed(true)")
-    expect(open).toMatch(/if \(!unindexed\) return\n\s+return source\.subscribe\(\(e\) => \{ if \(e\.kind === 'changed' \|\| e\.kind === 'item'\) setTries/)
+    expect(open).toContain("if (isProvisional(id) && e instanceof DriveSourceError && e.code === 'not-found' && waits.current < INDEX_WAITS) return setUnindexed(true)")
+    expect(open).toMatch(/if \(!unindexed\) return\n\s+return source\.subscribe\(\(e\) => \{ if \(e\.kind === 'changed' \|\| e\.kind === 'item'\) \{ waits\.current \+= 1; setTries/)
   })
 })
 
@@ -161,7 +161,7 @@ describe('#273 finding 1: until the page view is drawn in the window, a PDF open
   test('Open frames no decrypted content, and a PDF gets the open-in-another-app state with its button', () => {
     const open = src('v2/sections/open/index.tsx')
     expect(open).not.toContain('<iframe')
-    expect(open).toContain("useBlobUrl(kind === 'pdf' ? null : bytes")
+    expect(open).toContain("kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' }")
     expect(open).toContain(`{kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} />`)
     expect(open).not.toMatch(/else if \(kind === 'pdf'\) body =/)
   })
@@ -315,7 +315,7 @@ describe('#271 P2 and review: setup’s File Explorer step', () => {
     expect(ob).not.toContain("command('open_finder_location', { path: null })")
     expect(ob).toContain("const r = await command<void>('open_finder_location', { path })")
     expect(ob).toContain('setShowError(r.ok || r.unsupported ? null : r.reason)')
-    expect(ob).toMatch(/const tryAgain = async \(\) => \{\n\s+const v = await readShell\(\)\n\s+if \(!v\) \{ setRefused\(NO_STATE\); return \}/)
+    expect(ob).toMatch(/const tryAgain = async \(\) => \{\n\s+setShowError\(null\)\n\s+const v = await readShell\(\)\n\s+if \(!v\) \{ setShowError\(NO_STATE\); return \}/)
     expect(src('v2/onboarding/views.tsx')).toContain('{showError && <p role="alert" data-show-error')
   })
   test('the state is polled only on the File Explorer step or while a try runs', () => {
@@ -402,5 +402,49 @@ describe('base item 2: the brand slips outside the shared package', () => {
     const legacy = src('design.css')
     expect(legacy).not.toMatch(/^button,\s*\ninput\s*\{/m)
     expect(legacy).toContain(':where(html:not(.v2)) button,\n:where(html:not(.v2)) input {\n  font: inherit;\n}')
+  })
+})
+
+describe('self-review (code-review high) follow-ups', () => {
+  test('a late thumbnail at a size already held frees itself, never the URL on screen', () => {
+    const freed: string[] = []
+    const c = new ThumbCache(4, (u) => freed.push(u))
+    c.put('x', 'small', 'blob:shown')
+    c.put('x', 'small', 'blob:late')
+    expect([c.get('x', 'small'), freed]).toEqual(['blob:shown', ['blob:late']])
+    expect(src('v2/sections/open/index.tsx')).toContain('if (!live) { if (u) URL.revokeObjectURL(u); return }')
+  })
+  test('Esc under a tip goes to a menu or dialog the person opened, not to the guide', () => {
+    const root = (sel: string | null) => ({ querySelector: (q: string) => (sel && q.includes(sel) ? ({}) as Element : null) })
+    expect(escBelongsElsewhere(root('[role="menu"]'))).toBe(true)
+    expect(escBelongsElsewhere(root(null))).toBe(false)
+    expect(src('v2/guide/Guide.tsx')).toContain("if (e.key !== 'Escape' || escBelongsElsewhere()) return")
+    expect(src('v2/guide/Guide.tsx')).toContain('role="dialog" data-guide-card')
+  })
+  test('the list check is followed only while it runs', async () => {
+    const listeners = new Set<(e: DriveEvent) => void>()
+    const fake = { subscribe: (l: (e: DriveEvent) => void) => { listeners.add(l); return () => { listeners.delete(l) } } }
+    const seen: unknown[] = []
+    followListing(fake, async () => undefined, (p) => seen.push(p), 0)
+    await new Promise((r) => setTimeout(r, 5))
+    expect([seen, listeners.size]).toEqual([[undefined], 0])
+  })
+  test('Office owns Ctrl+F wherever it was opened from; Keep both shows their version again', () => {
+    const office = src('v2/sections/open/office/index.tsx')
+    expect(office).toContain('useOwnFind(true, useCallback(() => { frameRef.current?.focus() }, []))')
+    expect(office).toMatch(/createKeptCopy\(name, 'edited on this PC'[\s\S]{0,400}const fresh = await source\.readBytes\(fileId\)\n\s+await b\.open\(fresh\.bytes, name\)/)
+  })
+  test('a playing video is read once per open; a PDF is not read until the window draws it; Try again without a state says so', () => {
+    expect(src('v2/sections/photos/Viewer.tsx')).toContain('}, [source, extras, id])')
+    expect(src('v2/sections/open/index.tsx')).toContain("kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' }")
+    expect(src('v2/onboarding/index.tsx')).toContain('if (!v) { setShowError(NO_STATE); return }')
+    expect(src('v2/onboarding/index.tsx')).not.toContain('setRefused(NO_STATE)')
+  })
+  test('a provisional id gives up after a few engine changes, and the watch reads a whole file only when it may have landed', () => {
+    expect(INDEX_WAITS).toBe(3)
+    expect(src('v2/sections/open/index.tsx')).toContain("e.code === 'not-found' && waits.current < INDEX_WAITS) return setUnindexed(true)")
+    const watch = src('v2/sections/open/versionWatch.ts')
+    expect(watch).toContain("const mayHaveLanded = p?.kind === 'save' && item.local !== 'syncing' && (versionCount > p.from || p.from === 0)")
+    expect(watch).toContain('const soon = throttled(() => void check())')
   })
 })

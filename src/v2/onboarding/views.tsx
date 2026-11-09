@@ -238,7 +238,8 @@ function NavPane() {
 // DW-0206, DW-0206b, DW-0280
 export function ExplorerStep({ status, errorCode, showError = null, onShow, onContinue, onTryAgain }: {
   status: ExplorerStatus; errorCode: string | null
-  /** Why "Show in File Explorer" did not open it (Rust's refusal), shown under the buttons (#271 P2). */
+  /** Why "Show in File Explorer" did not open it (Rust's refusal), or why Try again tried nothing (the state could not
+   *  be read): shown under the buttons (#271 P2 and review). */
   showError?: string | null
   onShow: () => void; onContinue: () => void; onTryAgain: () => void
 }) {
@@ -266,6 +267,7 @@ export function ExplorerStep({ status, errorCode, showError = null, onShow, onCo
           <PrimaryButton onClick={onTryAgain}>Try again</PrimaryButton>
           <SecondaryButton onClick={onContinue}>Continue without File Explorer</SecondaryButton>
         </Buttons>
+        {showError && <p role="alert" data-show-error className="m-0 text-[12px] leading-[17px] text-red-text">{showError}</p>}
       </>
     )
   }

@@ -22,6 +22,7 @@ import { APP_LABEL, OfficeShell } from './View'
 import { createKeptCopy, tagContent } from '../model'
 import { useVersionWatch } from '../versionWatch'
 import { officeSave } from './save'
+import { useOwnFind } from '../find'
 import { failedWords } from '../../photos/Dialogs'
 import { showToast } from '../../../chrome/Toast'
 
@@ -244,6 +245,13 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
       const bytes = await b.save()
       const parentId = target.kind === 'new' ? target.parentId : item?.parentId ?? null
       const kept = await createKeptCopy(name, 'edited on this PC', () => source.list(parentId).then((l) => l.items.map((i) => i.name)), (n) => upload(n, bytes))
+      // This file stays theirs: the editor shows their version again, as the text editor does (self-review).
+      if (fileId) {
+        const fresh = await source.readBytes(fileId)
+        await b.open(fresh.bytes, name)
+        setDoc(fresh)
+        setVersionNumber((await source.details(fileId).catch(() => null))?.versionCount ?? conflict.latest)
+      }
       setConflict(null); setDirty(false)
       showToast({ kind: 'done', text: `Your edit is saved as ${kept.name}` })
     } catch (e) {
@@ -260,6 +268,9 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
   }
 
   useCommand('save', useCallback(() => { if (dirty) void save() }, [dirty, save]))
+  // Ctrl+F never leaves the editor for Search, whatever route opened it (#273 finding 14): the engine's frame takes the
+  // focus, and with it the next Ctrl+F (the engine's own find).
+  useOwnFind(true, useCallback(() => { frameRef.current?.focus() }, []))
   useCommand('commands', useCallback(() => setPalette(true), []))
   useCommand('present', useCallback(() => { if (app === 'impress') run('.uno:Presentation') }, [app, run]))
 

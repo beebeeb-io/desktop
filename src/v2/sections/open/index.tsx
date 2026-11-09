@@ -71,7 +71,8 @@ function useLoad(id: string) {
         setPhase({ name: 'loading', item })
         const kind = viewerKind(item.name)
         // A RAW shows the camera's preview (its thumbnail): the file itself is not read.
-        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
+        // A PDF is not read either until the window draws its pages (it opens in another app; P1b's pdf.js reads it).
+        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
         if (live) setPhase({ name: 'ready', item, data, version: versionCount })
       } catch (e) {
         if (!live) return
@@ -81,19 +82,24 @@ function useLoad(id: string) {
           if (!live) return
           if (item) return setPhase({ name: 'too-large', item })
         }
-        if (isProvisional(id) && e instanceof DriveSourceError && e.code === 'not-found') return setUnindexed(true)
+        if (isProvisional(id) && e instanceof DriveSourceError && e.code === 'not-found' && waits.current < INDEX_WAITS) return setUnindexed(true)
         setPhase({ name: 'failed', item: known })
       }
     })()
     return () => { live = false }
   }, [source, extras, id, tries])
-  // The engine's index event, never a timer: read again when the engine says something changed (#273 finding 11).
+  // The engine's index event, never a timer: read again when the engine says something changed (#273 finding 11). A file
+  // still unknown after a few of its changes is gone (deleted or renamed before it was indexed): the failed state.
+  const waits = useRef(0)
   useEffect(() => {
     if (!unindexed) return
-    return source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'item') setTries((n) => n + 1) })
+    return source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'item') { waits.current += 1; setTries((n) => n + 1) } })
   }, [source, unindexed])
   return { phase, retry: () => setTries((n) => n + 1), setPhase }
 }
+
+/** How many engine changes a provisional id waits through before it reads as failed. */
+export const INDEX_WAITS = 3
 
 /** Rust's stand-in id for a file this PC has just written and the engine has not indexed yet (drive_v2 item_at_path). */
 export const isProvisional = (id: string) => id.startsWith('local:')
@@ -204,7 +210,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   const bytes = data.kind === 'bytes' ? data.bytes : null
   // A PDF is never framed: the window's CSP refuses a `blob:` frame (lead's M3d ruling 5), so it opens in another app
   // until the page view is drawn in the window (pdf.js, the P1b lane). #273 finding 1.
-  const url = useBlobUrl(kind === 'pdf' ? null : bytes, item.mime ?? 'application/octet-stream')
+  const url = useBlobUrl(bytes, item.mime ?? 'application/octet-stream')
   const text = data.kind === 'text' ? data.text : ''
   const big = (item.size ?? 0) > MAX_EDITABLE_BYTES
   const openElsewhere = () => { source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open it in another app') })) }
@@ -304,7 +310,13 @@ function RawView({ item, nav, onOpenElsewhere }: { item: DriveItem; nav: Section
     setThumbs((t) => ({ ...t, ...held }))
     for (const [id, size] of want) {
       if (id in held) continue
-      source.thumbnail(id, size).then((u) => { cache.put(id, size, u); if (live) setThumbs((t) => ({ ...t, [id]: cache.get(id, size) ?? u })) }, () => {})
+      // An answer for a strip that has gone frees its URL instead of keeping it (self-review: a late answer replaced the
+      // URL the live strip showed).
+      source.thumbnail(id, size).then((u) => {
+        if (!live) { if (u) URL.revokeObjectURL(u); return }
+        cache.put(id, size, u)
+        setThumbs((t) => ({ ...t, [id]: cache.get(id, size) ?? null }))
+      }, () => {})
     }
     return () => { live = false }
   }, [source, near, item.id])

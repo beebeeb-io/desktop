@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DriveSource, VersionEntry } from '@beebeeb/shared/drive-ui'
 import { tagContent, tagVersion, versionNews, type SaveNote, type VersionWatch } from './model'
+import { throttled } from '../../throttle'
 
 /** What the watch reads to compare a landed version with this window's save: Rust's tag of the file's content now. */
 export type ReadTag = (id: string) => Promise<string>
@@ -40,7 +41,10 @@ export function useVersionWatch(source: DriveSource, id: string | null, base: nu
         const p = watch.current.pending
         // While a save waits, Rust's tag of the file is read: its number is the server's (0 for a file never uploaded,
         // which drive_details shows as 1) and its content part tells this save from another device's version.
-        const tag = p?.kind === 'save' && item.local !== 'syncing' ? await callbacks.current.readTag(id) : null
+        // Only when the version can have moved: past the one the save was made over, or (a file never uploaded, version 0,
+        // which drive_details shows as 1) once it is not moving. Never on every event (self-review: a whole read each time).
+        const mayHaveLanded = p?.kind === 'save' && item.local !== 'syncing' && (versionCount > p.from || p.from === 0)
+        const tag = mayHaveLanded ? await callbacks.current.readTag(id) : null
         const version = tag === null ? versionCount : tagVersion(tag) ?? versionCount
         const news = versionNews(watch.current, { version, local: item.local, content: tag === null ? undefined : tagContent(tag) })
         if (news === 'same') continue
@@ -57,9 +61,14 @@ export function useVersionWatch(source: DriveSource, id: string | null, base: nu
   }, [source, id])
   // A watch that starts with a save waiting (a new document's first save, before its id was known) reads at once.
   useEffect(() => { if (watch.current.pending) void check() }, [check])
-  useEffect(() => source.subscribe((e) => {
-    if (e.kind === 'changed' || e.kind === 'sync' || (e.kind === 'item' && e.item.id === id)) void check()
-  }), [source, id, check])
+  useEffect(() => {
+    // At most one re-read a second: the engine's poller says `changed` every tick while anything moves.
+    const soon = throttled(() => void check())
+    const stop = source.subscribe((e) => {
+      if (e.kind === 'changed' || e.kind === 'sync' || (e.kind === 'item' && e.item.id === id)) soon()
+    })
+    return () => { soon.cancel(); stop() }
+  }, [source, id, check])
   return {
     newer,
     note,

@@ -23,14 +23,20 @@ function saveRecent(list: string[]) { try { localStorage.setItem(RECENT_KEY, JSO
 export type ListingProgress = { done: number; total: number }
 
 /** The list check's progress, live: read now, then again (at most once a second) whenever the engine says something
- *  changed (`changed`, `sync`), until the caller stops. A failed read reads as "not listing". */
+ *  changed (`changed`, `sync`), until the check has finished (a read with no progress) or the caller stops. drive_status
+ *  counts the state DB, so it is not read for as long as Search is open (self-review). A failed read reads as "not
+ *  listing". */
 export function followListing(source: Pick<DriveSource, 'subscribe'>, read: () => Promise<ListingProgress | undefined>, onProgress: (p: ListingProgress | undefined) => void, ms = 1000): () => void {
   let live = true
-  const once = () => { read().then((p) => { if (live) onProgress(p) }, () => { if (live) onProgress(undefined) }) }
+  let stop: (() => void) | null = null
+  const done = () => { again.cancel(); stop?.(); stop = null }
+  const once = () => {
+    read().then((p) => { if (!live) return; onProgress(p); if (!p) done() }, () => { if (!live) return; onProgress(undefined); done() })
+  }
   const again = throttled(once, ms)
+  stop = source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'sync') again() })
   once()
-  const stop = source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'sync') again() })
-  return () => { live = false; again.cancel(); stop() }
+  return () => { live = false; done() }
 }
 
 /** DW-0802: the usual file menu, plus Show in enclosing folder. */
