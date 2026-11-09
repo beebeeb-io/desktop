@@ -19,7 +19,7 @@ export function CloudTile() {
 
 /** DW-0114: a new account has no files yet: one way forward. Add files is not amber here: New in the toolbar is
  *  the screen's one amber action. */
-export function EmptyFiles({ onAddFiles }: { onAddFiles?: () => void }) {
+export function EmptyFiles({ onAddFiles }: { /** Opens the New menu under the button (DW-0114, DW-1106 → DW-0414). */ onAddFiles?: (e: React.MouseEvent<HTMLButtonElement>) => void }) {
   return (
     <div data-empty="files" className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
       <FolderTile />

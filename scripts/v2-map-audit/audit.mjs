@@ -64,7 +64,11 @@ function unmangle(s) {
     }
   })
 }
-const board = JSON.parse(readFileSync(BOARD, 'utf8'), (_k, v) => unmangle(v)).Windows.frames.filter((f) => !EXCLUDED_SECTIONS.has(f.section))
+// The board's arrows lost their lead byte in that round trip ("â†“" became "†“"): read the four that remain as arrows,
+// so "Ctrl+↓" and "Alt+←" parse as keys (M3a).
+const ARROWS = { '\u2020\u0090': '←', '\u2020\u2019': '→', '\u2020\u201c': '↓', '\u2020\u2018': '↑' }
+const arrows = (s) => (typeof s === 'string' ? s.replace(/\u2020[\u0090\u2019\u201c\u2018]/g, (m) => ARROWS[m]) : s)
+const board = JSON.parse(readFileSync(BOARD, 'utf8'), (_k, v) => arrows(unmangle(v))).Windows.frames.filter((f) => !EXCLUDED_SECTIONS.has(f.section))
 const FRAME_IDS = new Set(board.map((f) => f.id))
 const batchOf = {}
 {
@@ -213,6 +217,9 @@ function planFor(action) {
     const name = nameFrom(rest)
     const generic = /^(?:a|an|any|one|each)\s+(?:[\w-]+\s+)?(row|file|folder|item|photo|card|tile|result|entry|line|thumbnail|device|session|passkey|version|share|person|request|search)s?\b/i.test(rest) || /^(rows?|files?|items?)$/i.test(rest) || name === ''
     plans.push({ verb, name: generic ? null : name, generic: generic ? rest : null })
+    // "Back Alt+←": a control named with its key. When no control has that whole name, the key is the way (M3a).
+    const keyed = alt.match(new RegExp(`^\\S.*\\s((?:(?:Ctrl|Alt|Shift|Win)\\+)+(?:${KEY}))$`))
+    if (keyed && verb === 'click') plans.push({ key: keyName(keyed[1]) })
   }
   return plans
 }
@@ -297,7 +304,12 @@ async function perform(page, plans) {
   for (const p of plans) {
     if (p.notAutomatable) { reason ??= p.notAutomatable; continue }
     if (p.key) {
-      if (p.focus) await (await findControl(page, p.focus))?.click({ timeout: 1500 }).catch(() => {})
+      if (p.focus) {
+        const f = await findControl(page, p.focus)
+        // `focus` gives the control the keyboard without a click (a click on a list would select a row).
+        if (p.focus.verb === 'focus') await f?.focus({ timeout: 1500 }).catch(() => {})
+        else await f?.click({ timeout: 1500 }).catch(() => {})
+      }
       await page.keyboard.press(p.key).catch(() => {})
       return { done: true, how: `key ${p.key}` }
     }
@@ -322,7 +334,12 @@ async function perform(page, plans) {
       await settle(page, 1500)
       const second = await findControl(page, p.next)
       if (!second) return { done: false }
-      try { await second.click({ timeout: 2000 }) } catch { return { done: false } }
+      // A second step keeps its own verb (M3a: Ctrl+click a second row adds it to the selection).
+      const modifiers = p.next.verb === 'ctrl+click' ? ['Control'] : p.next.verb === 'shift+click' ? ['Shift'] : []
+      try {
+        if (p.next.verb === 'double-click') await second.dblclick({ timeout: 2000 })
+        else await second.click({ timeout: 2000, modifiers })
+      } catch { return { done: false } }
     }
     return { done: true, how: `${p.verb ?? 'click'} ${p.name ?? p.selector ?? p.generic ?? 'first row'}` }
   }
@@ -436,6 +453,12 @@ async function audit(page, a) {
   if (cmds.length) row.commands = cmds
   const ownerOf = (c) => Object.entries(owners).find(([, o]) => o.commands.some((x) => (x.endsWith('*') ? c.startsWith(x.slice(0, -1)) : x === c)))?.[0] ?? null
 
+  // The board's "Does nothing …" (DW-0410b's F2 while the name is taken): the pass is a screen that did not change,
+  // and a change fails it (M3a). The only action that says so; the rule reads the board's words, not a list of rows.
+  if (!a.to.length && /^does nothing\b/i.test(a.does ?? '')) {
+    if (!changed && !cmds.length) return { ...row, outcome: 'ok', detail: 'the board says nothing happens; the screen stayed the same' }
+    return { ...row, outcome: 'wrong-target', detail: `the board says nothing happens; ${changed ? 'the screen changed' : `it called ${cmds.join(', ')}`}` }
+  }
   if (!a.to.length) {
     if (changed) return { ...row, outcome: 'ok', detail: 'no target frame; the screen changed' }
     if (cmds.length) return { ...row, outcome: 'command-unsupported', detail: cmds.join(', '), owner: ownerOf(cmds[0]) }

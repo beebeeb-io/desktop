@@ -29,7 +29,7 @@ export function boardSync(scenario: Scenario): SyncSummary {
 
 export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
   const empty = scenario === 'empty'
-  const files = createFilesSource({ scenario: scenario === 'offline' ? 'offline' : 'default', items: empty ? [] : undefined })
+  const files = createFilesSource({ scenario: scenario === 'offline' || scenario === 'rename-fails' ? scenario : 'default', items: empty ? [] : undefined })
   const shared = createSharedSource({ empty })
   const photos = createPhotosSource(empty ? [] : PHOTO_ENTRIES)
   const open = createOpenSource()

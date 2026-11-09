@@ -49,7 +49,8 @@ export function fmtWhen(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
   const diff = now.getTime() - d.getTime()
   if (diff < 60_000 && diff > -60_000) return 'Just now'
-  const day = (x: Date) => Math.floor(new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() / 86_400_000)
+  // Calendar days, not 24-hour spans: a DST change between the two midnights would shift a local-midnight count.
+  const day = (x: Date) => Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()) / 86_400_000
   const hm = `${two(d.getHours())}:${two(d.getMinutes())}`
   if (day(now) === day(d)) return `Today, ${hm}`
   if (day(now) - day(d) === 1) return `Yesterday, ${hm}`
@@ -150,4 +151,27 @@ export function savePrefs(folderId: string | null, prefs: FolderPrefs): void {
     all[folderId ?? 'root'] = prefs
     localStorage.setItem(KEY, JSON.stringify(all))
   } catch { /* a private window keeps the default */ }
+}
+
+/**
+ * A failed action's message (DW-0109): what failed and how to fix it, never a raw error code. `retry` says whether
+ * Try again can help: not for a build that lacks the command, a full account or a name already used.
+ */
+export function actionFailure(action: string, code: string): { text: string; retry: boolean } {
+  if (code === 'offline') return { text: `Couldn’t ${action}. Check your connection.`, retry: true }
+  if (code === 'quota') return { text: `Couldn’t ${action}. Not enough space.`, retry: false }
+  if (code === 'unsupported') return { text: `Couldn’t ${action}. This isn’t available in this build yet.`, retry: false }
+  if (code === 'signed-out') return { text: `Couldn’t ${action}. Sign in to continue.`, retry: false }
+  if (code === 'name-taken') return { text: `Couldn’t ${action}. That name is already used here.`, retry: false }
+  return { text: `Couldn’t ${action}.`, retry: true }
+}
+
+/** Type-to-select (DW-0420b): letters typed within this long of each other build one prefix, as File Explorer does. */
+export const TYPEAHEAD_MS = 1000
+
+/** The prefix after one more key, and the index of the first name that starts with it (or -1). */
+export function typeahead(prev: { text: string; at: number } | null, key: string, at: number, names: string[]): { text: string; at: number; hit: number } {
+  const text = prev && at - prev.at < TYPEAHEAD_MS ? prev.text + key : key
+  const want = text.toLowerCase()
+  return { text, at, hit: names.findIndex((n) => n.toLowerCase().startsWith(want)) }
 }

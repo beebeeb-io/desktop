@@ -8,6 +8,183 @@
     "DW-1101"
    ],
    "why": "the Files view: with or without a selection, the details panel or the drop target"
+  },
+  {
+   "frames": [
+    "DW-0421",
+    "DW-0119"
+   ],
+   "why": "the grid view: Lisbon trip's (thumbnails) or Files' (plain tiles); one screen with other data"
+  },
+  {
+   "frames": [
+    "DW-0414",
+    "DW-1520"
+   ],
+   "why": "New's menu, over the list (DW-0414) or over a view with no list header (DW-1520)"
   }
- ]
+ ],
+ "DW-0102#1": {
+  "verb": "click",
+  "name": "Dismiss",
+  "role": "button",
+  "why": "the banner's × is a button named Dismiss"
+ },
+ "DW-0103#1": {
+  "verb": "click",
+  "name": "Dismiss",
+  "role": "button",
+  "why": "the banner's × is a button named Dismiss"
+ },
+ "DW-0106#1": {
+  "verb": "click",
+  "name": "Dismiss",
+  "role": "button",
+  "why": "the banner's × is a button named Dismiss"
+ },
+ "DW-0404#0": {
+  "verb": "click",
+  "name": "Date changed",
+  "role": "menuitem",
+  "why": "one of the four sort keys the action lists: the one that changes the order"
+ },
+ "DW-0404#2": {
+  "verb": "click",
+  "name": "Modified",
+  "role": "button",
+  "why": "a column header: the list's Modified header"
+ },
+ "DW-0407#2": {
+  "verb": "click",
+  "name": "Password",
+  "role": "switch",
+  "why": "the Password switch turned on"
+ },
+ "DW-0408#1": {
+  "key": "ArrowRight",
+  "why": "← → read as the next file"
+ },
+ "DW-0411#0": {
+  "verb": "click",
+  "name": "versions",
+  "role": "button",
+  "why": "the Version history row's control is named by its count (3 versions)"
+ },
+ "DW-0413#1": {
+  "verb": "double-click",
+  "selector": "[data-version=\"v3\"]",
+  "why": "the current version, the one Preview can show (an earlier one has no versioned read yet: listed blocked)"
+ },
+ "DW-0420#3": {
+  "verb": "ctrl+click",
+  "selector": "[data-row=\"f-day1\"]",
+  "next": {
+   "verb": "ctrl+click",
+   "selector": "[data-row=\"f-day2\"]"
+  },
+  "why": "adding to a selection takes two rows: nothing is selected in this state"
+ },
+ "DW-1101#1": {
+  "verb": "ctrl+click",
+  "selector": "[data-row=\"i-budget\"]",
+  "next": {
+   "verb": "ctrl+click",
+   "selector": "[data-row=\"i-contract\"]"
+  },
+  "why": "adding to a selection takes two rows (DW-0403's two): nothing is selected in this state"
+ },
+ "DW-1101#2": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-contract\"]",
+  "why": "a file (the target is the file's open); the first row is the Backups folder"
+ },
+ "DW-1101#3": {
+  "key": "Space",
+  "focus": {
+   "verb": "click",
+   "selector": "[data-row=\"i-notes\"]"
+  },
+  "why": "Space previews the selected file: nothing is selected in this state"
+ },
+ "DW-1101#4": {
+  "verb": "right-click",
+  "selector": "[data-row=\"i-contract\"]",
+  "why": "a file's menu (the target is DW-0402's); the first row is the protected Backups folder"
+ },
+ "DW-0118#0": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-agreement\"]",
+  "why": "a listed file opens as usual: double-click (a click only selects)"
+ },
+ "DW-1107#0": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-agreement\"]",
+  "why": "a listed file opened"
+ },
+ "DW-1108#0": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-contract\"]",
+  "why": "a dimmed (online only) file opened"
+ },
+ "DW-1108#1": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-agreement\"]",
+  "why": "a file kept on this PC opened"
+ },
+ "DW-0420b#1": {
+  "key": "A",
+  "focus": {
+   "verb": "focus",
+   "selector": "[data-list-count] > div[tabindex=\"0\"]"
+  },
+  "why": "letters typed in the focused list"
+ },
+ "DW-0424#1": {
+  "verb": "double-click",
+  "selector": "[data-row=\"f-mail-2026\"]",
+  "why": "a year: 2026"
+ },
+ "DW-0424#2": {
+  "key": "F2",
+  "focus": {
+   "verb": "click",
+   "selector": "[data-row=\"f-mail-2026\"]"
+  },
+  "why": "rename a year (DW-0425's own path)"
+ },
+ "DW-0426#0": {
+  "verb": "click",
+  "selector": "[data-open-uploads]",
+  "why": "the status line is one button"
+ },
+ "DW-0429#1": {
+  "verb": "click",
+  "name": "Keep this PC’s",
+  "role": "button",
+  "why": "the board writes a straight apostrophe; the button the curly one"
+ },
+ "DW-0429#3": {
+  "verb": "click",
+  "name": "Cancel",
+  "role": "button",
+  "why": "Decide later is the dialog's Cancel (DW-0429 Shows: Cancel; Keep …)"
+ },
+ "DW-1103#0": {
+  "verb": "click",
+  "name": "as Grid",
+  "role": "menuitem",
+  "why": "the view that changes it: the list is already as List"
+ },
+ "DW-1103#1": {
+  "verb": "click",
+  "name": "Sort by",
+  "role": "menuitem",
+  "why": "the Sort by ▸ item opens its submenu"
+ },
+ "DW-0425#1": {
+  "verb": "click",
+  "name": "Open Settings",
+  "role": "button",
+  "why": "the dialog's own button: \"Open\" is not a verb here, and the banner's Settings behind the dialog is covered"
+ }
 }

@@ -10,6 +10,7 @@ import { setSeeds } from '../seed'
 import { answerFrom } from './reads'
 import { run } from './driver'
 import { RECIPES, type Recipe, type WindowKind } from './states'
+import { pinClock } from './clock'
 
 let started = false
 
@@ -57,6 +58,8 @@ export function prepare(kind: WindowKind): Promise<void> {
     return new Promise(() => {})
   }
   installHost(answerFrom(recipe.reads, recipe.answers))
+  // The frame's world includes its clock (./clock.ts): times read as the frame reads them, on any day.
+  pinClock()
   // Each live state starts from a clean PC: the recipe's own view settings, nothing left from another state.
   try {
     for (const k of Object.keys(localStorage)) if (k.startsWith('bb.v2.')) localStorage.removeItem(k)

@@ -4,8 +4,9 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 're
 import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType, useDriveSource, type DriveItem, type ItemDetails, type Listing } from '@beebeeb/shared/drive-ui'
 import { IconButton, BTN, BTN_AMBER, FOCUS } from './ui'
+import { BannerSlot } from '../../chrome/Banners'
 import {
-  fmtCount, fmtSize, fmtWhen, isProtected, kindOf, LOCAL_LABEL, middleShorten, sharedLabel, stemLength,
+  fmtCount, fmtSize, fmtWhen, isProtected, kindOf, LOCAL_LABEL, middleShorten, sharedLabel, stemLength, typeahead, TYPEAHEAD_MS,
   type FolderPrefs, type ViewMode,
 } from './model'
 import type { SortKey } from '@beebeeb/shared/drive-ui'
@@ -263,9 +264,18 @@ function List({ p, h }: { p: PaneProps; h: PaneHandlers }) {
   // One lazy list, no paging (DW-0420b): only the visible rows are drawn.
   const first = Math.max(0, Math.floor(top / ROW_H) - 6)
   const last = Math.min(p.items.length, Math.ceil((top + height) / ROW_H) + 6)
+  // Type-to-select: letters typed together build one prefix (typeahead), as File Explorer does.
+  const typed = useRef<{ text: string; at: number } | null>(null)
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey || e.key === ' ') return
-    const hit = p.items.findIndex((i) => i.name.toLowerCase().startsWith(e.key.toLowerCase()))
+    if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return
+    // A space is part of a name being typed; on its own it is Preview's (the window's key).
+    if (e.key === ' ') {
+      if (!typed.current || e.timeStamp - typed.current.at >= TYPEAHEAD_MS) return
+      e.preventDefault()
+    }
+    const next = typeahead(typed.current, e.key, e.timeStamp, p.items.map((i) => i.name))
+    typed.current = { text: next.text, at: next.at }
+    const hit = next.hit
     if (hit >= 0 && ref.current) { ref.current.scrollTop = hit * ROW_H; h.onSelect?.(p.items[hit].id, { ctrl: false, shift: false }) }
   }
   return (
@@ -375,7 +385,7 @@ export function EncryptedMark() {
 
 export function DetailsPanel({ p, h }: { p: PaneProps; h: PaneHandlers }) {
   const picked = p.items.filter((i) => p.selection.has(i.id))
-  const now = new Date('2026-11-08T12:00:00')
+  const now = p.now ?? new Date()
   if (picked.length === 0) {
     return <aside aria-label="Details" className="flex w-[320px] flex-none flex-col items-center justify-center border-l border-line bg-paper px-8 text-center text-[13px] text-ink-3">Select a file to see its details.</aside>
   }
@@ -430,6 +440,7 @@ export function FilesPane({ p }: { p: PaneProps }) {
     <div className="flex min-h-0 min-w-0 flex-1">
       <section aria-label={p.title ?? 'Files'} className="flex min-w-0 flex-1 flex-col">
         <Toolbar p={p} h={h} />
+        <BannerSlot />
         {showSelectionBar && <SelectionBar p={p} h={h} />}
         {p.top}
         {p.items.length === 0 && p.empty ? p.empty : p.prefs.view === 'grid' ? <Grid p={p} h={h} /> : <List p={p} h={h} />}

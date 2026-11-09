@@ -2,6 +2,7 @@
 // so every Files and Backups frame renders its own state headless. Owned by B04 only.
 import { DriveSourceError, type DriveItem, type DriveSource, type ItemId, type Listing, type SortDir, type SortKey } from '@beebeeb/shared/drive-ui'
 import { createFixtureSource } from '../fixtures'
+import { command } from '../../../desktopApi'
 
 export const NOW = '2026-11-08T12:00:00'
 const at = (day: string, hm = '12:00') => `${day}T${hm}:00`
@@ -117,7 +118,13 @@ export function thumbnailFor(name: string): string {
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
 }
 
-export type FilesScenario = 'default' | 'offline' | 'getting-ready'
+async function hostCall<T>(name: string, args: Record<string, unknown>): Promise<T> {
+  const r = await command<T>(name, args)
+  if (r.ok) return r.value
+  throw new DriveSourceError(r.unsupported ? 'unsupported' : 'failed', name)
+}
+
+export type FilesScenario = 'default' | 'offline' | 'getting-ready' | 'rename-fails'
 
 /** DW-1108: offline, online-only files are dimmed; the rest open. */
 export function createFilesSource(opts: { scenario?: FilesScenario; items?: DriveItem[] } = {}): DriveSource {
@@ -135,6 +142,8 @@ export function createFilesSource(opts: { scenario?: FilesScenario; items?: Driv
   let undoSeq = 0
   const trashed = new Map<string, DriveItem[]>()
   const offline = opts.scenario === 'offline'
+  // DW-0109: the first rename fails because the connection dropped; Try again goes through.
+  let renameFails = opts.scenario === 'rename-fails'
 
   return {
     ...base,
@@ -164,6 +173,7 @@ export function createFilesSource(opts: { scenario?: FilesScenario; items?: Driv
     },
     async rename(id, name) {
       const cur = find(id)
+      if (renameFails) { renameFails = false; throw new DriveSourceError('offline', 'drive_rename') }
       if (childrenOf(cur.parentId).some((i) => i.id !== id && i.name.toLowerCase() === name.toLowerCase())) throw new DriveSourceError('name-taken')
       const next = { ...cur, name }
       items = items.map((i) => (i.id === id ? next : i))
@@ -212,7 +222,15 @@ export function createFilesSource(opts: { scenario?: FilesScenario; items?: Driv
       items = items.map((i) => (i.id === id ? { ...i, local: on ? 'available-offline' : 'downloaded' } : i))
       emit()
     },
-    async upload() { return { started: 0 } },
+    // What only Windows can do (open in its app, File Explorer, the file picker) goes to the host as the desktop
+    // source sends it: in a plain browser the dev host has no such command, so it is "unavailable" (the map audit's
+    // command-unsupported), never a silent success.
+    async upload(parentId, input) {
+      if (input.kind !== 'pick') throw new DriveSourceError('unsupported', 'drive_upload_dropped')
+      return hostCall<{ started: number }>('drive_upload_pick', { parentId, mode: input.mode })
+    },
+    open: (id) => hostCall<void>('drive_open', { id }),
+    revealInFileManager: (id) => hostCall<void>('drive_reveal', { id }),
     subscribe(listener) {
       listeners.add(listener)
       return () => { listeners.delete(listener) }

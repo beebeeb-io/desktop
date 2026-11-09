@@ -29,11 +29,22 @@ const THIS_PC: Item[] = [
 const GB = 1024 ** 3
 const gb = (bytes: number) => (bytes === 0 ? '0 B' : bytes >= 1024 * GB ? `${(bytes / (1024 * GB)).toFixed(0)} TB` : `${Math.round(bytes / GB)} GB`)
 
+/**
+ * What a row's count shows. Sync history's is the problem badge: "the sidebar's red badge counts the problems"
+ * (DW-1301), so none at zero (DW-0401 draws Sync history bare) and red above it. The others are plain counts.
+ */
+export function rowCount(section: SectionId, count: number | undefined): { text: string; problems: boolean } | null {
+  if (count === undefined) return null
+  if (section === 'sync-history') return count > 0 ? { text: String(count), problems: true } : null
+  return { text: String(count), problems: false }
+}
+
 function NavLink({ item, active, onGo, count }: { item: Item; active: boolean; onGo: (s: SectionId) => void; count?: number }) {
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault()
     onGo(item.section)
   }
+  const shown = rowCount(item.section, count)
   return (
     <a
       href={`?section=${item.section}`}
@@ -43,7 +54,7 @@ function NavLink({ item, active, onGo, count }: { item: Item; active: boolean; o
     >
       <Icon name={item.icon} size={16} />
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
-      {count !== undefined && <span className="font-mono text-[11px] text-ink-3">{count}</span>}
+      {shown && <span className={`font-mono text-[11px] ${shown.problems ? 'font-medium text-red' : 'text-ink-3'}`}>{shown.text}</span>}
     </a>
   )
 }

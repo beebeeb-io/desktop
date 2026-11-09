@@ -59,6 +59,16 @@ export interface Navigation {
   forward: () => void
 }
 
+/**
+ * Navigation from outside a section (the window-wide banners, M3a): the same history entry `go` makes, announced as a
+ * popstate so the window's useNavigation follows it.
+ */
+export function navigateTo(next: Partial<Route> & { section: SectionId }): void {
+  const full: Route = { id: null, sub: null, ...next }
+  window.history.pushState(null, '', searchFromRoute(full, window.location.search))
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
 /** History-backed navigation: Back and Forward (Alt+Left, Alt+Right, the toolbar arrows) are the browser's own. */
 export function useNavigation(): Navigation {
   const [route, setRoute] = useState<Route>(() => routeFromSearch(window.location.search))

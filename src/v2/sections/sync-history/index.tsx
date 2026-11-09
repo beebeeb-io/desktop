@@ -15,7 +15,9 @@ export default function Section({ nav }: SectionProps) {
   const source = useDriveSource()
   const extras = useDriveExtras()
   const [rows, setRows] = useState<HistoryRow[]>([])
-  const [filter, setFilter] = useState<Filter>('all')
+  // The sync problem banner's View lands on Problems (DW-0102 → DW-0428): `sub=problems`, also while already here.
+  const [filter, setFilter] = useState<Filter>(nav.route.sub === 'problems' ? 'problems' : 'all')
+  useEffect(() => { if (nav.route.sub === 'problems') setFilter('problems') }, [nav.route])
   const [query, setQuery] = useState('')
   const [queued, setQueued] = useState(0)
   const now = useMemo(() => new Date(), [])
