@@ -215,20 +215,40 @@ static FIX_WORKERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::ne
 static FIX_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// A session's preparation before its first transfer (the QA logs: about 1.7 s).
 const FIX_PREP: Duration = Duration::from_millis(1700);
-/// A run's timeline (every FETCH, every `transfer_piece` and its refusal's HRESULT), printed for a run that fails: a
-/// red names its first refusal and what came before it (v2 R1r: CI saw ERROR 379 with 12 refusals, codes unknown).
+/// A run's timeline (every FETCH and CANCEL, every `transfer_piece` and its refusal's HRESULT), printed for a run that
+/// fails: a red names its first refusal and what came before it (v2 R1r: CI saw ERROR 379 with 12 refusals, codes
+/// unknown).
 static FIX_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FIX_T0: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// One timeline line. It also runs inside the Cloud Files callbacks, where a panic cannot unwind: a lock a panicking
+/// thread left poisoned is used as it is.
 fn fix_note(line: String) {
     let ms = FIX_T0
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_or_insert_with(Instant::now)
         .elapsed()
         .as_secs_f64()
         * 1000.0;
-    FIX_LOG.lock().unwrap().push(format!("{ms:10.1} ms {line}"));
+    FIX_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(format!("{ms:10.1} ms {line}"));
+}
+
+/// CANCEL_FETCH_DATA, logged into the run's timeline only (a cancel needs no answer): a refusal that says "the request
+/// is gone" then shows when Windows cancelled that request.
+unsafe extern "system" fn fix_cancel(info: *const CF_CALLBACK_INFO, params: *const CF_CALLBACK_PARAMETERS) {
+    if info.is_null() || params.is_null() {
+        return;
+    }
+    // SAFETY: valid for the duration of the callback; the cancel arm of a CANCEL_FETCH_DATA callback.
+    let (rkey, cancel) = unsafe { ((*info).RequestKey, (*params).Anonymous.Cancel.Anonymous.FetchData) };
+    fix_note(format!(
+        "CANCEL [{}, +{}) rkey {rkey}",
+        cancel.FileOffset, cancel.Length
+    ));
 }
 
 /// A provider that answers each FETCH as a range session does (review of #225): from a worker thread
@@ -314,7 +334,7 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
     let mut runs = Vec::new();
     for i in 0..3 {
         let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
-        qa.connect(session_piece_fetch);
+        qa.connect_with(session_piece_fetch, Some(fix_cancel));
         FIX_SERVED.lock().unwrap().clear();
         *FIX_READY_AT.lock().unwrap() = None;
         FIX_REFUSED.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -347,13 +367,13 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         let log = std::mem::take(&mut *FIX_LOG.lock().unwrap());
         runs.push((exit, errors, whole, refused));
         if exit != Some(1) || !whole || refused != 0 {
-            // The first 60 lines, every refusal and every overlap, and the last 20 (at most 240 lines).
-            let shown = |n: usize, line: &str| {
-                n < 60 || n + 20 >= log.len() || line.contains("refused") || line.contains("overlaps")
-            };
+            // The first 60 lines, then at most 160 refusals, cancels and overlaps, then always the last 20.
+            let tail = log.len().saturating_sub(20).max(60);
+            let flagged = |line: &str| ["refused", "CANCEL", "overlaps"].iter().any(|word| line.contains(word));
+            let middle = (60..tail).filter(|&n| flagged(&log[n])).take(160);
             println!("ld0105-f2b-native: run {i} failed; its timeline ({} lines):", log.len());
-            for (n, line) in log.iter().enumerate().filter(|(n, line)| shown(*n, line)).take(240) {
-                println!("    {n:5} {line}");
+            for n in (0..log.len().min(60)).chain(middle).chain(tail..log.len()) {
+                println!("    {n:5} {}", log[n]);
             }
         }
     }
