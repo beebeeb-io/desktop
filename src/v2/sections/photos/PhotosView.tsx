@@ -5,19 +5,64 @@ import { Icon } from '@beebeeb/shared/design'
 import { PhotoTileSkeleton } from '@beebeeb/shared/design'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { BTN, BTN_AMBER, FOCUS } from '../files/ui'
-import { ACROSS, ACROSS_LABEL, dayHeading, fmtMB, fmtN, groupByDay, idOf, isVideo, type Across, type PhotoCell } from './model'
+import { fmtSize } from '../files/model'
+import { ACROSS, ACROSS_LABEL, dayHeading, fmtN, groupByDay, idOf, isVideo, type Across, type PhotoCell } from './model'
 import { BannerSlot } from '../../chrome/Banners'
 
-/** The decrypted thumbnail URL for a photo, from the source; null until it arrives (or when there is none). */
-export function useThumb(id: string, size: 'small' | 'large'): string | null {
+/** Ids the open Photos list is showing. `null` until a list is published (a frame may draw before that). */
+let listedPhotoIds: Set<string> | null = null
+
+type ThumbStatus = 'loading' | 'ready' | 'failed'
+interface ThumbRecord { status: ThumbStatus; url: string | null }
+
+const thumbCache = new Map<string, ThumbRecord>()
+const thumbPending = new Map<string, Promise<ThumbRecord>>()
+const thumbKey = (id: string, size: 'small' | 'large') => `${size}:${id}`
+
+/** The photo ids on screen. A thumbnail is fetched only for an id in the latest list. */
+export function noteListedPhotos(ids: readonly string[]): void {
+  listedPhotoIds = new Set(ids)
+}
+
+function useThumbRecord(id: string, size: 'small' | 'large'): ThumbRecord {
   const source = useDriveSource()
-  const [url, setUrl] = useState<string | null>(null)
+  const key = thumbKey(id, size)
+  const [record, setRecord] = useState<ThumbRecord>(() => thumbCache.get(key) ?? { status: 'loading', url: null })
   useEffect(() => {
+    const cached = thumbCache.get(key)
+    if (cached) {
+      setRecord((prev) => (prev === cached ? prev : cached))
+      return
+    }
+    if (listedPhotoIds !== null && !listedPhotoIds.has(id)) return
     let live = true
-    source.thumbnail(id, size).then((u) => { if (live) setUrl(u) }, () => { if (live) setUrl(null) })
+    let task = thumbPending.get(key)
+    if (!task) {
+      task = source.thumbnail(id, size).then(
+        (url) => {
+          const next: ThumbRecord = url ? { status: 'ready', url } : { status: 'failed', url: null }
+          thumbCache.set(key, next)
+          return next
+        },
+        () => {
+          const next: ThumbRecord = { status: 'failed', url: null }
+          thumbCache.set(key, next)
+          return next
+        },
+      )
+      thumbPending.set(key, task)
+      void task.finally(() => { if (thumbPending.get(key) === task) thumbPending.delete(key) })
+    }
+    void task.then((next) => { if (live) setRecord(next) })
     return () => { live = false }
-  }, [source, id, size])
-  return url
+  }, [source, id, size, key])
+  return record
+}
+
+/** The decrypted thumbnail URL for a photo still in the list, cached per id and size. Null while it loads or when it failed. */
+export function useThumb(id: string, size: 'small' | 'large'): string | null {
+  const record = useThumbRecord(id, size)
+  return record.status === 'ready' ? record.url : null
 }
 
 export interface BackupLine { name: string; status: string }
@@ -61,7 +106,7 @@ const GRID: Record<Across, string> = {
 
 function Tile({ cell, selected, selecting, onOpen, onToggle }: { cell: PhotoCell; selected: boolean; selecting: boolean; onOpen?: (id: string) => void; onToggle?: (id: string, on?: boolean) => void }) {
   const id = idOf(cell)
-  const url = useThumb(id, 'small')
+  const thumb = useThumbRecord(id, 'small')
   const name = cell.entry.item.name
   return (
     <button
@@ -72,7 +117,11 @@ function Tile({ cell, selected, selecting, onOpen, onToggle }: { cell: PhotoCell
       onPointerEnter={(e) => { if (e.buttons === 1) onToggle?.(id, true) }}
       className={`relative aspect-square w-full select-none overflow-hidden rounded-md bg-paper-2 ${selected ? 'outline outline-2 outline-offset-[-2px] outline-ink' : ''} ${FOCUS}`}
     >
-      {url ? <img src={url} alt="" draggable={false} className="h-full w-full object-cover" /> : <PhotoTileSkeleton />}
+      {thumb.status === 'ready' && thumb.url
+        ? <img src={thumb.url} alt="" draggable={false} className="h-full w-full object-cover" />
+        : thumb.status === 'failed'
+          ? <span data-thumb="file" className="grid h-full w-full place-items-center text-ink-3"><Icon name="file" size={28} /></span>
+          : <PhotoTileSkeleton />}
       {isVideo(cell) && (
         <span className="absolute bottom-1 left-1 flex items-center gap-1 rounded bg-ink/70 px-1.5 py-0.5 font-mono text-[11px] text-paper">
           <Icon name="play" size={10} />{cell.meta?.duration}
@@ -116,7 +165,7 @@ export function EmptyPhotos({ onSources }: { onSources?: () => void }) {
       <div className="grid h-14 w-14 place-items-center rounded-2xl border border-line bg-paper-2 text-ink-3"><Icon name="image" size={26} /></div>
       <h2 className="m-0 text-[15px] font-semibold text-ink">No photos yet</h2>
       <p className="m-0 max-w-sm text-[13px] leading-5 text-ink-3">Photos backed up from your iPhone or iPad appear here. Turn on photo backup in Beebeeb on the iPhone or iPad.</p>
-      <button type="button" className={BTN} onClick={onSources}>Photo sources</button>
+      <button type="button" className={BTN} onClick={onSources}>Add a source</button>
     </div>
   )
 }
@@ -124,11 +173,12 @@ export function EmptyPhotos({ onSources }: { onSources?: () => void }) {
 export function PhotosView(p: PhotosViewProps) {
   const [menu, setMenu] = useState(p.acrossOpen ?? false)
   const visible = p.device ? p.cells.filter((c) => c.meta?.device === p.device) : p.cells
+  noteListedPhotos(visible.map(idOf))
   const days = groupByDay(visible)
   const picked = visible.filter((c) => p.selected.has(idOf(c)))
   const pickedBytes = picked.reduce((n, c) => n + (c.entry.item.size ?? 0), 0)
   const totals = p.totals
-  const subtitle = totals ? `${fmtN(totals.photos)} photos · ${fmtN(totals.videos)} videos · ${fmtMB(totals.bytes)}` : undefined
+  const subtitle = totals ? `${fmtN(totals.photos)} photos · ${fmtN(totals.videos)} videos · ${fmtSize(totals.bytes)}` : undefined
   const backing = p.device ? p.backups.filter((b) => b.name === p.device) : p.backups.filter((b) => b.status.includes('backing up'))
   const hasPills = p.devices.length > 0
 
@@ -160,7 +210,7 @@ export function PhotosView(p: PhotosViewProps) {
 
       {p.selecting && (
         <div role="toolbar" aria-label="Selection" data-selection-bar className="flex h-11 flex-none items-center gap-2 border-b border-line bg-paper-2 px-4 text-[13px]">
-          <span className="mr-2 font-medium text-ink">{picked.length} {picked.length === 1 ? 'photo' : 'photos'} <span className="font-mono text-[12px] text-ink-3">· {fmtMB(pickedBytes)}</span></span>
+          <span className="mr-2 font-medium text-ink">{picked.length} {picked.length === 1 ? 'photo' : 'photos'} <span className="font-mono text-[12px] text-ink-3">· {fmtSize(pickedBytes)}</span></span>
           <button type="button" className={BTN} onClick={p.onSelectAll}>Select all</button>
           <button type="button" className={BTN} onClick={p.onShare} disabled={picked.length === 0}>Share…</button>
           <button type="button" className={BTN} onClick={p.onOffline} disabled={picked.length === 0}>Make available offline</button>

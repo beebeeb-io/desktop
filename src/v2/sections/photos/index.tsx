@@ -12,7 +12,7 @@ import {
   loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, folderKey, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
 } from './model'
 import { useDriveExtras, type PhotoMeta, type PhotoSource } from '../../source/extras'
-import { PhotosView } from './PhotosView'
+import { noteListedPhotos, PhotosView } from './PhotosView'
 import { PhotoViewer } from './Viewer'
 import { DetailsDialog, failedWords, PhotoMove, RenameDialog, ShareDialog, SourcesDialog, type FolderChoice, type SourceChoice } from './Dialogs'
 
@@ -138,6 +138,7 @@ export default function Section(_props: SectionProps) {
     setDialog(null)
   }
 
+  noteListedPhotos(ordered.map(idOf))
   const current = index >= 0 ? ordered[index] : null
   const chosen = ordered.find((c) => selected.has(idOf(c))) ?? current
   const dialogs = (
