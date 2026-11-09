@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { DriveSourceError, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { restoredText } from '../src/v2/sections/trash'
-import { openFailureText } from '../src/v2/sections/shared'
+import { openFailureText } from '../src/v2/sections/shared/api'
 import { copyFor60s, COPY_DONE, COPY_FAILED } from '../src/v2/sections/settings/account/data'
 import { SearchView } from '../src/v2/sections/search/SearchView'
 import { createBoardSource } from '../src/v2/source/fixtures/board'
@@ -26,21 +26,29 @@ describe('Trash › Restore says where it went (DW-0748)', () => {
   })
 })
 
-describe('Shared › a failed open, Details or offline switch says what failed (DW-0501, DW-0505)', () => {
-  test('each DriveSource code has its own words, never the host text', () => {
+describe('Shared and Search › a failed open, Details or offline switch says what failed, in Files’ words (DW-0501, DW-0505)', () => {
+  test('each DriveSource code reads as Files reads it (files/model.ts actionFailure), never the host text', () => {
     const cases: [string, string][] = [
-      ['offline', 'Couldn’t open it. You’re offline.'],
-      ['unsupported', 'Couldn’t open it. This isn’t available in this version of Beebeeb.'],
-      ['not-found', 'Couldn’t open it. It isn’t there anymore.'],
-      ['failed', 'Couldn’t open it. Try again.'],
+      ['offline', 'Couldn’t open it. Check your connection.'],
+      ['unsupported', 'Couldn’t open it. This isn’t available in this build yet.'],
+      ['not-found', 'Couldn’t open it.'],
+      ['failed', 'Couldn’t open it.'],
     ]
     let checked = 0
     for (const [code, words] of cases) {
-      expect(openFailureText(new DriveSourceError(code as never, 'drive_open: secret host detail'), 'open it')).toBe(words)
+      const text = openFailureText(new DriveSourceError(code as never, 'drive_open: secret host detail'), 'open it')
+      expect(text).toBe(words)
+      expect(text).not.toContain('secret host detail')
       checked += 1
     }
     expect(checked).toBe(4)
-    expect(openFailureText(new Error('raw'), 'show the details')).toBe('Couldn’t show the details. Try again.')
+    expect(openFailureText(new Error('raw'), 'show the details')).toBe('Couldn’t show the details.')
+  })
+  test('Search’s menu never swallows a failure: open, File Explorer and the offline switch each say what failed', () => {
+    const search = readFileSync(new URL('../src/v2/sections/search/index.tsx', import.meta.url), 'utf8')
+    expect(search).not.toContain('.catch(() => {})')
+    expect(search.match(/openFailureText\(e, /g)?.length).toBe(3)
+    expect(search).toContain("on ? 'Keeping on this PC' : 'Removed from this PC'")
   })
 })
 

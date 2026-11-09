@@ -8,6 +8,7 @@ import { fileMenu } from '../files/menus'
 import { showToast } from '../../chrome/Toast'
 import { SearchView, type Pill, type SearchHit } from './SearchView'
 import { useDriveExtras } from '../../source/extras'
+import { openFailureText } from '../shared/api'
 
 const RECENT_KEY = 'bb.v2.search.recent'
 const MAX_RECENT = 8
@@ -64,13 +65,19 @@ export default function Section({ nav }: SectionProps) {
   const open = (item: DriveItem) => {
     remember(query)
     if (item.isFolder) nav.go({ section: 'files', id: item.id })
-    else void source.open(item.id).catch(() => showToast({ kind: 'failed', text: 'Couldn’t open it. Try again.' }))
+    else void source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'open it') }))
   }
   const pick = (id: string, item: DriveItem) => {
     remember(query)
     if (id === 'open') return open(item)
-    if (id === 'reveal') return void source.revealInFileManager(item.id).catch(() => {})
-    if (id === 'offline') return void source.setAvailableOffline(item.id, item.local !== 'available-offline').catch(() => {})
+    if (id === 'reveal') return void source.revealInFileManager(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'show it in File Explorer') }))
+    if (id === 'offline') {
+      // The same switch and words as Files' (DW-0412): a toast either way, never a silent failure.
+      const on = item.local !== 'available-offline'
+      return void source.setAvailableOffline(item.id, on).then(
+        () => showToast({ kind: 'done', text: on ? 'Keeping on this PC' : 'Removed from this PC' }),
+        (e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, on ? 'keep it on this PC' : 'remove it from this PC') }))
+    }
     // Everything else acts in the item's own folder, where Files shows it selected.
     nav.go({ section: 'files', id: item.parentId, sub: id === 'enclosing' ? `select:${item.id}` : `${id}:${item.id}` })
   }

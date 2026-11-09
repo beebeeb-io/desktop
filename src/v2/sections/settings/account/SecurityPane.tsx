@@ -10,11 +10,10 @@ import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
-import { ApproveSignIn } from '../../../auth/Approve'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 
 export type SecurityPage =
-  | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity' | 'approve'
+  | 'main' | 'checkup' | 'password' | 'totp-setup' | 'backup-codes' | 'totp' | 'passkeys' | 'activity'
   | 'delete-1' | 'delete-2' | 'delete-3' | 'delete-4' | 'delete-done'
 
 export interface SecurityInit {
@@ -64,7 +63,6 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       onMove={(code) => { setMoving(code); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
       onTurnedOff={() => { setState((s) => ({ ...s, totp: { ...s.totp, on: false } })); home() }} />
     case 'passkeys': return <Passkeys state={state} setState={setState} onBack={home} menuOn={init.passkeyMenu ? state.passkeys.find((p) => p.name === init.passkeyMenu)?.id : undefined} removing={init.removePasskey} />
-    case 'approve': return <ApprovePage onBack={home} onSeeSessions={() => settings.go('devices')} />
     case 'activity': return <Activity state={state} setState={setState} onBack={home} asking={init.dialog === 'activity-off'} now={now}
       onPassword={() => setPage('password')} onDevices={() => settings.go('devices')} />
     case 'delete-1': return <DeleteStep1 onBack={home} onNext={() => setPage('delete-2')} />
@@ -89,7 +87,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       </Group>
       <Group title="Devices">
         <Row label="Devices and sessions" value={<span className="font-mono">{state.devices.length}</span>} onClick={() => settings.go('devices')} />
-        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" onClick={() => setPage('approve')} />
+        <Row label="Approve a sign-in" sub="Type the code another device shows, or scan it" href="?window=main-app&frame=DW-A12" />
       </Group>
       <Group title="Sign out" note="Sign out of Drive signs out this app only. Your other devices stay signed in: use Devices and sessions for those.">
         <Row label={<span className="text-red">Sign out of Drive</span>} onClick={() => setDialog('signout')} />
@@ -100,33 +98,6 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
       </Group>
       {dialog === 'signout' || dialog === 'signout-all' ? <SignOutDialog all={dialog === 'signout-all'} onCancel={() => setDialog(undefined)} /> : null}
     </Page>
-  )
-}
-
-/**
- * DW-A12 to A17: Approve a sign-in, B10's screens (auth/Approve.tsx), mounted here (DW-A52 › Approve a sign-in). Esc on
- * the code page goes back to Sign-in and security; in the review it is the review's own Esc (Deny), and Settings stays.
- */
-function ApprovePage({ onBack, onSeeSessions }: { onBack: () => void; onSeeSessions: () => void }) {
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented) return
-      // Taken here, so Settings' own Esc (Back to Drive) does not fire under the approval.
-      e.preventDefault()
-      // The review's own Esc is Deny (and does nothing while Windows Hello runs); a result or the code page goes back.
-      const stage = document.querySelector('[data-approve-dialog]')?.getAttribute('data-approve-dialog')
-      if (stage === 'review' || stage === 'hello') return
-      e.stopPropagation()
-      onBack()
-    }
-    document.addEventListener('keydown', key, true)
-    return () => document.removeEventListener('keydown', key, true)
-  }, [onBack])
-  return (
-    <div className="mx-auto w-full max-w-[640px] pt-6" data-testid="pane">
-      <div className="px-8"><BackLink label="Sign-in and security" onBack={onBack} /></div>
-      <div className="px-2"><ApproveSignIn onSeeSessions={onSeeSessions} /></div>
-    </div>
   )
 }
 

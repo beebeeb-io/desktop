@@ -2,7 +2,7 @@
 // pending and file requests; the share_* and file_request_* commands for every action (sections/shared/api.ts).
 // A command this build lacks shows the honest "isn't available" toast, never invented data.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DriveSourceError, useDriveSource, type ItemDetails, type VersionEntry } from '@beebeeb/shared/drive-ui'
+import { useDriveSource, type ItemDetails, type VersionEntry } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
 import { Menu } from '../files/ui'
@@ -41,15 +41,6 @@ function toast(r: { ok: boolean }, done?: string) {
   if (r.ok) { if (done) showToast({ kind: 'done', text: done }) } else showToast({ kind: 'failed', text: api.failureText(r as never) })
 }
 
-/** A DriveSource failure in words (an open, Details, the offline switch): never the host's text. */
-export function openFailureText(e: unknown, what: string): string {
-  const code = e instanceof DriveSourceError ? e.code : 'failed'
-  if (code === 'offline') return `Couldn’t ${what}. You’re offline.`
-  if (code === 'unsupported') return `Couldn’t ${what}. This isn’t available in this version of Beebeeb.`
-  if (code === 'not-found') return `Couldn’t ${what}. It isn’t there anymore.`
-  return `Couldn’t ${what}. Try again.`
-}
-
 export default function Section({ nav }: SectionProps) {
   const source = useDriveSource()
   const tab = (['with-me', 'by-me', 'requests'].includes(nav.route.sub ?? '') ? nav.route.sub : 'with-me') as SharedTab
@@ -83,14 +74,14 @@ export default function Section({ nav }: SectionProps) {
   // DW-0501 Rules: shared folders and files open as in Files. A folder opens in Files; a file opens in its app.
   const openItem = (id: string) => {
     if (isFolder(id)) return nav.go({ section: 'files', id })
-    void source.open(id).catch((e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'open it') }))
+    void source.open(id).catch((e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'open it') }))
   }
   // DW-0505 Details: DW-0411's dialog over Shared, from the list on this PC.
   const showDetails = (id: string) => {
-    source.details(id).then((details) => setDialog({ kind: 'details', details }), (e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'show the details') }))
+    source.details(id).then((details) => setDialog({ kind: 'details', details }), (e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'show the details') }))
   }
   const showVersions = (details: ItemDetails) => {
-    source.versions(details.item.id).then((versions) => setDialog({ kind: 'versions', details, versions }), (e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'open Version history') }))
+    source.versions(details.item.id).then((versions) => setDialog({ kind: 'versions', details, versions }), (e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'open Version history') }))
   }
 
   const openPeople = async (itemId: string) => {
@@ -109,8 +100,8 @@ export default function Section({ nav }: SectionProps) {
     if (kind === 'with-me') {
       if (id === 'open' || id === 'preview') openItem(rowId)
       // DW-0412's words: the download starts now, so it is "Keeping", not "Kept".
-      else if (id === 'offline') await source.setAvailableOffline(rowId, true).then(() => showToast({ kind: 'done', text: 'Keeping on this PC' }), (e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'keep it on this PC') }))
-      else if (id === 'reveal') await source.revealInFileManager(rowId).catch((e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'show it in File Explorer') }))
+      else if (id === 'offline') await source.setAvailableOffline(rowId, true).then(() => showToast({ kind: 'done', text: 'Keeping on this PC' }), (e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'keep it on this PC') }))
+      else if (id === 'reveal') await source.revealInFileManager(rowId).catch((e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'show it in File Explorer') }))
       else if (id === 'details') showDetails(rowId)
       else if (id === 'leave') setDialog({ kind: 'leave', itemId: rowId })
     } else if (kind === 'link' || kind === 'people') {
@@ -230,7 +221,7 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'invite' && <InviteDialog busy={busy} onSend={(email, a) => void invite(d.itemId, email, a === 'Can edit')} onClose={() => void openPeople(d.itemId)} />}
       {d?.kind === 'details' && <DetailsDialog item={d.details.item} details={d.details} now={now} onVersions={() => showVersions(d.details)} onClose={() => setDialog(null)} />}
       {d?.kind === 'versions' && <VersionsDialog name={d.details.item.name} versions={d.versions} now={now} onClose={() => setDialog({ kind: 'details', details: d.details })}
-        onRestore={(vid) => void source.restoreVersion(d.details.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => showToast({ kind: 'failed', text: openFailureText(e, 'restore that version') }))} />}
+        onRestore={(vid) => void source.restoreVersion(d.details.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'restore that version') }))} />}
       {d?.kind === 'key-changed' && <KeyChangedAlert member={d.member}
         onCompare={() => void safety(d.itemId, d.member, { email: d.email, canEdit: d.canEdit })}
         onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true, d.member.id)} onCancel={() => void withdraw(d.itemId, d.member)} />}
