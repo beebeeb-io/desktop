@@ -2,10 +2,9 @@
 // the checkup ring and the QR code. Secret fields carry autocomplete off, spellcheck off and autocorrect off.
 import { useEffect, useRef, type ReactNode } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
-import { FIXTURE_NOW } from '../../../source/fixtures/account'
-import { hasTauri } from '../../../source'
 
-const now = () => (hasTauri() ? Date.now() : FIXTURE_NOW)
+// The dev server pins the clock for the frames (src/v2/dev/clock.ts); here the real time is the only source.
+const now = () => Date.now()
 
 export function relative(iso: string | null): string {
   if (!iso) return 'Not yet'

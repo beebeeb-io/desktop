@@ -8,7 +8,6 @@ import { hasTauri } from '../../../source'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
-import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 import { ApproveSignIn } from '../../../auth/Approve'
@@ -44,14 +43,15 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const { state, setState, reload } = useAccount(init.scenario)
   const [page, setPageRaw] = useState<SecurityPage>(init.page ?? 'main')
   const [dialog, setDialog] = useState(init.page ? undefined : init.dialog)
-  const [codes, setCodes] = useState<string[]>(init.page === 'backup-codes' ? FIXTURE_BACKUP_CODES : [])
-  const [shredAfter, setShredAfter] = useState<string | null>(FIXTURE_SHRED_AFTER)
-  const [linkExpires, setLinkExpires] = useState(FIXTURE_LINK_EXPIRES_AT)
+  // Nothing is known before a command answers: no example codes, and no example dates.
+  const [codes, setCodes] = useState<string[]>([])
+  const [shredAfter, setShredAfter] = useState<string | null>(null)
+  const [linkExpires, setLinkExpires] = useState<string | null>(null)
   const [moving, setMoving] = useState<string | undefined>()
   const setPage = useCallback((p: SecurityPage) => { setPageRaw(p); if (p === 'checkup') void reload() }, [reload])
   const home = useCallback(() => setPage('main'), [setPage])
   const go = (to: SecurityPage | 'account' | 'devices') => (to === 'account' || to === 'devices' ? settings.go(to) : setPage(to))
-  const now = hasTauri() ? Date.now() : FIXTURE_NOW
+  const now = Date.now()
 
   switch (page) {
     case 'checkup': return <Checkup state={state} onBack={home} go={go} />
@@ -66,7 +66,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
     case 'activity': return <Activity state={state} setState={setState} onBack={home} asking={init.dialog === 'activity-off'} now={now}
       onPassword={() => setPage('password')} onDevices={() => settings.go('devices')} />
     case 'delete-1': return <DeleteStep1 onBack={home} onNext={() => setPage('delete-2')} />
-    case 'delete-2': return <DeleteStep2 totp={state.totp.on} initialDigits={init.digits} onBack={() => { void run('account_delete_cancel', {}, null); home() }}
+    case 'delete-2': return <DeleteStep2 totp={state.totp.on} initialDigits={init.digits} onBack={() => { void run('account_delete_cancel', {}); home() }}
       onNext={(d) => { setLinkExpires(d.link_expires_at); setPage('delete-3') }} />
     case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home} onSendAgain={() => setPage('delete-1')}
       onUsed={(when) => { setShredAfter(when); setPage('delete-4') }} />
@@ -293,7 +293,7 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
   const next = async () => {
     const c = code
     setCode('')
-    const r = await run<{ email_link_sent: boolean; link_expires_at: string }>('account_delete_confirm', { code: totp ? c : null }, { email_link_sent: true, link_expires_at: FIXTURE_LINK_EXPIRES_AT })
+    const r = await run<{ email_link_sent: boolean; link_expires_at: string }>('account_delete_confirm', { code: totp ? c : null })
     if (r.ok) onNext(r.value)
     else setError(errorText(r.code))
   }
@@ -322,7 +322,7 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
  * step 1; and it cannot cancel the request (core has no signed-in delete-cancel yet), so Cancel deletion says so and
  * how long the mailed link works, instead of leaving as if it were cancelled.
  */
-function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void; onSendAgain: () => void }) {
+function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: { email: string; linkExpires: string | null; onCancelled: () => void; onUsed: (shredAfter: string | null) => void; onSendAgain: () => void }) {
   const [wait, setWait] = useState(38)
   const [link, setLink] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -336,7 +336,7 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: {
   const confirmLink = async () => {
     const l = link
     setLink('')
-    const r = await run<{ shred_after: string; cancel_until: string | null }>('account_delete_confirm_link', { link: l }, { shred_after: FIXTURE_SHRED_AFTER, cancel_until: null })
+    const r = await run<{ shred_after: string; cancel_until: string | null }>('account_delete_confirm_link', { link: l })
     if (r.ok) onUsed(r.value.shred_after)
     else setError(errorText(r.code))
   }
@@ -346,7 +346,11 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: {
       <div role="status" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
         We sent a confirmation link to <span className="font-medium">{email}</span>. Nothing is deleted until you use that link.
       </div>
-      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, and change your password.</p>
+      {linkExpires ? (
+        <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, and change your password.</p>
+      ) : (
+        <p className="text-[13px] text-ink-2">The link’s expiry isn’t known yet: the server hasn’t confirmed the email. Didn’t ask for this? Don’t use the link, and change your password.</p>
+      )}
       <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (link.trim()) void confirmLink() }}>
         <Field label="Or paste the link from the email">
           <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
@@ -361,13 +365,13 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: {
       </p>
       {cannotCancel ? (
         <div role="alert" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
-          <p>This version of Beebeeb can’t cancel the request yet. Nothing is deleted unless someone uses the link in the email, and it stops working at <span className="font-mono">{dateTime(linkExpires)}</span>.</p>
+          <p>This version of Beebeeb can’t cancel the request yet. Nothing is deleted unless someone uses the link in the email, and it stops working {linkExpires ? <>at <span className="font-mono">{dateTime(linkExpires)}</span></> : 'at a time the server hasn’t told us yet'}.</p>
           <button type="button" onClick={onCancelled} className="mt-2 text-[13px] text-ink underline">Back to Sign-in and security</button>
         </div>
       ) : null}
       <div className="flex justify-end gap-2">
         {/* The checked password is wiped either way (account_delete_cancel); the request itself waits for core (blocked). */}
-        <Btn onClick={() => { void run('account_delete_cancel', {}, null); setCannotCancel(true) }}>Cancel deletion</Btn>
+        <Btn onClick={() => { void run('account_delete_cancel', {}); setCannotCancel(true) }}>Cancel deletion</Btn>
         <Btn onClick={() => onUsed(null)}>I’ve opened the link</Btn>
       </div>
     </Page>
@@ -382,7 +386,7 @@ function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: {
   const undo = async () => {
     const l = link
     setLink('')
-    const r = await run<{ not_restored: string[] }>('account_delete_undo', { link: l || null }, { not_restored: [] })
+    const r = await run<{ not_restored: string[] }>('account_delete_undo', { link: l || null })
     if (r.ok) return onUndone()
     if (r.code === 'link_needed') setAskLink(true)
     setError(errorText(r.code))
