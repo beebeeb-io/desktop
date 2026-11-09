@@ -2,6 +2,9 @@
 // DW-0117), in the board's words. Owned by B05 only.
 import { DriveSourceError, type DriveItem, type DriveSource, type ShareEntry, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { createFilesSource } from './files'
+import type { Access, FileRequestRow, Invitation, LinkShare, Member, PeopleShare, WithMeRow } from '../../sections/shared/types'
+
+export type { Access, FileRequestRow, Invitation, LinkShare, Member, PeopleShare, WithMeRow }
 
 export const B05_NOW = '2026-11-08T12:00:00'
 const KB = 1000
@@ -16,8 +19,6 @@ function item(id: string, name: string, o: Partial<DriveItem> = {}): DriveItem {
 
 // ── Shared: with me ──────────────────────────────────────────────────────────
 
-export interface Invitation { id: string; name: string; from: string; isFolder: boolean }
-export interface WithMeRow { id: string; name: string; isFolder: boolean; owner: string; items?: number; size?: number | null; modifiedAt?: string }
 
 export const INVITATIONS: Invitation[] = [{ id: 'inv-autumn', name: 'Autumn shoot', from: 'Lotte de Wit', isFolder: true }]
 
@@ -30,8 +31,6 @@ export const WITH_ME: WithMeRow[] = [
 
 // ── Shared: by me ────────────────────────────────────────────────────────────
 
-export interface PeopleShare { id: string; name: string; isFolder: boolean; people: string[]; pending?: boolean; items?: number; size?: number | null }
-export interface LinkShare { id: string; name: string; expiresAt: string | null; password: boolean; size?: number | null; isFolder?: boolean }
 
 export const BY_ME_PEOPLE: PeopleShare[] = [
   { id: 'sb-lisbon', name: 'Lisbon trip', isFolder: true, people: ['Jonas Meier', 'Mia de Vries'], items: 212 },
@@ -47,16 +46,6 @@ export const BY_ME_LINKS: LinkShare[] = [
 
 // ── Shared: requests ─────────────────────────────────────────────────────────
 
-export interface FileRequestRow {
-  id: string
-  title: string
-  files: number
-  /** "12 of 50 files" when the request caps the number of files. */
-  maxFiles?: number
-  into?: string
-  expiresAt?: string | null
-  closed?: boolean
-}
 
 export const REQUESTS: FileRequestRow[] = [
   { id: 'rq-contracts', title: 'Signed contracts', files: 3, into: 'Documents', expiresAt: null },
@@ -67,9 +56,6 @@ export const REQUESTS: FileRequestRow[] = [
 
 // ── People with access, a person, the safety number ──────────────────────────
 
-export type Access = 'Can view' | 'Can edit'
-/** `markUnreadable`: this PC holds a comparison for the person it cannot read (Rust stops every new share to them). */
-export interface Member { id: string; name: string; email: string; you?: boolean; owner?: boolean; access?: Access; invited?: boolean; compared?: boolean; mismatch?: boolean; keyChanged?: boolean; markUnreadable?: boolean }
 
 export const LISBON = { id: 'sb-lisbon', name: 'Lisbon trip', items: 212 }
 export const LISBON_PEOPLE: Member[] = [

@@ -1,7 +1,8 @@
 // Notifications (DW-0750, DW-0750b): which alerts Beebeeb sends on this PC.
 import { useState } from 'react'
 import { Btn, Group, Page, Row, Switch } from './kit'
-import { useConfig } from './data'
+import { useConfig, useRead } from './data'
+import type { NotificationList } from '../../../../desktopApi'
 import { openExternal } from '../../../external'
 import { actionFailure } from '../../files/model'
 
@@ -15,6 +16,9 @@ export function Notifications({ offInWindows }: { offInWindows?: boolean } = {})
     shared: true, stopped: true, decision: true, finished: false, space: true, bdone: true, battn: true, allow: true,
   })
   const flip = (k: string) => (v: boolean) => setLocal((s) => ({ ...s, [k]: v }))
+  // How many alerts are unread: the server's count (`account_notifications`), never the board's "2 new" (P1c).
+  const notices = useRead<NotificationList>('account_notifications')
+  const unread = notices.state === 'ready' ? notices.value.unread_count : 0
   const sw = (_k: string, label: string, on: boolean, change: (v: boolean) => void) =>
     <Switch label={label} on={on} onChange={change} disabled={off} />
   return (
@@ -26,7 +30,7 @@ export function Notifications({ offInWindows }: { offInWindows?: boolean } = {})
         ) : (
           <Row label="Allow notifications" sub="Also controlled in Windows Settings." right={<Switch label="Allow notifications" on={local.allow} onChange={flip('allow')} />} />
         )}
-        <Row label="Recent notifications" value="2 new" href="?section=settings&page=recent" />
+        <Row label="Recent notifications" value={unread > 0 ? `${unread.toLocaleString('en')} new` : undefined} href="?section=settings&page=recent" />
       </Group>
       {refused ? <p role="alert" className="-mt-3 px-1 text-[12px] text-red-text">{refused}</p> : null}
       <Group title="Security">

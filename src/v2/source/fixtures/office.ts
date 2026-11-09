@@ -2,6 +2,9 @@
 // whose readBytes/saveBytes/versions behave like the engine's (a stale base version is a conflict). Owned by B08.
 import { DriveSourceError, type DriveItem, type DriveSource, type VersionEntry } from '@beebeeb/shared/drive-ui'
 import { createFilesSource, FILES_TREE } from './files'
+import type { DocFixture, DocSection, SlideFixture } from '../../sections/open/office/doc'
+
+export type { DocFixture, DocSection, SlideFixture }
 
 const none = { kind: 'none' } as const
 function file(id: string, parentId: string | null, name: string, size: number, mime: string): DriveItem {
@@ -15,8 +18,6 @@ export const OFFICE_ITEMS: DriveItem[] = [
   file('x-proposal', 'f-documents', 'Proposal 2012.doc', 31_744, 'application/msword'),
 ]
 
-export interface DocSection { heading: string; text: string; selected?: string }
-export interface DocFixture { title: string; sub: string; outline: [string, number][]; sections: DocSection[] }
 
 export const SELECTED_TEXT = 'delivers 60 edited photos and a 90-second film.'
 
@@ -64,7 +65,6 @@ export const SHEET_ROWS: string[][] = [
 ]
 export const SHEET_TABS = ['2026', '2025', 'Notes']
 
-export interface SlideFixture { title: string; sub?: string; points: string[]; photo: boolean }
 export const SLIDES: SlideFixture[] = [
   { title: 'Lisbon trip recap', sub: 'Northwind Studio · October 2026', points: [], photo: true },
   { title: 'What we shot', points: ['212 photos over two days · Alfama, Belém, the harbour', '60 edited selects for the hotel', 'A 90-second film'], photo: true },

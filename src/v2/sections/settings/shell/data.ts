@@ -1,13 +1,12 @@
-// B12's data layer. Everything comes through command() from desktopApi (never the shared API); a plain browser
-// (headless frames, bun run dev) has no IPC bridge, so the board's fixture values stand in. Fixtures live here
-// (settings area only) and carry the board's example numbers.
+// B12's data layer. Everything comes through command() from desktopApi (never the shared API). A plain browser on the
+// dev server (headless frames, bun run dev) has no IPC bridge: the board's values come from ../../../board.ts, which
+// the dev server fills from source/fixtures/settings.ts. The running app never shows them (P1c): before a read answers,
+// and when it fails, a pane shows the app's own defaults or its honest empty state.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { command, DEFAULT_CONFIG, type DesktopConfig } from '../../../../desktopApi'
+import { useDriveSource, type StorageSummary as DriveStorage } from '@beebeeb/shared/drive-ui'
+import { command, DEFAULT_CONFIG, type DesktopConfig, type StorageSummary } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
-import { GB, MB } from './kit'
-import type { SyncProblem } from '../../../source/extras'
-
-export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays: true, local_cache_limit_bytes: 50 * GB }
+import { board } from '../../../board'
 
 /**
  * Desktop settings: read once; each change is written as a patch through set_desktop_config. The command merges only
@@ -15,9 +14,9 @@ export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays:
  * in it pauses or resumes the engine, so a write sends only what the person changed.
  */
 export function useConfig(initial: Partial<DesktopConfig> = {}) {
-  // In the window, the app's own defaults until the read answers, never the board's example numbers (#270 follow-up);
-  // `loaded` says when the read has answered.
-  const [config, setConfig] = useState<DesktopConfig>({ ...(hasTauri() ? DEFAULT_CONFIG : FIXTURE_CONFIG), ...initial })
+  // In the window, the app's own defaults until the read answers, never the board's example numbers (#270 follow-up,
+  // P1c); `loaded` says when the read has answered.
+  const [config, setConfig] = useState<DesktopConfig>({ ...(hasTauri() ? DEFAULT_CONFIG : board<DesktopConfig>('config') ?? DEFAULT_CONFIG), ...initial })
   const [loaded, setLoaded] = useState(() => !hasTauri())
   const [error, setError] = useState<string | null>(null)
   // One write at a time, in the order they were made: Pause then Resume never lands as Resume then Pause.
@@ -61,65 +60,61 @@ export interface KnownFolder {
   display_name: string
   enabled: boolean
   item_count: number | null
-  /** Fixture-only: the board's size and last-backup text. The desktop reports an item count instead. */
+  /** The board's size and last-backup text (a frame's); the desktop reports an item count instead. */
   size?: string
   last?: string
   custom?: boolean
 }
 
-export const FIXTURE_FOLDERS: KnownFolder[] = [
-  { key: 'desktop', display_name: 'Desktop', enabled: true, item_count: 412, size: '3.2 GB', last: '09:30' },
-  { key: 'documents', display_name: 'Documents', enabled: true, item_count: 1820, size: '14.6 GB', last: '09:30' },
-  { key: 'pictures', display_name: 'Pictures', enabled: true, item_count: 6208, size: '8.4 GB', last: '09:28' },
-  { key: 'music', display_name: 'Music', enabled: false, item_count: 5344 },
-  { key: 'videos', display_name: 'Videos', enabled: false, item_count: 88 },
-  { key: 'downloads', display_name: 'Downloads', enabled: false, item_count: 301 },
-  { key: 'projects', display_name: 'Projects', enabled: true, item_count: 905, size: '1.6 GB', last: '09:30', custom: true },
-]
-
+/**
+ * This PC's backed-up folders (`get_known_folder_backup`, `set_known_folder_backup`). Empty until the read answers;
+ * a failed read says so (`error`), never the board's folders.
+ */
 export function useKnownFolders() {
-  const [folders, setFolders] = useState<KnownFolder[]>(FIXTURE_FOLDERS)
+  const [folders, setFolders] = useState<KnownFolder[]>(() => (hasTauri() ? [] : board<KnownFolder[]>('folders') ?? []))
+  const [error, setError] = useState(false)
   useEffect(() => {
     if (!hasTauri()) return
-    command<KnownFolder[]>('get_known_folder_backup').then((r) => { if (r.ok) setFolders(r.value) })
+    command<KnownFolder[]>('get_known_folder_backup').then((r) => { if (r.ok) setFolders(r.value); else setError(true) })
   }, [])
   const toggle = useCallback((key: string, enabled: boolean) => {
     setFolders((fs) => fs.map((f) => (f.key === key ? { ...f, enabled } : f)))
-    if (hasTauri() && !FIXTURE_FOLDERS.find((f) => f.key === key)?.custom) command('set_known_folder_backup', { key, enabled })
+    // Only the board's rows are custom folders (no command adds one), and the board has no Rust behind it.
+    if (hasTauri()) command('set_known_folder_backup', { key, enabled })
   }, [])
-  const remove = useCallback((key: string) => setFolders((fs) => fs.filter((f) => f.key !== key)), [])
-  const add = useCallback((name: string) => setFolders((fs) => [...fs, { key: name.toLowerCase(), display_name: name, enabled: true, item_count: null, custom: true }]), [])
-  return { folders, toggle, remove, add }
+  return { folders, toggle, error }
 }
 
-export interface StorageBreakdown {
-  usedBytes: number
-  quotaBytes: number
-  rows: { label: string; bytes: number }[]
-}
-export const FIXTURE_BREAKDOWN: StorageBreakdown = {
-  usedBytes: 240 * GB,
-  quotaBytes: 1024 * GB,
-  rows: [
-    { label: 'Photos and videos', bytes: 216 * GB },
-    { label: 'Files', bytes: 19.5 * GB },
-    { label: 'Thumbnails and previews', bytes: 3.1 * GB },
-    { label: 'Older versions', bytes: 1.2 * GB },
-    { label: 'Trash', bytes: 240 * MB },
-  ],
-}
-export const FIXTURE_LOCAL = { downloaded: 18.4 * GB, previews: 3.1 * GB, offline: 1.4 * GB, offlineItems: 3, previewLimit: 20 * GB, freeOnPc: 186 * 2 * GB }
+/** What a read gives a pane: the value once it answered, the refusal, or still waiting. */
+export type Read<T> = { state: 'loading' } | { state: 'ready'; value: T } | { state: 'failed'; reason: string }
 
-export const FIXTURE_DEVICES = [
-  { id: 'iphone', name: "Anna's iPhone", status: 'Backed up 12,480 photos · 96 GB' },
-  { id: 'ipad', name: "Anna's iPad", status: 'Backed up 4,120 photos · 38 GB' },
-  { id: 'old', name: 'Old iPhone', status: 'Backed up 2,040 photos · 11 GB' },
-]
+/** One read command, answered by Rust in the window and by the dev server's host in a plain browser (dev/reads.ts). */
+export function useRead<T>(name: string, args?: Record<string, unknown>): Read<T> & { reload: () => void } {
+  const [read, setRead] = useState<Read<T>>({ state: 'loading' })
+  const key = JSON.stringify(args ?? null)
+  const load = useCallback(() => {
+    let live = true
+    void command<T>(name, args).then((r) => { if (live) setRead(r.ok ? { state: 'ready', value: r.value } : { state: 'failed', reason: r.reason }) })
+    return () => { live = false }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, key])
+  useEffect(() => load(), [load])
+  return { ...read, reload: () => { load() } }
+}
 
-/** DW-0741's list (the board's): three failures with why, and one exclusion by design (no Try again). */
-export const FIXTURE_BACKUP_PROBLEMS: SyncProblem[] = [
-  { id: 'b-render', name: 'Render final.mov', folder: 'Documents', reason: 'the file is open in another app', retryable: true, backup: true },
-  { id: 'b-invoice', name: 'Invoice scan.pdf', folder: 'Desktop', reason: 'this file is damaged', retryable: true, backup: true },
-  { id: 'b-budget', name: 'Budget 2025.xlsx', folder: 'Documents', reason: 'it kept changing while it was backing up', retryable: true, backup: true },
-  { id: 'b-site', name: 'Site walkthrough.mkv', folder: 'Desktop', reason: 'files larger than 4 GB are not backed up from this PC', retryable: false, backup: true },
-]
+/** This PC's copies (`desktop_storage_summary`): downloaded files (`cache_bytes`) and Available offline (`pinned_bytes`). */
+export function useLocalSpace(): Read<StorageSummary> {
+  return useRead<StorageSummary>('desktop_storage_summary')
+}
+
+/** The account's storage, split by area (DriveSource's `storage()`, `drive_storage`). */
+export function useAccountStorage(): Read<DriveStorage> {
+  const source = useDriveSource()
+  const [read, setRead] = useState<Read<DriveStorage>>({ state: 'loading' })
+  useEffect(() => {
+    let live = true
+    source.storage().then((value) => { if (live) setRead({ state: 'ready', value }) }, (e: unknown) => { if (live) setRead({ state: 'failed', reason: e instanceof Error ? e.message : String(e) }) })
+    return () => { live = false }
+  }, [source])
+  return read
+}

@@ -1,21 +1,25 @@
-// General (DW-0701, DW-0781), About (DW-0751), the problem report (DW-0782) and the plan dialog (DW-0708).
+// General (DW-0701, DW-0781), the problem report (DW-0782) and the plan dialog (DW-0708). About is today's
+// (../today/about.tsx). The version and the plan are read (`app_version`, `account_subscription`), never the board's (P1c).
 import { useState } from 'react'
-import { BILLING_URL, command } from '../../../../desktopApi'
+import { BILLING_URL, command, type Subscription } from '../../../../desktopApi'
 import type { ProblemReportResult } from '../../../../diagnosticsCopy'
 import { useCapabilities } from '../../../../capabilities'
 import { openExternal } from '../../../external'
 import { runUpdate, updateCopyFor } from '../../../update'
 import { actionFailure } from '../../files/model'
 import { useUpdateOffer } from './updates'
-import { Btn, Dialog, Group, Meter, Page, Row, Choice, mono, GB } from './kit'
-import { useConfig } from './data'
+import { Btn, Dialog, Group, Meter, Page, Row, Choice, fmtBytes, mono } from './kit'
+import { useConfig, useRead } from './data'
 import { useSettings } from './context'
 import { startGuide } from '../../../guide/Guide'
-import type { DesktopTheme, ReleaseChannel } from '../../../../desktopApi'
+import { board } from '../../../board'
+import type { DesktopTheme } from '../../../../desktopApi'
 
-const VERSION = '0.9.1'
-const BUILD = '311'
-const CORE = '2084927'
+/** The running version (`app_version`); in a frame, the board's. Null until it answers, and when it can't. */
+export function useAppVersion(): string | null {
+  const live = useRead<string>('app_version')
+  return live.state === 'ready' ? live.value : board<{ version: string }>('about')?.version ?? null
+}
 
 /** DW-0781: a newer version, with the platform's update button (lead ruling M3e item 1). A refusal is said in the banner. */
 export function UpdateBanner({ version }: { version: string }) {
@@ -43,12 +47,13 @@ const THEMES: { value: DesktopTheme; label: string }[] = [
   { value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' },
 ]
 
-export function General({ updateAvailable }: { updateAvailable?: boolean } = {}) {
+export function General({ updateAvailable }: { updateAvailable?: string } = {}) {
   const { go, open } = useSettings()
   const { config, update } = useConfig()
   const offer = useUpdateOffer()
-  // The version the updater noted; a frame's variant (DW-0781) draws the board's.
-  const version = offer ?? (updateAvailable ? '0.9.2' : null)
+  const running = useAppVersion()
+  // The version the updater noted; a frame's variant (DW-0781) names the board's.
+  const version = offer ?? updateAvailable ?? null
   const newest = version !== null
   return (
     <Page title="General">
@@ -69,46 +74,7 @@ export function General({ updateAvailable }: { updateAvailable?: boolean } = {})
       </Group>
       <Group title="About">
         <Row label="Terms and privacy policy" href="https://beebeeb.io/terms" />
-        <Row label="About Beebeeb" value={newest ? `${VERSION} · update available` : `Version ${VERSION}`} mono onClick={() => go('about')} />
-      </Group>
-    </Page>
-  )
-}
-
-const CHANNELS: { value: ReleaseChannel; label: string }[] = [
-  { value: 'stable', label: 'Stable' }, { value: 'beta', label: 'Beta' }, { value: 'alpha', label: 'Alpha' },
-]
-
-export function About() {
-  const { go } = useSettings()
-  const { config, update } = useConfig()
-  const [state, setState] = useState<'idle' | 'checking'>('idle')
-  const [copied, setCopied] = useState(false)
-  const lines = `Beebeeb Drive ${VERSION} (${BUILD})\nEncryption core ${CORE}`
-  return (
-    <Page title="About Beebeeb"
-      back={<a href="?section=settings&page=general" onClick={(e) => { e.preventDefault(); go('general') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}>
-      <Group>
-        <Row label="Beebeeb Drive" sub="End-to-end encrypted storage"
-          right={<Btn onClick={() => { void navigator.clipboard?.writeText(lines); setCopied(true) }}>{copied ? 'Copied' : 'Copy'}</Btn>} />
-        <Row label="Version" value={`${VERSION} (${BUILD})`} mono />
-        <Row label="Encryption core" value={CORE} mono />
-      </Group>
-      <Group title="Updates" note="Beebeeb checks for updates at launch and every 4 hours.">
-        <Row label="Check for updates" sub={state === 'checking' ? 'Checking…' : `${VERSION} is the newest version · checked today, 09:12`}
-          right={<Btn onClick={() => { setState('checking'); setTimeout(() => setState('idle'), 800) }}>Check now</Btn>} />
-        <Row label="Release channel" sub="Regular releases after validation."
-          right={<Choice label="Release channel" value={config.release_channel ?? 'stable'} options={CHANNELS} onPick={(release_channel) => update({ release_channel })} />} />
-        <Row label="Release notes" onClick={() => undefined} />
-      </Group>
-      <Group title="Open source">
-        <Row label="Encryption core on GitHub" href="https://github.com/beebeeb-io/core" />
-        <Row label="Open-source licences" href="https://beebeeb.io/licences" />
-      </Group>
-      <Group title="More">
-        <Row label="About audits" href="https://beebeeb.io/security" />
-        <Row label="beebeeb.io" href="https://beebeeb.io" />
-        <Row label="Initlabs B.V." />
+        <Row label="About Beebeeb" value={running ? (newest ? `${running} · update available` : `Version ${running}`) : newest ? 'Update available' : undefined} mono onClick={() => go('about')} />
       </Group>
     </Page>
   )
@@ -144,21 +110,33 @@ export function ReportDialog() {
   )
 }
 
+/** "Renews 14 Mar 2027": a date in the board's day-month-year form. */
+const day = (iso: string) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+
+/** DW-0708: the account's plan (`account_subscription`): its storage, what is used, when it renews and how it bills. */
 export function PlanDialog() {
   const { close } = useSettings()
   const [refused, setRefused] = useState<string | null>(null)
+  const plan = useRead<Subscription>('account_subscription')
   // Paying happens on the website: the plan page opens in the browser (DW-0708#0), never in the window.
   const manage = () => { void openExternal(BILLING_URL).then((r) => setRefused(r.ok ? null : actionFailure('open beebeeb.io', r.unsupported ? 'unsupported' : 'failed').text)) }
+  const p = plan.state === 'ready' ? plan.value : null
+  const cycle = p?.billing_cycle ? p.billing_cycle[0].toUpperCase() + p.billing_cycle.slice(1) : null
   return (
     <Dialog labelId="plan-h" title="Your plan" onCancel={close}
       actions={<><Btn onClick={manage}>Manage on beebeeb.io</Btn><Btn variant="amber" onClick={close}>Done</Btn></>}>
       {refused ? <p role="alert" className="mb-2 text-[12px] text-red-text">{refused}</p> : null}
-      <div className="flex items-baseline justify-between"><span className="text-[15px] font-medium text-ink">1 TB</span><span className={mono}>240 GB used</span></div>
-      <div className="my-2"><Meter label="Storage used" fraction={240 / 1024} amber /></div>
-      <div className="flex justify-between"><span>Renews</span><span className={mono}>14 Mar 2027</span></div>
-      <div className="flex justify-between"><span>Billing</span><span>Yearly</span></div>
+      {p ? (
+        <>
+          <div className="flex items-baseline justify-between"><span className="text-[15px] font-medium text-ink">{p.quota_bytes ? fmtBytes(p.quota_bytes) : 'No storage yet'}</span><span className={mono}>{fmtBytes(p.used_bytes)} used</span></div>
+          {p.quota_bytes ? <div className="my-2"><Meter label="Storage used" fraction={p.used_bytes / p.quota_bytes} amber /></div> : null}
+          {p.current_period_end ? <div className="flex justify-between"><span>Renews</span><span className={mono}>{day(p.current_period_end)}</span></div> : null}
+          {cycle ? <div className="flex justify-between"><span>Billing</span><span>{cycle}</span></div> : null}
+        </>
+      ) : plan.state === 'failed' ? (
+        <p role="alert" className="text-[12px] text-red-text">{actionFailure('read your plan', 'failed').text}</p>
+      ) : <p className="text-ink-3" aria-busy="true">Reading your plan…</p>}
       <p className="mt-3 text-[12px] text-ink-3">Everything about paying happens on the website.</p>
-      <span hidden>{GB}</span>
     </Dialog>
   )
 }

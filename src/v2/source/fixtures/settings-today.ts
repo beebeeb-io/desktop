@@ -1,6 +1,7 @@
 // Fixture data for B13's settings panes (the board's example numbers). A plain browser has no IPC bridge, so these
 // stand in; with the bridge the panes read through command().
 import { GB, MB } from '../../sections/settings/shell/kit'
+import { failureSentence, type SpeedResult, type TestState } from '../../sections/settings/today/speedtest'
 
 export type BwVariant = 'normal' | 'idle' | 'limited' | 'empty' | 'metered'
 
@@ -97,3 +98,12 @@ export const PLACES: Place[] = [
 
 export const RELEASE_NOTES = ['Faster first sync after you sign in on a new PC.', 'Backups now show which folder is waiting.', 'Fixes a case where File Explorer kept showing a file as syncing.']
 export const CHANNEL_NEWEST: Record<'stable' | 'beta' | 'alpha', string> = { stable: '0.9.1', beta: '0.9.2', alpha: '0.9.3' }
+
+// The speed test's board states (DW-0786a–d), moved here from the pane by P1c: board data, never the live app's.
+export const SPEED_TEST_RESULT: SpeedResult = { latencyAvg: 24, latencyMin: 18, latencyMax: 41, up: 35.2, down: 94.0 }
+export const TEST_STATES: Record<string, TestState> = {
+  running: { phase: 'running', step: 'upload', done: 2, latency: 24, latencyRange: [18, 41] },
+  downloads: { phase: 'running', step: 'download', done: 1, latency: 24, latencyRange: [18, 41], up: 35.2 },
+  done: { phase: 'done', result: SPEED_TEST_RESULT },
+  error: { phase: 'error', message: failureSentence('ping') },
+}

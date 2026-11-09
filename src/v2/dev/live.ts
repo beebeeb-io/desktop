@@ -11,6 +11,7 @@ import { answerFrom } from './reads'
 import { run } from './driver'
 import { RECIPES, type Recipe, type WindowKind } from './states'
 import { pinClock } from './clock'
+import { installBoard } from './board'
 
 let started = false
 
@@ -43,6 +44,8 @@ function mark(id: string, result: string, gap?: string) {
  * recipe's own URL (another window, or the recipe's route and scenario), so module-level reads see them.
  */
 export function prepare(kind: WindowKind): Promise<void> {
+  // The board's example data for this host-less window (../board.ts): the sources and the values panes draw.
+  installBoard()
   const params = new URLSearchParams(window.location.search)
   const id = params.get('state')
   const recipe = id ? RECIPES[id] : undefined

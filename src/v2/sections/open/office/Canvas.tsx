@@ -4,7 +4,7 @@
 import { useEffect, useState, type ReactNode, type RefObject } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { FOCUS } from '../../files/ui'
-import type { DocFixture, SlideFixture } from '../../../source/fixtures/office'
+import type { DocFixture, SlideFixture } from './doc'
 import { Glyph } from './Ribbon'
 
 const PAGE_BG = 'bg-paper-3'

@@ -9,7 +9,7 @@ import { command } from '../../desktopApi'
 import { mergeMoving } from '../sections/files/liveExtras'
 import { useStatusNote } from './statusNote'
 
-const PHASE: Record<SyncSummary['phase'], string> = {
+export const PHASE: Record<SyncSummary['phase'], string> = {
   checking: 'Checking…',
   'up-to-date': 'Up to date',
   syncing: 'Syncing',

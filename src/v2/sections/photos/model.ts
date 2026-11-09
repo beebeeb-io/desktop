@@ -1,6 +1,6 @@
 // Photos' pure model: days, totals, the "photos across" choice. No I/O besides the remembered choice (this PC only).
 import type { PhotoEntry } from '@beebeeb/shared/drive-ui'
-import type { PhotoMeta } from '../../source/fixtures/photos'
+import type { PhotoMeta } from './types'
 
 export const ACROSS = [3, 4, 5, 7] as const
 export type Across = (typeof ACROSS)[number]
