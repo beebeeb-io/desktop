@@ -46,6 +46,9 @@ export interface SearchViewProps {
   loading?: { done: number; total: number } | null
   now?: Date
   menuOn?: string
+  /** The selected result (a click, or ↓ ↑ from the field and between rows): drawn neutral grey, as in Files. */
+  selected?: string | null
+  onSelect?: (id: string) => void
   onQuery?: (q: string) => void
   onPill?: (p: Pill) => void
   onOpen?: (item: DriveItem) => void
@@ -122,9 +125,11 @@ export function SearchView(p: SearchViewProps) {
               </div>
               <div className="min-h-0 flex-1 overflow-auto">
                 {shown.map(({ item, where }) => (
-                  <div key={item.id} role="row" tabIndex={-1} data-result={item.id} aria-selected={p.menuOn === item.id}
+                  <div key={item.id} role="row" tabIndex={-1} data-result={item.id} aria-selected={p.menuOn === item.id || p.selected === item.id}
+                    aria-label={where ? `${item.name}, ${where}` : item.name}
+                    onClick={() => p.onSelect?.(item.id)} onFocus={() => p.onSelect?.(item.id)}
                     onDoubleClick={() => p.onOpen?.(item)} onKeyDown={(e) => moveIn(e, item)} onContextMenu={(e) => { e.preventDefault(); p.onContext?.(item, e.clientX, e.clientY) }}
-                    className={`grid ${COLS} h-10 cursor-default items-center gap-3 px-4 text-[13px] ${p.menuOn === item.id ? 'bg-paper-3' : 'hover:bg-paper-2'} focus-visible:bg-paper-2 focus-visible:outline-none`}>
+                    className={`grid ${COLS} h-10 cursor-default items-center gap-3 px-4 text-[13px] ${p.menuOn === item.id || p.selected === item.id ? 'bg-paper-3' : 'hover:bg-paper-2'} focus-visible:outline-none`}>
                     <span role="gridcell" className="flex min-w-0 items-center gap-2.5"><FileIcon type={getFileType(item.name, item.isFolder)} size={22} /><span className="truncate text-ink-2" title={item.name}><Highlight name={item.name} query={query} /></span></span>
                     <span role="gridcell" className="font-mono text-[12px] text-ink-3">{fmtWhen(item.modifiedAt, p.now)}</span>
                     <span role="gridcell" className="font-mono text-[12px] text-ink-3">{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span>

@@ -31,6 +31,7 @@ export default function Section({ nav }: SectionProps) {
   const [hits, setHits] = useState<SearchHit[]>([])
   const [recent, setRecent] = useState<string[]>(loadRecent)
   const [menu, setMenu] = useState<{ item: DriveItem; x: number; y: number } | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
   const seq = useRef(0)
   const now = useMemo(() => new Date(), [])
   // The first sign-in's list check (B02b drive_status.listing): results may be incomplete while it runs.
@@ -40,6 +41,7 @@ export default function Section({ nav }: SectionProps) {
   useEffect(() => {
     const q = query.trim()
     const mine = ++seq.current
+    setSelected(null)
     if (!q) { setHits([]); return }
     void (async () => {
       const items = await source.search(q).catch(() => [] as DriveItem[])
@@ -76,8 +78,8 @@ export default function Section({ nav }: SectionProps) {
   return (
     <>
       <SearchView
-        query={query} hits={hits} pill={pill} recent={recent} now={now} menuOn={menu?.item.id} loading={loading}
-        onQuery={setQuery} onPill={setPill} onOpen={open}
+        query={query} hits={hits} pill={pill} recent={recent} now={now} menuOn={menu?.item.id} loading={loading} selected={selected}
+        onQuery={setQuery} onPill={setPill} onOpen={open} onSelect={setSelected}
         onContext={(item, x, y) => setMenu({ item, x, y })}
         onClearRecent={() => { setRecent([]); saveRecent([]) }}
         onEnd={() => nav.back()}

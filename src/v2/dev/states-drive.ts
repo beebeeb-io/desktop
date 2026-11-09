@@ -9,6 +9,7 @@ const JONAS = LISBON_PEOPLE[1]
 const NO_LISTS = { share_list: { invitations: [], links: [], requests: [], pending: [] } }
 const peopleOf = (): Recipe['steps'] => [{ context: 'row:sb-lisbon' }, { click: menuItem('people') }, { wait: '[data-people]' }]
 const SEARCH = 'field:Search names'
+const OPEN_SEARCH = 'btn:Search names'
 const OFFICE_ENGINE = 'the Office editor runs only in the Tauri build: Rust (office_v2) serves the engine over the bboffice scheme; a browser gets "We couldn’t prepare the editor"'
 
 export const DRIVE_STATES: Record<string, Recipe> = {
@@ -20,9 +21,10 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-0505': { q: 'section=shared&sub=with-me', steps: [{ context: 'row:sw-brand' }] },
   'DW-0506': { q: 'section=shared&sub=by-me', steps: [{ context: 'row:sl-budget' }] },
   'DW-0507': { q: 'section=shared&sub=requests', steps: [{ context: 'row:rq-selects' }] },
-  'DW-0508': { q: 'section=shared&sub=with-me&scenario=empty', reads: NO_LISTS },
-  'DW-0509': { q: 'section=shared&sub=by-me&scenario=empty', reads: NO_LISTS },
-  'DW-0510': { q: 'section=shared&sub=requests&scenario=empty', reads: NO_LISTS },
+  // Nothing shared yet, but the account has its files (`no-shares`): DW-0509's Files goes to DW-0401's list, not an empty one.
+  'DW-0508': { q: 'section=shared&sub=with-me&scenario=no-shares', reads: NO_LISTS },
+  'DW-0509': { q: 'section=shared&sub=by-me&scenario=no-shares', reads: NO_LISTS },
+  'DW-0510': { q: 'section=shared&sub=requests&scenario=no-shares', reads: NO_LISTS },
   'DW-0511': { q: 'section=shared&sub=by-me', steps: peopleOf() },
   'DW-0512': { q: 'section=shared&sub=by-me', steps: [...peopleOf()!, { click: '[data-person="m-jonas"]' }] },
   'DW-0512b': { q: 'section=shared&sub=by-me', steps: [...peopleOf()!, { click: '[data-person="m-jonas"]' }, { click: 'btn:Remove access' }] },
@@ -41,10 +43,11 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   },
 
   // ── B05: Search and Trash ─────────────────────────────────────────────────────────────────────────────────────
-  'DW-0801': { q: 'section=search', storage: { 'bb.v2.search.recent': ['contract', 'lisbon', 'invoice 2026'] } },
-  'DW-0802': { q: 'section=search', steps: [{ fill: SEARCH, value: 'Contr' }] },
-  'DW-0802b': { q: 'section=search&scenario=listing', steps: [{ fill: SEARCH, value: 'Contr' }] },
-  'DW-0803': { q: 'section=search', steps: [{ fill: SEARCH, value: 'harbr' }] },
+  // Search opens from Files (Ctrl+F, the toolbar's Search names), so Esc and × have a view to go back to (M3c).
+  'DW-0801': { q: 'section=files', storage: { 'bb.v2.search.recent': ['contract', 'lisbon', 'invoice 2026'] }, steps: [{ click: OPEN_SEARCH }, { wait: SEARCH }] },
+  'DW-0802': { q: 'section=files', steps: [{ click: OPEN_SEARCH }, { fill: SEARCH, value: 'Contr' }] },
+  'DW-0802b': { q: 'section=files&scenario=listing', steps: [{ click: OPEN_SEARCH }, { fill: SEARCH, value: 'Contr' }] },
+  'DW-0803': { q: 'section=files', steps: [{ click: OPEN_SEARCH }, { fill: SEARCH, value: 'harbr' }] },
   'DW-0747': { q: 'section=trash' },
   'DW-0748': { q: 'section=trash', steps: [{ context: 'row:t-contract-old' }] },
   'DW-0749': { q: 'section=trash', steps: [{ click: 'btn:Empty Trash…' }] },

@@ -8,10 +8,16 @@ import { accountProfile } from '../../../desktopApi'
 import { showToast } from '../../chrome/Toast'
 import { Menu } from '../files/ui'
 import { deletePermanently, failureText } from '../shared/api'
-import { DeleteForGoodDialog, TrashView, totalBytes, trashMenu } from './TrashView'
+import { DeleteForGoodDialog, TrashDetailsDialog, TrashView, totalBytes, trashMenu } from './TrashView'
 import { seed } from '../../seed'
 import { publishCount } from '../../chrome/counts'
+import { useCommand } from '../../shortcuts'
 
+/** DW-0748 Restore: "Puts it back in Documents, with Undo". One item names where it went; Undo sends it back. */
+export function restoredText(restored: TrashEntry[]): string {
+  if (restored.length === 1) return `Restored to ${restored[0]!.originalPath || 'Files'}`
+  return `${restored.length} items restored`
+}
 
 export default function Section({ nav }: SectionProps) {
   const source = useDriveSource()
@@ -24,6 +30,7 @@ export default function Section({ nav }: SectionProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [emptying, setEmptying] = useState<{ done: number; total: number } | null>(() => seed('trash.emptying', null))
+  const [details, setDetails] = useState<TrashEntry | null>(null)
   const now = useMemo(() => new Date(), [])
   const removedRun = useRef<{ ids: Set<string>; done: number } | null>(null)
 
@@ -53,15 +60,23 @@ export default function Section({ nav }: SectionProps) {
   }
 
   const restore = async (ids: string[]) => {
+    const restored = entries.filter((e) => ids.includes(e.item.id))
     try {
       await source.restoreFromTrash(ids)
       setEntries((e) => e.filter((x) => !ids.includes(x.item.id)))
       setSelected(new Set())
-      showToast({ kind: 'done', text: ids.length === 1 ? 'Restored' : `${ids.length} items restored` })
+      // Undo moves what came back to Trash again (the same move as Files' Delete); the list follows its event.
+      showToast({ kind: 'undo', text: restoredText(restored), onAction: () => void source.moveToTrash(ids).then(() => load(), () => showToast({ kind: 'failed', text: 'Couldn’t move it back to Trash. Try again.' })) })
     } catch {
       showToast({ kind: 'failed', text: 'Couldn’t restore. Try again.' })
     }
   }
+  // Alt+Enter (the window's Details shortcut) on one selected item: DW-0411's dialog for it, over Trash.
+  useCommand('details', useCallback(() => {
+    if (selected.size !== 1) return
+    const one = entries.find((e) => selected.has(e.item.id))
+    if (one) setDetails(one)
+  }, [selected, entries]))
 
   const run = async (ids: string[], secret: { code?: string; password?: string }) => {
     setBusy(true)
@@ -102,10 +117,11 @@ export default function Section({ nav }: SectionProps) {
           onPick={(id) => {
             const ids = selected.has(menu.entry.item.id) ? [...selected] : [menu.entry.item.id]
             if (id === 'restore') void restore(ids)
-            else if (id === 'details') nav.go({ section: 'files', id: menu.entry.item.id, sub: 'details' })
+            else if (id === 'details') setDetails(menu.entry)
             else if (id === 'delete') setConfirm({ ids, all: false })
           }} />
       )}
+      {details && <TrashDetailsDialog entry={details} now={now} onClose={() => setDetails(null)} />}
       {confirm && (
         <DeleteForGoodDialog
           title={confirm.all ? 'Empty Trash?' : 'Delete permanently?'} count={target.length} bytes={totalBytes(target)} factor={factor} busy={busy} error={error}

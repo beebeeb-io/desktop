@@ -1,6 +1,6 @@
 // B05's fixture data: Shared (DW-0501 to DW-0515), Search (DW-0801 to DW-0803) and Trash (DW-0747 to DW-0749b,
 // DW-0117), in the board's words. Owned by B05 only.
-import type { DriveItem, DriveSource, ShareEntry, TrashEntry } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, type DriveItem, type DriveSource, type ShareEntry, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { createFilesSource } from './files'
 
 export const B05_NOW = '2026-11-08T12:00:00'
@@ -141,12 +141,33 @@ function shareEntries(): ShareEntry[] {
   return [...withMe, ...byMe, ...links]
 }
 
+/** The ids B05's shares use (With me, By me, links): the board source asks this source about them (Details, Version history). */
+export const SHARED_IDS = new Set([...WITH_ME.map((r) => r.id), ...BY_ME_PEOPLE.map((r) => r.id), ...BY_ME_LINKS.map((r) => r.id)])
+
 export function createSharedSource(o: { empty?: boolean } = {}): DriveSource {
   const base = createFilesSource()
   let trash = o.empty ? [] : [...TRASH]
+  const shared = (id: string) => {
+    const hit = shareEntries().find((e) => e.item.id === id)
+    if (!hit) throw new DriveSourceError('not-found')
+    return hit
+  }
   return {
     ...base,
     shared: async () => (o.empty ? [] : shareEntries()),
+    // DW-0505 Details on a shared item: where it is (Shared), and three versions for a file, as Files' fixtures have.
+    details: async (id) => {
+      const { item, direction } = shared(id)
+      return { item, path: [{ id: null, name: direction === 'with-me' ? 'Shared with you' : 'Files' }], versionCount: item.isFolder ? 0 : 3 }
+    },
+    versions: async (id) => {
+      const { item } = shared(id)
+      return [
+        { id: 'v3', createdAt: item.modifiedAt, size: item.size ?? 0, current: true, deviceName: 'This PC' },
+        { id: 'v2', createdAt: '2026-10-01T10:00:00', size: item.size ?? 0, current: false, deviceName: 'iPhone' },
+        { id: 'v1', createdAt: '2026-09-01T10:00:00', size: item.size ?? 0, current: false, deviceName: 'MacBook' },
+      ]
+    },
     search: async (q) => SEARCH_ITEMS.filter((r) => r.item.name.toLowerCase().includes(q.trim().toLowerCase())).map((r) => r.item),
     trash: async () => trash,
     restoreFromTrash: async (ids) => { trash = trash.filter((t) => !ids.includes(t.item.id)) },

@@ -51,6 +51,9 @@ export function V2Shell() {
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [sync, setSync] = useState<SyncSummary | null>(null)
   const counts = useSidebarCounts(nav.route.section)
+  // Search is a view over the section it opened from: the sidebar keeps that one current (DW-0801 to DW-0803, M3c).
+  const [searchFrom, setSearchFrom] = useState<SectionId>('files')
+  if (nav.route.section !== 'search' && nav.route.section !== searchFrom) setSearchFrom(nav.route.section)
 
   useEffect(() => {
     source.storage().then(setStorage, () => setStorage(null))
@@ -76,7 +79,7 @@ export function V2Shell() {
     <div className="flex h-screen flex-col bg-paper font-sans text-ink">
       <CaptionBar title={title} />
       <div className="flex min-h-0 flex-1">
-        <Sidebar active={nav.route.section} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
+        <Sidebar active={nav.route.section === 'search' ? searchFrom : nav.route.section} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
         <main className="flex min-w-0 flex-1 flex-col">
           <Suspense fallback={null}>
             <Section nav={nav} />

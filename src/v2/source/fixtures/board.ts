@@ -5,7 +5,7 @@
 import type { DriveEvent, DriveSource, ItemId, StorageSummary, SyncSummary, TrashEntry } from '@beebeeb/shared/drive-ui'
 import type { Scenario } from '../fixtures'
 import { createFilesSource } from './files'
-import { createSharedSource, TRASH } from './shared'
+import { createSharedSource, SHARED_IDS, TRASH } from './shared'
 import { createPhotosSource, PHOTO_ENTRIES } from './photos'
 import { createOpenSource, OPEN_ITEMS } from './open'
 import { createOfficeSource, OFFICE_ITEMS } from './office'
@@ -30,7 +30,8 @@ export function boardSync(scenario: Scenario): SyncSummary {
 export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
   const empty = scenario === 'empty'
   const files = createFilesSource({ scenario: scenario === 'offline' || scenario === 'rename-fails' ? scenario : 'default', items: empty ? [] : undefined })
-  const shared = createSharedSource({ empty })
+  // `no-shares` (DW-0508 to DW-0510): nothing shared yet, while Files keeps DW-0401's rows (Files › leads somewhere).
+  const shared = createSharedSource({ empty: empty || scenario === 'no-shares' })
   const photos = createPhotosSource(empty ? [] : PHOTO_ENTRIES)
   const open = createOpenSource()
   const office = createOfficeSource()
@@ -59,10 +60,12 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     kind: 'fixtures',
     details: async (id) => {
       if (officeAlias.has(id)) return files.details(id)
+      // B05's shares (Shared › Details) are the shared fixtures' own items.
+      if (SHARED_IDS.has(id)) return shared.details(id)
       return owner(id).details(id)
     },
     thumbnail: (id, size) => owner(id).thumbnail(id, size),
-    versions: (id) => owner(id).versions(idFor(id)),
+    versions: (id) => (SHARED_IDS.has(id) ? shared.versions(id) : owner(id).versions(idFor(id))),
     readText: (id) => owner(id).readText(idFor(id)),
     saveText: (id, text, base) => owner(id).saveText(idFor(id), text, base),
     readBytes: (id) => owner(id).readBytes(idFor(id)),
