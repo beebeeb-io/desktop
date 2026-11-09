@@ -57,7 +57,11 @@ pub enum StartupSurface {
 /// opens the window (sign-in on first run), a login launch opens nothing, and an update's relaunch opens what the person
 /// had open and nothing else (sign-in if they were signed out).
 pub fn startup_surface(platform: Platform, no_sync_root: bool, source: LaunchSource) -> StartupSurface {
-    let configured_or_first_run = if no_sync_root { StartupSurface::Onboarding } else { StartupSurface::MainWindow };
+    let configured_or_first_run = if no_sync_root {
+        StartupSurface::Onboarding
+    } else {
+        StartupSurface::MainWindow
+    };
     if platform != Platform::Macos {
         return configured_or_first_run;
     }
@@ -201,19 +205,31 @@ mod tests {
 
     #[test]
     fn linux_still_opens_settings_after_startup() {
-        assert_eq!(startup_surface(Platform::Linux, false, LaunchSource::Manual), StartupSurface::MainWindow);
+        assert_eq!(
+            startup_surface(Platform::Linux, false, LaunchSource::Manual),
+            StartupSurface::MainWindow
+        );
         assert_eq!(main_window_label(Platform::Linux), "settings");
     }
 
     #[test]
     fn linux_first_run_still_opens_onboarding() {
-        assert_eq!(startup_surface(Platform::Linux, true, LaunchSource::Manual), StartupSurface::Onboarding);
+        assert_eq!(
+            startup_surface(Platform::Linux, true, LaunchSource::Manual),
+            StartupSurface::Onboarding
+        );
     }
 
     #[test]
     fn windows_startup_is_unchanged() {
-        assert_eq!(startup_surface(Platform::Windows, false, LaunchSource::Manual), StartupSurface::MainWindow);
-        assert_eq!(startup_surface(Platform::Windows, true, LaunchSource::Manual), StartupSurface::Onboarding);
+        assert_eq!(
+            startup_surface(Platform::Windows, false, LaunchSource::Manual),
+            StartupSurface::MainWindow
+        );
+        assert_eq!(
+            startup_surface(Platform::Windows, true, LaunchSource::Manual),
+            StartupSurface::Onboarding
+        );
         assert_eq!(main_window_label(Platform::Windows), "main-app");
     }
 
@@ -221,8 +237,14 @@ mod tests {
     fn macos_manual_launch_keeps_todays_rows() {
         // Slice 6 (task 1683) gave a Mac a row per way of launching (`surfaces::launch`'s tests pin them all); a manual
         // launch is the row it always had.
-        assert_eq!(startup_surface(Platform::Macos, false, LaunchSource::Manual), StartupSurface::MainWindow);
-        assert_eq!(startup_surface(Platform::Macos, true, LaunchSource::Manual), StartupSurface::Onboarding);
+        assert_eq!(
+            startup_surface(Platform::Macos, false, LaunchSource::Manual),
+            StartupSurface::MainWindow
+        );
+        assert_eq!(
+            startup_surface(Platform::Macos, true, LaunchSource::Manual),
+            StartupSurface::Onboarding
+        );
     }
 
     #[test]
@@ -236,8 +258,14 @@ mod tests {
         // Until slice 3 the tray click still shows the compact flyout on a Mac; Linux keeps it as its main window.
         assert_eq!(compact_window_label(Platform::Macos), "settings");
         assert_eq!(compact_window_label(Platform::Linux), "settings");
-        assert_eq!(compact_window_label(Platform::Linux), main_window_label(Platform::Linux));
-        assert_ne!(compact_window_label(Platform::Macos), main_window_label(Platform::Macos));
+        assert_eq!(
+            compact_window_label(Platform::Linux),
+            main_window_label(Platform::Linux)
+        );
+        assert_ne!(
+            compact_window_label(Platform::Macos),
+            main_window_label(Platform::Macos)
+        );
     }
 
     #[test]
@@ -273,7 +301,14 @@ mod tests {
         // 4), and a popover once slice 3 builds it.
         assert!(MACOS_LABEL_AWARE_CLOSE);
         assert_eq!(close_policy(Platform::Macos, "main"), ClosePolicy::Destroy);
-        for label in ["popover", "settings", "onboarding", "tray", "conflict-7f3a", "macos-settings"] {
+        for label in [
+            "popover",
+            "settings",
+            "onboarding",
+            "tray",
+            "conflict-7f3a",
+            "macos-settings",
+        ] {
             assert_eq!(close_policy(Platform::Macos, label), ClosePolicy::Hide, "{label}");
         }
     }
@@ -312,8 +347,17 @@ mod tests {
         assert!(dock_icon_wanted([("main", true)]));
         assert!(dock_icon_wanted([("settings", true), ("main", true)]));
         assert!(dock_icon_wanted([("conflict-7f3a", true)]));
-        assert!(!dock_icon_wanted([("onboarding", true), ("onboarding", false), ("conflict-7f3a", false)]));
-        assert!(!dock_icon_wanted([("settings", true), ("popover", true), ("tray", true), ("onboarding", true)]));
+        assert!(!dock_icon_wanted([
+            ("onboarding", true),
+            ("onboarding", false),
+            ("conflict-7f3a", false)
+        ]));
+        assert!(!dock_icon_wanted([
+            ("settings", true),
+            ("popover", true),
+            ("tray", true),
+            ("onboarding", true)
+        ]));
     }
 
     #[test]
@@ -321,8 +365,14 @@ mod tests {
         // Two-surface §12 row 2: `open_onboarding_window` and `open_reauth_window` route to `main` on macOS, and the
         // `onboarding` window is never built there. The other rows are today's labels, pinned.
         assert_eq!(onboarding_surface(Platform::Macos), OnboardingSurface::BeebeebWindow);
-        assert_eq!(onboarding_surface(Platform::Windows), OnboardingSurface::Window("windows-onboarding"));
-        assert_eq!(onboarding_surface(Platform::Linux), OnboardingSurface::Window("onboarding"));
+        assert_eq!(
+            onboarding_surface(Platform::Windows),
+            OnboardingSurface::Window("windows-onboarding")
+        );
+        assert_eq!(
+            onboarding_surface(Platform::Linux),
+            OnboardingSurface::Window("onboarding")
+        );
     }
 
     #[test]
@@ -424,7 +474,11 @@ mod wiring_tests {
         // `prevent_close` and the hide only inside the policy check. The hide is `hide_on_close`, which sends the
         // popover through `macos_popover::hide` (self-review of #202); no plain `window.hide()` is left here.
         let check = handler.find("close_policy(").unwrap();
-        assert_eq!(handler.matches("window.hide()").count(), 0, "a plain hide in:\n{handler}");
+        assert_eq!(
+            handler.matches("window.hide()").count(),
+            0,
+            "a plain hide in:\n{handler}"
+        );
         for call in ["api.prevent_close()", "hide_on_close(window)"] {
             assert_eq!(handler.matches(call).count(), 1, "{call} in:\n{handler}");
             assert!(
@@ -496,14 +550,19 @@ mod wiring_tests {
             !src.contains(".run(tauri::generate_context!())"),
             "the app runs without an exit-request callback again"
         );
-        let start = src.find(".build(tauri::generate_context!())").expect("the app is built first");
+        let start = src
+            .find(".build(tauri::generate_context!())")
+            .expect("the app is built first");
         let run = &src[start..start + src[start..].find("\n}\n").expect("the end of run()")];
         let asked = run
             .find("surfaces::policy::keep_running_on_exit_request(surfaces::policy::Platform::current(), *code)")
             .unwrap_or_else(|| panic!("the callback asks the policy:\n{run}"));
         let prevented = run.find("api.prevent_exit();").expect("and prevents the exit");
         assert!(asked < prevented, "{run}");
-        assert!(run.contains("tauri::RunEvent::ExitRequested { code, api, .. }"), "{run}");
+        assert!(
+            run.contains("tauri::RunEvent::ExitRequested { code, api, .. }"),
+            "{run}"
+        );
         assert_eq!(run.matches("api.prevent_exit();").count(), 1, "{run}");
     }
 
@@ -512,15 +571,23 @@ mod wiring_tests {
         // Review round 2, P2-1: with the window closed the app lives on in the menu bar, so double-clicking
         // Beebeeb.app, Spotlight or the Dock must bring the window back (spec §7.3, `RunEvent::Reopen`).
         let src = lib_rs();
-        let start = src.find(".build(tauri::generate_context!())").expect("the app is built first");
+        let start = src
+            .find(".build(tauri::generate_context!())")
+            .expect("the app is built first");
         let run = &src[start..start + src[start..].find("\n}\n").expect("the end of run()")];
         assert!(
             run.contains("if let tauri::RunEvent::Reopen { .. } = event {\n                reopen_main_window(app);"),
             "{run}"
         );
         let body = item_from(&src, "fn reopen_main_window(");
-        assert!(body.contains("show_main_window(app, MainNav::Home)"), "a closed window opens on Home:\n{body}");
-        assert!(body.contains("app.get_webview_window("), "an open one is shown as it is:\n{body}");
+        assert!(
+            body.contains("show_main_window(app, MainNav::Home)"),
+            "a closed window opens on Home:\n{body}"
+        );
+        assert!(
+            body.contains("app.get_webview_window("),
+            "an open one is shown as it is:\n{body}"
+        );
     }
 
     /// Every `win.show()` in `body` has an unhide of the app (`unhide_app(app)`) since the previous one: a window shown
@@ -530,7 +597,10 @@ mod wiring_tests {
         let mut shows = 0;
         while let Some(at) = body[from..].find("win.show()") {
             let before = &body[from..from + at];
-            assert!(before.contains("unhide_app(app);"), "{name}: a window is shown without unhiding the app first:\n{body}");
+            assert!(
+                before.contains("unhide_app(app);"),
+                "{name}: a window is shown without unhiding the app first:\n{body}"
+            );
             from += at + "win.show()".len();
             shows += 1;
         }
@@ -541,13 +611,23 @@ mod wiring_tests {
     fn opening_a_window_on_a_mac_unhides_the_app_first() {
         // Review round 2, P2-2: the tray's Hide hides the app; every way back must unhide it.
         let src = lib_rs();
-        assert_eq!(every_show_unhides_first("show_main_window", item_from(&src, "fn show_main_window(")), 2);
-        assert_eq!(every_show_unhides_first("reopen_main_window", item_from(&src, "fn reopen_main_window(")), 1);
+        assert_eq!(
+            every_show_unhides_first("show_main_window", item_from(&src, "fn show_main_window(")),
+            2
+        );
+        assert_eq!(
+            every_show_unhides_first("reopen_main_window", item_from(&src, "fn reopen_main_window(")),
+            1
+        );
         let compact = item_from(&src, "fn show_compact_app_window_with_nav(");
         assert_eq!(every_show_unhides_first("show_compact_app_window_with_nav", compact), 2);
         assert!(
-            compact.matches("#[cfg(target_os = \"macos\")]\n        unhide_app(app);").count()
-                + compact.matches("#[cfg(target_os = \"macos\")]\n            unhide_app(app);").count()
+            compact
+                .matches("#[cfg(target_os = \"macos\")]\n        unhide_app(app);")
+                .count()
+                + compact
+                    .matches("#[cfg(target_os = \"macos\")]\n            unhide_app(app);")
+                    .count()
                 == 2,
             "the compact window's unhide is macOS only (Linux keeps today's open):\n{compact}"
         );
@@ -559,9 +639,18 @@ mod wiring_tests {
         let src = lib_rs();
         let start = src.find("\"tray_hide\" =>").expect("the tray's Hide arm");
         let arm = &src[start..start + src[start..].find("\"tray_autostart\" =>").expect("the next arm")];
-        assert!(arm.contains("surfaces::policy::tray_hide(surfaces::policy::Platform::current())"), "{arm}");
-        assert!(arm.contains("TrayHide::App => {"), "{arm}");
-        assert!(!arm.contains("get_webview_window(\"settings\")"), "a literal label again:\n{arm}");
+        assert!(
+            arm.contains("surfaces::policy::tray_hide(surfaces::policy::Platform::current())"),
+            "{arm}"
+        );
+        // rustfmt puts the App arm's brace on a line of its own (its body starts with an attribute), so the arm is
+        // compared with every run of whitespace as one space.
+        let flat = arm.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("TrayHide::App => {"), "{arm}");
+        assert!(
+            !arm.contains("get_webview_window(\"settings\")"),
+            "a literal label again:\n{arm}"
+        );
     }
 
     #[test]
@@ -571,11 +660,20 @@ mod wiring_tests {
         // switch, which is the AppKit mitigation. Both branches (an existing window, a new one) keep that order.
         let src = lib_rs();
         let body = item_from(&src, "fn show_main_window(");
-        let dock = body.find("set_macos_dock_icon(app, true);").expect("the Dock icon first");
+        let dock = body
+            .find("set_macos_dock_icon(app, true);")
+            .expect("the Dock icon first");
         let mut checked = 0;
-        for branch in [&body[..body.find("let Some(config)").unwrap()], &body[body.find("let Some(config)").unwrap()..]] {
-            let show = branch.find("win.show();").unwrap_or_else(|| panic!("a show in:\n{branch}"));
-            let focus = branch.find("win.set_focus();").unwrap_or_else(|| panic!("a focus in:\n{branch}"));
+        for branch in [
+            &body[..body.find("let Some(config)").unwrap()],
+            &body[body.find("let Some(config)").unwrap()..],
+        ] {
+            let show = branch
+                .find("win.show();")
+                .unwrap_or_else(|| panic!("a show in:\n{branch}"));
+            let focus = branch
+                .find("win.set_focus();")
+                .unwrap_or_else(|| panic!("a focus in:\n{branch}"));
             assert!(show < focus, "{branch}");
             checked += 1;
         }
@@ -627,10 +725,16 @@ mod wiring_tests {
             open.contains("OnboardingSurface::BeebeebWindow => show_sign_in_in_beebeeb_window(app),"),
             "a Mac signs in in the Beebeeb window:\n{open}"
         );
-        assert!(!open.contains("WebviewWindowBuilder"), "the opener itself builds no window:\n{open}");
+        assert!(
+            !open.contains("WebviewWindowBuilder"),
+            "the opener itself builds no window:\n{open}"
+        );
 
         // The macOS hand-over opens `main` on Home: the window shows sign-in by itself when there is no session.
-        let mac = item_from(&src, "fn show_sign_in_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {\n    show_main_window(");
+        let mac = item_from(
+            &src,
+            "fn show_sign_in_in_beebeeb_window(app: &tauri::AppHandle) -> Result<(), String> {\n    show_main_window(",
+        );
         assert!(mac.contains("show_main_window(app, MainNav::Home);"), "{mac}");
         assert!(!mac.contains("WebviewWindowBuilder"), "{mac}");
 
@@ -645,7 +749,10 @@ mod wiring_tests {
             "the window builder for sign-in is not compiled on a Mac:\n{head}"
         );
         let builder = item_from(&src, "fn open_onboarding_window_labelled(");
-        assert!(builder.contains("WebviewWindowBuilder::new(") && builder.contains("\"Welcome to Beebeeb\""), "{builder}");
+        assert!(
+            builder.contains("WebviewWindowBuilder::new(") && builder.contains("\"Welcome to Beebeeb\""),
+            "{builder}"
+        );
 
         // Sign in again (R8): macOS opens the same window and asks it for the card (`MainNav::Reauth`, review P3-1, whatever
         // the session says); Windows keeps its refusal; Linux keeps its reload-in-mode.
@@ -657,7 +764,10 @@ mod wiring_tests {
         assert!(mac_arm.contains("show_reauth_in_beebeeb_window(&app)"), "{reauth}");
         let others = "#[cfg(not(any(target_os = \"windows\", target_os = \"macos\")))]";
         assert!(reauth.contains(others), "Linux keeps its own arm:\n{reauth}");
-        assert!(!mac_arm[..mac_arm.find(others).unwrap_or(mac_arm.len())].contains("WebviewWindowBuilder"), "{reauth}");
+        assert!(
+            !mac_arm[..mac_arm.find(others).unwrap_or(mac_arm.len())].contains("WebviewWindowBuilder"),
+            "{reauth}"
+        );
     }
 
     #[test]
@@ -691,7 +801,10 @@ mod wiring_tests {
             body.contains("show_main_window(app, MainNav::settings(None));"),
             "the OpenSettings arm must open the Beebeeb window on Settings:\n{body}"
         );
-        assert!(!body.contains("show_macos_settings_window"), "the retired Settings window is back");
+        assert!(
+            !body.contains("show_macos_settings_window"),
+            "the retired Settings window is back"
+        );
         // F11 and F15: View › Home opens the window on Home; View › Back never opens one.
         assert!(body.contains("MainMenuNav::Home => show_main_window(app, MainNav::Home),"));
         assert!(body.contains("MainMenuNav::Back => back_in_main_window(app),"));
@@ -707,6 +820,9 @@ mod wiring_tests {
             body.contains("show_main_window(app, MainNav::settings(Some(\"about\")));"),
             "a menu-triggered update check must open the Beebeeb window on About:\n{body}"
         );
-        assert!(!src.contains("fn show_macos_settings_window("), "the retired Settings window's opener is back");
+        assert!(
+            !src.contains("fn show_macos_settings_window("),
+            "the retired Settings window's opener is back"
+        );
     }
 }
