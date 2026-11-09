@@ -643,7 +643,10 @@ mod wiring_tests {
             arm.contains("surfaces::policy::tray_hide(surfaces::policy::Platform::current())"),
             "{arm}"
         );
-        assert!(arm.contains("TrayHide::App => {"), "{arm}");
+        // rustfmt puts the App arm's brace on a line of its own (its body starts with an attribute), so the arm is
+        // compared with every run of whitespace as one space.
+        let flat = arm.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("TrayHide::App => {"), "{arm}");
         assert!(
             !arm.contains("get_webview_window(\"settings\")"),
             "a literal label again:\n{arm}"

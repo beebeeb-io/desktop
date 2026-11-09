@@ -475,9 +475,14 @@ fn drive_v2_trash_items_refuses_what_the_server_does_not_have() {
 
 #[test]
 fn drive_v2_undo_trash_token_works_once() {
-    let token = remember_undo(vec!["a1".into(), "b1".into()]);
-    assert!(!token.contains("a1"), "the token names no file");
-    assert_eq!(take_undo(&token), Some(vec!["a1".to_string(), "b1".to_string()]));
+    // Ids with letters a UUID never has: "a1" is in about one random UUID in nine, and failed CI that way.
+    let ids = ["row-a1".to_string(), "row-b1".to_string()];
+    let token = remember_undo(ids.to_vec());
+    assert!(
+        ids.iter().all(|id| !token.contains(id.as_str())),
+        "the token names no file"
+    );
+    assert_eq!(take_undo(&token), Some(ids.to_vec()));
     assert_eq!(take_undo(&token), None);
 }
 
