@@ -74,6 +74,11 @@ export function SetupFlow() {
   }, [readFinder])
 
   const explorer = explorerStatus(finder)
+  // Try again: ask the reconciler, then read the state it reports (the retry's own answer is not shown).
+  const retryFinder = async () => {
+    await command('finder_setup_retry')
+    readFinder()
+  }
   const skip = () => setStep('done')
 
   const addPasskey = async () => {
@@ -134,7 +139,7 @@ export function SetupFlow() {
       break
     case 'explorer':
       body = <ExplorerStep status={explorer.status} errorCode={explorer.code} onShow={() => void command('finder_setup_show_app')}
-        onTryAgain={() => { void command('finder_setup_retry').then(readFinder) }} onContinue={() => setStep('notifications')} />
+        onTryAgain={() => void retryFinder()} onContinue={() => setStep('notifications')} />
       break
     case 'notifications':
       body = <NotificationsStep onAllow={() => { note('notifications', 'On'); setStep('login') }} onNotNow={() => { note('notifications', 'Off'); setStep('login') }} />

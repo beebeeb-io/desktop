@@ -157,7 +157,7 @@ export const FRAMES: FrameRegistry = {
   ),
   'DW-1520': () => (
     <Win overlay={<Menu x={window.innerWidth - 232} y={92} entries={newMenu()} onPick={noop} label="New" />}>
-      <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4"><h1 className="m-0 text-[15px] font-semibold text-ink">Files</h1><span className="flex-1" /><span className="inline-flex h-8 items-center rounded-md bg-amber px-4 text-[13px] font-medium text-[oklch(0.22_0.01_70)]">New</span></div>
+      <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4"><h1 className="m-0 text-[15px] font-semibold text-ink">Files</h1><span className="flex-1" /><span className="inline-flex h-8 items-center rounded-md bg-amber px-4 text-[13px] font-medium text-amber-ink">New</span></div>
       <ListBackdrop />
     </Win>
   ),

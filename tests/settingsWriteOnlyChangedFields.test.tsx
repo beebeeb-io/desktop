@@ -6,13 +6,15 @@
  * now merges only the fields it is sent (Rust: `config::tests::test_1889_m5_*`, `lib.rs`
  * `test_1889_m5_a_speed_changed_after_a_tray_pause_leaves_the_pause`), and these tests pin the senders:
  * the pages `Bandwidth` and `Notifications`, run with the component harness against a disk that merges
- * what it is sent, as the real command does; `MacSettings`' hook is pinned in `macSettingsTabs.test.tsx`; and
- * a source census over `src` finds no `set_desktop_config` call that sends a whole object.
+ * what it is sent, as the real command does; `MacSettings`' hook is pinned in `macSettingsTabs.test.tsx`; desktop v2's
+ * settings hook (`useConfig`, B12) runs the same way below; and a source census over `src` finds no
+ * `set_desktop_config` call that sends a whole object.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { invoke } from '@tauri-apps/api/core'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { command } from '../src/desktopApi'
 import { loadComponent, mount, type Mounted } from './fixtures/componentHarness'
 
 const mounted: Mounted[] = []
@@ -290,6 +292,52 @@ describe('Notifications page', () => {
   })
 })
 
+// Desktop v2 (B12): every Settings pane reads and writes through one hook. It wrote the whole object back until R1f
+// (the property this file pins); now a change is a patch.
+describe('desktop v2 Settings: useConfig', () => {
+  test('a change writes only that field, and a pause made elsewhere stays', async () => {
+    const { state, backend } = disk()
+    const m = mount('v2/sections/settings/shell/data.ts', 'useConfig', {
+      backend,
+      bindings: { command, DEFAULT_CONFIG: wholeConfig, FIXTURE_CONFIG: wholeConfig, hasTauri: () => true },
+    })
+    mounted.push(m)
+    await m.flush()
+    state.config.pause_sync = true // the tray pauses sync while Settings is open
+    m.tree().update({ notify_conflicts: false })
+    await m.flush()
+    expect(state.writes).toEqual([{ notify_conflicts: false }])
+    expect(state.config.pause_sync).toBe(true)
+    expect(m.tree().config.notify_conflicts).toBe(false)
+  })
+
+  test('writes go one at a time, in order: Pause then Resume never lands as Resume then Pause', async () => {
+    const { state, backend } = disk()
+    const release: Array<() => void> = []
+    const m = mount('v2/sections/settings/shell/data.ts', 'useConfig', {
+      backend: {
+        ...backend,
+        // Each write is held until the test lets it finish, so a second one could overtake the first.
+        set_desktop_config: (args: any) => new Promise<void>((done) => release.push(() => { backend.set_desktop_config(args); done() })),
+      },
+      bindings: { command, DEFAULT_CONFIG: wholeConfig, FIXTURE_CONFIG: wholeConfig, hasTauri: () => true },
+    })
+    mounted.push(m)
+    await m.flush()
+    m.tree().update({ pause_sync: true })
+    m.tree().update({ pause_sync: false })
+    await m.flush()
+    expect(release).toHaveLength(1) // the second waits for the first
+    release[0]()
+    await m.flush()
+    expect(release).toHaveLength(2)
+    release[1]()
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
+    expect(state.config.pause_sync).toBe(false)
+  })
+})
+
 describe('every sender of set_desktop_config', () => {
   function sources(dir: string): string[] {
     return readdirSync(dir).flatMap((name) => {
@@ -307,11 +355,13 @@ describe('every sender of set_desktop_config', () => {
         found.push({ file: file.slice(file.indexOf('/src/') + 1), sent: match[1] })
       }
     }
-    // The four senders: the Mac Settings hook, the Windows/Linux Settings view, and the two pages.
+    // The five senders: the Mac Settings hook, the Windows/Linux Settings view, the two pages, and desktop v2's Settings
+    // hook (B12; it sends `patch`, pinned by behaviour above).
     expect(found.map((f) => f.file).sort()).toEqual([
       'src/MacSettings.tsx',
       'src/pages/Bandwidth.tsx',
       'src/pages/Notifications.tsx',
+      'src/v2/sections/settings/shell/data.ts',
       'src/windows/views/SettingsView.tsx',
     ])
     for (const { file, sent } of found) {

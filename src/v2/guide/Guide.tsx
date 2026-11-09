@@ -49,7 +49,7 @@ export function GuideTip({ index, onNext, onSkip }: { index: number; onNext: () 
   const cardLeft = box ? Math.min(Math.max(box.left, 12), window.innerWidth - 332) : 260
   return (
     <div className="pointer-events-none absolute inset-0 z-40" data-guide-tip={tip.id}>
-      {box && <div data-outline className="absolute rounded-md border-2 border-ink shadow-[0_0_0_4px_oklch(1_0_0/0.6)]" style={box} />}
+      {box && <div data-outline className="absolute rounded-md border-2 border-ink ring-4 ring-paper/60" style={box} />}
       <div role="dialog" aria-label={`Tip ${index + 1} of ${TIPS.length}`} className="pointer-events-auto absolute w-[320px] rounded-lg border border-line bg-paper p-4 shadow-xl" style={{ top: cardTop, left: cardLeft }}>
         <p className="m-0 text-[13px] leading-[19px] text-ink">{tip.text}</p>
         <div className="mt-3 flex items-center justify-between">
@@ -68,11 +68,11 @@ export function GuideTip({ index, onNext, onSkip }: { index: number; onNext: () 
 /** DW-0380: the desktop, the window on Files, the taskbar's notification area, and the tip under the b. Once per PC. */
 export function TrayTipScene({ window: win, onGotIt }: { window: ReactNode; onGotIt: () => void }) {
   return (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-[oklch(0.62_0.03_230)] font-sans" data-desktop>
+    <div className="relative flex h-screen flex-col overflow-hidden bg-win-desktop font-sans" data-desktop>
       <div className="relative min-h-0 flex-1 p-6 pb-3">
         <div className="relative h-full overflow-hidden rounded-lg shadow-2xl [&>div]:!h-full">{win}</div>
       </div>
-      <div className="relative flex h-12 flex-none items-center justify-end bg-[oklch(0.95_0_0/0.92)] px-3" data-taskbar-row>
+      <div className="relative flex h-12 flex-none items-center justify-end bg-win-taskbar px-3" data-taskbar-row>
         <TaskbarStrip state="up-to-date" mode="light" />
         <div role="dialog" aria-label="Beebeeb lives in the notification area" className="absolute bottom-[54px] right-3 w-[300px] rounded-lg border border-line bg-paper p-4 shadow-xl" data-tray-tip>
           <div className="text-[13px] font-semibold text-ink">Beebeeb lives in the notification area</div>

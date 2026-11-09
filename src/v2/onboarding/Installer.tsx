@@ -7,7 +7,7 @@ export function InstallerScene({ page }: { page: 'installing' | 'finish' }) {
     <span data-installer-button={label} className={`inline-block min-w-[74px] rounded-[3px] border px-3 py-[3px] text-center text-[12px] ${dim ? 'border-[#c8c8c8] text-[#a0a0a0]' : primary ? 'border-[#0067c0] text-[#1a1a1a]' : 'border-[#adadad] text-[#1a1a1a]'} bg-[#f0f0f0]`}>{label}</span>
   )
   return (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-[oklch(0.62_0.03_230)] font-sans" data-desktop>
+    <div className="relative flex h-screen flex-col overflow-hidden bg-win-desktop font-sans" data-desktop>
       <div className="grid min-h-0 flex-1 place-items-center">
         <div role="dialog" aria-label="Beebeeb Setup" className="w-[500px] border border-[#888] bg-[#f0f0f0] text-[#1a1a1a] shadow-2xl" data-system-drawn>
           <div className="flex h-8 items-center gap-2 bg-white px-2 text-[12px]"><BBProductIcon product="drive" size={14} />Beebeeb Setup<span className="ml-auto text-[#5c5c5c]">✕</span></div>
@@ -41,9 +41,9 @@ export function InstallerScene({ page }: { page: 'installing' | 'finish' }) {
           </div>
         </div>
       </div>
-      <div className="flex h-12 flex-none items-center justify-center gap-2 bg-[oklch(0.95_0_0/0.92)]" data-taskbar-row>
-        {['Start', 'Search', 'File Explorer', 'Edge'].map((t) => <span key={t} className="h-7 w-7 rounded bg-[oklch(0.85_0_0)]" title={t} aria-hidden />)}
-        {page === 'installing' && <span className="h-7 w-7 rounded bg-[oklch(0.8_0_0)]" aria-hidden />}
+      <div className="flex h-12 flex-none items-center justify-center gap-2 bg-win-taskbar" data-taskbar-row>
+        {['Start', 'Search', 'File Explorer', 'Edge'].map((t) => <span key={t} className="h-7 w-7 rounded bg-win-taskbar-app" title={t} aria-hidden />)}
+        {page === 'installing' && <span className="h-7 w-7 rounded bg-win-taskbar-app-open" aria-hidden />}
       </div>
     </div>
   )

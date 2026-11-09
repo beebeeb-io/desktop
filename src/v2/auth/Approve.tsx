@@ -78,7 +78,7 @@ export interface ApproveDialogProps {
 export function ApproveDialog(p: ApproveDialogProps) {
   const device = p.review.device_name ?? 'that device'
   return (
-    <div className="absolute inset-0 z-40 grid place-items-center bg-[oklch(0_0_0/0.28)]">
+    <div className="absolute inset-0 z-40 grid place-items-center bg-scrim">
       <div role="dialog" aria-modal="true" aria-labelledby="approve-dialog-title" className="w-[440px] rounded-xl border border-line bg-paper p-6 shadow-2xl" data-approve-dialog={p.stage}>
         {p.stage === 'review' || p.stage === 'hello' ? <Review {...p} device={device} /> : <Result {...p} device={device} />}
       </div>

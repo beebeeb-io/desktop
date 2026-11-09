@@ -3,7 +3,7 @@
 // Drive's App lock sits above the shared rows (the securityExtra slot, DW-0716).
 import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { command } from '../../../../desktopApi'
+import { clearSession } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
@@ -126,11 +126,25 @@ function AppLock() {
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
+  // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
+  // neutral line, before the window moves on. Only through desktopApi's wrapper, which parses the outcome.
+  const [warning, setWarning] = useState<string | null>(null)
+  // The window again, without the Settings route: its gate reads the signed-out session and shows the sign-in. (It went to
+  // `frame=DW-A02/A03` without `platform=windows`, which loaded the legacy window, and a frame is a drawing anyway.)
+  const signedOut = () => window.location.assign('?window=main-app&platform=windows')
   const signOut = async () => {
     if (!hasTauri()) return onCancel()
-    const r = await command('clear_session')
-    if (r.ok) window.location.assign(`?window=main-app&frame=${all ? 'DW-A03' : 'DW-A02'}`)
-    else setError(r.reason)
+    const r = await clearSession()
+    if (!r.ok) setError(r.reason)
+    else if (r.value.warning) setWarning(r.value.warning.sentence)
+    else signedOut()
+  }
+  if (warning) {
+    return (
+      <Dialog labelId="signout-h" title="Signed out" onCancel={signedOut} actions={<Btn onClick={signedOut}>OK</Btn>}>
+        <p role="status">{warning}</p>
+      </Dialog>
+    )
   }
   return (
     <Dialog labelId="signout-h" title={all ? 'Sign out of all Beebeeb apps on this PC?' : 'Sign out of Drive?'} onCancel={onCancel}
@@ -386,7 +400,7 @@ function DeleteDone() {
         <span className="grid h-12 w-12 place-items-center rounded-full bg-green-bg text-green-text"><Icon name="check" size={22} /></span>
         <h1 className="text-[20px] font-semibold text-ink">Deletion cancelled</h1>
         <p className="max-w-[380px] text-[13px] text-ink-2">Your account is as it was. Nothing was deleted. We sent an email to say so.</p>
-        <a href="?window=main-app&section=files" className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-[oklch(0.22_0.01_70)]">Continue to Drive</a>
+        <a href="?window=main-app&section=files" className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-amber-ink">Continue to Drive</a>
       </div>
     </Page>
   )
