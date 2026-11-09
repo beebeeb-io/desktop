@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs'
 import { findGoesTo } from '../src/v2/sections/open/find'
 import { createKeptCopy, keptCopyName, saveNoteText, tagContent, versionNews } from '../src/v2/sections/open/model'
 import { failedWords } from '../src/v2/sections/photos/Dialogs'
-import { DriveSourceError } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, type DriveEvent } from '@beebeeb/shared/drive-ui'
+import { followListing, type ListingProgress } from '../src/v2/sections/search'
 import { officeSave } from '../src/v2/sections/open/office/save'
 import { NOT_INDEXED, saveFailure } from '../src/v2/sections/open/office'
 import { isProvisional } from '../src/v2/sections/open'
@@ -355,5 +356,30 @@ describe('M3b’s leftovers: create account steps 4–5 say a failure, and the a
 describe('#271: DW-A17’s Done goes to Account, as the board says (the PR body was wrong, the app was right)', () => {
   test('the approval’s Done opens Settings › Account', () => {
     expect(src('v2/sections/settings/account/SecurityPane.tsx')).toMatch(/case 'approve': return <ApproveSignIn [^\n]*onDone=\{\(\) => settings\.go\('account'\)\}/)
+  })
+})
+
+describe('M3c’s leftovers: Search’s list-loading count follows the loader’s progress, not the query', () => {
+  test('each change the engine reports reads the progress again; the count moves with no query change', async () => {
+    const listeners = new Set<(e: DriveEvent) => void>()
+    const fake = { subscribe: (l: (e: DriveEvent) => void) => { listeners.add(l); return () => { listeners.delete(l) } } }
+    const steps = [{ done: 1200, total: 18000 }, { done: 9000, total: 18000 }, undefined]
+    let at = 0
+    const seen: (ListingProgress | undefined)[] = []
+    const settle = () => new Promise((r) => setTimeout(r, 5))
+    const stop = followListing(fake, async () => steps[Math.min(at, steps.length - 1)], (p) => seen.push(p), 0)
+    await settle()
+    at = 1; listeners.forEach((l) => l({ kind: 'changed', folderId: null })); await settle()
+    at = 2; listeners.forEach((l) => l({ kind: 'sync', sync: {} as never })); await settle()
+    expect(seen).toEqual([{ done: 1200, total: 18000 }, { done: 9000, total: 18000 }, undefined])
+    stop()
+    expect(listeners.size).toBe(0)
+    at = 1; await settle()
+    expect(seen.length).toBe(3)
+  })
+  test('the section follows it, not a read keyed on the query', () => {
+    const search = src('v2/sections/search/index.tsx')
+    expect(search).toContain('useEffect(() => followListing(source, () => extras.status().then((s) => s.listing), setLoading), [source, extras])')
+    expect(search).not.toContain('[extras, query])')
   })
 })
