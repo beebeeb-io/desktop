@@ -1,14 +1,64 @@
 // Devices and sessions (DW-A55) and the confirm before a device is signed out (DW-A56).
+// A failed session list and an empty one are not the same screen: the failure offers Try again, and an empty success
+// shows this PC from local status when this PC is signed in.
 import { useEffect, useState } from 'react'
 import { Dialog, Group, Page } from '../shell/kit'
-import { useAccount, run, errorText, type Scenario } from './data'
+import { devicesPaneModel, useAccount, run, errorText, type DevicesPaneModel, type Scenario } from './data'
 import type { DeviceGroup } from './types'
 import { Btn, Pill, relative } from './ui'
 
 type Confirm = { kind: 'one'; device: DeviceGroup } | { kind: 'others' }
 
+const DEVICE_NOTE = 'A device signed out here stops working the next time it contacts Beebeeb. Signing out of the apps on this PC is on Sign-in and security.'
+
+function deviceDetail(d: DeviceGroup): string {
+  return [d.os, d.apps.filter((app) => app.length > 0).join(', '), relative(d.last_active_at)].filter((part) => part.length > 0).join(' · ')
+}
+
+function DeviceRow({ device, onSignOut }: { device: DeviceGroup; onSignOut?: (device: DeviceGroup) => void }) {
+  return (
+    <div className="flex min-h-[44px] items-center gap-3 px-4 py-2" data-testid="device-row"
+      aria-label={`${device.name}, ${device.apps.join(' and ')}, ${relative(device.last_active_at)}`}>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 text-[13px] leading-5 text-ink">{device.name}{device.is_current ? <Pill tone="green">This device</Pill> : null}</div>
+        <div className="text-[12px] leading-4 text-ink-3">{deviceDetail(device)}</div>
+      </div>
+      {device.country_code ? <span className="font-mono text-[12px] text-ink-3">{device.country_code}</span> : null}
+      {device.is_current || !onSignOut ? null : <Btn onClick={() => onSignOut(device)} aria-label={`Sign out ${device.name}`}>Sign out</Btn>}
+    </div>
+  )
+}
+
+/** The list body for the three states. No hooks: a test can call it and render the element. */
+export function DevicesList({ model, onRetry, onSignOut }: { model: DevicesPaneModel; onRetry: () => void; onSignOut?: (device: DeviceGroup) => void }) {
+  if (model.kind === 'failed') {
+    return (
+      <>
+        <p role="alert" className="text-[12px] text-red">{model.message}</p>
+        <Btn onClick={onRetry}>Try again</Btn>
+      </>
+    )
+  }
+  if (model.kind === 'empty') {
+    return (
+      <>
+        {model.thisPc ? <Group note={DEVICE_NOTE}><DeviceRow device={model.thisPc} /></Group> : null}
+        <p className="text-[12px] leading-4 text-ink-3">{model.note}</p>
+      </>
+    )
+  }
+  if (model.kind === 'rows') {
+    return (
+      <Group note={DEVICE_NOTE}>
+        {model.devices.map((d) => <DeviceRow key={d.session_ids.join() || d.name} device={d} onSignOut={onSignOut} />)}
+      </Group>
+    )
+  }
+  return null
+}
+
 export function DevicesPane({ scenario = 'default', confirm: initialConfirm }: { scenario?: Scenario; confirm?: string } = {}) {
-  const { state, setState, reload } = useAccount(scenario)
+  const { state, setState, reload, sessionList, localPc } = useAccount(scenario)
   const [confirm, setConfirm] = useState<Confirm | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
@@ -29,24 +79,15 @@ export function DevicesPane({ scenario = 'default', confirm: initialConfirm }: {
     void reload()
   }
 
-  const others = state.devices.filter((d) => !d.is_current).length
+  const model = devicesPaneModel({ sessions: sessionList, ...localPc })
+  // Rows stay the account state's objects, so signing one out removes the row that was rendered.
+  const shown: DevicesPaneModel = model.kind === 'rows' ? { kind: 'rows', devices: state.devices } : model
+  const others = shown.kind === 'rows' ? shown.devices.filter((d) => !d.is_current).length : 0
   return (
     <Page title="Devices and sessions" sub="Every device signed in to your Beebeeb account, in every app."
       action={others ? <Btn variant="danger" onClick={() => setConfirm({ kind: 'others' })}>Sign out everywhere else</Btn> : undefined}>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
-      <Group note="A device signed out here stops working the next time it contacts Beebeeb. Signing out of the apps on this PC is on Sign-in and security.">
-        {state.devices.map((d) => (
-          <div key={d.session_ids.join()} className="flex min-h-[44px] items-center gap-3 px-4 py-2" data-testid="device-row"
-            aria-label={`${d.name}, ${d.apps.join(' and ')}, ${relative(d.last_active_at)}`}>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 text-[13px] leading-5 text-ink">{d.name}{d.is_current ? <Pill tone="green">This device</Pill> : null}</div>
-              <div className="text-[12px] leading-4 text-ink-3">{d.os} · {d.apps.join(', ')} · {relative(d.last_active_at)}</div>
-            </div>
-            {d.country_code ? <span className="font-mono text-[12px] text-ink-3">{d.country_code}</span> : null}
-            {d.is_current ? null : <Btn onClick={() => setConfirm({ kind: 'one', device: d })} aria-label={`Sign out ${d.name}`}>Sign out</Btn>}
-          </div>
-        ))}
-      </Group>
+      <DevicesList model={shown} onRetry={() => void reload()} onSignOut={(device) => setConfirm({ kind: 'one', device })} />
       {confirm ? <ConfirmSignOut confirm={confirm} onCancel={() => setConfirm(null)} onConfirm={() => void signOut(confirm)} /> : null}
     </Page>
   )

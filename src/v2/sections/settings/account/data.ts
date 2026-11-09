@@ -2,7 +2,8 @@
 // A plain browser (headless frames, `bun run dev`) has no Rust behind the commands: the panes start from the app's own
 // empty state and show the host's honest refusal, never example rows.
 import { useCallback, useEffect, useState } from 'react'
-import { command, type AccountProfile, type AccountActivity, type AccountSessionList, type SecurityScore } from '../../../../desktopApi'
+import { appVersionFields } from '../../../../appVersion'
+import { command, commandUnavailableLabel, type AccountProfile, type AccountActivity, type AccountSessionList, type CommandResult, type DesktopPlatform, type SecurityScore, type SyncStatus } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { BREACHED, BREACH_BLOCKED } from '../../../auth/create/model'
 import type { ActivityEvent, DeviceGroup, Factor, Passkey, ProductRow } from './types'
@@ -67,8 +68,12 @@ export function useAccount(scenario: Scenario = 'default') {
   void scenario
   const [state, setState] = useState<AccountState>(initialAccountState)
   const [error, setError] = useState<string | null>(null)
+  // Kept off AccountState: an empty `devices` array is also the state before any read, and a failed list must not
+  // become that. Null until `account_session_list` answers.
+  const [sessionList, setSessionList] = useState<CommandResult<AccountSessionList> | null>(null)
+  const [localPc, setLocalPc] = useState<Pick<DevicesPaneInput, 'sync' | 'version' | 'platform'>>({ sync: null, version: null, platform: null })
   const reload = useCallback(async () => {
-    const [profile, name, sessions, score, activity, logging, passkeys] = await Promise.all([
+    const [profile, name, sessions, score, activity, logging, passkeys, sync, version, platform] = await Promise.all([
       command<AccountProfile>('account_profile'),
       command<{ display_name: string | null }>('account_display_name'),
       command<AccountSessionList>('account_session_list'),
@@ -76,9 +81,14 @@ export function useAccount(scenario: Scenario = 'default') {
       command<AccountActivity>('account_activity'),
       command<{ on: boolean }>('account_activity_logging'),
       command<Passkey[]>('account_passkeys_list'),
+      command<Pick<SyncStatus, 'logged_in'>>('sync_status'),
+      command<unknown>('app_version'),
+      command<DesktopPlatform>('desktop_platform'),
     ])
     const firstError = [profile, sessions, score].find((r) => !r.ok)
     setError(firstError && !firstError.ok ? firstError.reason : null)
+    setSessionList(sessions)
+    setLocalPc({ sync, version, platform })
     setState((s) => ({
       ...s,
       name: name.ok ? name.value.display_name ?? '' : s.name,
@@ -97,7 +107,7 @@ export function useAccount(scenario: Scenario = 'default') {
     }))
   }, [])
   useEffect(() => { void reload() }, [reload])
-  return { state, setState, error, reload }
+  return { state, setState, error, reload, sessionList, localPc }
 }
 
 /** Board words for each error code a B14 command returns. */
@@ -137,6 +147,66 @@ export const ERRORS: Record<string, string> = {
 export const NEW_PASSWORD_ERRORS = ['weak_password', 'same_password', 'password_breached', 'breach_check_blocked', 'breach_check_missing']
 export function errorText(code: string): string {
   return ERRORS[code] ?? 'Something went wrong. Nothing was changed.'
+}
+
+/** Said under a successful session list that has no other device. Not an error, and not a device. */
+export const OTHER_DEVICES_NOTE = 'Other devices appear here after they sign in on this account.'
+
+/** The three reads an empty list uses to describe this PC. Null fields have not answered yet. */
+export interface DevicesPaneInput {
+  /** `account_session_list`. Null until that command has answered. */
+  sessions: CommandResult<AccountSessionList> | null
+  /** `sync_status`. */
+  sync: CommandResult<Pick<SyncStatus, 'logged_in'>> | null
+  /** `app_version`. */
+  version: CommandResult<unknown> | null
+  /** `desktop_platform`, so the row can name the OS without inventing one. */
+  platform: CommandResult<DesktopPlatform> | null
+}
+
+export type DevicesPaneModel =
+  | { kind: 'pending' }
+  | { kind: 'failed'; message: string }
+  | { kind: 'empty'; thisPc: DeviceGroup | null; note: string }
+  | { kind: 'rows'; devices: DeviceGroup[] }
+
+function platformOs(platform: DevicesPaneInput['platform']): string {
+  if (!platform?.ok) return ''
+  return OS[platform.value] ?? ''
+}
+
+function versionText(version: DevicesPaneInput['version']): string | null {
+  if (!version?.ok) return null
+  return appVersionFields(version.value)?.version ?? null
+}
+
+/** This PC from local commands. No session id: nothing here can be revoked as if the server had listed it. */
+function thisPcRow(input: DevicesPaneInput): DeviceGroup {
+  const version = versionText(input.version)
+  return {
+    session_ids: [],
+    name: 'This PC',
+    os: platformOs(input.platform),
+    apps: version ? ['Drive', version] : ['Drive'],
+    last_active_at: new Date().toISOString(),
+    country_code: null,
+    is_current: true,
+  }
+}
+
+/**
+ * What Devices and sessions draws. A refused or unreachable list is the error, not zero rows. An empty success shows
+ * this PC only when `sync_status` says this PC is signed in — otherwise there is no device to show.
+ */
+export function devicesPaneModel(input: DevicesPaneInput): DevicesPaneModel {
+  if (!input.sessions) return { kind: 'pending' }
+  if (!input.sessions.ok) {
+    return { kind: 'failed', message: input.sessions.unsupported ? commandUnavailableLabel('account_session_list') : ERRORS.network }
+  }
+  const devices = groupSessions(input.sessions.value)
+  if (devices.length > 0) return { kind: 'rows', devices }
+  const signedIn = !!input.sync?.ok && input.sync.value.logged_in === true
+  return { kind: 'empty', thisPc: signedIn ? thisPcRow(input) : null, note: OTHER_DEVICES_NOTE }
 }
 
 /**
