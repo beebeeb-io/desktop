@@ -102,7 +102,7 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
         <nav aria-label="Settings" className="flex w-[232px] shrink-0 flex-col gap-1 border-r border-line bg-paper-2 p-2">
           <a href="?section=files" onClick={(e) => { e.preventDefault(); onBack?.() }}
             className="mb-2 flex h-8 items-center gap-2 rounded-md px-2.5 text-[13px] text-ink-2 hover:bg-paper-3">
-            <Icon name="chevron-right" size={14} className="rotate-180" />
+            <Icon name="chevron-left" size={14} />
             <span className="flex-1">Back to Drive</span>
             <kbd className="font-mono text-[11px] text-ink-3">esc</kbd>
           </a>
