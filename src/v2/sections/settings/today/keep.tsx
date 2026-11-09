@@ -2,26 +2,36 @@
 // does before it happens. Checked = kept (everything inside, also what is added later); nothing changes until Apply.
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { command, type VaultItem } from '../../../../desktopApi'
-import { hasTauri } from '../../../source'
+import { command, commandUnavailableLabel, formatBytes, type CommandResult, type VaultItem } from '../../../../desktopApi'
 import { Btn, Dialog, mono } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { Check, ErrorBanner, Skeleton } from './ui'
 
-/** The dialog's tree row: the folder's id and name, its subtree size in GB, and the folders inside it. */
-export interface KeepNode { id: string; name: string; gb: number; children?: KeepNode[] }
+/** The dialog's tree row. `bytes` and `files` are the reported subtree totals, or null when the read left them out. */
+export interface KeepNode { id: string; name: string; gb: number; bytes: number | null; files: number | null; children?: KeepNode[] }
+
+const reported = (value: number | undefined): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
 
 /**
  * The dialog's tree from the app's own reads: `list_vault_folders` (id, name, subtree size, children) and
  * `get_selective_sync` (the ids of folders that are online only). A folder is kept when it is not excluded and no
  * ancestor is; a node is added to `checked` only when its whole subtree stays, so a folder holding an excluded
  * descendant is "some folders kept" and its kept children are listed one by one. `size_bytes` is decimal GB here.
+ * A folder the vault marks `excluded` is not kept either, even when the id list omitted it.
  */
 export function keepTreeFrom(folders: VaultItem[], excluded: string[]): { tree: KeepNode[]; checked: Set<string> } {
   const ex = new Set(excluded)
+  const mark = (nodes: VaultItem[]) => {
+    for (const node of nodes) {
+      if (node.excluded) ex.add(node.id)
+      if (node.children?.length) mark(node.children)
+    }
+  }
+  mark(folders)
   const toNode = (f: VaultItem): KeepNode => {
     const kids = (f.children ?? []).map(toNode)
-    return { id: f.id, name: f.name, gb: f.size_bytes / 1e9, ...(kids.length ? { children: kids } : {}) }
+    const bytes = reported(f.size_bytes)
+    return { id: f.id, name: f.name, gb: bytes == null ? 0 : bytes / 1e9, bytes, files: reported(f.file_count), ...(kids.length ? { children: kids } : {}) }
   }
   const tree = folders.map(toNode)
   const hasExclusion = (n: KeepNode): boolean => ex.has(n.id) || (n.children ?? []).some(hasExclusion)
@@ -39,11 +49,13 @@ interface KeepStore { checked: Set<string>; initial: Set<string> }
 /** The tree the last successful read answered; the dialog's helpers work on it, never on a board tree. */
 let tree: KeepNode[] = []
 let store: KeepStore = { checked: new Set(), initial: new Set() }
+/** False after a failed read, so reset cannot check every folder the vault did not confirm. */
+let readOk = false
 const subs = new Set<() => void>()
 const put = (s: KeepStore) => { store = s; subs.forEach((f) => f()) }
 const useKeep = () => useSyncExternalStore((f) => { subs.add(f); return () => { subs.delete(f) } }, () => store)
-/** Back to the trees as the app last read them. */
-export const resetKeep = () => put({ checked: new Set(store.initial), initial: new Set(store.initial) })
+/** Back to the last successful read. A failed read leaves the selection alone: it must not check every folder. */
+export const resetKeep = () => { if (!readOk) return; put({ checked: new Set(store.initial), initial: new Set(store.initial) }) }
 /** Frame helper only (DW-0784's "changed" state): the board's preset tree has no live counterpart, so this never
  *  touches the app's data. The board's drawn state returns in M4's board-data pass. */
 export const presetKeep = () => undefined
@@ -94,7 +106,27 @@ const ancestorOn = (id: string, set: Set<string>, nodes = tree, inherited = fals
   return false
 }
 
-const gb = (v: number) => (v < 0.1 ? `${Math.round(v * 1024)} MB` : `${v.toFixed(1)} GB`)
+const sizeText = (n: KeepNode): string | null => (n.bytes == null ? null : formatBytes(n.bytes))
+/** The kept roots: a checked folder already includes its subtree, so its children are not added again. */
+function chosen(nodes: KeepNode[], set: Set<string>): KeepNode[] {
+  const out: KeepNode[] = []
+  for (const node of nodes) {
+    if (set.has(node.id)) out.push(node)
+    else if (node.children?.length) out.push(...chosen(node.children, set))
+  }
+  return out
+}
+function reportedSum(nodes: KeepNode[], key: 'bytes' | 'files'): number | null {
+  let seen = false
+  let total = 0
+  for (const node of nodes) {
+    const value = node[key]
+    if (value == null) continue
+    seen = true
+    total += value
+  }
+  return seen ? total : null
+}
 export function plan(s: KeepStore) {
   const ls = leaves(tree)
   const was = (l: KeepNode) => leafOn(l, s.initial)
@@ -103,7 +135,14 @@ export function plan(s: KeepStore) {
   const coming = ls.filter((l) => !was(l) && now(l))
   const on = ls.filter(now).reduce((t, l) => t + l.gb, 0)
   const all = ls.reduce((t, l) => t + l.gb, 0)
-  return { leaving, coming, leaveGb: leaving.reduce((t, l) => t + l.gb, 0), comeGb: coming.reduce((t, l) => t + l.gb, 0), on, off: all - on, changed: leaving.length + coming.length > 0 }
+  const bytes = reportedSum(chosen(tree, s.checked), 'bytes')
+  const totalBytes = reportedSum(tree, 'bytes')
+  return {
+    leaving, coming, leaveGb: leaving.reduce((t, l) => t + l.gb, 0), comeGb: coming.reduce((t, l) => t + l.gb, 0),
+    on, off: all - on, changed: leaving.length + coming.length > 0,
+    files: reportedSum(chosen(tree, s.checked), 'files'), bytes,
+    offBytes: bytes == null || totalBytes == null ? null : Math.max(0, totalBytes - bytes),
+  }
 }
 
 function Tree({ nodes, depth, openSet, flip }: { nodes: KeepNode[]; depth: number; openSet: Set<string>; flip: (id: string) => void }) {
@@ -126,7 +165,7 @@ function Tree({ nodes, depth, openSet, flip }: { nodes: KeepNode[]; depth: numbe
               <Icon name="folder" size={14} className="text-ink-3" />
               <span className="flex-1 truncate text-[13px] text-ink">{n.name}</span>
               <span className={`text-[12px] ${coming || leaving ? 'text-ink' : 'text-ink-3'} ${mono}`}>
-                {leaving ? `Leaves this PC · ${gb(n.gb)}` : coming ? `Downloads · ${gb(n.gb)}` : gb(n.gb)}
+                {sizeText(n) == null ? '' : leaving ? `Leaves this PC · ${sizeText(n)}` : coming ? `Downloads · ${sizeText(n)}` : sizeText(n)}
               </span>
               <span className="w-[112px] text-right text-[12px] text-ink-3">{st === 'on' ? 'Kept' : st === 'mixed' ? 'Some folders kept' : 'Online only'}</span>
             </div>
@@ -138,16 +177,31 @@ function Tree({ nodes, depth, openSet, flip }: { nodes: KeepNode[]; depth: numbe
   )
 }
 
-async function apply(s: KeepStore) {
-  if (!hasTauri()) return
-  const excluded = leaves(tree).filter((l) => !leafOn(l, s.checked)).map((l) => l.id)
-  await command('set_selective_sync', { excluded })
+/** The folders that are not kept, at the highest folder the person turned off, not each file-less leaf under it. */
+function excludedIds(nodes: KeepNode[], set: Set<string>): string[] {
+  const out: string[] = []
+  for (const node of nodes) {
+    if (set.has(node.id)) continue
+    const kids = node.children ?? []
+    if (kids.some((child) => stateOf(child, set) !== 'off')) out.push(...excludedIds(kids, set))
+    else out.push(node.id)
+  }
+  return out
+}
+function apply(s: KeepStore): Promise<CommandResult<void>> {
+  return command<void>('set_selective_sync', { excluded: excludedIds(tree, s.checked) })
+}
+function wrote(result: CommandResult<void>, setError: (message: string | null) => void, close: () => void) {
+  if (!result.ok) { setError(result.unsupported ? commandUnavailableLabel('set_selective_sync') : result.reason); return }
+  setError(null)
+  close()
 }
 
 /** The app's own answers, mapped onto the dialog's tree; null when either read fails. */
 async function readTree(): Promise<{ tree: KeepNode[]; checked: Set<string> } | null> {
   const [folders, excluded] = await Promise.all([command<VaultItem[]>('list_vault_folders'), command<string[]>('get_selective_sync')])
-  if (!folders.ok || !excluded.ok) return null
+  if (!folders.ok || !excluded.ok) { readOk = false; return null }
+  readOk = true
   return keepTreeFrom(folders.value, excluded.value)
 }
 
@@ -158,6 +212,7 @@ export function KeepDialog({ arg }: { arg?: string }) {
   const [openSet, setOpenSet] = useState(new Set<string>())
   const [phase, setPhase] = useState<Phase>(arg === 'error' ? 'error' : arg === 'empty' ? 'empty' : 'loading')
   const [attempt, setAttempt] = useState(0)
+  const [writeError, setWriteError] = useState<string | null>(null)
   useEffect(() => {
     if (arg === 'error' || arg === 'empty') return
     let live = true
@@ -171,11 +226,13 @@ export function KeepDialog({ arg }: { arg?: string }) {
     return () => { live = false }
   }, [arg, attempt])
   const p = plan(s)
-  const go = () => { if (p.leaving.length) open('keep-confirm'); else { void apply(s); close() } }
+  const go = () => { if (p.leaving.length) open('keep-confirm'); else void apply(s).then((result) => wrote(result, setWriteError, close)) }
+  const keptLine = `${p.files == null ? '' : `${p.files} ${p.files === 1 ? 'file' : 'files'} · `}${p.bytes == null ? '' : `${formatBytes(p.bytes)} on this PC`}${p.offBytes == null ? '' : ` · ${formatBytes(p.offBytes)} online only`}`
   return (
     <Dialog labelId="keep-h" title="Keep on this PC" wide onCancel={close}
       actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="amber" onClick={go} disabled={!p.changed || phase !== 'ready'}>Apply</Btn></>}>
       <p>Folders you choose stay on this PC. Everything else downloads when you open it.</p>
+      {writeError ? <p role="alert" className="mt-2 text-[12px] text-red-text">{writeError}</p> : null}
       {phase === 'error' ? (
         <div className="mt-3"><ErrorBanner title="Couldn't load your folders." action={<Btn onClick={() => { setPhase('loading'); setAttempt((a) => a + 1) }}>Try again</Btn>}>Nothing was changed. The folders you keep stay on this PC.</ErrorBanner></div>
       ) : phase === 'empty' ? (
@@ -193,7 +250,7 @@ export function KeepDialog({ arg }: { arg?: string }) {
             <span className="flex items-center gap-1.5"><Check state="off" label="Key: online only" onChange={() => undefined} />Online only</span>
           </div>
           <p className="mt-2 text-[12px] text-ink-3">Unchecking never deletes anything from Beebeeb: downloaded copies leave this PC and the files download again when opened.</p>
-          <p className={`mt-1 text-[13px] text-ink ${mono}`} data-testid="keep-footer">{p.changed ? 'After Apply: ' : 'On this PC: '}{gb(p.on)} on this PC · {gb(p.off)} online only</p>
+          <p className={`mt-1 text-[13px] text-ink ${mono}`} data-testid="keep-footer">{p.changed ? 'After Apply: ' : 'On this PC: '}{keptLine}</p>
         </>
       )}
     </Dialog>
@@ -202,16 +259,20 @@ export function KeepDialog({ arg }: { arg?: string }) {
 
 export function KeepConfirm({ arg }: { arg?: string }) {
   const { close, open } = useSettings()
+  const [writeError, setWriteError] = useState<string | null>(null)
   if (arg === 'changed') presetKeep()
   const s = useKeep()
   const p = plan(s)
   const names = p.leaving.length === 1 ? find(tree, p.leaving[0].id)?.name ?? '' : `${p.leaving.length} folders`
+  const leavingBytes = reportedSum(p.leaving, 'bytes')
+  const comingBytes = reportedSum(p.coming, 'bytes')
   return (
     <Dialog labelId="keepc-h" title={`Stop keeping ${names} on this PC?`} onCancel={() => open('keep')}
-      actions={<><Btn onClick={() => open('keep')}>Cancel</Btn><Btn variant="amber" onClick={() => { void apply(s); close() }}>Apply</Btn></>}>
-      <p><span className={mono}>{gb(p.leaveGb)}</span> leaves this PC. Nothing is deleted from Beebeeb: the files download again when you open them.</p>
+      actions={<><Btn onClick={() => open('keep')}>Cancel</Btn><Btn variant="amber" onClick={() => { void apply(s).then((result) => wrote(result, setWriteError, close)) }}>Apply</Btn></>}>
+      {writeError ? <p role="alert" className="mb-2 text-[12px] text-red-text">{writeError}</p> : null}
+      <p>{leavingBytes == null ? null : <><span className={mono}>{formatBytes(leavingBytes)}</span> leaves this PC. </>}Nothing is deleted from Beebeeb: the files download again when you open them.</p>
       <p className="mt-2">Changes that have not uploaded yet stay on this PC until they have.</p>
-      {p.coming.length ? <p className="mt-2"><span className={mono}>{gb(p.comeGb)}</span> downloads: {p.coming.map((c) => c.name).join(', ')}.</p> : null}
+      {p.coming.length ? <p className="mt-2">{comingBytes == null ? null : <><span className={mono}>{formatBytes(comingBytes)}</span> downloads: </>}{p.coming.map((c) => c.name).join(', ')}.</p> : null}
     </Dialog>
   )
 }
