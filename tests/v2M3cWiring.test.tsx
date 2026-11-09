@@ -10,6 +10,7 @@ import { signOutRefusal, windowAfterSignOut } from '../src/v2/sections/settings/
 import { copyFor60s, COPY_DONE, COPY_FAILED } from '../src/v2/sections/settings/account/data'
 import { SearchView } from '../src/v2/sections/search/SearchView'
 import { createBoardSource } from '../src/v2/source/fixtures/board'
+import { createFixtureExtras } from '../src/v2/source/fixtures/extras'
 import { elementsOf, mount } from './fixtures/componentHarness'
 
 const entry = (id: string, originalPath: string): TrashEntry => ({
@@ -125,6 +126,10 @@ describe('the fixture world for B05 (instrument inputs)', () => {
     const d = await s.details('sw-brand')
     expect([d.item.name, d.path.map((c) => c.name).join(' › '), d.versionCount]).toEqual(['Brand review.pdf', 'Shared with you', 3])
     expect((await s.versions('sw-brand')).length).toBe(3)
+  })
+  test('each search hit says where it is, as DW-0802 draws it', async () => {
+    const where = await createFixtureExtras('default').paths(['s-contract-draft', 's-contract-2025', 's-contractors'])
+    expect(where).toEqual({ 's-contract-draft': 'Files', 's-contract-2025': 'Documents › Legal', 's-contractors': 'Documents' })
   })
 })
 
