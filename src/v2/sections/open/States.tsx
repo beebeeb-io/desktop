@@ -25,17 +25,24 @@ export function DecryptingView({ name, done, total, onCancel }: { name: string; 
   )
 }
 
-export function TooLargeView({ name, size, free, onFreeUp, onDownloadTo }: { name: string; size: number; free?: number; onFreeUp?: () => void; onDownloadTo?: () => void }) {
+/** Too large (DW-1517). Without the room on this PC: the numbers, Free up space… and Download to…. With the room, the
+ *  file is only over what this window reads (Rust's read cap): it opens in its own app instead. */
+export function TooLargeView({ name, size, free, onFreeUp, onOpenElsewhere, onDownloadTo }: { name: string; size: number; free?: number; onFreeUp?: () => void; onOpenElsewhere?: () => void; onDownloadTo?: () => void }) {
+  const room = free !== undefined && free >= size
   return (
     <Centered>
       <div data-state="too-large" className="flex max-w-md flex-col items-center gap-3">
         <div className={tile}><Icon name="file" size={24} /></div>
         <h2 className="m-0 text-[15px] font-semibold text-ink">Too large to preview here</h2>
         <p className="m-0 text-[13px] leading-5 text-ink-2">
-          {name} is {fmtBytes(size)}. Opening it decrypts it on this PC, which needs that much free space{free !== undefined ? `; there's ${fmtBytes(free)}.` : '.'}
+          {room
+            ? `${name} is ${fmtBytes(size)}, more than this window opens. Open it in another app, which decrypts it on this PC.`
+            : `${name} is ${fmtBytes(size)}. Opening it decrypts it on this PC, which needs that much free space${free !== undefined ? `; there's ${fmtBytes(free)}.` : '.'}`}
         </p>
         <div className="flex gap-2">
-          <button type="button" className={BTN} onClick={onFreeUp}>Free up space…</button>
+          {room
+            ? <button type="button" className={BTN} onClick={onOpenElsewhere}>Open in another app…</button>
+            : <button type="button" className={BTN} onClick={onFreeUp}>Free up space…</button>}
           <button type="button" className={BTN} onClick={onDownloadTo}>Download to…</button>
         </div>
       </div>
@@ -43,11 +50,14 @@ export function TooLargeView({ name, size, free, onFreeUp, onDownloadTo }: { nam
   )
 }
 
+/** The status line's words when there is no room to decrypt (DW-1517). */
+export const noRoomWords = (needed: number, free: number) => `Not enough space to decrypt · ${fmtBytes(needed)} needed · ${fmtBytes(free)} free on this PC`
+
 /** The status line for the too-large state (DW-1517). */
 export function NoRoomStatus({ needed, free }: { needed: number; free: number }) {
   return (
     <footer role="status" className="flex h-7 flex-none items-center border-t border-line bg-paper-2 px-3 text-[12px] text-ink-3">
-      Not enough space to decrypt · {fmtBytes(needed)} needed · {fmtBytes(free)} free on this PC
+      {noRoomWords(needed, free)}
     </footer>
   )
 }

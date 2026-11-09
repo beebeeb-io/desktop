@@ -10,8 +10,9 @@ import { failedWords } from '../photos/Dialogs'
 import { ShareHost, VersionsHost } from './hosts'
 import { DetailsRail, FindBar, MoreButton, NewerBanner, OpenToolbar, ToolbarButton } from './Chrome'
 import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nameError, FILE_TYPES, SaveButton, SavedMessage, TextEditor, UnsavedAlert, type FileType } from './Editing'
-import { DecryptFailedView, DecryptingView, OpenInAppNote, TooLargeView } from './States'
+import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLargeView } from './States'
 import { useDriveExtras } from '../../source/extras'
+import { isTooLarge } from '../../source/desktop'
 import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
 import { fmtBytes, hhmm, languageLabel, lineCount, READ_ONLY_LINES, viewerKind } from './model'
 import * as player from './player'
@@ -38,6 +39,7 @@ export default function Section({ nav }: SectionProps) {
 
 function useLoad(id: string) {
   const source = useDriveSource()
+  const extras = useDriveExtras()
   const [phase, setPhase] = useState<Phase>({ name: 'loading', item: null })
   const [tries, setTries] = useState(0)
   useEffect(() => {
@@ -46,15 +48,19 @@ function useLoad(id: string) {
     setPhase((p) => ({ name: 'loading', item: 'item' in p ? p.item : null }))
     ;(async () => {
       try {
-        const { item } = await source.details(id)
+        const [{ item }, free] = await Promise.all([source.details(id), extras.status().then((s) => s.freeSpaceBytes, () => undefined)])
         known = item
-        if (live) setPhase({ name: 'loading', item })
+        if (!live) return
+        // A file not on this PC is decrypted here to open it: with less free space than it needs, say so (DW-1517).
+        if (needsRoom(item, free)) return setPhase({ name: 'too-large', item })
+        setPhase({ name: 'loading', item })
         const kind = viewerKind(item.name)
         const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
         if (live) setPhase({ name: 'ready', item, data })
       } catch (e) {
         if (!live) return
-        if (e instanceof DriveSourceError && e.code === 'quota') {
+        // No room to decrypt it (quota: the disk is full), or over the read cap: the too-large state (DW-1517).
+        if ((e instanceof DriveSourceError && e.code === 'quota') || isTooLarge(e)) {
           const { item } = await source.details(id).catch(() => ({ item: null }))
           if (item) return setPhase({ name: 'too-large', item })
         }
@@ -62,9 +68,13 @@ function useLoad(id: string) {
       }
     })()
     return () => { live = false }
-  }, [source, id, tries])
+  }, [source, extras, id, tries])
   return { phase, retry: () => setTries((n) => n + 1), setPhase }
 }
+
+/** Opening `item` decrypts it on this PC and `free` bytes (when known) are not enough for it. */
+export const needsRoom = (item: Pick<DriveItem, 'local' | 'size'>, free: number | undefined) =>
+  item.local === 'online-only' && free !== undefined && (item.size ?? 0) > free
 
 /**
  * A newer version arriving while the file is open is announced, never swapped in under the reader (DW-1519). The
@@ -116,7 +126,14 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
   }
   if (phase.name === 'failed') return <Frame name={phase.item?.name ?? ''} onBack={() => toFolder(phase.item)}><DecryptFailedView onRetry={retry} onReport={() => nav.go({ section: 'settings', sub: 'report' })} /></Frame>
   if (phase.name === 'too-large') {
-    return <Frame name={phase.item.name} onBack={() => toFolder(phase.item)}><TooLargeLive name={phase.item.name} size={phase.item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'storage' })} onDownloadTo={() => showToast({ kind: 'failed', text: 'Saving a decrypted copy elsewhere isn’t available in this version of Beebeeb.' })} /></Frame>
+    const item = phase.item
+    return (
+      <Frame name={item.name} onBack={() => toFolder(item)}>
+        <TooLargeLive name={item.name} size={item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'free-up' })}
+          onOpenElsewhere={() => void source.open(item.id).catch(() => showToast({ kind: 'failed', text: `Couldn’t open ${item.name} in another app.` }))}
+          onDownloadTo={() => showToast({ kind: 'failed', text: 'Saving a decrypted copy elsewhere isn’t available in this version of Beebeeb.' })} />
+      </Frame>
+    )
   }
   // Office files open in the editor by default (DW-1562); CSV keeps its table viewer.
   if (isOfficeFile(phase.item) && viewerKind(phase.item.name) !== 'csv') return <OfficeEditor target={{ kind: 'file', id }} nav={nav} />
@@ -505,11 +522,15 @@ export function createFailure(e: unknown): string {
   return 'Couldn’t make the file. Nothing was made. Try again.'
 }
 
-/** DW-1517 live: the free space on the sync folder's disk from B02b's drive_status; absent, the sentence leaves it out. */
+/** DW-1517 live: the free space on the sync folder's disk from B02b's drive_status; absent, the sentence leaves it out.
+ *  Without the room, the window's status line says the numbers too, until the file is left. */
 function TooLargeLive(p: Omit<Parameters<typeof TooLargeView>[0], 'free'>) {
   const extras = useDriveExtras()
   const [free, setFree] = useState<number | undefined>(undefined)
   useEffect(() => { extras.status().then((s) => setFree(s.freeSpaceBytes), () => setFree(undefined)) }, [extras])
-  // The window's own status line stays (V2App draws it); the sentence carries the free-space figure.
+  useEffect(() => {
+    setStatusNote(free !== undefined && free < p.size ? noRoomWords(p.size, free) : null)
+    return () => setStatusNote(null)
+  }, [free, p.size])
   return <TooLargeView {...p} free={free} />
 }

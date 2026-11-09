@@ -96,7 +96,8 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-1515': { q: 'section=open&id=o-zip' },
   // M3d: Studio plan.pdf's read stays in flight in the `decrypting` world; it sits in Lisbon trip, where Cancel goes.
   'DW-1516': { q: 'section=open&id=o-pdf&scenario=decrypting', steps: [{ wait: '[data-state="decrypting"]' }] },
-  'DW-1517': { q: 'section=open&id=o-pdf', gap: 'Too large shows on a quota answer from readBytes; the fixtures never give one' },
+  // M3d: an 18.2 GB video over Rust's read cap, with 12.4 GB free: the too-large state with the numbers.
+  'DW-1517': { q: 'section=open&id=o-walkthrough', steps: [{ wait: '[data-state="too-large"]' }] },
   // server.log has no fixture text, so reading it fails: the live failure path.
   'DW-1518': { q: 'section=open&id=o-log' },
   // M3d: in the `newer` world Anna's iPhone saves version 4 while the note is open: the engine's item event, the banner.

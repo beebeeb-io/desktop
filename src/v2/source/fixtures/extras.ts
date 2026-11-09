@@ -35,7 +35,7 @@ export function fixtureStatus(scenario: string): DriveStatus {
     syncProblems: 0,
     backupProblems: 0,
     fileCount: 1_284,
-    freeSpaceBytes: 12_400_000_000,
+    freeSpaceBytes: 12.4 * 1024 ** 3, // the board's 12.4 GB (DW-1517), in the units fmtBytes shows
     backup: { state: 'on', lastBackupAt: '2026-11-08T11:52:00', deviceFolder: 'Anna-Laptop', foldersOn: 3, foldersGettingReady: 0 },
     conflicts: [],
     ...(scenario === 'syncing' ? { uploadBps: 1_400_000, etaSeconds: 60 } : {}),

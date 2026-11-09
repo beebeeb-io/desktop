@@ -835,5 +835,11 @@
   "name": "Copy link",
   "role": "button",
   "why": "the name parser drops a trailing \"link\" (\"Copy\"), and the loose match then takes Send a copy…, the first button with \"copy\" in it"
+ },
+ "DW-0611#0": {
+  "notAutomatable": "the system player plays and pauses: the board draws its controls for reference, and playback is not in the page (the browser fixtures carry no video bytes either); native smoke"
+ },
+ "DW-1555#0": {
+  "notAutomatable": "an event, not a control: the editor's first download finishing opens the document (DW-1507); the engine is served by Rust (office_v2), never in a browser"
  }
 }

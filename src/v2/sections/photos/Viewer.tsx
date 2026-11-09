@@ -178,6 +178,8 @@ function VideoPlayer({ id, poster, name, onOpen }: { id: string; poster: string 
     window.addEventListener('keydown', on)
     return () => window.removeEventListener('keydown', on)
   }, [])
+  // A person's own video from their phone: there is no caption file to load with it.
+  // eslint-disable-next-line jsx-a11y/media-has-caption
   if (url) return <video ref={ref} src={url} poster={poster ?? undefined} controls onError={() => setFailed(true)} aria-label={name} className="max-h-full max-w-full" data-video />
   return (
     <div className="flex flex-col items-center gap-3">

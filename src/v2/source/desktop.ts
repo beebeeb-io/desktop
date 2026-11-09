@@ -13,15 +13,26 @@ const CODES: DriveSourceErrorCode[] = [
   'offline', 'unsupported', 'not-found', 'name-taken', 'quota', 'read-only', 'conflict', 'locked', 'signed-out', 'failed',
 ]
 
+/** Rust's answer for a file over the read cap (fsops::read_capped), and the detail its DriveSourceError carries. */
+const TOO_LARGE = 'unsupported: too large'
+export const TOO_LARGE_DETAIL = 'too large'
+/** A read refused because the file is over the cap: the viewer's too-large state, never "couldn't decrypt" (DW-1517). */
+export const isTooLarge = (e: unknown) => e instanceof DriveSourceError && e.code === 'unsupported' && e.message === TOO_LARGE_DETAIL
+
+/** The DriveSourceError for a command's `Err` text. */
+export function errorFrom(text: string, name: string): DriveSourceError {
+  const code = CODES.find((c) => text.startsWith(`${c}:`) || text === c)
+  // A command this build does not have, or no Tauri at all (a plain browser), is `unsupported`.
+  if (!code && /not found|unknown command|invoke|__TAURI/i.test(text)) return new DriveSourceError('unsupported', name)
+  // `unsupported: too large` is a file over the read cap (fsops::read_capped): the viewer says so (DW-1517).
+  return new DriveSourceError(code ?? 'failed', code === 'unsupported' && text === TOO_LARGE ? TOO_LARGE_DETAIL : name)
+}
+
 async function call<T>(name: string, args?: InvokeArgs): Promise<T> {
   try {
     return await invoke<T>(name, args)
   } catch (error) {
-    const text = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
-    const code = CODES.find((c) => text.startsWith(`${c}:`) || text === c)
-    // A command this build does not have, or no Tauri at all (a plain browser), is `unsupported`.
-    if (!code && /not found|unknown command|invoke|__TAURI/i.test(text)) throw new DriveSourceError('unsupported', name)
-    throw new DriveSourceError(code ?? 'failed', name)
+    throw errorFrom(typeof error === 'string' ? error : error instanceof Error ? error.message : '', name)
   }
 }
 

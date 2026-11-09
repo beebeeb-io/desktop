@@ -26,6 +26,8 @@ export const OPEN_ITEMS: DriveItem[] = [
   file('o-csv', 'Invoices Q3.csv', 3400, 'text/csv'),
   file('o-zip', 'Raw footage 2024.zip', 1.4 * 1024 ** 3, 'application/zip'),
   file('o-log', 'server.log', 3.1 * 1024 ** 2, 'text/plain'),
+  // DW-1517: online only, and more than the 12.4 GB this PC has free (fixtures/extras.ts).
+  file('o-walkthrough', 'Studio walkthrough 4K.mov', 18.2 * 1024 ** 3, 'video/quicktime', { parentId: 'f-studio-demos', local: 'online-only' }),
 ]
 
 export const PY_TEXT = `import csv
@@ -136,7 +138,7 @@ export const AUDIO_QUEUE = [
 const TEXTS: Record<string, string> = { 'o-py': PY_TEXT, 'o-md': MD_TEXT, 'o-csv': CSV_TEXT }
 
 /** Studio demos, inside Shoot selects: a folder no board frame lists, so the Files frames keep their rows. */
-const STUDIO_DEMOS: DriveItem = { ...file('f-studio-demos', 'Studio demos', 0, ''), parentId: 'f-shoot', isFolder: true, size: null, childCount: 4, mime: undefined }
+const STUDIO_DEMOS: DriveItem = { ...file('f-studio-demos', 'Studio demos', 0, ''), parentId: 'f-shoot', isFolder: true, size: null, childCount: 5, mime: undefined }
 /** The Open fixtures that Files lists too (the RAW's and the recording's folders), merged into the board's tree. */
 export const OPEN_TREE: DriveItem[] = [STUDIO_DEMOS, ...OPEN_ITEMS.filter((i) => i.parentId === 'f-shoot' || i.parentId === 'f-studio-demos')]
 
