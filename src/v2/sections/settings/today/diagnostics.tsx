@@ -1,13 +1,13 @@
 // General › Help › Diagnostics (DW-0790, DW-0790b): what Beebeeb is doing on this PC, and a support bundle you can
 // read before you send it. Nothing is sent by Beebeeb: the person attaches the file to the draft. App activity is this
 // process's own (`app_activity_snapshot`, once a second while the page is open), never the board's example (P1c).
+// A row names the command it came from and the time that command answered. A failed read stays, with Try again.
 import { useEffect, useState } from 'react'
-import { command, type AppActivitySnapshot } from '../../../../desktopApi'
+import { command, commandUnavailableLabel, type AppActivitySnapshot } from '../../../../desktopApi'
 import { actionFailure } from '../../files/model'
 import type { ProblemReportResult } from '../../../../diagnosticsCopy'
-import { Btn, Group, Page, Row, mono } from '../shell/kit'
+import { Btn, Group, Page, Row, fmtBytes, mono } from '../shell/kit'
 import { useSettings } from '../shell/context'
-import { fmtBytes } from '../shell/kit'
 import { board } from '../../../board'
 import { BackLink, ErrorBanner, InfoBanner, fmtSpeed } from './ui'
 
@@ -18,53 +18,102 @@ function Spark({ values, label }: { values: number[]; label: string }) {
 }
 /** The last 20 samples, oldest first: one a second while the page is open. */
 const KEEP = 20
+const ACTIVITY_SOURCE = 'app_activity_snapshot'
+const REPORT_SOURCE = 'report_problem'
 
-/** Samples app activity once a second while mounted. `failed`: the read was refused (its rows say so). */
-function useActivity(): { samples: AppActivitySnapshot[]; failed: boolean } {
+/** Clock time of a read, in Europe/Amsterdam. `iso` is when the command answered. */
+export function formatReadAt(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'Not read yet'
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(d)
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  const day = get('day')
+  const month = get('month')
+  const year = get('year')
+  const hour = get('hour')
+  const minute = get('minute')
+  if (!day || !month || !year || !hour || !minute) return 'Not read yet'
+  return `${day} ${month} ${year}, ${hour}:${minute}`
+}
+
+function readLabel(source: string, readAt: string | null): string {
+  return `${source} · ${readAt ? formatReadAt(readAt) : 'Not read yet'}`
+}
+
+/** One `app_activity_snapshot` answer. `readAt` is when it answered, not a clock this page invented. */
+export type ActivityRead =
+  | { ok: true; value: AppActivitySnapshot; readAt: string }
+  | { ok: false; unsupported: boolean; readAt: string | null }
+
+export interface DiagnosticsProps {
+  saved?: boolean
+  failed?: boolean
+  report?: ProblemReportResult
+  /** An answer already in hand (the General dialog, or a test). Omit it and the page reads the command. */
+  activity?: ActivityRead
+  /** When `report_problem` answered. Omit it and a save on this page records that time. */
+  reportReadAt?: string | null
+}
+
+/** The four rows from the samples: the newest value and its last 20 seconds. A figure not read yet is a dash. */
+export function activityRows(samples: AppActivitySnapshot[], readAt: string | null = null): { k: string; v: string; s: number[]; source: string; readAt: string | null }[] {
+  const last = samples[samples.length - 1]
+  const series = (f: (a: AppActivitySnapshot) => number | null | undefined) => samples.map((a) => f(a) ?? 0)
+  const row = (k: string, v: string, s: number[]) => ({ k, v, s, source: ACTIVITY_SOURCE, readAt })
+  return [
+    row('CPU', last ? `${last.cpu_percent.toFixed(1)} %` : '—', series((a) => a.cpu_percent)),
+    row('Memory', last ? fmtBytes(last.memory_rss_bytes) : '—', series((a) => a.memory_rss_bytes)),
+    row('Upload', last ? fmtSpeed(last.upload_bps ?? null) : '—', series((a) => a.upload_bps)),
+    row('Download', last ? fmtSpeed(last.download_bps ?? null) : '—', series((a) => a.download_bps)),
+  ]
+}
+
+/** Samples app activity once a second while mounted, unless `scripted` is the answer already. */
+function useActivity(scripted: ActivityRead | undefined): { answer: ActivityRead | null; samples: AppActivitySnapshot[]; retry: () => void } {
   const [samples, setSamples] = useState<AppActivitySnapshot[]>([])
-  const [failed, setFailed] = useState(false)
+  const [answer, setAnswer] = useState<ActivityRead | null>(null)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
+    if (scripted) return
     let live = true
     const read = () => {
-      void command<AppActivitySnapshot>('app_activity_snapshot').then((r) => {
+      void command<AppActivitySnapshot>(ACTIVITY_SOURCE).then((r) => {
         if (!live) return
-        if (r.ok) { setFailed(false); setSamples((s) => [...s, r.value].slice(-KEEP)) } else setFailed(true)
+        const readAt = new Date().toISOString()
+        if (r.ok) {
+          setAnswer({ ok: true, value: r.value, readAt })
+          setSamples((s) => [...s, r.value].slice(-KEEP))
+        } else setAnswer({ ok: false, unsupported: r.unsupported, readAt })
       })
     }
     read()
     const t = setInterval(read, 1000)
     return () => { live = false; clearInterval(t) }
-  }, [])
-  return { samples, failed }
+  }, [scripted, attempt])
+  const retry = () => setAttempt((n) => n + 1)
+  if (scripted) return { answer: scripted, samples: scripted.ok ? [scripted.value] : [], retry }
+  return { answer, samples, retry }
 }
 
-/** The four rows from the samples: the newest value and its last 20 seconds. A figure not read yet is a dash. */
-export function activityRows(samples: AppActivitySnapshot[]): { k: string; v: string; s: number[] }[] {
-  const last = samples[samples.length - 1]
-  const series = (f: (a: AppActivitySnapshot) => number | null | undefined) => samples.map((a) => f(a) ?? 0)
-  return [
-    { k: 'CPU', v: last ? `${last.cpu_percent.toFixed(1)} %` : '—', s: series((a) => a.cpu_percent) },
-    { k: 'Memory', v: last ? fmtBytes(last.memory_rss_bytes) : '—', s: series((a) => a.memory_rss_bytes) },
-    { k: 'Upload', v: last ? fmtSpeed(last.upload_bps ?? null) : '—', s: series((a) => a.upload_bps) },
-    { k: 'Download', v: last ? fmtSpeed(last.download_bps ?? null) : '—', s: series((a) => a.download_bps) },
-  ]
-}
-
-export function Diagnostics({ saved, failed, report: given }: { saved?: boolean; failed?: boolean; report?: ProblemReportResult } = {}) {
+export function Diagnostics({ saved, failed, report: given, activity: activityProp, reportReadAt: givenReportAt }: DiagnosticsProps = {}) {
   const { go } = useSettings()
-  // A frame's saved variant draws the board's bundle; a real save names its own file.
-  const [report, setReport] = useState<ProblemReportResult | null>(given ?? board<ProblemReportResult>('report') ?? null)
-  const [result, setResult] = useState<'none' | 'saved' | 'failed'>(saved && report ? 'saved' : failed ? 'failed' : 'none')
+  // A frame's saved variant draws the board's bundle; a real save names its own file. No folder is guessed.
+  const initialReport = given ?? board<ProblemReportResult>('report') ?? null
+  const [report, setReport] = useState<ProblemReportResult | null>(initialReport)
+  const [result, setResult] = useState<'none' | 'saved' | 'failed'>(saved && initialReport ? 'saved' : failed ? 'failed' : 'none')
+  const [reportAt, setReportAt] = useState<string | null>(givenReportAt ?? null)
   const [refusal, setRefusal] = useState<string | null>(null)
-  // App activity samples only while this page is open.
-  const activity = useActivity()
-  const rows = activityRows(activity.samples)
+  const activity = useActivity(activityProp)
+  const rows = activity.answer?.ok ? activityRows(activity.samples, activity.answer.readAt) : activity.answer ? [] : activityRows([], null)
   // Export… is the desktop's own flow (DW-0790#0): `report_problem` writes the bundle, shows it in File Explorer and
   // opens the draft; the banner then says where it is. A build without it says so; nothing is claimed saved.
   const exportBundle = async () => {
     setRefusal(null)
-    const r = await command<ProblemReportResult>('report_problem')
-    if (r.ok) { setReport(r.value); setResult('saved'); return }
+    const r = await command<ProblemReportResult>(REPORT_SOURCE)
+    if (r.ok) { setReport(r.value); setReportAt(new Date().toISOString()); setResult('saved'); return }
+    setReportAt(new Date().toISOString())
     if (r.unsupported) { setResult('none'); setRefusal(actionFailure('save the support bundle', 'unsupported').text); return }
     setResult('failed')
   }
@@ -74,19 +123,30 @@ export function Diagnostics({ saved, failed, report: given }: { saved?: boolean;
     void command<void>('plugin:opener|reveal_item_in_dir', { paths: [report.path] })
       .then((r) => setRefusal(r.ok ? null : actionFailure('show it in File Explorer', r.unsupported ? 'unsupported' : 'failed').text))
   }
+  const activityFailed = activity.answer != null && activity.answer.ok === false
   return (
     <Page title="Diagnostics" back={<BackLink to="general">General</BackLink>}>
       {result === 'saved' && report ? (
         <InfoBanner title="Support bundle saved." action={<Btn onClick={reveal}>Show in File Explorer</Btn>}>
-          <span>Saved to <span className={`text-[12px] break-all ${mono}`}>{report.path}</span>. {report.email_opened ? 'A draft to support is opening in your email app; attach the file yourself.' : "Your email app didn't open; send the file to support@beebeeb.io yourself."}</span>
+          <span>{readLabel(REPORT_SOURCE, reportAt)}. Saved to <span className={`text-[12px] break-all ${mono}`}>{report.path}</span>. {report.email_opened ? 'A draft to support is opening in your email app; attach the file yourself.' : "Your email app didn't open; send the file to support@beebeeb.io yourself."}</span>
         </InfoBanner>
       ) : null}
       {refusal ? <p role="alert" className="text-[12px] text-red-text">{refusal}</p> : null}
-      {result === 'failed' ? <ErrorBanner title="Couldn't save the support bundle" action={<Btn onClick={exportBundle}>Try again</Btn>}>The folder for support bundles could not be written to.</ErrorBanner> : null}
-      <Group title="App activity" note={activity.failed ? 'Beebeeb couldn’t read its activity on this PC.' : 'Sampled only while this page is open.'}>
-        {rows.map((r) => (
-          <div key={r.k} className="flex items-center gap-3 px-4 py-2.5" data-testid="activity-row">
-            <span className="flex-1 text-[13px] text-ink">{r.k}</span>
+      {result === 'failed' ? <ErrorBanner title="Couldn't save the support bundle" action={<Btn onClick={exportBundle}>Try again</Btn>}>{readLabel(REPORT_SOURCE, reportAt)}. The folder for support bundles could not be written to.</ErrorBanner> : null}
+      <Group title="App activity" note={activityFailed ? undefined : activity.answer ? 'Sampled only while this page is open.' : 'Not read yet.'}>
+        {activityFailed && activity.answer && !activity.answer.ok ? (
+          <div className="flex items-center gap-3 px-4 py-2.5" data-testid="read-row" data-source={ACTIVITY_SOURCE} data-state="failed">
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] text-ink">App activity</div>
+              <div className="text-[12px] leading-4 text-ink-3">{readLabel(ACTIVITY_SOURCE, activity.answer.readAt)}</div>
+              <div role="alert" className="text-[12px] leading-4 text-red-text">{activity.answer.unsupported ? commandUnavailableLabel(ACTIVITY_SOURCE) : 'Beebeeb couldn’t read its activity on this PC.'}</div>
+            </div>
+            <Btn onClick={activity.retry}>Try again</Btn>
+          </div>
+        ) : rows.map((r) => (
+          <div key={r.k} className="flex items-center gap-3 px-4 py-2.5" data-testid="activity-row" data-source={r.source}>
+            <span className="w-24 text-[13px] text-ink">{r.k}</span>
+            <span className="min-w-0 flex-1 text-[12px] leading-4 text-ink-3">{readLabel(r.source, r.readAt)}</span>
             {r.s.length > 1 ? <Spark values={r.s} label={r.k} /> : <span className="h-7 w-24" />}
             <span className={`w-24 text-right text-[13px] text-ink-2 ${mono}`}>{r.v}</span>
           </div>
@@ -96,9 +156,10 @@ export function Diagnostics({ saved, failed, report: given }: { saved?: boolean;
         <Row label="Export a support bundle" sub="Saves a file on this PC, then opens a draft to support."
           right={<Btn onClick={exportBundle}>Export…</Btn>} />
         <div className="px-4 py-3 text-[12px] leading-4 text-ink-3">
-          <p><span className="text-ink-2">In the bundle:</span> queue counts, an error code and the last error message.</p>
-          <p className="mt-1"><span className="text-ink-2">Removed first:</span> paths, file and folder names and sign-in tokens.</p>
-          <p className="mt-1"><span className="text-ink-2">Kept:</span> standard error words, numbers, opaque ids and the server address.</p>
+          <p>Beebeeb saves a file on this PC and opens an email to support@beebeeb.io in your own email app. You read the file first, attach it and send the email yourself.</p>
+          <p className="mt-2"><span className="text-ink-2">In the bundle.</span> Queue counts, an error code and the last error message.</p>
+          <p className="mt-1"><span className="text-ink-2">Removed first.</span> Paths, file and folder names, sign-in tokens. Kept: standard error words, numbers, opaque ids and the server address.</p>
+          <p className="mt-1"><span className="text-ink-2">Your email.</span> The email is sent from your own address, so support sees it.</p>
         </div>
       </Group>
       <Group title="Help">
