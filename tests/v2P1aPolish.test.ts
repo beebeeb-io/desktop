@@ -146,3 +146,13 @@ describe('#273 finding 11 (New file): a file this window just made opens once th
     expect(open).toMatch(/if \(!unindexed\) return\n\s+return source\.subscribe\(\(e\) => \{ if \(e\.kind === 'changed' \|\| e\.kind === 'item'\) setTries/)
   })
 })
+
+describe('#273 finding 1: until the page view is drawn in the window, a PDF opens in another app, never a refused frame', () => {
+  test('Open frames no decrypted content, and a PDF gets the open-in-another-app state with its button', () => {
+    const open = src('v2/sections/open/index.tsx')
+    expect(open).not.toContain('<iframe')
+    expect(open).toContain("useBlobUrl(kind === 'pdf' ? null : bytes")
+    expect(open).toContain(`{kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} />`)
+    expect(open).not.toMatch(/else if \(kind === 'pdf'\) body =/)
+  })
+})

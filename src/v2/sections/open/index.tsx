@@ -8,12 +8,12 @@ import { showToast } from '../../chrome/Toast'
 import { setStatusNote } from '../../chrome/statusNote'
 import { failedWords } from '../photos/Dialogs'
 import { ShareHost, VersionsHost } from './hosts'
-import { DetailsRail, FindBar, MoreButton, NewerBanner, OpenToolbar, ToolbarButton } from './Chrome'
+import { DetailsRail, MoreButton, NewerBanner, OpenToolbar, ToolbarButton } from './Chrome'
 import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nameError, FILE_TYPES, openEditorFind, SaveButton, SavedMessage, TextEditor, UnsavedAlert, type FileType } from './Editing'
 import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLargeView } from './States'
 import { useDriveExtras } from '../../source/extras'
 import { isTooLarge } from '../../source/desktop'
-import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
+import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, RawViewer, type Track } from './Viewers'
 import { createKeptCopy, fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, saveNoteText, tagContent, viewerKind } from './model'
 import * as player from './player'
 import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
@@ -199,11 +199,11 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   const kind = viewerKind(item.name)
   const [wrap, setWrap] = useState(false)
   const [mdMode, setMdMode] = useState<'rendered' | 'source'>('rendered')
-  const [zoom, setZoom] = useState(1)
-  const [find, setFind] = useState<string | null>(null)
   const [share, setShare] = useState(false)
   const bytes = data.kind === 'bytes' ? data.bytes : null
-  const url = useBlobUrl(bytes, item.mime ?? 'application/octet-stream')
+  // A PDF is never framed: the window's CSP refuses a `blob:` frame (lead's M3d ruling 5), so it opens in another app
+  // until the page view is drawn in the window (pdf.js, the P1b lane). #273 finding 1.
+  const url = useBlobUrl(kind === 'pdf' ? null : bytes, item.mime ?? 'application/octet-stream')
   const text = data.kind === 'text' ? data.text : ''
   const big = (item.size ?? 0) > MAX_EDITABLE_BYTES
   const openElsewhere = () => { source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open it in another app') })) }
@@ -214,11 +214,6 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   const textual = TEXTUAL.has(kind)
   const editable = (kind === 'code' || kind === 'text' || kind === 'markdown') && !big
   const pictures = kind === 'raw' || kind === 'image' || kind === 'audio'
-  const zoomBy = (d: number) => setZoom((z) => Math.min(3, Math.max(0.5, +(z + d).toFixed(2))))
-  // Ctrl+F finds in the document; Ctrl+Plus and Ctrl+− zoom the page (DW-1505).
-  useOwnFind(kind === 'pdf', useCallback(() => setFind(''), []))
-  useCommand('zoom-in', useCallback(() => { if (kind === 'pdf') zoomBy(0.25) }, [kind]))
-  useCommand('zoom-out', useCallback(() => { if (kind === 'pdf') zoomBy(-0.25) }, [kind]))
   useCommand('edit', useCallback(() => { if (editable) edit(); else if (kind === 'csv') nav.go({ section: 'open', id: item.id, sub: 'office' }) }, [editable, kind])) // eslint-disable-line react-hooks/exhaustive-deps
 
   const keep = () => source.setAvailableOffline(item.id, true).then(() => showToast({ kind: 'done', text: 'Keeping it on this PC' }), (e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'keep it on this PC') }))
@@ -236,7 +231,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
         </span>
       )}
       {(kind === 'code' || kind === 'text') && <><ToolbarButton label="Wrap" pressed={wrap} onClick={() => setWrap((w) => !w)} /><ToolbarButton label="Copy" onClick={copy} /></>}
-      {kind === 'pdf' && <><PdfZoom zoom={zoom} onZoom={setZoom} /><ToolbarButton label="Find" shortcut="Ctrl+F" onClick={() => setFind('')} /><ToolbarButton label="Share" onClick={() => setShare(true)} /></>}
+      {kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} /><ToolbarButton label="Share" onClick={() => setShare(true)} /></>}
       {pictures && <><ToolbarButton label="Share" onClick={() => setShare(true)} /><ToolbarButton label="Offline" onClick={() => void keep()} /><ToolbarButton label="Details" onClick={onDetails} /><ToolbarButton label="Trash" onClick={() => void trash()} /></>}
       {kind === 'archive' && <ToolbarButton label="Open in another app…" onClick={openElsewhere} />}
       {(editable || kind === 'csv') && <ToolbarButton label="Edit" shortcut="Ctrl+E" onClick={kind === 'csv' ? () => nav.go({ section: 'open', id: item.id, sub: 'office' }) : edit} />}
@@ -248,7 +243,6 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   if (kind === 'raw') body = <RawView item={item} nav={nav} onOpenElsewhere={openElsewhere} />
   else if (kind === 'image') body = url ? <ImageViewer src={url} name={item.name} /> : null
   else if (kind === 'audio') body = <AudioView item={item} bytes={bytes} nav={nav} />
-  else if (kind === 'pdf') body = url ? <div className="flex min-h-0 flex-1 flex-col">{find !== null && <FindBar query={find} onQuery={setFind} onDone={() => setFind(null)} message="Find works in the page view: click the page, then Ctrl+F" />}<PdfFrame url={url} zoom={zoom} /></div> : null
   else if (kind === 'markdown') body = <MarkdownViewer text={text} mode={mdMode} onOpenFile={openFile} />
   else if (kind === 'csv') body = <CsvViewer text={text} />
   else if (kind === 'archive') body = <ZipView bytes={bytes} />
@@ -263,11 +257,6 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
       {share && <ShareHost items={[item]} onClose={() => setShare(false)} />}
     </div>
   )
-}
-
-/** The page view: WebView2's own PDF viewer draws the pages, their thumbnails and its find; the zoom is passed to it. */
-function PdfFrame({ url, zoom }: { url: string; zoom: number }) {
-  return <iframe key={zoom} src={`${url}#zoom=${Math.round(zoom * 100)}`} sandbox="allow-popups allow-scripts" title="PDF preview" className="block h-full min-h-0 w-full flex-1 border-0" />
 }
 
 /** "Shoot selects · Sunday 14:20": the folder and when the file changed (DW-1501, DW-1503). */
