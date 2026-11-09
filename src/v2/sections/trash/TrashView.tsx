@@ -1,10 +1,10 @@
 // Trash (DW-0747), its menu (DW-0748), the warning with a code (DW-0749), emptying (DW-0749b) and empty (DW-0117).
 // Views only: the live section and the frames pass the state.
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS, Modal, type MenuEntry } from '../files/ui'
-import { fmtCount, fmtSize, fmtWhen } from '../files/model'
+import { fmtCount, fmtSize, fmtWhen, kindOf } from '../files/model'
 
 const COLS = 'grid-cols-[minmax(0,2.4fr)_minmax(130px,1fr)_96px_minmax(0,1.4fr)]'
 const BTN_RED = `inline-flex h-8 items-center justify-center rounded-md bg-red px-4 text-[13px] font-medium text-white hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS}`
@@ -88,6 +88,34 @@ export function TrashView(p: TrashViewProps) {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * DW-0748 Details (Alt+Enter): DW-0411's dialog over Trash, with the facts that hold for a deleted item. Trash's
+ * list is the server's, so there is no copy on this PC and no version count to show: those rows give way to when it
+ * was deleted and where it was.
+ */
+export function TrashDetailsDialog({ entry, now = new Date(), onClose }: { entry: TrashEntry; now?: Date; onClose?: () => void }) {
+  const { item } = entry
+  const facts: [string, ReactNode][] = [
+    ['Size', <span key="s" className="font-mono text-[12px]">{item.isFolder && item.size == null ? fmtCount(item.childCount) : fmtSize(item.size)}</span>],
+    ['Changed', <span key="c" className="font-mono text-[12px]">{fmtWhen(item.modifiedAt, now)}</span>],
+    ['Deleted', <span key="d" className="font-mono text-[12px]">{fmtWhen(entry.trashedAt, now)}</span>],
+    ['Where it was', entry.originalPath || 'Files'],
+    ['Encrypted', <span key="e" className="inline-flex items-center gap-1.5 text-amber-deep"><Icon name="lock" size={12} />Yes, end to end</span>],
+  ]
+  return (
+    <Modal
+      title={<span className="flex items-center gap-2.5"><FileIcon type={getFileType(item.name, item.isFolder)} size={26} /><span><span className="block break-all">{item.name}</span><span className="block text-[12px] font-normal text-ink-3">{kindOf(item)}</span></span></span>}
+      label="Details" onClose={onClose}
+      footer={<><span className="flex-1" /><button type="button" className={BTN} onClick={onClose}>Done</button></>}
+    >
+      <dl className="m-0">
+        {facts.map(([k, v]) => <div key={k} className="flex min-h-9 items-center justify-between gap-4 border-b border-line last:border-0"><dt className="text-ink-3">{k}</dt><dd className="m-0 text-right text-ink">{v}</dd></div>)}
+      </dl>
+      <p className="m-0 mt-3 text-[12px] leading-4 text-ink-3">Items are deleted for good after 30 days. Restore it to open it or see its versions.</p>
+    </Modal>
   )
 }
 

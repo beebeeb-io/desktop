@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
-import { run, errorText, copyFor60s, type AccountState } from './data'
+import { run, errorText, copyFor60s, COPY_DONE, COPY_FAILED, type AccountState } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_TOTP, type Passkey } from '../../../source/fixtures/account'
 import { Btn, BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, TextInput, ago, day, useEscBack } from './ui'
 
@@ -15,7 +15,7 @@ export function TotpSetup({ onCodes, onBack, initialDigits = '', moving }: { onC
   const [setup, setSetup] = useState<{ secret: string; qr_rows: string[] } | null>(null)
   const [code, setCode] = useState(initialDigits)
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<boolean | null>(null)
   useEscBack(onBack)
   useEffect(() => {
     let live = true
@@ -41,10 +41,10 @@ export function TotpSetup({ onCodes, onBack, initialDigits = '', moving }: { onC
           <Field label="Or enter this key in an authenticator on this PC">
             <div className="flex items-center gap-2">
               <code className="rounded-md border border-line bg-paper-2 px-2 py-1 font-mono text-[13px] tracking-wider text-ink" data-testid="totp-key">{setup ? setup.secret.replace(/(.{4})/g, '$1 ').trim() : '…'}</code>
-              <Btn disabled={!setup} onClick={() => { if (setup) { void copyFor60s(setup.secret); setCopied(true) } }}>{copied ? 'Copied' : 'Copy key'}</Btn>
+              <Btn disabled={!setup} onClick={() => { if (setup) void copyFor60s(setup.secret).then(setCopied) }}>{copied ? 'Copied' : 'Copy key'}</Btn>
             </div>
           </Field>
-          {copied ? <p className="text-[12px] text-ink-3">The clipboard clears after 60 seconds.</p> : null}
+          {copied != null ? <p role="status" className="text-[12px] text-ink-3">{copied ? COPY_DONE : COPY_FAILED}</p> : null}
           <Field label="6-digit code" error={error}>
             <CodeBoxes length={6} label="6-digit code" value={code} onChange={(v) => { setCode(v); setError(null) }} error={!!error} focus />
           </Field>
@@ -71,9 +71,9 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
         ))}
       </ol>
       <div className="flex items-center gap-2">
-        <Btn onClick={() => { void copyFor60s(text); setNote('Copied. The clipboard clears after 60 seconds.') }}>Copy all codes</Btn>
-        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }, true).then((r) => r.ok && r.value && setNote('Saved.'))}>Save as text…</Btn>
-        {note ? <span className="text-[12px] text-ink-3">{note}</span> : null}
+        <Btn onClick={() => void copyFor60s(text).then((ok) => setNote(ok ? COPY_DONE : COPY_FAILED))}>Copy all codes</Btn>
+        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }, true).then((r) => { if (!r.ok) setNote(errorText(r.code)); else if (r.value) setNote('Saved.') })}>Save as text…</Btn>
+        {note ? <span role="status" className="text-[12px] text-ink-3">{note}</span> : null}
         <span className="flex-1" />
         <Btn variant="amber" onClick={onDone}>I’ve saved them</Btn>
       </div>
@@ -88,7 +88,8 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
 }
 
 export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dialog }: {
-  state: AccountState; onBack: () => void; onNewCodes: (codes: string[]) => void; onMove: () => void; onTurnedOff: () => void; dialog?: 'off' | 'new-codes' | 'move'
+  /** `onMove(code)`: the current code the person typed, for the new set-up's step-up (DW-A71 → A69). */
+  state: AccountState; onBack: () => void; onNewCodes: (codes: string[]) => void; onMove: (code: string) => void; onTurnedOff: () => void; dialog?: 'off' | 'new-codes' | 'move'
 }) {
   const [ask, setAsk] = useState<'off' | 'new-codes' | 'move' | null>(dialog ?? null)
   useEscBack(onBack, !ask)
@@ -109,7 +110,7 @@ export function TotpStatus({ state, onBack, onNewCodes, onMove, onTurnedOff, dia
         <Row label="Move to a new authenticator" onClick={() => setAsk('move')} />
         <Row label={<span className="text-red">Turn off two-factor</span>} onClick={() => setAsk('off')} />
       </Group>
-      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={(_c, codes) => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(); else onNewCodes(codes ?? []) }} /> : null}
+      {ask ? <CodeDialog kind={ask} onCancel={() => setAsk(null)} onOk={(c, codes) => { const k = ask; setAsk(null); if (k === 'off') onTurnedOff(); else if (k === 'move') onMove(c); else onNewCodes(codes ?? []) }} /> : null}
     </Page>
   )
 }

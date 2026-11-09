@@ -57,11 +57,11 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   switch (page) {
     case 'checkup': return <Checkup state={state} onBack={home} go={go} />
     case 'password': return <ChangePassword onBack={home} onDone={() => { setState((s) => ({ ...s, passwordChangedAt: new Date().toISOString() })); home() }} showError={init.passwordError} />
-    case 'totp-setup': return <TotpSetup moving={moving} initialDigits={init.digits} onBack={() => (state.totp.on ? setPage('totp') : home())}
-      onCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
+    case 'totp-setup': return <TotpSetup moving={moving} initialDigits={init.digits} onBack={() => { setMoving(undefined); if (state.totp.on) setPage('totp'); else home() }}
+      onCodes={(c) => { setMoving(undefined); setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
     case 'backup-codes': return <BackupCodes codes={codes} onDone={() => { setCodes([]); setPage('totp') }} />
     case 'totp': return <TotpStatus state={state} onBack={home} dialog={init.dialog === 'totp-off' ? 'off' : undefined}
-      onMove={() => { setMoving('current'); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
+      onMove={(code) => { setMoving(code); setPage('totp-setup') }} onNewCodes={(c) => { setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, codesLeft: c.length } })); setPage('backup-codes') }}
       onTurnedOff={() => { setState((s) => ({ ...s, totp: { ...s.totp, on: false } })); home() }} />
     case 'passkeys': return <Passkeys state={state} setState={setState} onBack={home} menuOn={init.passkeyMenu ? state.passkeys.find((p) => p.name === init.passkeyMenu)?.id : undefined} removing={init.removePasskey} />
     case 'activity': return <Activity state={state} setState={setState} onBack={home} asking={init.dialog === 'activity-off'} now={now}
@@ -69,7 +69,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
     case 'delete-1': return <DeleteStep1 onBack={home} onNext={() => setPage('delete-2')} />
     case 'delete-2': return <DeleteStep2 totp={state.totp.on} initialDigits={init.digits} onBack={() => { void run('account_delete_cancel', {}, null); home() }}
       onNext={(d) => { setLinkExpires(d.link_expires_at); setPage('delete-3') }} />
-    case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home}
+    case 'delete-3': return <DeleteStep3 email={state.email} linkExpires={linkExpires} onCancelled={home} onSendAgain={() => setPage('delete-1')}
       onUsed={(when) => { setShredAfter(when); setPage('delete-4') }} />
     case 'delete-4': return <DeleteStep4 shredAfter={shredAfter} onUndone={() => setPage('delete-done')} onSignOut={() => setDialog('signout')} dialog={dialog} closeDialog={() => setDialog(undefined)} />
     case 'delete-done': return <DeleteDone />
@@ -313,10 +313,18 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
   )
 }
 
-function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void }) {
+/**
+ * Step 3. Honest about what this build can do (M3c): it cannot yet tell that the link was used (the server's
+ * GET /auth/account/deletion has no core read yet), so it does not claim to move on by itself; a new link takes the
+ * password and code again (the server's delete-request, which replaces the earlier link), so Send again goes back to
+ * step 1; and it cannot cancel the request (core has no signed-in delete-cancel yet), so Cancel deletion says so and
+ * how long the mailed link works, instead of leaving as if it were cancelled.
+ */
+function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void; onSendAgain: () => void }) {
   const [wait, setWait] = useState(38)
   const [link, setLink] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [cannotCancel, setCannotCancel] = useState(false)
   useEffect(() => {
     if (wait <= 0) return
     const t = window.setTimeout(() => setWait((w) => w - 1), 1000)
@@ -336,7 +344,7 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: strin
       <div role="status" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
         We sent a confirmation link to <span className="font-medium">{email}</span>. Nothing is deleted until you use that link.
       </div>
-      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Cancel the deletion here, then change your password.</p>
+      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, and change your password.</p>
       <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (link.trim()) void confirmLink() }}>
         <Field label="Or paste the link from the email">
           <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
@@ -346,11 +354,18 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed }: { email: strin
       </form>
       {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
       <p className="text-[12px] text-ink-3">
-        {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={() => { setWait(60) }} className="text-ink underline">Send again</button>}
-        {' · '}This screen moves on by itself once the link is used.
+        {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={onSendAgain} className="text-ink underline">Send again</button>}
+        {' · '}A new link asks for your password again.
       </p>
+      {cannotCancel ? (
+        <div role="alert" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
+          <p>This version of Beebeeb can’t cancel the request yet. Nothing is deleted unless someone uses the link in the email, and it stops working at <span className="font-mono">{dateTime(linkExpires)}</span>.</p>
+          <button type="button" onClick={onCancelled} className="mt-2 text-[13px] text-ink underline">Back to Sign-in and security</button>
+        </div>
+      ) : null}
       <div className="flex justify-end gap-2">
-        <Btn onClick={() => { void run('account_delete_cancel', {}, null); onCancelled() }}>Cancel deletion</Btn>
+        {/* The checked password is wiped either way (account_delete_cancel); the request itself waits for core (blocked). */}
+        <Btn onClick={() => { void run('account_delete_cancel', {}, null); setCannotCancel(true) }}>Cancel deletion</Btn>
         <Btn onClick={() => onUsed(null)}>I’ve opened the link</Btn>
       </div>
     </Page>
@@ -375,7 +390,8 @@ function DeleteStep4({ shredAfter, onUndone, onSignOut, dialog, closeDialog }: {
       <StepHead n={4} />
       <div className="rounded-[12px] border border-line bg-paper px-4 py-3">
         <div className="text-[13px] text-ink-2">Your account and every product’s data will be deleted on</div>
-        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{shredAfter ? dateTime(shredAfter) : '72 hours after the link was used'}</div>
+        {/* Without the server's date (the link was opened in the browser), the page the link opened shows it: never a guessed duration (decision 2436). */}
+        <div className="mt-1 text-[17px] font-semibold text-ink" data-testid="shred-at">{shredAfter ? dateTime(shredAfter) : 'the date the link’s page showed'}</div>
       </div>
       <Group title="Changed your mind?">
         <Row label="Undo from this screen" />

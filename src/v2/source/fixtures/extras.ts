@@ -6,6 +6,10 @@
 // `default` is up to date, with no problems and nothing moving (DW-0401).
 import type { DriveExtras, DriveStatus, PhotoMeta, SyncProblem, TransferRow } from '../extras'
 import { HISTORY, OFFLINE_ENTRIES, PHOTO_ENTRIES, PHOTO_META } from './photos'
+import { SEARCH_ITEMS } from './shared'
+
+/** Where each of B05's search hits is (DW-0802: "Documents › Legal"); anything else is in Files. */
+const WHERE: Record<string, string> = Object.fromEntries(SEARCH_ITEMS.map((r) => [r.item.id, r.where]))
 
 const MB = 1_000_000
 
@@ -67,6 +71,6 @@ export function createFixtureExtras(scenario: string): DriveExtras {
     offlineList: async () => (empty ? [] : OFFLINE_ENTRIES).map((o) => ({ item: o.item, items: o.item.isFolder ? o.item.childCount : undefined, bytes: o.bytes ?? 0 })),
     photoMeta: async (ids) => Object.fromEntries(ids.flatMap((id) => { const m = photoMeta(id); return m ? [[id, m]] : [] })),
     photoSources: async () => [{ id: 'f-backups', name: 'Camera uploads', path: 'Backups/Anna’s iPhone/Camera uploads', count: PHOTO_ENTRIES.length }],
-    paths: async (ids) => Object.fromEntries(ids.map((id) => [id, 'Files'])),
+    paths: async (ids) => Object.fromEntries(ids.map((id) => [id, WHERE[id] ?? 'Files'])),
   }
 }

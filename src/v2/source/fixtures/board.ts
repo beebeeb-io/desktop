@@ -5,7 +5,7 @@
 import type { DriveEvent, DriveSource, ItemId, StorageSummary, SyncSummary, TrashEntry } from '@beebeeb/shared/drive-ui'
 import type { Scenario } from '../fixtures'
 import { createFilesSource } from './files'
-import { createSharedSource, TRASH } from './shared'
+import { createSharedSource, SHARED_IDS, TRASH } from './shared'
 import { createPhotosSource, PHOTO_ENTRIES } from './photos'
 import { createOpenSource, OPEN_ITEMS } from './open'
 import { createOfficeSource, OFFICE_ITEMS } from './office'
@@ -30,7 +30,8 @@ export function boardSync(scenario: Scenario): SyncSummary {
 export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
   const empty = scenario === 'empty'
   const files = createFilesSource({ scenario: scenario === 'offline' || scenario === 'rename-fails' ? scenario : 'default', items: empty ? [] : undefined })
-  const shared = createSharedSource({ empty })
+  // `no-shares` (DW-0508 to DW-0510): nothing shared yet, while Files keeps DW-0401's rows (Files › leads somewhere).
+  const shared = createSharedSource({ empty: empty || scenario === 'no-shares' })
   const photos = createPhotosSource(empty ? [] : PHOTO_ENTRIES)
   const open = createOpenSource()
   const office = createOfficeSource()
@@ -53,16 +54,20 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}:00`
   }
   const leaveTrash = (ids: ItemId[]) => { trash = trash.filter((t) => !ids.includes(t.item.id)) }
+  // What Trash's Restore took out (B05's own Trash rows are in no Files folder): Undo, a move to Trash, puts them back.
+  const restored = new Map<ItemId, TrashEntry>()
 
   return {
     ...files,
     kind: 'fixtures',
     details: async (id) => {
       if (officeAlias.has(id)) return files.details(id)
+      // B05's shares (Shared › Details) are the shared fixtures' own items.
+      if (SHARED_IDS.has(id)) return shared.details(id)
       return owner(id).details(id)
     },
     thumbnail: (id, size) => owner(id).thumbnail(id, size),
-    versions: (id) => owner(id).versions(idFor(id)),
+    versions: (id) => (SHARED_IDS.has(id) ? shared.versions(id) : owner(id).versions(idFor(id))),
     readText: (id) => owner(id).readText(idFor(id)),
     saveText: (id, text, base) => owner(id).saveText(idFor(id), text, base),
     readBytes: (id) => owner(id).readBytes(idFor(id)),
@@ -74,7 +79,12 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     async moveToTrash(ids) {
       const found = await Promise.all(ids.map((id) => files.details(id).catch(() => null)))
       const moved = await files.moveToTrash(ids)
-      const entries = found.flatMap((d) => (d ? [{ item: d.item, trashedAt: stamp(), originalPath: d.path.slice(1).map((c) => c.name).join(' › ') || 'Files' }] : []))
+      const entries = found.flatMap((d, i) => {
+        if (d) return [{ item: d.item, trashedAt: stamp(), originalPath: d.path.slice(1).map((c) => c.name).join(' › ') || 'Files' }]
+        const back = restored.get(ids[i]!)
+        restored.delete(ids[i]!)
+        return back ? [{ ...back, trashedAt: stamp() }] : []
+      })
       trash = [...entries, ...trash]
       moves.set(moved.undoToken, ids)
       ids.forEach((id) => send({ kind: 'removed', id }))
@@ -86,6 +96,7 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
       moves.delete(token)
     },
     async restoreFromTrash(ids) {
+      for (const t of trash) if (ids.includes(t.item.id)) restored.set(t.item.id, t)
       leaveTrash(ids)
       // A move from Files goes back once all of it has left Trash.
       for (const [token, moved] of moves) {

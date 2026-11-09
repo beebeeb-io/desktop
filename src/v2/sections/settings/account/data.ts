@@ -145,12 +145,22 @@ export async function run<T>(name: string, args: Record<string, unknown>, fake: 
   return r.ok ? { ok: true, value: r.value } : { ok: false, code: r.reason }
 }
 
-/** Copy, then clear the clipboard after 60 seconds if it still holds what we put there (the web's rule). */
-export async function copyFor60s(text: string): Promise<void> {
+/**
+ * Copy, then clear the clipboard after 60 seconds if it still holds what we put there (the web's rule). Resolves to
+ * whether the clipboard took it, so the screen never says "Copied" when nothing was copied.
+ */
+export async function copyFor60s(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text)
-    window.setTimeout(async () => {
-      try { if ((await navigator.clipboard.readText()) === text) await navigator.clipboard.writeText('') } catch { /* nothing to clear */ }
-    }, 60_000)
-  } catch { /* clipboard refused: nothing copied */ }
+  } catch {
+    return false
+  }
+  window.setTimeout(async () => {
+    try { if ((await navigator.clipboard.readText()) === text) await navigator.clipboard.writeText('') } catch { /* nothing to clear */ }
+  }, 60_000)
+  return true
 }
+
+/** What a copy button says after a click: the clipboard took it, or it did not. */
+export const COPY_DONE = 'Copied. The clipboard clears after 60 seconds.'
+export const COPY_FAILED = 'Couldn’t copy. Select the text and copy it yourself.'

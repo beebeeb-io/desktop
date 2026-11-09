@@ -96,7 +96,7 @@ export function rowsFromEntries(entries: ShareEntry[]): { withMe: WithMeRow[]; p
   for (const e of entries) {
     const base = { id: e.item.id, name: e.item.name, isFolder: e.item.isFolder }
     if (e.direction === 'with-me') withMe.push({ ...base, owner: e.people[0]?.name ?? '', items: e.item.childCount, size: e.item.size, modifiedAt: e.item.modifiedAt })
-    else if (e.hasLink) links.push({ id: base.id, name: base.name, expiresAt: null, password: false, size: e.item.size })
+    else if (e.hasLink) links.push({ id: base.id, name: base.name, expiresAt: null, password: false, size: e.item.size, isFolder: base.isFolder })
     if (e.direction === 'by-me' && e.people.length > 0) people.push({ ...base, people: e.people.map((p) => p.name), items: e.item.childCount, size: e.item.size })
   }
   return { withMe, people, links }

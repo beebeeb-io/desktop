@@ -166,7 +166,7 @@ const KEY_ONLY = new RegExp(`^(?:${KEY})(?:\\s*(?:,|/|or)\\s*(?:${KEY}))*$`)
 const OS_DRAWN = /\b(File Explorer|Explorer|installer|taskbar|notification area|system tray|Start menu|toast|UAC|SmartScreen|Windows Hello|Windows Security|desktop shortcut|Alt\+Tab|Win\+|Windows (?:shows|draws|asks)|the b\b|Jump List|another app|the OS|outside the window|resize|drag the window|Snap|title bar|caption bar buttons|minimi[sz]e|maximi[sz]e|the window's close)/i
 const DRAG = /\bdrag/i
 const HOVER = /^(hover|point at|pointer over)\b/i
-const EVENT = /^(approved|denied|countdown|when\b|after\b|once\b|if\b|the server|a server|wrong\b|correct\b|code arrives|.*\breaches\b|times? out|expires|.*\b(finishes|completes|succeeds|fails)\b|back from|coming back|leave the page|hold (ctrl|shift|alt)|pinch|hover|point at|a minute later|later\b|on success|on error|no answer|the upload|the download|sync (finishes|stops))/i
+const EVENT = /^(approved|denied|countdown|when\b|after\b|once\b|if\b|the server|a server|wrong\b|correct\b|code arrives|opening the link|.*\breaches\b|times? out|expires|.*\b(finishes|completes|succeeds|fails)\b|back from|coming back|leave the page|hold (ctrl|shift|alt)|pinch|hover|point at|a minute later|later\b|on success|on error|no answer|the upload|the download|sync (finishes|stops))/i
 
 function keyName(k) {
   const map = { Esc: 'Escape', Del: 'Delete', Return: 'Enter', Space: ' ', '↑': 'ArrowUp', '↓': 'ArrowDown', '←': 'ArrowLeft', '→': 'ArrowRight', '†“': 'ArrowDown', '†‘': 'ArrowUp', Up: 'ArrowUp', Down: 'ArrowDown', Left: 'ArrowLeft', Right: 'ArrowRight', 'Page Up': 'PageUp', 'Page Down': 'PageDown', Win: 'Meta', Ctrl: 'Control' }
@@ -358,14 +358,16 @@ async function perform(page, plans) {
       continue
     }
     if (p.then) await page.keyboard.press(p.then).catch(() => {})
-    if (p.next) {
+    // Each later step keeps its own verb (M3a: Ctrl+click a second row adds it to the selection). M3c: a step may fill a
+    // field and carry its own `next`, so a plan types what the person types (a code, a password) before the button.
+    for (let step = p.next; step; step = step.next) {
       await settle(page, 1500)
-      const second = await findControl(page, p.next)
+      const second = await findControl(page, step)
       if (!second) return { done: false }
-      // A second step keeps its own verb (M3a: Ctrl+click a second row adds it to the selection).
-      const modifiers = p.next.verb === 'ctrl+click' ? ['Control'] : p.next.verb === 'shift+click' ? ['Shift'] : []
+      const modifiers = step.verb === 'ctrl+click' ? ['Control'] : step.verb === 'shift+click' ? ['Shift'] : []
       try {
-        if (p.next.verb === 'double-click') await second.dblclick({ timeout: 2000 })
+        if (step.verb === 'double-click') await second.dblclick({ timeout: 2000 })
+        else if (step.verb === 'fill') await second.fill(step.value ?? '', { timeout: 2000 })
         else await second.click({ timeout: 2000, modifiers })
       } catch { return { done: false } }
     }
@@ -489,9 +491,10 @@ async function audit(page, a) {
   if (cmds.length) row.commands = cmds
   const ownerOf = (c) => Object.entries(owners).find(([, o]) => o.commands.some((x) => (x.endsWith('*') ? c.startsWith(x.slice(0, -1)) : x === c)))?.[0] ?? null
 
-  // The board's "Does nothing …" (DW-0410b's F2 while the name is taken): the pass is a screen that did not change,
-  // and a change fails it (M3a). The only action that says so; the rule reads the board's words, not a list of rows.
-  if (!a.to.length && /^does nothing\b/i.test(a.does ?? '')) {
+  // The board's "Does nothing …" (DW-0410b's F2 while the name is taken) and "Nothing opens: …" (DW-A51's recovery
+  // phrase row, M3c): the pass is a screen that did not change, and a change fails it (M3a). The rule reads the board's
+  // words, not a list of rows.
+  if (!a.to.length && /^(does nothing|nothing opens)\b/i.test(a.does ?? '')) {
     if (!changed && !cmds.length) return { ...row, outcome: 'ok', detail: 'the board says nothing happens; the screen stayed the same' }
     return { ...row, outcome: 'wrong-target', detail: `the board says nothing happens; ${changed ? 'the screen changed' : `it called ${cmds.join(', ')}`}` }
   }

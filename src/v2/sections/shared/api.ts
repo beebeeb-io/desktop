@@ -1,7 +1,9 @@
 // B05's commands outside DriveSource (spec 3.2), all through desktopApi's command(). Each one sends only ids, emails,
 // permission choices, expiry and (one way, into Rust) a password or code. Nothing comes back that carries a key: a
 // link answers with its display form, without the part after #; Rust has already put the full link on the clipboard.
+import { DriveSourceError } from '@beebeeb/shared/drive-ui'
 import { command, commandUnavailableLabel, type CommandResult } from '../../../desktopApi'
+import { actionFailure } from '../files/model'
 import type { Access, FileRequestRow, Invitation, LinkShare, Member } from './model'
 import { publishCount } from '../../chrome/counts'
 
@@ -57,6 +59,12 @@ const UNSUPPORTED_WORDS: [RegExp, string][] = [
   [/sealed before this app kept the key/, 'This share was made before Beebeeb kept what it needs for a safety number. Nothing was changed.'],
   [/sharing a folder to a changed key/, 'Sharing a folder after a key change isn’t available in this version of Beebeeb. Nothing was shared.'],
 ]
+
+/** A failed DriveSource call (an open, Details, the offline switch, File Explorer) in Files' words (files/model.ts), so
+ * Shared, Search and Files say the same thing for the same failure; never the host's text. */
+export function openFailureText(e: unknown, action: string): string {
+  return actionFailure(action, e instanceof DriveSourceError ? e.code : 'failed').text
+}
 
 /** The copy for a failed command: never the host's text. */
 export function failureText(r: CommandResult<unknown>): string {

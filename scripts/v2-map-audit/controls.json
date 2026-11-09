@@ -420,5 +420,293 @@
   "verb": "click",
   "name": "Verify phrase",
   "role": "button"
+ },
+ "DW-0801#1": {
+  "verb": "click",
+  "selector": "[data-recent] button",
+  "why": "a recent search: the first one, contract (the recent list is plain buttons, not rows)"
+ },
+ "DW-0802#2": {
+  "key": "ArrowDown",
+  "focus": {
+   "verb": "focus",
+   "selector": "[data-search-field]"
+  },
+  "why": "↓ pressed in the search field"
+ },
+ "DW-0802b#0": {
+  "notAutomatable": "an event: DW-0802 is the list with the note gone, and the note goes when the list has loaded (DW-0802b's rule). Each letter searches again and re-reads the progress, but the fixture host's list never finishes loading",
+  "why": "typing works (it searches again with each letter); the target needs the first sign-in's list to finish, which only a real sign-in does: native smoke"
+ },
+ "DW-0803#0": {
+  "verb": "fill",
+  "selector": "[data-search-field]",
+  "value": "Contr",
+  "why": "edit the search: \"harbr\" becomes \"Contr\" (DW-0802's query)"
+ },
+ "DW-0747#2": {
+  "key": "Delete",
+  "focus": {
+   "verb": "click",
+   "selector": "[data-row=\"t-contract-old\"]"
+  },
+  "why": "Delete acts on the selection: nothing is selected in this state, so one row is clicked first (DW-0748's Contract old.pdf)"
+ },
+ "DW-0749#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"Authenticator code\"]",
+  "value": "518204",
+  "next": {
+   "verb": "click",
+   "name": "Empty Trash",
+   "role": "button"
+  },
+  "why": "Empty Trash is on at six digits: the frame's \"51\" typed on to six, then the button"
+ },
+ "DW-0749b#0": {
+  "verb": "click",
+  "selector": "nav[aria-label=\"Sections\"] a[href=\"?section=files\"]",
+  "why": "another view: Files, in the sidebar"
+ },
+ "DW-0502#0": {
+  "verb": "right-click",
+  "selector": "[data-row=\"sl-budget\"]",
+  "why": "a link's row (Budget 2026.xlsx, DW-0506's); \"a link\" also names the Link column header"
+ },
+ "DW-0502#1": {
+  "verb": "click",
+  "selector": "[data-row=\"sb-lisbon\"] button",
+  "why": "the people on a share are one button in its row (Lisbon trip: Jonas Meier, Mia de Vries)"
+ },
+ "DW-0504#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"Title\"]",
+  "value": "Send me your signed contract",
+  "next": {
+   "verb": "click",
+   "name": "Create link",
+   "role": "button"
+  },
+  "why": "Create link is on once the request has a title: the frame's example title, then the button"
+ },
+ "DW-0506#2": {
+  "verb": "click",
+  "name": "Change expiry",
+  "role": "menuitem",
+  "why": "the Change expiry ▸ item opens its submenu"
+ },
+ "DW-0509#0": {
+  "verb": "click",
+  "selector": "[data-empty=\"by-me\"] a",
+  "why": "\"Files\" is the empty state's link, not \"files\" (rows)"
+ },
+ "DW-0513#1": {
+  "verb": "click",
+  "name": "They don’t match",
+  "role": "button",
+  "why": "the board writes a straight apostrophe; the button the curly one"
+ },
+ "DW-0513b#1": {
+  "verb": "click",
+  "name": "Remove Jonas’s access",
+  "role": "button",
+  "why": "the board writes a straight apostrophe; the button the curly one"
+ },
+ "DW-A51#0": {
+  "verb": "click",
+  "name": "Anna de Vries",
+  "role": "button",
+  "why": "the Name row is the button that shows the name"
+ },
+ "DW-A84a#1": {
+  "verb": "click",
+  "name": "Email verified",
+  "role": "button",
+  "why": "a done row: the first one, Email verified"
+ },
+ "DW-A65#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"New email\"]",
+  "value": "anna.devries@example.eu",
+  "next": {
+   "verb": "fill",
+   "selector": "input[aria-label=\"Password\"]",
+   "value": "correct horse battery",
+   "next": {
+    "verb": "click",
+    "name": "Send code",
+    "role": "button"
+   }
+  },
+  "why": "Send code is on once both fields are filled: the new address and the password, then the button"
+ },
+ "DW-A66#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"8-digit code\"]",
+  "value": "48291736",
+  "next": {
+   "verb": "click",
+   "name": "Confirm",
+   "role": "button"
+  },
+  "why": "Confirm is on at eight digits: the frame's four typed on to eight"
+ },
+ "DW-A67#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"Current password\"]",
+  "value": "correct horse battery",
+  "next": {
+   "verb": "fill",
+   "selector": "input[aria-label=\"New password\"]",
+   "value": "river-lantern-quiet-74",
+   "next": {
+    "verb": "fill",
+    "selector": "input[aria-label=\"New password again\"]",
+    "value": "river-lantern-quiet-74",
+    "next": {
+     "verb": "click",
+     "name": "Change password",
+     "role": "button"
+    }
+   }
+  },
+  "why": "Change password is on once the three fields are valid: current, new and new again, then the button"
+ },
+ "DW-A68#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"Current password\"]",
+  "value": "correct horse battery",
+  "next": {
+   "verb": "click",
+   "name": "Change password",
+   "role": "button"
+  },
+  "why": "the new password is kept (DW-A68): only the current one is typed again"
+ },
+ "DW-A69#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"6-digit code\"]",
+  "value": "482913",
+  "next": {
+   "verb": "click",
+   "name": "Turn on",
+   "role": "button"
+  },
+  "why": "Turn on is on at six digits: the frame's \"48\" typed on to six; \"Turn on\" read as \"on\" matched another button"
+ },
+ "DW-A70#0": {
+  "verb": "click",
+  "name": "I’ve saved them",
+  "role": "button",
+  "why": "the board writes a straight apostrophe; the button the curly one"
+ },
+ "DW-A71#0": {
+  "verb": "click",
+  "name": "Make new backup codes",
+  "role": "button",
+  "next": {
+   "verb": "fill",
+   "selector": "[role=dialog] input[aria-label=\"6-digit code\"]",
+   "value": "482913",
+   "next": {
+    "verb": "click",
+    "name": "Continue",
+    "role": "button"
+   }
+  },
+  "why": "the board's \"Asks for a code, then shows 8 new codes\": the current code, then Continue"
+ },
+ "DW-A71#1": {
+  "verb": "click",
+  "name": "Move to a new authenticator",
+  "role": "button",
+  "next": {
+   "verb": "fill",
+   "selector": "[role=dialog] input[aria-label=\"6-digit code\"]",
+   "value": "482913",
+   "next": {
+    "verb": "click",
+    "name": "Continue",
+    "role": "button"
+   }
+  },
+  "why": "the board's \"Asks for the current code, then the set-up screen\": the code, then Continue"
+ },
+ "DW-A72#0": {
+  "verb": "fill",
+  "selector": "[role=dialog] input[aria-label=\"6-digit code\"]",
+  "value": "482913",
+  "next": {
+   "verb": "click",
+   "name": "Turn off two-factor, destructive",
+   "role": "button"
+  },
+  "why": "Turn off is on at six digits (its accessible name says it is destructive); \"Turn off\" read as \"off\""
+ },
+ "DW-A73#1": {
+  "verb": "click",
+  "name": "More for iCloud Keychain",
+  "role": "button",
+  "why": "⋯ on a passkey is the button named More for <passkey>"
+ },
+ "DW-A74#0": {
+  "verb": "click",
+  "name": "Add a passkey",
+  "role": "button",
+  "next": {
+   "verb": "fill",
+   "selector": "[role=dialog] input[aria-label=\"Password\"]",
+   "value": "correct horse battery",
+   "next": {
+    "verb": "click",
+    "name": "Continue",
+    "role": "button"
+   }
+  },
+  "why": "the board's \"Confirms it's you, then the system passkey dialog\": the password, then Continue"
+ },
+ "DW-A76#0": {
+  "verb": "fill",
+  "selector": "[role=dialog] input[aria-label=\"Password\"]",
+  "value": "correct horse battery",
+  "next": {
+   "verb": "click",
+   "name": "Remove iCloud Keychain, destructive",
+   "role": "button"
+  },
+  "why": "Remove is on once the password is typed (its accessible name names the passkey and says it is destructive)"
+ },
+ "DW-A78#0": {
+  "verb": "fill",
+  "selector": "[role=dialog] input[aria-label=\"Password\"]",
+  "value": "correct horse battery",
+  "next": {
+   "verb": "click",
+   "name": "Turn off security logging, destructive",
+   "role": "button"
+  },
+  "why": "Turn off is on once the password is typed; \"Turn off\" read as \"off\""
+ },
+ "DW-A58#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"Password\"]",
+  "value": "correct horse battery",
+  "next": {
+   "verb": "click",
+   "name": "Continue, destructive",
+   "role": "button"
+  },
+  "why": "Continue is on once the password is typed (its accessible name says it is destructive)"
+ },
+ "DW-A80#0": {
+  "verb": "fill",
+  "selector": "input[aria-label=\"6-digit code\"]",
+  "value": "712604",
+  "next": {
+   "verb": "click",
+   "name": "Continue, destructive",
+   "role": "button"
+  },
+  "why": "Continue is on at six digits: the frame's \"71\" typed on to six"
  }
 }

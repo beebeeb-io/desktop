@@ -20,10 +20,11 @@ export function AccountPane({ initial = 'main', scenario = 'default', codeDigits
   const home = useCallback(() => setPage('main'), [])
 
   if (page === 'name') return <ChangeName current={state.name} onDone={(name) => { setState((s) => ({ ...s, name })); home() }} onCancel={home} />
-  if (page === 'email') return <ChangeEmail onSent={(email) => { setPendingEmail(email); setPage('email-code') }} onCancel={home} />
+  // The address is kept only for Send again (EmailCode → here); a cancel or a confirmed change starts the next visit empty.
+  if (page === 'email') return <ChangeEmail initialEmail={pendingEmail} onSent={(email) => { setPendingEmail(email); setPage('email-code') }} onCancel={() => { setPendingEmail(''); home() }} />
   if (page === 'email-code') {
     return <EmailCode email={pendingEmail} initialDigits={codeDigits} onBack={() => setPage('email')}
-      onDone={() => { setState((s) => ({ ...s, email: pendingEmail, emailVerified: true })); home() }} />
+      onDone={() => { setState((s) => ({ ...s, email: pendingEmail, emailVerified: true })); setPendingEmail(''); home() }} />
   }
 
   return (
@@ -74,8 +75,8 @@ function ChangeName({ current, onDone, onCancel }: { current: string; onDone: (n
   )
 }
 
-function ChangeEmail({ onSent, onCancel }: { onSent: (email: string) => void; onCancel: () => void }) {
-  const [email, setEmail] = useState('')
+function ChangeEmail({ initialEmail = '', onSent, onCancel }: { initialEmail?: string; onSent: (email: string) => void; onCancel: () => void }) {
+  const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
   const [error, setError] = useState<{ field: 'email' | 'password'; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -130,7 +131,10 @@ function EmailCode({ email, initialDigits, onBack, onDone }: { email: string; in
         <CodeBoxes length={8} label="8-digit code" value={code} onChange={(v) => { setCode(v); setError(null) }} error={!!error} focus />
         {error ? <p role="alert" className="text-[12px] text-red">{error}</p> : null}
         <p className="text-[12px] text-ink-3">
-          {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={() => { setWait(60) }} className="text-ink underline">Send again</button>}
+          {/* A new code is a new email change (the server's /me/email/start takes the password), so Send again goes
+              back to Change email with the address kept: it never pretends a code went out. */}
+          {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={onBack} className="text-ink underline">Send again</button>}
+          {' · '}A new code asks for your password again.
         </p>
         <p className="text-[12px] text-ink-3">Sign-in on your other devices keeps working; their next sign-in uses the new address.</p>
         <div className="flex justify-end gap-2"><Btn onClick={onBack}>Back</Btn><Btn variant="amber" disabled={code.length !== 8} onClick={() => void confirm()}>Confirm</Btn></div>
