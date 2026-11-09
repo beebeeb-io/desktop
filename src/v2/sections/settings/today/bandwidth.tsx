@@ -194,6 +194,15 @@ export function SpeedTest({ forced, scroll }: { forced?: TestState; scroll?: boo
   const st = forced ?? live
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => { if (scroll) ref.current?.scrollIntoView({ block: 'start' }) }, [scroll])
+  if (st.phase === 'unavailable') {
+    return (
+      <div ref={ref} data-testid="speedtest">
+        <Group title="Speed test">
+          <Row label="Test connection speed" sub={st.message} />
+        </Group>
+      </div>
+    )
+  }
   const running = st.phase === 'running'
   const step = (name: string, state: 'done' | 'now' | 'wait', detail: string, bar?: { frac: number; amber?: boolean }) => (
     <div className="px-4 py-2.5" data-testid="step">
@@ -206,7 +215,8 @@ export function SpeedTest({ forced, scroll }: { forced?: TestState; scroll?: boo
       <Group title="Speed test">
         <Row label="Test connection speed"
           sub={running ? 'Testing… this takes 30 to 90 seconds.' : 'Measures latency, upload and download between this PC and Beebeeb. It takes 30 to 90 seconds.'}
-          right={<Btn onClick={runSpeedTest} disabled={running}>{running ? 'Running…' : st.phase === 'done' ? 'Run test again' : 'Run test'}</Btn>} />
+          right={<Btn onClick={runSpeedTest}>{running ? 'Running…' : st.phase === 'done' ? 'Run test again' : 'Run test'}</Btn>} />
+        {st.phase === 'running' && st.notice ? <p className="px-4 pb-3 text-[12px] leading-4 text-ink-3" data-testid="speed-notice">{st.notice}</p> : null}
         {st.phase === 'running' ? (
           <>
             {step('Latency', st.step === 'latency' ? 'now' : 'done', st.step === 'latency' ? 'Pinging…' : st.latency != null ? `${st.latency} ms${st.latencyRange ? ` (${st.latencyRange[0]} to ${st.latencyRange[1]} ms)` : ''}` : 'Done')}
