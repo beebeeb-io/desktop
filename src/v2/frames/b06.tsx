@@ -36,7 +36,8 @@ function Win({ section, body, overlay, toast, counts }: { section: SectionId; bo
       <div data-frame-window className="relative flex h-screen flex-col overflow-hidden bg-paper font-sans text-ink">
         <CaptionBarView title={section === 'photos' ? 'Photos - Beebeeb' : section === 'sync-history' ? 'Sync history - Beebeeb' : 'Available offline - Beebeeb'} />
         <div className="flex min-h-0 flex-1">
-          <Sidebar active={section} onGo={() => {}} storage={STORAGE} accountName="Anna" counts={counts} />
+          {/* The board draws Shared 1 and Trash 12 in every B06 frame, as in DW-0401 (M3d). */}
+          <Sidebar active={section} onGo={() => {}} storage={STORAGE} accountName="Anna" counts={{ shared: 1, trash: 12, ...counts }} />
           <main className="flex min-w-0 flex-1 flex-col">{body}</main>
         </div>
         <StatusLine sync={SYNC_OK} />
@@ -83,7 +84,7 @@ export const FRAMES: FrameRegistry = {
   'DW-0608': () => photos(viewer('ph-harbour', { kept: true, keeping: true })),
   'DW-0609': () => photos(viewer('ph-harbour'), <DetailsDialog cell={harbour} now={NOW} />),
   'DW-0610': () => photos(viewer('ph-market'), undefined, { kind: 'undo', text: 'Moved to Trash' }),
-  'DW-0611': () => photos(viewer('ph-sunday')),
+  'DW-0611': () => photos(viewer('ph-sunday', { referencePlayer: true })),
   'DW-0116': () => photos(grid({ cells: [], devices: [], backups: [], totals: null, canUpload: false })),
 
   'DW-1301': () => history(),

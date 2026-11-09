@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event'
 import type { DriveItem, ItemId } from '@beebeeb/shared/drive-ui'
 import { hasTauri } from './index'
 import { createFixtureExtras } from './fixtures/extras'
+import { createFileIn } from './desktop'
 
 export interface ListingProgress { done: number; total: number }
 export interface ConflictRef { id: ItemId; name: string }
@@ -77,6 +78,8 @@ export interface PhotoMeta {
   height?: number
   durationSeconds?: number
   uploading: boolean
+  /** The device whose backup holds it (its device folder under Backups); absent outside Backups. */
+  device?: string
 }
 
 export interface PhotoSource { id: ItemId | null; name: string; path: string; count: number }
@@ -93,6 +96,9 @@ export interface DriveExtras {
   photoSources(): Promise<PhotoSource[]>
   /** "Files › Docs" for each id, for search results. */
   paths(ids: ItemId[]): Promise<Record<ItemId, string>>
+  /** A new file in a folder with these bytes (New file; the editors' "Keep both"), answered as the new item. A taken
+   *  name fails with `name-taken`, never an overwrite. */
+  createFile(parentId: ItemId | null, name: string, bytes: Uint8Array): Promise<DriveItem>
 }
 
 export function createDesktopExtras(): DriveExtras {
@@ -113,6 +119,7 @@ export function createDesktopExtras(): DriveExtras {
     photoMeta: (ids) => (ids.length ? invoke('drive_photo_meta', { ids }) : Promise.resolve({})),
     photoSources: () => invoke('drive_photo_sources'),
     paths: (ids) => (ids.length ? invoke('drive_paths', { ids }) : Promise.resolve({})),
+    createFile: createFileIn,
   }
 }
 

@@ -708,5 +708,132 @@
    "role": "button"
   },
   "why": "Continue is on at six digits: the frame's \"71\" typed on to six"
+ },
+ "DW-0601#1": {
+  "key": "Space",
+  "focus": {
+   "verb": "focus",
+   "selector": "[data-tile=\"ph-harbour\"]"
+  },
+  "why": "Space previews the photo with the keyboard on it (M3d): nothing has the focus in this state"
+ },
+ "DW-0603#0": {
+  "verb": "click",
+  "name": "4",
+  "role": "menuitemradio",
+  "why": "a choice that changes the grid (7 is checked); the menu's choices are menuitemradio, which the generic choice selector does not list"
+ },
+ "DW-0605#1": {
+  "verb": "click",
+  "name": "More actions",
+  "role": "button",
+  "why": "the ⋯ button is named More actions"
+ },
+ "DW-0605b#1": {
+  "key": "ArrowRight",
+  "why": "← → read as the next photo (as DW-0408#1)"
+ },
+ "DW-0715#0": {
+  "verb": "right-click",
+  "selector": "[data-row=\"o-invoices\"]",
+  "why": "the board's target is the menu itself (DW-1306 draws it on Invoices 2026); its Remove from this PC is DW-1306#0"
+ },
+ "DW-1301#1": {
+  "verb": "double-click",
+  "selector": "[data-row=\"i-contract\"]",
+  "why": "a row that is in Beebeeb (Contract draft.pdf); the first row is a problem that never synced (DW-0428's own double-click)"
+ },
+ "DW-1301#3": {
+  "verb": "click",
+  "selector": "[data-filter=\"this-pc\"]",
+  "why": "a filter that narrows the list (All is already on): This PC, the target DW-1302"
+ },
+ "DW-1501#1": {
+  "key": "ArrowRight",
+  "why": "← → read as the next photo in the folder"
+ },
+ "DW-1503#2": {
+  "notAutomatable": "media keys and AirPods reach the player through the window's media session, which Windows drives"
+ },
+ "DW-1503#3": {
+  "verb": "click",
+  "selector": "[data-track][aria-current=\"false\"]",
+  "why": "a track in Up next other than the one playing"
+ },
+ "DW-1503#4": {
+  "notAutomatable": "the target, DW-1504, is Windows' Quick Settings media controls (Windows draws them); Back itself goes to the folder and playback carries on"
+ },
+ "DW-1513#2": {
+  "verb": "click",
+  "selector": "[data-drive-link]",
+  "why": "the note's link to a file in Drive (the plan)"
+ },
+ "DW-1514#0": {
+  "verb": "click",
+  "selector": "tbody tr:nth-child(2) td:nth-child(2)",
+  "why": "a cell: the second row's Client"
+ },
+ "DW-1521#0": {
+  "verb": "click",
+  "selector": "[data-type=\"txt\"]",
+  "next": {
+   "verb": "click",
+   "name": "Continue"
+  },
+  "why": "Markdown or Text, then Continue: Text (Markdown is already selected), then Continue"
+ },
+ "DW-1521#1": {
+  "verb": "click",
+  "selector": "[data-type=\"docx\"]",
+  "next": {
+   "verb": "click",
+   "name": "Continue"
+  },
+  "why": "Word, then Continue"
+ },
+ "DW-1523#1": {
+  "verb": "click",
+  "name": "Back to the folder",
+  "role": "button",
+  "why": "Close or back with changes: the editor's back"
+ },
+ "DW-1551#0": {
+  "key": "Enter",
+  "why": "↑ ↓ and Enter: Enter runs the highlighted command"
+ },
+ "DW-1557#0": {
+  "verb": "click",
+  "selector": "a[href=\"https://github.com/beebeeb-io/office\"]",
+  "why": "the links: the source link (Third-party licenses waits for the notices, which load with the editor)"
+ },
+ "DW-1526#1": {
+  "verb": "click",
+  "name": "Keep this PC’s",
+  "role": "button",
+  "why": "the board writes a straight apostrophe; the button the curly one (as DW-0429#1)"
+ },
+ "DW-1526#2": {
+  "verb": "click",
+  "name": "Keep Anna’s iPhone’s",
+  "role": "button",
+  "why": "the board writes straight apostrophes; the button curly ones"
+ },
+ "DW-1551#1": {
+  "key": "Escape",
+  "why": "the board writes the key as \"esc\" (lower case), which the key parser reads as a control's name"
+ },
+ "DW-1557#1": {
+  "key": "Escape",
+  "why": "the board writes the key as \"esc\" (lower case), which the key parser reads as a control's name"
+ },
+ "DW-1561#2": {
+  "key": "Escape",
+  "why": "the board writes the key as \"esc\" (lower case), which the key parser reads as a control's name"
+ },
+ "DW-0607#0": {
+  "verb": "click",
+  "name": "Copy link",
+  "role": "button",
+  "why": "the name parser drops a trailing \"link\" (\"Copy\"), and the loose match then takes Send a copy…, the first button with \"copy\" in it"
  }
 }

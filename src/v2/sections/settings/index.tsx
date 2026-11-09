@@ -8,5 +8,7 @@ const KNOWN: PaneId[] = ['general', 'about', 'account', 'security', 'devices', '
 export default function Section({ nav }: SectionProps) {
   const sub = nav.route.sub as PaneId | null
   const pane = sub && KNOWN.includes(sub) ? sub : 'general'
-  return <SettingsView key={pane} pane={pane} onBack={() => nav.go({ section: 'files', id: null, sub: null })} />
+  // `report`: General with the problem report open (DW-0782), for Report a problem outside Settings (DW-1518).
+  const dialog = nav.route.sub === 'report' ? 'report' : null
+  return <SettingsView key={`${pane}:${dialog}`} pane={pane} dialog={dialog} onBack={() => nav.go({ section: 'files', id: null, sub: null })} />
 }

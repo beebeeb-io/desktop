@@ -6,7 +6,7 @@
 
 import { invoke, type InvokeArgs } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { DriveSourceError, type DriveSource, type DriveSourceErrorCode, type ItemId } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, type DriveItem, type DriveSource, type DriveSourceErrorCode, type ItemId } from '@beebeeb/shared/drive-ui'
 
 /** The reason codes the v2 commands return as `Err("code: detail")`; anything else is `failed`. */
 const CODES: DriveSourceErrorCode[] = [
@@ -31,7 +31,7 @@ const todo = (command: string) => async (): Promise<never> => {
 
 // Binary content frames (drive_read_bytes / drive_save_bytes): [u32 LE header length][header JSON][bytes].
 // Content travels as raw IPC bytes, never base64 JSON.
-function frame(header: Record<string, string>, bytes: Uint8Array): Uint8Array {
+function frame(header: Record<string, string | null>, bytes: Uint8Array): Uint8Array {
   const head = new TextEncoder().encode(JSON.stringify(header))
   const out = new Uint8Array(4 + head.length + bytes.length)
   new DataView(out.buffer).setUint32(0, head.length, true)
@@ -54,6 +54,15 @@ function unframe(buf: ArrayBuffer): { header: Record<string, string>; bytes: Uin
  */
 export function uploadDroppedPaths(parentId: ItemId | null, paths: string[]): Promise<{ started: number }> {
   return call('drive_upload_dropped', { parentId, paths })
+}
+
+/**
+ * A new file in a folder with these bytes (New file, DW-1522; the editors' "Keep both"): Rust writes it into the sync
+ * folder and the engine uploads it. A taken name is refused (`name-taken`), never overwritten. Answers the new item;
+ * its id may be provisional (`local:…`) for a moment, which every command resolves.
+ */
+export function createFileIn(parentId: ItemId | null, name: string, bytes: Uint8Array): Promise<DriveItem> {
+  return call('drive_create_file', frame({ parentId, name }, bytes))
 }
 
 export function createDesktopSource(): DriveSource {
@@ -101,10 +110,13 @@ export function createDesktopSource(): DriveSource {
     // contract grows a confirmation (B02 PR note for the lead).
     deletePermanently: todo('desktop_trash_delete_permanently'),
     restoreVersion: (id, versionId) => call('restore_file_version', { fileId: id, versionId }), // existing
-    upload: (parentId, input) =>
-      input.kind === 'pick'
-        ? call('drive_upload_pick', { parentId, mode: input.mode })                     // new: native picker in Rust
-        : todo('drive_upload_dropped')(),  // browser File objects have no path; drops go through uploadDroppedPaths
+    upload: async (parentId, input) => {
+      if (input.kind === 'pick') return call('drive_upload_pick', { parentId, mode: input.mode }) // new: native picker in Rust
+      // Files the window made itself (a new file, a kept copy): their bytes go to Rust, one new file each. Drops from
+      // File Explorer have paths and go through uploadDroppedPaths.
+      for (const file of input.files) await createFileIn(parentId, file.name, new Uint8Array(await file.arrayBuffer()))
+      return { started: input.files.length }
+    },
     open: (id) => call('drive_open', { id }),                                           // new: hydrate, decrypt, open in its app
     readText: (id) => call('drive_read_text', { id }),                                  // new
     saveText: (id, text, baseVersionId) => call('drive_save_text', { id, text, baseVersionId }), // new

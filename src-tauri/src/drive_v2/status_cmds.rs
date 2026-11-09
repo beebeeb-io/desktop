@@ -261,6 +261,12 @@ pub(crate) async fn drive_photo_meta(
         let Some((db, root)) = local()? else {
             return Ok(HashMap::new());
         };
+        let roots: Vec<String> = db
+            .backups_roots()
+            .map_err(DriveError::db)?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
         let mut out = HashMap::new();
         for id in ids.iter().take(model::PHOTOS_PAGE) {
             let Ok(entry) = model::resolve(&db, id) else { continue };
@@ -278,6 +284,7 @@ pub(crate) async fn drive_photo_meta(
                 }
             }
             meta.uploading = entry.status == FileStatus::Uploading || uploading.iter().any(|u| u == id);
+            meta.device = photo_meta::backup_device(&roots, &entry.path);
             out.insert(id.clone(), meta);
         }
         Ok(out)

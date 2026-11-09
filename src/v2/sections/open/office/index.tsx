@@ -10,10 +10,13 @@ import {
 import { useCommand } from '../../../shortcuts'
 import type { Navigation } from '../../../routes'
 import { SavedMessage, UnsavedAlert } from '../Editing'
+import { ShareHost, VersionsHost } from '../hosts'
+import { openUrl } from '../../../../desktopApi'
+import { useDriveExtras } from '../../../source/extras'
 import { EngineFrame, FormulaBar, OutlinePane } from './Canvas'
 import { engineHostUrl, engineStatus, failureDetail, prepareEngine, waitForBridge, type EngineProgress } from './engine'
 import type { RelayBridge } from './relay'
-import { AboutPanel, CommandPalette, ConflictDialog, defaultNewName, FailedView, isLegacy, LegacyNote, NewDocumentDialog, OfficeStatus, PreparingView, TableSizeDialog, type ConflictChoice, type PaletteRow } from './Parts'
+import { AboutPanel, CommandPalette, ConflictDialog, defaultNewName, FailedView, isLegacy, LegacyNote, NewDocumentDialog, OFFICE_SOURCE_URL, OfficeStatus, PreparingView, TableSizeDialog, type ConflictChoice, type PaletteRow } from './Parts'
 import { OFFICE_TABS, type Control } from './Ribbon'
 import { APP_LABEL, OfficeShell } from './View'
 
@@ -55,6 +58,9 @@ export type OfficeTarget = { kind: 'file'; id: string } | { kind: 'new'; parentI
 
 export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navigation }) {
   const source = useDriveSource()
+  const extras = useDriveExtras()
+  const [share, setShare] = useState(false)
+  const [versionsOpen, setVersionsOpen] = useState(false)
   const { engine, setEngine, retry } = useEngine()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const bridgeRef = useRef<RelayBridge | null>(null)
@@ -137,12 +143,11 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
     })()
   }, [doc, name, target, refreshDoc, setEngine])
 
+  // A new document's first save and "Keep both" make a new file: Rust writes it into the folder (drive_create_file).
   const upload = useCallback(async (fileName: string, bytes: Uint8Array) => {
     const parentId = target.kind === 'new' ? target.parentId : item?.parentId ?? null
-    await source.upload(parentId, { kind: 'files', files: [new File([bytes as BlobPart], fileName)] })
-    const listing = await source.list(parentId)
-    return listing.items.find((i) => i.name === fileName) ?? null
-  }, [source, target, item])
+    return extras.createFile(parentId, fileName, bytes)
+  }, [extras, target, item])
 
   const save = useCallback(async (base?: string): Promise<boolean> => {
     const b = bridgeRef.current
@@ -221,7 +226,10 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
     ]
   }, [app, recent, fileId])
 
-  const back = () => (dirty ? setLeave(true) : nav.back())
+  // Back: the folder the document is in; with unsaved changes it asks first (DW-1507).
+  const folderId = target.kind === 'new' ? target.parentId : item?.parentId ?? null
+  const toFolder = () => nav.go({ section: 'files', id: folderId })
+  const back = () => (dirty ? setLeave(true) : toFolder())
   const otherApp = () => { if (fileId) void source.open(fileId) }
   const meta = item ? `${APP_LABEL[app]} · opens in the editor` : undefined
   const ext = extOf(name)
@@ -244,11 +252,11 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
     <>
       <OfficeShell
         app={app} path={path} name={name} meta={meta} dirty={dirty} saving={saving} tab={OFFICE_TABS[app].includes(tab) ? tab : 'Home'} onTab={setTab} onRun={onControl}
-        onSave={() => void save()} onPalette={() => setPalette(true)} onShare={() => fileId && nav.go({ section: 'files', sub: 'share', id: fileId })} onBack={back}
+        onSave={() => void save()} onPalette={() => setPalette(true)} onShare={() => { if (item) setShare(true) }} onBack={back}
         dimmed={engine.name !== 'ready'} layout={{ current: layout, onPick: (id) => { setLayout(id); const l = IMPRESS_LAYOUTS.find((x) => x.id === id); if (l) run('.uno:AssignLayout', layoutDispatchArgs(l)) } }}
         note={<>
           {isLegacy(ext) && <LegacyNote ext={ext} onOtherApp={otherApp} />}
-          {justSaved && !dirty && <SavedMessage version={versionNumber} onVersions={() => fileId && nav.go({ section: 'files', sub: 'versions', id: fileId })} />}
+          {justSaved && !dirty && <SavedMessage version={versionNumber} onVersions={() => { if (item) setVersionsOpen(true) }} />}
           {error && <div role="alert" className="flex h-9 flex-none items-center border-b border-line bg-paper-2 px-4 text-[13px] text-ink">{error}</div>}
         </>}
         status={<OfficeStatus left={left} dirty={dirty} conflict={!!conflict} version={versionNumber} time={savedAt ? hhmm(savedAt) : ''} loading={engine.name !== 'ready'} zoom={zoom} onZoom={(z) => { setZoom(z); void bridgeRef.current?.setZoom(z) }} onAbout={() => setAbout(true)} />}
@@ -262,9 +270,11 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
         else if (row?.command) run(row.command, row.args)
       }} />}
       {conflict && <ConflictDialog latest={conflict.latest} opened={versionNumber} saving={saving} onChoose={(c) => void onConflict(c)} onCancel={() => setConflict(null)} />}
-      {about && <AboutPanel onClose={() => setAbout(false)} noticesAvailable={false} onOpenLink={(w) => { if (w === 'source') window.open('https://github.com/beebeeb-io/office', '_blank', 'noopener') }} />}
+      {about && <AboutPanel onClose={() => setAbout(false)} noticesAvailable={false} onOpenLink={(w) => { if (w === 'source') void openUrl(OFFICE_SOURCE_URL) }} />}
       {tableDialog && <TableSizeDialog onCancel={() => setTableDialog(false)} onInsert={(rows, cols) => { setTableDialog(false); run('.uno:InsertTable', [{ name: 'Rows', value: rows }, { name: 'Columns', value: cols }]) }} />}
-      {leave && <UnsavedAlert name={name} onKeep={() => setLeave(false)} onDiscard={() => nav.back()} onSave={() => void save().then((ok) => { if (ok) nav.back(); else setLeave(false) })} />}
+      {leave && <UnsavedAlert name={name} onKeep={() => setLeave(false)} onDiscard={toFolder} onSave={() => void save().then((ok) => { if (ok) toFolder(); else setLeave(false) })} />}
+      {share && item && <ShareHost items={[item]} onClose={() => setShare(false)} />}
+      {versionsOpen && item && <VersionsHost item={item} onClose={() => setVersionsOpen(false)} />}
     </>
   )
 }
@@ -278,6 +288,6 @@ export function NewDocumentFlow({ parentId, nav }: { parentId: string | null; na
   if (made) return <OfficeEditor target={made} nav={nav} />
   return (
     <NewDocumentDialog kind={kind} template={template} name={name} onKind={(k) => { setKind(k); setTemplate('blank') }} onTemplate={setTemplate} onName={setName}
-      onCancel={() => nav.back()} onCreate={() => setMade({ kind: 'new', parentId, app: kind, template, name: name.trim() })} />
+      onCancel={() => nav.go({ section: 'files', id: parentId })} onCreate={() => setMade({ kind: 'new', parentId, app: kind, template, name: name.trim() })} />
   )
 }

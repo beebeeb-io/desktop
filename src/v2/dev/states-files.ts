@@ -83,7 +83,8 @@ export const FILES_STATES: Record<string, Recipe> = {
   'DW-1101': { q: 'section=files' },
   'DW-1102': { q: 'section=files', storage: prefs('f-lisbon', { view: 'grid', panel: true }), steps: [{ dbl: 'row:f-lisbon' }, { click: 'row:p-alfama' }] },
   'DW-1103': { q: 'section=files', steps: [{ context: LIST }] },
-  'DW-1104': { q: 'section=files', steps: [{ context: 'row:i-harbour' }] },
+  // Ruled (item 3): a downloaded photo that is not kept (Alfama.heic in Lisbon trip), so Make available offline is there.
+  'DW-1104': { q: 'section=files&id=f-lisbon', steps: [{ context: 'row:p-alfama' }] },
   // Opened from Files (Search names), so Esc's way back is Files, not whatever the tab showed before.
   'DW-1105': { q: 'section=files', steps: [{ click: 'btn:Search names' }, { fill: 'input[type=search],[role=searchbox],input', value: 'Contr' }] },
   'DW-1106': { q: 'section=files&id=f-new' },

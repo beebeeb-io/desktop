@@ -406,6 +406,50 @@ fn drive_v2_create_folder_on_the_sync_root() {
 }
 
 #[test]
+fn drive_v2_create_file_on_the_sync_root() {
+    let f = fixture();
+    drive(&f);
+    let docs = model::resolve(&f.db, "d0c5").unwrap();
+    assert_eq!(
+        fsops::create_file(&f.db, &f.root, Some(&docs), "Notes.md", b"# Notes\n").unwrap(),
+        "Docs/Notes.md"
+    );
+    assert_eq!(
+        std::fs::read(f.root.join("Docs").join("Notes.md")).unwrap(),
+        b"# Notes\n"
+    );
+    assert_eq!(
+        fsops::create_file(&f.db, &f.root, None, "Untitled.txt", b"").unwrap(),
+        "Untitled.txt",
+        "an empty file in the root"
+    );
+    // A name already on disk is refused, and the file there keeps its bytes (never truncated).
+    std::fs::write(f.root.join("Docs").join("keep.txt"), b"old").unwrap();
+    assert_eq!(
+        fsops::create_file(&f.db, &f.root, Some(&docs), "KEEP.txt", b"new").unwrap_err(),
+        DriveError::NameTaken
+    );
+    assert_eq!(std::fs::read(f.root.join("Docs").join("keep.txt")).unwrap(), b"old");
+    assert_eq!(
+        fsops::create_file(&f.db, &f.root, Some(&docs), "report.PDF", b"x").unwrap_err(),
+        DriveError::NameTaken,
+        "a cloud-only name counts, any case"
+    );
+    for bad in ["", "a/b", "..", "con.txt", "x?.md", "trailing."] {
+        assert_eq!(
+            fsops::create_file(&f.db, &f.root, None, bad, b"").unwrap_err(),
+            DriveError::InvalidName,
+            "{bad:?}"
+        );
+    }
+    let shared = model::resolve(&f.db, "s1").unwrap();
+    assert_eq!(
+        fsops::create_file(&f.db, &f.root, Some(&shared), "x.md", b"").unwrap_err(),
+        DriveError::ReadOnly
+    );
+}
+
+#[test]
 fn drive_v2_rename_on_the_sync_root() {
     let f = fixture();
     drive(&f);

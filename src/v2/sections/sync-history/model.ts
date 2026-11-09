@@ -62,7 +62,8 @@ export function rowsFromActivity(activity: ActivityRow[]): HistoryRow[] {
     const failed = a.state === 'failed'
     const where = a.folder || 'Beebeeb'
     return {
-      id: a.id, name: a.name, device: 'This PC', scope: 'this-pc' as const, kind: 'file' as const,
+      // The row's id is the file's id (a finished transfer without one is `transfer-…`): what opening it shows.
+      id: a.id, name: a.name, device: 'This PC', scope: 'this-pc' as const, kind: 'file' as const, itemId: a.id.startsWith('transfer-') ? undefined : a.id,
       at: new Date(a.at * 1000).toISOString(),
       what: failed ? `Didn’t sync · ${where}` : a.direction === 'down' ? `Downloaded from ${where}` : `Uploaded to ${where}`,
       problem: failed ? 'It didn’t sync. Nothing was lost; Beebeeb will try again.' : undefined,

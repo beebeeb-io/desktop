@@ -94,30 +94,40 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-1513': { q: 'section=open&id=o-md' },
   'DW-1514': { q: 'section=open&id=o-csv' },
   'DW-1515': { q: 'section=open&id=o-zip' },
-  'DW-1516': { q: 'section=open&id=o-pdf', gap: 'Decrypting shows only while a read is in flight; the fixtures answer at once' },
+  // M3d: Studio plan.pdf's read stays in flight in the `decrypting` world; it sits in Lisbon trip, where Cancel goes.
+  'DW-1516': { q: 'section=open&id=o-pdf&scenario=decrypting', steps: [{ wait: '[data-state="decrypting"]' }] },
   'DW-1517': { q: 'section=open&id=o-pdf', gap: 'Too large shows on a quota answer from readBytes; the fixtures never give one' },
   // server.log has no fixture text, so reading it fails: the live failure path.
   'DW-1518': { q: 'section=open&id=o-log' },
-  'DW-1519': { q: 'section=open&id=o-md', gap: 'the newer-version banner follows an item event from the engine; the fixtures send none' },
+  // M3d: in the `newer` world Anna's iPhone saves version 4 while the note is open: the engine's item event, the banner.
+  'DW-1519': { q: 'section=open&id=o-md&scenario=newer', steps: [{ wait: '[data-newer-banner]' }] },
   'DW-1520': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }] },
-  'DW-1521': { q: 'section=open&sub=new-file' },
-  'DW-1522': { q: 'section=open&sub=new-file', steps: [{ click: 'text:Text' }, { click: 'btn:Continue' }] },
+  // M3d: New file is opened from Files' New menu (DW-1520), so Cancel has the folder to go back to.
+  'DW-1521': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }, { click: menuItem('new-file') }, { wait: '[data-type="md"]' }] },
+  'DW-1522': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }, { click: menuItem('new-file') }, { click: '[data-type="txt"]' }, { click: 'btn:Continue' }] },
   'DW-1523': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { key: 'Ctrl+End' }, { type: '.cm-content', text: '\n3. Send the notes round' }] },
   'DW-1524': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { key: 'Ctrl+s' }] },
-  'DW-1525': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { click: 'btn:Back' }] },
-  'DW-1526': { q: 'section=open&id=o-md&sub=edit', gap: 'the edit conflict follows a save on another device; the board source plants none' },
+  // M3d: the editor's own back ("Back to the folder"); `btn:Back` matched the sidebar's Backups first.
+  'DW-1525': { q: 'section=open&id=o-md&sub=edit', steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { click: 'btn:Back to the folder' }, { wait: 'btn:Keep editing' }] },
+  // M3d: in the `edit-conflict` world Anna's iPhone saves version 4 while the note is edited: the save meets it.
+  'DW-1526': {
+    q: 'section=open&id=o-md&sub=edit&scenario=edit-conflict',
+    steps: [{ wait: '.cm-content' }, { click: '.cm-content' }, { type: '.cm-content', text: '\n3. Send the notes round' }, { key: 'Ctrl+s' }, { wait: 'btn:Keep both' }],
+  },
   'DW-1527': { q: 'section=open&id=o-log', gap: 'server.log has no fixture text (B07 draws its 41,206 lines in the frame only)' },
 
   // ── B08: Office ───────────────────────────────────────────────────────────────────────────────────────────────
-  'DW-1507': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
+  // M3d: opened from Files › Documents (a double-click), so Back and Alt+← have the folder behind them.
+  'DW-1507': { q: 'section=files&id=f-documents', steps: [{ dbl: 'row:x-agreement' }, { wait: '[data-office]' }], gap: OFFICE_ENGINE },
   'DW-1550': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
-  'DW-1551': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
+  // M3d: Commands opens with Ctrl+K and finds "head" (the palette works without the engine; running a command needs it).
+  'DW-1551': { q: 'section=open&id=x-agreement&sub=office', steps: [{ wait: 'main' }, { key: 'Ctrl+k' }, { fill: 'field:Search commands, styles, files', value: 'head' }], gap: OFFICE_ENGINE },
   'DW-1552': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
   'DW-1553': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
   'DW-1554': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
   'DW-1555': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
   'DW-1556': { q: 'section=open&id=x-agreement&sub=office' },
-  'DW-1557': { q: 'section=open&id=x-agreement&sub=office', gap: OFFICE_ENGINE },
+  'DW-1557': { q: 'section=open&id=x-agreement&sub=office', steps: [{ click: 'btn:About' }, { wait: 'btn:Third-party licenses' }], gap: OFFICE_ENGINE },
   'DW-1511': { q: 'section=open&id=x-proposal&sub=office', gap: OFFICE_ENGINE },
   'DW-1508': { q: 'section=open&id=x-budget&sub=office', gap: OFFICE_ENGINE },
   'DW-1559': { q: 'section=open&id=x-budget&sub=office', gap: OFFICE_ENGINE },
@@ -125,8 +135,8 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-1560': { q: 'section=open&id=x-recap&sub=office', gap: OFFICE_ENGINE },
   'DW-1561': { q: 'section=open&id=x-recap&sub=office', gap: OFFICE_ENGINE },
   'DW-1558': { q: 'section=files', steps: [{ click: '[data-anchor="new"]' }, { click: menuItem('new-document') }] },
-  // The Files tree's Word file in Documents (B04's Contract renewal.docx) stands in for B08's Service agreement.docx: same menu.
-  'DW-1562': { q: 'section=files&id=f-documents', steps: [{ context: 'row:d-renewal' }] },
+  // M3d: Service agreement.docx is listed in Documents now, so the menu is on the frame's own file.
+  'DW-1562': { q: 'section=files&id=f-documents', steps: [{ context: 'row:x-agreement' }] },
 }
 
 /** DW-1305: the board's snapshot with nothing in it (a new account: no activity, no conflicts, nothing waiting). */
