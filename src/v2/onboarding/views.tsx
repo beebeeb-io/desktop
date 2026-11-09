@@ -5,8 +5,9 @@ import { BBProductLockup, BBToggle, Icon, type IconName } from '@beebeeb/shared/
 import { CaptionBarView } from '../chrome/CaptionBar'
 import { Field, HelloGlyph, PrimaryButton, SecondaryButton, TextLink } from '../auth/parts'
 
-export type SetupStep = 'passkey' | 'lock' | 'backup' | 'photos' | 'explorer' | 'notifications' | 'login'
+export type SetupStep = 'folder' | 'passkey' | 'lock' | 'backup' | 'photos' | 'explorer' | 'notifications' | 'login'
 export const STEPS: { id: SetupStep; label: string }[] = [
+  { id: 'folder', label: 'Choose folder' },
   { id: 'passkey', label: 'Passkey' },
   { id: 'lock', label: 'App lock' },
   { id: 'backup', label: 'Back up folders' },
@@ -30,7 +31,7 @@ export function SetupWindow({ step, explorer, onSkip, children }: { step: SetupS
         <aside className="flex w-[240px] flex-none flex-col justify-between border-r border-line bg-paper-2 px-5 py-6" aria-label="Setup steps">
           <div>
             <BBProductLockup product="drive" size={28} />
-            {index >= 0 && <p className="mb-2 mt-5 font-mono text-[11px] text-ink-3">Step {index + 1} of 7</p>}
+            {index >= 0 && <p className="mb-2 mt-5 font-mono text-[11px] text-ink-3">Step {index + 1} of {STEPS.length}</p>}
             <ol className={`m-0 list-none p-0 ${index >= 0 ? '' : 'mt-5'}`}>
               {STEPS.map((s, i) => {
                 const done = step === 'done' || (index >= 0 && i < index)
@@ -84,6 +85,30 @@ function Fact({ icon, title, children }: { icon: IconName; title: string; childr
       <Icon name={icon} size={16} className="mt-0.5 flex-none text-ink-3" />
       <span className="text-[13px] leading-[18px]"><span className="font-medium">{title}</span> <span className="text-ink-2">{children}</span></span>
     </li>
+  )
+}
+
+// DW-0201, 36-onboarding-real
+export function FolderStep({ path, busy, error, onChoose, onContinue }: {
+  path: string | null; busy: boolean; error: string | null; onChoose: () => void; onContinue: () => void
+}) {
+  return (
+    <>
+      <StepHeading icon="folder" title="Choose your Beebeeb folder" sub="Pick a folder on this PC. Beebeeb keeps it in sync with your account; your files stay where they are." />
+      {path
+        ? <div data-folder-path className="flex items-center gap-2.5 rounded-md border border-line bg-paper-2 px-3 py-2.5">
+            <Icon name="folder" size={16} className="flex-none text-ink-3" />
+            <span className="min-w-0 break-all font-mono text-[12px] text-ink">{path}</span>
+          </div>
+        : <div data-folder-missing className="rounded-md border border-line px-3 py-2.5 text-[12px] leading-[17px] text-ink-2">
+            No folder chosen yet.
+          </div>}
+      {error && <p role="alert" data-folder-error className="mt-2 text-[12px] leading-[17px] text-red-text">{error}</p>}
+      <p className="mt-3 text-[12px] leading-4 text-ink-3">You can change the folder later in Settings › Sync.</p>
+      {path
+        ? <Buttons><PrimaryButton amber={false} onClick={onContinue}>Continue</PrimaryButton><SecondaryButton onClick={onChoose} disabled={busy}>{busy ? 'Opening…' : 'Change folder…'}</SecondaryButton></Buttons>
+        : <Buttons><PrimaryButton onClick={onChoose} disabled={busy}>{busy ? 'Opening…' : 'Choose folder…'}</PrimaryButton><SecondaryButton onClick={onContinue} disabled>Continue</SecondaryButton></Buttons>}
+    </>
   )
 }
 
@@ -313,8 +338,11 @@ export function LoginStep({ on, onToggle, onContinue }: { on: boolean; onToggle:
 
 export interface SetupSummary { passkey: string; lock: string; backup: string; previews: string; explorer: string; notifications: string; login: string }
 
-// DW-0208
-export function DoneStep({ summary, onRow, onOpen }: { summary: SetupSummary; onRow: (page: string) => void; onOpen: () => void }) {
+// DW-0208, 36-onboarding-real
+export function DoneStep({ summary, folder = null, onRow, onOpen, onChooseFolder }: {
+  summary: SetupSummary; folder?: string | null; onRow: (page: string) => void; onOpen: () => void; onChooseFolder?: () => void
+}) {
+  const ready = typeof folder === 'string' && folder.length > 0
   // Each row opens its own settings page (DW-0208#0: App lock opens Settings › Security), M3e.
   const rows: [string, string, string][] = [
     ['Passkey', summary.passkey, 'security'], ['App lock', summary.lock, 'security'], ['Backup', summary.backup, 'backups'],
@@ -323,18 +351,34 @@ export function DoneStep({ summary, onRow, onOpen }: { summary: SetupSummary; on
   ]
   return (
     <>
-      <StepHeading icon="check" title="You’re set up" sub="You can change any of this later in Settings." />
-      <ul className="m-0 list-none divide-y divide-line border-y border-line p-0" data-summary>
-        {rows.map(([k, v, page]) => (
-          <li key={k} data-summary-row>
-            <button type="button" onClick={() => onRow(page)} className="flex h-9 w-full items-center justify-between bg-transparent text-left text-[13px] text-ink hover:bg-paper-2">
-              <span>{k}</span><span className="flex items-center gap-1 text-ink-2">{v}<Icon name="chevron-right" size={12} className="text-ink-4" /></span>
-            </button>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-3 text-[12px] text-ink-3">Your file list and thumbnails keep loading in the background.</p>
-      <Buttons><PrimaryButton onClick={onOpen}>Open my Beebeeb</PrimaryButton></Buttons>
+      {ready
+        ? <StepHeading icon="check" title="You’re set up" sub="You can change any of this later in Settings." />
+        : <StepHeading icon="info" title="One thing left" sub="Beebeeb needs a folder on this PC before it can sync your files. You can choose it now, or later in Settings › Sync." />}
+      {ready
+        ? <ul className="m-0 list-none divide-y divide-line border-y border-line p-0" data-summary>
+            {rows.map(([k, v, page]) => (
+              <li key={k} data-summary-row>
+                <button type="button" onClick={() => onRow(page)} className="flex h-9 w-full items-center justify-between bg-transparent text-left text-[13px] text-ink hover:bg-paper-2">
+                  <span>{k}</span><span className="flex items-center gap-1 text-ink-2">{v}<Icon name="chevron-right" size={12} className="text-ink-4" /></span>
+                </button>
+              </li>
+            ))}
+            <li data-summary-row data-folder-path>
+              <button type="button" onClick={() => onRow('sync')} className="flex h-9 w-full items-center justify-between bg-transparent text-left text-[13px] text-ink hover:bg-paper-2">
+                <span>Folder</span><span className="flex min-w-0 items-center gap-1 text-ink-2"><span className="truncate font-mono text-[11px]">{folder}</span><Icon name="chevron-right" size={12} className="text-ink-4" /></span>
+              </button>
+            </li>
+          </ul>
+        : <ul className="m-0 list-none divide-y divide-line border-y border-line p-0" data-done-missing>
+            <li className="flex gap-3 py-2 text-[13px] leading-[18px]">
+              <Icon name="folder" size={16} className="mt-0.5 flex-none text-ink-3" />
+              <span>A folder for your Beebeeb files</span>
+            </li>
+          </ul>}
+      <p className="mt-3 text-[12px] text-ink-3">{ready ? 'Your file list and thumbnails keep loading in the background.' : 'Everything else on this PC keeps working without it.'}</p>
+      {ready
+        ? <Buttons><PrimaryButton onClick={onOpen}>Open my Beebeeb</PrimaryButton></Buttons>
+        : <Buttons><PrimaryButton amber={false} onClick={onChooseFolder ?? onOpen}>Choose folder</PrimaryButton><SecondaryButton onClick={onOpen}>Open my Beebeeb</SecondaryButton></Buttons>}
     </>
   )
 }
