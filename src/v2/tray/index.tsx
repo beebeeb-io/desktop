@@ -141,6 +141,22 @@ export default function TrayApp() {
     return () => { cancelled = true; stop() }
   }, [])
 
+  // A refusal from the b's own menu (DW-1231), e.g. a Pause Windows would not let the engine write: the menu is
+  // drawn by Windows and has no line of its own, so Rust opens this flyout and says the one sentence here. It stays
+  // until the next action, exactly as the flyout's own failures do.
+  useEffect(() => {
+    if (!hasTauri()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void import('@tauri-apps/api/event').then(({ listen }) =>
+      listen<string>('tray-menu-notice', (event) => setNotice(event.payload)).then((off) => {
+        if (cancelled) off()
+        else unlisten = off
+      }),
+    )
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
   // Closes on Esc and when it loses focus; a second click on the b is the shell's.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setNotice(null); void hideFlyout() } }
