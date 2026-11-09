@@ -14,10 +14,12 @@ function Avatar({ name }: { name: string }) {
 const STATE_TONE: Record<string, string> = { 'This app': 'text-ink', 'Signed in': 'text-ink-2', 'Not signed in': 'text-ink-3' }
 
 export function AccountPane({ initial = 'main', scenario = 'default', codeDigits = '' }: { initial?: AccountPage; scenario?: Scenario; codeDigits?: string } = {}) {
-  const { state, setState } = useAccount(scenario)
+  const { state, setState, error, reload } = useAccount(scenario)
   const [page, setPage] = useState<AccountPage>(initial)
   const [pendingEmail, setPendingEmail] = useState(initial === 'email-code' ? 'anna.devries@example.eu' : '')
   const home = useCallback(() => setPage('main'), [])
+  // No address yet and the read failed: a blank name and email would look like an account to edit.
+  const profileError = error && state.email === '' ? errorText(error) : null
 
   if (page === 'name') return <ChangeName current={state.name} onDone={(name) => { setState((s) => ({ ...s, name })); home() }} onCancel={home} />
   // The address is kept only for Send again (EmailCode → here); a cancel or a confirmed change starts the next visit empty.
@@ -29,12 +31,19 @@ export function AccountPane({ initial = 'main', scenario = 'default', codeDigits
 
   return (
     <Page title="Account">
-      <Group>
-        <Row label={<span className="flex items-center gap-3"><Avatar name={state.name} />{state.name || 'Add your name'}</span>} onClick={() => setPage('name')} />
-        <Row label={state.email} sub={state.emailVerified ? 'Sign-in email' : undefined}
-          value={state.emailVerified ? undefined : <span className="text-red">Not verified</span>} onClick={() => setPage('email')} />
-        {!state.emailVerified ? <Row label="Verify" sub="We send a code to this address" onClick={() => setPage('email-code')} /> : null}
-      </Group>
+      {profileError ? (
+        <>
+          <p role="alert" className="text-[12px] text-red">{profileError}</p>
+          <Btn onClick={() => void reload()}>Try again</Btn>
+        </>
+      ) : (
+        <Group>
+          <Row label={<span className="flex items-center gap-3"><Avatar name={state.name} />{state.name || 'Add your name'}</span>} onClick={() => setPage('name')} />
+          <Row label={state.email} sub={state.emailVerified ? 'Sign-in email' : undefined}
+            value={state.emailVerified ? 'Verified' : <span className="text-red">Not verified</span>} onClick={() => setPage('email')} />
+          {!state.emailVerified ? <Row label="Verify" sub="We send a code to this address" onClick={() => setPage('email-code')} /> : null}
+        </Group>
+      )}
       <Group title="Recovery" note="We can’t show it again. Keep your 12 words on paper or in a password manager.">
         <div className="flex min-h-[44px] items-center px-4 py-2 text-[13px] text-ink" aria-label="Recovery phrase, shown once at sign-up" data-testid="row">
           Recovery phrase <span className="ml-1 text-ink-3">· Shown once at sign-up</span>
@@ -59,7 +68,7 @@ function ChangeName({ current, onDone, onCancel }: { current: string; onDone: (n
     if (!trimmed) return setError(errorText('name_empty'))
     if (trimmed.length > 64) return setError(errorText('name_too_long'))
     setBusy(true)
-    const r = await run('account_set_name', { name: trimmed }, null)
+    const r = await run('account_set_name', { name: trimmed })
     setBusy(false)
     if (r.ok) onDone(trimmed)
     else setError(errorText(r.code))
