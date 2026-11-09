@@ -4,7 +4,7 @@
 // The engine itself comes from Rust's cache (office_v2), downloaded once and hash-checked there.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  applyTemplate, CALC_PALETTE_ENTRIES, DriveSourceError, IMPRESS_LAYOUTS, insertBeforeExtension, layoutDispatchArgs, resolveOfficeFileKind, useDriveSource, WRITER_PALETTE_ENTRIES,
+  applyTemplate, CALC_PALETTE_ENTRIES, DriveSourceError, IMPRESS_LAYOUTS, layoutDispatchArgs, resolveOfficeFileKind, useDriveSource, WRITER_PALETTE_ENTRIES,
   type DriveItem, type OfficeApp, type OfficeBridge, type OutlineHeading, type TemplateDef, type UnoArg,
 } from '@beebeeb/shared/drive-ui'
 import { useCommand } from '../../../shortcuts'
@@ -19,6 +19,21 @@ import type { RelayBridge } from './relay'
 import { AboutPanel, CommandPalette, ConflictDialog, defaultNewName, FailedView, isLegacy, LegacyNote, NewDocumentDialog, OFFICE_SOURCE_URL, OfficeStatus, PreparingView, TableSizeDialog, type ConflictChoice, type PaletteRow } from './Parts'
 import { OFFICE_TABS, type Control } from './Ribbon'
 import { APP_LABEL, OfficeShell } from './View'
+import { createKeptCopy, tagContent } from '../model'
+import { useVersionWatch } from '../versionWatch'
+import { officeSave } from './save'
+import { failedWords } from '../../photos/Dialogs'
+import { showToast } from '../../../chrome/Toast'
+
+/** A new document's file is written, and the engine has not added it yet: the save waits for that (#273 finding 11). */
+export const NOT_INDEXED = 'Not saved yet. Beebeeb is still adding the new document to the folder; try again in a moment. Your edit is still here.'
+
+/** Why a save did not happen, in words: a taken name says so, never "try again" alone (#273 finding 2). */
+export function saveFailure(e: unknown): string {
+  if (e instanceof DriveSourceError && e.code === 'unsupported') return 'This PC can’t save a new file from the editor yet.'
+  if (e instanceof DriveSourceError && e.code === 'name-taken') return failedWords(e, 'save it. Your edit is still here')
+  return 'Not saved. Your edit is still here; try again.'
+}
 
 type Engine = { name: 'checking' } | { name: 'preparing'; progress: EngineProgress } | { name: 'booting'; src: string } | { name: 'ready'; src: string } | { name: 'failed'; detail: string }
 
@@ -68,7 +83,9 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
   useEffect(() => () => { bridgeRef.current?.close(); bridgeRef.current = null }, [])
   const [item, setItem] = useState<DriveItem | null>(null)
   const [path, setPath] = useState<string[]>(['Files'])
-  const [doc, setDoc] = useState<{ bytes: Uint8Array; versionId: string } | null>(null)
+  // `versionId` is Rust's tag of the bytes on this PC; null for a new document Rust has written that the engine has not
+  // indexed yet (its provisional id reads only once indexed). The tag then comes with the engine's next event.
+  const [doc, setDoc] = useState<{ bytes: Uint8Array; versionId: string | null } | null>(null)
   const [versionNumber, setVersionNumber] = useState(0)
   const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [dirty, setDirty] = useState(target.kind === 'new')
@@ -90,19 +107,42 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
   const app: OfficeApp = target.kind === 'new' ? target.app : resolveOfficeFileKind(item?.mime, name)?.app ?? 'writer'
   const fileId = target.kind === 'file' ? target.id : item?.id ?? null
 
+  /** Rust's tag of the document on this PC; null while the engine has not indexed a file this window just made. */
+  const tagOf = useCallback(async (id: string): Promise<string | null> => {
+    try { return (await source.readBytes(id)).versionId } catch (e) {
+      if (e instanceof DriveSourceError && e.code === 'not-found') return null
+      throw e
+    }
+  }, [source])
+  // The save's state is the engine's: "Saved on this PC · encrypting…" until it has uploaded the save, then "Saved ·
+  // encrypted · version N" with Rust's number (#273 finding 12, as the text editor).
+  const { note, savedHere } = useVersionWatch(source, fileId, doc ? versionNumber : null, {
+    readTag: (id) => source.readBytes(id).then((r) => r.versionId),
+    saved: (version, tag) => { setVersionNumber(version); setDoc((d) => (d && d.versionId !== null && tagContent(d.versionId) === tagContent(tag) ? { ...d, versionId: tag } : d)) },
+  })
+  // A new document's tag, once the engine has indexed the file Rust wrote: on its event, never a timer guess (finding 11).
+  useEffect(() => {
+    if (!fileId || !doc || doc.versionId !== null) return
+    return source.subscribe((e) => {
+      if (e.kind !== 'changed' && e.kind !== 'item') return
+      void tagOf(fileId).then((tag) => { if (tag) setDoc((d) => (d && d.versionId === null ? { ...d, versionId: tag } : d)) }, () => {})
+    })
+  }, [source, fileId, doc, tagOf])
+
   // The document: details, the decrypted bytes and the version it was opened at.
   useEffect(() => {
     if (target.kind !== 'file') return
     let live = true
     ;(async () => {
       try {
-        const [{ item: it, path: p }, bytes, versions] = await Promise.all([source.details(target.id), source.readBytes(target.id), source.versions(target.id)])
+        const [{ item: it, path: p, versionCount }, bytes] = await Promise.all([source.details(target.id), source.readBytes(target.id)])
         if (!live) return
         setItem(it)
         // The path starts at the root crumb (Files), as drive_details gives it.
         setPath(p.length ? p.map((c) => c.name) : ['Files'])
         setDoc(bytes)
-        setVersionNumber(Math.max(1, versions.findIndex((v) => v.id === bytes.versionId) >= 0 ? versions.length - versions.findIndex((v) => v.id === bytes.versionId) : versions.length))
+        // Rust's number: the server's version (drive_details' versionCount), never one counted in the window.
+        setVersionNumber(versionCount)
         setSavedAt(new Date(it.modifiedAt))
       } catch {
         if (live) setEngine({ name: 'failed', detail: 'The document could not be decrypted on this PC.' })
@@ -157,15 +197,15 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
     setError(null)
     try {
       const bytes = await b.save()
-      if (target.kind === 'new' && !item) {
-        const made = await upload(name, bytes)
-        if (made) { setItem(made); const r = await source.readBytes(made.id); setDoc({ bytes, versionId: r.versionId }) }
-        setVersionNumber(1)
-      } else if (fileId && doc) {
-        const next = await source.saveBytes(fileId, bytes, base ?? doc.versionId)
-        setDoc({ bytes, versionId: next.versionId })
-        setVersionNumber((n) => (base ? (conflict?.latest ?? n) + 1 : n + 1))
-      }
+      // The first save makes the file: once Rust has written it, that save is done, whether or not the engine has indexed
+      // it yet; its tag comes now or with the engine's event (#273 finding 11). A later save names the tag it was read at.
+      const r = await officeSave({ creating: target.kind === 'new' && !item, fileId, doc, base }, bytes, {
+        make: (x) => upload(name, x), tagOf, saveBytes: (id, x, tag) => source.saveBytes(id, x, tag),
+      })
+      if (r.kind === 'not-indexed') { setError(NOT_INDEXED); return false }
+      if (r.kind === 'made') setItem(r.item)
+      setDoc({ bytes, versionId: r.versionId })
+      savedHere(r.kind === 'made' ? null : r.versionId)
       setSavedAt(new Date())
       setDirty(false)
       setJustSaved(true)
@@ -177,13 +217,13 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
         const latest = versions.find((v) => v.current) ?? versions[0]
         setConflict({ latest: versions.length, latestId: latest?.id ?? '' })
       } else {
-        setError(e instanceof DriveSourceError && e.code === 'unsupported' ? 'This PC can’t save a new file from the editor yet.' : 'Not saved. Your edit is still here; try again.')
+        setError(saveFailure(e))
       }
       return false
     } finally {
       setSaving(false)
     }
-  }, [saving, target, item, upload, name, source, fileId, doc, conflict])
+  }, [saving, target, item, upload, name, source, fileId, doc, tagOf, savedHere])
 
   const onConflict = async (c: ConflictChoice) => {
     if (!conflict) return
@@ -193,17 +233,21 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
       if (!fileId || !b) return
       const fresh = await source.readBytes(fileId)
       await b.open(fresh.bytes, name)
-      setDoc(fresh); setVersionNumber(conflict.latest); setConflict(null); setDirty(false)
+      setDoc(fresh); setVersionNumber((await source.details(fileId).catch(() => null))?.versionCount ?? conflict.latest); setConflict(null); setDirty(false)
       return
     }
     const b = bridgeRef.current
     if (!b) return
     setSaving(true)
     try {
-      await upload(insertBeforeExtension(name, ' (edited on this PC)'), await b.save())
-      setConflict(null); setDirty(false); setJustSaved(true)
-    } catch {
-      setError('Not saved. Your edit is still here; try again.')
+      // Mine goes next to it under a free name (the text editor's rule); this file stays theirs (#273 finding 2).
+      const bytes = await b.save()
+      const parentId = target.kind === 'new' ? target.parentId : item?.parentId ?? null
+      const kept = await createKeptCopy(name, 'edited on this PC', () => source.list(parentId).then((l) => l.items.map((i) => i.name)), (n) => upload(n, bytes))
+      setConflict(null); setDirty(false)
+      showToast({ kind: 'done', text: `Your edit is saved as ${kept.name}` })
+    } catch (e) {
+      setError(saveFailure(e))
     } finally { setSaving(false) }
   }
 
@@ -257,10 +301,10 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
         dimmed={engine.name !== 'ready'} layout={{ current: layout, onPick: (id) => { setLayout(id); const l = IMPRESS_LAYOUTS.find((x) => x.id === id); if (l) run('.uno:AssignLayout', layoutDispatchArgs(l)) } }}
         note={<>
           {isLegacy(ext) && <LegacyNote ext={ext} onOtherApp={otherApp} />}
-          {justSaved && !dirty && <SavedMessage version={versionNumber} onVersions={() => { if (item) setVersionsOpen(true) }} />}
+          {justSaved && !dirty && note && <SavedMessage note={note} onVersions={() => { if (item) setVersionsOpen(true) }} />}
           {error && <div role="alert" className="flex h-9 flex-none items-center border-b border-line bg-paper-2 px-4 text-[13px] text-ink">{error}</div>}
         </>}
-        status={<OfficeStatus left={left} dirty={dirty} conflict={!!conflict} version={versionNumber} time={savedAt ? hhmm(savedAt) : ''} loading={engine.name !== 'ready'} zoom={zoom} onZoom={(z) => { setZoom(z); void bridgeRef.current?.setZoom(z) }} onAbout={() => setAbout(true)} />}
+        status={<OfficeStatus left={left} dirty={dirty} conflict={!!conflict} version={versionNumber} time={savedAt ? hhmm(savedAt) : ''} loading={engine.name !== 'ready' && engine.name !== 'failed'} failed={engine.name === 'failed'} uploading={note?.kind === 'local'} zoom={zoom} onZoom={(z) => { setZoom(z); void bridgeRef.current?.setZoom(z) }} onAbout={() => setAbout(true)} />}
       >
         {body}
       </OfficeShell>

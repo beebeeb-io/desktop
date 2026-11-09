@@ -1,7 +1,7 @@
 // Open: one file in the Drive window's content area, under the window's toolbar (DW-1501..1527). Office is B08's.
 // Reads and saves only through useDriveSource(). The route is `section=open&id=<file>[&sub=edit]`; `sub=new-file&id=<folder>`.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { DriveSourceError, MAX_EDITABLE_BYTES, insertBeforeExtension, useDriveSource, type DriveItem, type DriveSource, type VersionEntry } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, MAX_EDITABLE_BYTES, useDriveSource, type DriveItem, type VersionEntry } from '@beebeeb/shared/drive-ui'
 import { useCommand } from '../../shortcuts'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
@@ -9,14 +9,16 @@ import { setStatusNote } from '../../chrome/statusNote'
 import { failedWords } from '../photos/Dialogs'
 import { ShareHost, VersionsHost } from './hosts'
 import { DetailsRail, FindBar, MoreButton, NewerBanner, OpenToolbar, ToolbarButton } from './Chrome'
-import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nameError, FILE_TYPES, SaveButton, SavedMessage, TextEditor, UnsavedAlert, type FileType } from './Editing'
+import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nameError, FILE_TYPES, openEditorFind, SaveButton, SavedMessage, TextEditor, UnsavedAlert, type FileType } from './Editing'
 import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLargeView } from './States'
 import { useDriveExtras } from '../../source/extras'
 import { isTooLarge } from '../../source/desktop'
 import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
-import { fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, versionNews, viewerKind } from './model'
+import { createKeptCopy, fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, saveNoteText, tagContent, viewerKind } from './model'
 import * as player from './player'
 import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
+import { findGoesTo, useOwnFind } from './find'
+import { useVersionWatch } from './versionWatch'
 
 type Loaded =
   | { kind: 'text'; text: string; versionId: string }
@@ -24,24 +26,15 @@ type Loaded =
   | { kind: 'none' }
 
 /** `loading` carries the item once its details are in, so Decrypting names it and Cancel knows its folder (DW-1516). */
-type Phase = { name: 'loading'; item: DriveItem | null } | { name: 'ready'; item: DriveItem; data: Loaded } | { name: 'too-large'; item: DriveItem } | { name: 'failed'; item: DriveItem | null }
+/** `ready` carries Rust's version number of what was read (drive_details' versionCount); `too-large` the free space
+ *  when it was read for the decision. */
+type Phase = { name: 'loading'; item: DriveItem | null } | { name: 'ready'; item: DriveItem; data: Loaded; version: number } | { name: 'too-large'; item: DriveItem; free?: number } | { name: 'failed'; item: DriveItem | null }
 
 const TEXTUAL = new Set(['code', 'text', 'markdown', 'csv'])
 
-/** How many mounted views own Ctrl+F (the PDF's find bar). V2App leaves Find to this section: with no owner it is Search,
- *  as everywhere else. */
-let findOwners = 0
-function useOwnFind(own: boolean, handler: () => void) {
-  useEffect(() => {
-    if (!own) return
-    findOwners += 1
-    return () => { findOwners -= 1 }
-  }, [own])
-  useCommand('find', useCallback(() => { if (own) handler() }, [own, handler]))
-}
-
 export default function Section({ nav }: SectionProps) {
-  useCommand('find', useCallback(() => { if (findOwners === 0) nav.go({ section: 'search' }) }, [nav]))
+  // Ctrl+F: a view's own find, else Search; never Search from an editor, which would drop its edit (find.ts).
+  useCommand('find', useCallback(() => { if (findGoesTo(nav.route.sub) === 'search') nav.go({ section: 'search' }) }, [nav]))
   const { id, sub } = nav.route
   if (sub === 'new-file') return <NewFileFlow parentId={id} nav={nav} />
   if (sub === 'new-document') return <NewDocumentFlow parentId={id} nav={nav} />
@@ -55,91 +48,85 @@ function useLoad(id: string) {
   const extras = useDriveExtras()
   const [phase, setPhase] = useState<Phase>({ name: 'loading', item: null })
   const [tries, setTries] = useState(0)
+  // A file this window has just made (New file) has a provisional id until the engine indexes it: wait for that.
+  const [unindexed, setUnindexed] = useState(false)
   useEffect(() => {
     let live = true
     let known: DriveItem | null = null
+    setUnindexed(false)
     setPhase((p) => ({ name: 'loading', item: 'item' in p ? p.item : null }))
     ;(async () => {
       try {
-        const [{ item }, free] = await Promise.all([source.details(id), extras.status().then((s) => s.freeSpaceBytes, () => undefined)])
+        const { item, versionCount } = await source.details(id)
         known = item
         if (!live) return
         // A file not on this PC is decrypted here to open it: with less free space than it needs, say so (DW-1517).
-        if (needsRoom(item, free)) return setPhase({ name: 'too-large', item })
+        // Only then is the free space read (drive_status counts the state DB; a file on this PC never needs it).
+        if (item.local === 'online-only') {
+          const free = await extras.status().then((s) => s.freeSpaceBytes, () => undefined)
+          if (!live) return
+          if (needsRoom(item, free)) return setPhase({ name: 'too-large', item, free })
+        }
         setPhase({ name: 'loading', item })
         const kind = viewerKind(item.name)
         // A RAW shows the camera's preview (its thumbnail): the file itself is not read.
         const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
-        if (live) setPhase({ name: 'ready', item, data })
+        if (live) setPhase({ name: 'ready', item, data, version: versionCount })
       } catch (e) {
         if (!live) return
         // No room to decrypt it (quota: the disk is full), or over the read cap: the too-large state (DW-1517).
         if ((e instanceof DriveSourceError && e.code === 'quota') || isTooLarge(e)) {
           const { item } = await source.details(id).catch(() => ({ item: null }))
+          if (!live) return
           if (item) return setPhase({ name: 'too-large', item })
         }
+        if (isProvisional(id) && e instanceof DriveSourceError && e.code === 'not-found') return setUnindexed(true)
         setPhase({ name: 'failed', item: known })
       }
     })()
     return () => { live = false }
   }, [source, extras, id, tries])
+  // The engine's index event, never a timer: read again when the engine says something changed (#273 finding 11).
+  useEffect(() => {
+    if (!unindexed) return
+    return source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'item') setTries((n) => n + 1) })
+  }, [source, unindexed])
   return { phase, retry: () => setTries((n) => n + 1), setPhase }
 }
+
+/** Rust's stand-in id for a file this PC has just written and the engine has not indexed yet (drive_v2 item_at_path). */
+export const isProvisional = (id: string) => id.startsWith('local:')
 
 /** Opening `item` decrypts it on this PC and `free` bytes (when known) are not enough for it. */
 export const needsRoom = (item: Pick<DriveItem, 'local' | 'size'>, free: number | undefined) =>
   item.local === 'online-only' && free !== undefined && (item.size ?? 0) > free
 
-/**
- * A newer version arriving while the file is open is announced, never swapped in under the reader (DW-1519). The
- * version that was current when the file was read is the baseline; a later current version is newer, unless this
- * window saved it (its own upload is not "a newer version arrived"). Compared by the server's version ids, never by
- * the read's content tag (a different shape: `v3-…`).
- */
-function useNewer(source: DriveSource, id: string, ready: boolean) {
-  const [newer, setNewer] = useState<VersionEntry | null>(null)
-  const state = useRef<{ base: string | null; ours: { from: string | null; at: number } | null }>({ base: null, ours: null })
-  const rebase = useCallback(() => {
-    source.versions(id).then((v) => {
-      const cur = v.find((x) => x.current)?.id ?? null
-      // Our save has landed once the current version is no longer the one it was saved over.
-      if (state.current.ours && cur !== state.current.ours.from) state.current.ours = null
-      state.current.base = cur
-    }, () => {})
-  }, [source, id])
-  useEffect(() => { if (ready) rebase() }, [ready, rebase])
-  useEffect(() => source.subscribe((e) => {
-    if (e.kind !== 'item' || e.item.id !== id) return
-    void source.versions(id).then((v) => {
-      const cur = v.find((x) => x.current)
-      if (!cur) return
-      const news = versionNews(state.current, cur.id, Date.now())
-      if (news === 'same') return
-      state.current = { base: cur.id, ours: null }
-      if (news === 'news') setNewer(cur)
-    }, () => {})
-  }), [source, id])
-  return {
-    newer,
-    dismiss: () => setNewer(null),
-    /** This window saved a new version: its landing is not news, and what was announced before it is settled. */
-    savedHere: () => { state.current.ours = { from: state.current.base, at: Date.now() }; setNewer(null); rebase() },
-  }
-}
-
 function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: SectionProps['nav'] }) {
   const source = useDriveSource()
+  const readTextTag = useCallback((x: string) => source.readText(x).then((d) => d.versionId), [source])
   const { phase, retry, setPhase } = useLoad(id)
-  const { newer, dismiss: dismissNewer, savedHere } = useNewer(source, id, phase.name === 'ready')
+  const watch = useVersionWatch(source, id, phase.name === 'ready' ? phase.version : null, {
+    readTag: readTextTag,
+    // The restore landed: read the file again and say it is the restore (#273 finding 8).
+    restored: (version) => {
+      showToast({ kind: 'done', text: `Version restored. This is now version ${version}.` })
+      setStatusNote(`Version restored · version ${version} · ${hhmm(new Date().toISOString())}`)
+      retry()
+    },
+    // The save is on the server: what is shown carries Rust's new tag, so a later edit starts from its number.
+    saved: (version, tag) => setPhase((p) => (p.name === 'ready' && p.data.kind === 'text' && tagContent(p.data.versionId) === tagContent(tag) ? { ...p, data: { ...p.data, versionId: tag }, version } : p)),
+  })
+  const { newer, note, dismiss: dismissNewer, savedHere, clearNote } = watch
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [panel, setPanel] = useState(false)
-  // DW-1524: after a save the note shows rendered, with "Saved · encrypted · version N".
-  const [savedVersion, setSavedVersion] = useState<number | null>(null)
-  // The last version this window saved: Rust's tag keeps the server's number until the engine has uploaded the save.
-  const lastSaved = useRef(0)
-  // The window's status line says the save too, until the file is left or edited again (DW-1524).
+  // DW-1524: after a save the note shows rendered, with the save's state; the window's status line says it too, until
+  // the file is left or edited again.
+  const savedAt = useRef('')
   useEffect(() => () => setStatusNote(null), [])
-  useEffect(() => { if (editing || savedVersion === null) setStatusNote(null) }, [editing, savedVersion])
+  useEffect(() => {
+    if (editing || note === null) setStatusNote(null)
+    else setStatusNote(`${saveNoteText(note)} · ${savedAt.current}`)
+  }, [editing, note])
   useCommand('toggle-details-panel', useCallback(() => setPanel((p) => !p), []))
   // "Back to the folder" (the toolbar's back): the folder the file is in, whatever led here (DW-1503, DW-1507).
   const toFolder = (item: DriveItem | null) => (item ? nav.go({ section: 'files', id: item.parentId }) : nav.back())
@@ -153,7 +140,7 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
     const item = phase.item
     return (
       <Frame name={item.name} onBack={() => toFolder(item)}>
-        <TooLargeLive name={item.name} size={item.size ?? 0} onFreeUp={() => nav.go({ section: 'settings', sub: 'free-up' })}
+        <TooLargeLive name={item.name} size={item.size ?? 0} known={phase.free} onFreeUp={() => nav.go({ section: 'settings', sub: 'free-up' })}
           onOpenElsewhere={() => void source.open(item.id).catch(() => showToast({ kind: 'failed', text: `Couldn’t open ${item.name} in another app.` }))}
           onDownloadTo={() => showToast({ kind: 'failed', text: 'Saving a decrypted copy elsewhere isn’t available in this version of Beebeeb.' })} />
       </Frame>
@@ -162,26 +149,24 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
   // Office files open in the editor by default (DW-1562); CSV keeps its table viewer.
   if (isOfficeFile(phase.item) && viewerKind(phase.item.name) !== 'csv') return <OfficeEditor target={{ kind: 'file', id }} nav={nav} />
   const { item, data } = phase
-  const showNewer = () => { dismissNewer(); setSavedVersion(null); retry() }
+  const showNewer = () => { dismissNewer(); clearNote(); retry() }
   const banner = newer && !editing
     ? <NewerBanner text={`A newer version arrived from ${newer.deviceName ?? 'another device'}, ${hhmm(newer.createdAt)}.`} onShow={showNewer} />
-    : savedVersion !== null && !editing ? <SavedMessage version={savedVersion} onVersions={() => setVersionsOpen(true)} /> : null
+    : note !== null && !editing ? <SavedMessage note={note} onVersions={() => setVersionsOpen(true)} /> : null
   const aside = panel ? <DetailsAside id={id} onClose={() => setPanel(false)} /> : null
-  const saved = (d: { text: string; versionId: string }, version: number) => {
-    lastSaved.current = version
-    setPhase({ name: 'ready', item, data: { kind: 'text', ...d } })
-    setSavedVersion(version)
-    savedHere()
-    setStatusNote(`Saved · encrypted · version ${version} · ${hhmm(new Date().toISOString())}`)
+  const saved = (d: { text: string; versionId: string }) => {
+    savedAt.current = hhmm(new Date().toISOString())
+    setPhase({ name: 'ready', item, data: { kind: 'text', ...d }, version: phase.version })
+    savedHere(d.versionId)
     nav.go({ section: 'open', id: item.id, sub: null })
   }
   const body = editing && data.kind === 'text'
-    ? <Editor item={item} initial={data} savedBefore={lastSaved.current} onSaved={saved} onLeave={(reload) => { nav.go({ section: 'open', id: item.id, sub: null }); if (reload) { dismissNewer(); retry() } }} />
-    : <Viewer item={item} data={data} nav={nav} banner={banner} onBack={() => toFolder(item)} onDetails={() => setPanel((p) => !p)} onEdit={() => setSavedVersion(null)} />
+    ? <Editor item={item} initial={data} onSaved={saved} onLeave={(reload) => { nav.go({ section: 'open', id: item.id, sub: null }); if (reload) { dismissNewer(); retry() } }} />
+    : <Viewer item={item} data={data} nav={nav} banner={banner} onBack={() => toFolder(item)} onDetails={() => setPanel((p) => !p)} onEdit={clearNote} />
   return (
     <div className="flex min-h-0 flex-1">
       {body}{aside}
-      {versionsOpen && <VersionsHost item={item} onClose={() => setVersionsOpen(false)} />}
+      {versionsOpen && <VersionsHost item={item} onClose={() => setVersionsOpen(false)} onRestored={watch.restoredHere} />}
     </div>
   )
 }
@@ -412,11 +397,10 @@ const rawMaker = (name: string) => RAW_MAKERS[name.slice(name.lastIndexOf('.') +
 // ---- The editor: Ctrl+S saves a new encrypted version; leaving with changes asks first ----
 /** Ctrl+S saves a new encrypted version and shows the note with "Saved · encrypted · version N" (DW-1523 → DW-1524);
  *  leaving with changes asks first (DW-1525); a newer version saved elsewhere is a choice, never an overwrite (DW-1526). */
-function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
+function Editor({ item, initial, onSaved, onLeave }: {
   item: DriveItem; initial: { text: string; versionId: string }
-  /** The version this window saved last, when the tag has not caught up with it yet. */
-  savedBefore?: number
-  onSaved: (d: { text: string; versionId: string }, version: number) => void
+  /** Rust wrote the save on this PC; `d.versionId` is Rust's tag of it (the engine uploads it later). */
+  onSaved: (d: { text: string; versionId: string }) => void
   /** Back to the viewer; `reload` reads the file again (another device's version replaced this one). */
   onLeave: (reload: boolean) => void
 }) {
@@ -425,11 +409,16 @@ function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
   const doc = useRef(initial.text)
   const base = useRef(initial)
   const [dirty, setDirty] = useState(false)
-  const version = Math.max(Number(initial.versionId.replace(/^v(\d+).*$/, '$1')) || 1, savedBefore)
+  // Rust's number: the server's version, which a save keeps until the engine has uploaded it (never one made here).
+  const version = Number(initial.versionId.replace(/^v(\d+).*$/, '$1')) || 1
   const [saving, setSaving] = useState(false)
   const [leave, setLeave] = useState(false)
   const [conflict, setConflict] = useState<{ theirs: { text: string; versionId: string }; entry: VersionEntry | undefined } | null>(null)
   const busy = useRef(false)
+  // Ctrl+F is the editor's own find (DW-1523), from the toolbar too, never Search: leaving would drop the edit.
+  const host = useRef<HTMLDivElement>(null)
+  const openFind = useCallback(() => openEditorFind(host.current), [])
+  useOwnFind(true, openFind)
 
   const save = useCallback(async (): Promise<boolean> => {
     if (busy.current) return false
@@ -439,8 +428,7 @@ function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
       const d = await source.saveText(item.id, doc.current, base.current.versionId)
       base.current = d
       setDirty(false)
-      // Rust's tag keeps the server's number until the engine has uploaded it; the save is the next version either way.
-      onSaved(d, Math.max(Number(d.versionId.replace(/^v(\d+).*$/, '$1')) || 0, version + 1))
+      onSaved(d)
       return true
     } catch (e) {
       if (e instanceof DriveSourceError && e.code === 'conflict') {
@@ -473,17 +461,17 @@ function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
       setConflict(null)
       onLeave(true)
     } else {
-      // Mine goes next to it as its own file; this file stays theirs.
-      const name = insertBeforeExtension(item.name, ' (This PC)')
+      // Mine goes next to it as its own file, under a free name; this file stays theirs.
       try {
-        await extras.createFile(item.parentId, name, new TextEncoder().encode(doc.current))
+        const bytes = new TextEncoder().encode(doc.current)
+        const { name } = await createKeptCopy(item.name, 'This PC', () => source.list(item.parentId).then((l) => l.items.map((i) => i.name)), (n) => extras.createFile(item.parentId, n, bytes))
         setConflict(null)
         setDirty(false)
         showToast({ kind: 'done', text: `Your edit is saved as ${name}` })
         onLeave(true)
       } catch (e) {
         setConflict(null)
-        showToast({ kind: 'failed', text: failedWords(e, `save your edit as ${name}. It’s still here`) })
+        showToast({ kind: 'failed', text: failedWords(e, 'save your edit as a copy. It’s still here') })
       }
     }
   }
@@ -494,7 +482,9 @@ function Editor({ item, initial, savedBefore = 0, onSaved, onLeave }: {
         <SaveButton onClick={() => void save()} disabled={!dirty || saving} />
         <MoreButton />
       </OpenToolbar>
-      <TextEditor name={item.name} initialDoc={initial.text} onChange={(d) => { doc.current = d; setDirty(d !== base.current.text) }} onSave={() => void save()} />
+      <div ref={host} className="contents">
+        <TextEditor name={item.name} initialDoc={initial.text} onChange={(d) => { doc.current = d; setDirty(d !== base.current.text) }} onSave={() => void save()} />
+      </div>
       {leave && <UnsavedAlert name={item.name} onKeep={() => setLeave(false)} onDiscard={() => onLeave(false)} onSave={() => { setLeave(false); void save() }} />}
       {conflict && (
         <EditConflictDialog
@@ -561,10 +551,11 @@ export function createFailure(e: unknown): string {
 
 /** DW-1517 live: the free space on the sync folder's disk from B02b's drive_status; absent, the sentence leaves it out.
  *  Without the room, the window's status line says the numbers too, until the file is left. */
-function TooLargeLive(p: Omit<Parameters<typeof TooLargeView>[0], 'free'>) {
+function TooLargeLive({ known, ...p }: Omit<Parameters<typeof TooLargeView>[0], 'free'> & { known?: number }) {
   const extras = useDriveExtras()
-  const [free, setFree] = useState<number | undefined>(undefined)
-  useEffect(() => { extras.status().then((s) => setFree(s.freeSpaceBytes), () => setFree(undefined)) }, [extras])
+  // The figure the open already read is passed in; only a too-large read (no figure yet) asks drive_status (#273 finding 5).
+  const [free, setFree] = useState<number | undefined>(known)
+  useEffect(() => { if (known === undefined) extras.status().then((s) => setFree(s.freeSpaceBytes), () => setFree(undefined)) }, [extras, known])
   useEffect(() => {
     setStatusNote(free !== undefined && free < p.size ? noRoomWords(p.size, free) : null)
     return () => setStatusNote(null)

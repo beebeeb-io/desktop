@@ -1,5 +1,5 @@
 // Pure helpers for the Open section: which viewer a file gets, the CSV table, line counts, sizes and times.
-import { MAX_EDITABLE_BYTES, RAW_IMAGE_EXTS } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, insertBeforeExtension, MAX_EDITABLE_BYTES, RAW_IMAGE_EXTS, type DriveItem } from '@beebeeb/shared/drive-ui'
 
 export type ViewerKind = 'raw' | 'image' | 'audio' | 'pdf' | 'markdown' | 'csv' | 'archive' | 'code' | 'text' | 'other'
 
@@ -104,13 +104,70 @@ export function keyBelongsElsewhere(e: Pick<KeyboardEvent, 'key' | 'target'>, do
   return !!doc?.querySelector('[role="dialog"], [role="alertdialog"], dialog[open]')
 }
 
-/** How long after this window's own save a new version is taken to be that save landing (DW-1519). */
-export const OWN_SAVE_MS = 60_000
+/** The content part of Rust's read tag (`v3-<content>`, drive_v2 fsops::version_tag): two reads of the same content
+ *  carry the same part, whatever the version number. Null for a tag without one. */
+export const tagContent = (tag: string): string | null => (tag.includes('-') ? tag.slice(tag.indexOf('-') + 1) : null)
+/** The version number in Rust's tag: the server's number, which Rust keeps until the engine has uploaded a save. */
+export const tagVersion = (tag: string): number | null => { const m = /^v(\d+)/.exec(tag); return m ? Number(m[1]) : null }
 
-/** What a version change means while a file is open (DW-1519): the one already shown, this window's own save landing
- *  (saved over `ours.from` within OWN_SAVE_MS), or news from another device. */
-export function versionNews(s: { base: string | null; ours: { from: string | null; at: number } | null }, current: string, now: number): 'same' | 'ours' | 'news' {
-  if (current === s.base) return 'same'
-  if (s.ours && now - s.ours.at < OWN_SAVE_MS) return 'ours'
+/**
+ * What the open file's version is, and what this window is waiting for (DW-1519, DW-1524). `base` is Rust's version
+ * number (drive_details' versionCount) of what the window shows. `pending` is this window's own save or restore until
+ * the engine has it on the server: Rust writes a save on this PC at once, and the engine encrypts and uploads it later.
+ */
+export interface VersionWatch {
+  base: number
+  pending: { kind: 'save'; from: number; content: string | null } | { kind: 'restore'; from: number } | null
+}
+
+/** What a re-read of the file found: its version number, its local state, and (for a save) the content part of a read. */
+export interface VersionSeen { version: number; local?: DriveItem['local']; content?: string | null }
+
+/**
+ * What a re-read means: `same` (nothing has landed), `saved` (this window's save is on the server: the version moved
+ * past the one it was saved over and the file holds the save's content), `restored` (this window's restore landed), or
+ * `news` (another device's version). Decided by the versions and the content, never by a time window: a save the
+ * engine uploads minutes later is still this window's, and another device's version that lands first is still news
+ * (desktop #273 finding 3). A version still moving on this PC (`syncing`) has not landed.
+ */
+export function versionNews(w: VersionWatch, seen: VersionSeen): 'same' | 'saved' | 'restored' | 'news' {
+  if (seen.version <= (w.pending?.from ?? w.base) || seen.local === 'syncing') return 'same'
+  if (w.pending?.kind === 'restore') return 'restored'
+  if (w.pending?.kind === 'save') return w.pending.content === null || seen.content === w.pending.content ? 'saved' : 'news'
   return 'news'
+}
+
+/** A save's note under the toolbar and on the status line (DW-1524, lead's ruling on #273 finding 12): saved on this PC
+ *  until the engine has encrypted and uploaded it, then encrypted with Rust's version number. */
+export type SaveNote = { kind: 'local' } | { kind: 'encrypted'; version: number }
+export const saveNoteText = (n: SaveNote) => (n.kind === 'local' ? 'Saved on this PC · encrypting…' : `Saved · encrypted · version ${n.version}`)
+
+/** A free name for a kept copy ("Keep both" in the text editor and in Office), by create-file's rule: a name is taken
+ *  when the folder has it in any case. The label, then the label with 2, 3, …: "Meeting notes (This PC).md", then
+ *  "Meeting notes (This PC 2).md" (#273 finding 2). */
+export function keptCopyName(name: string, label: string, taken: Iterable<string>): string {
+  const lower = new Set([...taken].map((n) => n.toLowerCase()))
+  for (let n = 1; ; n++) {
+    const candidate = insertBeforeExtension(name, ` (${n === 1 ? label : `${label} ${n}`})`)
+    if (!lower.has(candidate.toLowerCase())) return candidate
+  }
+}
+
+/** How many names "Keep both" tries when Rust still finds one taken (a cloud-only name, or Windows' 8.3 alias of one). */
+export const KEEP_BOTH_TRIES = 5
+
+/** Make the kept copy under the first free name. The folder's names come first; a name Rust refuses as taken (one the
+ *  listing could not show) moves on to the next, so a second conflict on the same file never fails for good. */
+export async function createKeptCopy<T>(name: string, label: string, folderNames: () => Promise<string[]>, create: (name: string) => Promise<T>): Promise<{ made: T; name: string }> {
+  const taken = new Set((await folderNames().catch((): string[] => [])).map((n) => n.toLowerCase()))
+  for (let i = 0; i < KEEP_BOTH_TRIES; i++) {
+    const candidate = keptCopyName(name, label, taken)
+    try {
+      return { made: await create(candidate), name: candidate }
+    } catch (e) {
+      if (!(e instanceof DriveSourceError && e.code === 'name-taken')) throw e
+      taken.add(candidate.toLowerCase())
+    }
+  }
+  throw new DriveSourceError('name-taken', 'keep both')
 }
