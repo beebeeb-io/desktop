@@ -11,18 +11,11 @@ import { AccountEntry } from './create/entry'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 import { usePrivateScreen } from './privateScreen'
+import { hasNoPlan } from './plan'
 
 type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
-
-/** No plan yet: the server's `plan_state` (server #422) says `none`. An older server without it: no plan or no quota. */
-export function hasNoPlan(sub: { plan_state?: string | null; plan?: string | null; status?: string | null; quota_bytes?: number | null } | null): boolean {
-  if (!sub) return false
-  if (sub.plan_state) return sub.plan_state === 'none'
-  const plan = (sub.plan ?? '').toLowerCase()
-  return plan === '' || plan === 'none' || (sub.status ?? '').toLowerCase() === 'none' || (sub.quota_bytes ?? 1) === 0
-}
 
 async function readGate(): Promise<GateState> {
   const status = await command<{ logged_in: boolean; vault_unlocked?: boolean }>('sync_status')

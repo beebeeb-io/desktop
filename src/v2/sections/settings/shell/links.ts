@@ -29,7 +29,8 @@ export const PAGE_WORDS: readonly string[] = [...PANE_IDS.filter((p) => !NEEDS_A
 
 export function settingsPage(word: string | null | undefined): SettingsPage {
   if (word && (PANE_IDS as readonly string[]).includes(word)) return { pane: word as PaneId }
-  return (word && ALIASES[word]) || { pane: 'general' }
+  // Own keys only: an inherited one ("constructor") is not a page (#274 review).
+  return (word && Object.prototype.hasOwnProperty.call(ALIASES, word) && ALIASES[word]) || { pane: 'general' }
 }
 
 /**

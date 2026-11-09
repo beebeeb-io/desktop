@@ -136,8 +136,8 @@ export function SetupFlow() {
   }, [step, trying, readShell])
 
   // "Show in File Explorer" opens this PC's sync folder, as v1 does (src/pages/SyncFolder.tsx): Rust refuses a null path
-  // on Windows. A refusal is shown, never dropped (#271 P2).
-  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the setup window has no toast host: the refusal stays under the button it is about
+  // on Windows. A refusal is shown, never dropped (#271 P2); the setup window has no toast host, so it stays under the
+  // button it is about.
   const [showError, setShowError] = useState<string | null>(null)
   const showInExplorer = async () => {
     const path = shell?.path ?? (await readShell())?.path ?? null

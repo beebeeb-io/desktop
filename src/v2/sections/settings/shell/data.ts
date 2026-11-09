@@ -40,14 +40,18 @@ export function useConfig(initial: Partial<DesktopConfig> = {}) {
     })
     return () => { live = false }
   }, [])
-  const update = useCallback((patch: Partial<DesktopConfig>) => {
+  /** Resolves when this change is written (true) or refused (false), so a caller that reads the config from Rust
+   *  next waits for it (#274 review: a channel check ran before the new channel was saved). */
+  const update = useCallback((patch: Partial<DesktopConfig>): Promise<boolean> => {
     for (const k of Object.keys(patch)) changed.current.add(k)
     setConfig((c) => ({ ...c, ...patch }))
     // Outside the state updater, which React may run twice: one change, one write.
-    if (!hasTauri()) return
-    writes.current = writes.current
+    if (!hasTauri()) return Promise.resolve(true)
+    const written = writes.current
       .then(() => command('set_desktop_config', { config: patch }))
-      .then((r) => { if (!r.ok) setError(r.reason) })
+      .then((r) => { if (!r.ok) setError(r.reason); return r.ok })
+    writes.current = written
+    return written
   }, [])
   return { config, update, error, loaded }
 }
