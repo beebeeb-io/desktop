@@ -1,17 +1,23 @@
 // B12's data layer. Everything comes through command() from desktopApi (never the shared API); a plain browser
 // (headless frames, bun run dev) has no IPC bridge, so the board's fixture values stand in. Fixtures live here
 // (settings area only) and carry the board's example numbers.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { command, DEFAULT_CONFIG, type DesktopConfig } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { GB, MB } from './kit'
 
 export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays: true, local_cache_limit_bytes: 50 * GB }
 
-/** Desktop settings: read once, written whole through set_desktop_config. */
+/**
+ * Desktop settings: read once; each change is written as a patch through set_desktop_config. The command merges only
+ * the fields it is sent (CLAUDE.md "Never break": merge-only, never the whole object read on open), and a `pause_sync`
+ * in it pauses or resumes the engine, so a write sends only what the person changed.
+ */
 export function useConfig(initial: Partial<DesktopConfig> = {}) {
   const [config, setConfig] = useState<DesktopConfig>({ ...FIXTURE_CONFIG, ...initial })
   const [error, setError] = useState<string | null>(null)
+  // One write at a time, in the order they were made: Pause then Resume never lands as Resume then Pause.
+  const writes = useRef<Promise<unknown>>(Promise.resolve())
   useEffect(() => {
     if (!hasTauri()) return
     let live = true
@@ -23,11 +29,12 @@ export function useConfig(initial: Partial<DesktopConfig> = {}) {
     return () => { live = false }
   }, [])
   const update = useCallback((patch: Partial<DesktopConfig>) => {
-    setConfig((c) => {
-      const next = { ...c, ...patch }
-      if (hasTauri()) command('set_desktop_config', { config: next }).then((r) => { if (!r.ok) setError(r.reason) })
-      return next
-    })
+    setConfig((c) => ({ ...c, ...patch }))
+    // Outside the state updater, which React may run twice: one change, one write.
+    if (!hasTauri()) return
+    writes.current = writes.current
+      .then(() => command('set_desktop_config', { config: patch }))
+      .then((r) => { if (!r.ok) setError(r.reason) })
   }, [])
   return { config, update, error }
 }

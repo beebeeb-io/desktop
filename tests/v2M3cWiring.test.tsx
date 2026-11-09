@@ -6,7 +6,6 @@ import { createElement } from 'react'
 import { DriveSourceError, type TrashEntry } from '@beebeeb/shared/drive-ui'
 import { restoredText } from '../src/v2/sections/trash'
 import { openFailureText } from '../src/v2/sections/shared'
-import { signOutRefusal, windowAfterSignOut } from '../src/v2/sections/settings/account/SecurityPane'
 import { copyFor60s, COPY_DONE, COPY_FAILED } from '../src/v2/sections/settings/account/data'
 import { SearchView } from '../src/v2/sections/search/SearchView'
 import { createBoardSource } from '../src/v2/source/fixtures/board'
@@ -42,21 +41,6 @@ describe('Shared › a failed open, Details or offline switch says what failed (
     }
     expect(checked).toBe(4)
     expect(openFailureText(new Error('raw'), 'show the details')).toBe('Couldn’t show the details. Try again.')
-  })
-})
-
-describe('Sign out lands on the real sign-in, never a board frame (DW-A57, DW-A57a)', () => {
-  test('the window opens again as itself, without the section or a frame', () => {
-    const next = windowAfterSignOut('?window=main-app&platform=windows&section=settings&sub=security&theme=dark&frame=DW-A02')
-    expect(next).toBe('?window=main-app&platform=windows&theme=dark')
-    expect(next).not.toContain('frame=')
-    expect(next).not.toContain('section=')
-  })
-  test('a refused sign-out shows Rust’s own sentence, and anything else the generic words', () => {
-    expect(signOutRefusal('unsent_changes: Some changes haven’t reached the server yet.')).toBe('Some changes haven’t reached the server yet.')
-    expect(signOutRefusal('network')).toBe('Beebeeb can’t reach the server. Check the connection and try again.')
-    expect(signOutRefusal('reqwest: connection refused at 10.0.0.1')).toBe('Something went wrong. Nothing was changed.')
-    expect(signOutRefusal('unsent_copy_failed: Beebeeb couldn’t copy the changes.\nThey’re still waiting.')).toBe('Beebeeb couldn’t copy the changes.\nThey’re still waiting.')
   })
 })
 

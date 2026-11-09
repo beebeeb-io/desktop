@@ -347,8 +347,8 @@ export function CompareView({ mode, onMode, onChoose, onDone }: { mode: 'Stacked
         </div>
       </div>
       <div className="mb-3 grid h-[200px] grid-cols-2 gap-1 overflow-hidden rounded-md" data-compare={mode}>
-        <div className="bg-gradient-to-br from-[oklch(0.75_0.04_200)] to-[oklch(0.55_0.05_160)]" />
-        <div className="bg-gradient-to-br from-[oklch(0.76_0.04_200)] to-[oklch(0.56_0.05_160)] blur-[0.6px]" />
+        <div className="bg-(image:--sample-photo-original)" />
+        <div className="bg-(image:--sample-photo-preview) blur-[0.6px]" />
       </div>
       <ul className="m-0 mb-3 list-none divide-y divide-line border-y border-line p-0">
         {COMPARE_SIZES.map(([k, v]) => <li key={k} data-compare-size className="flex h-8 items-center justify-between text-[13px]"><span>{k}</span><span className="font-mono text-[12px] text-ink-2">{v}</span></li>)}

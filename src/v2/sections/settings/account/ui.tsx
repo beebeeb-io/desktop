@@ -125,8 +125,8 @@ export function Ring({ done, total }: { done: number; total: number }) {
 export function Qr({ rows, alt }: { rows: string[]; alt: string }) {
   const n = rows.length, q = 4
   return (
-    <svg role="img" aria-label={alt} width="148" height="148" viewBox={`0 0 ${n + 2 * q} ${n + 2 * q}`} shapeRendering="crispEdges" className="rounded-md border border-line bg-white" data-testid="qr">
-      {rows.flatMap((row, y) => [...row].map((m, x) => (m === '1' ? <rect key={`${x}-${y}`} x={x + q} y={y + q} width="1" height="1" fill="#111" /> : null)))}
+    <svg role="img" aria-label={alt} width="148" height="148" viewBox={`0 0 ${n + 2 * q} ${n + 2 * q}`} shapeRendering="crispEdges" className="rounded-md border border-line bg-white fill-qr-ink" data-testid="qr">
+      {rows.flatMap((row, y) => [...row].map((m, x) => (m === '1' ? <rect key={`${x}-${y}`} x={x + q} y={y + q} width="1" height="1" /> : null)))}
     </svg>
   )
 }

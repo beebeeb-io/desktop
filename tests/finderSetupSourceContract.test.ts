@@ -245,6 +245,13 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'pages/SyncFolder.tsx | open_finder_location': 1,
       [OPEN_SETTINGS]: 1,
       'pages/SyncFolder.tsx | reset_macos_integration': 1,
+      // Desktop v2 (R1f, looked at): the Windows first run (mounted only for `platform=windows`) shows File Explorer's
+      // state from loadFinderSetup's `.value` and discards what Show and Try again answer; the notification-area flyout
+      // (a `tray` window, which tauri.macos.conf.json does not build) discards what opening the sync folder answers.
+      // None renders a reason or the warnings (the leak table below stays the three exemptions).
+      'v2/onboarding/index.tsx | finder_setup_*': 2,
+      'v2/onboarding/index.tsx | wrapper:loadFinderSetup': 1,
+      'v2/tray/index.tsx | open_finder_location': 1,
       'windows/views/SettingsView/integrationPanels.tsx | finder.run': 1,
     })
   })
@@ -263,6 +270,9 @@ describe('the sweep: every call site of a Finder command, and what it does with 
       'finderSetup.ts': { 'finder_setup_*': 7, open_login_items_and_extensions_settings: 2 },
       'pages/Shared.tsx': { open_in_finder: 2 },
       'pages/SyncFolder.tsx': { open_finder_location: 2, open_login_items_and_extensions_settings: 2, reset_macos_integration: 2 },
+      // Desktop v2 (R1f): one literal per call site above, none reached through a variable.
+      'v2/onboarding/index.tsx': { 'finder_setup_*': 2 },
+      'v2/tray/index.tsx': { open_finder_location: 1 },
     })
   })
 

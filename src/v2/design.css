@@ -1,17 +1,71 @@
 /* Desktop v2's token file: the board-only tokens (board.html .kit-screen), each with a light and a dark value.
    Like src/design.css for the legacy windows, this is the one place a v2 colour literal belongs
    (tests/noHardcodedThemeColors.test.ts exempts token files by this name). Everything else uses
-   @beebeeb/shared/tokens.css through Tailwind. */
-:root {
+   @beebeeb/shared/tokens.css through Tailwind.
+
+   The colours sit in @theme, so each one is also a Tailwind colour (`text-red-text`, `bg-scrim`, `text-amber-ink`);
+   `.dark` below gives the theme-aware ones their dark value. A colour that is not in `.dark` is the same in both
+   themes ON PURPOSE, and its group says why: it sits on a colour that does not change with the theme (Amber), or it
+   draws something whose colours are not the app's (Windows' own UI, a document's paper, a photo). */
+@theme {
+  /* Theme-aware text (dark values in .dark). */
   --color-red-text: oklch(0.48 0.19 25);
   --color-green-text: oklch(0.46 0.13 155);
+  /* The dimming behind Beebeeb's own dialogs: the board's --kit-scrim, 28% black in light, 55% in dark. */
+  --color-scrim: oklch(0 0 0 / 0.28);
+
+  /* Text on a solid Amber fill (the primary button). Amber does not change with the theme, so neither does the ink
+     on it: the board's literal on every Amber fill, the same contract as src/design.css's --amber-ink. */
+  --color-amber-ink: oklch(0.22 0.01 70);
+
+  /* A document's page: white paper and dark ink in both themes, as an office app draws it. */
+  --color-page: oklch(1 0 0);
+  --color-page-ink: oklch(0.22 0.01 70);
+  --color-page-shadow: oklch(0 0 0 / 0.14);
+
+  /* A QR code's modules: near-black on its white quiet zone in both themes, so every camera can read it. */
+  --color-qr-ink: #111;
+
+  /* A photo is looked at on near-black in both themes; the placeholder stands in until its pixels load. */
+  --color-viewer: oklch(0.16 0.01 70);
+  --color-viewer-placeholder: oklch(0.3 0.02 70);
+  /* The sample photos the frames draw where a real picture would be. */
+  --color-sample-thumb: oklch(0.82 0.02 240);
+
+  /* Drawn by Windows, not by Beebeeb (data-system-ui / data-system-drawn scenes): Windows' light greys, the desktop
+     behind the installer and the guide, the taskbar, the Windows Hello dimming, and Quick Settings' dark greys. They
+     follow Windows, never the app's theme. */
+  --color-win-surface: oklch(0.96 0 0);
+  --color-win-ink: oklch(0.25 0 0);
+  --color-win-ink-2: oklch(0.5 0 0);
+  --color-win-line: oklch(0.9 0 0);
+  --color-win-field: oklch(0.88 0 0);
+  --color-win-selected: oklch(0.93 0 0);
+  --color-win-selected-line: oklch(0.8 0 0);
+  --color-win-button-line: oklch(0.7 0 0);
+  --color-win-desktop: oklch(0.62 0.03 230);
+  --color-win-taskbar: oklch(0.95 0 0 / 0.92);
+  --color-win-taskbar-app: oklch(0.85 0 0);
+  --color-win-taskbar-app-open: oklch(0.8 0 0);
+  --color-win-scrim: oklch(0 0 0 / 0.32);
+  --color-win-dark-surface: oklch(0.22 0.005 250);
+  --color-win-dark-tile: oklch(0.3 0.005 250);
+  --color-win-dark-line: oklch(0.35 0.005 250);
+  --color-win-dark-art: oklch(0.4 0.005 250);
+}
+:root {
   --card-r: 12px;
   --row2: 60px;
   --pad: 16px;
   --fs-cap: 12px;
   --lh-cap: 16px;
+  /* Sample photos as whole pictures (used as `bg-(image:--sample-photo-…)`): the same in both themes, like a photo. */
+  --sample-photo-slide: linear-gradient(135deg, oklch(0.78 0.04 230), oklch(0.62 0.05 200) 55%, oklch(0.82 0.06 80));
+  --sample-photo-original: linear-gradient(to bottom right in oklab, oklch(0.75 0.04 200), oklch(0.55 0.05 160));
+  --sample-photo-preview: linear-gradient(to bottom right in oklab, oklch(0.76 0.04 200), oklch(0.56 0.05 160));
 }
 .dark {
   --color-red-text: oklch(0.70 0.19 25);
   --color-green-text: oklch(0.72 0.16 155);
+  --color-scrim: oklch(0 0 0 / 0.55);
 }

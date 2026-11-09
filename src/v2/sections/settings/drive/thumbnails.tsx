@@ -1,6 +1,6 @@
 // Drive › Thumbnails and previews (DW-0744), its confirm (DW-0744b) and the compare view (DW-0745).
 import { useState } from 'react'
-import { Btn, Dialog, Group, Page, Row, Switch, mono } from '../shell/kit'
+import { Btn, Dialog, Group, Page, Row, Slider, Switch, mono } from '../shell/kit'
 import { useSettings } from '../shell/context'
 
 type Size = '720p' | '1080p' | '2K' | '4K'
@@ -73,7 +73,8 @@ export function Compare() {
         <span className={`absolute left-3 top-3 rounded bg-paper px-1.5 text-[11px] ${mono}`}>Original · 30.9 MB</span>
         <span className={`absolute right-3 top-3 rounded bg-paper px-1.5 text-[11px] ${mono}`}>4K HEIC · 1.0 MB</span>
       </div>
-      <input type="range" aria-label="Wipe position" min={0} max={100} value={wipe} onChange={(e) => setWipe(Number(e.target.value))} />
+      {/* The kit's neutral slider (punch list, DW-0745): the browser's default range input is blue. */}
+      <Slider label="Wipe position" min={0} max={100} value={wipe} onChange={setWipe} />
       <Group>
         <Row label="Sizes" value={SIZES.map((s) => `${s} ${SIZE_KB[s]}`).join(' · ')} mono />
         <Row label="Format" value="HEIC 1.0 MB · JPEG 2.1 MB" mono />

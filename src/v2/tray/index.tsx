@@ -48,6 +48,12 @@ export async function runFlyoutCommand(what: FlyoutCommand, snapshot: PopoverSna
   await hideFlyout()
 }
 
+/** The footer's "Open in File Explorer": open the sync folder, then hide, whatever it answered (the result is not shown). */
+async function openFileExplorer(): Promise<void> {
+  await command<void>('open_finder_location', { path: null })
+  await hideFlyout()
+}
+
 const engineExtras = pickExtras()
 
 export default function TrayApp() {
@@ -83,7 +89,7 @@ export default function TrayApp() {
     onAction: (what) => void runFlyoutCommand(what, snapshot),
     onRow: () => void front(),
     onOpenBeebeeb: () => void front(),
-    onOpenExplorer: () => void command<void>('open_finder_location', { path: null }).then(hideFlyout),
+    onOpenExplorer: () => void openFileExplorer(),
     onSettings: () => void command<void>('show_main_app_settings').then(hideFlyout),
     onViewHistory: () => void front(),
   }

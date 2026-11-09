@@ -3,7 +3,7 @@
 // Drive's App lock sits above the shared rows (the securityExtra slot, DW-0716).
 import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { command } from '../../../../desktopApi'
+import { clearSession } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
@@ -152,41 +152,26 @@ function AppLock() {
   )
 }
 
-/**
- * After a sign-out the window opens again as itself: its gate (auth/Gate.tsx) finds no session and shows sign-in
- * (DW-A02, or DW-A03 with no Continue as), and nothing of the signed-out account stays in this page's memory. Never a
- * board frame (`?frame=`): that is a drawing with no handlers.
- */
-export function windowAfterSignOut(search: string): string {
-  const now = new URLSearchParams(search)
-  const next = new URLSearchParams()
-  for (const k of ['window', 'platform', 'theme']) { const v = now.get(k); if (v) next.set(k, v) }
-  return `?${next.toString()}`
-}
-
-/** clear_session refuses as `<code>: <Rust's own sentence>` (sign_out/copy.rs); those sentences are the app's words. */
-export function signOutRefusal(reason: string): string {
-  const m = /^(unsent_changes|unsent_copy_failed|unsent_count_failed): ([\s\S]+)$/.exec(reason)
-  return m ? m[2]! : errorText(reason)
-}
-
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
-  // A sign-out that happened but could not confirm a step (SessionActionOutcome.warning): said before the window moves on.
+  // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
+  // neutral line, before the window moves on. Only through desktopApi's wrapper, which parses the outcome.
   const [warning, setWarning] = useState<string | null>(null)
-  const reopen = () => window.location.replace(windowAfterSignOut(window.location.search))
+  // The window again, without the Settings route: its gate reads the signed-out session and shows the sign-in. (It went to
+  // `frame=DW-A02/A03` without `platform=windows`, which loaded the legacy window, and a frame is a drawing anyway.)
+  const signedOut = () => window.location.assign('?window=main-app&platform=windows')
   const signOut = async () => {
     if (!hasTauri()) return onCancel()
-    const r = await command<{ warning?: { code: string; sentence: string } | null }>('clear_session')
-    if (!r.ok) return setError(signOutRefusal(r.reason))
-    if (r.value?.warning?.sentence) return setWarning(r.value.warning.sentence)
-    reopen()
+    const r = await clearSession()
+    if (!r.ok) setError(r.reason)
+    else if (r.value.warning) setWarning(r.value.warning.sentence)
+    else signedOut()
   }
   if (warning) {
     return (
-      <Dialog labelId="signout-h" title="Signed out" onCancel={reopen} actions={<Btn onClick={reopen}>OK</Btn>}>
-        <p role="alert">{warning}</p>
+      <Dialog labelId="signout-h" title="Signed out" onCancel={signedOut} actions={<Btn onClick={signedOut}>OK</Btn>}>
+        <p role="status">{warning}</p>
       </Dialog>
     )
   }
@@ -460,7 +445,7 @@ function DeleteDone() {
         <span className="grid h-12 w-12 place-items-center rounded-full bg-green-bg text-green-text"><Icon name="check" size={22} /></span>
         <h1 className="text-[20px] font-semibold text-ink">Deletion cancelled</h1>
         <p className="max-w-[380px] text-[13px] text-ink-2">Your account is as it was. Nothing was deleted. We sent an email to say so.</p>
-        <a href="?window=main-app&section=files" className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-[oklch(0.22_0.01_70)]">Continue to Drive</a>
+        <a href="?window=main-app&section=files" className="mt-2 rounded-md bg-amber px-3 py-1.5 text-[13px] font-medium text-amber-ink">Continue to Drive</a>
       </div>
     </Page>
   )
