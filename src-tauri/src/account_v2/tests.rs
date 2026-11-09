@@ -171,7 +171,7 @@ fn the_no_secret_check_fails_on_a_planted_field() {
 /// The delete-link routes are public: they run without a session, so Undo works after the link revoked it.
 #[test]
 fn the_delete_link_commands_need_no_session() {
-    let source = include_str!("mod.rs");
+    let source = include_str!("mod.rs").replace("\r\n", "\n");
     for signature in ["fn account_delete_confirm_link(", "fn account_delete_undo("] {
         let start = source.find(signature).expect(signature);
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
