@@ -2,7 +2,8 @@
 // the fixtures in ../source/fixtures/auth.ts; the live flow is ../auth/index.tsx.
 import type { ReactElement } from 'react'
 import type { FrameRegistry } from './types'
-import { FrameWindow } from '../chrome/FrameWindow'
+import { CaptionBar } from '../chrome/CaptionBar'
+import { SettingsView } from '../sections/settings/shell/SettingsView'
 import { AnotherDeviceView } from '../auth/AnotherDevice'
 import { ApprovalToast, ApproveCodePanel, ApproveDialog, type ApproveDialogProps } from '../auth/Approve'
 import { LockedView, NoPlanView } from '../auth/Gate'
@@ -32,15 +33,22 @@ function device(status: Parameters<typeof AnotherDeviceView>[0]['status'], secon
   )
 }
 
-function approve(stage: ApproveDialogProps['stage'], o: Partial<ApproveDialogProps> = {}): () => ReactElement {
+/** Approving happens in the settings view, Security (DW-A12: "In the settings view, not a separate window"). */
+function security(panel: ReactElement, overlay?: ReactElement): () => ReactElement {
   return () => (
-    <FrameWindow section="settings" title="Beebeeb" overlay={
-      <ApproveDialog stage={stage} review={REVIEW} typedCode={REQUEST_CODE} password={PASSWORD}
-        onTypedCode={noop} onPassword={noop} onApprove={noop} onDeny={noop} onSeeSessions={noop} onDone={noop} {...o} />
-    }>
-      <ApproveCodePanel code={REQUEST_CODE} onCode={noop} onContinue={noop} />
-    </FrameWindow>
+    <div className="relative flex h-screen flex-col bg-paper font-sans text-ink">
+      <CaptionBar title="Settings - Beebeeb" />
+      <div className="flex min-h-0 flex-1 flex-col"><SettingsView pane="security" override={panel} /></div>
+      {overlay}
+    </div>
   )
+}
+
+function approve(stage: ApproveDialogProps['stage'], o: Partial<ApproveDialogProps> = {}): () => ReactElement {
+  return security(<ApproveCodePanel code={REQUEST_CODE} onCode={noop} onContinue={noop} />, (
+    <ApproveDialog stage={stage} review={REVIEW} typedCode={REQUEST_CODE} password={PASSWORD}
+      onTypedCode={noop} onPassword={noop} onApprove={noop} onDeny={noop} onSeeSessions={noop} onDone={noop} {...o} />
+  ))
 }
 
 function twoFactor(mode: 'totp' | 'backup', code: string, state: 'idle' | 'verifying' | 'wrong'): () => ReactElement {
@@ -64,9 +72,7 @@ export const FRAMES: FrameRegistry = {
   'DW-A10': device('expired', 0),
   // Approving a sign-in
   'DW-A11': () => <ApprovalToast device={APPROVER} country="Germany" />,
-  'DW-A12': () => (
-    <FrameWindow section="settings" title="Beebeeb"><ApproveCodePanel code="K7QM-4W" onCode={noop} onContinue={noop} /></FrameWindow>
-  ),
+  'DW-A12': security(<ApproveCodePanel code="K7QM-4W" onCode={noop} onContinue={noop} />),
   'DW-A13': approve('review'),
   'DW-A14': approve('hello'),
   'DW-A15': approve('approved'),

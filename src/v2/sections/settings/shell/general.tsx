@@ -4,6 +4,7 @@ import { BILLING_URL } from '../../../../desktopApi'
 import { Btn, Dialog, Group, Meter, Page, Row, Choice, mono, GB } from './kit'
 import { useConfig } from './data'
 import { useSettings } from './context'
+import { startGuide } from '../../../guide/Guide'
 import type { DesktopTheme, ReleaseChannel } from '../../../../desktopApi'
 
 const VERSION = '0.9.1'
@@ -38,7 +39,7 @@ export function General({ updateAvailable }: { updateAvailable?: boolean } = {})
           right={<Choice label="Theme" value={config.theme ?? 'system'} options={THEMES} onPick={(theme) => update({ theme })} />} />
       </Group>
       <Group title="Help">
-        <Row label="Show the guide again" onClick={() => { window.location.search = '?section=files&frame=DW-0380' }} />
+        <Row label="Show the guide again" onClick={startGuide} />
         <Row label="Help and report a problem" onClick={() => open('report')} />
         <Row label="Diagnostics" href="?section=settings&sub=diagnostics" />
       </Group>

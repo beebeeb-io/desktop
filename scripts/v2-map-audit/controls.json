@@ -186,5 +186,239 @@
   "name": "Open Settings",
   "role": "button",
   "why": "the dialog's own button: \"Open\" is not a verb here, and the banner's Settings behind the dialog is covered"
+ },
+ "DW-A02#2": {
+  "before": [
+   {
+    "fill": "#f-password",
+    "value": "correct horse battery"
+   }
+  ],
+  "verb": "click",
+  "name": "Sign in",
+  "role": "button"
+ },
+ "DW-A03#0": {
+  "before": [
+   {
+    "fill": "#f-password",
+    "value": "correct horse battery"
+   }
+  ],
+  "verb": "click",
+  "name": "Sign in",
+  "role": "button"
+ },
+ "DW-A12#0": {
+  "before": [
+   {
+    "fill": "#f-code-on-the-other-device",
+    "value": "K7QM4WTD"
+   }
+  ],
+  "verb": "click",
+  "name": "Continue",
+  "role": "button"
+ },
+ "DW-A13#2": {
+  "notAutomatable": "an event, not a control: the request turns five minutes old while it is reviewed (DW-A17 is that state)"
+ },
+ "DW-A14#1": {
+  "notAutomatable": "drawn by Windows: Cancel is in the Windows Security dialog (Windows Hello); the board draws it for reference"
+ },
+ "DW-A18#0": {
+  "notAutomatable": "an event: the frame draws Sign in disabled (“Unlocking vault…”) while the sign-in runs; it can be pressed again once that answers or times out"
+ },
+ "DW-A21#0": {
+  "notAutomatable": "an event: the frame draws the button counting down (“Try again in 30 s”), disabled until the wait ends; then it is DW-A19's Sign in"
+ },
+ "DW-A23#1": {
+  "before": [
+   {
+    "fill": "input[aria-label^='Word ']",
+    "values": [
+     "legal",
+     "winner",
+     "thank",
+     "year",
+     "wave",
+     "sausage",
+     "worth",
+     "useful",
+     "legal",
+     "winner",
+     "thank",
+     "yellow"
+    ]
+   }
+  ],
+  "verb": "click",
+  "name": "Restore keys",
+  "role": "button"
+ },
+ "DW-A26#0": {
+  "verb": "fill",
+  "selector": "#totp",
+  "value": "482193"
+ },
+ "DW-A27#0": {
+  "verb": "fill",
+  "selector": "#totp",
+  "value": "193482"
+ },
+ "DW-A28#0": {
+  "before": [
+   {
+    "fill": "#f-backup-code",
+    "value": "12345678"
+   }
+  ],
+  "verb": "click",
+  "name": "Verify backup code",
+  "role": "button"
+ },
+ "DW-A29#1": {
+  "notAutomatable": "drawn by Windows: More choices is in the Windows Security passkey dialog (the board draws it for reference)"
+ },
+ "DW-A29#2": {
+  "notAutomatable": "drawn by Windows: Cancel is in the Windows Security passkey dialog (the board draws it for reference)"
+ },
+ "DW-A30#0": {
+  "before": [
+   {
+    "fill": "#f-password",
+    "value": "correct horse battery"
+   }
+  ],
+  "verb": "click",
+  "name": "Unlock",
+  "role": "button"
+ },
+ "DW-0009#1": {
+  "notAutomatable": "drawn by Windows: More choices is in the Windows Security dialog (Windows Hello)"
+ },
+ "DW-0009#2": {
+  "notAutomatable": "drawn by Windows: Cancel is in the Windows Security dialog (Windows Hello); the window stays locked and Unlock asks again"
+ },
+ "DW-A32#0": {
+  "before": [
+   {
+    "fill": "#f-code",
+    "value": "48210937"
+   }
+  ],
+  "verb": "click",
+  "name": "Verify",
+  "role": "button"
+ },
+ "DW-A32#2": {
+  "notAutomatable": "an event, then a click: the link appears when the resend countdown ends (the frame shows 0:42 left)"
+ },
+ "DW-A33#1": {
+  "notAutomatable": "an event, then a click: the link appears when the resend countdown ends (the frame shows 0:31 left)"
+ },
+ "DW-A34#0": {
+  "before": [
+   {
+    "fill": "#f-code",
+    "value": "48210937"
+   }
+  ],
+  "verb": "click",
+  "name": "Verify",
+  "role": "button"
+ },
+ "DW-A35#0": {
+  "before": [
+   {
+    "click": {
+     "selector": "#honest"
+    }
+   }
+  ],
+  "verb": "click",
+  "name": "Continue",
+  "role": "button"
+ },
+ "DW-A36#1": {
+  "verb": "fill",
+  "selector": "#f-password",
+  "value": "Winter-har"
+ },
+ "DW-A36#2": {
+  "verb": "fill",
+  "selector": "#f-password",
+  "value": "Password123456789012345",
+  "then": "Tab"
+ },
+ "DW-A37#0": {
+  "verb": "fill",
+  "selector": "#f-password",
+  "value": "Winter-harbour-lantern-42"
+ },
+ "DW-A38#0": {
+  "verb": "fill",
+  "selector": "#f-password",
+  "value": "Winter-harbour-lantern-42"
+ },
+ "DW-A39#0": {
+  "before": [
+   {
+    "click": {
+     "selector": "#saved"
+    }
+   }
+  ],
+  "verb": "click",
+  "name": "I saved it, verify",
+  "role": "button"
+ },
+ "DW-A43#0": {
+  "notAutomatable": "an event, not a control: the account creation finishes (core's signup_flow answers)"
+ },
+ "DW-0201#0": {
+  "before": [
+   {
+    "click": {
+     "name": "Add a passkey",
+     "role": "button"
+    }
+   },
+   {
+    "fill": "#f-your-password-to-confirm-it-s-you",
+    "value": "correct horse battery"
+   }
+  ],
+  "verb": "click",
+  "name": "Add a passkey",
+  "role": "button"
+ },
+ "DW-0208#0": {
+  "verb": "click",
+  "selector": "[data-summary-row] button"
+ },
+ "DW-A47#0": {
+  "before": [
+   {
+    "fill": "input[aria-label^='Word ']",
+    "values": [
+     "legal",
+     "winner",
+     "thank",
+     "year",
+     "wave",
+     "sausage",
+     "worth",
+     "useful",
+     "legal",
+     "winner",
+     "thank",
+     "yellow"
+    ]
+   }
+  ],
+  "verb": "click",
+  "name": "Verify phrase",
+  "role": "button"
  }
 }
