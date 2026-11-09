@@ -152,7 +152,7 @@ export const FRAMES: FrameRegistry = {
   'DW-0410b': () => (
     <Win p={pane({ items: withCopy, sel: ['i-contract-copy'], rest: { renaming: { id: 'i-contract-copy', value: 'Contract draft.pdf', error: takenMessage('Contract draft.pdf', false) } } })} />
   ),
-  'DW-0411': () => <Win p={pane({ sel: ['i-contract'] })} overlay={<DetailsDialog item={contract()} details={detailsOf('i-contract')} />} />,
+  'DW-0411': () => <Win p={pane({ sel: ['i-contract'] })} overlay={<DetailsDialog item={contract()} details={detailsOf('i-contract')} added="2026-10-28T12:00:00" now={new Date(NOW)} />} />,
   'DW-0412': () => {
     const items = FILES_TREE.map((i) => (i.id === 'i-contract' ? { ...i, local: 'available-offline' as const } : i))
     return (
@@ -165,6 +165,7 @@ export const FRAMES: FrameRegistry = {
   'DW-0413': () => (
     <Win p={pane({ sel: ['i-contract'] })} overlay={
       <VersionsDialog
+        now={new Date(NOW)}
         name="Contract draft.pdf"
         versions={[
           { id: 'v3', createdAt: '2026-11-07T16:42:00', size: 1_200_000, current: true, deviceName: 'This PC' },

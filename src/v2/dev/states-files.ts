@@ -6,22 +6,26 @@ import { menuItem } from './driver'
 const LIST = '[data-list-count] > div[tabindex="0"]'
 const prefs = (folder: string, p: object) => ({ 'bb.v2.folder-prefs': { [folder]: p } })
 const PANEL = prefs('root', { panel: true })
-const NO_BANNERS = 'the window draws no banners: chrome/Banners is not mounted in V2Shell or any section'
 
 export const FILES_STATES: Record<string, Recipe> = {
   // ── B03: global elements ──────────────────────────────────────────────────────────────────────────────────────
-  'DW-0101': { q: 'section=files&scenario=offline', gap: `the offline banner: ${NO_BANNERS}` },
-  'DW-0102': { q: 'section=files&scenario=problems', gap: `the sync-problem banner: ${NO_BANNERS}` },
-  'DW-0103': { q: 'section=files&scenario=nearly-full', gap: `the storage-almost-full banner: ${NO_BANNERS}` },
-  'DW-0104': { q: 'section=files&scenario=full', gap: `the storage-full banner: ${NO_BANNERS}` },
-  'DW-0105': { q: 'section=files', gap: `the signed-out banner: ${NO_BANNERS}` },
-  'DW-0106': { q: 'section=files', gap: `the backup-problem banner: ${NO_BANNERS}` },
+  // The window's banner (chrome/Banners, mounted with the caption bar, drawn under the Files toolbar): one per scenario.
+  'DW-0101': { q: 'section=files&scenario=offline' },
+  'DW-0102': { q: 'section=files&scenario=problems' },
+  'DW-0103': { q: 'section=files&scenario=nearly-full' },
+  'DW-0104': { q: 'section=files&scenario=full' },
+  'DW-0105': { q: 'section=files&scenario=signed-out' },
+  'DW-0106': { q: 'section=files&scenario=backup-problems' },
   'DW-0107': {
     q: 'section=files', steps: [{ context: 'row:i-contract' }, { click: menuItem('copy-link') }],
-    gap: 'Copy link in Files answers "Sharing isn’t available in this build yet": no live path in Files shows "Link copied"',
+    gap: 'Copy link makes the link in Rust (share_link_copy), which a browser has not: no live path here shows "Link copied"',
   },
   'DW-0108': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'Delete' }] },
-  'DW-0109': { q: 'section=files', gap: 'a failed rename never reaches the fixture source (it has no offline write); the toast only shows on a host error' },
+  // The fixture's first rename fails for the connection (`rename-fails`); Try again goes through.
+  'DW-0109': {
+    q: 'section=files&scenario=rename-fails',
+    steps: [{ click: 'row:i-contract' }, { key: 'F2' }, { fill: 'field:Name', value: 'Contract final.pdf' }, { key: 'Enter', on: 'field:Name' }],
+  },
   'DW-0114': { q: 'section=files&scenario=empty' },
   'DW-0118': { q: 'section=files&scenario=listing' },
   'DW-0119': { q: 'section=files', storage: prefs('root', { view: 'grid' }) },
@@ -35,11 +39,13 @@ export const FILES_STATES: Record<string, Recipe> = {
 
   // ── B04: Files ────────────────────────────────────────────────────────────────────────────────────────────────
   'DW-0401': { q: 'section=files', storage: PANEL, steps: [{ click: 'row:i-contract' }] },
-  'DW-0402': { q: 'section=files', steps: [{ context: 'row:i-contract' }] },
+  // Files' root keeps its details panel open (DW-0401, DW-0403, DW-0412 draw it), so the menu opens over it too.
+  'DW-0402': { q: 'section=files', storage: PANEL, steps: [{ context: 'row:i-contract' }] },
   'DW-0403': { q: 'section=files', storage: PANEL, steps: [{ click: 'row:i-budget' }, { ctrl: 'row:i-contract' }] },
   'DW-0404': { q: 'section=files', steps: [{ click: '[data-anchor="sort"]' }] },
   'DW-0405': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'Delete' }] },
-  'DW-0406': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'Ctrl+d' }] },
+  // The copy is made; the pause lets its 3 s "Duplicated" go, so a second Ctrl+D shows as its own message (M3a).
+  'DW-0406': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'Ctrl+d' }, { pause: 3300 }] },
   'DW-0407': { q: 'section=files', steps: [{ context: 'row:i-contract' }, { click: menuItem('share') }] },
   // The live preview shows text and thumbnails; Meeting notes.md stands in for the board's PDF page (same panel).
   'DW-0408': { q: 'section=files', steps: [{ click: 'row:i-notes' }, { key: 'Space' }], gap: 'the preview panel draws no PDF pages (PreviewHost previews text and thumbnails); Meeting notes.md opens the same panel' },
@@ -61,26 +67,28 @@ export const FILES_STATES: Record<string, Recipe> = {
   'DW-0481': { q: 'section=files', gap: 'the drop target shows only during a File Explorer drag (Tauri’s drag-drop event); a browser has none' },
 
   // Folders, Backups and uploads
-  'DW-0420': { q: 'section=files&id=f-lisbon' },
+  // Opened from Files, as a person gets there, so Back (Alt+Left) has somewhere to go.
+  'DW-0420': { q: 'section=files', steps: [{ dbl: 'row:f-lisbon' }, { wait: 'text:Day 1' }] },
   'DW-0420b': { q: 'section=files&id=f-archive', steps: [{ scroll: LIST, top: 138 * 36 }] },
   'DW-0421': { q: 'section=files&id=f-lisbon', storage: prefs('f-lisbon', { view: 'grid' }) },
   'DW-0422': { q: 'section=backups' },
   'DW-0423': { q: 'section=backups&id=f-bk-laptop' },
   'DW-0424': { q: 'section=backups&id=f-bk-mail' },
   'DW-0425': { q: 'section=backups&id=f-bk-mail', steps: [{ click: 'row:f-mail-2026' }, { key: 'F2' }] },
-  'DW-0426': { q: 'section=files&id=f-lisbon' },
-  'DW-0427': { q: 'section=files&id=f-lisbon', steps: [{ click: '[data-open-uploads]' }] },
-  'DW-0429': { q: 'section=files', gap: 'the conflict dialog opens from drive_status conflicts; the fixture extras report none' },
+  'DW-0426': { q: 'section=files&id=f-lisbon&scenario=uploading' },
+  'DW-0427': { q: 'section=files&id=f-lisbon&scenario=uploading', steps: [{ click: '[data-open-uploads]' }] },
+  'DW-0429': { q: 'section=files&scenario=conflict' },
 
   // Browse files
   'DW-1101': { q: 'section=files' },
-  'DW-1102': { q: 'section=files&id=f-lisbon', storage: prefs('f-lisbon', { view: 'grid', panel: true }), steps: [{ click: 'row:p-alfama' }] },
+  'DW-1102': { q: 'section=files', storage: prefs('f-lisbon', { view: 'grid', panel: true }), steps: [{ dbl: 'row:f-lisbon' }, { click: 'row:p-alfama' }] },
   'DW-1103': { q: 'section=files', steps: [{ context: LIST }] },
   'DW-1104': { q: 'section=files', steps: [{ context: 'row:i-harbour' }] },
-  'DW-1105': { q: 'section=search', steps: [{ fill: 'input[type=search],[role=searchbox],input', value: 'Contr' }] },
+  // Opened from Files (Search names), so Esc's way back is Files, not whatever the tab showed before.
+  'DW-1105': { q: 'section=files', steps: [{ click: 'btn:Search names' }, { fill: 'input[type=search],[role=searchbox],input', value: 'Contr' }] },
   'DW-1106': { q: 'section=files&id=f-new' },
   'DW-1107': { q: 'section=files&scenario=listing' },
-  'DW-1108': { q: 'section=files&scenario=offline', gap: `the offline banner: ${NO_BANNERS}` },
-  'DW-1109': { q: 'section=files', gap: `the signed-out banner: ${NO_BANNERS}` },
+  'DW-1108': { q: 'section=files&scenario=offline' },
+  'DW-1109': { q: 'section=files&scenario=signed-out' },
   'DW-1110': { q: 'section=backups', steps: [{ click: 'row:f-bk-mail' }, { key: 'F2' }] },
 }

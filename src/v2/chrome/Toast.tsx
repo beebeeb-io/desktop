@@ -24,7 +24,8 @@ export const useToast = () => useContext(ToastContext)
 
 /** The message itself, for the host and for frames. */
 export function ToastView({ message, onAction, onClose }: { message: ToastMessage; onAction?: () => void; onClose?: () => void }) {
-  const label = message.kind === 'undo' ? 'Undo' : message.kind === 'failed' ? 'Try again' : null
+  // Try again only where it repeats something: a failure nobody can retry shows no button that does nothing.
+  const label = message.kind === 'undo' ? 'Undo' : message.kind === 'failed' && message.onAction ? 'Try again' : null
   return (
     <div
       role={message.kind === 'failed' ? 'alert' : 'status'}

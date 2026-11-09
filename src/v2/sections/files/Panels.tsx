@@ -1,5 +1,5 @@
 // Preview, no-preview, the uploads panel and the system file pickers drawn for reference (DW-0408, DW-0408b, DW-0415 to DW-0416, DW-0427, DW-0480, DW-0481).
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { FileIcon, getFileType } from '@beebeeb/shared/drive-ui'
 import { BTN, CloseX } from './ui'
@@ -89,9 +89,23 @@ export function UploadsPanel({ rows, summary, onTryAgain, onPauseAll, onClose, o
       </section>
     )
   }
+  // Esc or a click outside closes it (DW-0427), wherever the focus is; the status line's own click is its toggle.
+  const panel = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!onClose) return
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const down = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (panel.current?.contains(t) || (t instanceof Element && t.closest('[data-open-uploads]'))) return
+      onClose()
+    }
+    window.addEventListener('keydown', key)
+    window.addEventListener('mousedown', down)
+    return () => { window.removeEventListener('keydown', key); window.removeEventListener('mousedown', down) }
+  }, [onClose])
   return (
-    <div role="presentation" className="absolute bottom-8 left-3 z-40 w-[440px]" onKeyDown={(e) => { if (e.key === 'Escape') onClose?.() }}>
-      <section role="dialog" aria-label="Uploads" data-panel="uploads" className="overflow-hidden rounded-xl border border-line bg-paper shadow-2xl">
+    <div role="presentation" className="absolute bottom-8 left-3 z-40 w-[440px]">
+      <section ref={panel} role="dialog" aria-label="Uploads" data-panel="uploads" className="overflow-hidden rounded-xl border border-line bg-paper shadow-2xl">
         <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <div><h2 className="m-0 text-[14px] font-semibold text-ink">Uploads</h2><p className="m-0 text-[12px] leading-4 text-ink-3">{summary}</p></div>
           <CloseX onClick={onClose} />

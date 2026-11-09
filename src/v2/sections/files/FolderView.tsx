@@ -18,7 +18,7 @@ import { OPEN_WITH_EDITOR, OPEN_WITH_OTHER, withOfficeOpen } from '../open/offic
 import { isOfficeFile } from '../open/office'
 import { Menu, type MenuEntry } from './ui'
 import {
-  arrange, BACKUPS_ID, isProtected, loadPrefs, nameProblem, nameTaken, savePrefs, takenMessage, type FolderPrefs,
+  arrange, BACKUPS_ID, failureText, isProtected, loadPrefs, nameProblem, nameTaken, savePrefs, takenMessage, type FolderPrefs,
 } from './model'
 
 type Dialog =
@@ -32,13 +32,7 @@ type Dialog =
 
 interface MenuState { x: number; y: number; label: string; entries: MenuEntry[]; run: (id: string) => void }
 
-function words(e: unknown, fallback = 'That didn’t work. Try again.'): string {
-  const code = e instanceof DriveSourceError ? e.code : 'failed'
-  if (code === 'offline') return 'Needs a connection.'
-  if (code === 'unsupported') return 'This isn’t available in this build yet.'
-  if (code === 'quota') return 'Not enough space.'
-  return fallback
-}
+const codeOf = (e: unknown): string => (e instanceof DriveSourceError ? e.code : 'failed')
 
 export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'backups' }) {
   const source = useDriveSource()
@@ -84,7 +78,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const shownListing = listing ? { ...listing, path } : null
   const service = path.find((c) => c.name === 'Mail Backup')
   const locked = mode === 'backups' || path.some((c) => c.id === BACKUPS_ID) || (listing ? byId.size > 0 && items.every((i) => i.readOnly) && path.length > 1 : false)
-  const canNew = !locked && !offline
+  // Offline, changes wait on this PC and upload when the connection is back (DW-1108): New stays on.
+  const canNew = !locked
 
   const changePrefs = (next: FolderPrefs) => { setPrefs(next); savePrefs(folderId, next) }
 
@@ -117,16 +112,24 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const go = (id: string | null) => nav.go({ section: mode, id: mode === 'backups' && id === rootId ? null : id })
   const up = () => { const p = path; if (p.length > 1) go(p[p.length - 2].id) }
 
+  /**
+   * A failed action (DW-0109): the protected folder message for a protected item, else what failed in words, with Try
+   * again repeating the action where trying again can help.
+   */
+  const fail = (e: unknown, item?: DriveItem, what?: { action: string; again: () => void }) => {
+    if (e instanceof DriveSourceError && (e.code === 'read-only' || e.code === 'locked') && item) { setDialog({ kind: 'protected', item }); return }
+    const f = failureText(what?.action ?? 'do that', codeOf(e))
+    showToast({ kind: 'failed', text: f.text, onAction: f.retry ? what?.again : undefined })
+  }
+
+  const openInApp = (item: DriveItem) => {
+    source.open(item.id).catch((e: unknown) => fail(e, item, { action: 'open it', again: () => openInApp(item) }))
+  }
   const open = (item: DriveItem) => {
     if (item.isFolder) { go(item.id); return }
     if (offline && item.local === 'online-only') { setConnectionNeeded(item); return }
     if (isOfficeFile(item)) { nav.go({ section: 'open', id: item.id, sub: 'office' }); return }
-    source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: words(e) }))
-  }
-
-  const fail = (e: unknown, item?: DriveItem) => {
-    if (e instanceof DriveSourceError && (e.code === 'read-only' || e.code === 'locked') && item) setDialog({ kind: 'protected', item })
-    else showToast({ kind: 'failed', text: words(e) })
+    openInApp(item)
   }
 
   const trash = (list: DriveItem[]) => {
@@ -136,8 +139,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     source.moveToTrash(list.map((i) => i.id)).then(({ undoToken }) => {
       undo.current = undoToken
       setSelection(new Set())
-      showToast({ kind: 'undo', text: 'Moved to Trash', onAction: () => { void source.undoTrash(undoToken).catch((e: unknown) => fail(e)) } })
-    }, (e: unknown) => fail(e, list[0]))
+      showToast({ kind: 'undo', text: 'Moved to Trash', onAction: () => { void source.undoTrash(undoToken).catch((e: unknown) => fail(e, undefined, { action: 'put it back', again: () => { void source.undoTrash(undoToken) } })) } })
+    }, (e: unknown) => fail(e, list[0], { action: 'move it to Trash', again: () => trash(list) }))
   }
 
   const duplicate = (list: DriveItem[]) => {
@@ -145,7 +148,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     source.duplicate(list.map((i) => i.id)).then((copies) => {
       setSelection(new Set(copies.map((c) => c.id)))
       showToast({ kind: 'done', text: 'Duplicated' })
-    }, (e: unknown) => fail(e, list[0]))
+    }, (e: unknown) => fail(e, list[0], { action: 'duplicate it', again: () => duplicate(list) }))
   }
 
   const startRename = (item: DriveItem | undefined) => {
@@ -161,10 +164,15 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     const problem = nameProblem(value)
     if (problem) { setRenaming({ ...renaming, error: problem }); return }
     if (nameTaken(value, items, item.id)) { setRenaming({ ...renaming, error: takenMessage(value, item.isFolder) }); return }
+    const current = renaming
     source.rename(item.id, value).then(() => setRenaming(null), (e: unknown) => {
-      if (e instanceof DriveSourceError && e.code === 'name-taken') setRenaming({ ...renaming, error: takenMessage(value, item.isFolder) })
-      else { setRenaming(null); fail(e, item) }
+      if (e instanceof DriveSourceError && e.code === 'name-taken') setRenaming({ ...current, error: takenMessage(value, item.isFolder) })
+      else { setRenaming(null); fail(e, item, { action: 'rename', again: () => renameTo(item, value) }) }
     })
+  }
+  /** Try again on a failed rename: the same name once more, without the field (DW-0109). */
+  const renameTo = (item: DriveItem, value: string) => {
+    source.rename(item.id, value).catch((e: unknown) => fail(e, item, { action: 'rename', again: () => renameTo(item, value) }))
   }
 
   const toggleOffline = (list: DriveItem[], on?: boolean) => {
@@ -172,20 +180,20 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     const next = on ?? !files.every((i) => i.local === 'available-offline')
     Promise.all(files.map((i) => source.setAvailableOffline(i.id, next))).then(
       () => showToast({ kind: 'done', text: next ? 'Keeping on this PC' : 'Removed from this PC' }),
-      (e: unknown) => fail(e, files[0]),
+      (e: unknown) => fail(e, files[0], { action: next ? 'keep it on this PC' : 'remove it from this PC', again: () => toggleOffline(list, next) }),
     )
   }
 
   const upload = (mode2: 'files' | 'folder') => {
     source.upload(folderId, { kind: 'pick', mode: mode2 }).then(
       ({ started }) => { if (started > 0) showToast({ kind: 'done', text: `Uploading ${started} ${started === 1 ? 'item' : 'items'}` }) },
-      (e: unknown) => showToast({ kind: 'failed', text: words(e) }),
+      (e: unknown) => fail(e, undefined, { action: 'start the upload', again: () => upload(mode2) }),
     )
   }
 
-  const reveal = (item: DriveItem) => { source.revealInFileManager(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: words(e) })) }
+  const reveal = (item: DriveItem) => { source.revealInFileManager(item.id).catch((e: unknown) => fail(e, item, { action: 'show it in File Explorer', again: () => reveal(item) })) }
   const showVersions = (item: DriveItem) => {
-    source.versions(item.id).then((versions) => setDialog({ kind: 'versions', item, versions }), (e: unknown) => fail(e, item))
+    source.versions(item.id).then((versions) => setDialog({ kind: 'versions', item, versions }), (e: unknown) => fail(e, item, { action: 'open Version history', again: () => showVersions(item) }))
   }
   const settings = (sub: string) => nav.go({ section: 'settings', sub })
 
@@ -202,7 +210,13 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       case OPEN_WITH_OTHER: if (one) void source.open(one.id); break
       case 'preview': if (one && !one.isFolder) setDialog({ kind: 'preview', item: one }); break
       case 'share': setDialog({ kind: 'share', items: list }); break
-      case 'copy-link': showToast({ kind: 'failed', text: 'Sharing isn’t available in this build yet.' }); break
+      // DW-0402 → DW-0107: one file that has a link copies that link (no choices, so Rust reuses it and never mints a
+      // second one); anything else gets a new link with the board's default, 30 days (DW-0407 Rules). Rust answers.
+      case 'copy-link': {
+        const existing = list.length === 1 && one?.shared.kind === 'link'
+        void copyShareLink(list.map((i) => i.id), { expires: existing ? '' : 'In 30 days', password: null }, showToast)
+        break
+      }
       case 'offline': toggleOffline(list); break
       case 'reveal': if (one) reveal(one); break
       case 'details': if (one) setDialog({ kind: 'details', item: one }); break
@@ -274,7 +288,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement
-      if (dialog || menu || t.tagName === 'INPUT' || t.tagName === 'SELECT') return
+      // A key the list already used (a space inside a name being typed) is not the window's.
+      if (e.defaultPrevented || dialog || menu || t.tagName === 'INPUT' || t.tagName === 'SELECT') return
       if (e.key === 'ArrowDown' && e.ctrlKey) { e.preventDefault(); picked.forEach(open) }
       else if (e.key === 'ArrowUp' && e.ctrlKey) { e.preventDefault(); up() }
       else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.altKey && !e.ctrlKey) {
@@ -312,7 +327,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       if (locked) { setDialog({ kind: 'protected', item: items[0] }); return }
       void uploadDroppedPaths(target?.id ?? folderId, p.paths).then(
         ({ started }) => showToast({ kind: 'done', text: `Uploading ${started} ${started === 1 ? 'item' : 'items'}` }),
-        (e: unknown) => showToast({ kind: 'failed', text: words(e) }),
+        (e: unknown) => showToast({ kind: 'failed', text: failureText('upload them', codeOf(e)).text }),
       )
     })).then((fn) => { if (gone) fn(); else off = fn })
     return () => { gone = true; off?.() }
@@ -323,6 +338,31 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     if (!raw) return
     const ids = (JSON.parse(raw) as string[]).filter((id) => id !== folder.id)
     source.move(ids, folder.id).then(() => showToast({ kind: 'done', text: `Moved to ${folder.name}` }), (e2: unknown) => fail(e2, folder))
+  }
+
+  /** DW-0121's Try again: checks the connection; back, the file opens; still offline, the panel stays and the list re-reads. */
+  const tryConnection = (item: DriveItem) => {
+    source.sync().then((s) => {
+      if (s.phase === 'offline') { load(); return }
+      setConnectionNeeded(null)
+      openInApp(item)
+    }, () => load())
+  }
+
+  /** DW-0414: New's menu, under the control that opened it (New in the toolbar, or Add files in an empty folder). */
+  const openNewMenu = (e: MouseEvent, align: 'right' | 'center') => {
+    e.stopPropagation()
+    const r = e.currentTarget.getBoundingClientRect()
+    setMenu({
+      x: align === 'right' ? r.right - 264 : r.left + r.width / 2 - 132, y: r.bottom + 4, label: 'New', entries: newMenu(),
+      run: (id) => {
+        if (id === 'new-folder') openNewFolder()
+        else if (id === 'upload') upload('files')
+        else if (id === 'upload-folder') upload('folder')
+        else if (id === 'new-file') nav.go({ section: 'open', sub: 'new-file' })
+        else if (id === 'new-document') nav.go({ section: 'open', id: nav.route.id, sub: 'new-document' })
+      },
+    })
   }
 
   const handlers: PaneHandlers = {
@@ -337,20 +377,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     onSortColumn: (key) => changePrefs({ ...prefs, sort: { ...prefs.sort, key, dir: prefs.sort.key === key && prefs.sort.dir === 'asc' ? 'desc' : 'asc' } }),
     // The view's own click closes a menu, so the click that opens one stops here (M1 audit: New and Sort never opened).
     onSortMenu: (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 4, label: 'Sort', entries: sortMenu(prefs), run: runBackground }) },
-    onNewMenu: (e) => {
-      e.stopPropagation()
-      const r = e.currentTarget.getBoundingClientRect()
-      setMenu({
-        x: r.right - 264, y: r.bottom + 4, label: 'New', entries: newMenu(),
-        run: (id) => {
-          if (id === 'new-folder') openNewFolder()
-          else if (id === 'upload') upload('files')
-          else if (id === 'upload-folder') upload('folder')
-          else if (id === 'new-file') nav.go({ section: 'open', sub: 'new-file' })
-          else if (id === 'new-document') nav.go({ section: 'open', id: nav.route.id, sub: 'new-document' })
-        },
-      })
-    },
+    onNewMenu: (e) => openNewMenu(e, 'right'),
     onTogglePanel: () => changePrefs({ ...prefs, panel: !prefs.panel }),
     onFind: () => nav.go({ section: 'search' }),
     onRenameChange: (value) => setRenaming((r) => (r ? { ...r, value, error: null } : r)),
@@ -389,10 +416,10 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
           columns: mode === 'backups' && path.length === 1 ? 'backups' : 'files', canNew, top,
           title: mode === 'backups' ? 'Backups' : 'Files', handlers,
           transfers: live.transfers, backupMeta: backupMetaFor(live.status, items),
-          empty: emptyAndAddable ? <EmptyFiles onAddFiles={(() => upload('files')) as () => void} /> : undefined,
+          empty: emptyAndAddable ? <EmptyFiles onAddFiles={(e) => openNewMenu(e, 'center')} /> : undefined,
         }}
       />
-      {connectionNeeded && <NeedsConnection fileName={connectionNeeded.name} onTryAgain={() => load()} onClose={() => setConnectionNeeded(null)} />}
+      {connectionNeeded && <NeedsConnection fileName={connectionNeeded.name} onTryAgain={() => tryConnection(connectionNeeded)} onClose={() => setConnectionNeeded(null)} />}
       {menu && <Menu x={menu.x} y={menu.y} label={menu.label} entries={menu.entries} onPick={menu.run} onClose={() => setMenu(null)} />}
       {live.uploadsOpen && (
         <UploadsPanel
@@ -421,8 +448,14 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       {dialog?.kind === 'details' && <DetailsDialog item={dialog.item} details={details?.item.id === dialog.item.id ? details : null} onVersions={() => showVersions(dialog.item)} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'versions' && (
         <VersionsDialog
-          name={dialog.item.name} versions={dialog.versions} onClose={() => setDialog(null)} onOpen={() => setDialog({ kind: 'preview', item: dialog.item })}
-          onRestore={(vid) => { source.restoreVersion(dialog.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => fail(e, dialog.item)) }}
+          name={dialog.item.name} versions={dialog.versions} onClose={() => setDialog(null)}
+          // DW-0413: the current version previews as the file; an earlier one has no read of its own yet (no versioned
+          // read in DriveSource), so it says so instead of showing the current content under an older date.
+          onOpen={(vid) => {
+            if (dialog.versions.find((v) => v.id === vid)?.current) setDialog({ kind: 'preview', item: dialog.item })
+            else showToast({ kind: 'failed', text: 'An earlier version can’t be previewed in this build yet. Restore it to open it.' })
+          }}
+          onRestore={(vid) => { source.restoreVersion(dialog.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => fail(e, dialog.item, { action: 'restore it', again: () => { void source.restoreVersion(dialog.item.id, vid) } })) }}
         />
       )}
       {dialog?.kind === 'protected' && <ProtectedAlert name={dialog.item.name} onOk={() => setDialog(null)} onSettings={() => { setDialog(null); settings('mail-backup') }} />}
@@ -431,21 +464,39 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   )
 }
 
-function MoveHost({ dialog, setDialog, onDone, fail }: { dialog: Extract<Dialog, { kind: 'move' }>; setDialog: (d: Dialog) => void; onDone: () => void; fail: (e: unknown, item?: DriveItem) => void }) {
+function MoveHost({ dialog, setDialog, onDone, fail }: { dialog: Extract<Dialog, { kind: 'move' }>; setDialog: (d: Dialog) => void; onDone: () => void; fail: (e: unknown, item?: DriveItem, what?: { action: string; again: () => void }) => void }) {
   const source = useDriveSource()
   const [listing, setListing] = useState<Listing | null>(null)
+  // DW-0409's New folder asks for the name first (DW-0417), then the Move dialog comes back with the folder selected.
+  const [naming, setNaming] = useState<{ value: string; error: string | null } | null>(null)
   useEffect(() => { source.list(dialog.at).then(setListing, () => setListing(null)) }, [source, dialog.at])
   const moving = new Set(dialog.items.map((i) => i.id))
   // Backups and Trash aren't offered; folders a service manages can't be chosen (DW-0409).
   const folders: FolderRow[] = (listing?.items ?? []).filter((i) => i.isFolder && !moving.has(i.id) && !isProtected(i)).map((i) => ({ id: i.id, name: i.name, count: i.childCount ?? 0 }))
   const target = dialog.target ? folders.find((f) => f.id === dialog.target) : undefined
   const here = listing?.folder
+  if (naming) {
+    const create = () => {
+      const name = naming.value.trim()
+      const problem = nameProblem(name) ?? (nameTaken(name, listing?.items ?? []) ? takenMessage(name, true) : null)
+      if (problem) { setNaming({ ...naming, error: problem }); return }
+      source.createFolder(dialog.at, name).then((c) => {
+        setNaming(null)
+        setDialog({ ...dialog, target: c.id })
+        void source.list(dialog.at).then(setListing, () => setListing(null))
+      }, (e: unknown) => {
+        if (e instanceof DriveSourceError && e.code === 'name-taken') setNaming({ ...naming, error: takenMessage(name, true) })
+        else { setNaming(null); fail(e, undefined, { action: 'make the folder', again: () => setNaming({ value: name, error: null }) }) }
+      })
+    }
+    return <NewFolderDialog parentName={here?.name ?? 'Files'} value={naming.value} error={naming.error} onChange={(value) => setNaming({ value, error: null })} onCreate={create} onClose={() => setNaming(null)} />
+  }
   return (
     <MoveDialog
       path={listing?.path ?? [{ id: null, name: 'Files' }]} folders={folders} selectedId={dialog.target} targetName={target?.name ?? here?.name ?? 'Files'}
       onSelect={(id) => setDialog({ ...dialog, target: id })} onEnter={(id) => setDialog({ ...dialog, at: id, target: null })} onCrumb={(id) => setDialog({ ...dialog, at: id, target: null })}
-      onNewFolder={() => { void source.createFolder(dialog.at, 'Untitled folder').then((c) => setDialog({ ...dialog, target: c.id }), (e: unknown) => fail(e)); setTimeout(() => source.list(dialog.at).then(setListing), 0) }}
-      onMove={() => { source.move(dialog.items.map((i) => i.id), dialog.target ?? dialog.at).then(() => { onDone(); showToast({ kind: 'done', text: `Moved to ${target?.name ?? here?.name ?? 'Files'}` }) }, (e: unknown) => fail(e, dialog.items[0])) }}
+      onNewFolder={() => setNaming({ value: 'Untitled folder', error: null })}
+      onMove={() => { source.move(dialog.items.map((i) => i.id), dialog.target ?? dialog.at).then(() => { onDone(); showToast({ kind: 'done', text: `Moved to ${target?.name ?? here?.name ?? 'Files'}` }) }, (e: unknown) => fail(e, dialog.items[0], { action: 'move it', again: () => { void source.move(dialog.items.map((i) => i.id), dialog.target ?? dialog.at) } })) }}
       onClose={onDone}
     />
   )
@@ -469,7 +520,8 @@ function PreviewHost({ item, items, onClose, onSwitch, onOpen, onShare, onKeep }
     const on = (e: KeyboardEvent) => {
       const at = items.findIndex((i) => i.id === item.id)
       const step = (d: number) => { for (let i = at + d; i >= 0 && i < items.length; i += d) if (!items[i].isFolder) { onSwitch(items[i]); return } }
-      if (e.key === ' ') { e.preventDefault(); onClose() }
+      // Space or Esc closes Preview (DW-0408, DW-0408b).
+      if (e.key === ' ' || e.key === 'Escape') { e.preventDefault(); onClose() }
       else if (e.key === 'ArrowLeft') step(-1)
       else if (e.key === 'ArrowRight') step(1)
     }

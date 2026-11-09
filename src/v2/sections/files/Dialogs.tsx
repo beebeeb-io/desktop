@@ -6,7 +6,6 @@ import { FileIcon, getFileType, type DriveItem, type ItemDetails, type VersionEn
 import { BTN, BTN_AMBER, FOCUS, Modal } from './ui'
 import { fmtCount, fmtDay, fmtSize, fmtWhen, kindOf } from './model'
 
-const NOW = new Date('2026-11-08T12:00:00')
 
 function Select({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange?: (v: string) => void }) {
   return (
@@ -104,11 +103,18 @@ export function NewFolderDialog({ parentName, value, error, onChange, onCreate, 
 }
 
 /** DW-0411: Details, the iPhone's rows. */
-export function DetailsDialog({ item, details, onVersions, onClose }: { item: DriveItem; details: ItemDetails | null; onVersions?: () => void; onClose?: () => void }) {
+export function DetailsDialog({ item, details, added, now = new Date(), onVersions, onClose }: {
+  item: DriveItem; details: ItemDetails | null
+  /** When the file was added; absent while no source says it (the row then reads —, never a guess). */
+  added?: string
+  /** "Now" for the relative times (frames pin the board's clock; live is the real one). */
+  now?: Date
+  onVersions?: () => void; onClose?: () => void
+}) {
   const facts: [string, ReactNode][] = [
     ['Size', <span key="s" className="font-mono text-[12px]">{item.isFolder ? fmtCount(item.childCount) : fmtSize(item.size)}</span>],
-    ['Changed', <span key="c" className="font-mono text-[12px]">{fmtWhen(item.modifiedAt, NOW)}</span>],
-    ['Added', <span key="a" className="font-mono text-[12px]">{details?.changedOn ? fmtDay('2026-10-28T12:00:00') : '—'}</span>],
+    ['Changed', <span key="c" className="font-mono text-[12px]">{fmtWhen(item.modifiedAt, now)}</span>],
+    ['Added', <span key="a" className="font-mono text-[12px]">{added ? fmtDay(added) : '—'}</span>],
     ['Where', details ? details.path.map((c) => c.name).join(' › ') : 'Files'],
     ['On this PC', item.local === 'downloaded' || item.local === 'available-offline' ? 'Yes' : 'No'],
     ['Encrypted', <span key="e" className="inline-flex items-center gap-1.5 text-amber-deep"><Icon name="lock" size={12} />Yes, end to end</span>],
@@ -133,7 +139,7 @@ export function DetailsDialog({ item, details, onVersions, onClose }: { item: Dr
 }
 
 /** DW-0413: Version history. */
-export function VersionsDialog({ name, versions, onRestore, onOpen, onClose }: { name: string; versions: VersionEntry[]; onRestore?: (id: string) => void; onOpen?: (id: string) => void; onClose?: () => void }) {
+export function VersionsDialog({ name, versions, now = new Date(), onRestore, onOpen, onClose }: { name: string; versions: VersionEntry[]; now?: Date; onRestore?: (id: string) => void; onOpen?: (id: string) => void; onClose?: () => void }) {
   return (
     <Modal
       title={<span>Version history<span className="block text-[12px] font-normal text-ink-3">{name}, {versions.length} versions</span></span>}
@@ -143,7 +149,7 @@ export function VersionsDialog({ name, versions, onRestore, onOpen, onClose }: {
       <ul className="m-0 list-none p-0">
         {versions.map((v) => (
           <li key={v.id} data-version={v.id} title={v.deviceName ? `Changed on ${v.deviceName}` : undefined} onDoubleClick={() => onOpen?.(v.id)} className="flex h-11 items-center gap-3 border-b border-line last:border-0">
-            <span className="min-w-0 flex-1 text-ink">{fmtWhen(v.createdAt, NOW).replace('Today, ', 'Today, ')}</span>
+            <span className="min-w-0 flex-1 text-ink">{fmtWhen(v.createdAt, now)}</span>
             <span className="font-mono text-[12px] text-ink-3">{fmtSize(v.size)}</span>
             {v.current ? <span className="w-28 text-right text-[12px] text-ink-3">Current version</span> : <span className="w-28 text-right"><button type="button" className={`${BTN} h-7 px-3`} onClick={() => onRestore?.(v.id)}>Restore</button></span>}
           </li>

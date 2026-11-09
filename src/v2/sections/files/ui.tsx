@@ -116,7 +116,10 @@ export function Menu({ x, y, entries, onPick, onClose, label }: { x: number; y: 
   const left = Math.max(8, Math.min(x, window.innerWidth - 280))
   const top = Math.max(8, Math.min(y, window.innerHeight - 40 - entries.length * 33))
   return (
-    <div className="fixed z-50" style={{ left, top }} data-menu={label}>
+    // A click inside the menu stays inside: the view behind closes menus on its own click, which would close a
+    // submenu's parent (Sort by ▸) before it opens (M3a).
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+    <div className="fixed z-50" style={{ left, top }} data-menu={label} onClick={(e) => e.stopPropagation()}>
       <MenuPanel entries={entries} onPick={(id) => { onPick(id); onClose?.() }} label={label} />
     </div>
   )

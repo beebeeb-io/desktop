@@ -2,9 +2,11 @@
 // sync problem, backup problem, storage almost full, offline. Neutral surfaces; no amber (amber is for
 // encryption state and the primary action only).
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useDriveSource, type StorageSummary, type SyncSummary } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type DriveStatus } from '../source/extras'
+import { navigateTo, type Route, type SectionId } from '../routes'
 
 export type BannerKind = 'signed-out' | 'storage-full' | 'sync-problem' | 'backup-problem' | 'storage-almost-full' | 'offline'
 
@@ -56,12 +58,14 @@ export function bannerCopy(kind: BannerKind, o: { syncProblems?: number; backupP
   const used = o.storage ? Math.round(o.storage.usedBytes / 1024 ** 3) : 950
   const quota = o.storage ? o.storage.quotaBytes / 1024 ** 4 : 1
   switch (kind) {
-    case 'offline': return { text: "You're offline.", detail: `This list is from ${o.asOf ?? 'today at 09:12'}. Changes upload when you're back.` }
-    case 'sync-problem': return { text: `${n(o.syncProblems)} ${n(o.syncProblems) === 1 ? 'item' : 'items'} can't sync.`, detail: 'Everything else is up to date.', action: 'View' }
+    // DW-1108 Shows the sentence in full: "Changes you make will upload when you’re back." Typographic apostrophes, as
+    // the rest of the window's copy (DW-0109's "Couldn’t", DW-0410b's "There’s").
+    case 'offline': return { text: 'You’re offline.', detail: `This list is from ${o.asOf ?? 'today at 09:12'}. Changes you make will upload when you’re back.` }
+    case 'sync-problem': return { text: `${n(o.syncProblems)} ${n(o.syncProblems) === 1 ? 'item' : 'items'} can’t sync.`, detail: 'Everything else is up to date.', action: 'View' }
     case 'storage-almost-full': return { text: 'Your storage is almost full.', detail: `${used} GB of ${quota} TB used.`, action: 'Storage' }
     case 'storage-full': return { text: 'Your storage is full.', detail: 'New uploads and backups are paused. Your files are safe.', action: 'Storage' }
     case 'signed-out': return { text: 'Backup and sync have stopped.', detail: 'Enter your password to continue. Nothing has been lost.', action: 'Sign in' }
-    case 'backup-problem': return { text: `${n(o.backupProblems)} ${n(o.backupProblems) === 1 ? 'item' : 'items'} couldn't back up.`, detail: 'Everything else is backed up.', action: 'View' }
+    case 'backup-problem': return { text: `${n(o.backupProblems)} ${n(o.backupProblems) === 1 ? 'item' : 'items'} couldn’t back up.`, detail: 'Everything else is backed up.', action: 'View' }
   }
 }
 
@@ -86,7 +90,20 @@ export function Banner({ kind, copy, onAction, onDismiss }: { kind: BannerKind; 
   )
 }
 
-/** Where each banner's button goes: the frame it names, as a route event the shell can follow. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** How old the list on this PC is, in the banner's words: "today at 09:12", "yesterday at 22:40", "on 3 Nov at 08:00". */
+export function listAge(iso: string, now: Date): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'before the connection dropped'
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const day = (x: Date) => Math.floor(new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() / 86_400_000)
+  const ago = day(now) - day(d)
+  if (ago === 0) return `today at ${hm}`
+  if (ago === 1) return `yesterday at ${hm}`
+  return `on ${d.getDate()} ${MONTHS[d.getMonth()]} at ${hm}`
+}
+
+/** Where each banner's button goes: the frame it names. */
 export const BANNER_TARGET: Partial<Record<BannerKind, string>> = {
   'sync-problem': 'DW-0428',
   'storage-almost-full': 'DW-0712',
@@ -94,7 +111,43 @@ export const BANNER_TARGET: Partial<Record<BannerKind, string>> = {
   'signed-out': 'DW-1109',
   'backup-problem': 'DW-0741',
 }
+/**
+ * The route of that frame: Sync history on Problems (DW-0428), Settings › Storage (DW-0712), Settings › Backups'
+ * Couldn't back up (DW-0741). Sign in has none: the password sign-in over the list kept on this PC (DW-1109 → DW-A03)
+ * is B10's, and the window has no entry to it yet, so its button stays an event (M3a: listed as blocked).
+ */
+export const BANNER_ROUTE: Partial<Record<BannerKind, Partial<Route> & { section: SectionId }>> = {
+  'sync-problem': { section: 'sync-history', sub: 'problems' },
+  'storage-almost-full': { section: 'settings', sub: 'storage' },
+  'storage-full': { section: 'settings', sub: 'storage' },
+  'backup-problem': { section: 'settings', sub: 'backup-failures' },
+}
 export const BANNER_ACTION_EVENT = 'bb:banner-action'
+
+/** A banner's button: its route when it has one, else the event. */
+export function followBanner(kind: BannerKind): void {
+  const route = BANNER_ROUTE[kind]
+  if (route) navigateTo(route)
+  else window.dispatchEvent(new CustomEvent(BANNER_ACTION_EVENT, { detail: { kind, frame: BANNER_TARGET[kind] } }))
+}
+
+// The banner sits under the toolbar on every view (DW-0101 to DW-0106 Rules). The window mounts one GlobalBanner; a
+// section with a toolbar puts a BannerSlot under it and the banner is drawn there. A view without a slot gets it under
+// the caption bar, so it is never lost.
+let slot: HTMLElement | null = null
+const slotListeners = new Set<() => void>()
+const subscribeSlot = (l: () => void) => { slotListeners.add(l); return () => { slotListeners.delete(l) } }
+
+/** Where the window's banner is drawn: right under a section's toolbar. */
+export function BannerSlot() {
+  const mine = useRef<HTMLElement | null>(null)
+  const ref = useCallback((el: HTMLDivElement | null) => {
+    if (el) { mine.current = el; slot = el }
+    else if (slot === mine.current) slot = null
+    slotListeners.forEach((l) => l())
+  }, [])
+  return <div ref={ref} data-banner-slot className="contents" />
+}
 
 /** The live banner of the window: storage and sync from the DriveSource; the signed-out state and the sync and
  *  backup problem counts from B02b's `drive_status` (refreshed with each sync event). `extra` overrides them. */
@@ -120,23 +173,34 @@ export function GlobalBanner({ extra }: { extra?: Pick<BannerInput, 'signedOut' 
     ...extra, storage, offline: sync?.phase === 'offline',
   }), [extra, status, storage, sync])
   const kind = activeBanner({ ...input, dismissed })
-  // The offline banner names when the list was last fresh: the last sync summary heard while online, never a guess.
+  const target = useSyncExternalStore(subscribeSlot, () => slot, () => null)
+  // The offline banner names when the list was last fresh: the list's own time (the copy on this PC), else the last
+  // sync summary heard while online; never a guess.
   const [lastOnline, setLastOnline] = useState<string | null>(null)
+  const [listAsOf, setListAsOf] = useState<string | null>(null)
   useEffect(() => {
     if (sync && sync.phase !== 'offline') setLastOnline(new Date().toTimeString().slice(0, 5))
   }, [sync])
+  const offline = sync?.phase === 'offline'
+  useEffect(() => {
+    if (!offline) { setListAsOf(null); return }
+    let live = true
+    source.list(null).then((l) => { if (live) setListAsOf(l.asOf ?? null) }, () => { if (live) setListAsOf(null) })
+    return () => { live = false }
+  }, [source, offline])
   // A dismissed banner comes back when it happens again: forget a dismissal once its condition clears.
   useEffect(() => {
     const live = new Set(activeKinds(input))
     setDismissed((d) => (d.size === 0 || [...d].every((k) => live.has(k)) ? d : new Set([...d].filter((k) => live.has(k)))))
   }, [input])
   if (!kind) return null
-  return (
+  const banner = (
     <Banner
       kind={kind}
-      copy={bannerCopy(kind, { syncProblems: input.syncProblems, backupProblems: input.backupProblems, storage, asOf: lastOnline ? `today at ${lastOnline}` : 'before the connection dropped' })}
-      onAction={() => window.dispatchEvent(new CustomEvent(BANNER_ACTION_EVENT, { detail: { kind, frame: BANNER_TARGET[kind] } }))}
+      copy={bannerCopy(kind, { syncProblems: input.syncProblems, backupProblems: input.backupProblems, storage, asOf: listAsOf ? listAge(listAsOf, new Date()) : lastOnline ? `today at ${lastOnline}` : 'before the connection dropped' })}
+      onAction={() => followBanner(kind)}
       onDismiss={() => setDismissed((d) => new Set(d).add(kind))}
     />
   )
+  return target ? createPortal(banner, target) : banner
 }

@@ -68,11 +68,13 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-0116': { q: 'section=photos&scenario=empty' },
 
   // ── B06: Sync history and Available offline ───────────────────────────────────────────────────────────────────
-  'DW-1301': { q: 'section=sync-history', gap: 'other devices’ changes are in no command on this PC: the live list has this PC’s rows only' },
-  'DW-1302': { q: 'section=sync-history', steps: [{ click: '[data-filter="this-pc"]' }] },
-  'DW-1303': { q: 'section=sync-history', steps: [{ click: '[data-filter="other"]' }], gap: 'other devices’ changes are in no command on this PC: the filter shows none' },
-  'DW-0428': { q: 'section=sync-history', steps: [{ click: '[data-filter="problems"]' }] },
-  'DW-1304': { q: 'section=sync-history', steps: [{ click: '[data-filter="other"]' }, { fill: 'field:Search history', value: 'contract' }], gap: 'other devices’ changes are in no command on this PC' },
+  // Sync history's frames show three problems (the sidebar's red 3, Problems · 3): the `problems` scenario, the one
+  // fixture world with problems in it (M3a: the default world, DW-0401, has none).
+  'DW-1301': { q: 'section=sync-history&scenario=problems', gap: 'other devices’ changes are in no command on this PC: the live list has this PC’s rows only' },
+  'DW-1302': { q: 'section=sync-history&scenario=problems', steps: [{ click: '[data-filter="this-pc"]' }] },
+  'DW-1303': { q: 'section=sync-history&scenario=problems', steps: [{ click: '[data-filter="other"]' }], gap: 'other devices’ changes are in no command on this PC: the filter shows none' },
+  'DW-0428': { q: 'section=sync-history&scenario=problems', steps: [{ click: '[data-filter="problems"]' }] },
+  'DW-1304': { q: 'section=sync-history&scenario=problems', steps: [{ click: '[data-filter="other"]' }, { fill: 'field:Search history', value: 'contract' }], gap: 'other devices’ changes are in no command on this PC' },
   'DW-1305': { q: 'section=sync-history&scenario=empty', reads: { popover_snapshot: { ...emptySnapshot() } } },
   'DW-0715': { q: 'section=available-offline' },
   'DW-1306': { q: 'section=available-offline', steps: [{ context: 'row:o-invoices' }] },

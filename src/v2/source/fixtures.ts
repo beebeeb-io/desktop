@@ -2,6 +2,7 @@
 // browser gets ./fixtures/board.ts, which layers every batch's fixtures on it), so every frame builds and screenshots
 // headless with no Tauri, no network and no account. `?scenario=` picks a state the global frames need:
 //   default | empty (DW-0114) | offline (DW-0101) | nearly-full (DW-0103) | full (DW-0104) | syncing (DW-1203)
+//   | rename-fails (DW-0109: the first rename fails for the connection; Try again goes through)
 // Batches add fixture data in src/v2/source/fixtures/<area>.ts (their own files), never by editing this one's rows.
 
 import {
@@ -17,7 +18,7 @@ import {
 } from '@beebeeb/shared/drive-ui'
 import { childrenIn, FILES_TREE } from './fixtures/files'
 
-export type Scenario = 'default' | 'empty' | 'offline' | 'nearly-full' | 'full' | 'syncing'
+export type Scenario = 'default' | 'empty' | 'offline' | 'nearly-full' | 'full' | 'syncing' | 'rename-fails'
 
 const GB = 1024 ** 3
 const NOW = '2026-11-08T10:00:00Z'
@@ -202,6 +203,6 @@ export function createFixtureSource(scenario: Scenario = 'default'): DriveSource
 
 export function scenarioFromSearch(search: string): Scenario {
   const value = new URLSearchParams(search).get('scenario')
-  const known: Scenario[] = ['default', 'empty', 'offline', 'nearly-full', 'full', 'syncing']
+  const known: Scenario[] = ['default', 'empty', 'offline', 'nearly-full', 'full', 'syncing', 'rename-fails']
   return known.includes(value as Scenario) ? (value as Scenario) : 'default'
 }

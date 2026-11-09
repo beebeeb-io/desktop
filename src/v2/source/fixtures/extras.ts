@@ -1,6 +1,9 @@
 // B02b's fixtures: the board's numbers for the extras (../extras.ts), so every frame renders headless. Owned by B02b.
 // `scenario` follows ?scenario=: `syncing` gives the flyout's moving state (DW-1203); `problems` the sync banner
-// (DW-0103's "3 items can't sync"); `listing` the getting-ready strip (DW-1107); `default` is up to date.
+// (DW-0102's "3 items can't sync") and the three problems Sync history lists; `listing` the getting-ready strip
+// (DW-1107); `signed-out` the session that ended (DW-0105, DW-1109); `backup-problems` the backup banner (DW-0106);
+// `conflict` one file changed in two places (DW-0429); `uploading` the uploads in Lisbon trip (DW-0426, DW-0427);
+// `default` is up to date, with no problems and nothing moving (DW-0401).
 import type { DriveExtras, DriveStatus, PhotoMeta, SyncProblem, TransferRow } from '../extras'
 import { HISTORY, OFFLINE_ENTRIES, PHOTO_ENTRIES, PHOTO_META } from './photos'
 
@@ -32,6 +35,9 @@ export function fixtureStatus(scenario: string): DriveStatus {
     ...(scenario === 'syncing' ? { uploadBps: 1_400_000, etaSeconds: 60 } : {}),
     ...(scenario === 'problems' ? { syncProblems: 3, stoppedFiles: 1 } : {}),
     ...(scenario === 'listing' ? { listing: { done: 18_240, total: 40_112 } } : {}),
+    ...(scenario === 'signed-out' ? { signedOut: true } : {}),
+    ...(scenario === 'backup-problems' ? { backupProblems: 3 } : {}),
+    ...(scenario === 'conflict' ? { conflicts: [{ id: 'i-contract', name: 'Contract draft.pdf' }] } : {}),
   }
 }
 
@@ -52,9 +58,11 @@ export function createFixtureExtras(scenario: string): DriveExtras {
   const empty = scenario === 'empty'
   return {
     status: async () => fixtureStatus(scenario),
-    transfers: async () => (empty ? [] : FIXTURE_TRANSFERS),
+    // Uploads move only where the board shows them (DW-0426, DW-0427; the flyout's syncing): an up-to-date world has none.
+    transfers: async () => (scenario === 'uploading' || scenario === 'syncing' ? FIXTURE_TRANSFERS : []),
     subscribeTransfers: () => () => {},
-    syncProblems: async () => (empty ? [] : FIXTURE_PROBLEMS),
+    // The list agrees with the status: problems only where drive_status counts them (DW-0401 has none).
+    syncProblems: async () => (scenario === 'problems' ? FIXTURE_PROBLEMS : []),
     retry: async (ids) => ({ retried: ids.length }),
     offlineList: async () => (empty ? [] : OFFLINE_ENTRIES).map((o) => ({ item: o.item, items: o.item.isFolder ? o.item.childCount : undefined, bytes: o.bytes ?? 0 })),
     photoMeta: async (ids) => Object.fromEntries(ids.flatMap((id) => { const m = photoMeta(id); return m ? [[id, m]] : [] })),
