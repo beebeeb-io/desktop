@@ -21,15 +21,20 @@ static F2B_DATA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 const F2B_SIZE: usize = 344_661_074;
 
 fn f2b_note(line: String) {
-    let ms = F2B_T0.lock().unwrap().get_or_insert_with(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    let ms = F2B_T0
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        * 1000.0;
     F2B_LOG.lock().unwrap().push(format!("{ms:10.1} ms {line}"));
 }
 
 fn f2b_serve(r: Request) {
-    let ready = *F2B_READY_AT
-        .lock()
-        .unwrap()
-        .get_or_insert_with(|| Instant::now() + Duration::from_millis(F2B_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst)));
+    let ready = *F2B_READY_AT.lock().unwrap().get_or_insert_with(|| {
+        Instant::now() + Duration::from_millis(F2B_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst))
+    });
     std::thread::sleep(ready.saturating_duration_since(Instant::now()));
     let data = F2B_DATA.get().expect("initialised before robocopy starts");
     let size = data.len() as i64;
@@ -43,7 +48,10 @@ fn f2b_serve(r: Request) {
     let (start, end) = match mode {
         1 => (r.offset, r.offset + r.length),
         2 => (0, size),
-        _ => (r.offset / CHUNK * CHUNK, ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(size)),
+        _ => (
+            r.offset / CHUNK * CHUNK,
+            ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(size),
+        ),
     };
     // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal is logged).
     let result = if matches!(mode, 4 | 5) {
@@ -62,7 +70,10 @@ fn f2b_serve(r: Request) {
     } else {
         unsafe { transfer_range(r.connection, r.transfer, r.request, data, || false, start, end - start) }
     };
-    f2b_note(format!("  TRANSFER [{start}, {end}) -> {:?}", result.as_ref().map_err(|e| format!("0x{:08X}", e.code().0 as u32))));
+    f2b_note(format!(
+        "  TRANSFER [{start}, {end}) -> {:?}",
+        result.as_ref().map_err(|e| format!("0x{:08X}", e.code().0 as u32))
+    ));
     if result.is_ok() {
         served.push((start, end));
     }
@@ -77,7 +88,13 @@ unsafe extern "system" fn f2b_fetch(info: *const CF_CALLBACK_INFO, params: *cons
     // SAFETY: the fetch arm of a FETCH_DATA callback.
     let fetch = unsafe { (*params).Anonymous.FetchData };
     // SAFETY: the info pointer is live; ProcessInfo is filled (REQUIRE_PROCESS_INFO).
-    let pid = unsafe { if (*info).ProcessInfo.is_null() { 0 } else { (*(*info).ProcessInfo).ProcessId } };
+    let pid = unsafe {
+        if (*info).ProcessInfo.is_null() {
+            0
+        } else {
+            (*(*info).ProcessInfo).ProcessId
+        }
+    };
     f2b_note(format!(
         "FETCH req [{}, +{}) opt [{}, +{}) pid {pid} rkey {}",
         r.offset, r.length, fetch.OptionalFileOffset, fetch.OptionalLength, r.request
@@ -148,7 +165,17 @@ fn ld0105_f2b_native_robocopy_matrix() {
         F2B_SERVED.lock().unwrap().clear();
         F2B_LOG.lock().unwrap().clear();
         let name = format!("f2b-{i}.mp4");
-        assert!(placeholders::create_placeholder(&qa.root, &format!("qa-f2b-{i}"), &name, F2B_SIZE as i64, 1_700_000_000, false).unwrap());
+        assert!(
+            placeholders::create_placeholder(
+                &qa.root,
+                &format!("qa-f2b-{i}"),
+                &name,
+                F2B_SIZE as i64,
+                1_700_000_000,
+                false
+            )
+            .unwrap()
+        );
         let dst = tempfile::tempdir().unwrap();
         let first = f2b_robocopy(&qa, &name, dst.path(), flags);
         let after_first = census_of(&qa.path(&name)).0;
@@ -199,7 +226,10 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
     }
     // SAFETY: valid for the duration of the callback.
     let r = unsafe { request_of(info, params) };
-    let ready = *FIX_READY_AT.lock().unwrap().get_or_insert_with(|| Instant::now() + FIX_PREP);
+    let ready = *FIX_READY_AT
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| Instant::now() + FIX_PREP);
     let worker = std::thread::spawn(move || serve_session_piece(r, ready));
     FIX_WORKERS.lock().unwrap().push(worker);
 }
@@ -214,9 +244,19 @@ fn serve_session_piece(r: Request, ready: Instant) {
     const CHUNK: i64 = 16 << 20;
     let start = r.offset / CHUNK * CHUNK;
     let end = ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(data.len() as i64);
-    let keys = crate::cf_range::RequestKeys { transfer_key: r.transfer, request_key: r.request };
+    let keys = crate::cf_range::RequestKeys {
+        transfer_key: r.transfer,
+        request_key: r.request,
+    };
     // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal returns an error).
-    match unsafe { crate::windows_cf::streaming::transfer_piece(r.connection, keys, start as u64, &data[start as usize..end as usize]) } {
+    match unsafe {
+        crate::windows_cf::streaming::transfer_piece(
+            r.connection,
+            keys,
+            start as u64,
+            &data[start as usize..end as usize],
+        )
+    } {
         Ok(()) => served.push((start, end)),
         Err(_) => {
             FIX_REFUSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -240,7 +280,17 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         *FIX_READY_AT.lock().unwrap() = None;
         FIX_REFUSED.store(0, std::sync::atomic::Ordering::SeqCst);
         let name = format!("robo-{i}.mp4");
-        assert!(placeholders::create_placeholder(&qa.root, &format!("qa-robo-{i}"), &name, F2B_SIZE as i64, 1_700_000_000, false).unwrap());
+        assert!(
+            placeholders::create_placeholder(
+                &qa.root,
+                &format!("qa-robo-{i}"),
+                &name,
+                F2B_SIZE as i64,
+                1_700_000_000,
+                false
+            )
+            .unwrap()
+        );
         let dst = tempfile::tempdir().unwrap();
         let (exit, errors) = f2b_robocopy(&qa, &name, dst.path(), &[]);
         let whole = std::fs::read(dst.path().join(&name)).ok().as_deref() == Some(data.as_slice());
@@ -249,9 +299,17 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         for worker in workers {
             let _ = worker.join();
         }
-        runs.push((exit, errors, whole, FIX_REFUSED.load(std::sync::atomic::Ordering::SeqCst)));
+        runs.push((
+            exit,
+            errors,
+            whole,
+            FIX_REFUSED.load(std::sync::atomic::Ordering::SeqCst),
+        ));
     }
-    println!("ld0105-f2b-native: buffered robocopy x3 of session pieces (a worker, after {FIX_PREP:?}) (CF_TRANSFER_MAX {}): {runs:?}", crate::windows_cf::streaming::CF_TRANSFER_MAX);
+    println!(
+        "ld0105-f2b-native: buffered robocopy x3 of session pieces (a worker, after {FIX_PREP:?}) (CF_TRANSFER_MAX {}): {runs:?}",
+        crate::windows_cf::streaming::CF_TRANSFER_MAX
+    );
     for (exit, errors, whole, refused) in &runs {
         assert_eq!(*exit, Some(1), "robocopy copied the file (exit 1), errors: [{errors}]");
         assert!(*whole, "the copy is byte for byte the file");
