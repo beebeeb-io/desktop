@@ -73,10 +73,11 @@ export default function Section({ nav }: SectionProps) {
   }
   // Alt+Enter (the window's Details shortcut) on one selected item: DW-0411's dialog for it, over Trash.
   useCommand('details', useCallback(() => {
-    if (selected.size !== 1) return
+    // Never over another dialog or a menu (the delete-for-good step-up keeps the keyboard).
+    if (selected.size !== 1 || confirm || menu || details) return
     const one = entries.find((e) => selected.has(e.item.id))
     if (one) setDetails(one)
-  }, [selected, entries]))
+  }, [selected, entries, confirm, menu, details]))
 
   const run = async (ids: string[], secret: { code?: string; password?: string }) => {
     setBusy(true)

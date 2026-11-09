@@ -111,9 +111,11 @@ function ApprovePage({ onBack, onSeeSessions }: { onBack: () => void; onSeeSessi
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
-      // Taken here, so Settings' own Esc (Back to Drive) does not fire under the review.
+      // Taken here, so Settings' own Esc (Back to Drive) does not fire under the approval.
       e.preventDefault()
-      if (document.querySelector('[data-approve-dialog]')) return
+      // The review's own Esc is Deny (and does nothing while Windows Hello runs); a result or the code page goes back.
+      const stage = document.querySelector('[data-approve-dialog]')?.getAttribute('data-approve-dialog')
+      if (stage === 'review' || stage === 'hello') return
       e.stopPropagation()
       onBack()
     }
@@ -164,18 +166,29 @@ export function windowAfterSignOut(search: string): string {
 
 /** clear_session refuses as `<code>: <Rust's own sentence>` (sign_out/copy.rs); those sentences are the app's words. */
 export function signOutRefusal(reason: string): string {
-  const m = /^(unsent_changes|unsent_copy_failed|unsent_count_failed): (.+)$/.exec(reason)
+  const m = /^(unsent_changes|unsent_copy_failed|unsent_count_failed): ([\s\S]+)$/.exec(reason)
   return m ? m[2]! : errorText(reason)
 }
 
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
+  // A sign-out that happened but could not confirm a step (SessionActionOutcome.warning): said before the window moves on.
+  const [warning, setWarning] = useState<string | null>(null)
+  const reopen = () => window.location.replace(windowAfterSignOut(window.location.search))
   const signOut = async () => {
     if (!hasTauri()) return onCancel()
-    const r = await command('clear_session')
-    if (r.ok) window.location.replace(windowAfterSignOut(window.location.search))
-    else setError(signOutRefusal(r.reason))
+    const r = await command<{ warning?: { code: string; sentence: string } | null }>('clear_session')
+    if (!r.ok) return setError(signOutRefusal(r.reason))
+    if (r.value?.warning?.sentence) return setWarning(r.value.warning.sentence)
+    reopen()
+  }
+  if (warning) {
+    return (
+      <Dialog labelId="signout-h" title="Signed out" onCancel={reopen} actions={<Btn onClick={reopen}>OK</Btn>}>
+        <p role="alert">{warning}</p>
+      </Dialog>
+    )
   }
   return (
     <Dialog labelId="signout-h" title={all ? 'Sign out of all Beebeeb apps on this PC?' : 'Sign out of Drive?'} onCancel={onCancel}
@@ -342,15 +355,17 @@ function DeleteStep2({ totp, initialDigits = '', onBack, onNext }: { totp: boole
 }
 
 /**
- * Step 3. Honest about what this build can see (M3c): it cannot yet tell that the link was used (the server's
+ * Step 3. Honest about what this build can do (M3c): it cannot yet tell that the link was used (the server's
  * GET /auth/account/deletion has no core read yet), so it does not claim to move on by itself; a new link takes the
- * password and code again (the server's delete-request), so Send again goes back to step 1; and the mailed link keeps
- * working until it expires (no signed-in cancel in core yet), which the page says.
+ * password and code again (the server's delete-request, which replaces the earlier link), so Send again goes back to
+ * step 1; and it cannot cancel the request (core has no signed-in delete-cancel yet), so Cancel deletion says so and
+ * how long the mailed link works, instead of leaving as if it were cancelled.
  */
 function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: { email: string; linkExpires: string; onCancelled: () => void; onUsed: (shredAfter: string | null) => void; onSendAgain: () => void }) {
   const [wait, setWait] = useState(38)
   const [link, setLink] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [cannotCancel, setCannotCancel] = useState(false)
   useEffect(() => {
     if (wait <= 0) return
     const t = window.setTimeout(() => setWait((w) => w - 1), 1000)
@@ -370,7 +385,7 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: {
       <div role="status" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
         We sent a confirmation link to <span className="font-medium">{email}</span>. Nothing is deleted until you use that link.
       </div>
-      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, then change your password. Cancel deletion leaves this screen; the link keeps working until then.</p>
+      <p className="text-[13px] text-ink-2">The link works once, until <span className="font-mono" data-testid="link-expires">{dateTime(linkExpires)}</span>. Didn’t ask for this? Don’t use the link, and change your password.</p>
       <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (link.trim()) void confirmLink() }}>
         <Field label="Or paste the link from the email">
           <input value={link} onChange={(e) => { setLink(e.target.value); setError(null) }} autoComplete="off" spellCheck={false} autoCorrect="off"
@@ -383,8 +398,15 @@ function DeleteStep3({ email, linkExpires, onCancelled, onUsed, onSendAgain }: {
         {wait > 0 ? <>Send again in <span className="font-mono">0:{String(wait).padStart(2, '0')}</span></> : <button type="button" onClick={onSendAgain} className="text-ink underline">Send again</button>}
         {' · '}A new link asks for your password again.
       </p>
+      {cannotCancel ? (
+        <div role="alert" className="rounded-[12px] border border-line bg-paper-2 px-4 py-3 text-[13px] text-ink">
+          <p>This version of Beebeeb can’t cancel the request yet. Nothing is deleted unless someone uses the link in the email, and it stops working at <span className="font-mono">{dateTime(linkExpires)}</span>.</p>
+          <button type="button" onClick={onCancelled} className="mt-2 text-[13px] text-ink underline">Back to Sign-in and security</button>
+        </div>
+      ) : null}
       <div className="flex justify-end gap-2">
-        <Btn onClick={() => { void run('account_delete_cancel', {}, null); onCancelled() }}>Cancel deletion</Btn>
+        {/* The checked password is wiped either way (account_delete_cancel); the request itself waits for core (blocked). */}
+        <Btn onClick={() => { void run('account_delete_cancel', {}, null); setCannotCancel(true) }}>Cancel deletion</Btn>
         <Btn onClick={() => onUsed(null)}>I’ve opened the link</Btn>
       </div>
     </Page>

@@ -11,7 +11,8 @@ import { copyFor60s, COPY_DONE, COPY_FAILED } from '../src/v2/sections/settings/
 import { SearchView } from '../src/v2/sections/search/SearchView'
 import { createBoardSource } from '../src/v2/source/fixtures/board'
 import { createFixtureExtras } from '../src/v2/source/fixtures/extras'
-import { elementsOf, mount } from './fixtures/componentHarness'
+import { rowsFromEntries } from '../src/v2/sections/shared/model'
+import { elementsOf, mount, textOf } from './fixtures/componentHarness'
 
 const entry = (id: string, originalPath: string): TrashEntry => ({
   item: { id, parentId: null, name: `${id}.pdf`, isFolder: false, size: 1, modifiedAt: '2026-11-01T10:00:00', shared: { kind: 'none' }, local: 'online-only', hasThumbnail: false },
@@ -55,6 +56,7 @@ describe('Sign out lands on the real sign-in, never a board frame (DW-A57, DW-A5
     expect(signOutRefusal('unsent_changes: Some changes haven’t reached the server yet.')).toBe('Some changes haven’t reached the server yet.')
     expect(signOutRefusal('network')).toBe('Beebeeb can’t reach the server. Check the connection and try again.')
     expect(signOutRefusal('reqwest: connection refused at 10.0.0.1')).toBe('Something went wrong. Nothing was changed.')
+    expect(signOutRefusal('unsent_copy_failed: Beebeeb couldn’t copy the changes.\nThey’re still waiting.')).toBe('Beebeeb couldn’t copy the changes.\nThey’re still waiting.')
   })
 })
 
@@ -115,6 +117,40 @@ describe('Search: ↓ from the field selects the result it moves to (DW-0802)', 
   })
 })
 
+describe('Shared › a link to a folder opens as a folder (DW-0502, DW-0506 Open)', () => {
+  test('a link row keeps what DriveSource says it is', () => {
+    const folder = { id: 'f', parentId: null, name: 'Lisbon trip', isFolder: true, size: null, modifiedAt: '2026-11-01T10:00:00', shared: { kind: 'link' as const }, local: 'online-only' as const, hasThumbnail: false }
+    const { links } = rowsFromEntries([{ item: folder, direction: 'by-me', people: [], hasLink: true }])
+    expect(links.map((l) => [l.id, l.isFolder])).toEqual([['f', true]])
+  })
+})
+
+describe('Delete step 3 › Cancel deletion says it cannot cancel yet, and never leaves as if it had (DW-A81)', () => {
+  test('the click wipes the checked password, stays, and says how long the link works', async () => {
+    const left: string[] = []
+    const Stub = (p: { children?: unknown }) => createElement('div', null, p.children as never)
+    const Btn = (p: { children?: unknown; onClick?: () => void }) => createElement('button', { onClick: p.onClick }, p.children as never)
+    const ran: string[] = []
+    const m = mount('v2/sections/settings/account/SecurityPane.tsx', 'DeleteStep3', {
+      backend: {},
+      bindings: {
+        Page: Stub, StepHead: () => null, Field: Stub, Btn, dateTime: () => '10 November at 03:00', errorText: (c: string) => c, FIXTURE_SHRED_AFTER: '',
+        run: async (name: string) => { ran.push(name); return { ok: true, value: null } },
+      },
+      props: { email: 'anna@example.eu', linkExpires: '2026-11-10T02:00:00Z', onCancelled: () => left.push('left'), onUsed() {}, onSendAgain() {} },
+      expand: true,
+    })
+    m.render()
+    await m.click('Cancel deletion')
+    const text = textOf(m.tree())
+    expect(ran).toEqual(['account_delete_cancel'])
+    expect(left).toEqual([])
+    expect(text).toContain('can’t cancel the request yet')
+    expect(text).toContain('10 November at 03:00')
+    m.close()
+  })
+})
+
 describe('the fixture world for B05 (instrument inputs)', () => {
   test('no-shares: nothing shared, while Files keeps DW-0401’s rows (DW-0509 › Files)', async () => {
     const s = createBoardSource('no-shares')
@@ -126,6 +162,15 @@ describe('the fixture world for B05 (instrument inputs)', () => {
     const d = await s.details('sw-brand')
     expect([d.item.name, d.path.map((c) => c.name).join(' › '), d.versionCount]).toEqual(['Brand review.pdf', 'Shared with you', 3])
     expect((await s.versions('sw-brand')).length).toBe(3)
+  })
+  test('Undo after a Restore puts a Trash row back (DW-0748 Restore, with Undo)', async () => {
+    const s = createBoardSource()
+    const before = (await s.trash()).length
+    await s.restoreFromTrash(['t-contract-old'])
+    expect((await s.trash()).length).toBe(before - 1)
+    await s.moveToTrash(['t-contract-old'])
+    expect((await s.trash()).map((t) => t.item.id)).toContain('t-contract-old')
+    expect((await s.trash()).length).toBe(before)
   })
   test('each search hit says where it is, as DW-0802 draws it', async () => {
     const where = await createFixtureExtras('default').paths(['s-contract-draft', 's-contract-2025', 's-contractors'])

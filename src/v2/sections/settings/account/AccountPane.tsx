@@ -20,10 +20,11 @@ export function AccountPane({ initial = 'main', scenario = 'default', codeDigits
   const home = useCallback(() => setPage('main'), [])
 
   if (page === 'name') return <ChangeName current={state.name} onDone={(name) => { setState((s) => ({ ...s, name })); home() }} onCancel={home} />
-  if (page === 'email') return <ChangeEmail initialEmail={pendingEmail} onSent={(email) => { setPendingEmail(email); setPage('email-code') }} onCancel={home} />
+  // The address is kept only for Send again (EmailCode → here); a cancel or a confirmed change starts the next visit empty.
+  if (page === 'email') return <ChangeEmail initialEmail={pendingEmail} onSent={(email) => { setPendingEmail(email); setPage('email-code') }} onCancel={() => { setPendingEmail(''); home() }} />
   if (page === 'email-code') {
     return <EmailCode email={pendingEmail} initialDigits={codeDigits} onBack={() => setPage('email')}
-      onDone={() => { setState((s) => ({ ...s, email: pendingEmail, emailVerified: true })); home() }} />
+      onDone={() => { setState((s) => ({ ...s, email: pendingEmail, emailVerified: true })); setPendingEmail(''); home() }} />
   }
 
   return (

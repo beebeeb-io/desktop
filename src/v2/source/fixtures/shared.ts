@@ -31,7 +31,7 @@ export const WITH_ME: WithMeRow[] = [
 // ── Shared: by me ────────────────────────────────────────────────────────────
 
 export interface PeopleShare { id: string; name: string; isFolder: boolean; people: string[]; pending?: boolean; items?: number; size?: number | null }
-export interface LinkShare { id: string; name: string; expiresAt: string | null; password: boolean; size?: number | null }
+export interface LinkShare { id: string; name: string; expiresAt: string | null; password: boolean; size?: number | null; isFolder?: boolean }
 
 export const BY_ME_PEOPLE: PeopleShare[] = [
   { id: 'sb-lisbon', name: 'Lisbon trip', isFolder: true, people: ['Jonas Meier', 'Mia de Vries'], items: 212 },

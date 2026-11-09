@@ -72,7 +72,7 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
       </ol>
       <div className="flex items-center gap-2">
         <Btn onClick={() => void copyFor60s(text).then((ok) => setNote(ok ? COPY_DONE : COPY_FAILED))}>Copy all codes</Btn>
-        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }, true).then((r) => setNote(r.ok ? (r.value ? 'Saved.' : null) : errorText(r.code)))}>Save as text…</Btn>
+        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }, true).then((r) => { if (!r.ok) setNote(errorText(r.code)); else if (r.value) setNote('Saved.') })}>Save as text…</Btn>
         {note ? <span role="status" className="text-[12px] text-ink-3">{note}</span> : null}
         <span className="flex-1" />
         <Btn variant="amber" onClick={onDone}>I’ve saved them</Btn>

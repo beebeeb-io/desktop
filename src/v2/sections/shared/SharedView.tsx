@@ -141,7 +141,7 @@ export function SharedView(p: SharedViewProps) {
           <Heading count={p.links.length}>Links</Heading>
           <div role="grid" aria-label="Links" data-list-count={p.links.length}>
             <Columns labels={['Name', 'Link', 'Password', 'Size']} />
-            {p.links.map((r) => <Row key={r.id} id={r.id} kind="link" name={r.name} isFolder={false} selected={p.menuOn === r.id} h={h}
+            {p.links.map((r) => <Row key={r.id} id={r.id} kind="link" name={r.name} isFolder={r.isFolder ?? false} selected={p.menuOn === r.id} h={h}
               cells={[
                 <span className={`inline-flex items-center gap-1.5 text-[12px] ${isPast(r.expiresAt, now) ? 'text-ink-3' : 'text-ink-2'}`}><Icon name="link" size={13} />{linkExpiry(r.expiresAt, now)}</span>,
                 <span className="inline-flex items-center gap-1.5 text-[12px] text-ink-3">{r.password ? <><Icon name="lock" size={12} />With password</> : ''}</span>, sizeOf(r)]} />)}

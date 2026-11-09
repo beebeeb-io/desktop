@@ -54,6 +54,8 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}T${two(d.getHours())}:${two(d.getMinutes())}:00`
   }
   const leaveTrash = (ids: ItemId[]) => { trash = trash.filter((t) => !ids.includes(t.item.id)) }
+  // What Trash's Restore took out (B05's own Trash rows are in no Files folder): Undo, a move to Trash, puts them back.
+  const restored = new Map<ItemId, TrashEntry>()
 
   return {
     ...files,
@@ -77,7 +79,12 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
     async moveToTrash(ids) {
       const found = await Promise.all(ids.map((id) => files.details(id).catch(() => null)))
       const moved = await files.moveToTrash(ids)
-      const entries = found.flatMap((d) => (d ? [{ item: d.item, trashedAt: stamp(), originalPath: d.path.slice(1).map((c) => c.name).join(' › ') || 'Files' }] : []))
+      const entries = found.flatMap((d, i) => {
+        if (d) return [{ item: d.item, trashedAt: stamp(), originalPath: d.path.slice(1).map((c) => c.name).join(' › ') || 'Files' }]
+        const back = restored.get(ids[i]!)
+        restored.delete(ids[i]!)
+        return back ? [{ ...back, trashedAt: stamp() }] : []
+      })
       trash = [...entries, ...trash]
       moves.set(moved.undoToken, ids)
       ids.forEach((id) => send({ kind: 'removed', id }))
@@ -89,6 +96,7 @@ export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
       moves.delete(token)
     },
     async restoreFromTrash(ids) {
+      for (const t of trash) if (ids.includes(t.item.id)) restored.set(t.item.id, t)
       leaveTrash(ids)
       // A move from Files goes back once all of it has left Trash.
       for (const [token, moved] of moves) {

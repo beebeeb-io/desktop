@@ -74,10 +74,11 @@ export default function Section({ nav }: SectionProps) {
   }, [source, load])
 
   // Links: DriveSource knows which items have one; share_list adds expiry and password.
-  const links = rows.links.map((l) => lists.links.find((x) => x.id === l.id) ?? l)
+  const links = rows.links.map((l) => ({ ...l, ...lists.links.find((x) => x.id === l.id) }))
   const people = rows.people.map((p) => ({ ...p, pending: lists.pending.includes(p.id) }))
   const nameOf = (id: string) => [...rows.people, ...rows.links, ...rows.withMe].find((r) => r.id === id)?.name ?? ''
-  const isFolder = (id: string) => [...rows.people, ...rows.withMe].find((r) => r.id === id)?.isFolder ?? false
+  // DriveSource knows what each row is: a link's row carries it too (share_list's link rows do not).
+  const isFolder = (id: string) => [...rows.people, ...rows.withMe, ...rows.links].find((r) => r.id === id)?.isFolder ?? false
 
   // DW-0501 Rules: shared folders and files open as in Files. A folder opens in Files; a file opens in its app.
   const openItem = (id: string) => {
