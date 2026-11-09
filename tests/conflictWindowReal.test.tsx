@@ -1,11 +1,17 @@
 /**
  * Slice 34: the conflict window resolves the two copies it shows.
  *
- * The window renders both sides of a real conflict (the preview the daemon returns), names each side,
- * its size and its time from the conflict's own data, and says in plain words when a side's bytes are
- * not on this PC. A choice goes through the real `resolve_conflict` command and the window closes only
- * after that command confirms; a refusal leaves it open with the error. Keep both names the
- * "-conflicted copy" it leaves behind and says where it went.
+ * The window renders both sides of a real conflict (the preview the daemon returns), names each side
+ * (the URL's fileName — the same file on both devices) and its real size from the conflict's own
+ * data, and says in plain words when a side's bytes are not on this PC. A choice goes through the
+ * real `resolve_conflict` command and the window closes only after that command confirms; a refusal
+ * leaves it open with the error. Keep both says where the copy went without inventing a filename:
+ * the out-of-scope resolver names the copy its own way and `resolve_conflict` returns no name
+ * (nightctl ask-002421-17685), so the window names no file at all.
+ *
+ * The wire contract for a side is `ConflictContentSide` (src-tauri/src/engine_bridge/types.rs):
+ * `size_bytes`, `text`, `unavailable_reason` — it carries no name and no time. The fixture below
+ * injects exactly those fields and no others.
  *
  * The component harness executes the real `ConflictWindow` declaration from src/ConflictWindow.tsx
  * against a scripted backend (tests/fixtures/componentHarness.ts).
@@ -22,18 +28,15 @@ afterEach(() => {
 })
 
 interface Side {
-  name?: string | null
   size_bytes?: number | null
-  when?: string | null
-  modified_at?: number | string | null
   text?: string | null
   unavailable_reason?: string | null
 }
 
 const preview = (over: { is_text?: boolean; local?: Side; remote?: Side; version?: number | null } = {}) => ({
   is_text: over.is_text ?? false,
-  local: over.local ?? { name: 'Contract draft.pdf', size_bytes: 1_258_291, when: 'Today, 09:12' },
-  remote: over.remote ?? { name: 'Contract draft (Anna’s iPad).pdf', size_bytes: 1_363_149, when: 'Today, 08:50' },
+  local: over.local ?? { size_bytes: 1_258_291 },
+  remote: over.remote ?? { size_bytes: 3_363_149 },
   version: over.version ?? null,
 })
 
@@ -90,25 +93,24 @@ const buttons = (m: Mounted) =>
   m.elements().filter((el) => el.type === 'button').map((el) => textOf(el.props.children).replace(/\s+/g, ' ').trim())
 
 describe('ConflictWindow with a real conflict', () => {
-  test('each side shows its name, size and time from the conflict, and a side not on this PC says so and offers the other', async () => {
+  test('each side shows the file name and its real size, no invented time, and a side not on this PC says so and offers the other', async () => {
     const { m } = open({
       value: preview({
-        local: { name: 'Contract draft.pdf', size_bytes: 1_258_291, when: 'Today, 09:12' },
+        local: { size_bytes: 1_258_291 },
         remote: {
-          name: 'Contract draft (Anna’s iPad).pdf',
-          size_bytes: 1_363_149,
-          when: 'Today, 08:50',
+          size_bytes: 3_363_149,
           unavailable_reason: 'These bytes are not on this PC yet.',
         },
       }),
     })
     await m.flush()
     const text = shown(m)
-    expect(text).toContain('Contract draft.pdf')
-    expect(text).toContain('Contract draft (Anna’s iPad).pdf')
+    // The name is the URL's fileName: the same file, shown on both sides, plus the heading.
+    expect(text.match(/Contract draft\.pdf/g)?.length ?? 0).toBe(3)
     expect(text).toContain('1 MB')
-    expect(text).toContain('Today, 09:12')
-    expect(text).toContain('Today, 08:50')
+    expect(text).toContain('3 MB')
+    // The wire contract carries no time, so none is invented.
+    expect(text).not.toContain('Today')
     expect(text).toContain('These bytes are not on this PC yet.')
     expect(buttons(m)).toEqual(expect.arrayContaining(['Keep Mine', 'Keep Theirs', 'Keep Both', 'Keep the other version']))
   })
@@ -116,7 +118,7 @@ describe('ConflictWindow with a real conflict', () => {
   test('a choice calls resolve_conflict and closes only after it confirms; a refusal keeps the window open with the error', async () => {
     const pending = deferred()
     const ok = open({
-      value: preview({ remote: { name: 'Contract draft (Anna’s iPad).pdf', when: 'Today, 08:50', unavailable_reason: 'These bytes are not on this PC yet.' } }),
+      value: preview({ remote: { size_bytes: 3_363_149, unavailable_reason: 'These bytes are not on this PC yet.' } }),
       resolve: () => pending.promise,
     })
     await ok.m.flush()
@@ -142,14 +144,18 @@ describe('ConflictWindow with a real conflict', () => {
     expect(buttons(refused.m)).toEqual(expect.arrayContaining(['Keep Mine', 'Keep Theirs', 'Keep Both']))
   })
 
-  test('Keep both leaves a copy named with the -conflicted copy suffix and says where it went', async () => {
+  test('Keep both leaves a copy beside the original and names no file the resolver does not name', async () => {
     const keepBoth = open({ value: preview() })
     await keepBoth.m.flush()
     await keepBoth.m.click('Keep Both')
     expect(keepBoth.calls).toContainEqual({ name: 'resolve_conflict', args: { fileId: 'f1', choice: 'both' } })
     const text = shown(keepBoth.m)
-    expect(text).toContain('Contract draft -conflicted copy.pdf')
+    // resolve_conflict returns no name and the resolver uses its own scheme, so the window must not
+    // promise a specific filename; it says where the copy went instead.
+    expect(text).toContain('beside the original')
     expect(text).toContain('folder')
+    expect(text).not.toContain('-conflicted copy')
+    expect(text).not.toContain('(conflict -')
     expect(keepBoth.win.closed).toBe(1)
   })
 })

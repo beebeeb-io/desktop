@@ -11,8 +11,9 @@
  *   • Keep Mine    → resolve_conflict(fileId, 'local')
  *   • Keep Theirs  → resolve_conflict(fileId, 'remote')
  *   • Keep Both    → resolve_conflict(fileId, 'both')  ← daemon
- *                    materialises a `(Conflict from Device, HH:MM)`
- *                    copy before syncing — see plan Phase 4.
+ *                    materialises a copy beside the original before
+ *                    syncing, under a name of its own (the command
+ *                    returns no name, so this window names no file).
  *
  * URL contract (set by `open_conflict_window` IPC in lib.rs):
  *   ?window=conflict&fileId=<uuid>&fileName=<utf8>&isText=true|false
@@ -125,42 +126,24 @@ export default function ConflictWindow() {
   const [doneMessage, setDoneMessage] = useState<string | null>(null)
   const [resolveError, setResolveError] = useState<string | null>(null)
 
-  /** The engine's side data is the contract's three fields; the conflict may also carry the side's own
-   *  name and time, and those are shown when present instead of a role label we made up. */
-  function formatSideWhen(value: unknown): string | null {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      // State.db times are seconds; ISO helpers hand back milliseconds.
-      const ms = value > 0 && value < 1_000_000_000_000 ? value * 1000 : value
-      return new Date(ms).toLocaleString()
-    }
-    if (typeof value === 'string' && value.trim() !== '') return value
-    return null
-  }
-
-  function sideFacts(side: ConflictContentSide | undefined, role: string): { name: string; meta: string } {
-    const extra = side as (ConflictContentSide & { name?: unknown; when?: unknown; modified_at?: unknown }) | undefined
-    const name = typeof extra?.name === 'string' && extra.name.trim() !== '' ? extra.name : role
-    const when = typeof extra?.when === 'string' && extra.when.trim() !== ''
-      ? extra.when
-      : formatSideWhen(extra?.modified_at)
+  /** A conflict side's wire contract is `size_bytes`/`text`/`unavailable_reason` only — it carries no
+   *  name and no time. Both sides are the same file, so the name is the URL's fileName; the size is
+   *  the side's own. Nothing is invented for the fields the contract does not send. */
+  function sideFacts(side: ConflictContentSide | undefined): { name: string; meta: string } {
     const parts: string[] = []
     if (typeof side?.size_bytes === 'number') parts.push(formatBytes(side.size_bytes))
-    if (when) parts.push(when)
-    return { name, meta: parts.join(' · ') }
+    return { name: fileName, meta: parts.join(' · ') }
   }
 
-  /** The copy Keep both leaves next to the original (the suffix the person will look for). */
-  function conflictedCopyName(name: string): string {
-    const dot = name.lastIndexOf('.')
-    return dot > 0 ? `${name.slice(0, dot)} -conflicted copy${name.slice(dot)}` : `${name} -conflicted copy`
-  }
-
+  /** Keep both leaves the copy next to the original, under a name only the resolver knows: it uses
+   *  its own suffix and `resolve_conflict` returns no name (nightctl ask-002421-17685), so the window
+   *  says where the copy went without promising a filename it cannot check. */
   function keepBothMessage(): string {
-    return `Both versions are kept. The other copy is “${conflictedCopyName(fileName)}”, in this file’s folder.`
+    return 'Both versions are kept. The other copy is beside the original, in this file’s folder.'
   }
 
-  const localFacts = sideFacts(preview?.local, 'This PC')
-  const remoteFacts = sideFacts(preview?.remote, 'Other device')
+  const localFacts = sideFacts(preview?.local)
+  const remoteFacts = sideFacts(preview?.remote)
   const localBlocked = preview?.local.unavailable_reason != null
   const remoteBlocked = preview?.remote.unavailable_reason != null
   // A side whose bytes are not on this PC cannot be chosen; the pane says so and offers the side that can.
