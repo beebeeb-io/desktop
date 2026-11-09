@@ -1,7 +1,7 @@
 // DW-A11 to A17: approving a sign-in from this PC. The notification (Windows draws it), the code field in Account,
 // the review dialog (what the server measured, what the device reported, the typed code), Windows Hello, and the
 // results. The approval itself runs in Rust (`auth_approve_request`): Windows Hello, then the step-up, claim and relay.
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { BBProductIcon, Icon } from '@beebeeb/shared/design'
 import { approveLookup, approveRequest, type ApprovalReview } from './api'
 import { approveErrorText, formatDeviceCode, isDeviceCode, type ApproveStage } from './model'
@@ -199,7 +199,10 @@ function Result(p: ApproveDialogProps & { device: string }) {
  * review, then Rust raises Windows Hello and runs the step-up, claim and relay. The password is cleared from state as
  * soon as it is sent. Done leaves for Account (DW-A17); the result screens' sessions link opens Devices (DW-A55).
  */
-export function ApproveSignIn({ back, onSeeSessions, onDone }: { back?: ReactNode; onSeeSessions: () => void; onDone: () => void }) {
+export function ApproveSignIn({ back, onBack, onSeeSessions, onDone }: {
+  /** The page's way back (a link), and what Esc does on the code and result screens: back to Sign-in and security. */
+  back?: ReactNode; onBack?: () => void; onSeeSessions: () => void; onDone: () => void
+}) {
   const [code, setCode] = useState('')
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A12: the board's one honest message sits under the code field, tied to it.
   const [lookupError, setLookupError] = useState<string>()
@@ -222,12 +225,19 @@ export function ApproveSignIn({ back, onSeeSessions, onDone }: { back?: ReactNod
     setTyped('')
     setStage(r.value.seconds_left <= 0 ? 'expired' : 'review')
   }
+  // One answer per request: a second Esc, or Esc and a click, while the first is on its way sends nothing (a second deny
+  // would come back already_handled and say another device answered).
+  const deciding = useRef(false)
   const decide = async (approve: boolean) => {
+    if (deciding.current) return
+    deciding.current = true
     const secret = password
     setPassword('')
     setError(undefined)
-    if (approve) { setBusy(true); setStage('hello') }
+    setBusy(true)
+    if (approve) setStage('hello')
     const r = await approveRequest(review?.code ?? code, secret, approve)
+    deciding.current = false
     setBusy(false)
     if (r.ok) { setStage(r.value.status === 'approved' ? 'approved' : 'denied'); return }
     if (r.reason === 'already_handled') setStage('already-handled')
@@ -236,6 +246,18 @@ export function ApproveSignIn({ back, onSeeSessions, onDone }: { back?: ReactNod
     else { setStage('review'); setError(r.reason) }
   }
   const done = () => { setReview(null); setStage('code'); setCode(''); onDone() }
+  // Esc goes back to Sign-in and security, as on the other Security pages; the review takes its own Esc (Deny).
+  useEffect(() => {
+    if (!onBack || stage === 'review' || stage === 'hello') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      e.preventDefault()
+      e.stopPropagation()
+      onBack()
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [onBack, stage])
   return (
     <>
       <ApproveCodePanel code={code} error={lookupError} busy={busy && stage === 'code'} back={back} onCode={setCode} onContinue={() => void lookup()} />

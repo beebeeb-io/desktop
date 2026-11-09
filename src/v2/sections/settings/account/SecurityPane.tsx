@@ -74,7 +74,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
     case 'delete-4': return <DeleteStep4 shredAfter={shredAfter} onUndone={() => setPage('delete-done')} onSignOut={() => setDialog('signout')} dialog={dialog} closeDialog={() => setDialog(undefined)} />
     case 'delete-done': return <DeleteDone />
     // B10's approval (DW-A12 to A17), mounted here by M3b: the code, the review dialog, the results.
-    case 'approve': return <ApproveSignIn back={<BackLink label="Sign-in and security" onBack={home} />} onSeeSessions={() => settings.go('devices')} onDone={() => settings.go('account')} />
+    case 'approve': return <ApproveSignIn back={<BackLink label="Sign-in and security" onBack={home} />} onBack={home} onSeeSessions={() => settings.go('devices')} onDone={() => settings.go('account')} />
   }
 
   const t = state.totp

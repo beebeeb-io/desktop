@@ -43,10 +43,15 @@ export function hresultOf(error: string | null): string | null {
   return m ? `0x${m[0].slice(2).toUpperCase()}` : null
 }
 
-/** The step's state: ready once registered; failed on a recorded error (unless a new try is running); adding otherwise. */
-export function explorerStatus(v: ShellIntegrationView | null, trying = false): { status: ExplorerStatus; code: string | null } {
+/**
+ * The step's state: ready once registered; failed on a recorded error, or when the last try was refused before Rust
+ * recorded anything (`refused`: its reason); adding while a try runs or before the first one.
+ */
+export function explorerStatus(v: ShellIntegrationView | null, trying = false, refused: string | null = null): { status: ExplorerStatus; code: string | null } {
   if (v?.installed || v?.status === 'installed') return { status: 'ready', code: null }
-  if (v && !trying && v.status === 'error') return { status: 'failed', code: hresultOf(v.last_error) }
+  if (trying) return { status: 'adding', code: null }
+  if (v?.status === 'error') return { status: 'failed', code: hresultOf(v.last_error) }
+  if (refused != null) return { status: 'failed', code: hresultOf(refused) }
   return { status: 'adding', code: null }
 }
 
@@ -83,6 +88,7 @@ export function SetupFlow() {
   const [compareMode, setCompareMode] = useState<'Stacked' | 'Wipe' | 'Hold to flip'>('Stacked')
   const [shell, setShell] = useState<ShellIntegrationView | null>(null)
   const [trying, setTrying] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
   const firstTry = useRef(false)
   const [login, setLogin] = useState(true)
   const note = (k: keyof SetupSummary, v: string) => setSummary((s) => ({ ...s, [k]: v }))
@@ -93,9 +99,12 @@ export function SetupFlow() {
     return r.ok ? r.value : null
   }, [])
   // Registers this PC's sync folder with File Explorer (and starts sync there); Try again runs the same, on the same folder.
+  // A try Rust refuses before it records an outcome (the session is changing, the folder cannot be made) still ends in the
+  // failed state with Try again, never in "Adding" for ever. A browser without the command stays as it was.
   const addToExplorer = useCallback(async (path: string | null) => {
     setTrying(true)
-    await command('install_windows_shell_integration', { path })
+    const r = await command('install_windows_shell_integration', { path })
+    setRefused(r.ok || r.unsupported ? null : r.reason)
     setTrying(false)
     await readShell()
   }, [readShell])
@@ -111,7 +120,7 @@ export function SetupFlow() {
     return () => { window.clearInterval(t) }
   }, [readShell, addToExplorer])
 
-  const explorer = explorerStatus(shell, trying)
+  const explorer = explorerStatus(shell, trying, refused)
   const skip = () => setStep('done')
 
   const addPasskey = async () => {

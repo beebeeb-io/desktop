@@ -33,8 +33,10 @@ export function GuideHost({ nav }: { nav: Navigation }) {
     if (want && at.current.section !== want) go({ section: want })
   }, [go])
 
-  // Asked for before this window opened (setup), while it is open (Show the guide again), or from the setup window.
+  // Asked for before this window opened (setup), while it is open (Show the guide again), or from the setup window. A
+  // board frame (`?frame=`) that draws the whole window never runs it.
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).has('frame')) return
     const start = () => { if (guideDue() && at.current.step == null) show(0) }
     start()
     window.addEventListener(GUIDE_EVENT, start)

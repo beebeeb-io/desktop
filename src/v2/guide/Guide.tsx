@@ -14,11 +14,14 @@ export const TIPS: { id: TipId; text: string }[] = [
   { id: 'settings', text: 'Storage, devices, backups and app lock. Ctrl+, opens them, and you can see this guide again there.' },
 ]
 
-/** The first file in the list (a name with an extension), else the first row: what "Right-click a file" points at. */
+/** The first file in the list or the grid (a name with an extension): what "Right-click a file" points at. None when the
+ *  window shows no file (only folders, or nothing): the guide then skips that tip (DW-0302). */
 function firstFileRow(): Element | null {
-  const rows = Array.from(document.querySelectorAll('main [role="row"][data-row], main li[data-row]'))
-  const name = (r: Element) => (r.querySelector('[role="gridcell"]') ?? r).textContent?.trim() ?? ''
-  return rows.find((r) => /\.[a-z0-9]{1,5}$/i.test(name(r))) ?? rows[0] ?? null
+  const rows = Array.from(document.querySelectorAll('main [role="row"][data-row], main [role="row"][data-tile]'))
+  // A list row's first cell is its name; a tile's name sits in a cell's title (its first cell is the picture).
+  const name = (r: Element) => Array.from(r.querySelectorAll('[role="gridcell"]'))
+    .map((c) => (c.querySelector('[title]')?.getAttribute('title') ?? c.textContent ?? '').trim()).find(Boolean) ?? ''
+  return rows.find((r) => /\.[a-z0-9]{1,5}$/i.test(name(r))) ?? null
 }
 
 /** Where each tip points: found by what the person sees, so the guide follows the real window. */
@@ -50,13 +53,25 @@ export function GuideTip({ index, onNext, onSkip }: { index: number; onNext: () 
   const [box, setBox] = useState<Box | null>(null)
   const card = useRef<HTMLDivElement>(null)
   const [cardHeight, setCardHeight] = useState(140)
+  // Measured when the tip opens, again for a target that draws a moment later (a section still loading), and on resize.
   useLayoutEffect(() => {
-    const el = findTarget(tip.id)
-    if (card.current) setCardHeight(card.current.offsetHeight)
-    if (!el) { setBox(null); return }
-    const r = el.getBoundingClientRect()
-    const left = Math.max(2, r.left - 4)
-    setBox({ top: r.top - 4, left, width: Math.min(r.width + 8, window.innerWidth - left - 2), height: r.height + 8 })
+    let tries = 0
+    let timer = 0
+    const measure = () => {
+      if (card.current) setCardHeight(card.current.offsetHeight)
+      const el = findTarget(tip.id)
+      if (!el) {
+        setBox(null)
+        if (tries++ < 20) timer = window.setTimeout(measure, 100)
+        return
+      }
+      const r = el.getBoundingClientRect()
+      const left = Math.max(2, r.left - 4)
+      setBox({ top: r.top - 4, left, width: Math.min(r.width + 8, window.innerWidth - left - 2), height: r.height + 8 })
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => { window.clearTimeout(timer); window.removeEventListener('resize', measure) }
   }, [tip.id])
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onSkip() }
@@ -112,22 +127,26 @@ export function TrayTipScene({ window: win, onGotIt }: { window: ReactNode; onGo
 }
 
 const DUE_KEY = 'bb.v2.guide.due'
-const SEEN_KEY = 'bb.v2.guide.seen'
 /** Sent on the window when the guide is asked for (Settings › General › Show the guide again, in this window). */
 export const GUIDE_EVENT = 'bb:v2-guide'
+/** This window asked for it: the guide still starts here when storage refuses (the setup window's ask is then lost). */
+let askedHere = false
 
 /** Whether the guide was asked for and has not run to its end or been skipped since. */
 export function guideDue(): boolean {
+  if (askedHere) return true
   try { return localStorage.getItem(DUE_KEY) === '1' } catch { return false }
 }
 
 /** Ask for the guide: setup's last step (the main window opens next) and Settings › General › Show the guide again. */
 export function startGuide(): void {
-  try { localStorage.setItem(DUE_KEY, '1') } catch { /* storage refused: this window still starts it below */ }
+  askedHere = true
+  try { localStorage.setItem(DUE_KEY, '1') } catch { /* storage refused: this window still starts it (askedHere) */ }
   window.dispatchEvent(new Event(GUIDE_EVENT))
 }
 
 /** Skip or Done: the guide does not come back by itself. */
 export function markGuideSeen(): void {
-  try { localStorage.removeItem(DUE_KEY); localStorage.setItem(SEEN_KEY, '1') } catch { /* private mode: the guide may show again */ }
+  askedHere = false
+  try { localStorage.removeItem(DUE_KEY) } catch { /* storage refused: nothing was stored */ }
 }

@@ -63,3 +63,52 @@ describe('the guide', () => {
     expect(cardPlace(toolbar, 130, view).top).toBe(toolbar.top + toolbar.height + 10)
   })
 })
+
+describe('review fixes (M3b self-review)', () => {
+  test('a try Rust refused before recording anything shows failed with Try again, not "Adding" for ever', () => {
+    expect(explorerStatus(view({ status: 'missing' }), false, 'could not create the folder (0x80070005)')).toEqual({ status: 'failed', code: '0x80070005' })
+    expect(explorerStatus(view({ status: 'missing' }), false, 'session changed')).toEqual({ status: 'failed', code: null })
+    expect(explorerStatus(view({ status: 'missing' }), true, 'session changed')).toEqual({ status: 'adding', code: null })
+  })
+
+  test('Show the guide again starts the guide in this window when storage refuses', async () => {
+    const guide = await import('../src/v2/guide/Guide')
+    const events: string[] = []
+    const g = globalThis as Record<string, unknown>
+    const before = { window: g.window, localStorage: g.localStorage }
+    g.window = { dispatchEvent: (e: Event) => events.push(e.type) }
+    g.localStorage = { getItem() { throw new Error('refused') }, setItem() { throw new Error('refused') }, removeItem() { throw new Error('refused') } }
+    try {
+      expect(guide.guideDue()).toBe(false)
+      guide.startGuide()
+      expect(events).toEqual([guide.GUIDE_EVENT])
+      expect(guide.guideDue()).toBe(true)
+      guide.markGuideSeen()
+      expect(guide.guideDue()).toBe(false)
+    } finally {
+      g.window = before.window
+      g.localStorage = before.localStorage
+    }
+  })
+
+  test('the file-menu tip finds a file row or tile, and nothing in a list of folders', async () => {
+    const { findTarget } = await import('../src/v2/guide/Guide')
+    const cell = (text: string, title?: string) => ({ textContent: text, querySelector: (s: string) => (s === '[title]' && title ? { getAttribute: () => title } : null) })
+    const row = (cells: unknown[]) => ({ querySelectorAll: () => cells, querySelector: () => cells[0] ?? null, textContent: '' })
+    const g = globalThis as Record<string, unknown>
+    const before = g.document
+    const show = (rows: unknown[]) => { g.document = { querySelectorAll: (s: string) => (s.includes('[role="row"]') ? rows : []) } }
+    try {
+      show([row([cell('Documents')]), row([cell('Photos 2026')])])
+      expect(findTarget('file-menu')).toBeNull()
+      const file = row([cell('Budget 2026.xlsx')])
+      show([row([cell('Documents')]), file])
+      expect(findTarget('file-menu')).toBe(file as never)
+      const tile = row([cell(''), cell('Harbour.heic', 'Harbour.heic')])
+      show([row([cell(''), cell('Documents', 'Documents')]), tile])
+      expect(findTarget('file-menu')).toBe(tile as never)
+    } finally {
+      g.document = before
+    }
+  })
+})

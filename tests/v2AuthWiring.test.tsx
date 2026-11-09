@@ -62,3 +62,42 @@ describe('DW-A45: the three option cards and their buttons', () => {
     expect(calls).toEqual(['phrase', 'device', 'neither'])
   })
 })
+
+/** - DW-A13: one answer per request. A second Esc (or Esc and a click) while the deny is on its way sends nothing. */
+describe('DW-A13: deny is sent once', () => {
+  test('two denies in a row reach Rust once', async () => {
+    const api = await import('../src/v2/auth/api')
+    const model = await import('../src/v2/auth/model')
+    const { mount } = await import('./fixtures/componentHarness')
+    let dialog: Record<string, any> | null = null
+    let release: (v: unknown) => void = () => {}
+    const m = mount('v2/auth/Approve.tsx', 'ApproveSignIn', {
+      backend: {
+        auth_approve_lookup: () => ({ code: 'K7QM-4WTD', country: 'DE', ip: '203.0.113.42', requested_at: '', expires_at: '', seconds_left: 200, device_name: 'Anna’s iPhone', client: null, os: null }),
+        auth_approve_request: () => new Promise((r) => { release = r }),
+      },
+      bindings: {
+        approveLookup: api.approveLookup, approveRequest: api.approveRequest, approveErrorText: model.approveErrorText,
+        ApproveCodePanel: (p: Record<string, any>) => createElement('button', { onClick: p.onContinue }, 'Continue'),
+        ApproveDialog: (p: Record<string, any>) => { dialog = p; return null },
+      },
+      props: { onSeeSessions() {}, onDone() {} },
+      expand: true,
+    })
+    try {
+      await m.click('Continue')
+      m.elements() // draws the tree, which hands the dialog its props
+      expect(dialog!.stage).toBe('review')
+      void dialog!.onDeny()
+      void dialog!.onDeny()
+      await m.flush()
+      expect(m.calls.filter((c) => c.name === 'auth_approve_request').length).toBe(1)
+      release({ status: 'denied' })
+      await m.flush()
+      m.elements()
+      expect(dialog!.stage).toBe('denied')
+    } finally {
+      m.close()
+    }
+  })
+})
