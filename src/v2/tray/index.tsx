@@ -90,9 +90,12 @@ export async function revealRow(row: FlyoutRow, path?: string): Promise<Done> {
   return shown
 }
 
-/** The footer's "Open in File Explorer": the sync folder in File Explorer (DW-1180). */
-async function openFileExplorer(): Promise<Done> {
-  const r = await command<void>('open_finder_location', { path: null })
+/** The footer's "Open in File Explorer": the sync folder in File Explorer (DW-1180). It sends the folder the config holds,
+ *  as v1 does (src/pages/SyncFolder.tsx): Rust refuses a null path on Windows, and the refusal is shown (#271 review). */
+export async function openFileExplorer(): Promise<Done> {
+  const root = await command<string | null>('get_sync_root')
+  if (!root.ok) return root
+  const r = await command<void>('open_finder_location', { path: root.value })
   if (r.ok) await hideFlyout()
   return r
 }

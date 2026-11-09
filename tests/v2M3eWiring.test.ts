@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { routeFromNav, routeFromSearch, searchFromRoute, settingsRouteFor } from '../src/v2/routes'
 import { followHref, PAGE_WORDS, settingsPage } from '../src/v2/sections/settings/shell/links'
 import { readFileSync } from 'node:fs'
-import { flyoutFailure, revealRow, runFlyoutCommand } from '../src/v2/tray'
+import { flyoutFailure, openFileExplorer, revealRow, runFlyoutCommand } from '../src/v2/tray'
 import { flyoutView } from '../src/v2/tray/model'
 import { SCENARIOS, NOW } from '../src/v2/tray/fixtures'
 import { kindOf, sectionOfPath } from '../src/v2/sections/settings/today/insights'
@@ -153,6 +153,29 @@ describe('the flyout’s actions (B09)', () => {
     answers.popover_open_window = null
     await revealRow(row.rows[0])
     expect(ran()).toEqual([{ cmd: 'drive_reveal', args: { id: 'h0' } }, { cmd: 'popover_open_window', args: { to: 'trash' } }])
+  })
+})
+
+describe('the footer’s Open in File Explorer sends the sync folder (P1a, #271 review: Rust refuses a null path on Windows)', () => {
+  test('it reads the folder the config holds and opens that, then the flyout hides', async () => {
+    answers.get_sync_root = 'C:\\Users\\Ada\\Beebeeb'
+    answers.open_finder_location = null
+    expect((await openFileExplorer()).ok).toBe(true)
+    expect(ran()).toEqual([
+      { cmd: 'get_sync_root', args: {} },
+      { cmd: 'open_finder_location', args: { path: 'C:\\Users\\Ada\\Beebeeb' } },
+    ])
+    expect(hid()).toBe(1)
+  })
+  test('a refusal stays on screen: the flyout does not hide, and the folder read failing opens nothing', async () => {
+    answers.get_sync_root = 'C:\\Users\\Ada\\Beebeeb'
+    answers.open_finder_location = new Error('The folder could not be opened')
+    expect((await openFileExplorer()).ok).toBe(false)
+    expect(hid()).toBe(0)
+    calls = []
+    answers.get_sync_root = new Error('settings unreadable')
+    expect((await openFileExplorer()).ok).toBe(false)
+    expect(ran()).toEqual([{ cmd: 'get_sync_root', args: {} }])
   })
 })
 

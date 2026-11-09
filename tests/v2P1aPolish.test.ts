@@ -314,7 +314,7 @@ describe('#271 P2 and review: setup’s File Explorer step', () => {
     const ob = src('v2/onboarding/index.tsx')
     expect(ob).not.toContain("command('open_finder_location', { path: null })")
     expect(ob).toContain("const r = await command<void>('open_finder_location', { path })")
-    expect(ob).toContain('setShowError(r.ok || r.unsupported ? null : r.reason)')
+    expect(ob).toContain('setShowError(r.ok || r.unsupported ? null : SHOW_FAILED)')
     expect(ob).toMatch(/const tryAgain = async \(\) => \{\n\s+setShowError\(null\)\n\s+const v = await readShell\(\)\n\s+if \(!v\) \{ setShowError\(NO_STATE\); return \}/)
     expect(src('v2/onboarding/views.tsx')).toContain('{showError && <p role="alert" data-show-error')
   })

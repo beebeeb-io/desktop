@@ -65,6 +65,8 @@ export const shellPolls = (step: string, trying: boolean) => step === 'explorer'
 
 /** "Show in File Explorer" before the config names a folder: nothing to open yet. */
 export const NO_FOLDER_YET = 'Beebeeb doesn’t know this PC’s Beebeeb folder yet. Try again in a moment.'
+/** "Show in File Explorer" refused (the folder could not be opened). */
+export const SHOW_FAILED = 'Couldn’t open the Beebeeb folder in File Explorer. Try again in a moment.'
 /** Try again when the state can't be read: it does not guess which folder to add. */
 export const NO_STATE = 'Beebeeb couldn’t read this PC’s settings, so nothing was tried. Try again in a moment.'
 
@@ -141,7 +143,8 @@ export function SetupFlow() {
     const path = shell?.path ?? (await readShell())?.path ?? null
     if (!path) { setShowError(NO_FOLDER_YET); return }
     const r = await command<void>('open_finder_location', { path })
-    setShowError(r.ok || r.unsupported ? null : r.reason)
+    // Our words, never the command's text (the Finder family's rule, tests/finderSetupSourceContract.test.ts).
+    setShowError(r.ok || r.unsupported ? null : SHOW_FAILED)
   }
   // Try again registers the folder the config holds: the state is read first, and without a read it does not guess
   // (Rust would fall back to its default folder, not the configured one). #271 review.
