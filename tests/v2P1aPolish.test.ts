@@ -12,6 +12,8 @@ import { isProvisional } from '../src/v2/sections/open'
 import { folderKey, shown, videoReadable, type PhotoCell } from '../src/v2/sections/photos/model'
 import { READ_CAP_BYTES } from '../src/v2/source/desktop'
 import { ThumbCache } from '../src/v2/sections/open/thumbCache'
+import { actionFailure } from '../src/v2/sections/files/model'
+import { routeFilter } from '../src/v2/sections/sync-history/model'
 
 const src = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
@@ -235,5 +237,30 @@ describe('#273 findings 5 and 9: opening a file reads only what it needs, and a 
   })
   test('a run that a newer one replaced stops after its second details read', () => {
     expect(open()).toMatch(/const \{ item \} = await source\.details\(id\)\.catch\(\(\) => \(\{ item: null \}\)\)\n\s+if \(!live\) return\n\s+if \(item\) return setPhase\(\{ name: 'too-large', item \}\)/)
+  })
+})
+
+describe('#268 review: failures say what failed, the Problems filter follows the route, one close function', () => {
+  test('a failed New folder names the action and offers Try again, which reopens the dialog', () => {
+    const fv = src('v2/sections/files/FolderView.tsx')
+    expect(fv).toContain("fail(e, undefined, { action: 'create the folder', again: openNewFolder })")
+    expect(actionFailure('create the folder', 'offline')).toEqual({ text: 'Couldn’t create the folder. Check your connection.', retry: true })
+    expect(fv).not.toMatch(/fail\(e\)\s*\}/)
+  })
+  test('Ctrl+Z’s failed undo is the toast’s: what failed, and Try again with the same token', () => {
+    const fv = src('v2/sections/files/FolderView.tsx')
+    expect(fv).toMatch(/useCommand\('undo', useCallback\(\(\) => \{[\s\S]{0,200}putBack\(token\)/)
+    expect(fv).not.toContain('source.undoTrash(token).catch((e: unknown) => fail(e))')
+  })
+  test('Problems from the banner, All again once the route no longer asks for it', () => {
+    expect(routeFilter('problems')).toBe('problems')
+    expect(routeFilter(null)).toBe('all')
+    expect(routeFilter(undefined)).toBe('all')
+    expect(src('v2/sections/sync-history/index.tsx')).toContain('useEffect(() => { setFilter(routeFilter(nav.route.sub)) }, [nav.route])')
+  })
+  test('the uploads panel’s close is one memoised function', () => {
+    const live = src('v2/sections/files/liveExtras.tsx')
+    expect(live).toContain('const closeUploads = useCallback(() => setUploadsOpen(false), [])')
+    expect(live).not.toContain('closeUploads: () =>')
   })
 })

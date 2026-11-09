@@ -83,6 +83,8 @@ export function useLiveFolderExtras() {
   const [uploadsOpen, setUploadsOpen] = useState(false)
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
 
+  // One function for the panel's close, not a new one each render (#268).
+  const closeUploads = useCallback(() => setUploadsOpen(false), [])
   const refresh = useCallback(() => {
     extras.status().then(setStatus, () => setStatus(null))
     extras.transfers().then(setRows, () => setRows([]))
@@ -110,7 +112,7 @@ export function useLiveFolderExtras() {
     })
   }
   return {
-    status, rows, uploads, uploadsOpen, closeUploads: () => setUploadsOpen(false), retry,
+    status, rows, uploads, uploadsOpen, closeUploads, retry,
     transfers: transfersByItem(rows), conflicts, resolve, later: (id: string) => setDismissed((d) => new Set(d).add(id)),
   }
 }

@@ -86,3 +86,6 @@ export function rowsFromProblems(problems: SyncProblem[], now: Date): HistoryRow
 
 /** The queue's change id behind a problem row, or null for a row with nothing to retry. */
 export const problemId = (r: HistoryRow): string | null => (r.id.startsWith('problem:') ? r.id.slice('problem:'.length) : null)
+
+/** The filter a route asks for: Problems for `sub=problems` (the sync problem banner's View, DW-0102 → DW-0428), else All. */
+export const routeFilter = (sub: string | null | undefined): Filter => (sub === 'problems' ? 'problems' : 'all')
