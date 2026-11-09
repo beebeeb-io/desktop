@@ -753,6 +753,11 @@
   "selector": "[data-testid=\"device-row\"]",
   "why": "a device row under Your devices right now is one button"
  },
+ "DW-0783#1": {
+  "verb": "click",
+  "selector": "[data-testid=\"largest-row\"][href^=\"?section=files\"]",
+  "why": "the board's target is Files; the first largest file is under Backups, which opens in the Backups section (DW-0422, M3e), so the row clicked is the first one in Files"
+ },
  "DW-0785f#1": {
   "notAutomatable": "another window, not a control on this page: the flyout says the same with Sync anyway (DW-1222)"
  },
