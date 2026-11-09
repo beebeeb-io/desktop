@@ -1,10 +1,12 @@
 // Owned by batch B11: first run on Windows (DW-0201 to DW-0209, 960 x 640). Mounted for ?window=onboarding&platform=windows
 // once ./enabled.ts says so. The backup step reuses src/windows/KnownFolderOnboarding.tsx's logic: the same commands,
-// Desktop, Documents and Pictures on by default, the prompt marked seen either way.
-import { useCallback, useEffect, useState } from 'react'
+// Desktop, Documents and Pictures on by default, the prompt marked seen either way. File Explorer is Windows' Cloud Files
+// registration (`windows_shell_integration_state`, `install_windows_shell_integration`, as the v2 spec lists them);
+// macOS's Finder reconciler (`finder_setup_state`) answers only on a Mac.
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { command, getKnownFolderBackup, markKnownFolderOnboardingSeen, setKnownFolderBackup, type KnownFolderStatus } from '../../desktopApi'
-import { loadFinderSetup, type FinderSetupView } from '../../finderSetup'
+import { startGuide } from '../guide/Guide'
 import {
   BackupStep, CompareView, DoneStep, ExplorerStep, LockStep, LoginStep, NotificationsStep, PasskeyStep, PhotosStep, SetupWindow,
   type BackupFolder, type ExplorerStatus, type LockAfter, type PreviewSample, type SetupStep, type SetupSummary,
@@ -24,14 +26,38 @@ export function toBackupFolders(list: KnownFolderStatus[], chosen: Set<string>):
   }))
 }
 
-export function explorerStatus(v: FinderSetupView | null): { status: ExplorerStatus; code: string | null } {
-  if (!v) return { status: 'adding', code: null }
-  if (v.setup === 'ready') return { status: 'ready', code: null }
-  if (v.setup === 'failed') {
-    const c = v.last_failure?.code
-    return { status: 'failed', code: c == null ? null : `0x${(c >>> 0).toString(16).toUpperCase().padStart(8, '0')}` }
-  }
+/** `windows_shell_integration_state` (src-tauri finder_setup_commands.rs, `FinderInstallState`): the last registration's result. */
+export interface ShellIntegrationView {
+  installed: boolean
+  path: string | null
+  /** `installed`, `error`, or `missing` before the first registration on this PC. */
+  status: string
+  last_error: string | null
+  last_attempt_at: number | null
+  reason_category: string | null
+}
+
+/** The HRESULT Windows returned, in mono for support (DW-0280: 0x8007017C), when the error text carries one. */
+export function hresultOf(error: string | null): string | null {
+  const m = error?.match(/0x[0-9a-f]{8}/i)
+  return m ? `0x${m[0].slice(2).toUpperCase()}` : null
+}
+
+/**
+ * The step's state: ready once registered; failed on a recorded error, or when the last try was refused before Rust
+ * recorded anything (`refused`: its reason); adding while a try runs or before the first one.
+ */
+export function explorerStatus(v: ShellIntegrationView | null, trying = false, refused: string | null = null): { status: ExplorerStatus; code: string | null } {
+  if (v?.installed || v?.status === 'installed') return { status: 'ready', code: null }
+  if (trying) return { status: 'adding', code: null }
+  if (v?.status === 'error') return { status: 'failed', code: hresultOf(v.last_error) }
+  if (refused != null) return { status: 'failed', code: hresultOf(refused) }
   return { status: 'adding', code: null }
+}
+
+/** A PC that never registered starts here, right after sign-in ("Adding started at sign-in", DW-0206). */
+export function needsFirstRegistration(v: ShellIntegrationView | null): boolean {
+  return v != null && !v.installed && v.status === 'missing'
 }
 
 const SAMPLE: PreviewSample = { label: '4K HEIC', size: '1.0 MB', original: '30.9 MB', photos: 0, local: '0 GB', cloud: '0 GB', space: '20 GB' }
@@ -60,25 +86,41 @@ export function SetupFlow() {
   const [backup, setBackup] = useState({ busy: false, error: null as string | null })
   const [preview, setPreview] = useState({ size: '4K', format: 'HEIC' })
   const [compareMode, setCompareMode] = useState<'Stacked' | 'Wipe' | 'Hold to flip'>('Stacked')
-  const [finder, setFinder] = useState<FinderSetupView | null>(null)
+  const [shell, setShell] = useState<ShellIntegrationView | null>(null)
+  const [trying, setTrying] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const firstTry = useRef(false)
   const [login, setLogin] = useState(true)
   const note = (k: keyof SetupSummary, v: string) => setSummary((s) => ({ ...s, [k]: v }))
 
-  const readFinder = useCallback(() => { void loadFinderSetup().then((r) => setFinder(r.ok ? r.value : null)) }, [])
+  const readShell = useCallback(async () => {
+    const r = await command<ShellIntegrationView>('windows_shell_integration_state')
+    setShell(r.ok ? r.value : null)
+    return r.ok ? r.value : null
+  }, [])
+  // Registers this PC's sync folder with File Explorer (and starts sync there); Try again runs the same, on the same folder.
+  // A try Rust refuses before it records an outcome (the session is changing, the folder cannot be made) still ends in the
+  // failed state with Try again, never in "Adding" for ever. A browser without the command stays as it was.
+  const addToExplorer = useCallback(async (path: string | null) => {
+    setTrying(true)
+    const r = await command('install_windows_shell_integration', { path })
+    setRefused(r.ok || r.unsupported ? null : r.reason)
+    setTrying(false)
+    await readShell()
+  }, [readShell])
   useEffect(() => {
-    readFinder()
+    void readShell().then((v) => {
+      if (!needsFirstRegistration(v) || firstTry.current) return
+      firstTry.current = true
+      void addToExplorer(v?.path ?? null)
+    })
     void getKnownFolderBackup().then((r) => { if (r.ok) setKnown(r.value) })
     void command<boolean>('autostart_enabled').then((r) => { if (r.ok) setLogin(r.value) })
-    const t = window.setInterval(readFinder, 2000)
-    return () => { window.clearInterval(t); setPasskey({ asking: false, password: '', error: null }) }
-  }, [readFinder])
+    const t = window.setInterval(() => void readShell(), 2000)
+    return () => { window.clearInterval(t) }
+  }, [readShell, addToExplorer])
 
-  const explorer = explorerStatus(finder)
-  // Try again: ask the reconciler, then read the state it reports (the retry's own answer is not shown).
-  const retryFinder = async () => {
-    await command('finder_setup_retry')
-    readFinder()
-  }
+  const explorer = explorerStatus(shell, trying, refused)
   const skip = () => setStep('done')
 
   const addPasskey = async () => {
@@ -110,7 +152,8 @@ export function SetupFlow() {
   }
 
   const finish = async () => {
-    // The main window opens; this setup window closes (DW-0208's rule). The guide runs there once (../guide).
+    // The main window opens on Files and runs the guide once (DW-0380); this setup window closes (DW-0208's rule).
+    startGuide()
     await command<void>('show_main_app_window')
     try { await getCurrentWindow().close() } catch { window.close() }
   }
@@ -138,8 +181,8 @@ export function SetupFlow() {
       body = <CompareView mode={compareMode} onMode={setCompareMode} onChoose={() => {}} onDone={() => setStep('photos')} />
       break
     case 'explorer':
-      body = <ExplorerStep status={explorer.status} errorCode={explorer.code} onShow={() => void command('finder_setup_show_app')}
-        onTryAgain={() => void retryFinder()} onContinue={() => setStep('notifications')} />
+      body = <ExplorerStep status={explorer.status} errorCode={explorer.code} onShow={() => void command('open_finder_location', { path: null })}
+        onTryAgain={() => void addToExplorer(shell?.path ?? null)} onContinue={() => setStep('notifications')} />
       break
     case 'notifications':
       body = <NotificationsStep onAllow={() => { note('notifications', 'On'); setStep('login') }} onNotNow={() => { note('notifications', 'Off'); setStep('login') }} />

@@ -3,8 +3,8 @@
 // window signed out (AuthGate shows the account entry), the first-run states in the onboarding window signed in.
 import type { Recipe } from './states'
 import { SCENARIOS } from '../tray/fixtures'
-import { QR_SVG, REQUEST_CODE, SECONDS_LEFT, THIS_PC } from '../source/fixtures/auth'
-import { EMAIL, KNOWN_FOLDERS, METER_GOOD, METER_SHORT, METER_STRONG, POLICY, POSITIONS, RECOVER_PARTIAL, RECOVER_WRONG, WORDS } from '../source/fixtures/signup'
+import { PHRASE_PARTIAL, PHRASE_WRONG, QR_SVG, REQUEST_CODE, REVIEW, SECONDS_LEFT, THIS_PC } from '../source/fixtures/auth'
+import { EMAIL, EXPLORER_ERROR, KNOWN_FOLDERS, METER_GOOD, METER_SHORT, METER_STRONG, POLICY, POSITIONS, RECOVER_PARTIAL, RECOVER_WRONG, WORDS } from '../source/fixtures/signup'
 
 // ── B09: the flyout ─────────────────────────────────────────────────────────────────────────────────────────────
 const flyout = (name: string, o: Recipe = {}): Recipe => ({ window: 'tray', ...o, reads: { popover_snapshot: SCENARIOS[name].snapshot, ...o.reads } })
@@ -24,23 +24,42 @@ const toDevice = (poll?: unknown): Recipe => signIn({
   steps: [{ click: 'btn:Sign in with another device' }, { pause: poll ? 1400 : 300 }],
 })
 const NO_CONTINUE_AS = 'Continue as needs the shared Beebeeb-apps session store (task 2323): SignInFlow never has an account to offer'
-const NO_APPROVE = 'the approval screens (auth/Approve.tsx) are not mounted in the live window: Settings › Security’s Approve a sign-in has no screen to open'
-const PHRASE = WORDS.join(' ')
+/** The 12 word boxes, filled one by one as a person types them (`words` may leave boxes empty). */
+const typeWords = (words: string[]): NonNullable<Recipe['steps']> =>
+  words.flatMap((w, i) => (w ? [{ fill: `field:Word ${i + 1}`, value: w }] : []))
+// Approving a sign-in (DW-A12 to A17): Settings › Security › Approve a sign-in, the code, then the review dialog. The
+// lookup (`auth_approve_lookup`) is a read: it answers with the board's request; the approval's answer is the step's.
+const SECURITY = 'section=settings&sub=security'
+const toApprove = (code = ''): NonNullable<Recipe['steps']> => [
+  { click: 'btn:Approve a sign-in' }, { wait: 'field:Code on the other device' }, ...(code ? [{ fill: 'field:Code on the other device', value: code }] : []),
+]
+const toReview: NonNullable<Recipe['steps']> = [
+  ...toApprove(REQUEST_CODE), { click: 'btn:Continue' }, { wait: 'field:Code shown on that device' },
+  { fill: 'field:Code shown on that device', value: REQUEST_CODE }, { fill: 'field:Your password', value: 'correct horse battery' },
+]
+const approve = (o: Recipe = {}): Recipe => ({ q: SECURITY, ...o, answers: { auth_approve_lookup: [REVIEW], ...o.answers } })
 
 // ── B11 ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+/** `auth_signup_password_meter` for the board's three passwords (DW-A36 strong, DW-A37 short, DW-A38 good). A table of
+ *  the frames' answers, not an evaluator (core evaluates): any other password is not in the fixture and gets no meter. */
+const METERS: Record<string, unknown> = { 'Winter-harbour-lantern-42': METER_STRONG, 'Winter-har': METER_SHORT, 'Password123456789012345': METER_GOOD }
+const meterRead = (a?: Record<string, unknown>) => METERS[String(a?.password)] ?? { error: 'the fixture holds no meter for this password' }
 const create = (step: string, seeds: Record<string, unknown> = {}): Recipe =>
-  signIn({ reads: { auth_signup_begin: POLICY, auth_signup_default_device_name: THIS_PC }, seeds: { 'entry.mode': { kind: 'create' }, 'create.step': step, ...seeds } })
+  signIn({ reads: { auth_signup_begin: POLICY, auth_signup_default_device_name: THIS_PC, auth_signup_password_meter: meterRead }, seeds: { 'entry.mode': { kind: 'create' }, 'create.step': step, ...seeds } })
 const forgot = (screen: string, seeds: Record<string, unknown> = {}): Recipe =>
-  signIn({ seeds: { 'entry.mode': { kind: 'forgot' }, 'forgot.screen': screen, ...seeds } })
+  signIn({ reads: { auth_signup_password_meter: meterRead }, seeds: { 'entry.mode': { kind: 'forgot' }, 'forgot.screen': screen, ...seeds } })
 const SIGNED_IN = { sync_status: { logged_in: true, vault_unlocked: true }, get_known_folder_backup: KNOWN_FOLDERS, autostart_enabled: true }
-const finder = (setup: 'ready' | 'adding' | 'failed') => ({
-  setup, reason: setup === 'failed' ? 'shell_registration' : null, launch_location: 'installed', attempt: 1, max_attempts: 3,
-  last_failure: setup === 'failed' ? { code: 0x8007017c, at: 0 } : null,
+/** `windows_shell_integration_state`: registered, never tried on this PC (setup then adds it), or the last try failed. */
+const shell = (setup: 'ready' | 'adding' | 'failed') => ({
+  installed: setup === 'ready', path: setup === 'adding' ? null : 'C:\\Users\\Anna\\Beebeeb', status: { ready: 'installed', adding: 'missing', failed: 'error' }[setup],
+  last_error: setup === 'failed' ? `Windows didn’t register the sync folder (${EXPLORER_ERROR})` : null, last_attempt_at: setup === 'adding' ? null : 0,
+  reason_category: setup === 'failed' ? 'unknown' : null,
 })
 const setup = (step: string, o: { finder?: 'ready' | 'adding' | 'failed' } = {}): Recipe => ({
-  window: 'onboarding', reads: { ...SIGNED_IN, finder_setup_state: finder(o.finder ?? 'ready') }, seeds: { 'setup.step': step },
+  window: 'onboarding', reads: { ...SIGNED_IN, windows_shell_integration_state: shell(o.finder ?? 'ready') }, seeds: { 'setup.step': step },
 })
-const NO_GUIDE = 'the first-time guide (guide/Guide.tsx) is not mounted in the live window: nothing starts it after setup or from Settings'
+/** The guide over the live window (../guide/GuideHost.tsx): step 0 is the notification-area tip, 1 to 5 the tips. */
+const guide = (step: number, section = 'files'): Recipe => ({ q: `section=${section}`, seeds: { 'guide.step': step } })
 
 export const WINDOW_STATES: Record<string, Recipe> = {
   // ── B09: the notification area and its flyout ─────────────────────────────────────────────────────────────────
@@ -80,13 +99,13 @@ export const WINDOW_STATES: Record<string, Recipe> = {
   'DW-A08': toDevice(device('signed_in')),
   'DW-A09': toDevice(device('denied')),
   'DW-A10': toDevice(device('expired', 0)),
-  'DW-A11': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A12': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A13': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A14': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A15': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A16': { q: 'section=settings&sub=security', gap: NO_APPROVE },
-  'DW-A17': { q: 'section=settings&sub=security', gap: NO_APPROVE },
+  'DW-A11': { q: SECURITY, native: 'the sign-in request toast is drawn by Windows (the board draws it for reference); nothing raises it yet: this PC gets no sign-in-request event' },
+  'DW-A12': { q: SECURITY, reads: { auth_approve_lookup: REVIEW }, steps: toApprove('K7QM4W') },
+  'DW-A13': approve({ steps: toReview }),
+  'DW-A14': approve({ answers: { auth_approve_request: [{ pending: true }] }, steps: [...toReview, { click: 'btn:Approve' }] }),
+  'DW-A15': approve({ answers: { auth_approve_request: [{ status: 'approved' }] }, steps: [...toReview, { click: 'btn:Approve' }] }),
+  'DW-A16': approve({ answers: { auth_approve_request: [{ status: 'denied' }] }, steps: [...toReview, { click: 'btn:Deny' }] }),
+  'DW-A17': approve({ answers: { auth_approve_lookup: [{ ...REVIEW, seconds_left: 0 }] }, steps: [...toApprove(REQUEST_CODE), { click: 'btn:Continue' }] }),
   // Email and password: each problem is the host's answer to the sign-in (desktop_login).
   'DW-A18': signIn({ answers: { desktop_login: [{ pending: true }] }, steps: submit() }),
   'DW-A19': signIn({ answers: { desktop_login: [{ error: 'invalid_credentials' }] }, steps: submit() }),
@@ -94,10 +113,10 @@ export const WINDOW_STATES: Record<string, Recipe> = {
   'DW-A21': signIn({ answers: { desktop_login: [{ error: 'rate_limited:30' }] }, steps: submit() }),
   'DW-A22': signIn({ answers: { desktop_login: Array(5).fill({ error: 'invalid_credentials' }) }, steps: [...submit(), { click: 'btn:Sign in' }, { click: 'btn:Sign in' }, { click: 'btn:Sign in' }, { click: 'btn:Sign in' }] }),
   'DW-A63': signIn({ answers: { desktop_login: [{ error: 'account_deleted' }] }, steps: submit() }),
-  'DW-A23': signIn({ answers: { desktop_login: [{ ...OUTCOME, vault_unlocked: false }] }, steps: submit() }),
+  'DW-A23': signIn({ answers: { desktop_login: [{ ...OUTCOME, vault_unlocked: false }] }, steps: [...submit(), ...typeWords(PHRASE_PARTIAL)] }),
   'DW-A24': signIn({
     answers: { desktop_login: [{ ...OUTCOME, vault_unlocked: false }], desktop_unlock_with_recovery_phrase: [{ error: 'wrong phrase' }], auth_phrase_unknown_words: [[2]] },
-    steps: [...submit(), { fill: 'input', value: PHRASE }, { click: 'btn:Restore keys' }],
+    steps: [...submit(), ...typeWords(PHRASE_WRONG), { click: 'btn:Restore keys' }],
   }),
   'DW-A25': signIn({ answers: { desktop_login: [{ ...OUTCOME, vault_unlocked: false }] }, steps: [...submit(), { click: 'btn:I’ve lost my recovery phrase' }] }),
   'DW-A26': signIn({ answers: { desktop_login: [{ ...OUTCOME, requires_2fa: true }] }, steps: [...submit(), { fill: 'any:#totp', value: '4821' }] }),
@@ -146,11 +165,11 @@ export const WINDOW_STATES: Record<string, Recipe> = {
   'DW-0281': setup('login'),
   'DW-0208': setup('done'),
   'DW-0209': setup('compare'),
-  'DW-0380': { q: 'section=files', gap: NO_GUIDE },
-  'DW-0301': { q: 'section=files', gap: NO_GUIDE },
-  'DW-0302': { q: 'section=files', gap: NO_GUIDE },
-  'DW-0303': { q: 'section=shared', gap: NO_GUIDE },
-  'DW-0304': { q: 'section=photos', gap: NO_GUIDE },
-  'DW-0305': { q: 'section=files', gap: NO_GUIDE },
+  'DW-0380': guide(0),
+  'DW-0301': guide(1),
+  'DW-0302': guide(2),
+  'DW-0303': guide(3, 'shared'),
+  'DW-0304': guide(4, 'photos'),
+  'DW-0305': guide(5),
 }
 

@@ -24,7 +24,8 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
   code: string
   state: 'idle' | 'verifying' | 'wrong'
   onCode: (v: string) => void
-  onSubmit: () => void
+  /** Gets the code itself: the sixth digit's change submits before the parent has re-rendered with it (DW-A26). */
+  onSubmit: (code: string) => void
   onSwitch: () => void
   onBack: () => void
 }) {
@@ -35,7 +36,7 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
         <StepLockup /><div className="mt-4" />
         <Heading sub="Use one of the backup codes you saved when you turned on two-factor. Each works once.">Use a backup code</Heading>
         {state === 'wrong' && <Note tone="red" title="That backup code isn’t right">Nothing was signed in.</Note>}
-        <form onSubmit={(e) => { e.preventDefault(); if (code.length === 8 && state !== 'verifying') onSubmit() }} noValidate>
+        <form onSubmit={(e) => { e.preventDefault(); if (code.length === 8 && state !== 'verifying') onSubmit(code) }} noValidate>
           <Field label="Backup code" mono {...SECRET_FIELD} inputMode="numeric" maxLength={8} placeholder="12345678" value={code}
             disabled={state === 'verifying'} onChange={(e) => onCode(digitsOnly(e.target.value, 8))} />
           <PrimaryButton type="submit" disabled={code.length !== 8 || state === 'verifying'}>{state === 'verifying' ? 'Verifying…' : 'Verify backup code'}</PrimaryButton>
@@ -64,8 +65,8 @@ export function TwoFactorView({ mode, code, state, onCode, onSubmit, onSwitch, o
         <input
           id="totp" ref={inputRef} {...SECRET_FIELD} type="text" inputMode="numeric" maxLength={6} value={code}
           disabled={state === 'verifying'}
-          onChange={(e) => { const v = digitsOnly(e.target.value, 6); onCode(v); if (v.length === 6) onSubmit() }}
-          onKeyDown={(e) => { if (e.key === 'Enter' && code.length === 6) onSubmit() }}
+          onChange={(e) => { const v = digitsOnly(e.target.value, 6); onCode(v); if (v.length === 6) onSubmit(v) }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && code.length === 6) onSubmit(code) }}
           className="absolute inset-0 opacity-0"
         />
       </div>

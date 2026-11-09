@@ -25,6 +25,16 @@ export const signupBegin = (): Promise<CommandResult<SignupPolicyView>> => comma
 export const sendCode = (email: string): Promise<CommandResult<void>> => command('auth_signup_send_code', { email })
 export const verifyCode = (code: string): Promise<CommandResult<void>> => command('auth_signup_verify_code', { codeTyped: code })
 export const passwordMeter = (password: string): Promise<CommandResult<PasswordMeter>> => command('auth_signup_password_meter', { password })
+/**
+ * The meter follows the latest keystroke (core's evaluator). The cleanup drops an answer that arrives after a newer
+ * keystroke asked again, and an evaluation that failed clears the meter: no strength is shown that core did not
+ * evaluate for this password (the flows kept the last one, so a short password could read "Strong.").
+ */
+export function followMeter(password: string, set: (m: PasswordMeter | null) => void, ask = passwordMeter): () => void {
+  let live = true
+  void ask(password).then((r) => { if (live) set(r.ok ? r.value : null) })
+  return () => { live = false }
+}
 export const breachCheck = (password: string): Promise<CommandResult<BreachAnswer>> => command('auth_signup_breach_check', { password })
 export const setPassword = (password: string, confirmation: string): Promise<CommandResult<void>> =>
   command('auth_signup_set_password', { password, confirmation })

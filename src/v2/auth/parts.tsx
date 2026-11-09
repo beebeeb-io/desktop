@@ -94,7 +94,7 @@ export function Field({ label, icon, error, mono, secret, id, ...input }: FieldP
           {...(secret ? { ...SECRET_FIELD, type: 'password' } : {})}
           {...input}
           aria-invalid={error ? true : undefined}
-          aria-describedby={error ? `${fieldId}-error` : undefined}
+          aria-describedby={error ? `${fieldId}-error` : input['aria-describedby']}
           className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-ink-4"
         />
       </div>

@@ -1,7 +1,7 @@
 // DW-A11 to A17: approving a sign-in from this PC. The notification (Windows draws it), the code field in Account,
 // the review dialog (what the server measured, what the device reported, the typed code), Windows Hello, and the
 // results. The approval itself runs in Rust (`auth_approve_request`): Windows Hello, then the step-up, claim and relay.
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { BBProductIcon, Icon } from '@beebeeb/shared/design'
 import { approveLookup, approveRequest, type ApprovalReview } from './api'
 import { approveErrorText, formatDeviceCode, isDeviceCode, type ApproveStage } from './model'
@@ -23,23 +23,33 @@ export function ApprovalToast({ device, country }: { device: string; country: st
   )
 }
 
-/** DW-A12: Account › Approve a sign-in. The PC types the code; it does not scan. */
-export function ApproveCodePanel({ code, error, busy, onCode, onContinue }: {
-  code: string; error?: string; busy?: boolean; onCode: (v: string) => void; onContinue: () => void
+/** DW-A12: Settings › Security › Approve a sign-in, in the settings view. The PC types the code; it does not scan. */
+export function ApproveCodePanel({ code, error, busy, back, onCode, onContinue }: {
+  code: string; error?: string; busy?: boolean
+  /** The settings page's way back (Sign-in and security), as its other pages have it. */
+  back?: ReactNode
+  onCode: (v: string) => void; onContinue: () => void
 }) {
   return (
-    <section aria-labelledby="approve-heading" className="max-w-[520px] p-6" data-approve-panel>
-      <div className="text-[11px] font-medium uppercase tracking-wide text-ink-3">Security</div>
-      <h2 id="approve-heading" className="mt-1 text-[18px] font-semibold text-ink">Approve a sign-in</h2>
+    <section aria-labelledby="approve-heading" className="mx-auto w-full max-w-[640px] px-8 py-6" data-approve-panel>
+      {back}
+      <h1 id="approve-heading" className="m-0 text-[20px] font-semibold leading-7 text-ink">Approve a sign-in</h1>
       <p className="mt-1 mb-4 text-[13px] leading-[18px] text-ink-2">
-        Type the code the other device shows. You’ll see where the request came from before anything is shared.
+        Type the code the other device is showing. Only approve a request you started yourself.
       </p>
       <form onSubmit={(e) => { e.preventDefault(); if (isDeviceCode(code) && !busy) onContinue() }} noValidate>
-        <Field label="Code" mono placeholder="XXXX-XXXX" autoComplete="off" spellCheck={false} autoCorrect="off" value={code}
-          error={error} onChange={(e) => onCode(formatDeviceCode(e.target.value))} />
-        <div className="w-[200px]"><PrimaryButton type="submit" disabled={!isDeviceCode(code) || busy}>{busy ? 'Looking it up…' : 'Continue'}</PrimaryButton></div>
+        <div className="max-w-[320px]">
+          <Field label="Code on the other device" mono placeholder="XXXX-XXXX" autoComplete="off" spellCheck={false} autoCorrect="off" value={code}
+            error={error} aria-describedby={error ? undefined : 'approve-code-hint'} onChange={(e) => onCode(formatDeviceCode(e.target.value))} />
+          {!error && <p id="approve-code-hint" className="-mt-1 mb-3 text-[12px] text-ink-3">Eight characters, shown as XXXX-XXXX.</p>}
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="w-[160px]">
+            <PrimaryButton type="submit" disabled={!isDeviceCode(code) || busy}><Icon name="check" size={14} />{busy ? 'Looking it up…' : 'Continue'}</PrimaryButton>
+          </div>
+          <span className="text-[12px] text-ink-3">or scan its QR code with your iPhone instead</span>
+        </div>
       </form>
-      <p className="mt-4 flex items-center gap-2 text-[12px] text-ink-3"><Icon name="scan" size={14} />On your iPhone, scan the QR code on the other device instead.</p>
     </section>
   )
 }
@@ -90,11 +100,17 @@ export function ApproveDialog(p: ApproveDialogProps) {
 function Review(p: ApproveDialogProps & { device: string }) {
   const matches = formatDeviceCode(p.typedCode) === p.review.code
   const { onDeny, busy } = p
-  // Esc is Deny (DW-A13); Enter approves only when the code matches (the form's submit guard).
+  // Esc is Deny (DW-A13), and only Deny: taken in the capture phase so the settings view's Esc (Back to Drive) does not
+  // also run. Enter approves only when the code matches (the form's submit guard).
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onDeny() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!busy) onDeny()
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
   }, [onDeny, busy])
   const country = p.review.country ?? 'Unknown'
   return (
@@ -179,10 +195,14 @@ function Result(p: ApproveDialogProps & { device: string }) {
 }
 
 /**
- * The live approval, for Account › Approve a sign-in (B14 mounts it): look the code up, review, then Rust raises
- * Windows Hello and runs the step-up, claim and relay. The password is cleared from state as soon as it is sent.
+ * The live approval, for Settings › Security › Approve a sign-in (mounted by the Security pane): look the code up,
+ * review, then Rust raises Windows Hello and runs the step-up, claim and relay. The password is cleared from state as
+ * soon as it is sent. Done leaves for Account (DW-A17); the result screens' sessions link opens Devices (DW-A55).
  */
-export function ApproveSignIn({ onSeeSessions }: { onSeeSessions: () => void }) {
+export function ApproveSignIn({ back, onBack, onSeeSessions, onDone }: {
+  /** The page's way back (a link), and what Esc does on the code and result screens: back to Sign-in and security. */
+  back?: ReactNode; onBack?: () => void; onSeeSessions: () => void; onDone: () => void
+}) {
   const [code, setCode] = useState('')
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- DW-A12: the board's one honest message sits under the code field, tied to it.
   const [lookupError, setLookupError] = useState<string>()
@@ -205,12 +225,19 @@ export function ApproveSignIn({ onSeeSessions }: { onSeeSessions: () => void }) 
     setTyped('')
     setStage(r.value.seconds_left <= 0 ? 'expired' : 'review')
   }
+  // One answer per request: a second Esc, or Esc and a click, while the first is on its way sends nothing (a second deny
+  // would come back already_handled and say another device answered).
+  const deciding = useRef(false)
   const decide = async (approve: boolean) => {
+    if (deciding.current) return
+    deciding.current = true
     const secret = password
     setPassword('')
     setError(undefined)
-    if (approve) { setBusy(true); setStage('hello') }
+    setBusy(true)
+    if (approve) setStage('hello')
     const r = await approveRequest(review?.code ?? code, secret, approve)
+    deciding.current = false
     setBusy(false)
     if (r.ok) { setStage(r.value.status === 'approved' ? 'approved' : 'denied'); return }
     if (r.reason === 'already_handled') setStage('already-handled')
@@ -218,10 +245,22 @@ export function ApproveSignIn({ onSeeSessions }: { onSeeSessions: () => void }) 
     else if (r.reason === 'hello_cancelled') setStage('review')
     else { setStage('review'); setError(r.reason) }
   }
-  const done = () => { setReview(null); setStage('code'); setCode('') }
+  const done = () => { setReview(null); setStage('code'); setCode(''); onDone() }
+  // Esc goes back to Sign-in and security, as on the other Security pages; the review takes its own Esc (Deny).
+  useEffect(() => {
+    if (!onBack || stage === 'review' || stage === 'hello') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      e.preventDefault()
+      e.stopPropagation()
+      onBack()
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [onBack, stage])
   return (
     <>
-      <ApproveCodePanel code={code} error={lookupError} busy={busy && stage === 'code'} onCode={setCode} onContinue={() => void lookup()} />
+      <ApproveCodePanel code={code} error={lookupError} busy={busy && stage === 'code'} back={back} onCode={setCode} onContinue={() => void lookup()} />
       {review && stage !== 'code' && (
         <ApproveDialog
           stage={stage} review={review} typedCode={typed} password={password} error={error} busy={busy}

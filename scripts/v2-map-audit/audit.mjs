@@ -97,7 +97,7 @@ const SECTION_WINDOW = {
   'File Explorer': 'File Explorer', 'Install Beebeeb on Windows': 'the installer',
   'First run': 'sign-in', 'Sign in': 'sign-in', 'Continue as': 'sign-in', 'Another device': 'sign-in', 'Email and password': 'sign-in',
   'Two-factor and passkeys': 'sign-in', 'Create an account': 'sign-in', 'Forgot password': 'sign-in', 'Before Files: locked, no plan yet': 'sign-in',
-  'First run on Windows': 'first run', 'The first-time guide': 'first run',
+  'First run on Windows': 'first run',
 }
 const SECTION_OF = Object.fromEntries(board.map((f) => [f.id, f.section]))
 const windowOf = (id) => SECTION_WINDOW[SECTION_OF[id]] ?? 'the main window'
@@ -275,8 +275,10 @@ async function findOnce(page, p) {
     }
     return null
   }
+  // The board types a straight apostrophe ("I've"), the app's copy a typographic one ("I’ve"): either matches (M3b).
   const exact = p.name
-  const names = exact.endsWith('…') ? [exact] : [exact, `${exact}…`]
+  const spelled = [...new Set([exact, exact.replace(/'/g, '’'), exact.replace(/’/g, "'")])]
+  const names = spelled.flatMap((n) => (n.endsWith('…') ? [n] : [n, `${n}…`]))
   for (const scope of scopes) {
     for (const role of p.role ? [p.role] : ROLES) {
       for (const n of names) {
@@ -285,14 +287,40 @@ async function findOnce(page, p) {
       }
     }
   }
-  const loose = new RegExp(esc(exact), 'i')
+  const loose = new RegExp(esc(exact).replace(/['’]/g, "['’]"), 'i')
   for (const scope of scopes) {
     for (const role of p.role ? [p.role] : ROLES) {
       const l = await firstVisible(scope.getByRole(role, { name: loose }))
       if (l) return l
     }
-    const l = (await firstVisible(scope.getByLabel(loose))) ?? (await firstVisible(scope.getByTitle(loose))) ?? (await firstVisible(scope.getByText(exact, { exact: true }))) ?? (await firstVisible(scope.getByText(loose)))
+    let l = (await firstVisible(scope.getByLabel(loose))) ?? (await firstVisible(scope.getByTitle(loose)))
+    for (const n of spelled) l ??= await firstVisible(scope.getByText(n, { exact: true }))
+    l ??= await firstVisible(scope.getByText(loose))
     if (l) return l
+  }
+  return null
+}
+
+/**
+ * A plan's `before` steps (controls.json, M3b): what a person does before the action itself, e.g. types the password
+ * before Sign in or ticks the box before Continue. `{ fill: css, value }` (or `values`, one per match in order),
+ * `{ click: name }` or `{ click: { selector } }`, `{ key }`. Resolves to null, or to why a step found no control.
+ */
+async function beforeSteps(page, steps) {
+  for (const s of steps) {
+    try {
+      if (s.fill) {
+        const values = s.values ?? [s.value ?? '']
+        for (const [i, v] of values.entries()) await page.locator(s.fill).nth(i).fill(v, { timeout: 2000 })
+      } else if (s.click) {
+        const c = await findControl(page, typeof s.click === 'string' ? { name: s.click } : s.click)
+        if (!c) return `no control for the step before it: ${JSON.stringify(s)}`
+        await c.click({ timeout: 2000 })
+      } else if (s.key) await page.keyboard.press(s.key)
+    } catch (e) {
+      return `the step before it failed: ${JSON.stringify(s)} (${String(e).split('\n')[0]})`
+    }
+    await page.waitForTimeout(150)
   }
   return null
 }
@@ -431,10 +459,18 @@ async function audit(page, a) {
   if (state.gap) row.gap = state.gap
   if (state.result.startsWith('native')) return { ...row, outcome: 'not-automatable', detail: state.result.replace(/^native: /, 'drawn by Windows: ') }
   if (state.result !== 'ready') return { ...row, outcome: 'source-unreached', detail: state.result }
+  // How much of the frame's own screen the live state shows (1 = every token of the frame's signature is on screen).
+  row.stateScore = Number(cover(sigs[a.source] ?? [], new Set(await signature(page))).toFixed(2))
+  // What a person does first (controls.json `before`): the action starts from the screen after it.
+  const prep = plans.find((p) => p.before)?.before
+  if (prep) {
+    const failed = await beforeSteps(page, prep)
+    if (failed) return { ...row, outcome: 'missing-control', detail: failed }
+    row.before = prep.length
+    await settle(page, 1500)
+  }
   const preUrl = page.url()
   const pre = new Set(await signature(page))
-  // How much of the frame's own screen the live state shows (1 = every token of the frame's signature is on screen).
-  row.stateScore = Number(cover(sigs[a.source] ?? [], pre).toFixed(2))
   // Commands the window calls on its own (sync_status every second, the theme's desktop_config) are not the control's.
   const idle = unavailable(page)
   await page.waitForTimeout(SETTLE_MS)

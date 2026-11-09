@@ -55,10 +55,8 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
     void api.signupBegin().then((r) => { if (r.ok) setPolicy(r.value) })
     void api.defaultDeviceName().then((r) => { if (r.ok) setDevice(r.value) })
     return () => {
-      // Leaving the flow forgets everything, here and in Rust.
-      setPw({ password: '', confirm: '', show: false })
-      setWords([])
-      setAnswers([])
+      // Leaving the flow forgets everything in Rust. The typed secrets go with this component's state: a set-state in an
+      // unmount cleanup does nothing in a build, and under React's dev StrictMode re-mount it emptied the live screen.
       window.clearTimeout(clipboardTimer.current)
       void api.cancelSignup()
     }
@@ -67,7 +65,7 @@ export function CreateAccountFlow({ onBack, onCreated, onSignIn }: CreateAccount
   // The meter follows each keystroke (core's evaluator).
   useEffect(() => {
     if (step !== 'password') return
-    void api.passwordMeter(pw.password).then((r) => { if (r.ok) setMeter(r.value) })
+    return api.followMeter(pw.password, setMeter)
   }, [pw.password, step])
 
   const send = async (resend: boolean) => {
