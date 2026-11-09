@@ -3,7 +3,7 @@
 // backup view (`drive_status`) and its problems list (`drive_sync_problems`), the other devices and the services from
 // the Backups folder's own listing (DriveSource). What no command reads says so; the board's numbers stay in its frames.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Btn, Dialog, Group, Meter, Page, Row, Switch, mono } from '../shell/kit'
+import { Btn, Dialog, Group, Page, Row, Switch, mono } from '../shell/kit'
 import { useKnownFolders } from '../shell/data'
 import { useSettings } from '../shell/context'
 import { useDriveSource, type DriveItem } from '@beebeeb/shared/drive-ui'
@@ -13,12 +13,6 @@ import { newestOnly, throttled } from '../../../throttle'
 import { board } from '../../../board'
 
 export type BackupState = 'idle' | 'running'
-
-/** The board's status card numbers, for a frame (no command reports a backup pass's progress or size yet). */
-interface BoardCard {
-  idle: { last: string; bytes: string; failed: number }
-  running: { folder: string; left: string; done: number; total: number }
-}
 
 /** The service folders in Backups (a Beebeeb service manages them, DW-0425); the rest are devices. */
 const SERVICES = new Set(['Mail Backup'])
@@ -31,13 +25,25 @@ export function lastBackupText(iso: string, now = new Date()): string {
   return sameDay ? d.toTimeString().slice(0, 5) : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 }
 
+/** A running pass: folder count from this read, or done/total when the read carried them. No size and no clock. */
+function runningLine(view: BackupView): string | null {
+  const extra = view as BackupView & { done?: unknown; total?: unknown }
+  if (typeof extra.done === 'number' && typeof extra.total === 'number'
+    && Number.isFinite(extra.done) && Number.isFinite(extra.total) && extra.done >= 0 && extra.total > 0) {
+    return `${extra.done.toLocaleString('en')} of ${extra.total.toLocaleString('en')}`
+  }
+  const n = view.foldersOn
+  if (typeof n === 'number' && Number.isFinite(n) && n > 0) return `${n.toLocaleString('en')} ${n === 1 ? 'folder' : 'folders'}`
+  return null
+}
+
 /** The card's title and line, from the engine's backup view and how many backup items it stopped trying. */
 export function cardWords(view: BackupView | null, failed: number, now = new Date()): { title: string; line: string | null } {
-  if (!view) return { title: 'Backups', line: null }
+  if (!view) return { title: 'Not reported yet', line: null }
+  if (view.state === 'getting-ready') return { title: 'Backing up', line: runningLine(view) }
   const title = view.state === 'off' ? 'Backups are off'
     : view.state === 'stopped' ? 'Backups stopped'
-      : view.state === 'getting-ready' ? 'Getting ready to back up'
-        : failed > 0 ? 'Backed up, except a few items' : 'All backed up'
+      : failed > 0 ? 'Backed up, except a few items' : 'All backed up'
   const line = view.lastBackupAt ? `Last backup ${lastBackupText(view.lastBackupAt, now)}` : view.state === 'off' ? null : 'No backup has finished yet'
   return { title, line }
 }
@@ -48,17 +54,19 @@ function useBackupStatus() {
   const source = useDriveSource()
   const [view, setView] = useState<BackupView | null>(null)
   const [failed, setFailed] = useState(0)
+  const readRef = useRef<() => void>(() => {})
   useEffect(() => {
     let live = true
     const read = () => {
       extras.status().then((s) => { if (live) setView(s.backup) }, () => { if (live) setView(null) })
       extras.syncProblems().then((list) => { if (live) setFailed(list.filter((p) => p.backup && p.retryable).length) }, () => { if (live) setFailed(0) })
     }
+    readRef.current = read
     read()
     const off = source.subscribe((e) => { if (e.kind === 'sync') read() })
     return () => { live = false; off() }
   }, [extras, source])
-  return { view, failed }
+  return { view, failed, retry: () => readRef.current() }
 }
 
 /** The Backups folder's children (DriveSource): each device's backup, and the services. This PC's own is left out. */
@@ -88,31 +96,31 @@ function useBackupFolders(thisPc: string | undefined) {
 
 const itemsText = (n: number | null | undefined) => (n == null ? undefined : `${n.toLocaleString('en')} ${n === 1 ? 'item' : 'items'}`)
 
-function StatusCard({ state, view, failed, onBackUpNow }: { state: BackupState; view: BackupView | null; failed: number; onBackUpNow: () => void }) {
+function StatusCard({ state, view, failed, onBackUpNow, onRetry }: { state: BackupState; view: BackupView | null; failed: number; onBackUpNow: () => void; onRetry: () => void }) {
   const { go } = useSettings()
-  const drawn = board<BoardCard>('backupCard')
-  if (state === 'running' && drawn) {
-    const r = drawn.running
+  // A frame's running pass still says only what this read reported.
+  const reported = state === 'running' && view && view.state !== 'off' && view.state !== 'stopped'
+    ? { ...view, state: 'getting-ready' as const }
+    : view
+  const words = cardWords(reported, failed)
+  if (!reported) {
     return (
-      <div className="rounded-[12px] border border-line bg-paper px-4 py-3" data-testid="backup-status">
-        <div className="flex items-baseline justify-between"><span className="text-[14px] font-medium text-ink">Backing up {r.folder}</span>
-          <span className={`text-[12px] text-ink-3 ${mono}`}>{r.left}</span></div>
-        <div className="my-2"><Meter label={`Backing up ${r.folder}`} fraction={r.done / r.total} amber /></div>
-        <div className={`text-[12px] text-ink-3 ${mono}`}>{r.done.toLocaleString('en')} of {r.total.toLocaleString('en')} files</div>
+      <div className="flex items-center gap-3 rounded-[12px] border border-line bg-paper px-4 py-3" data-testid="backup-status">
+        <div className="flex-1">
+          <div className="text-[14px] font-medium text-ink">{words.title}</div>
+        </div>
+        <Btn onClick={onRetry}>Try again</Btn>
       </div>
     )
   }
-  // A frame draws the board's card; the running app says what the engine reports.
-  const words = drawn ? { title: 'All backed up', line: `Last backup ${drawn.idle.last} · ${drawn.idle.bytes}` } : cardWords(view, failed)
-  const count = drawn ? drawn.idle.failed : failed
   return (
     <div className="flex items-center gap-3 rounded-[12px] border border-line bg-paper px-4 py-3" data-testid="backup-status">
       <div className="flex-1">
         <div className="text-[14px] font-medium text-ink">{words.title}</div>
         {words.line ? <div className="text-[12px] text-ink-3"><span className={mono}>{words.line}</span> from this PC</div> : null}
-        {count > 0 ? (
+        {failed > 0 ? (
           <a href="?section=settings&page=backup-failures" onClick={(e) => { e.preventDefault(); go('backup-failures') }} className="text-[12px] text-ink-2 underline">
-            Couldn't back up {count.toLocaleString('en')} {count === 1 ? 'item' : 'items'}
+            Couldn't back up {failed.toLocaleString('en')} {failed === 1 ? 'item' : 'items'}
           </a>
         ) : null}
       </div>
@@ -124,13 +132,13 @@ function StatusCard({ state, view, failed, onBackUpNow }: { state: BackupState; 
 export function Backups({ state = 'idle' }: { state?: BackupState } = {}) {
   const { go, open } = useSettings()
   const { folders, toggle, error } = useKnownFolders()
-  const { view, failed } = useBackupStatus()
+  const { view, failed, retry } = useBackupStatus()
   const backupFolders = useBackupFolders(view?.deviceFolder)
   // Blocked: no command starts a backup pass now (the engine backs up on its own schedule). Said, never pretended.
   const [refused, setRefused] = useState<string | null>(null)
   return (
     <Page title="Backups">
-      <StatusCard state={state} view={view} failed={failed} onBackUpNow={() => setRefused(actionFailure('start a backup now', 'unsupported').text)} />
+      <StatusCard state={state} view={view} failed={failed} onBackUpNow={() => setRefused(actionFailure('start a backup now', 'unsupported').text)} onRetry={retry} />
       {refused ? <p role="alert" className="-mt-3 px-1 text-[12px] text-red-text">{refused}</p> : null}
       <Group title="This PC" note="OneDrive's folder backup may keep Desktop, Documents and Pictures in the OneDrive folder. Beebeeb backs up the folders in your user folder, not OneDrive's copies; add OneDrive's folder below to back those up too.">
         {folders.map((f) => (
