@@ -14,6 +14,15 @@ export const BREACH_BLOCKED = 'We could not check this password against known br
 export const WORDS_MISMATCH = 'Those words do not match your recovery phrase.'
 export const CREATE_FAILED = 'We could not create your account. Nothing was stored. You can try again.'
 export const FINISH_FAILED = 'Your account was created. We could not finish setting it up on this device. Nothing is lost.'
+/** Steps 4 and 5 (DW-A36, DW-A39) when a step fails: the board draws no error there, so the lead wrote the line (M3b's
+ *  leftovers, 2026-11-09). */
+export const STEP_FAILED = 'That didn’t work. Check your connection and try again.'
+/** The line under the button: Rust's sentence when it sent one, else STEP_FAILED. A code (`clipboard`, `write_failed`,
+ *  `internal`) is never shown. */
+export function stepFailureText(reason: string | null | undefined): string {
+  const r = (reason ?? '').trim()
+  return /^[A-Z][^_]* [^_]*$/.test(r) ? r : STEP_FAILED
+}
 export const TICKET_EXPIRED = 'Your email code expired before the account was created. Request a new one. Your password and recovery phrase are kept.'
 
 /** DW-A31's errors. */

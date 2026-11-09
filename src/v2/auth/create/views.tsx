@@ -153,8 +153,13 @@ export function PasswordFields({ password, confirm, meter, breach, show, busy, o
   )
 }
 
-export function PasswordStep(props: Parameters<typeof PasswordFields>[0] & { canContinue: boolean; blocked: boolean; onContinue: () => void }) {
-  const { canContinue, blocked, onContinue, ...fields } = props
+/** A step that failed, under its button (M3b's leftovers; the copy is the lead's, create/model.ts STEP_FAILED). */
+function StepError({ text }: { text?: string | null }) {
+  return text ? <p role="alert" data-step-error className="m-0 mt-2 text-[12px] leading-4 text-red-text">{text}</p> : null
+}
+
+export function PasswordStep(props: Parameters<typeof PasswordFields>[0] & { canContinue: boolean; blocked: boolean; onContinue: () => void; error?: string | null }) {
+  const { canContinue, blocked, onContinue, error, ...fields } = props
   return (
     <AuthWindow>
       <StepLockup /><div className="mt-4" />
@@ -165,6 +170,7 @@ export function PasswordStep(props: Parameters<typeof PasswordFields>[0] & { can
         <PasswordFields {...fields} />
         <p className="mb-3 text-[12px] leading-4 text-ink-3">We check it against known data breaches without sending it: only the first 5 characters of its hash leave this PC.</p>
         <PrimaryButton type="submit" disabled={!canContinue || fields.busy}>{fields.busy ? 'Checking…' : 'Continue'}</PrimaryButton>
+        <StepError text={error} />
       </form>
     </AuthWindow>
   )
@@ -172,9 +178,10 @@ export function PasswordStep(props: Parameters<typeof PasswordFields>[0] & { can
 
 // ── Step 5: the phrase ───────────────────────────────────────────────────────
 
-export function PhraseStep({ words, saved, copied, onSaved, onCopy, onSave, onPrint, onContinue }: {
+export function PhraseStep({ words, saved, copied, onSaved, onCopy, onSave, onPrint, onContinue, error }: {
   words: string[]; saved: boolean; copied: boolean
   onSaved: (v: boolean) => void; onCopy: () => void; onSave: () => void; onPrint: () => void; onContinue: () => void
+  error?: string | null
 }) {
   usePrivateScreen()
   return (
@@ -202,6 +209,7 @@ export function PhraseStep({ words, saved, copied, onSaved, onCopy, onSave, onPr
         I have saved my recovery phrase offline.
       </label>
       <PrimaryButton disabled={!saved} onClick={onContinue}>I saved it, verify</PrimaryButton>
+      <StepError text={error} />
     </AuthWindow>
   )
 }

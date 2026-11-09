@@ -125,3 +125,16 @@ export function spreadPaste(words: string[], index: number, pasted: string): str
 export function initials(name: string): string {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('')
 }
+
+/** A country as people read it: Rust's two-letter code ("DE") becomes its English name ("Germany", as the board says),
+ *  through the platform's own list (Intl.DisplayNames). A storage or sign-in place is a country, never a city (LD-0021);
+ *  a code the list does not know reads "Unknown", and anything else is shown as it came. */
+export function countryName(code: string | null | undefined): string {
+  const c = (code ?? '').trim()
+  if (!c) return 'Unknown'
+  if (!/^[A-Za-z]{2}$/.test(c)) return c
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'region', fallback: 'none' }).of(c.toUpperCase())
+    return name && name !== 'Unknown Region' ? name : 'Unknown'
+  } catch { return 'Unknown' }
+}

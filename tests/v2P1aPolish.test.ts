@@ -14,7 +14,8 @@ import { READ_CAP_BYTES } from '../src/v2/source/desktop'
 import { ThumbCache } from '../src/v2/sections/open/thumbCache'
 import { actionFailure } from '../src/v2/sections/files/model'
 import { routeFilter } from '../src/v2/sections/sync-history/model'
-import { phraseFilled, totpEntry } from '../src/v2/auth/model'
+import { countryName, phraseFilled, totpEntry } from '../src/v2/auth/model'
+import { STEP_FAILED, stepFailureText } from '../src/v2/auth/create/model'
 import { firstFileRow, tipMissing } from '../src/v2/guide/Guide'
 import { shellPolls } from '../src/v2/onboarding'
 
@@ -321,5 +322,38 @@ describe('#271 P2 and review: setup’s File Explorer step', () => {
     expect(shellPolls('backup', true)).toBe(true)
     expect(shellPolls('backup', false)).toBe(false)
     expect(shellPolls('done', false)).toBe(false)
+  })
+})
+
+describe('M3b’s leftovers: create account steps 4–5 say a failure, and the approval says the country', () => {
+  test('a failed step shows the lead’s line, or Rust’s sentence when it sent one; never a code', () => {
+    expect(STEP_FAILED).toBe('That didn’t work. Check your connection and try again.')
+    expect(stepFailureText('clipboard')).toBe(STEP_FAILED)
+    expect(stepFailureText('write_failed')).toBe(STEP_FAILED)
+    expect(stepFailureText(undefined)).toBe(STEP_FAILED)
+    expect(stepFailureText('The phrase was already confirmed on this PC.')).toBe('The phrase was already confirmed on this PC.')
+  })
+  test('each of the four handlers shows its failure under its button, and the button works again', () => {
+    const flow = src('v2/auth/create/index.tsx')
+    expect(flow.match(/setStepError\(stepFailureText\((?:r|w)\.reason\)\)/g)?.length).toBe(5)
+    expect(flow).toContain('onSave={() => void savePhrase()}')
+    expect(flow.match(/error=\{stepError\}/g)?.length).toBe(2)
+    expect(flow).not.toMatch(/if \(!r\.ok\) return\n/)
+    const views = src('v2/auth/create/views.tsx')
+    expect(views.match(/<StepError text=\{error\} \/>/g)?.length).toBe(2)
+  })
+  test('a country code reads as its English name; never a city (LD-0021)', () => {
+    expect(countryName('DE')).toBe('Germany')
+    expect(countryName('fi')).toBe('Finland')
+    expect(countryName('ZZ')).toBe('Unknown')
+    expect(countryName(null)).toBe('Unknown')
+    expect(countryName('Germany')).toBe('Germany')
+    expect(src('v2/auth/Approve.tsx')).toContain('const country = countryName(p.review.country)')
+  })
+})
+
+describe('#271: DW-A17’s Done goes to Account, as the board says (the PR body was wrong, the app was right)', () => {
+  test('the approval’s Done opens Settings › Account', () => {
+    expect(src('v2/sections/settings/account/SecurityPane.tsx')).toMatch(/case 'approve': return <ApproveSignIn [^\n]*onDone=\{\(\) => settings\.go\('account'\)\}/)
   })
 })
