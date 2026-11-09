@@ -1,7 +1,7 @@
 // Shared, live: DriveSource.shared() for the lists it can fill; share_list (Rust) for invitations, link expiry,
 // pending and file requests; the share_* and file_request_* commands for every action (sections/shared/api.ts).
 // A command this build lacks shows the honest "isn't available" toast, never invented data.
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import type { SectionProps } from '../types'
 import { showToast } from '../../chrome/Toast'
@@ -23,10 +23,12 @@ type Dialog =
   | { kind: 'people'; itemId: string }
   | { kind: 'person'; itemId: string; member: Member }
   | { kind: 'remove'; itemId: string; member: Member }
-  | { kind: 'safety'; itemId: string; member: Member; groups: string[] }
-  | { kind: 'mismatch'; itemId: string; member: Member; groups: string[] }
+  // `refused`: the comparison is for an invite a changed key stopped (DW-0515); They match then seals it.
+  | { kind: 'safety'; itemId: string; member: Member; groups: string[]; refused?: { email: string; canEdit: boolean } }
+  | { kind: 'mismatch'; itemId: string; member: Member; groups: string[]; refused?: { email: string; canEdit: boolean } }
   | { kind: 'invite'; itemId: string }
   | { kind: 'key-changed'; itemId: string; member: Member; email: string; canEdit: boolean }
+  | { kind: 'mark-changed'; itemId: string; member: Member }
 
 const EMPTY_LISTS: ShareLists = { invitations: [], links: [], requests: [], pending: [] }
 const days = (label: string) => (label === 'Never' ? null : Number(label.replace(/\D/g, '')) || null)
@@ -45,6 +47,7 @@ export default function Section({ nav }: SectionProps) {
   const [menu, setMenu] = useState<{ kind: RowKind; id: string; x: number; y: number } | null>(null)
   const [dialog, setDialog] = useState<Dialog | null>(() => seed('shared.dialog', null))
   const [busy, setBusy] = useState(false)
+  const dismissed = useRef(new Set<string>())
   const now = useMemo(() => new Date(), [])
 
   const load = useCallback(async () => {
@@ -67,7 +70,9 @@ export default function Section({ nav }: SectionProps) {
     const r = await api.sharePeople(itemId)
     if (!r.ok) return toast(r)
     setMembers(r.value)
-    setDialog({ kind: 'people', itemId })
+    // DW-0515: a remembered key no longer matches; nothing new goes to them until the owner chooses.
+    const changed = r.value.find((m) => m.keyChanged && !dismissed.current.has(m.id))
+    setDialog(changed ? { kind: 'mark-changed', itemId, member: changed } : { kind: 'people', itemId })
   }
 
   const pick = async (id: string) => {
@@ -110,11 +115,16 @@ export default function Section({ nav }: SectionProps) {
     if (res.ok) { setDialog(null); void load() }
   }
 
-  const invite = async (itemId: string, email: string, canEdit: boolean, acceptChangedKey = false) => {
+  const invite = async (itemId: string, email: string, canEdit: boolean, acceptChangedKey = false, memberId: string | null = null) => {
     setBusy(true)
-    const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey)
+    const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey, memberId)
     setBusy(false)
-    if (!r.ok) return toast(r)
+    if (!r.ok) {
+      toast(r)
+      // A folder's Share anyway: Rust withdrew the refused invite, so the dialog about it closes and People reloads.
+      if (acceptChangedKey && /sharing a folder to a changed key/.test(r.reason)) await openPeople(itemId)
+      return
+    }
     if (r.value.status === 'key-changed') {
       const member = members.find((m) => m.id === (r.value as { memberId: string }).memberId) ?? { id: r.value.memberId, name: email, email }
       return setDialog({ kind: 'key-changed', itemId, member, email, canEdit })
@@ -122,10 +132,18 @@ export default function Section({ nav }: SectionProps) {
     await openPeople(itemId)
   }
 
-  const safety = async (itemId: string, member: Member) => {
+  const safety = async (itemId: string, member: Member, refused?: { email: string; canEdit: boolean }) => {
     const r = await api.shareSafetyNumber(member.id)
     if (!r.ok) return toast(r)
-    setDialog({ kind: 'safety', itemId, member, groups: r.value.groups })
+    setDialog({ kind: 'safety', itemId, member, groups: r.value.groups, refused })
+  }
+
+  // DW-0515 Cancel on a refused seal: "Shares nothing". The refused invite holds no key; it is withdrawn so it never
+  // waits on the other side as an invitation that cannot open.
+  const withdraw = async (itemId: string, member: Member) => {
+    const r = await api.shareRevoke(itemId, member.id)
+    if (!r.ok) toast(r)
+    await openPeople(itemId)
   }
 
   const go = (t: SharedTab) => nav.go({ section: 'shared', id: null, sub: t })
@@ -151,6 +169,11 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'password' && <LinkPasswordDialog name={nameOf(d.itemId)} hasPassword={!!links.find((l) => l.id === d.itemId)?.password} onClose={() => setDialog(null)}
         onSave={async (pw) => { setDialog(null); toast(await api.shareLinkUpdate(d.itemId, { password: pw }), pw ? 'Password set' : 'Password removed'); void load() }} />}
       {d?.kind === 'new-request' && <NewRequestDialog folders={['Files', 'Documents', 'Photos']} busy={busy} onCreate={(r) => void createRequest(r)} onClose={() => setDialog(null)} />}
+      {d?.kind === 'mark-changed' && <><PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members} />
+        <KeyChangedAlert member={d.member}
+          onCompare={() => void safety(d.itemId, d.member)}
+          onShareAnyway={async () => { const r = await api.shareAcceptChangedKey(d.member.id); if (!r.ok) return toast(r); await openPeople(d.itemId) }}
+          onCancel={() => { dismissed.current.add(d.member.id); setDialog({ kind: 'people', itemId: d.itemId }) }} /></>}
       {d?.kind === 'people' && <PeopleDialog name={nameOf(d.itemId)} items={people.find((p) => p.id === d.itemId)?.items ?? 0} members={members}
         onPerson={(m) => setDialog({ kind: 'person', itemId: d.itemId, member: m })} onInvite={() => setDialog({ kind: 'invite', itemId: d.itemId })} onClose={() => setDialog(null)} />}
       {d?.kind === 'person' && <PersonDialog member={d.member}
@@ -160,14 +183,24 @@ export default function Section({ nav }: SectionProps) {
         onRemove={async () => { setBusy(true); const r = await api.shareRevoke(d.itemId, d.member.id); setBusy(false); toast(r); if (r.ok) await openPeople(d.itemId) }}
         onCancel={() => setDialog({ kind: 'person', itemId: d.itemId, member: d.member })} />}
       {d?.kind === 'safety' && <SafetyNumberDialog member={d.member} groups={d.groups}
-        onMatch={async () => { const r = await api.shareMarkCompared(d.member.id, true); toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: { ...d.member, compared: r.ok } }) }}
-        onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: d.member, groups: d.groups }) }}
-        onClose={() => setDialog({ kind: 'person', itemId: d.itemId, member: d.member })} />}
+        onMatch={async () => {
+          const r = await api.shareMarkCompared(d.member.id, true)
+          // A refused invite is not shared yet: They match seals it now, to the key just compared.
+          if (d.refused) return r.ok ? void invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id) : toast(r)
+          // Rust wrote They match to every mark of the person: no earlier state of theirs stands.
+          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: r.ok ? { ...d.member, compared: true, mismatch: false, keyChanged: false, markUnreadable: false } : d.member })
+        }}
+        onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: d.member, groups: d.groups, refused: d.refused }) }}
+        // A refused invite holds no key: every way out of its comparison but They match withdraws it (as DW-0515 Cancel).
+        onClose={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog({ kind: 'person', itemId: d.itemId, member: d.member }))} />}
       {d?.kind === 'mismatch' && <MismatchDialog member={d.member} groups={d.groups}
-        onRemove={() => setDialog({ kind: 'remove', itemId: d.itemId, member: d.member })} onCompare={() => setDialog({ kind: 'safety', itemId: d.itemId, member: d.member, groups: d.groups })} onClose={() => setDialog(null)} />}
+        onRemove={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog({ kind: 'remove', itemId: d.itemId, member: d.member }))}
+        onCompare={() => setDialog({ kind: 'safety', itemId: d.itemId, member: d.member, groups: d.groups, refused: d.refused })}
+        onClose={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog(null))} />}
       {d?.kind === 'invite' && <InviteDialog busy={busy} onSend={(email, a) => void invite(d.itemId, email, a === 'Can edit')} onClose={() => void openPeople(d.itemId)} />}
       {d?.kind === 'key-changed' && <KeyChangedAlert member={d.member}
-        onCompare={() => void safety(d.itemId, d.member)} onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true)} onCancel={() => void openPeople(d.itemId)} />}
+        onCompare={() => void safety(d.itemId, d.member, { email: d.email, canEdit: d.canEdit })}
+        onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true, d.member.id)} onCancel={() => void withdraw(d.itemId, d.member)} />}
     </>
   )
 }

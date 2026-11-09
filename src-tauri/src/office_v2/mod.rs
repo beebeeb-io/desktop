@@ -103,9 +103,7 @@ pub(crate) fn status_of(bundle: Option<&'static PinnedBundle>, root: &Path) -> E
     }
 }
 
-pub(crate) fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub(crate) use crate::hexfmt::encode as hex;
 
 /// Write `bytes` chunks to `<path>.part`, hash them, and keep the file only if size and hash match the pin.
 pub(crate) struct Sink {

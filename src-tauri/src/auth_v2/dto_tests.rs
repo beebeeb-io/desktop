@@ -3,8 +3,18 @@
 use super::approve::{ApprovalResult, ApprovalReview};
 use super::device::DeviceRequestView;
 
-const FORBIDDEN: [&str; 10] =
-    ["password", "phrase", "mnemonic", "secret", "prf", "master", "backup_codes", "otpauth", "fragment", "token"];
+const FORBIDDEN: [&str; 10] = [
+    "password",
+    "phrase",
+    "mnemonic",
+    "secret",
+    "prf",
+    "master",
+    "backup_codes",
+    "otpauth",
+    "fragment",
+    "token",
+];
 
 /// Field names of a serialized DTO that contain a forbidden word.
 fn offending(value: &serde_json::Value) -> Vec<String> {
@@ -42,7 +52,13 @@ fn samples() -> Vec<serde_json::Value> {
             os: Some("iOS".into()),
         })
         .unwrap(),
-        serde_json::to_value(ApprovalResult { status: "approved".into() }).unwrap(),
+        serde_json::to_value(ApprovalResult {
+            status: "approved".into(),
+        })
+        .unwrap(),
+        // The passkey sign-in's answer. B10's own `PasskeySignInOutcome` left when B15 moved the sign-in onto core's
+        // passkey flow (`auth_passkey_sign_in`), which answers the shared `LoginOutcome` (flags only).
+        serde_json::to_value(crate::login_commands::LoginOutcome::browser_signed_in()).unwrap(),
     ]
 }
 

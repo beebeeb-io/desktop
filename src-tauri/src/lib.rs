@@ -98,6 +98,8 @@ mod name_alias;
 // Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
 // memory. Windows and Linux run it; macOS keeps its own resume.
 mod held_queue;
+// v2: the one lower-case hex encoder and 32-byte decoder (office_v2 pins, share_v2 keys).
+mod hexfmt;
 mod macos_popover;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and

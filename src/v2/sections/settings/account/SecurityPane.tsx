@@ -7,7 +7,7 @@ import { command } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
-import { useAccount, run, errorText, type AccountState, type Scenario } from './data'
+import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
@@ -210,7 +210,7 @@ function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onD
     setBusy(false)
     if (r.ok) { setNext(''); setAgain(''); return onDone() }
     if (r.code === 'wrong_password') return setError({ field: 'current', text: 'Current password is incorrect. Nothing was changed.' })
-    setError({ field: r.code === 'weak_password' || r.code === 'same_password' ? 'new' : 'current', text: errorText(r.code) })
+    setError({ field: NEW_PASSWORD_ERRORS.includes(r.code) ? 'new' : 'current', text: errorText(r.code) })
   }
   return (
     <Page title="Change password" back={<BackLink label="Sign-in and security" onBack={onBack} />}>

@@ -420,8 +420,6 @@ pub(super) const FINDER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration:
 #[cfg(target_os = "macos")]
 pub(super) const FINDER_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-
-
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn signal_lock_holds_the_engine_slot() {
     let _ = LOCK_HOLDS_THE_ENGINE_SLOT.try_with(|signal| signal.notify_one());
@@ -812,6 +810,12 @@ impl account_binding::LocalData for StateDbLocalData {
         {
             tracing::warn!(step = %step, "could not clear the unfinished sign-out marker");
         }
+        // B05e (lead ruling 2026-11-09): a reset of local data removes the share marks and sealed keys, which a
+        // sign-out keeps. First, so a failed removal fails the reset before the rows go.
+        self.db.forget_share_trust_rows().map_err(|e| {
+            reopen();
+            format!("clear the local data: {e}")
+        })?;
         // On a Mac the previous account's Finder domain is still registered: the debt is recorded in the same
         // transaction that clears the rows, so no crash can leave the rows gone and the debt forgotten.
         self.db.clear_account_data(cfg!(target_os = "macos")).map_err(|e| {

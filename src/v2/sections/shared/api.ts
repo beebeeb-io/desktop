@@ -16,9 +16,12 @@ export const shareAccept = (id: string) => command<void>('share_accept', { id })
 export const shareDecline = (id: string) => command<void>('share_decline', { id })
 export const shareLeave = (id: string) => command<void>('share_leave', { id })
 export const sharePeople = (itemId: string) => command<Member[]>('share_people', { itemId })
-export const shareInvite = (itemId: string, email: string, access: Access, acceptChangedKey = false) =>
-  command<InviteOutcome>('share_invite', { itemId, email, canEdit: access === 'Can edit', acceptChangedKey })
-export const shareSetAccess = (itemId: string, memberId: string, access: Access) => command<void>('share_set_access', { itemId, memberId, canEdit: access === 'Can edit' })
+/** `memberId`: with `acceptChangedKey`, the refused invite the `key-changed` answer named (DW-0515 Share anyway seals that one). */
+export const shareInvite = (itemId: string, email: string, access: Access, acceptChangedKey = false, memberId: string | null = null) =>
+  command<InviteOutcome>('share_invite', { itemId, email, canEdit: access === 'Can edit', acceptChangedKey, memberId })
+/** The server's permission for a member (`read` / `add` / `write` / `admin`); the UI offers view and edit. */
+export const shareSetAccess = (itemId: string, memberId: string, access: Access) =>
+  command<void>('share_set_access', { itemId, memberId, permission: access === 'Can edit' ? 'write' : 'read' })
 /** Stop sharing: one person (`memberId`) or the whole share or link (`memberId` null). */
 export const shareRevoke = (itemId: string, memberId: string | null) => command<void>('share_revoke', { itemId, memberId })
 /** Link options from the Files share dialog (DW-0407); none means "copy the live link". Several ids make one bundle link. */
@@ -33,6 +36,8 @@ export const shareLinkUpdate = (itemId: string, change: { expiresDays?: number |
   command<void>('share_link_update', { itemId, expiresDays: change.expiresDays, setExpiry: 'expiresDays' in change, password: change.password ?? null, setPassword: 'password' in change })
 export const shareSafetyNumber = (memberId: string) => command<{ groups: string[] }>('share_safety_number', { memberId })
 export const shareMarkCompared = (memberId: string, matched: boolean) => command<void>('share_mark_compared', { memberId, matched })
+/** DW-0515 over People, Share anyway: keep this share as it is. The person's mark stays, so later shares to them stay checked. */
+export const shareAcceptChangedKey = (memberId: string) => command<void>('share_accept_changed_key', { memberId })
 
 export interface FileRequestInput { title: string; note: string; folderName: string; expiresDays: number | null; maxFiles: number | null; maxBytes: number | null }
 export const fileRequestCreate = (input: FileRequestInput) => command<CopiedLink>('file_request_create', { input })
@@ -45,11 +50,24 @@ export const fileRequestRemove = (id: string) => command<void>('file_request_rem
 export const deletePermanently = (ids: string[], secret: { password?: string; code?: string }) =>
   command<void>('drive_delete_permanently', { ids, password: secret.password ?? null, code: secret.code ?? null })
 
+/** Rust's specific `unsupported: …` reasons, each with words that say what to do. */
+const UNSUPPORTED_WORDS: [RegExp, string][] = [
+  [/link can't be copied again/, 'This link can’t be copied again in this version of Beebeeb. To share the file by link, stop sharing the link and make a new one.'],
+  [/does not list this person's account id/, 'Safety numbers need a newer server. Nothing was changed.'],
+  [/sealed before this app kept the key/, 'This share was made before Beebeeb kept what it needs for a safety number. Nothing was changed.'],
+  [/sharing a folder to a changed key/, 'Sharing a folder after a key change isn’t available in this version of Beebeeb. Nothing was shared.'],
+]
+
 /** The copy for a failed command: never the host's text. */
 export function failureText(r: CommandResult<unknown>): string {
   if (r.ok) return ''
   if (r.unsupported) return commandUnavailableLabel('')
+  if (/^unsupported/.test(r.reason)) return UNSUPPORTED_WORDS.find(([re]) => re.test(r.reason))?.[1] ?? commandUnavailableLabel('')
   if (/^offline/.test(r.reason)) return 'You’re offline. Try again when you’re connected.'
+  if (/^peer_key_changed/.test(r.reason)) return 'This person’s key has changed. Nothing was shared.'
+  if (/^not-shared/.test(r.reason)) return 'Couldn’t finish sharing. Nothing was shared. Try again.'
+  if (/^signed-out/.test(r.reason)) return 'You’re signed out. Sign in again, then try again.'
+  if (/^rate_limited/.test(r.reason)) return 'Too many attempts. Wait a minute, then try again.'
   if (/^(invalid_credentials|wrong_code)/.test(r.reason)) return 'That didn’t work. Check it and try again.'
   return 'Something went wrong. Try again.'
 }

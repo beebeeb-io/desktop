@@ -4,7 +4,7 @@
 import { useState, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { BTN, BTN_AMBER, FOCUS, Modal } from '../files/ui'
-import { initialsOf, type Access, type Member } from './model'
+import { initialsOf, safetyState, type Access, type Member } from './model'
 
 const BTN_RED = `inline-flex h-8 items-center justify-center rounded-md bg-red px-4 text-[13px] font-medium text-white hover:brightness-95 disabled:opacity-40 ${FOCUS}`
 const RED_TEXT = 'text-[color:var(--color-red-text)]'
@@ -117,7 +117,7 @@ export function PersonDialog({ member, onAccess, onSafety, onRemove, onBack }: {
       <div className="pt-3 text-[12px] font-semibold text-ink-2">Identity</div>
       <button type="button" onClick={onSafety} data-safety className={`-mx-2 flex w-[calc(100%+16px)] items-center justify-between rounded-md px-2 py-2 text-left hover:bg-paper-2 ${FOCUS}`}>
         <span className="text-ink">Safety number</span>
-        <span className="inline-flex items-center gap-1.5 text-[12px] text-ink-3">{member.mismatch ? 'Didn’t match' : member.compared ? 'Compared' : 'Not compared'}<Icon name="chevron-right" size={12} /></span>
+        <span className="inline-flex items-center gap-1.5 text-[12px] text-ink-3">{safetyState(member)}<Icon name="chevron-right" size={12} /></span>
       </button>
       <p className="m-0 mt-1 text-[12px] leading-4 text-ink-3">Optional. Comparing proves your files go to the real {first}.</p>
     </Modal>
@@ -198,7 +198,7 @@ export function InviteDialog({ email: initialEmail = '', access: initialAccess =
 export function KeyChangedAlert({ member, onCompare, onShareAnyway, onCancel }: { member: Member; onCompare?: () => void; onShareAnyway?: () => void; onCancel?: () => void }) {
   const first = member.name.split(' ')[0]
   return (
-    <Modal title={`${first}’s key has changed`} onClose={onCancel} width={440}
+    <Modal title={`${first}’s key has changed`} onClose={onCancel} width={520}
       footer={<><button type="button" className={BTN} onClick={onShareAnyway}>Share anyway</button><span className="flex-1" /><button type="button" className={BTN} onClick={onCancel}>Cancel</button><button type="button" className={BTN} onClick={onCompare}>Compare safety numbers</button></>}>
       <p className="m-0">{first} may have set up a new account, or someone may be trying to read what you share. Nothing new goes to {first} until you choose.</p>
     </Modal>
