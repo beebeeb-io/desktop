@@ -314,18 +314,20 @@ export function LoginStep({ on, onToggle, onContinue }: { on: boolean; onToggle:
 export interface SetupSummary { passkey: string; lock: string; backup: string; previews: string; explorer: string; notifications: string; login: string }
 
 // DW-0208
-export function DoneStep({ summary, onRow, onOpen }: { summary: SetupSummary; onRow: () => void; onOpen: () => void }) {
-  const rows: [string, string][] = [
-    ['Passkey', summary.passkey], ['App lock', summary.lock], ['Backup', summary.backup], ['Previews', summary.previews],
-    ['File Explorer', summary.explorer], ['Notifications', summary.notifications], ['Open at login', summary.login],
+export function DoneStep({ summary, onRow, onOpen }: { summary: SetupSummary; onRow: (page: string) => void; onOpen: () => void }) {
+  // Each row opens its own settings page (DW-0208#0: App lock opens Settings › Security), M3e.
+  const rows: [string, string, string][] = [
+    ['Passkey', summary.passkey, 'security'], ['App lock', summary.lock, 'security'], ['Backup', summary.backup, 'backups'],
+    ['Previews', summary.previews, 'thumbnails'], ['File Explorer', summary.explorer, 'sync'],
+    ['Notifications', summary.notifications, 'notifications'], ['Open at login', summary.login, 'sync'],
   ]
   return (
     <>
       <StepHeading icon="check" title="You’re set up" sub="You can change any of this later in Settings." />
       <ul className="m-0 list-none divide-y divide-line border-y border-line p-0" data-summary>
-        {rows.map(([k, v]) => (
+        {rows.map(([k, v, page]) => (
           <li key={k} data-summary-row>
-            <button type="button" onClick={onRow} className="flex h-9 w-full items-center justify-between bg-transparent text-left text-[13px] text-ink hover:bg-paper-2">
+            <button type="button" onClick={() => onRow(page)} className="flex h-9 w-full items-center justify-between bg-transparent text-left text-[13px] text-ink hover:bg-paper-2">
               <span>{k}</span><span className="flex items-center gap-1 text-ink-2">{v}<Icon name="chevron-right" size={12} className="text-ink-4" /></span>
             </button>
           </li>

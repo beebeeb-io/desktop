@@ -66,6 +66,9 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     return source.subscribe((e) => { if (e.kind === 'changed' || e.kind === 'item' || e.kind === 'removed') load() })
   }, [source, load])
   useEffect(() => { setPrefs(loadPrefs(folderId)); setSelection(new Set()); setRenaming(null); setDetails(null) }, [folderId])
+  // "Shows it in Files, selected" (Storage insights' largest files DW-0783#1, Search's enclosing folder): `sub=select:<id>`.
+  const selectId = /^select:(.+)$/.exec(nav.route.sub ?? '')?.[1] ?? null
+  useEffect(() => { if (selectId) { setSelection(new Set([selectId])); setAnchor(selectId) } }, [selectId, folderId])
 
   const items = useMemo(() => arrange(listing?.items ?? [], prefs.sort), [listing, prefs.sort])
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])

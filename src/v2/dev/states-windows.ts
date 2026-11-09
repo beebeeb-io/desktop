@@ -29,7 +29,7 @@ const typeWords = (words: string[]): NonNullable<Recipe['steps']> =>
   words.flatMap((w, i) => (w ? [{ fill: `field:Word ${i + 1}`, value: w }] : []))
 // Approving a sign-in (DW-A12 to A17): Settings › Security › Approve a sign-in, the code, then the review dialog. The
 // lookup (`auth_approve_lookup`) is a read: it answers with the board's request; the approval's answer is the step's.
-const SECURITY = 'section=settings&sub=security'
+const SECURITY = 'section=settings&page=security'
 const toApprove = (code = ''): NonNullable<Recipe['steps']> => [
   { click: 'btn:Approve a sign-in' }, { wait: 'field:Code on the other device' }, ...(code ? [{ fill: 'field:Code on the other device', value: code }] : []),
 ]
@@ -75,7 +75,8 @@ export const WINDOW_STATES: Record<string, Recipe> = {
   'DW-1210': flyout('update'),
   'DW-1211': flyout('locked'),
   'DW-1212': flyout('checking', { reads: { popover_snapshot: { error: 'not yet' } } }),
-  'DW-1213': flyout('no-plan', { gap: FLYOUT_EXTRAS('no-plan state') }),
+  // No plan yet comes from the server (`account_subscription`, read when the flyout shows; M3e).
+  'DW-1213': flyout('no-plan', { reads: { account_subscription: { plan_state: 'none' } } }),
   'DW-1214': flyout('update-required', { gap: FLYOUT_EXTRAS('update-required state') }),
   'DW-1215': flyout('finder-adding'),
   'DW-1216': flyout('finder-failed'),

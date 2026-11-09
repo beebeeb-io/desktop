@@ -8,6 +8,7 @@ import { BY_ME_PEOPLE, BY_ME_LINKS, INVITATIONS, LISBON_PEOPLE, REQUESTS, SAFETY
 import { HISTORY } from '../source/fixtures/photos'
 import { FIXTURE_ACCOUNT } from '../source/fixtures/account'
 import { SCENARIOS } from '../tray/fixtures'
+import { INSIGHTS_BREAKDOWN } from '../source/fixtures/settings-today'
 
 /** A recipe's read: a value, `{ error }` for a refusal (`unsupported` for "this build lacks it"), or `{ pending: true }` for
  *  a host that has not answered yet (a busy state: the call never settles). */
@@ -41,6 +42,8 @@ export const BOARD_READS: Reads = {
   share_safety_number: { groups: SAFETY_NUMBER },
   account_profile: { email: FIXTURE_ACCOUNT.email, email_verified: FIXTURE_ACCOUNT.email_verified, totp_enabled: true },
   popover_snapshot: (args?: Record<string, unknown>) => (args?.activityLimit === 200 ? boardSnapshot() : SCENARIOS['up-to-date'].snapshot),
+  // Storage › Storage insights (DW-0783): the board's breakdown, the 50 largest asked for.
+  account_storage_breakdown: INSIGHTS_BREAKDOWN,
 }
 
 /**

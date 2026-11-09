@@ -417,7 +417,11 @@ pub(super) const MENU_RESUME_SYNC_LABEL: &str = "Resume Sync";
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(super) fn pause_menu_label(paused: bool) -> &'static str {
-    if paused { MENU_RESUME_SYNC_LABEL } else { MENU_PAUSE_SYNC_LABEL }
+    if paused {
+        MENU_RESUME_SYNC_LABEL
+    } else {
+        MENU_PAUSE_SYNC_LABEL
+    }
 }
 
 /// F3: the label for what the file says now (an unreadable file reads as not paused, as the menu toggle does).
@@ -522,7 +526,11 @@ pub(super) fn desktop_menu_specs() -> &'static [DesktopMenuSpec] {
 
 /// The menu table this build installs: a Mac's own, else the shared one (Windows, Linux).
 pub(super) fn installed_menu_specs() -> &'static [DesktopMenuSpec] {
-    if cfg!(target_os = "macos") { MACOS_MENU_SPECS } else { DESKTOP_MENU_SPECS }
+    if cfg!(target_os = "macos") {
+        MACOS_MENU_SPECS
+    } else {
+        DESKTOP_MENU_SPECS
+    }
 }
 
 pub(super) fn desktop_menu_spec(id: &str) -> Option<&'static DesktopMenuSpec> {
@@ -675,9 +683,11 @@ pub(super) fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
                     Some(item) => Box::new(item.clone()),
                     None => Box::new(build_desktop_menu_item(app, desktop_menu_spec_required(id))?),
                 },
-                MacosMenuEntry::About => {
-                    Box::new(PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?)
-                }
+                MacosMenuEntry::About => Box::new(PredefinedMenuItem::about(
+                    app,
+                    Some("About Beebeeb"),
+                    Some(about_metadata()),
+                )?),
                 MacosMenuEntry::Hide => Box::new(PredefinedMenuItem::hide(app, Some("Hide Beebeeb"))?),
                 MacosMenuEntry::HideOthers => Box::new(PredefinedMenuItem::hide_others(app, Some("Hide Others"))?),
                 MacosMenuEntry::ShowAll => Box::new(PredefinedMenuItem::show_all(app, Some("Show All"))?),
@@ -832,8 +842,9 @@ pub(super) fn request_menu_update_check(app: &tauri::AppHandle) {
     // F2: the Beebeeb window on Settings › About, which checks and answers in its row.
     #[cfg(target_os = "macos")]
     show_main_window(app, MainNav::settings(Some("about")));
+    // Desktop v2 (M3e): Settings › About, where the check answers in its row, as on a Mac.
     #[cfg(not(target_os = "macos"))]
-    show_main_app_window_with_nav(app, Some("settings"));
+    show_main_app_window_with_nav(app, Some("settings/about"));
     if let Some(window) = app.get_webview_window(update_check_window_label()) {
         log_menu_result(
             MENU_CHECK_UPDATES_ID,

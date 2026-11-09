@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { Btn, Dialog, Group, Page, Row, Slider, Switch, mono } from '../shell/kit'
 import { useSettings } from '../shell/context'
+import { actionFailure } from '../../files/model'
 
 type Size = '720p' | '1080p' | '2K' | '4K'
 type Fmt = 'HEIC' | 'JPEG'
@@ -64,6 +65,7 @@ export function Compare() {
   const { go } = useSettings()
   const [mode, setMode] = useState<Mode>('Wipe')
   const [wipe, setWipe] = useState(50)
+  const [refused, setRefused] = useState<string | null>(null)
   return (
     <Page title="Compare previews" action={<Btn variant="amber" onClick={() => go('thumbnails')}>Done</Btn>}>
       <Seg label="View" value={mode} options={['Stacked', 'Wipe', 'Hold to flip'] as Mode[]} onPick={setMode} />
@@ -78,8 +80,10 @@ export function Compare() {
       <Group>
         <Row label="Sizes" value={SIZES.map((s) => `${s} ${SIZE_KB[s]}`).join(' · ')} mono />
         <Row label="Format" value="HEIC 1.0 MB · JPEG 2.1 MB" mono />
-        <Row label="Choose photo" onClick={() => undefined} />
+        {/* Blocked (M3e): nothing measures another of your photos at each size yet; Choose photo says so. */}
+        <Row label="Choose photo" onClick={() => setRefused(actionFailure('choose another photo', 'unsupported').text)} />
       </Group>
+      {refused ? <p role="alert" className="text-[12px] text-red-text">{refused}</p> : null}
       <p className="text-[12px] text-ink-3">Sizes are measured on the chosen photo.</p>
     </Page>
   )

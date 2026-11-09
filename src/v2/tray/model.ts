@@ -4,6 +4,7 @@
 // nothing else. Pure: no I/O, so every state is a unit test.
 
 import type { ActivityRow, PopoverSnapshot } from '../../popoverContract'
+import { RESTART_COPY, type UpdateCopy } from '../updateCopy'
 
 export type FlyoutKind =
   | 'update-required'
@@ -42,6 +43,8 @@ export interface FlyoutExtras {
   etaSeconds?: number | null
   /** The error Windows returned for a failed Cloud Files registration, in mono. */
   finderCode?: string | null
+  /** How this build updates (lead ruling M3e item 1): Windows restarts into it, a Mac downloads it. Default: restart. */
+  update?: UpdateCopy
 }
 
 export type FlyoutCommand =
@@ -51,7 +54,7 @@ export type FlyoutCommand =
   | 'try-again'
   | 'show-failed'
   | 'add-storage'
-  | 'download-update'
+  | 'update'
   | 'unlock'
   | 'choose-plan'
   | 'sign-in'
@@ -203,8 +206,9 @@ export function flyoutView(snapshot: PopoverSnapshot, extras: FlyoutExtras = {},
   const base = { reason: null, action: null, progress: null, list, explorerEnabled } as const
   const act = (label: string, command: FlyoutCommand, primary = true): FlyoutAction => ({ label, command, primary })
 
+  const update = extras.update ?? RESTART_COPY
   if (extras.updateRequired) {
-    return { ...base, kind: 'update-required', tone: 'attention', icon: 'download', title: 'Update Beebeeb', line: 'This version of Beebeeb is too old to connect. Update to continue.', action: act('Download update', 'download-update') }
+    return { ...base, kind: 'update-required', tone: 'attention', icon: 'download', title: 'Update Beebeeb', line: 'This version of Beebeeb is too old to connect. Update to continue.', action: act(update.label, 'update') }
   }
   if (snapshot.phase === 'locked') {
     return {
@@ -266,7 +270,7 @@ export function flyoutView(snapshot: PopoverSnapshot, extras: FlyoutExtras = {},
     return { ...base, kind: 'needs-decision', tone: 'attention', icon: 'alert', title: `${formatCount(n)} ${plural(n, 'file needs', 'files need')} a decision`, line: 'Changed in two places', action: act('Review…', 'review') }
   }
   if (snapshot.update) {
-    return { ...base, kind: 'update-available', tone: 'attention', icon: 'download', title: `Version ${snapshot.update.version} is available`, line: 'Download it, then open it to install.', action: act('Download update', 'download-update', false) }
+    return { ...base, kind: 'update-available', tone: 'attention', icon: 'download', title: `Version ${snapshot.update.version} is available`, line: update.line, action: act(update.label, 'update', false) }
   }
   if (extras.metered) {
     return { ...base, kind: 'metered', tone: 'neutral', icon: 'wait', title: 'Sync is waiting', line: 'This PC is on a metered connection', action: act('Sync anyway', 'sync-anyway', false) }

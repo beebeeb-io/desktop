@@ -55,8 +55,34 @@ static CLOCK: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::n
 #[cfg(target_os = "macos")]
 static GEAR_MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
+/// Whether `label` is the window that runs the flyout's actions: the Mac's menu-bar popover, and on Windows the
+/// notification-area flyout (the "tray" window, desktop v2 B09). Every other window is refused.
+pub(super) fn flyout_window_allowed(label: &str, windows: bool) -> bool {
+    label == if windows { "tray" } else { "popover" }
+}
+
+/// Where the flyout's "open the window" actions take the main window off a Mac: the nav word
+/// [`show_main_app_window_with_nav`] puts in the window's URL or sends it (`None`: the window as it is, or Files).
+/// Desktop v2's `routes.ts` (`routeFromNav`) reads the same words.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(super) fn flyout_open_nav(to: &str) -> Result<Option<&'static str>, String> {
+    match to {
+        "front" => Ok(None),
+        "settings" => Ok(Some("settings")),
+        // A decision waits: the window opens on Files, which shows the "Two versions" dialog (DW-0429).
+        "review" => Ok(Some("review")),
+        // Sync stopped: Sync history on Problems (DW-0428).
+        "problems" => Ok(Some("problems")),
+        // A Recent changes row whose file is no longer in the folder: Trash, where a trashed file is (DW-1202#0).
+        "trash" => Ok(Some("trash")),
+        // View full history, under the last of the 50 rows (DW-1220): Sync history.
+        "history" => Ok(Some("activity")),
+        _ => Err("That view is not available.".into()),
+    }
+}
+
 fn require_popover(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "popover" {
+    if flyout_window_allowed(window.label(), cfg!(target_os = "windows")) {
         Ok(())
     } else {
         Err("This action belongs to the menu-bar popover.".into())
@@ -197,7 +223,8 @@ fn show(app: &tauri::AppHandle) -> Result<(), String> {
     unhide_app(app);
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
-    win.emit(crate::popover_data::POPOVER_SHOWN_EVENT, ()).map_err(|e| e.to_string())
+    win.emit(crate::popover_data::POPOVER_SHOWN_EVENT, ())
+        .map_err(|e| e.to_string())
 }
 
 /// Both mouse buttons behave alike. A revoked session goes straight to the in-window sign-in flow.
@@ -261,8 +288,9 @@ pub(super) fn popover_open_window(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, to);
-        Err("The menu-bar popover is available on macOS.".into())
+        // The Windows flyout (desktop v2 B09): the main window, on the view the action names.
+        show_main_app_window_with_nav(&app, flyout_open_nav(&to)?);
+        Ok(())
     }
 }
 
@@ -277,8 +305,24 @@ pub(super) async fn popover_retry_sync(app: tauri::AppHandle, window: tauri::Web
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
-        Err("The menu-bar popover is available on macOS.".into())
+        // Off a Mac the engine is started by the runner, so Try again asks the running engine for its next step now:
+        // the nudge `drive_sync_retry` sends (Can't reach Beebeeb, DW-1206).
+        let state = app.state::<AppState>();
+        let acct = state.active_account()?;
+        let link = acct
+            .engine
+            .lock()
+            .await
+            .as_ref()
+            .filter(|engine| engine.is_running())
+            .map(|engine| engine.send_phase());
+        match link {
+            Some(link) => {
+                link.nudge();
+                Ok(())
+            }
+            None => Err("Sync isn't running on this PC.".into()),
+        }
     }
 }
 
@@ -289,13 +333,24 @@ pub(super) async fn popover_unlock(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     require_popover(&window)?;
-    match unlock_vault(app.clone(), state).await {
-        #[cfg(target_os = "macos")]
-        Err(error) if error == NO_VAULT_KEY_UNLOCK_ERROR => {
-            show_main_window(&app, MainNav::Setup);
-            Ok(())
+    // Windows: the flyout never unlocks by itself. It opens the window on its lock screen (DW-1211 → DW-0009), where
+    // Windows Hello is asked first (`auth_unlock_with_windows_hello`); unlocking here would skip that.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = state;
+        show_main_app_window_impl(&app);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match unlock_vault(app.clone(), state).await {
+            #[cfg(target_os = "macos")]
+            Err(error) if error == NO_VAULT_KEY_UNLOCK_ERROR => {
+                show_main_window(&app, MainNav::Setup);
+                Ok(())
+            }
+            result => result,
         }
-        result => result,
     }
 }
 
@@ -385,7 +440,7 @@ pub(super) fn popover_gear_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::{changes_left, popover_frame};
+    use super::{changes_left, flyout_open_nav, flyout_window_allowed, popover_frame};
     use crate::sign_out::waiting::{OtherChange, WaitingChanges, WaitingFile};
     use crate::surfaces::anchor::{LSize, Placement};
 
@@ -395,10 +450,17 @@ mod tests {
     #[test]
     fn a_failed_count_while_sign_out_sends_leaves_the_count_out() {
         assert_eq!(changes_left(Err("database is locked".into())), 0);
-        let file = |id: &str| WaitingFile { file_id: id.into(), path: None, writes: Vec::new() };
+        let file = |id: &str| WaitingFile {
+            file_id: id.into(),
+            path: None,
+            writes: Vec::new(),
+        };
         let waiting = WaitingChanges {
             files: vec![file("a"), file("b")],
-            others: vec![OtherChange { op_id: "op".into(), live: false }],
+            others: vec![OtherChange {
+                op_id: "op".into(),
+                live: false,
+            }],
         };
         assert_eq!(changes_left(Ok(waiting)), 3);
     }
@@ -426,5 +488,47 @@ mod tests {
             tauri::Size::Logical(size) => assert_eq!((size.width, size.height), (372.0, 420.0)),
             other => panic!("the fitted size is not set in points: {other:?}"),
         }
+    }
+
+    /// Desktop v2 M3e: on Windows the flyout is the "tray" window, and every `popover_*` command refused it ("This
+    /// action belongs to the menu-bar popover."), so Open Beebeeb, Review…, Show, Try again and Unlock all failed there.
+    /// Each platform's own flyout may run them; no other window may, and neither may the other platform's label.
+    #[test]
+    fn each_platform_flyout_and_no_other_window_runs_the_flyout_actions() {
+        assert!(flyout_window_allowed("tray", true), "the Windows flyout");
+        assert!(flyout_window_allowed("popover", false), "the Mac's menu-bar popover");
+        for other in [
+            "main-app",
+            "onboarding",
+            "windows-onboarding",
+            "settings",
+            "conflict-1",
+            "main",
+        ] {
+            assert!(!flyout_window_allowed(other, true), "{other} on Windows");
+            assert!(!flyout_window_allowed(other, false), "{other} elsewhere");
+        }
+        assert!(
+            !flyout_window_allowed("popover", true),
+            "no popover window exists on Windows"
+        );
+        assert!(
+            !flyout_window_allowed("tray", false),
+            "the tray label is not the Mac's flyout"
+        );
+    }
+
+    /// The Windows flyout's "open the window" actions: each lands on its view, and a word the window doesn't know is
+    /// refused rather than opening Files as if it had worked.
+    #[test]
+    fn the_windows_flyout_opens_the_window_on_the_view_each_action_names() {
+        assert_eq!(flyout_open_nav("front"), Ok(None));
+        assert_eq!(flyout_open_nav("settings"), Ok(Some("settings")));
+        assert_eq!(flyout_open_nav("review"), Ok(Some("review")));
+        assert_eq!(flyout_open_nav("problems"), Ok(Some("problems")));
+        assert_eq!(flyout_open_nav("trash"), Ok(Some("trash")));
+        assert_eq!(flyout_open_nav("history"), Ok(Some("activity")));
+        assert!(flyout_open_nav("finder").is_err());
+        assert!(flyout_open_nav("settings&x=1").is_err());
     }
 }

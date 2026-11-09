@@ -47,7 +47,7 @@ export function Pill({ children, tone = 'neutral' }: { children: ReactNode; tone
 
 export function BackLink({ to, children }: { to: PaneId; children: ReactNode }) {
   const { go } = useSettings()
-  return <a href={`?section=settings&sub=${to}`} onClick={(e) => { e.preventDefault(); go(to) }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">{children}</a>
+  return <a href={`?section=settings&page=${to}`} onClick={(e) => { e.preventDefault(); go(to) }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">{children}</a>
 }
 
 export function Toast({ children }: { children: ReactNode }) {
