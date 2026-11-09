@@ -131,8 +131,8 @@ export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { ch
 function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void; onSignedOut: () => void }) {
   const [checking, setChecking] = useState(false)
   // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
-  // neutral line, before the sign-in shows. Only through desktopApi's wrapper, which parses the outcome. A sign-out that did not
-  // happen checks again, as before: the window stays on this screen.
+  // neutral line, before the sign-in shows. Only through desktopApi's wrapper, which parses the outcome. A sign-out that
+  // did not happen checks again, as before: the window stays on this screen.
   const [warning, setWarning] = useState<string | null>(null)
   const signOut = async () => {
     const r = await clearSession()
