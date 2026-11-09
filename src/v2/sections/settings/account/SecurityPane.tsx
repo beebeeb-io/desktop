@@ -129,7 +129,9 @@ function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }
   // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
   // neutral line, before the window moves on. Only through desktopApi's wrapper, which parses the outcome.
   const [warning, setWarning] = useState<string | null>(null)
-  const signedOut = () => window.location.assign(`?window=main-app&frame=${all ? 'DW-A03' : 'DW-A02'}`)
+  // The window again, without the Settings route: its gate reads the signed-out session and shows the sign-in. (It went to
+  // `frame=DW-A02/A03` without `platform=windows`, which loaded the legacy window, and a frame is a drawing anyway.)
+  const signedOut = () => window.location.assign('?window=main-app&platform=windows')
   const signOut = async () => {
     if (!hasTauri()) return onCancel()
     const r = await clearSession()

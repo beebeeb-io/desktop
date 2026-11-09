@@ -1,7 +1,7 @@
 // B12's data layer. Everything comes through command() from desktopApi (never the shared API); a plain browser
 // (headless frames, bun run dev) has no IPC bridge, so the board's fixture values stand in. Fixtures live here
 // (settings area only) and carry the board's example numbers.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { command, DEFAULT_CONFIG, type DesktopConfig } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { GB, MB } from './kit'
@@ -16,6 +16,8 @@ export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays:
 export function useConfig(initial: Partial<DesktopConfig> = {}) {
   const [config, setConfig] = useState<DesktopConfig>({ ...FIXTURE_CONFIG, ...initial })
   const [error, setError] = useState<string | null>(null)
+  // One write at a time, in the order they were made: Pause then Resume never lands as Resume then Pause.
+  const writes = useRef<Promise<unknown>>(Promise.resolve())
   useEffect(() => {
     if (!hasTauri()) return
     let live = true
@@ -29,7 +31,10 @@ export function useConfig(initial: Partial<DesktopConfig> = {}) {
   const update = useCallback((patch: Partial<DesktopConfig>) => {
     setConfig((c) => ({ ...c, ...patch }))
     // Outside the state updater, which React may run twice: one change, one write.
-    if (hasTauri()) void command('set_desktop_config', { config: patch }).then((r) => { if (!r.ok) setError(r.reason) })
+    if (!hasTauri()) return
+    writes.current = writes.current
+      .then(() => command('set_desktop_config', { config: patch }))
+      .then((r) => { if (!r.ok) setError(r.reason) })
   }, [])
   return { config, update, error }
 }

@@ -4,16 +4,22 @@
  * happened but could not confirm one step (FB-24, `Ok({warning})`) said nothing about it. They now go through
  * desktopApi's `clearSession` and show the warning's sentence as a neutral status line before the window moves on
  * (tests/sessionActionOutcome.test.ts pins the source contract: the wrapper only, and every caller reads `.warning`).
- * Run with the component harness against a scripted `clear_session`.
+ *
+ * On Windows today `clear_session` never answers a warning (its only one, the Finder removal, is macOS-only), so the
+ * warning path is the contract's, kept ready; the paths Windows takes are here too: a sign-out that did not happen says
+ * why, and one that did lands on the v2 window's own sign-in. Run with the component harness against a scripted
+ * `clear_session`.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
+import { createElement } from 'react'
 import { clearSession, command } from '../src/desktopApi'
-import { elementsOf, mount, textOf, type Mounted } from './fixtures/componentHarness'
+import { elementsOf, loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
 
 const SENTENCE = rustStr('lib.rs', 'FINDER_SIGN_OUT_UNCONFIRMED_WARNING')
 const WARNED = { warning: { code: 'finder_removal_unconfirmed', sentence: SENTENCE } }
 const CLEAN = { warning: null }
+const REFUSED = 'Sign-out paused: the sync folder could not be read.'
 
 const mounted: Mounted[] = []
 afterEach(() => {
@@ -23,79 +29,121 @@ afterEach(() => {
 const statusLines = (m: Mounted) => m.elements().filter((el) => el.props.role === 'status').map((el) => textOf(el.props.children))
 
 describe('the no-plan screen\'s sign-out', () => {
-  function open(answer: unknown) {
-    let signedOut = 0
+  function open(answer: () => unknown) {
+    const signedOut: Array<string | null> = []
     const m = mount('v2/auth/Gate.tsx', 'NoPlanWindow', {
-      backend: { clear_session: () => answer },
-      // The views are plain tags here: the test reads what NoPlanWindow hands them, not how they draw it.
-      bindings: { clearSession, command, PLANS_URL: 'https://beebeeb.io/pricing', GateWindow: 'gate-window', NoPlanView: 'no-plan-view', BBButton: 'bb-button' },
-      props: { onCheckAgain() {}, onSignedOut: () => { signedOut += 1 } },
+      backend: { clear_session: answer },
+      // The view is a plain tag here: the test reads what NoPlanWindow hands it, not how it draws it.
+      bindings: { clearSession, command, PLANS_URL: 'https://beebeeb.io/pricing', NoPlanView: 'no-plan-view' },
+      props: { onCheckAgain() {}, onSignedOut: (warning: string | null) => signedOut.push(warning) },
     })
     mounted.push(m)
-    const signOut = async () => { m.elements().find((el) => el.type === 'no-plan-view')!.props.onSignOut(); await m.flush() }
-    return { m, signOut, signedOut: () => signedOut }
+    const view = () => m.elements().find((el) => el.type === 'no-plan-view')!
+    const signOut = async () => { view().props.onSignOut(); await m.flush() }
+    return { m, view, signOut, signedOut }
   }
 
-  test('a warning is said as a status line, and the sign-in shows after OK', async () => {
-    const { m, signOut, signedOut } = open(WARNED)
+  test('a warning goes up with the sign-out', async () => {
+    const { m, signOut, signedOut } = open(() => WARNED)
     await signOut()
     expect(m.calls.map((c) => c.name)).toEqual(['clear_session'])
-    expect(statusLines(m)).toEqual([SENTENCE])
-    expect(signedOut()).toBe(0)
-    const ok = m.elements().find((el) => el.type === 'bb-button')!
-    expect(textOf(ok.props.children)).toBe('OK')
-    ok.props.onClick()
-    expect(signedOut()).toBe(1)
+    expect(signedOut).toEqual([SENTENCE])
   })
 
-  test('without a warning the sign-in shows at once, with no extra screen', async () => {
-    const { m, signOut, signedOut } = open(CLEAN)
+  test('a clean sign-out goes up with no warning', async () => {
+    const { signOut, signedOut, view } = open(() => CLEAN)
     await signOut()
-    expect(signedOut()).toBe(1)
+    expect(signedOut).toEqual([null])
+    expect(view().props.error).toBeNull()
+  })
+
+  test('a sign-out that did not happen stays on the screen and says why', async () => {
+    const { signOut, signedOut, view } = open(() => { throw new Error(REFUSED) })
+    await signOut()
+    expect(signedOut).toEqual([])
+    expect(view().props.error).toBe(REFUSED)
+  })
+})
+
+describe('the gate holds the warning until OK', () => {
+  test('a later check that finds the session gone (a focus brings one) does not drop it', async () => {
+    let loggedIn = true
+    const bindings = { command, hasNoPlan: loadComponent('v2/auth/Gate.tsx', 'hasNoPlan', {}) }
+    const readGate = loadComponent('v2/auth/Gate.tsx', 'readGate', bindings)
+    const SignedOutWarning = loadComponent('v2/auth/Gate.tsx', 'SignedOutWarning', { GateWindow: 'gate-window', BBButton: 'bb-button', React: { createElement } })
+    const m = mount('v2/auth/Gate.tsx', 'AuthGate', {
+      backend: {
+        sync_status: () => ({ logged_in: loggedIn, vault_unlocked: loggedIn }),
+        account_subscription: () => ({ plan_state: 'none' }),
+      },
+      bindings: { readGate, SignedOutWarning, NoPlanWindow: 'no-plan-window', AccountEntry: 'account-entry', LockedWindow: 'locked-window' },
+      props: { children: 'drive' },
+      expand: true,
+    })
+    mounted.push(m)
+    await m.flush()
+    const noPlan = m.elements().find((el) => el.type === 'no-plan-window')!
+    loggedIn = false
+    noPlan.props.onSignedOut(SENTENCE)
+    await m.flush()
+    // The check after the sign-out (and any later one) reads `signed-out`; the warning still shows, over it.
+    expect(statusLines(m)).toEqual([SENTENCE])
+    expect(m.elements().some((el) => el.type === 'account-entry')).toBe(false)
+    m.elements().find((el) => el.type === 'bb-button')!.props.onClick()
+    await m.flush()
     expect(statusLines(m)).toEqual([])
-    expect(m.elements().some((el) => el.type === 'no-plan-view')).toBe(true)
+    expect(m.elements().some((el) => el.type === 'account-entry')).toBe(true)
   })
 })
 
 describe('the Settings sign-out confirm', () => {
-  function open(answer: unknown) {
+  const SIGN_IN = '?window=main-app&platform=windows'
+
+  function open(answer: () => unknown) {
     const assigned: string[] = []
     const m = mount('v2/sections/settings/account/SecurityPane.tsx', 'SignOutDialog', {
-      backend: { clear_session: () => answer },
+      backend: { clear_session: answer },
       bindings: { clearSession, hasTauri: () => true, Dialog: 'settings-dialog', Btn: 'settings-btn' },
       props: { all: false, onCancel() {} },
     })
     mounted.push(m)
     ;(globalThis as any).window.location = { assign: (to: string) => assigned.push(to) }
     // The dialog's buttons are its `actions`, a prop of the dialog rather than a child.
-    const actions = () => elementsOf(m.elements().find((el) => el.type === 'settings-dialog')!.props.actions)
+    const dialog = () => m.elements().find((el) => el.type === 'settings-dialog')!
+    const actions = () => elementsOf(dialog().props.actions)
     const confirm = async () => {
       const button = actions().find((el) => el.type === 'settings-btn' && el.props.variant === 'danger')!
       expect(textOf(button.props.children)).toBe('Sign out')
       button.props.onClick()
       await m.flush()
     }
-    return { m, confirm, assigned, actions }
+    return { m, confirm, assigned, actions, dialog }
   }
 
+  test('a clean sign-out reloads the v2 window, whose gate shows the sign-in (not the legacy window, not a frame)', async () => {
+    const { confirm, assigned, m } = open(() => CLEAN)
+    await confirm()
+    expect(assigned).toEqual([SIGN_IN])
+    expect(statusLines(m)).toEqual([])
+  })
+
   test('a warning keeps the dialog, titled Signed out, with the sentence as a status line; OK moves on', async () => {
-    const { m, confirm, assigned, actions } = open(WARNED)
+    const { m, confirm, assigned, actions, dialog } = open(() => WARNED)
     await confirm()
     expect(m.calls.map((c) => c.name)).toEqual(['clear_session'])
-    const dialog = elementsOf(m.tree()).find((el) => el.type === 'settings-dialog')!
-    expect(dialog.props.title).toBe('Signed out')
+    expect(dialog().props.title).toBe('Signed out')
     expect(statusLines(m)).toEqual([SENTENCE])
     expect(assigned).toEqual([])
     const ok = actions().filter((el) => el.type === 'settings-btn')
     expect(ok.map((el) => textOf(el.props.children))).toEqual(['OK'])
     ok[0].props.onClick()
-    expect(assigned).toEqual(['?window=main-app&frame=DW-A02'])
+    expect(assigned).toEqual([SIGN_IN])
   })
 
-  test('without a warning the window moves on at once', async () => {
-    const { m, confirm, assigned } = open(CLEAN)
+  test('a sign-out that did not happen keeps the confirm open and says why', async () => {
+    const { m, confirm, assigned } = open(() => { throw new Error(REFUSED) })
     await confirm()
-    expect(assigned).toEqual(['?window=main-app&frame=DW-A02'])
-    expect(statusLines(m)).toEqual([])
+    expect(assigned).toEqual([])
+    expect(m.elements().filter((el) => el.props.role === 'alert').map((el) => textOf(el.props.children))).toEqual([REFUSED])
   })
 })

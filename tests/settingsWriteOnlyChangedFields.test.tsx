@@ -310,6 +310,32 @@ describe('desktop v2 Settings: useConfig', () => {
     expect(state.config.pause_sync).toBe(true)
     expect(m.tree().config.notify_conflicts).toBe(false)
   })
+
+  test('writes go one at a time, in order: Pause then Resume never lands as Resume then Pause', async () => {
+    const { state, backend } = disk()
+    const release: Array<() => void> = []
+    const m = mount('v2/sections/settings/shell/data.ts', 'useConfig', {
+      backend: {
+        ...backend,
+        // Each write is held until the test lets it finish, so a second one could overtake the first.
+        set_desktop_config: (args: any) => new Promise<void>((done) => release.push(() => { backend.set_desktop_config(args); done() })),
+      },
+      bindings: { command, DEFAULT_CONFIG: wholeConfig, FIXTURE_CONFIG: wholeConfig, hasTauri: () => true },
+    })
+    mounted.push(m)
+    await m.flush()
+    m.tree().update({ pause_sync: true })
+    m.tree().update({ pause_sync: false })
+    await m.flush()
+    expect(release).toHaveLength(1) // the second waits for the first
+    release[0]()
+    await m.flush()
+    expect(release).toHaveLength(2)
+    release[1]()
+    await m.flush()
+    expect(state.writes).toEqual([{ pause_sync: true }, { pause_sync: false }])
+    expect(state.config.pause_sync).toBe(false)
+  })
 })
 
 describe('every sender of set_desktop_config', () => {

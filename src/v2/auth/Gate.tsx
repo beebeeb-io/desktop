@@ -35,6 +35,10 @@ async function readGate(): Promise<GateState> {
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<GateState>('checking')
+  // A sign-out from the no-plan screen that happened but could not confirm one step (FB-24): its sentence shows until OK.
+  // It is held here, not in that screen, because the next check (a focus brings one) unmounts the screen once the session
+  // is gone.
+  const [signedOutWarning, setSignedOutWarning] = useState<string | null>(null)
   const check = useCallback(() => { void readGate().then(setState) }, [])
   useEffect(() => {
     check()
@@ -42,10 +46,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
   }, [check])
+  if (signedOutWarning) return <SignedOutWarning sentence={signedOutWarning} onOk={() => { setSignedOutWarning(null); check() }} />
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
   if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
-  if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={check} />
+  if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
 }
 
@@ -103,7 +108,7 @@ function LockedWindow({ onUnlocked }: { onUnlocked: () => void }) {
 }
 
 /** DW-0014: signed in, no plan yet. Plans are only on the website; nothing syncs until there is one. */
-export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { checking?: boolean; onChoose: () => void; onCheckAgain: () => void; onSignOut: () => void }) {
+export function NoPlanView({ checking, error, onChoose, onCheckAgain, onSignOut }: { checking?: boolean; error?: string | null; onChoose: () => void; onCheckAgain: () => void; onSignOut: () => void }) {
   const footer = (
     <div className="absolute inset-x-2 bottom-12 bg-paper-2 px-2.5 pb-3" data-no-plan-meter>
       <div className="mb-1 text-[12px] font-medium text-ink-2">No plan</div>
@@ -118,6 +123,7 @@ export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { ch
         <p className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">
           Your account is ready. Choose a plan on beebeeb.io, including the free trial. Beebeeb continues here by itself.
         </p>
+        {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
         <div className="flex flex-wrap justify-center gap-2">
           <BBButton variant="amber" onClick={onChoose}><span className="text-[13px] font-medium">Choose a plan on beebeeb.io</span></BBButton>
           <BBButton onClick={onCheckAgain} disabled={checking}><span className="text-[13px] font-medium">{checking ? 'Checking…' : 'Check again'}</span></BBButton>
@@ -128,34 +134,38 @@ export function NoPlanView({ checking, onChoose, onCheckAgain, onSignOut }: { ch
   )
 }
 
-function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void; onSignedOut: () => void }) {
+function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void; onSignedOut: (warning: string | null) => void }) {
   const [checking, setChecking] = useState(false)
-  // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
-  // neutral line, before the sign-in shows. Only through desktopApi's wrapper, which parses the outcome. A sign-out that
-  // did not happen checks again, as before: the window stays on this screen.
-  const [warning, setWarning] = useState<string | null>(null)
+  // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the gate has no toast host: the screen stays and says why the sign-out did not happen
+  const [failed, setFailed] = useState<string | null>(null)
+  // Only through desktopApi's wrapper, which parses the outcome; a step it could not confirm (FB-24,
+  // tests/sessionActionOutcome.test.ts) goes up with the sign-out, and AuthGate says it.
   const signOut = async () => {
+    setFailed(null)
     const r = await clearSession()
-    if (r.ok && r.value.warning) setWarning(r.value.warning.sentence)
-    else onSignedOut()
-  }
-  if (warning) {
-    return (
-      <GateWindow>
-        <section className="flex max-w-[380px] flex-col items-center text-center" aria-labelledby="signed-out-heading" data-signed-out-warning>
-          <h1 id="signed-out-heading" className="m-0 text-[18px] font-semibold">Signed out</h1>
-          <p role="status" className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">{warning}</p>
-          <BBButton onClick={onSignedOut}><span className="text-[13px] font-medium">OK</span></BBButton>
-        </section>
-      </GateWindow>
-    )
+    if (r.ok) onSignedOut(r.value.warning?.sentence ?? null)
+    else setFailed(r.reason)
   }
   return (
     <NoPlanView
       checking={checking}
+      error={failed}
       onChoose={() => void command('plugin:opener|open_url', { url: PLANS_URL })}
       onCheckAgain={() => { setChecking(true); onCheckAgain(); window.setTimeout(() => setChecking(false), 800) }}
       onSignOut={() => void signOut()}
     />
+  )
+}
+
+/** Signed out, but one step could not be confirmed (FB-24): the sentence, neutrally, then the sign-in after OK. */
+export function SignedOutWarning({ sentence, onOk }: { sentence: string; onOk: () => void }) {
+  return (
+    <GateWindow>
+      <section className="flex max-w-[380px] flex-col items-center text-center" aria-labelledby="signed-out-heading" data-signed-out-warning>
+        <h1 id="signed-out-heading" className="m-0 text-[18px] font-semibold">Signed out</h1>
+        <p role="status" className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">{sentence}</p>
+        <BBButton onClick={onOk}><span className="text-[13px] font-medium">OK</span></BBButton>
+      </section>
+    </GateWindow>
   )
 }
