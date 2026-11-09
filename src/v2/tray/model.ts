@@ -303,6 +303,88 @@ export function flyoutView(snapshot: PopoverSnapshot, extras: FlyoutExtras = {},
 }
 
 /**
+ * The b's own state (DW-1230): the six icons `chrome/TrayArt.tsx` draws. Kept here rather than imported from that
+ * module, which pulls in the board's stylesheet; `TRAY_STATES` and this union are the same six words.
+ */
+export type TrayIconState = 'up-to-date' | 'syncing' | 'paused' | 'needs-decision' | 'stopped' | 'offline'
+
+export type TrayItemId =
+  | 'status'
+  | 'open'
+  | 'explorer'
+  | 'pause'
+  | 'resume'
+  | 'lock'
+  | 'unlock'
+  | 'check-updates'
+  | 'settings'
+  | 'quit'
+
+/** One row of the native menu. `status` is the disabled first line: the state the tooltip also says. */
+export interface TrayMenuEntry {
+  /** Absent on a separator. */
+  id?: TrayItemId
+  label: string
+  disabled?: boolean
+  separator?: boolean
+}
+
+export interface TrayMenuView {
+  /** Which b Windows draws. Locked and the quiet states keep the plain b, as DW-1230 groups them. */
+  icon: TrayIconState
+  /** The state in two or three words, for the tooltip and the menu's first line. */
+  label: string
+  /** "Beebeeb: " plus the state, the words Narrator reads on the icon (DW-1230 a11y). */
+  tooltip: string
+  items: TrayMenuEntry[]
+}
+
+/** The icon, label and tooltip for each flyout state. Four states share the plain b (DW-1230). */
+const TRAY_LOOKS: Record<FlyoutKind, { icon: TrayIconState; label: string; tooltip: string }> = {
+  'up-to-date': { icon: 'up-to-date', label: 'Up to date', tooltip: 'Beebeeb: up to date' },
+  syncing: { icon: 'syncing', label: 'Syncing', tooltip: 'Beebeeb: syncing' },
+  paused: { icon: 'paused', label: 'Paused', tooltip: 'Beebeeb: paused' },
+  'needs-decision': { icon: 'needs-decision', label: 'Needs a decision', tooltip: 'Beebeeb: needs a decision' },
+  stopped: { icon: 'stopped', label: 'Stopped and storage full', tooltip: 'Beebeeb: stopped' },
+  'storage-full': { icon: 'stopped', label: 'Stopped and storage full', tooltip: 'Beebeeb: stopped' },
+  'signed-out': { icon: 'stopped', label: 'Signed out', tooltip: 'Beebeeb: not signed in' },
+  'update-required': { icon: 'stopped', label: 'Update required', tooltip: 'Beebeeb: update required' },
+  offline: { icon: 'offline', label: 'Offline', tooltip: 'Beebeeb: no connection' },
+  locked: { icon: 'up-to-date', label: 'Locked', tooltip: 'Beebeeb: locked' },
+  'no-plan': { icon: 'up-to-date', label: 'No plan', tooltip: 'Beebeeb: no plan' },
+  'update-available': { icon: 'up-to-date', label: 'Update available', tooltip: 'Beebeeb: update available' },
+  'storage-almost-full': { icon: 'up-to-date', label: 'Storage almost full', tooltip: 'Beebeeb: storage almost full' },
+  metered: { icon: 'up-to-date', label: 'Sync is waiting', tooltip: 'Beebeeb: sync is waiting' },
+  'finder-failed': { icon: 'up-to-date', label: 'Needs attention', tooltip: 'Beebeeb: needs attention' },
+  'finder-adding': { icon: 'up-to-date', label: 'Adding to File Explorer', tooltip: 'Beebeeb: adding to File Explorer' },
+  checking: { icon: 'up-to-date', label: 'Checking', tooltip: 'Beebeeb: checking' },
+}
+
+/**
+ * The b's menu, from the same view the flyout draws: the label and the first line say the state, and the
+ * Pause/Resume and Lock/Unlock rows follow it. `paused` is the snapshot's own flag, because a locked
+ * snapshot hides Pause in the flyout while sync still runs behind it.
+ */
+export function trayMenu(view: FlyoutView, { paused }: { paused: boolean }): TrayMenuView {
+  const look = TRAY_LOOKS[view.kind]
+  const signedIn = view.kind !== 'signed-out'
+  const locked = view.kind === 'locked'
+  const items: TrayMenuEntry[] = [
+    { id: 'status', label: look.label, disabled: true },
+    { id: 'open', label: 'Open Beebeeb' },
+    { id: 'explorer', label: 'Open in File Explorer', disabled: !view.explorerEnabled },
+    { label: '', separator: true },
+    { id: paused ? 'resume' : 'pause', label: paused ? 'Resume syncing' : 'Pause syncing', disabled: !signedIn },
+    { id: locked ? 'unlock' : 'lock', label: locked ? 'Unlock Beebeeb' : 'Lock Beebeeb', disabled: !signedIn },
+    { id: 'check-updates', label: 'Check for updates…' },
+    { id: 'settings', label: 'Settings…' },
+    { label: '', separator: true },
+    { id: 'quit', label: 'Quit Beebeeb' },
+  ]
+  return { icon: look.icon, label: look.label, tooltip: look.tooltip, items }
+}
+
+/**
  * Whose plan the flyout's "No plan yet" is (#274 review): signing out, or another account signing in, drops the last
  * account's answer and reads again at once, never after the minute's wait. `for` is the account the answer is about.
  */

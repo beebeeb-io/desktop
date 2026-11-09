@@ -209,44 +209,284 @@ pub(super) fn apply_menu_zoom(app: &tauri::AppHandle, action: MenuZoomAction) ->
 
 // ── System tray ──────────────────────────────────────────────────────────────
 
-/// Build the tray context menu with the current autostart checked state.
-/// Called on first setup and again whenever the autostart state changes.
-///
-/// The tray context menu keeps the daemon reachable without quitting it.
-/// "Open Beebeeb" surfaces the main app on Windows and the compact app window
-/// on other platforms; "Hide" tucks the current app surface away.
-pub(super) fn build_tray_menu<M: tauri::Manager<tauri::Wry>>(
+/// The b's menu and tooltip, from the same state the window draws (DW-1230, DW-1231). The words are the ones
+/// `src/v2/tray/model.ts` gives the flyout, so the two surfaces cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TrayMenuState {
+    pub(super) signed_in: bool,
+    pub(super) paused: bool,
+    pub(super) locked: bool,
+    pub(super) explorer_ready: bool,
+    /// Which b Windows draws (TrayArt's `TrayState`). Locked and the quiet states keep the plain b.
+    pub(super) icon: &'static str,
+    /// The state in two or three words: the tooltip and the menu's first (disabled) line.
+    pub(super) label: &'static str,
+    pub(super) tooltip: &'static str,
+}
+
+impl TrayMenuState {
+    pub(super) fn pause_label(&self) -> &'static str {
+        if self.paused { "Resume syncing" } else { "Pause syncing" }
+    }
+
+    pub(super) fn lock_label(&self) -> &'static str {
+        if self.locked { "Unlock Beebeeb" } else { "Lock Beebeeb" }
+    }
+}
+
+/// What the b reads. `conflicts` is the one field that needs the state DB; the rest comes from the session and the last
+/// `engine-status` the popover mirrors.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct TrayInputs {
+    pub(super) signed_in: bool,
+    pub(super) locked: bool,
+    pub(super) paused: bool,
+    pub(super) explorer_ready: bool,
+    pub(super) update_available: bool,
+    pub(super) conflicts: u32,
+    pub(super) engine_state: String,
+    pub(super) files_remaining: Option<u32>,
+}
+
+/// The same precedence the flyout uses (`popover_phase`, then `flyoutView` over it), for what the tray can read:
+/// signed out, locked, paused, offline, stopped, a decision needed, an update, syncing, up to date. The storage
+/// summary stays in the popover snapshot; the flyout shows its full and almost-full states, the tooltip does not.
+pub(super) fn tray_menu_state(inputs: &TrayInputs) -> TrayMenuState {
+    let (icon, label, tooltip) = if !inputs.signed_in {
+        ("stopped", "Signed out", "Beebeeb: not signed in")
+    } else if inputs.locked {
+        ("up-to-date", "Locked", "Beebeeb: locked")
+    } else if inputs.paused {
+        ("paused", "Paused", "Beebeeb: paused")
+    } else if inputs.engine_state == "offline" {
+        ("offline", "Offline", "Beebeeb: no connection")
+    } else if inputs.engine_state == "error" {
+        ("stopped", "Stopped and storage full", "Beebeeb: stopped")
+    } else if inputs.conflicts > 0 {
+        ("needs-decision", "Needs a decision", "Beebeeb: needs a decision")
+    } else if inputs.update_available {
+        ("up-to-date", "Update available", "Beebeeb: update available")
+    } else if inputs.engine_state == "syncing" || inputs.files_remaining.unwrap_or(0) > 0 {
+        ("syncing", "Syncing", "Beebeeb: syncing")
+    } else {
+        ("up-to-date", "Up to date", "Beebeeb: up to date")
+    };
+    TrayMenuState {
+        signed_in: inputs.signed_in,
+        paused: inputs.paused,
+        locked: inputs.locked,
+        explorer_ready: inputs.explorer_ready,
+        icon,
+        label,
+        tooltip,
+    }
+}
+
+/// The current inputs, the way `popover_snapshot` reads them: the session, the live pause flag, the engine mirror,
+/// the cached storage summary and the last update offer. No network and no fetch.
+fn tray_inputs_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> TrayInputs {
+    let state = app.try_state::<AppState>();
+    let (signed_in, locked, paused) = match state.as_deref() {
+        Some(state) => {
+            let acct = state.active_account().ok();
+            let session = acct
+                .as_ref()
+                .and_then(|acct| acct.session.lock().ok().map(|guard| guard.is_some()))
+                .unwrap_or(false);
+            let paused = acct
+                .as_ref()
+                .map(|acct| acct.sync_paused.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            let auth_present = state.auth_present.lock().map(|guard| *guard).unwrap_or(false);
+            let signed_in = session || auth_present;
+            (signed_in, signed_in && !session, paused)
+        }
+        None => (false, false, false),
+    };
+    let (engine_state, files_remaining) = app
+        .try_state::<popover_data::PopoverRuntime>()
+        .and_then(|runtime| {
+            runtime
+                .status
+                .lock()
+                .ok()
+                .map(|view| (view.state.clone(), view.files_remaining))
+        })
+        .unwrap_or_default();
+    TrayInputs {
+        signed_in,
+        locked,
+        paused,
+        explorer_ready: true,
+        update_available: crate::macos_popover::update_offer().is_some(),
+        conflicts: 0,
+        engine_state,
+        files_remaining,
+    }
+}
+
+/// How many files wait for a decision. Read only when the menu is rebuilt, never on a timer.
+fn tray_conflict_count() -> u32 {
+    use state_db::FileStatus;
+    DesktopConfig::load()
+        .and_then(|cfg| state_db_for_config(&cfg))
+        .ok()
+        .flatten()
+        .and_then(|db| db.list_by_status(FileStatus::Conflict).ok())
+        .map(|rows| u32::try_from(rows.len()).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
+/// The cheap part of a rebuild: everything but the conflict count. Equal keys mean the menu would not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayKey {
+    signed_in: bool,
+    locked: bool,
+    paused: bool,
+    update_available: bool,
+    engine_state: String,
+    files_remaining: Option<u32>,
+}
+
+fn tray_key(inputs: &TrayInputs) -> TrayKey {
+    TrayKey {
+        signed_in: inputs.signed_in,
+        locked: inputs.locked,
+        paused: inputs.paused,
+        update_available: inputs.update_available,
+        engine_state: inputs.engine_state.clone(),
+        files_remaining: inputs.files_remaining,
+    }
+}
+
+/// The key of the menu currently on the tray (shared by the listener threads).
+static TRAY_KEY: Mutex<Option<TrayKey>> = Mutex::new(None);
+
+/// Rebuild the b's menu and tooltip when the state the window shows changed. `force` runs it for an event that is not
+/// in the cheap key (a conflict arrived or resolved): the count needs the state DB, so it is read off the event thread.
+pub(super) fn refresh_tray_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>, force: bool) {
+    if app.tray_by_id("tray").is_none() {
+        return;
+    }
+    let inputs = tray_inputs_now(app);
+    if !force {
+        let key = tray_key(&inputs);
+        let mut last = TRAY_KEY.lock().unwrap_or_else(|poison| poison.into_inner());
+        if last.as_ref() == Some(&key) {
+            return;
+        }
+        *last = Some(key);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let conflicts = tray_conflict_count();
+        let inputs = TrayInputs {
+            conflicts,
+            ..tray_inputs_now(&app)
+        };
+        let state = tray_menu_state(&inputs);
+        let main = app.clone();
+        let _ = app.run_on_main_thread(move || apply_tray_menu(&main, &state));
+    });
+}
+
+fn apply_tray_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &TrayMenuState) {
+    let Some(tray) = app.tray_by_id("tray") else {
+        return;
+    };
+    #[cfg(not(target_os = "macos"))]
+    match build_tray_menu(app, app.autolaunch().is_enabled().unwrap_or(false), state) {
+        Ok(menu) => {
+            if let Err(error) = tray.set_menu(Some(menu)) {
+                tracing::warn!(%error, "could not set the tray menu");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not build the tray menu"),
+    }
+    if let Err(error) = tray.set_tooltip(Some(state.tooltip)) {
+        tracing::warn!(%error, "failed to update tray tooltip");
+    }
+}
+
+/// Build the b's context menu from the state the window shows. Called on first setup and every time that state
+/// changes, not only when someone clicks. Windows draws the menu; Beebeeb supplies these items, top to bottom:
+/// the state, Open Beebeeb, Open in File Explorer, Pause/Resume syncing, Lock/Unlock Beebeeb, Check for updates…,
+/// Settings…, Start at login, Quit Beebeeb.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(super) fn build_tray_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
     manager: &M,
     autostart_enabled: bool,
-) -> tauri::Result<Menu<tauri::Wry>> {
-    // "Open Beebeeb" surfaces the main app window (the full sidebar/content
-    // shell on Windows; the compact app window on macOS/Linux). The menu-item id
-    // stays `open_settings` for backwards compatibility with existing event
-    // wiring — only the label and target window changed.
+    state: &TrayMenuState,
+) -> tauri::Result<Menu<R>> {
+    // The first line is not a command: it says the same state as the tooltip. `open_settings` keeps its id for the
+    // existing event wiring; only its label and target window changed.
+    let status_item = MenuItemBuilder::new(state.label)
+        .id("tray_status")
+        .enabled(false)
+        .build(manager)?;
     let show_item = MenuItemBuilder::new("Open Beebeeb")
         .id("open_settings")
         .build(manager)?;
-    let hide_item = MenuItemBuilder::new("Hide").id("tray_hide").build(manager)?;
+    let explorer_item = MenuItemBuilder::new("Open in File Explorer")
+        .id("tray_explorer")
+        .enabled(state.explorer_ready)
+        .build(manager)?;
+    let pause_item = MenuItemBuilder::new(state.pause_label())
+        .id("tray_pause")
+        .enabled(state.signed_in)
+        .build(manager)?;
+    let lock_item = MenuItemBuilder::new(state.lock_label())
+        .id("tray_lock")
+        .enabled(state.signed_in)
+        .build(manager)?;
+    let check_item = MenuItemBuilder::new("Check for updates…")
+        .id("tray_check_updates")
+        .build(manager)?;
+    let settings_item = MenuItemBuilder::new("Settings…").id("tray_settings").build(manager)?;
     let autostart_item = CheckMenuItemBuilder::new("Start at login")
         .id("tray_autostart")
         .checked(autostart_enabled)
         .build(manager)?;
     let sep1 = PredefinedMenuItem::separator(manager)?;
     let sep2 = PredefinedMenuItem::separator(manager)?;
-    let quit_item = PredefinedMenuItem::quit(manager, Some("Quit"))?;
+    let quit_item = PredefinedMenuItem::quit(manager, Some("Quit Beebeeb"))?;
     Menu::with_items(
         manager,
-        &[&show_item, &hide_item, &sep1, &autostart_item, &sep2, &quit_item],
+        &[
+            &status_item,
+            &show_item,
+            &explorer_item,
+            &sep1,
+            &pause_item,
+            &lock_item,
+            &check_item,
+            &settings_item,
+            &autostart_item,
+            &sep2,
+            &quit_item,
+        ],
     )
 }
 
-/// Attach a Tauri event listener that updates the tray tooltip when
-/// the engine emits an `engine-status` event. Spec 030 §5.
-///
-/// We use tooltip-only animation in v1 — different icon variants
-/// (idle / syncing / error PNGs) are a follow-up once design ships
-/// the colored set. Updating the tooltip on every tick is cheap and
-/// lets the user see "Syncing 5 files…" change as work progresses.
+/// What a failed Lock says, in the flyout: honest about the state the person is left in.
+const TRAY_LOCK_FAILED: &str = "Beebeeb couldn’t lock, so it stays unlocked.";
+/// What a failed Unlock says: the lock stays, and the window can still unlock.
+const TRAY_UNLOCK_FAILED: &str = "Beebeeb couldn’t unlock. Unlock it in the Beebeeb window.";
+
+/// A refusal in the b's menu is said in the flyout, never dropped: the menu is Windows' and has no line of its own,
+/// so this opens the flyout and tells it the one sentence. It stays until the next action, as the flyout's own do.
+fn report_tray_refusal<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sentence: &str) {
+    if let Some(win) = app.get_webview_window("tray") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    if let Err(error) = app.emit("tray-menu-notice", sentence) {
+        tracing::warn!(%error, "could not report the tray menu's refusal in the flyout");
+    }
+}
+
+/// Attach the listeners that keep the b's tooltip and menu on the state the window shows: every `engine-status`
+/// (cheap: the mirror is already folded in), and a conflict arriving or resolving (the count needs the state DB).
 pub(super) fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Listener;
     let app_for_listener = app.clone();
@@ -259,9 +499,8 @@ pub(super) fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHan
             }
         };
         // Task 1683 slice 2: `state` can now be `syncing` or `offline`. Nothing a user
-        // sees today may change before the flip (slice 6), so the tooltip and
-        // `sync_status` keep reading the state the old emitter would have sent
-        // (`engine_status::legacy_state`).
+        // sees today may change before the flip (slice 6), so `sync_status` keeps reading
+        // the state the old emitter would have sent (`engine_status::legacy_state`).
         let state = engine_status::legacy_state(&payload);
 
         // The popover snapshot reads the NEW fields (real state, progress, last check,
@@ -276,7 +515,7 @@ pub(super) fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHan
         // (per-account, decision 0800) so the `sync_status` command can return
         // it on first paint without subscribing to the event stream itself.
         // Failures here (poisoned mutex, registry not synthesized yet) are
-        // non-fatal — the tray tooltip update below still runs.
+        // non-fatal — the b's tooltip update below still runs.
         if !state.is_empty()
             && let Some(app_state) = app_for_listener.try_state::<AppState>()
             && let Ok(acct) = app_state.active_account()
@@ -285,20 +524,22 @@ pub(super) fn attach_tray_status_listener<R: tauri::Runtime>(app: &tauri::AppHan
             *guard = state.to_string();
         }
 
-        let tooltip = engine_status::tray_tooltip(&payload);
-
-        if let Some(tray) = app_for_listener.tray_by_id("tray")
-            && let Err(e) = tray.set_tooltip(Some(&tooltip))
-        {
-            tracing::warn!(error = %e, "failed to update tray tooltip");
-        }
+        refresh_tray_menu(&app_for_listener, false);
     });
+
+    for event_name in ["engine-conflict", "conflict-resolved", "conflict-auto-resolved"] {
+        let listener = app.clone();
+        app.listen(event_name, move |_event| refresh_tray_menu(&listener, true));
+    }
 }
 
 pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    // The same state the window draws, at launch: the first frame's menu is not a guess (the conflict count is
+    // filled in by the refresh just below).
+    let initial = tray_menu_state(&tray_inputs_now(app.handle()));
     // Read current autostart state so the check mark is correct on launch.
     #[cfg(not(target_os = "macos"))]
-    let tray_menu = build_tray_menu(app, app.autolaunch().is_enabled().unwrap_or(false))?;
+    let tray_menu = build_tray_menu(app, app.autolaunch().is_enabled().unwrap_or(false), &initial)?;
 
     // The tray ICON itself is built declaratively from `app.trayIcon` in
     // tauri.conf.json (iconPath, iconAsTemplate, tooltip,
@@ -315,9 +556,72 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     tray.set_menu(Some(tray_menu))?;
+    let _ = tray.set_tooltip(Some(initial.tooltip));
+    // The initial menu was built without the state DB read; this fills in a waiting conflict at launch.
+    refresh_tray_menu(&app.handle().clone(), true);
 
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "open_settings" => show_main_app_window_impl(app),
+        "tray_explorer" => {
+            let app = app.clone();
+            // Off the main thread, as the menu's own Open Folder is; a failure is shown, never dropped.
+            spawn_menu_task("tray_explorer", async move {
+                let result = on_the_blocking_pool(OPEN_FOLDER_FAILED, open_current_finder_location).await;
+                show_menu_open_failure(&app, &result);
+                result
+            });
+        }
+        "tray_pause" => {
+            let app = app.clone();
+            // The same path the window's Pause uses (`set_sync_paused`); a refusal opens the flyout and says it there.
+            spawn_menu_task("tray_pause", async move {
+                let (pausing, result) = toggle_sync_paused_from_menu(&app).await;
+                if result.is_err() {
+                    report_tray_refusal(
+                        &app,
+                        if pausing {
+                            MENU_PAUSE_FAILED_SENTENCE
+                        } else {
+                            MENU_RESUME_FAILED_SENTENCE
+                        },
+                    );
+                }
+                result
+            });
+        }
+        "tray_lock" => {
+            let app = app.clone();
+            // Lock/Unlock is the window's own command (`lock_vault` / `unlock_vault`), read at click time so a stale
+            // menu cannot lock twice.
+            spawn_menu_task("tray_lock", async move {
+                let result = if tray_inputs_now(&app).locked {
+                    let state = app.state::<AppState>();
+                    match unlock_vault(app.clone(), state).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            report_tray_refusal(&app, TRAY_UNLOCK_FAILED);
+                            Err(error)
+                        }
+                    }
+                } else {
+                    let state = app.state::<AppState>();
+                    match lock_vault(state).await {
+                        Ok(_) => Ok(()),
+                        Err(error) => {
+                            report_tray_refusal(&app, TRAY_LOCK_FAILED);
+                            Err(error)
+                        }
+                    }
+                };
+                // A lock or unlock changes the menu at once, not at the next engine pulse.
+                refresh_tray_menu(&app, true);
+                result
+            });
+        }
+        // The same check the window's Settings › About runs, and the Beebeeb menu's Check for Updates….
+        "tray_check_updates" => request_menu_update_check(app),
+        // The window's Settings page, opened by the same helper the menu's Open Settings uses.
+        "tray_settings" => show_main_app_window_with_nav(app, Some("settings")),
         "tray_hide" => match surfaces::policy::tray_hide(surfaces::policy::Platform::current()) {
             // A Mac hides the app (⌘H): the Beebeeb window and the menu-bar popover; the Dock or a reopen unhides.
             surfaces::policy::TrayHide::App =>
@@ -345,8 +649,9 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = manager.enable();
             }
             let new_state = !currently;
+            let menu_state = tray_menu_state(&tray_inputs_now(app));
             if let Some(tray) = app.tray_by_id("tray")
-                && let Ok(menu) = build_tray_menu(app, new_state)
+                && let Ok(menu) = build_tray_menu(app, new_state, &menu_state)
             {
                 let _ = tray.set_menu(Some(menu));
             }
@@ -770,5 +1075,70 @@ pub(super) fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<
                 tracing::warn!(%error, "failed to create main app window");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inputs(update: impl FnOnce(&mut TrayInputs)) -> TrayInputs {
+        let mut inputs = TrayInputs {
+            signed_in: true,
+            explorer_ready: true,
+            ..TrayInputs::default()
+        };
+        update(&mut inputs);
+        inputs
+    }
+
+    #[test]
+    fn tray_menu_says_syncing_while_files_move() {
+        let state = tray_menu_state(&inputs(|inputs| {
+            inputs.engine_state = "syncing".into();
+            inputs.files_remaining = Some(12);
+        }));
+        assert_eq!(state.icon, "syncing");
+        assert_eq!(state.label, "Syncing");
+        assert_eq!(state.tooltip, "Beebeeb: syncing");
+        assert_eq!(state.pause_label(), "Pause syncing");
+        assert_eq!(state.lock_label(), "Lock Beebeeb");
+    }
+
+    #[test]
+    fn tray_menu_says_locked_and_offers_unlock_with_the_plain_b() {
+        let state = tray_menu_state(&inputs(|inputs| {
+            inputs.locked = true;
+            inputs.engine_state = "idle".into();
+        }));
+        assert_eq!(state.icon, "up-to-date", "DW-1230 keeps the plain b while locked");
+        assert_eq!(state.label, "Locked");
+        assert_eq!(state.tooltip, "Beebeeb: locked");
+        assert_eq!(state.lock_label(), "Unlock Beebeeb");
+        assert_eq!(
+            state.pause_label(),
+            "Pause syncing",
+            "sync keeps running behind the lock"
+        );
+    }
+
+    #[test]
+    fn tray_menu_says_needs_a_decision_with_a_waiting_conflict() {
+        let state = tray_menu_state(&inputs(|inputs| {
+            inputs.conflicts = 2;
+            inputs.engine_state = "idle".into();
+        }));
+        assert_eq!(state.icon, "needs-decision");
+        assert_eq!(state.label, "Needs a decision");
+        assert_eq!(state.tooltip, "Beebeeb: needs a decision");
+    }
+
+    #[test]
+    fn tray_menu_says_up_to_date_when_nothing_is_happening() {
+        let state = tray_menu_state(&inputs(|inputs| inputs.engine_state = "idle".into()));
+        assert_eq!(state.icon, "up-to-date");
+        assert_eq!(state.label, "Up to date");
+        assert_eq!(state.tooltip, "Beebeeb: up to date");
+        assert_eq!(state.pause_label(), "Pause syncing");
     }
 }
