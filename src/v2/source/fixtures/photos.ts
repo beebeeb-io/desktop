@@ -3,20 +3,14 @@
 import type { DriveItem, DriveSource, PhotoEntry } from '@beebeeb/shared/drive-ui'
 import { createFixtureSource } from '../fixtures'
 import { thumbnailFor } from './files'
+import type { PhotoMeta } from '../../sections/photos/types'
+import type { HistoryRow, HistoryScope } from '../../sections/sync-history/types'
+
+export type { HistoryRow, HistoryScope, PhotoMeta }
 
 export const PHOTOS_NOW = '2026-11-08T12:00:00'
 const none = { kind: 'none' } as const
 
-/** What the board shows beside a photo that DriveSource's PhotoEntry does not carry yet (reported as a gap). */
-export interface PhotoMeta {
-  /** Absent live: the engine doesn't know which device took it. */
-  device?: string
-  duration?: string
-  uploading?: boolean
-  camera?: string
-  dims?: string
-  previewBytes?: number
-}
 
 const IPHONE = 'Anna’s iPhone'
 const OLD = 'Old iPhone'
@@ -74,22 +68,6 @@ export function createPhotosSource(entries: PhotoEntry[] = PHOTO_ENTRIES): Drive
 }
 
 // Sync history ---------------------------------------------------------------------------------------------------
-export type HistoryScope = 'this-pc' | 'other'
-export interface HistoryRow {
-  id: string
-  name: string
-  /** "Uploaded to Contracts", "Downloaded from Anna’s iPhone": what happened and where. */
-  what: string
-  device: string
-  at: string
-  scope: HistoryScope
-  /** Set on a row that did not sync: why, in plain words. */
-  problem?: string
-  /** The Beebeeb item the row shows in the window when opened (a trashed file opens Trash). */
-  itemId?: string
-  trashed?: boolean
-  kind: 'file' | 'folder'
-}
 
 const PC = 'This PC'
 const h = (id: string, name: string, what: string, device: string, at: string, extra: Partial<HistoryRow> = {}): HistoryRow => ({

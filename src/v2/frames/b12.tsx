@@ -5,9 +5,9 @@ import { SettingsView } from '../sections/settings/shell/SettingsView'
 import type { PaneId } from '../sections/settings/shell/context'
 import { General } from '../sections/settings/shell/general'
 import { Notifications } from '../sections/settings/shell/notifications'
-import { Security } from '../sections/settings/shell/security'
+import { Security } from './b12-security'
 import { BackupFailures, Backups } from '../sections/settings/backups'
-import { FIXTURE_BACKUP_PROBLEMS } from '../sections/settings/shell/data'
+import { FIXTURE_BACKUP_PROBLEMS } from '../source/fixtures/settings'
 import type { FrameRegistry } from './types'
 
 /** The window with the settings view in it. `tall`: drawn taller than the window so the whole section shows. */
@@ -24,7 +24,7 @@ function win(pane: PaneId, opts: { dialog?: string; tall?: boolean; override?: R
 
 export const FRAMES: FrameRegistry = {
   'DW-0701': win('general'),
-  'DW-0781': win('general', { override: <General updateAvailable /> }),
+  'DW-0781': win('general', { override: <General updateAvailable="0.9.2" /> }),
   'DW-0751': win('about', { tall: true }),
   'DW-0782': win('general', { dialog: 'report' }),
   'DW-0708': win('general', { dialog: 'plan' }),

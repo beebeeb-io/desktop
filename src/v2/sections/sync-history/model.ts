@@ -2,7 +2,7 @@
 // same ActivityRow the flyout reads (popoverContract) and the sync_activity_summary counts (syncActivityModel).
 import type { ActivityRow } from '../../../popoverContract'
 import type { SyncActivitySummary } from '../../../windows/syncActivityModel'
-import type { HistoryRow } from '../../source/fixtures/photos'
+import type { HistoryRow } from './types'
 import type { SyncProblem } from '../../source/extras'
 
 export type { HistoryRow }

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { Dialog, Group, Page } from '../shell/kit'
 import { useAccount, run, errorText, type Scenario } from './data'
-import type { DeviceGroup } from '../../../source/fixtures/account'
+import type { DeviceGroup } from './types'
 import { Btn, Pill, relative } from './ui'
 
 type Confirm = { kind: 'one'; device: DeviceGroup } | { kind: 'others' }

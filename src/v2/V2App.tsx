@@ -2,14 +2,14 @@
 // Frozen after the scaffold: batches build inside sections/, chrome/ (B03) and their own directories;
 // a change here goes through the lead (design/desktop-v2/BATCHES.md, "Shared files").
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactElement } from 'react'
 import { DriveSourceProvider, useDriveSource, type DriveSource, type StorageSummary, type SyncSummary } from '@beebeeb/shared/drive-ui'
 import { CaptionBar } from './chrome/CaptionBar'
 import { Sidebar } from './chrome/Sidebar'
 import { StatusLine } from './chrome/StatusLine'
 import { AuthGate } from './auth/Gate'
 import { GuideHost } from './guide/GuideHost'
-import { FRAMES } from './frames/registry'
+import { board } from './board'
 import { useNavigation, type SectionId } from './routes'
 import { useShortcuts, type CommandId } from './shortcuts'
 import { pickSource } from './source'
@@ -171,8 +171,11 @@ function FrameNotBuilt({ id }: { id: string }) {
 
 export default function V2App() {
   const source = useMemo(() => recountingTrash(pickSource()), [])
-  const frame = new URLSearchParams(window.location.search).get('frame')
-  const renderFrame = frame ? FRAMES[frame] : undefined
+  // `?frame=DW-xxxx` draws a board frame (headless screenshots, the map audit). The frame table is the dev server's
+  // (registered by ./dev/live.ts through ./board.ts): a production build has none, so the parameter opens the window.
+  const frames = board<Record<string, () => ReactElement>>('frames')
+  const frame = frames ? new URLSearchParams(window.location.search).get('frame') : null
+  const renderFrame = frame ? frames?.[frame] : undefined
   return (
     <DriveSourceProvider source={source}>
       {frame ? (renderFrame ? renderFrame() : <FrameNotBuilt id={frame} />) : (

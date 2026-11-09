@@ -1,29 +1,21 @@
-// The window the B03 frames are drawn in: the caption bar, the sidebar, a Files toolbar and list stand-in, the
+// The window the B03 frames are drawn in (frames only, never the running app): the caption bar, the sidebar, a Files toolbar and list stand-in, the
 // status line. B04 builds the real Files section; these frames show only the global element in its window, so
 // the list here is the fixtures' rows, static.
 
 import type { ReactNode } from 'react'
-import { BBButton } from '@beebeeb/shared/design'
 import type { StorageSummary, SyncSummary } from '@beebeeb/shared/drive-ui'
-import { CaptionBarView } from './CaptionBar'
-import { Sidebar } from './Sidebar'
-import { StatusLine } from './StatusLine'
+import { CaptionBarView } from '../chrome/CaptionBar'
+import { Sidebar } from '../chrome/Sidebar'
+import { StatusLine } from '../chrome/StatusLine'
+import { Toolbar } from '../chrome/Toolbar'
 import { rootItems } from '../source/fixtures'
 import type { SectionId } from '../routes'
+
+export { Toolbar }
 
 const GB = 1024 ** 3
 export const STORAGE_240: StorageSummary = { usedBytes: 240 * GB, quotaBytes: 1024 * GB, filesBytes: 150 * GB, photosBytes: 60 * GB, backupsBytes: 30 * GB }
 export const SYNC_OK: SyncSummary = { phase: 'up-to-date', onDevice: 4, availableOffline: 3, onlineOnly: 4, pending: 0 }
-
-export function Toolbar() {
-  return (
-    <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4">
-      <h1 className="m-0 text-[15px] font-semibold text-ink">Files</h1>
-      <span className="flex-1" />
-      <BBButton variant="amber" size="md">New</BBButton>
-    </div>
-  )
-}
 
 function size(bytes: number | null): string {
   if (bytes === null) return ''

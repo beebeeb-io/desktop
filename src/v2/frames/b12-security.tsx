@@ -1,7 +1,8 @@
-// Security (DW-0716, DW-0716b): one pane. Drive's App lock sits above the shared Sign-in rows (the kit's
-// securityExtra slot, DW-A52). Turning the lock off or changing the delay asks for Windows Hello first.
+// B12's drawing of Security (DW-0716, DW-0716b), for its frames only: Drive's App lock above the shared Sign-in rows,
+// with the board's example values. The running app's Security is B14's (sections/settings/account/SecurityPane.tsx,
+// which carries the App lock as it really is); this drawing never reaches it (P1c).
 import { useState } from 'react'
-import { Btn, Choice, Dialog, Group, Page, Row, Switch } from './kit'
+import { Btn, Choice, Dialog, Group, Page, Row, Switch } from '../sections/settings/shell/kit'
 
 type Delay = 'immediate' | '5' | '30' | '60'
 const DELAYS: { value: Delay; label: string }[] = [

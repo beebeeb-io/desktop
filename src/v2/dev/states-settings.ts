@@ -4,7 +4,7 @@
 // the frames use, so the live pane is the real one with its real handlers.
 import type { Recipe } from './states'
 import { TEST_STATES } from '../sections/settings/today/bandwidth'
-import { FIXTURE_BACKUP_PROBLEMS } from '../sections/settings/shell/data'
+import { FIXTURE_BACKUP_PROBLEMS } from '../source/fixtures/settings'
 
 const pane = (sub: string, o: { dialog?: string; props?: Record<string, unknown>; steps?: Recipe['steps']; gap?: string; native?: string; reads?: Recipe['reads'] } = {}): Recipe => {
   const seeds: Record<string, unknown> = {}
@@ -23,7 +23,7 @@ const account = (initial: string, codeDigits?: string) => pane('account', { prop
 export const SETTINGS_STATES: Record<string, Recipe> = {
   // ── B12: the settings shell ───────────────────────────────────────────────────────────────────────────────────
   'DW-0701': pane('general'),
-  'DW-0781': pane('general', { props: { updateAvailable: true } }),
+  'DW-0781': pane('general', { props: { updateAvailable: '0.9.2' } }),
   // About says 0.9.1 is the newest (Back → General without a banner, DW-0751#5 → DW-0701); Check now finds 0.9.2
   // (DW-0751#1 → DW-0781): the updater's answer, a read, which General's banner then shows.
   'DW-0751': pane('about', { reads: {

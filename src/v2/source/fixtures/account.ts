@@ -1,26 +1,8 @@
 // B14 fixtures (account settings): the board's example account, Anna. A plain browser (headless frames,
 // `bun run dev`) has no IPC bridge, so these stand in for the commands. Never real data.
+import type { ActivityEvent, DeviceGroup, Factor, Passkey, ProductRow, ProductState } from '../../sections/settings/account/types'
 
-export type ProductState = 'This app' | 'Signed in' | 'Not signed in'
-export interface ProductRow { name: string; state: ProductState }
-
-export interface DeviceGroup {
-  /** One session id per Beebeeb app signed in on the device (a row's Sign out ends all of them). */
-  session_ids: string[]
-  name: string
-  os: string
-  apps: string[]
-  /** RFC 3339, or null when the server has none. */
-  last_active_at: string | null
-  country_code: string | null
-  is_current: boolean
-}
-
-export interface Passkey { id: string; name: string; created_at: string; last_used_at: string | null; prf: boolean }
-
-export interface ActivityEvent { id: string; what: string; at: string; country: string | null; address: string | null }
-
-export interface Factor { key: string; satisfied: boolean }
+export type { ActivityEvent, DeviceGroup, Factor, Passkey, ProductRow, ProductState }
 
 /** Fixed "now" so relative times in the frames never drift. */
 export const FIXTURE_NOW = Date.parse('2026-11-05T19:42:00Z')

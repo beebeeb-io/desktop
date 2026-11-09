@@ -2,9 +2,9 @@
 // hand the views these shapes.
 import type { ShareEntry } from '@beebeeb/shared/drive-ui'
 import type { MenuEntry } from '../files/ui'
-import type { FileRequestRow, LinkShare, Member, PeopleShare, WithMeRow } from '../../source/fixtures/shared'
+import type { FileRequestRow, LinkShare, Member, PeopleShare, WithMeRow } from './types'
 
-export type { FileRequestRow, Invitation, LinkShare, PeopleShare, WithMeRow, Member, Access } from '../../source/fixtures/shared'
+export type { FileRequestRow, Invitation, LinkShare, PeopleShare, WithMeRow, Member, Access } from './types'
 export type SharedTab = 'with-me' | 'by-me' | 'requests'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']

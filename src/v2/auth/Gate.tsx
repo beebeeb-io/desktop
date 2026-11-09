@@ -1,11 +1,12 @@
 // Owned by batch B10. Signed out, locked or without a plan, the window shows sign-in (DW-A02/A03), the lock (DW-0009)
 // or no plan (DW-0014) instead of Files. Outside Tauri (the browser dev server) every check is unavailable and the
-// window renders with the fixtures, as before.
+// window renders with the board's fixtures, as before. The dimmed sidebar behind a gate names no account (the window's
+// own generic "Account", never the board's example person).
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
 import { clearSession, command } from '../../desktopApi'
 import { CaptionBarView } from '../chrome/CaptionBar'
-import { Toolbar } from '../chrome/FrameWindow'
+import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
 import { unlockWithWindowsHello } from './api'
@@ -61,7 +62,7 @@ function GateWindow({ children, sidebarFooter, overlay, dimSidebar = true }: { c
       <CaptionBarView title="Beebeeb" />
       <div className="flex min-h-0 flex-1">
         <div className={`relative flex ${dimSidebar ? 'pointer-events-none opacity-45' : ''}`} aria-hidden={dimSidebar || undefined} inert={dimSidebar || undefined}>
-          <Sidebar active="files" onGo={() => {}} storage={null} accountName="Anna" />
+          <Sidebar active="files" onGo={() => {}} storage={null} accountName="Account" />
           {sidebarFooter}
         </div>
         <main className="flex min-w-0 flex-1 flex-col">

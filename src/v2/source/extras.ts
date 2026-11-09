@@ -1,6 +1,7 @@
 // Batch B02b: the data the screens draw beyond DriveSource's first contract (PUNCHLIST "GAP (data)" items from B03,
 // B04, B05, B06, B07, B09). One interface, two sides: the desktop side calls the `drive_*` commands in
-// src-tauri/src/drive_v2/status_cmds.rs; a plain browser gets the board's fixtures (./fixtures/extras.ts).
+// src-tauri/src/drive_v2/status_cmds.rs; on the dev server a plain browser gets the board's fixtures (./fixtures/extras.ts,
+// registered by ../dev/live.ts through ../board.ts; a production build never has them).
 //
 // Folding these into `DriveSource` itself goes through B01's contract (packages/shared is a generated mirror and
 // frozen here); until then this module is that one contract change, desktop-side. Data only: never a key, a token,
@@ -11,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { DriveItem, ItemId } from '@beebeeb/shared/drive-ui'
 import { hasTauri } from './index'
-import { createFixtureExtras } from './fixtures/extras'
+import { board } from '../board'
 import { createFileIn } from './desktop'
 
 export interface ListingProgress { done: number; total: number }
@@ -123,11 +124,12 @@ export function createDesktopExtras(): DriveExtras {
   }
 }
 
-/** Same rule as `pickSource`: `?source=fixtures` or a plain browser gets the fixtures. */
+/** Same rule as `pickSource`: on the dev server, `?source=fixtures` or a plain browser gets the board's fixtures. */
 export function pickExtras(search: string = typeof window === 'undefined' ? '' : window.location.search): DriveExtras {
   const params = new URLSearchParams(search)
-  if (params.get('source') === 'fixtures' || !hasTauri()) return createFixtureExtras(params.get('scenario') ?? 'default')
-  return createDesktopExtras()
+  const wantsBoard = !hasTauri() || (import.meta.env.DEV && params.get('source') === 'fixtures')
+  const fromBoard = wantsBoard ? board<(scenario: string) => DriveExtras>('extras') : undefined
+  return fromBoard ? fromBoard(params.get('scenario') ?? 'default') : createDesktopExtras()
 }
 
 let shared: DriveExtras | null = null
