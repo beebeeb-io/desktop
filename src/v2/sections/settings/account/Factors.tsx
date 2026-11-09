@@ -1,10 +1,11 @@
 // Two-factor (DW-A69 to A72), passkeys (A73 to A76) and sign-in activity (A77 to A79). Shared account screens:
-// every product draws them the same. Passkeys call account_passkeys_* (B15 builds them; fixtures until then).
+// every product draws them the same. Every answer comes from its account_totp / account_passkeys_* command; a plain
+// browser shows the host's honest refusal, never an example key or codes.
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { run, errorText, copyFor60s, COPY_DONE, COPY_FAILED, type AccountState } from './data'
-import { FIXTURE_BACKUP_CODES, FIXTURE_TOTP, type Passkey } from '../../../source/fixtures/account'
+import type { Passkey } from './types'
 import { Btn, BackLink, CodeBoxes, Field, PasswordInput, Pill, Qr, TextInput, ago, day, useEscBack } from './ui'
 
 type Set = (f: (s: AccountState) => AccountState) => void
@@ -19,17 +20,17 @@ export function TotpSetup({ onCodes, onBack, initialDigits = '', moving }: { onC
   useEscBack(onBack)
   useEffect(() => {
     let live = true
-    void run<{ secret: string; otpauth_uri: string; qr_rows: string[] }>('account_totp_setup', { password: null, currentCode: moving ?? null }, FIXTURE_TOTP).then((r) => {
+    void run<{ secret: string; otpauth_uri: string; qr_rows: string[] }>('account_totp_setup', { password: null, currentCode: moving ?? null }).then((r) => {
       if (!live) return
       if (r.ok) setSetup(r.value)
       else setError(errorText(r.code))
     })
-    return () => { live = false; void run('account_totp_abandon', {}, null) }
+    return () => { live = false; void run('account_totp_abandon', {}) }
   }, [moving])
   const turnOn = async () => {
     const c = code
     setCode('')
-    const r = await run<{ backup_codes: string[] }>('account_totp_confirm', { code: c }, { backup_codes: FIXTURE_BACKUP_CODES })
+    const r = await run<{ backup_codes: string[] }>('account_totp_confirm', { code: c })
     if (r.ok) onCodes(r.value.backup_codes)
     else setError(errorText(r.code))
   }
@@ -72,7 +73,7 @@ export function BackupCodes({ codes, onDone }: { codes: string[]; onDone: () => 
       </ol>
       <div className="flex items-center gap-2">
         <Btn onClick={() => void copyFor60s(text).then((ok) => setNote(ok ? COPY_DONE : COPY_FAILED))}>Copy all codes</Btn>
-        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }, true).then((r) => { if (!r.ok) setNote(errorText(r.code)); else if (r.value) setNote('Saved.') })}>Save as text…</Btn>
+        <Btn onClick={() => void run<boolean>('account_save_backup_codes', { text }).then((r) => { if (!r.ok) setNote(errorText(r.code)); else if (r.value) setNote('Saved.') })}>Save as text…</Btn>
         {note ? <span role="status" className="text-[12px] text-ink-3">{note}</span> : null}
         <span className="flex-1" />
         <Btn variant="amber" onClick={onDone}>I’ve saved them</Btn>
@@ -123,12 +124,12 @@ function CodeDialog({ kind, onCancel, onOk }: { kind: 'off' | 'new-codes' | 'mov
     const c = code
     setCode('')
     if (kind === 'off') {
-      const r = await run('account_totp_disable', { code: c }, null)
+      const r = await run('account_totp_disable', { code: c })
       if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
     }
     if (kind === 'new-codes') {
       // Server #422: new codes with the current code; the authenticator stays (no new set-up).
-      const r = await run<{ backup_codes: string[] }>('account_backup_codes_regenerate', { code: c }, { backup_codes: FIXTURE_BACKUP_CODES })
+      const r = await run<{ backup_codes: string[] }>('account_backup_codes_regenerate', { code: c })
       if (!r.ok) return setError(r.code === 'invalid_code' ? 'Incorrect code. Try again.' : errorText(r.code))
       return onOk(c, r.value.backup_codes)
     }
@@ -225,7 +226,7 @@ function AddPasskey({ onCancel, onAdded }: { onCancel: () => void; onAdded: (p: 
     const pw = password
     setPassword('')
     const name = 'Windows Hello'
-    const r = await run<{ id: string }>('account_passkeys_add', { name, password: pw }, { id: `pk-${Date.now()}` })
+    const r = await run<{ id: string }>('account_passkeys_add', { name, password: pw })
     if (!r.ok) return setError(errorText(r.code))
     onAdded({ id: r.value.id, name, created_at: new Date().toISOString(), last_used_at: null, prf: true })
   }
@@ -255,7 +256,7 @@ function RemovePasskey({ passkey, others, onCancel, onRemoved, onError }: { pass
   const remove = async () => {
     const pw = password
     setPassword('')
-    const r = await run('account_passkeys_remove', { id: passkey.id, password: pw }, null)
+    const r = await run('account_passkeys_remove', { id: passkey.id, password: pw })
     if (r.ok) onRemoved()
     else onError()
   }
@@ -288,14 +289,14 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
   const on = state.activityLogging
   const toggle = async (next: boolean) => {
     if (!next) return setAsk(true)
-    const r = await run('account_set_activity_logging', { on: true, password: null }, null)
+    const r = await run('account_set_activity_logging', { on: true, password: null })
     if (r.ok) setState((s) => ({ ...s, activityLogging: true }))
     else setError(errorText(r.code))
   }
   const turnOff = async () => {
     const pw = password
     setPassword('')
-    const r = await run('account_set_activity_logging', { on: false, password: pw }, null)
+    const r = await run('account_set_activity_logging', { on: false, password: pw })
     setAsk(false)
     if (r.ok) setState((s) => ({ ...s, activityLogging: false, activity: [] }))
     else setError(errorText(r.code))
@@ -312,6 +313,11 @@ export function Activity({ state, setState, onBack, onPassword, onDevices, askin
         <div className="rounded-[12px] border border-line bg-paper px-4 py-3" data-testid="logging-off">
           <h2 className="text-[13px] font-semibold text-ink">Security logging is off</h2>
           <p className="text-[12px] text-ink-3">Nothing new is recorded. What was recorded is deleted within 30 days. Security alerts, like a new sign-in or a password change, still arrive.</p>
+        </div>
+      ) : groups.size === 0 ? (
+        <div className="rounded-[12px] border border-line bg-paper px-4 py-3" data-testid="activity-empty">
+          <p className="text-[13px] text-ink">No sign-in activity recorded yet.</p>
+          <p className="text-[12px] text-ink-3">Sign-ins and security changes appear here once the server answers.</p>
         </div>
       ) : (
         [...groups.entries()].map(([title, events]) => (
