@@ -2,7 +2,7 @@
 // type-to-select, and where each banner's button goes.
 import { describe, expect, test } from 'bun:test'
 import { rowCount } from '../src/v2/chrome/Sidebar'
-import { failureText, typeahead, TYPEAHEAD_MS } from '../src/v2/sections/files/model'
+import { actionFailure, fmtWhen, typeahead, TYPEAHEAD_MS } from '../src/v2/sections/files/model'
 import { BANNER_ROUTE, bannerCopy, listAge } from '../src/v2/chrome/Banners'
 import { statusWords, uploadingLine } from '../src/v2/chrome/StatusLine'
 import { createFixtureExtras, FIXTURE_TRANSFERS } from '../src/v2/source/fixtures/extras'
@@ -37,16 +37,16 @@ describe('the fixture world agrees with itself', () => {
 
 describe('a failed action says what failed (DW-0109)', () => {
   test('offline: the board’s words, and Try again can help', () => {
-    expect(failureText('rename', 'offline')).toEqual({ text: 'Couldn’t rename. Check your connection.', retry: true })
+    expect(actionFailure('rename', 'offline')).toEqual({ text: 'Couldn’t rename. Check your connection.', retry: true })
   })
   test('no Try again where trying again cannot help; never a code', () => {
     for (const code of ['unsupported', 'quota', 'signed-out', 'name-taken']) {
-      const f = failureText('move it', code)
+      const f = actionFailure('move it', code)
       expect(f.retry).toBe(false)
       expect(f.text.startsWith('Couldn’t move it. ')).toBe(true)
       expect(f.text).not.toContain(code)
     }
-    expect(failureText('open it', 'failed')).toEqual({ text: 'Couldn’t open it.', retry: true })
+    expect(actionFailure('open it', 'failed')).toEqual({ text: 'Couldn’t open it.', retry: true })
   })
 })
 
@@ -86,6 +86,11 @@ describe('the status line says the state that needs attention (DW-0401, DW-0426,
     expect(statusWords(sync, { uploading: 'Uploading 2 of 4 · 42.4 MB left' })).toBe('Uploading 2 of 4 · 42.4 MB left')
     expect(statusWords(sync, { listing: true })).toBe('Getting your files ready')
   })
+  test('offline or paused wins over queued uploads (self-review)', () => {
+    expect(statusWords({ ...sync, phase: 'offline' }, { uploading: 'Uploading 1 of 3' })).toBe('Offline')
+    expect(statusWords({ ...sync, phase: 'paused' }, { uploading: 'Uploading 1 of 3' }).startsWith('Paused · ')).toBe(true)
+    expect(uploadingLine(FIXTURE_TRANSFERS.filter((r) => r.state !== 'moving'))).toBeNull()
+  })
   test('uploads: moving of all, the bytes left of those not stopped; nothing moving is no line', () => {
     expect(uploadingLine(FIXTURE_TRANSFERS)).toBe('Uploading 2 of 4 · 52.7 MB left')
     expect(uploadingLine(FIXTURE_TRANSFERS.filter((r) => r.state === 'stopped'))).toBeNull()
@@ -103,5 +108,15 @@ describe('the offline banner says how old the list is (DW-0101, DW-1108)', () =>
   })
   test('DW-1108’s sentence', () => {
     expect(bannerCopy('offline', { asOf: 'today at 09:12' }).detail).toBe('This list is from today at 09:12. Changes you make will upload when you’re back.')
+  })
+})
+
+describe('calendar days across a DST change (run under TZ=Europe/Lisbon too)', () => {
+  // Summer time ends on 25 Oct 2026: the two local midnights are 25 hours apart.
+  const now = new Date('2026-10-26T09:00:00')
+  test('the evening before is yesterday', () => {
+    expect(listAge('2026-10-25T22:00:00', now)).toBe('yesterday at 22:00')
+    expect(fmtWhen('2026-10-25T22:00:00', now)).toBe('Yesterday, 22:00')
+    expect(fmtWhen('2026-10-24T22:00:00', now)).toBe('24 Oct 2026')
   })
 })

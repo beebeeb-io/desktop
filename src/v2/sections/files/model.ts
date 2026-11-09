@@ -49,7 +49,8 @@ export function fmtWhen(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
   const diff = now.getTime() - d.getTime()
   if (diff < 60_000 && diff > -60_000) return 'Just now'
-  const day = (x: Date) => Math.floor(new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() / 86_400_000)
+  // Calendar days, not 24-hour spans: a DST change between the two midnights would shift a local-midnight count.
+  const day = (x: Date) => Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()) / 86_400_000
   const hm = `${two(d.getHours())}:${two(d.getMinutes())}`
   if (day(now) === day(d)) return `Today, ${hm}`
   if (day(now) - day(d) === 1) return `Yesterday, ${hm}`
@@ -156,7 +157,7 @@ export function savePrefs(folderId: string | null, prefs: FolderPrefs): void {
  * A failed action's message (DW-0109): what failed and how to fix it, never a raw error code. `retry` says whether
  * Try again can help: not for a build that lacks the command, a full account or a name already used.
  */
-export function failureText(action: string, code: string): { text: string; retry: boolean } {
+export function actionFailure(action: string, code: string): { text: string; retry: boolean } {
   if (code === 'offline') return { text: `Couldn’t ${action}. Check your connection.`, retry: true }
   if (code === 'quota') return { text: `Couldn’t ${action}. Not enough space.`, retry: false }
   if (code === 'unsupported') return { text: `Couldn’t ${action}. This isn’t available in this build yet.`, retry: false }

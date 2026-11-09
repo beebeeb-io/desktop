@@ -18,7 +18,7 @@ import { OPEN_WITH_EDITOR, OPEN_WITH_OTHER, withOfficeOpen } from '../open/offic
 import { isOfficeFile } from '../open/office'
 import { Menu, type MenuEntry } from './ui'
 import {
-  arrange, BACKUPS_ID, failureText, isProtected, loadPrefs, nameProblem, nameTaken, savePrefs, takenMessage, type FolderPrefs,
+  arrange, BACKUPS_ID, actionFailure, isProtected, loadPrefs, nameProblem, nameTaken, savePrefs, takenMessage, type FolderPrefs,
 } from './model'
 
 type Dialog =
@@ -118,7 +118,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
    */
   const fail = (e: unknown, item?: DriveItem, what?: { action: string; again: () => void }) => {
     if (e instanceof DriveSourceError && (e.code === 'read-only' || e.code === 'locked') && item) { setDialog({ kind: 'protected', item }); return }
-    const f = failureText(what?.action ?? 'do that', codeOf(e))
+    const f = actionFailure(what?.action ?? 'do that', codeOf(e))
     showToast({ kind: 'failed', text: f.text, onAction: f.retry ? what?.again : undefined })
   }
 
@@ -139,8 +139,13 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     source.moveToTrash(list.map((i) => i.id)).then(({ undoToken }) => {
       undo.current = undoToken
       setSelection(new Set())
-      showToast({ kind: 'undo', text: 'Moved to Trash', onAction: () => { void source.undoTrash(undoToken).catch((e: unknown) => fail(e, undefined, { action: 'put it back', again: () => { void source.undoTrash(undoToken) } })) } })
+      showToast({ kind: 'undo', text: 'Moved to Trash', onAction: () => putBack(undoToken) })
     }, (e: unknown) => fail(e, list[0], { action: 'move it to Trash', again: () => trash(list) }))
+  }
+
+  /** Undo of a move to Trash; a failure says so, and its Try again is this again. */
+  const putBack = (token: string) => {
+    source.undoTrash(token).catch((e: unknown) => fail(e, undefined, { action: 'put it back', again: () => putBack(token) }))
   }
 
   const duplicate = (list: DriveItem[]) => {
@@ -196,6 +201,13 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
     source.versions(item.id).then((versions) => setDialog({ kind: 'versions', item, versions }), (e: unknown) => fail(e, item, { action: 'open Version history', again: () => showVersions(item) }))
   }
   const settings = (sub: string) => nav.go({ section: 'settings', sub })
+  /** Restore a version (DW-0413); done closes Version history, a failure's Try again is this again. */
+  const restore = (item: DriveItem, vid: string) => {
+    source.restoreVersion(item.id, vid).then(
+      () => { setDialog((d) => (d?.kind === 'versions' ? null : d)); showToast({ kind: 'done', text: 'Version restored' }) },
+      (e: unknown) => fail(e, item, { action: 'restore it', again: () => restore(item, vid) }),
+    )
+  }
 
   const openMove = (list: DriveItem[]) => {
     const blocked = list.find(isProtected)
@@ -327,7 +339,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
       if (locked) { setDialog({ kind: 'protected', item: items[0] }); return }
       void uploadDroppedPaths(target?.id ?? folderId, p.paths).then(
         ({ started }) => showToast({ kind: 'done', text: `Uploading ${started} ${started === 1 ? 'item' : 'items'}` }),
-        (e: unknown) => showToast({ kind: 'failed', text: failureText('upload them', codeOf(e)).text }),
+        (e: unknown) => showToast({ kind: 'failed', text: actionFailure('upload them', codeOf(e)).text }),
       )
     })).then((fn) => { if (gone) fn(); else off = fn })
     return () => { gone = true; off?.() }
@@ -343,7 +355,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   /** DW-0121's Try again: checks the connection; back, the file opens; still offline, the panel stays and the list re-reads. */
   const tryConnection = (item: DriveItem) => {
     source.sync().then((s) => {
-      if (s.phase === 'offline') { load(); return }
+      load()
+      if (s.phase === 'offline') return
       setConnectionNeeded(null)
       openInApp(item)
     }, () => load())
@@ -441,7 +454,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
           onInvite={() => { setDialog(null); nav.go({ section: 'shared' }) }} onClose={() => setDialog(null)}
         />
       )}
-      {dialog?.kind === 'move' && <MoveHost dialog={dialog} setDialog={setDialog} onDone={() => setDialog(null)} fail={fail} />}
+      {dialog?.kind === 'move' && <MoveHost dialog={dialog} setDialog={setDialog} onDone={() => setDialog((d) => (d?.kind === 'move' ? null : d))} fail={fail} />}
       {dialog?.kind === 'new-folder' && (
         <NewFolderDialog parentName={listing?.folder.name ?? 'Files'} value={dialog.value} error={dialog.error} onChange={(value) => setDialog({ ...dialog, value, error: null })} onCreate={createFolder} onClose={() => setDialog(null)} />
       )}
@@ -455,7 +468,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
             if (dialog.versions.find((v) => v.id === vid)?.current) setDialog({ kind: 'preview', item: dialog.item })
             else showToast({ kind: 'failed', text: 'An earlier version can’t be previewed in this build yet. Restore it to open it.' })
           }}
-          onRestore={(vid) => { source.restoreVersion(dialog.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => fail(e, dialog.item, { action: 'restore it', again: () => { void source.restoreVersion(dialog.item.id, vid) } })) }}
+          onRestore={(vid) => restore(dialog.item, vid)}
         />
       )}
       {dialog?.kind === 'protected' && <ProtectedAlert name={dialog.item.name} onOk={() => setDialog(null)} onSettings={() => { setDialog(null); settings('mail-backup') }} />}
@@ -475,6 +488,13 @@ function MoveHost({ dialog, setDialog, onDone, fail }: { dialog: Extract<Dialog,
   const folders: FolderRow[] = (listing?.items ?? []).filter((i) => i.isFolder && !moving.has(i.id) && !isProtected(i)).map((i) => ({ id: i.id, name: i.name, count: i.childCount ?? 0 }))
   const target = dialog.target ? folders.find((f) => f.id === dialog.target) : undefined
   const here = listing?.folder
+  // The move; done closes the dialog with "Moved to …", a failure's Try again is this again (dialog open or not).
+  const moveThere = (items: DriveItem[], to: string | null, name: string) => {
+    source.move(items.map((i) => i.id), to).then(
+      () => { onDone(); showToast({ kind: 'done', text: `Moved to ${name}` }) },
+      (e: unknown) => fail(e, items[0], { action: 'move it', again: () => moveThere(items, to, name) }),
+    )
+  }
   if (naming) {
     const create = () => {
       const name = naming.value.trim()
@@ -496,7 +516,7 @@ function MoveHost({ dialog, setDialog, onDone, fail }: { dialog: Extract<Dialog,
       path={listing?.path ?? [{ id: null, name: 'Files' }]} folders={folders} selectedId={dialog.target} targetName={target?.name ?? here?.name ?? 'Files'}
       onSelect={(id) => setDialog({ ...dialog, target: id })} onEnter={(id) => setDialog({ ...dialog, at: id, target: null })} onCrumb={(id) => setDialog({ ...dialog, at: id, target: null })}
       onNewFolder={() => setNaming({ value: 'Untitled folder', error: null })}
-      onMove={() => { source.move(dialog.items.map((i) => i.id), dialog.target ?? dialog.at).then(() => { onDone(); showToast({ kind: 'done', text: `Moved to ${target?.name ?? here?.name ?? 'Files'}` }) }, (e: unknown) => fail(e, dialog.items[0], { action: 'move it', again: () => { void source.move(dialog.items.map((i) => i.id), dialog.target ?? dialog.at) } })) }}
+      onMove={() => moveThere(dialog.items, dialog.target ?? dialog.at, target?.name ?? here?.name ?? 'Files')}
       onClose={onDone}
     />
   )

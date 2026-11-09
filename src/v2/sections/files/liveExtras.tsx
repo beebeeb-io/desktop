@@ -45,6 +45,13 @@ export function uploadRows(rows: TransferRow[]): UploadRow[] {
   }))
 }
 
+/** Live progress: the moving rows replace their earlier copies (by id, or the same file); the queue's rows stay. */
+export function mergeMoving(prev: TransferRow[], moving: TransferRow[]): TransferRow[] {
+  const ids = new Set(moving.map((m) => m.id))
+  const rest = prev.filter((r) => r.state !== 'moving' && !ids.has(r.id) && !moving.some((m) => m.fileId && m.fileId === r.fileId))
+  return [...moving, ...rest]
+}
+
 /** "2 of 4 · 42 MB left · Continues in the background", with only the parts the rows know. */
 export function uploadSummary(rows: UploadRow[]): string {
   const live = rows.filter((r) => r.state !== 'attention')
@@ -70,11 +77,7 @@ export function useLiveFolderExtras() {
     refresh()
     const timer = window.setInterval(refresh, 10_000)
     // Live progress: the moving rows replace their earlier copies; the queue's rows stay until the next read.
-    const stop = extras.subscribeTransfers((moving) => setRows((prev) => {
-      const ids = new Set(moving.map((m) => m.id))
-      const rest = prev.filter((r) => r.state !== 'moving' && !ids.has(r.id) && !moving.some((m) => m.fileId && m.fileId === r.fileId))
-      return [...moving, ...rest]
-    }))
+    const stop = extras.subscribeTransfers((moving) => setRows((prev) => mergeMoving(prev, moving)))
     const open = () => setUploadsOpen(true)
     window.addEventListener(UPLOADS_OPEN_EVENT, open)
     return () => { window.clearInterval(timer); stop(); window.removeEventListener(UPLOADS_OPEN_EVENT, open) }

@@ -96,7 +96,8 @@ export function listAge(iso: string, now: Date): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return 'before the connection dropped'
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const day = (x: Date) => Math.floor(new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() / 86_400_000)
+  // Calendar days (UTC of the local date): a DST change between the two midnights does not shift the count.
+  const day = (x: Date) => Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()) / 86_400_000
   const ago = day(now) - day(d)
   if (ago === 0) return `today at ${hm}`
   if (ago === 1) return `yesterday at ${hm}`
@@ -134,16 +135,18 @@ export function followBanner(kind: BannerKind): void {
 // The banner sits under the toolbar on every view (DW-0101 to DW-0106 Rules). The window mounts one GlobalBanner; a
 // section with a toolbar puts a BannerSlot under it and the banner is drawn there. A view without a slot gets it under
 // the caption bar, so it is never lost.
-let slot: HTMLElement | null = null
+// Every mounted slot, the newest last: the banner goes to the newest, and back to the one before when it unmounts.
+let slots: HTMLElement[] = []
 const slotListeners = new Set<() => void>()
 const subscribeSlot = (l: () => void) => { slotListeners.add(l); return () => { slotListeners.delete(l) } }
+const currentSlot = () => slots[slots.length - 1] ?? null
 
 /** Where the window's banner is drawn: right under a section's toolbar. */
 export function BannerSlot() {
   const mine = useRef<HTMLElement | null>(null)
   const ref = useCallback((el: HTMLDivElement | null) => {
-    if (el) { mine.current = el; slot = el }
-    else if (slot === mine.current) slot = null
+    if (el) { mine.current = el; slots = [...slots.filter((s) => s !== el), el] }
+    else if (mine.current) { const gone = mine.current; slots = slots.filter((s) => s !== gone); mine.current = null }
     slotListeners.forEach((l) => l())
   }, [])
   return <div ref={ref} data-banner-slot className="contents" />
@@ -173,7 +176,7 @@ export function GlobalBanner({ extra }: { extra?: Pick<BannerInput, 'signedOut' 
     ...extra, storage, offline: sync?.phase === 'offline',
   }), [extra, status, storage, sync])
   const kind = activeBanner({ ...input, dismissed })
-  const target = useSyncExternalStore(subscribeSlot, () => slot, () => null)
+  const target = useSyncExternalStore(subscribeSlot, currentSlot, () => null)
   // The offline banner names when the list was last fresh: the list's own time (the copy on this PC), else the last
   // sync summary heard while online; never a guess.
   const [lastOnline, setLastOnline] = useState<string | null>(null)

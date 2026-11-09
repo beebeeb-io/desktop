@@ -453,6 +453,12 @@ async function audit(page, a) {
   if (cmds.length) row.commands = cmds
   const ownerOf = (c) => Object.entries(owners).find(([, o]) => o.commands.some((x) => (x.endsWith('*') ? c.startsWith(x.slice(0, -1)) : x === c)))?.[0] ?? null
 
+  // The board's "Does nothing …" (DW-0410b's F2 while the name is taken): the pass is a screen that did not change,
+  // and a change fails it (M3a). The only action that says so; the rule reads the board's words, not a list of rows.
+  if (!a.to.length && /^does nothing\b/i.test(a.does ?? '')) {
+    if (!changed && !cmds.length) return { ...row, outcome: 'ok', detail: 'the board says nothing happens; the screen stayed the same' }
+    return { ...row, outcome: 'wrong-target', detail: `the board says nothing happens; ${changed ? 'the screen changed' : `it called ${cmds.join(', ')}`}` }
+  }
   if (!a.to.length) {
     if (changed) return { ...row, outcome: 'ok', detail: 'no target frame; the screen changed' }
     if (cmds.length) return { ...row, outcome: 'command-unsupported', detail: cmds.join(', '), owner: ownerOf(cmds[0]) }

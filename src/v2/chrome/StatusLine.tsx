@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import type { SyncSummary } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type TransferRow } from '../source/extras'
 import { fmtSize } from '../sections/files/model'
+import { mergeMoving } from '../sections/files/liveExtras'
 
 const PHASE: Record<SyncSummary['phase'], string> = {
   checking: 'Checking…',
@@ -24,8 +25,9 @@ const PHASE: Record<SyncSummary['phase'], string> = {
 export function uploadingLine(rows: TransferRow[]): string | null {
   const up = rows.filter((r) => r.direction === 'up')
   const live = up.filter((r) => r.state !== 'stopped')
-  if (live.length === 0) return null
   const moving = live.filter((r) => r.state === 'moving').length
+  // Queued uploads with nothing moving are not "Uploading 0 of 3": the phase says why (Offline, Paused).
+  if (moving === 0) return null
   const known = live.every((r) => (r.total ?? 0) > 0)
   const left = live.reduce((n, r) => n + Math.max(0, (r.total ?? 0) - r.bytes), 0)
   return [`Uploading ${moving} of ${up.length}`, known ? `${fmtSize(left)} left` : null].filter(Boolean).join(' · ')
@@ -34,11 +36,12 @@ export function uploadingLine(rows: TransferRow[]): string | null {
 function useUploading(sync: SyncSummary | null): string | null {
   const extras = useDriveExtras()
   const [rows, setRows] = useState<TransferRow[]>([])
+  // The moving rows arrive on their own event (one subscription); the whole queue is read again with each summary.
+  useEffect(() => extras.subscribeTransfers((moving) => setRows((prev) => mergeMoving(prev, moving))), [extras])
   useEffect(() => {
     let live = true
     extras.transfers().then((r) => { if (live) setRows(r) }, () => { if (live) setRows([]) })
-    const stop = extras.subscribeTransfers((moving) => setRows((prev) => [...moving, ...prev.filter((r) => r.state !== 'moving' && !moving.some((m) => m.id === r.id))]))
-    return () => { live = false; stop() }
+    return () => { live = false }
   }, [extras, sync])
   return uploadingLine(rows)
 }
@@ -61,9 +64,9 @@ function useEngine(sync: SyncSummary | null): { signedOut: boolean; listing: boo
  */
 export function statusWords(sync: SyncSummary, o: { signedOut?: boolean; uploading?: string | null; listing?: boolean } = {}): string {
   if (o.signedOut) return 'Signed out'
-  if (o.uploading) return o.uploading
-  if (o.listing) return 'Getting your files ready'
   if (sync.phase === 'offline') return PHASE.offline
+  if (o.uploading && sync.phase !== 'paused') return o.uploading
+  if (o.listing) return 'Getting your files ready'
   return [
     sync.phase === 'syncing' && sync.pending > 0 ? `Syncing ${sync.pending}` : PHASE[sync.phase],
     `${sync.onDevice} on this PC`,
