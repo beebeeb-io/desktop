@@ -147,7 +147,16 @@ mod tests {
             Ok("settings/security")
         );
         assert_eq!(crate::settings_nav(Some("about")).as_deref(), Ok("settings/about"));
-        for bad in ["", "Backups", "backups&x=1", "../general", "mail-backup", "general/x"] {
+        assert_eq!(crate::settings_nav(Some("report")).as_deref(), Ok("settings/report"));
+        for bad in [
+            "",
+            "Backups",
+            "backups&x=1",
+            "../general",
+            "compare",
+            "device",
+            "general/x",
+        ] {
             assert!(crate::settings_nav(Some(bad)).is_err(), "{bad:?}");
         }
         assert_eq!(

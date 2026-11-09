@@ -616,7 +616,9 @@ pub(super) fn main_nav_for_route(nav: Option<&str>) -> MainNav {
 }
 
 /// The settings pages an opener in another window may name (desktop v2's `section=settings&page=<page>`, M3e): the
-/// setup window's summary rows, the menu's Check for Updates. The word goes into the window's URL, so only these.
+/// setup window's summary rows, the menu's Check for Updates. The word goes into the window's URL, so only these: the
+/// window's own page words (`PAGE_WORDS`, src/v2/sections/settings/shell/links.ts; tests/v2M3eWiring.test.ts keeps the
+/// two lists equal). Compare and a device's page need a device, so no opener names them.
 pub(super) const SETTINGS_PAGES: &[&str] = &[
     "general",
     "about",
@@ -634,6 +636,10 @@ pub(super) const SETTINGS_PAGES: &[&str] = &[
     "location",
     "diagnostics",
     "backup-failures",
+    "report",
+    "free-up",
+    "signin-activity",
+    "mail-backup",
 ];
 
 /// The nav word for Settings, on `page` when one is named: "settings" or "settings/<page>". A page that isn't one of

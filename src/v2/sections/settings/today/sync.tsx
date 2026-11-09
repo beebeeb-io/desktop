@@ -1,6 +1,6 @@
 // Drive › Sync and File Explorer with what the desktop does today: Keep on this PC, repair (DW-0746c/d) and the
 // metered-connection wait (DW-0746e). B12's pane (drive/sync.tsx) stays as it is; this one replaces it in the list.
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useState } from 'react'
 import { command, type CommandResult } from '../../../../desktopApi'
 import { actionFailure } from '../../files/model'
 import { Btn, Dialog, Group, Page, Row, Switch, fmtBytes } from '../shell/kit'
@@ -8,16 +8,14 @@ import { FIXTURE_LOCAL, useConfig } from '../shell/data'
 import { useSettings } from '../shell/context'
 import { ErrorBanner } from './ui'
 
+// No command repairs the File Explorer registration yet (Repair… says so, DW-0746c): the live row is idle, and a frame
+// names the phase it draws.
 type Repair = { phase: 'idle' | 'running' | 'failed' | 'done'; kept?: number }
-const repair: Repair = { phase: 'idle' }
-const subs = new Set<() => void>()
-const useRepair = () => useSyncExternalStore((f) => { subs.add(f); return () => { subs.delete(f) } }, () => repair)
 
 export function SyncToday({ metered, repair: forced }: { metered?: boolean; repair?: Repair['phase'] } = {}) {
   const { open, go } = useSettings()
   const { config, update } = useConfig()
-  const live = useRepair()
-  const rep: Repair = forced ? { phase: forced } : live
+  const rep: Repair = { phase: forced ?? 'idle' }
   const [login, setLogin] = useState(true)
   const [nav, setNav] = useState(true)
   const [refused, setRefused] = useState<string | null>(null)

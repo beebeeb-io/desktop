@@ -15,19 +15,16 @@ export function updateCopyFor(caps: DesktopCapabilities | null): UpdateCopy {
   return caps.host_os === 'macos' ? MAC_DOWNLOAD_COPY : SITE_DOWNLOAD_COPY
 }
 
-/** The installer can take a while to fetch; past this, the button says so instead of spinning forever. */
-const INSTALL_TIMEOUT_MS = 30_000
+/** The install running in this window, if any: a second click joins it instead of starting another download. */
+let installing: Promise<CommandResult<void>> | null = null
 
-/** Runs the update: restart into it, or open its download. Resolves with what happened, never with a fake success. */
+/**
+ * Runs the update: restart into it, or open its download. Resolves with what happened, never with a fake success. An
+ * install has no time limit: `install_update` answers with an error, or restarts the app into the new version, and a
+ * button that said "couldn't" while the download went on would offer a second install.
+ */
 export async function runUpdate(copy: UpdateCopy, caps: DesktopCapabilities | null = null): Promise<CommandResult<void>> {
   if (copy.mode === 'download') return openExternal(caps?.host_os === 'macos' ? MACOS_DOWNLOAD_URL : 'https://beebeeb.io/download')
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<CommandResult<void>>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, reason: 'timeout', unsupported: false }), INSTALL_TIMEOUT_MS)
-  })
-  try {
-    return await Promise.race([command<void>('install_update'), timeout])
-  } finally {
-    clearTimeout(timer)
-  }
+  installing ??= command<void>('install_update').finally(() => { installing = null })
+  return installing
 }

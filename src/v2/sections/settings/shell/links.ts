@@ -20,6 +20,13 @@ const ALIASES: Record<string, SettingsPage> = {
   'signin-activity': { pane: 'security', props: { init: { page: 'activity' } } },
 }
 
+/** Pages that need a device (Compare, a device's own page): reached from their list, never named by an opener. */
+const NEEDS_A_DEVICE: readonly PaneId[] = ['compare', 'device']
+
+/** Every page word an opener may name: the panes, and the words for a dialog or a sub-page. Rust's `SETTINGS_PAGES`
+ *  (src-tauri/src/tray_window.rs) is the same list. */
+export const PAGE_WORDS: readonly string[] = [...PANE_IDS.filter((p) => !NEEDS_A_DEVICE.includes(p)), ...Object.keys(ALIASES)]
+
 export function settingsPage(word: string | null | undefined): SettingsPage {
   if (word && (PANE_IDS as readonly string[]).includes(word)) return { pane: word as PaneId }
   return (word && ALIASES[word]) || { pane: 'general' }

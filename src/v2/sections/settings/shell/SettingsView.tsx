@@ -29,7 +29,7 @@ function Missing({ pane }: { pane: string }) {
   return <div className="grid flex-1 place-items-center text-[13px] text-ink-3">The {pane} pane is not available in this build.</div>
 }
 
-export function SettingsView({ pane: initialPane = 'general', dialog: initialDialog = null, props: initialProps = null, onGo, onBack, tall, override }: {
+export function SettingsView({ pane: initialPane = 'general', dialog: initialDialog = null, props: initialProps = null, routeKey = null, onGo, onBack, tall, override }: {
   pane?: PaneId
   dialog?: string | null
   /** The first pane's props: a sub-page an opener named (Sign-in activity is Security's `activity` page). */
@@ -37,6 +37,9 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
   /** The window's route takes the page (`section=settings&page=<page>`, M3e), so a page is addressable and Back
    *  steps through the pages. Without it (a frame) the view keeps the page itself. */
   onGo?: (pane: PaneId, opts?: GoOptions) => void
+  /** The route's page word: when it changes, the view opens the page, dialog and props it is given (the sidebar stays
+   *  mounted, so its focus stays where the person clicked). */
+  routeKey?: string | null
   onBack?: () => void
   tall?: boolean
   /** A frame's variant of the first pane (a pane state the user reaches by acting). */
@@ -48,6 +51,14 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
   // Leaving that pane drops them: coming back opens the pane plain.
   const [seeded, setSeeded] = useState(() => ({ pane: initialPane, props: seed<Record<string, unknown> | null>('settings.paneProps', initialProps) }))
   useEffect(() => { if (seeded.props && pane !== seeded.pane) setSeeded({ pane: seeded.pane, props: null }) }, [pane, seeded])
+  // A new page from the route (another page clicked, Back, an opener): taken while rendering, so no frame shows the old.
+  const [route, setRoute] = useState(routeKey)
+  if (route !== routeKey) {
+    setRoute(routeKey)
+    setPane(initialPane)
+    setDialog(initialDialog)
+    setSeeded({ pane: initialPane, props: initialProps })
+  }
   const close = useCallback(() => setDialog(null), [])
   const open = useCallback((d: string) => setDialog(d), [])
   const go = useCallback((to: PaneId, opts: GoOptions = {}) => {
@@ -100,7 +111,7 @@ export function SettingsView({ pane: initialPane = 'general', dialog: initialDia
           <div className="px-2.5 pb-0.5 pt-3 text-[11px] font-medium uppercase tracking-wide text-ink-3">Drive</div>
           <ul className="flex flex-col gap-0.5" data-testid="drive-nav">{DRIVE.map(item)}</ul>
         </nav>
-        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">{override && pane === initialPane ? override : Pane ? <Pane {...paneProps} /> : <Missing pane={pane} />}</div>
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">{override && pane === initialPane ? override : Pane ? <Pane key={`${route ?? ''}:${pane}`} {...paneProps} /> : <Missing pane={pane} />}</div>
         {Dlg ? <Dlg arg={dialog!.split(':')[1]} /> : null}
       </div>
     </Ctx.Provider>

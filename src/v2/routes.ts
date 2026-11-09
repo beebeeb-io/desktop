@@ -52,8 +52,8 @@ const NAV_WORDS: Record<string, Partial<Route> & { section: SectionId }> = {
 
 export function routeFromNav(nav: string | null): Route | null {
   if (!nav) return null
-  const word = NAV_WORDS[nav]
-  if (word) return { id: null, sub: null, ...word }
+  // Own keys only: `toString` or `__proto__` in a URL is no word.
+  if (Object.hasOwn(NAV_WORDS, nav)) return { id: null, sub: null, ...NAV_WORDS[nav] }
   const [section, sub, ...rest] = nav.split('/')
   if (!isSection(section) || rest.length || (sub !== undefined && !/^[a-z][a-z-]{0,39}$/.test(sub))) return null
   return { section, id: null, sub: section === 'settings' ? sub ?? 'general' : sub ?? null }

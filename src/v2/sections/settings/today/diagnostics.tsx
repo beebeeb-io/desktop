@@ -42,7 +42,8 @@ export function Diagnostics({ saved, failed, report: given }: { saved?: boolean;
     setResult('failed')
   }
   const reveal = () => {
-    void command<void>('plugin:opener|reveal_item_in_dir', { path: report.path })
+    // tauri-plugin-opener 2.5's `reveal_item_in_dir(paths: Vec<PathBuf>)`: a list, even of one.
+    void command<void>('plugin:opener|reveal_item_in_dir', { paths: [report.path] })
       .then((r) => setRefusal(r.ok ? null : actionFailure('show it in File Explorer', r.unsupported ? 'unsupported' : 'failed').text))
   }
   return (

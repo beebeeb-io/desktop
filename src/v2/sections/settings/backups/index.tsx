@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Btn, Dialog, Group, Meter, Page, Row, Switch, mono } from '../shell/kit'
 import { FIXTURE_DEVICES, useKnownFolders } from '../shell/data'
 import { useSettings } from '../shell/context'
+import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type SyncProblem } from '../../../source/extras'
 import { actionFailure } from '../../files/model'
 
@@ -67,26 +68,42 @@ export function Backups({ state = 'idle' }: { state?: BackupState } = {}) {
 
 /**
  * DW-0741: the backup items Beebeeb stopped trying, from the engine's problems list (`drive_sync_problems`, the backup
- * ones), each with Try again (`drive_sync_retry`); exclusions are listed apart, without it. An item leaves the list once
- * it backs up, so Try again marks it as trying and reads the list again; a refusal is said. `problems`: a frame's list.
+ * ones), each with Try again (`drive_sync_retry`); exclusions are listed apart, without it. The list is the engine's
+ * truth: it is read again after each Try again and on each sync change, so an item leaves once it is queued again and
+ * one that fails again comes back with Try again. What the retry answered is one line, as Sync history says it.
+ * `problems`: a frame's list.
  */
 export function BackupFailures({ problems }: { problems?: SyncProblem[] } = {}) {
   const { go } = useSettings()
   const extras = useDriveExtras()
+  const source = useDriveSource()
   const [list, setList] = useState<SyncProblem[] | null>(problems ?? null)
+  // The ids whose Try again is on its way (until the list has been read again).
   const [trying, setTrying] = useState<ReadonlySet<string>>(new Set())
-  const [refused, setRefused] = useState<string | null>(null)
-  const load = useCallback(() => {
+  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
+  const load = useCallback(async () => {
     if (problems) return
-    extras.syncProblems().then((all) => setList(all.filter((p) => p.backup)), () => setRefused(actionFailure('load the list', 'failed').text))
+    try {
+      setList((await extras.syncProblems()).filter((p) => p.backup))
+    } catch {
+      setNote({ text: actionFailure('load the list', 'failed').text, failed: true })
+    }
   }, [extras, problems])
-  useEffect(load, [load])
-  const retry = (ids: string[]) => {
-    setRefused(null)
-    extras.retry(ids).then(
-      () => { setTrying((t) => new Set([...t, ...ids])); load() },
-      () => setRefused(actionFailure('try again', 'failed').text),
-    )
+  useEffect(() => {
+    void load()
+    return source.subscribe((e) => { if (e.kind === 'sync') void load() })
+  }, [source, load])
+  const retry = async (ids: string[]) => {
+    setNote(null)
+    setTrying((t) => new Set([...t, ...ids]))
+    try {
+      const { retried } = await extras.retry(ids)
+      setNote({ text: retried > 0 ? 'Trying again.' : 'Beebeeb is already trying again.', failed: false })
+    } catch {
+      setNote({ text: actionFailure('try again', 'failed').text, failed: true })
+    }
+    await load()
+    setTrying((t) => new Set([...t].filter((id) => !ids.includes(id))))
   }
   const failures = (list ?? []).filter((p) => p.retryable)
   const excluded = (list ?? []).filter((p) => !p.retryable)
@@ -94,14 +111,14 @@ export function BackupFailures({ problems }: { problems?: SyncProblem[] } = {}) 
   return (
     <Page title="Couldn't back up"
       back={<a href="?section=settings&page=backups" onClick={(e) => { e.preventDefault(); go('backups') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}
-      action={waiting.length ? <Btn onClick={() => retry(waiting.map((f) => f.id))}>Try all again</Btn> : undefined}>
+      action={waiting.length ? <Btn onClick={() => void retry(waiting.map((f) => f.id))}>Try all again</Btn> : undefined}>
       <p className="text-[13px] text-ink-2">{list && !failures.length ? 'Everything is backed up.' : 'Beebeeb stopped trying these after several tries. Everything else is backed up.'}</p>
-      {refused ? <p role="alert" className="text-[12px] text-red-text">{refused}</p> : null}
+      {note ? <p role={note.failed ? 'alert' : 'status'} className={`text-[12px] ${note.failed ? 'text-red-text' : 'text-ink-3'}`}>{note.text}</p> : null}
       {failures.length ? (
         <Group>
           {failures.map((f) => (
             <Row key={f.id} label={f.name} sub={`${f.folder}: ${f.reason}`}
-              right={trying.has(f.id) ? <Btn disabled>Trying again…</Btn> : <Btn onClick={() => retry([f.id])}>Try again</Btn>} />
+              right={trying.has(f.id) ? <Btn disabled>Trying again…</Btn> : <Btn onClick={() => void retry([f.id])}>Try again</Btn>} />
           ))}
         </Group>
       ) : null}

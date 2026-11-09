@@ -3,12 +3,13 @@
 // Windows "tray" window and say a refusal; the update button follows the platform (ruling M3e item 1).
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { routeFromNav, routeFromSearch, searchFromRoute, settingsRouteFor } from '../src/v2/routes'
-import { followHref, settingsPage } from '../src/v2/sections/settings/shell/links'
+import { followHref, PAGE_WORDS, settingsPage } from '../src/v2/sections/settings/shell/links'
+import { readFileSync } from 'node:fs'
 import { flyoutFailure, revealRow, runFlyoutCommand } from '../src/v2/tray'
 import { flyoutView } from '../src/v2/tray/model'
 import { SCENARIOS, NOW } from '../src/v2/tray/fixtures'
-import { kindOf } from '../src/v2/sections/settings/today/insights'
-import { updateCopyFor } from '../src/v2/update'
+import { kindOf, sectionOfPath } from '../src/v2/sections/settings/today/insights'
+import { runUpdate, updateCopyFor } from '../src/v2/update'
 import { MAC_DOWNLOAD_COPY, RESTART_COPY } from '../src/v2/updateCopy'
 import type { DesktopCapabilities } from '../src/capabilities'
 
@@ -60,7 +61,7 @@ describe('settings pages are addressable as section=settings&page=<page> (lead r
     expect(routeFromNav('activity')).toEqual({ section: 'sync-history', id: null, sub: null })
     expect(routeFromNav('review')).toEqual({ section: 'files', id: null, sub: null })
     expect(routeFromNav('trash')).toEqual({ section: 'trash', id: null, sub: null })
-    for (const bad of ['', 'finder', 'settings/Backups', 'settings/a/b', 'settings/x&y=1']) expect(routeFromNav(bad)).toBeNull()
+    for (const bad of ['', 'finder', 'settings/Backups', 'settings/a/b', 'settings/x&y=1', 'toString', '__proto__', 'constructor']) expect(routeFromNav(bad)).toBeNull()
     // A route of the window's own wins over the opener's word.
     expect(routeFromSearch('?section=trash&nav=settings').section).toBe('trash')
     expect(searchFromRoute({ section: 'files', id: null, sub: null }, '?nav=settings')).toBe('?section=files')
@@ -71,9 +72,18 @@ describe('settings pages are addressable as section=settings&page=<page> (lead r
       expect(settingsRouteFor(s)).toEqual({ section: 'settings', sub: 'general' })
     }
   })
+  test('Rust accepts exactly the page words the window knows, so a native opener never names a page that opens General', () => {
+    const rust = readFileSync(new URL('../src-tauri/src/tray_window.rs', import.meta.url), 'utf8')
+    const list = /SETTINGS_PAGES: &\[&str\] = &\[([^\]]*)\]/.exec(rust)?.[1] ?? ''
+    const words = [...list.matchAll(/"([a-z-]+)"/g)].map((m) => m[1])
+    expect(words.length).toBeGreaterThan(15)
+    expect([...words].sort()).toEqual([...PAGE_WORDS].sort())
+    for (const w of words) expect(w === 'general' || settingsPage(w).pane !== 'general' || settingsPage(w).dialog !== undefined).toBe(true)
+  })
   test('page words that are a dialog or a sub-page land there; an unknown word opens General', () => {
     expect(settingsPage('report')).toEqual({ pane: 'general', dialog: 'report' })
     expect(settingsPage('mail-backup')).toEqual({ pane: 'backups' })
+    expect(settingsPage('free-up')).toEqual({ pane: 'storage', dialog: 'free-up' })
     expect(settingsPage('signin-activity')).toEqual({ pane: 'security', props: { init: { page: 'activity' } } })
     expect(settingsPage('devices')).toEqual({ pane: 'devices' })
     expect(settingsPage('nonsense')).toEqual({ pane: 'general' })
@@ -155,6 +165,18 @@ describe('the update button follows the platform (lead ruling M3e item 1)', () =
     expect(updateCopyFor(caps('linux', 'package_manager')).mode).toBe('download')
     expect(updateCopyFor(null)).toEqual(RESTART_COPY)
   })
+  test('a second click while the update installs joins it: one install_update, no time limit that says "couldn’t" midway', async () => {
+    let done: (v: null) => void = () => {}
+    answers.install_update = new Promise<null>((r) => { done = r })
+    const first = runUpdate(RESTART_COPY)
+    const second = runUpdate(RESTART_COPY)
+    done(null)
+    expect([(await first).ok, (await second).ok]).toEqual([true, true])
+    expect(ran().filter((c) => c.cmd === 'install_update')).toHaveLength(1)
+    answers.install_update = null
+    await runUpdate(RESTART_COPY)
+    expect(ran().filter((c) => c.cmd === 'install_update')).toHaveLength(2)
+  })
   test('the flyout says Restart to update on Windows (DW-1210, DW-1214) and Download update on a Mac', () => {
     const s = SCENARIOS.update
     expect(flyoutView(s.snapshot, s.extras, NOW).action?.label).toBe('Restart to update')
@@ -172,5 +194,11 @@ describe('Storage insights reads the account’s own largest files (B13)', () =>
     expect(kindOf('Backups/site.7z', 'other')).toBe('Archive')
     expect(kindOf('Notes/plan.txt', 'documents')).toBe('Documents')
     expect(kindOf('blob', 'other')).toBe('Other')
+  })
+  test('a largest file in a device’s backup opens in Backups, the rest in Files (DW-0783#1)', () => {
+    expect(sectionOfPath('Backups/Anna-PC/Videos/Render final.mov')).toBe('backups')
+    expect(sectionOfPath('Backups')).toBe('backups')
+    expect(sectionOfPath('Backups old/a.zip')).toBe('files')
+    expect(sectionOfPath('Projects/Backups/a.zip')).toBe('files')
   })
 })

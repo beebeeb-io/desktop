@@ -17,7 +17,7 @@ export default function Section({ nav }: SectionProps) {
   // Read while the page renders (StrictMode renders twice), dropped once it is on screen: Back to it later opens it plain.
   useEffect(() => { handoff = null }, [nav.route.sub])
   return (
-    <SettingsView key={`${nav.route.sub ?? ''}`} pane={page.pane}
+    <SettingsView routeKey={nav.route.sub ?? ''} pane={page.pane}
       dialog={given?.dialog ?? page.dialog ?? null} props={given?.props ?? page.props ?? null}
       onGo={(pane, opts) => { handoff = { pane, ...opts }; nav.go({ section: 'settings', sub: pane }) }}
       onBack={() => nav.go(lastDriveRoute())} />

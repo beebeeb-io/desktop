@@ -29,6 +29,11 @@ const EXT_KIND: [RegExp, string][] = [
 export function kindOf(path: string, category: StorageCategory): string {
   return EXT_KIND.find(([re]) => re.test(path))?.[1] ?? KIND_OF[category]
 }
+/** The section a largest file is in: the Backups folder at the top of Beebeeb is its own section (DW-0422), the
+ *  rest is Files. */
+export function sectionOfPath(path: string): 'backups' | 'files' {
+  return /^Backups(\/|$)/.test(path) ? 'backups' : 'files'
+}
 /** How many of the largest files the page lists; the rest of the top 50 are counted. */
 const LISTED = 10
 
@@ -80,10 +85,10 @@ export function Insights({ state: initial = 'ready' }: { state?: InsightsState }
   }, [menu])
   const heading = <BackLink to="storage">Storage</BackLink>
   const fail = (what: string) => (e: unknown) => setRefused(openFailureText(e, what))
-  // A largest file shows in Files, selected in its folder (DW-0783#1).
-  const showInFiles = (id: string) => {
+  // A largest file shows in its folder, selected (DW-0783#1): in Backups for a device's backup, else in Files.
+  const showInFiles = (id: string, path: string) => {
     setRefused(null)
-    source.details(id).then((d) => navigateTo({ section: 'files', id: d.item.parentId, sub: `select:${id}` }), fail('show it in Files'))
+    source.details(id).then((d) => navigateTo({ section: sectionOfPath(path), id: d.item.parentId, sub: `select:${id}` }), fail('show it in Files'))
   }
   // Its menu (DW-0783#2): Show in File Explorer, Move to Trash; each says so when it can't.
   const act = (label: string, id: string) => {
@@ -144,8 +149,8 @@ export function Insights({ state: initial = 'ready' }: { state?: InsightsState }
       {refused ? <p role="alert" className="text-[12px] text-red-text">{refused}</p> : null}
       <Group title="Largest files, top 50" note="Worked out on this PC from the decrypted file list; Beebeeb's servers never see names or kinds.">
         {d.largest.slice(0, LISTED).map((f, i) => (
-          <a key={f.id} href={`?section=files&sub=select:${encodeURIComponent(f.id)}`} title={f.path} data-testid="largest-row" data-row={f.id}
-            onClick={(e) => { e.preventDefault(); showInFiles(f.id) }}
+          <a key={f.id} href={`?section=${sectionOfPath(f.path)}&sub=select:${encodeURIComponent(f.id)}`} title={f.path} data-testid="largest-row" data-row={f.id}
+            onClick={(e) => { e.preventDefault(); showInFiles(f.id, f.path) }}
             onContextMenu={(e) => { e.preventDefault(); setMenu({ i, x: e.clientX, y: e.clientY }) }}
             className="flex min-h-[40px] items-center gap-3 px-4 py-1.5 hover:bg-paper-2">
             <span className={`min-w-0 flex-1 truncate text-[12px] text-ink ${mono}`}>{cutPath(f.path)}</span>
