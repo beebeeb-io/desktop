@@ -1,6 +1,7 @@
 //! `update_window` items split out of `lib.rs`.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedReleaseVersion {
@@ -239,10 +240,8 @@ pub(super) fn manifest_updater_for_release_channel(
         .map_err(|e| e.to_string())
 }
 
-/// The real release version displayed by the app and compared against channel
-/// manifests. Set by release.yml as $BEEBEEB_RELEASE_VERSION before `cargo
-/// build` runs; falls back to the Cargo package version for local/dev builds
-/// where CI hasn't set it.
+/// The real release version displayed by the app and compared against channel manifests. Set by release.yml as
+/// $BEEBEEB_RELEASE_VERSION before `cargo build` runs; falls back to the Cargo package version for local/dev builds.
 pub(super) fn real_app_version() -> &'static str {
     option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -425,10 +424,7 @@ pub(super) async fn check_for_updates_now(app: tauri::AppHandle) -> Result<Manua
             Ok(result)
         }
         Ok(None) => {
-            tracing::info!(
-                channel = %channel.as_str(),
-                "manual update check found no manifest release"
-            );
+            tracing::info!(channel = %channel.as_str(), "manual update check found no manifest release");
             macos_popover::note_update(channel.as_str(), None);
             Ok(manual_update_up_to_date_result(channel))
         }
@@ -442,10 +438,33 @@ pub(super) async fn check_for_updates_now(app: tauri::AppHandle) -> Result<Manua
 /// The code a refused in-place install leads with, so a caller can tell it from a failed one.
 pub(super) const UPDATE_INSTALL_UNSUPPORTED_CODE: &str = "update_install_unsupported";
 
+/// The code a refused second install leads with, so a caller can tell it from a failed one.
+pub(super) const UPDATE_INSTALL_IN_PROGRESS_CODE: &str = "update_install_in_progress";
+/// False when no window is installing. Both install commands take it with compare-and-swap.
+static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// Holds the install slot for as long as it lives; every error path returns early, so `Drop` releases it.
+pub(super) struct InstallClaim;
+impl Drop for InstallClaim {
+    fn drop(&mut self) {
+        INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+/// Claims the process-wide install slot. Refused before any download if another window already holds it.
+pub(super) fn claim_install() -> Result<InstallClaim, String> {
+    INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| InstallClaim)
+        .map_err(|_| {
+            format!("{UPDATE_INSTALL_IN_PROGRESS_CODE}: an update is already installing in another Beebeeb window.")
+        })
+}
+#[cfg(test)]
+#[path = "install_guard_tests.rs"]
+mod install_guard_tests;
+
 /// Task 2176: the App Sandbox denies replacing the running bundle, so on a Mac an in-place install can only fail, after
 /// the download, with an error nobody can diagnose. A Mac is offered a download instead (two-surface spec §0 ruling 5),
-/// and both install commands refuse here, first, as defence in depth behind the window's own rule. Windows and Linux
-/// keep their installers.
+/// and both install commands refuse here, first, as defence in depth behind the window's own rule.
 pub(super) fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Result<(), String> {
     if host == desktop_capabilities::HostOs::Macos {
         return Err(format!(
@@ -463,6 +482,7 @@ pub(super) fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Resu
 #[tauri::command]
 pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
+    let _claim = claim_install()?;
     let channel = configured_release_channel();
     let updater = updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
@@ -518,6 +538,7 @@ pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> 
 #[tauri::command]
 pub(super) async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
+    let _claim = claim_install()?;
     let channel = configured_release_channel();
     let updater = manifest_updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
@@ -621,7 +642,6 @@ pub(super) fn windows_tray_flyout_position(
     let physical_width = (WINDOWS_TRAY_FLYOUT_WIDTH as f64 * scale_factor).round() as i32;
     let physical_height = (WINDOWS_TRAY_FLYOUT_HEIGHT as f64 * scale_factor).round() as i32;
     let physical_gap = (WINDOWS_TRAY_FLYOUT_GAP as f64 * scale_factor).round() as i32;
-
     tauri::PhysicalPosition {
         x: (click_x.round() as i32).saturating_sub(physical_width).max(0),
         y: (click_y.round() as i32).saturating_sub(physical_height.saturating_add(physical_gap)),
@@ -679,30 +699,16 @@ pub(super) fn windows_tray_flyout_scale_factor(win: &tauri::WebviewWindow, click
 
 // ── macOS tray flyout anchoring (task 1384) ────────────────────────────────
 //
-// The compact "settings" window (App.tsx) doubles as the macOS/Linux tray
-// flyout. Pre-1384 it always opened decorated and `.center()`-ed — a
-// 680×540pt window landing mid-screen instead of under the status item.
-// macOS had its own anchor math here, anchored from the tray click event's
-// `rect`. It retired with the menu-bar popover (task 1683 slice 3, review P3-7
-// of #160): the tray click opens the popover, placed by `surfaces::anchor`, and
-// nothing hands this window an anchor any more. The statics and the `Popover`
-// mode below remain until GL-0009 retires them. Linux keeps the original
-// centered/decorated behaviour untouched (see the `#[cfg(not(any(
-// target_os = "windows", target_os = "macos")))]` branch in
-// `setup_tray`'s click handler, and the `#[cfg(not(target_os = "macos"))]`
-// branch in `show_compact_app_window_with_nav` below).
+// Retired with the menu-bar popover (task 1683 slice 3, review P3-7 of #160): the tray click opens the popover,
+// placed by `surfaces::anchor`, and nothing hands this window an anchor any more. The statics and the `Popover`
+// mode below remain until GL-0009 retires them. Linux keeps the original centered/decorated behaviour untouched.
 
 pub(super) const MACOS_SETTINGS_WINDOW_WIDTH: f64 = 680.0;
 pub(super) const MACOS_SETTINGS_WINDOW_HEIGHT: f64 = 540.0;
 
-/// A one-shot handoff to `show_compact_app_window_with_nav`: the physical
-/// position the flyout should open at. The tray click handler set it before
-/// the menu-bar popover replaced the flyout; nothing sets it now (review P3-7
-/// of #160), so every open reads `None` until GL-0009 retires it. `take()`n
-/// (consumed) the moment it's read, so an unrelated open of the same
-/// window (the "Open Beebeeb" menu item, a notification, a deep link) that
-/// didn't go through the tray click falls back to centering instead of
-/// reusing a stale tray position.
+/// A one-shot handoff to `show_compact_app_window_with_nav`: the physical position the flyout should open at.
+/// Nothing sets it now (review P3-7 of #160), so every open reads `None` until GL-0009 retires it; `take()`n
+/// (consumed) the moment it's read, so an unrelated open falls back to centering instead of reusing a stale position.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) static MACOS_TRAY_FLYOUT_ANCHOR: LazyLock<Mutex<Option<tauri::PhysicalPosition<i32>>>> =
     LazyLock::new(|| Mutex::new(None));
