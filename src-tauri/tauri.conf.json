@@ -54,7 +54,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.beebeeb.io https://releases.beebeeb.io; img-src 'self' blob: data:; font-src 'self'; frame-src 'self' bboffice: http://bboffice.localhost",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.beebeeb.io https://releases.beebeeb.io; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; frame-src 'self' bboffice: http://bboffice.localhost",
       "headers": {
         "Cross-Origin-Opener-Policy": "same-origin",
         "Cross-Origin-Embedder-Policy": "require-corp"

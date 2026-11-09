@@ -4,6 +4,8 @@
 // (DW-1107); `signed-out` the session that ended (DW-0105, DW-1109); `backup-problems` the backup banner (DW-0106);
 // `conflict` one file changed in two places (DW-0429); `uploading` the uploads in Lisbon trip (DW-0426, DW-0427);
 // `default` is up to date, with no problems and nothing moving (DW-0401).
+import { DriveSourceError, type DriveItem } from '@beebeeb/shared/drive-ui'
+import { command } from '../../../desktopApi'
 import type { DriveExtras, DriveStatus, PhotoMeta, SyncProblem, TransferRow } from '../extras'
 import { HISTORY, OFFLINE_ENTRIES, PHOTO_ENTRIES, PHOTO_META } from './photos'
 import { SEARCH_ITEMS } from './shared'
@@ -33,7 +35,7 @@ export function fixtureStatus(scenario: string): DriveStatus {
     syncProblems: 0,
     backupProblems: 0,
     fileCount: 1_284,
-    freeSpaceBytes: 12_400_000_000,
+    freeSpaceBytes: 12.4 * 1024 ** 3, // the board's 12.4 GB (DW-1517), in the units fmtBytes shows
     backup: { state: 'on', lastBackupAt: '2026-11-08T11:52:00', deviceFolder: 'Anna-Laptop', foldersOn: 3, foldersGettingReady: 0 },
     conflicts: [],
     ...(scenario === 'syncing' ? { uploadBps: 1_400_000, etaSeconds: 60 } : {}),
@@ -53,7 +55,7 @@ function photoMeta(id: string): PhotoMeta | undefined {
   return {
     takenAt: PHOTO_ENTRIES.find((e) => e.item.id === id)?.takenAt,
     camera: m.camera, width: w || undefined, height: h || undefined,
-    durationSeconds: m.duration ? min * 60 + sec : undefined, uploading: !!m.uploading,
+    durationSeconds: m.duration ? min * 60 + sec : undefined, uploading: !!m.uploading, device: m.device,
   }
 }
 
@@ -70,7 +72,18 @@ export function createFixtureExtras(scenario: string): DriveExtras {
     retry: async (ids) => ({ retried: ids.length }),
     offlineList: async () => (empty ? [] : OFFLINE_ENTRIES).map((o) => ({ item: o.item, items: o.item.isFolder ? o.item.childCount : undefined, bytes: o.bytes ?? 0 })),
     photoMeta: async (ids) => Object.fromEntries(ids.flatMap((id) => { const m = photoMeta(id); return m ? [[id, m]] : [] })),
-    photoSources: async () => [{ id: 'f-backups', name: 'Camera uploads', path: 'Backups/Anna’s iPhone/Camera uploads', count: PHOTO_ENTRIES.length }],
+    // DW-0604: the backups' folders (the devices) and the board's folder from Files, Lisbon trip.
+    photoSources: async () => (empty ? [] : [
+      { id: 'f-backups', name: 'Camera uploads', path: 'Backups/Anna’s iPhone/Camera uploads', count: PHOTO_ENTRIES.length },
+      { id: 'f-lisbon', name: 'Lisbon trip', path: 'Lisbon trip', count: 212 },
+    ]),
     paths: async (ids) => Object.fromEntries(ids.map((id) => [id, WHERE[id] ?? 'Files'])),
+    // A write: it goes to the host as the desktop side sends it. A plain browser's dev host has no such command, so it
+    // is "unavailable" (the map audit's command-unsupported), never a made-up file (M3d).
+    async createFile(parentId, name) {
+      const r = await command<DriveItem>('drive_create_file', { parentId, name })
+      if (r.ok) return r.value
+      throw new DriveSourceError(r.unsupported ? 'unsupported' : 'failed', 'drive_create_file')
+    },
   }
 }

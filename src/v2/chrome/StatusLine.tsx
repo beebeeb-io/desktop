@@ -6,6 +6,7 @@ import type { SyncSummary } from '@beebeeb/shared/drive-ui'
 import { useDriveExtras, type TransferRow } from '../source/extras'
 import { fmtSize } from '../sections/files/model'
 import { mergeMoving } from '../sections/files/liveExtras'
+import { useStatusNote } from './statusNote'
 
 const PHASE: Record<SyncSummary['phase'], string> = {
   checking: 'Checking…',
@@ -78,6 +79,8 @@ export function statusWords(sync: SyncSummary, o: { signedOut?: boolean; uploadi
 export function StatusLine({ sync }: { sync: SyncSummary | null }) {
   const { signedOut, listing } = useEngine(sync)
   const uploading = useUploading(sync)
+  // A section's own words (a save, DW-1524) stand in for the sync words, never for Signed out or Offline.
+  const note = useStatusNote()
   if (!sync) return <footer className="h-7 flex-none border-t border-line bg-paper-2" />
   // B02b: the status line opens the Uploads panel over it (DW-0427); Files listens for the event.
   return (
@@ -85,7 +88,7 @@ export function StatusLine({ sync }: { sync: SyncSummary | null }) {
       <button type="button" data-open-uploads onClick={() => window.dispatchEvent(new CustomEvent('bb:uploads-open'))}
         className="inline-flex items-center gap-1.5 rounded-sm text-left hover:text-ink focus-visible:outline-2 focus-visible:outline-ink-3">
         {signedOut && <span aria-hidden="true" className="h-1.5 w-1.5 flex-none rounded-full bg-red" />}
-        {statusWords(sync, { signedOut, uploading, listing })}
+        {note && !signedOut && sync.phase !== 'offline' ? note : statusWords(sync, { signedOut, uploading, listing })}
       </button>
     </footer>
   )

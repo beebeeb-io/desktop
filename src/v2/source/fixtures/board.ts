@@ -4,10 +4,10 @@
 // screen and its frame show the same rows. `?scenario=` picks a state the global frames need (see ../fixtures.ts).
 import type { DriveEvent, DriveSource, ItemId, StorageSummary, SyncSummary, TrashEntry } from '@beebeeb/shared/drive-ui'
 import type { Scenario } from '../fixtures'
-import { createFilesSource } from './files'
+import { createFilesSource, FILES_TREE } from './files'
 import { createSharedSource, SHARED_IDS, TRASH } from './shared'
 import { createPhotosSource, PHOTO_ENTRIES } from './photos'
-import { createOpenSource, OPEN_ITEMS } from './open'
+import { createOpenSource, OPEN_ITEMS, OPEN_TREE } from './open'
 import { createOfficeSource, OFFICE_ITEMS } from './office'
 
 const GB = 1024 ** 3
@@ -29,11 +29,15 @@ export function boardSync(scenario: Scenario): SyncSummary {
 
 export function createBoardSource(scenario: Scenario = 'default'): DriveSource {
   const empty = scenario === 'empty'
-  const files = createFilesSource({ scenario: scenario === 'offline' || scenario === 'rename-fails' ? scenario : 'default', items: empty ? [] : undefined })
+  // B07's folders (Shoot selects' RAWs, Studio demos) are listed too: the viewers step through their folder; and B08's
+  // documents in Documents (Service agreement.docx, Proposal 2012.doc), where Files opens them (M3d). No B04 frame draws
+  // either folder's rows.
+  const listed = [...FILES_TREE, ...OPEN_TREE, ...OFFICE_ITEMS.filter((i) => i.parentId === 'f-documents')]
+  const files = createFilesSource({ scenario: scenario === 'offline' || scenario === 'rename-fails' ? scenario : 'default', items: empty ? [] : listed })
   // `no-shares` (DW-0508 to DW-0510): nothing shared yet, while Files keeps DW-0401's rows (Files › leads somewhere).
   const shared = createSharedSource({ empty: empty || scenario === 'no-shares' })
   const photos = createPhotosSource(empty ? [] : PHOTO_ENTRIES)
-  const open = createOpenSource()
+  const open = createOpenSource({ scenario: scenario === 'decrypting' || scenario === 'newer' || scenario === 'edit-conflict' ? scenario : 'default' })
   const office = createOfficeSource()
   const openIds = new Set(OPEN_ITEMS.map((i) => i.id))
   const officeIds = new Set(OFFICE_ITEMS.map((i) => i.id))

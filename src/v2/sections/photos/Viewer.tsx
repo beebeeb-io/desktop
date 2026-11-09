@@ -1,10 +1,12 @@
 // The photo viewer (DW-0605, DW-0605b, DW-0606, DW-0608, DW-0610, DW-0611): the photo large, the gallery strip, the
 // actions. The preview is the source's large thumbnail; the original goes through DriveSource.open (decrypted in Rust).
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
+import { useDriveSource } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS, IconButton } from '../files/ui'
 import { fmtExt, idOf, mb1, isVideo, takenLabel, type PhotoCell } from './model'
 import { useThumb } from './PhotosView'
+import { keyBelongsElsewhere } from '../open/model'
 
 export interface ViewerProps {
   cells: PhotoCell[]
@@ -17,6 +19,8 @@ export interface ViewerProps {
   keeping?: boolean
   /** Frame hook: the ⋯ menu drawn open (DW-0606). */
   moreOpen?: boolean
+  /** Frame hook: draw Windows' player controls for reference (DW-0611); live, the video element draws its own. */
+  referencePlayer?: boolean
   onBack?: () => void
   onStep?: (delta: -1 | 1) => void
   onJump?: (i: number) => void
@@ -24,6 +28,8 @@ export interface ViewerProps {
   onMore?: (id: 'save' | 'move' | 'rename' | 'duplicate') => void
   onShare?: () => void
   onOffline?: () => void
+  /** DW-0608: "On this PC" offers this; the original stops being kept here. */
+  onRemoveLocal?: () => void
   onDetails?: () => void
   onTrash?: () => void
   onOpen?: () => void
@@ -49,10 +55,13 @@ export function PhotoViewer(p: ViewerProps) {
   const size = cell.entry.item.size ?? 0
   const previewBytes = cell.meta?.previewBytes
   const [more, setMore] = useState(p.moreOpen ?? false)
+  const [offer, setOffer] = useState(false)
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if (e.key === 'Escape') p.onBack?.()
+      // The video's own controls take the arrows (seeking) while they have the focus; a dialog over the photo keeps its keys.
+      else if (keyBelongsElsewhere(e)) return
       else if (e.key === 'ArrowLeft') p.onStep?.(-1)
       else if (e.key === 'ArrowRight') p.onStep?.(1)
     }
@@ -91,13 +100,15 @@ export function PhotoViewer(p: ViewerProps) {
       </div>
 
       <div className="relative flex min-h-0 flex-1 items-center justify-center bg-paper-2">
-        {big ? <img src={big} alt={cell.entry.item.name} draggable={false} className="max-h-full max-w-full object-contain" /> : <div className="h-2/3 w-2/3 animate-pulse rounded-md bg-paper-3" />}
+        {video && !p.referencePlayer
+          ? <VideoPlayer id={idOf(cell)} poster={big} name={cell.entry.item.name} onOpen={p.onOpen} />
+          : big ? <img src={big} alt={cell.entry.item.name} draggable={false} className="max-h-full max-w-full object-contain" /> : <div className="h-2/3 w-2/3 animate-pulse rounded-md bg-paper-3" />}
         {p.progress && original && (
           <div className="absolute inset-x-0 top-0 h-1 bg-ink/10" role="progressbar" aria-label="Downloading the original" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
             <div className="h-full bg-ink-3" style={{ width: `${pct}%` }} />
           </div>
         )}
-        {video && (
+        {video && p.referencePlayer && (
           <div aria-hidden="true" data-reference="windows-player" className="absolute inset-x-8 bottom-4 flex h-11 items-center gap-3 rounded-lg bg-ink/75 px-3 text-paper">
             <Icon name="play" size={16} /><span className="font-mono text-[11px]">0:00</span>
             <span className="h-1 flex-1 rounded-full bg-paper/30"><span className="block h-full w-1/5 rounded-full bg-paper" /></span>
@@ -119,7 +130,14 @@ export function PhotoViewer(p: ViewerProps) {
 
       <div className="flex h-12 flex-none items-center gap-1 border-t border-line px-3">
         <Action icon="share" label="Share" onClick={p.onShare} />
-        <Action icon="pin" label="Offline" onClick={p.onOffline}>{p.kept ? 'On this PC' : 'Offline'}</Action>
+        <div className="relative">
+          <Action icon="pin" label="Offline" onClick={p.kept ? () => setOffer((o) => !o) : p.onOffline}>{p.kept ? 'On this PC' : 'Offline'}</Action>
+          {p.kept && offer && (
+            <div role="menu" aria-label="On this PC" className="absolute bottom-10 left-0 z-30 w-56 rounded-lg border border-line bg-paper p-1 shadow-xl">
+              <button type="button" role="menuitem" onClick={() => { setOffer(false); p.onRemoveLocal?.() }} className={`flex h-8 w-full items-center rounded-md px-3 text-left text-[13px] text-ink hover:bg-paper-2 ${FOCUS}`}>Remove from this PC</button>
+            </div>
+          )}
+        </div>
         <Action icon="info" label="Details" onClick={p.onDetails} />
         <Action icon="trash" label="Trash" onClick={p.onTrash} />
         <span className="flex-1" />
@@ -127,6 +145,51 @@ export function PhotoViewer(p: ViewerProps) {
         {video && <button type="button" className={BTN} onClick={p.onOpen}>Open</button>}
         <span className="ml-3 font-mono text-[11px] text-ink-3">{mb1(size)}{previewBytes && !video ? ` · preview ${(previewBytes / 1e6).toFixed(1)} MB` : ''}</span>
       </div>
+    </div>
+  )
+}
+
+/**
+ * DW-0611: the video in the window, decrypted on this PC (DriveSource.readBytes), with WebView2's own player controls.
+ * Space plays and pauses. A video the window cannot read (too large, a codec WebView2 lacks) says so and opens in
+ * Windows' player instead.
+ */
+function VideoPlayer({ id, poster, name, onOpen }: { id: string; poster: string | null; name: string; onOpen?: () => void }) {
+  const source = useDriveSource()
+  const [url, setUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+  const ref = useRef<HTMLVideoElement>(null)
+  useEffect(() => {
+    let live = true
+    let made: string | null = null
+    setUrl(null); setFailed(false)
+    source.readBytes(id).then((r) => {
+      if (!live || r.bytes.byteLength === 0) { if (live) setFailed(true); return }
+      made = URL.createObjectURL(new Blob([r.bytes as BlobPart]))
+      setUrl(made)
+    }, () => { if (live) setFailed(true) })
+    return () => { live = false; if (made) URL.revokeObjectURL(made) }
+  }, [source, id])
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      const v = ref.current
+      if (e.key !== ' ' || !v || keyBelongsElsewhere(e)) return
+      e.preventDefault()
+      if (v.paused) void v.play().catch(() => {})
+      else v.pause()
+    }
+    window.addEventListener('keydown', on)
+    return () => window.removeEventListener('keydown', on)
+  }, [])
+  // A person's own video from their phone: there is no caption file to load with it.
+  // eslint-disable-next-line jsx-a11y/media-has-caption
+  if (url) return <video ref={ref} src={url} poster={poster ?? undefined} controls onError={() => setFailed(true)} aria-label={name} className="max-h-full max-w-full" data-video />
+  return (
+    <div className="flex flex-col items-center gap-3">
+      {poster ? <img src={poster} alt={name} draggable={false} className="max-h-[60vh] max-w-full object-contain" /> : <div className="h-64 w-96 animate-pulse rounded-md bg-paper-3" />}
+      {failed
+        ? <p role="status" className="m-0 text-[13px] text-ink-2">This video can’t play in the window. <button type="button" onClick={onOpen} className="text-ink underline">Open it in Windows’ player</button></p>
+        : <p role="status" className="m-0 text-[13px] text-ink-3">Decrypting on this PC…</p>}
     </div>
   )
 }

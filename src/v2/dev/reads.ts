@@ -22,8 +22,9 @@ function historyActivity(): ActivityRow[] {
     const failed = !!r.problem
     const down = /^Downloaded from /.test(r.what)
     const folder = r.what.replace(/^(Didn’t sync · |Uploaded to |Downloaded from |Moved to |Backed up to )/, '')
+    // Rust's activity row id is the file's id (popover_data/snapshot.rs), so a row Sync history opens names its item.
     return {
-      id: r.id, name: r.name, folder, path: `${folder}/${r.name}`, direction: failed ? null : down ? 'down' : 'up',
+      id: r.itemId ?? r.id, name: r.name, folder, path: `${folder}/${r.name}`, direction: failed ? null : down ? 'down' : 'up',
       state: failed ? 'failed' : 'done', at: at(r.at), size_bytes: null, done_bytes: null, total_bytes: null,
     }
   })
