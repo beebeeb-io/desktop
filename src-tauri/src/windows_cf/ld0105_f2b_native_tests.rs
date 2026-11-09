@@ -215,6 +215,21 @@ static FIX_WORKERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::ne
 static FIX_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// A session's preparation before its first transfer (the QA logs: about 1.7 s).
 const FIX_PREP: Duration = Duration::from_millis(1700);
+/// A run's timeline (every FETCH, every `transfer_piece` and its refusal's HRESULT), printed for a run that fails: a
+/// red names its first refusal and what came before it (v2 R1r: CI saw ERROR 379 with 12 refusals, codes unknown).
+static FIX_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static FIX_T0: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn fix_note(line: String) {
+    let ms = FIX_T0
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        * 1000.0;
+    FIX_LOG.lock().unwrap().push(format!("{ms:10.1} ms {line}"));
+}
 
 /// A provider that answers each FETCH as a range session does (review of #225): from a worker thread
 /// after the callback returned, nothing before [`FIX_PREP`] after the first FETCH, then the 16 MiB chunk
@@ -226,6 +241,7 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
     }
     // SAFETY: valid for the duration of the callback.
     let r = unsafe { request_of(info, params) };
+    fix_note(format!("FETCH [{}, +{}) rkey {}", r.offset, r.length, r.request));
     let ready = *FIX_READY_AT
         .lock()
         .unwrap()
@@ -239,11 +255,21 @@ fn serve_session_piece(r: Request, ready: Instant) {
     let data = F2B_DATA.get().expect("initialised before robocopy starts");
     let mut served = FIX_SERVED.lock().unwrap();
     if served.iter().any(|&(s, e)| s <= r.offset && r.offset + r.length <= e) {
+        fix_note(format!(
+            "  [{}, +{}) rkey {} already served: no transfer",
+            r.offset, r.length, r.request
+        ));
         return;
     }
     const CHUNK: i64 = 16 << 20;
     let start = r.offset / CHUNK * CHUNK;
     let end = ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(data.len() as i64);
+    // Whether this transfer sends bytes a run already sent (a FETCH across a chunk's end): the timeline says so.
+    let again = if served.iter().any(|&(s, e)| s < end && start < e) {
+        " (overlaps a range already sent)"
+    } else {
+        ""
+    };
     let keys = crate::cf_range::RequestKeys {
         transfer_key: r.transfer,
         request_key: r.request,
@@ -257,8 +283,21 @@ fn serve_session_piece(r: Request, ready: Instant) {
             &data[start as usize..end as usize],
         )
     } {
-        Ok(()) => served.push((start, end)),
-        Err(_) => {
+        Ok(()) => {
+            fix_note(format!("  TRANSFER [{start}, {end}) rkey {} ok{again}", r.request));
+            served.push((start, end));
+        }
+        Err((at, e)) => {
+            let code = e.code().0 as u32;
+            let gone = if crate::cf_range::request_gone(code) {
+                ", the request is gone"
+            } else {
+                ""
+            };
+            fix_note(format!(
+                "  TRANSFER [{start}, {end}) rkey {} refused at {at}: 0x{code:08X}{gone}{again}",
+                r.request
+            ));
             FIX_REFUSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -279,6 +318,8 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         FIX_SERVED.lock().unwrap().clear();
         *FIX_READY_AT.lock().unwrap() = None;
         FIX_REFUSED.store(0, std::sync::atomic::Ordering::SeqCst);
+        FIX_LOG.lock().unwrap().clear();
+        *FIX_T0.lock().unwrap() = None;
         let name = format!("robo-{i}.mp4");
         assert!(
             placeholders::create_placeholder(
@@ -299,12 +340,22 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         for worker in workers {
             let _ = worker.join();
         }
-        runs.push((
-            exit,
-            errors,
-            whole,
-            FIX_REFUSED.load(std::sync::atomic::Ordering::SeqCst),
+        let refused = FIX_REFUSED.load(std::sync::atomic::Ordering::SeqCst);
+        fix_note(format!(
+            "robocopy exit {exit:?} [{errors}], copy byte-equal {whole}, refused {refused}"
         ));
+        let log = std::mem::take(&mut *FIX_LOG.lock().unwrap());
+        runs.push((exit, errors, whole, refused));
+        if exit != Some(1) || !whole || refused != 0 {
+            // The first 60 lines, every refusal and every overlap, and the last 20 (at most 240 lines).
+            let shown = |n: usize, line: &str| {
+                n < 60 || n + 20 >= log.len() || line.contains("refused") || line.contains("overlaps")
+            };
+            println!("ld0105-f2b-native: run {i} failed; its timeline ({} lines):", log.len());
+            for (n, line) in log.iter().enumerate().filter(|(n, line)| shown(*n, line)).take(240) {
+                println!("    {n:5} {line}");
+            }
+        }
     }
     println!(
         "ld0105-f2b-native: buffered robocopy x3 of session pieces (a worker, after {FIX_PREP:?}) (CF_TRANSFER_MAX {}): {runs:?}",
