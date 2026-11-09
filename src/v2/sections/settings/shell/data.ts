@@ -14,21 +14,33 @@ export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays:
  * in it pauses or resumes the engine, so a write sends only what the person changed.
  */
 export function useConfig(initial: Partial<DesktopConfig> = {}) {
-  const [config, setConfig] = useState<DesktopConfig>({ ...FIXTURE_CONFIG, ...initial })
+  // In the window, the app's own defaults until the read answers, never the board's example numbers (#270 follow-up);
+  // `loaded` says when the read has answered.
+  const [config, setConfig] = useState<DesktopConfig>({ ...(hasTauri() ? DEFAULT_CONFIG : FIXTURE_CONFIG), ...initial })
+  const [loaded, setLoaded] = useState(() => !hasTauri())
   const [error, setError] = useState<string | null>(null)
   // One write at a time, in the order they were made: Pause then Resume never lands as Resume then Pause.
   const writes = useRef<Promise<unknown>>(Promise.resolve())
+  // The fields changed here: a read that answers after a change never writes over it (#270 follow-up).
+  const changed = useRef(new Set<string>())
   useEffect(() => {
     if (!hasTauri()) return
     let live = true
     command<DesktopConfig>('get_desktop_config').then((r) => {
       if (!live) return
-      if (r.ok) setConfig({ ...DEFAULT_CONFIG, ...r.value, ...initial })
-      else setError(r.reason)
+      if (r.ok) {
+        setConfig((c) => {
+          const read: Record<string, unknown> = { ...DEFAULT_CONFIG, ...r.value, ...initial }
+          for (const k of changed.current) read[k] = (c as unknown as Record<string, unknown>)[k]
+          return read as unknown as DesktopConfig
+        })
+      } else setError(r.reason)
+      setLoaded(true)
     })
     return () => { live = false }
   }, [])
   const update = useCallback((patch: Partial<DesktopConfig>) => {
+    for (const k of Object.keys(patch)) changed.current.add(k)
     setConfig((c) => ({ ...c, ...patch }))
     // Outside the state updater, which React may run twice: one change, one write.
     if (!hasTauri()) return
@@ -36,7 +48,7 @@ export function useConfig(initial: Partial<DesktopConfig> = {}) {
       .then(() => command('set_desktop_config', { config: patch }))
       .then((r) => { if (!r.ok) setError(r.reason) })
   }, [])
-  return { config, update, error }
+  return { config, update, error, loaded }
 }
 
 export interface KnownFolder {

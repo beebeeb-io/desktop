@@ -1,7 +1,7 @@
 // Owned by batch B10. Signed out, locked or without a plan, the window shows sign-in (DW-A02/A03), the lock (DW-0009)
 // or no plan (DW-0014) instead of Files. Outside Tauri (the browser dev server) every check is unavailable and the
 // window renders with the fixtures, as before.
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
 import { clearSession, command } from '../../desktopApi'
 import { CaptionBarView } from '../chrome/CaptionBar'
@@ -140,11 +140,17 @@ function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void;
   const [failed, setFailed] = useState<string | null>(null)
   // Only through desktopApi's wrapper, which parses the outcome; a step it could not confirm (FB-24,
   // tests/sessionActionOutcome.test.ts) goes up with the sign-out, and AuthGate says it.
+  // One sign-out at a time: a double click sends one clear_session (#270 follow-up).
+  const busy = useRef(false)
   const signOut = async () => {
+    if (busy.current) return
+    busy.current = true
     setFailed(null)
-    const r = await clearSession()
-    if (r.ok) onSignedOut(r.value.warning?.sentence ?? null)
-    else setFailed(r.reason)
+    try {
+      const r = await clearSession()
+      if (r.ok) onSignedOut(r.value.warning?.sentence ?? null)
+      else setFailed(r.reason)
+    } finally { busy.current = false }
   }
   return (
     <NoPlanView
