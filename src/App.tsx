@@ -4,6 +4,7 @@
 import { useCapabilities, supportsRoute, CapabilityAlternative } from './capabilities'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { appVersionFields } from './appVersion'
 import { command, loadSyncStatus, type DesktopPlatform, type SyncStatus } from './desktopApi'
 import { heldSignOutWarning, subscribeSignOutWarning } from './accountSession'
 import Status from './pages/Status'
@@ -66,8 +67,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    command<string>('app_version').then((result) => {
-      if (result.ok) setVersion(result.value)
+    command<unknown>('app_version').then((result) => {
+      if (result.ok) setVersion(appVersionFields(result.value)?.version ?? null)
     })
   }, [])
 

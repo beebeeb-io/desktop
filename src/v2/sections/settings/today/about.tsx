@@ -1,6 +1,7 @@
 // About › Updates (DW-0789 family): release channel with what each does, the version a channel is at, and the
 // notes of a version before downloading it. Beebeeb never installs an update by itself.
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { appVersionFields } from '../../../../appVersion'
 import { command, type ManualUpdateCheckResult } from '../../../../desktopApi'
 import { useCapabilities } from '../../../../capabilities'
 import { runUpdate, updateCopyFor } from '../../../update'
@@ -48,12 +49,12 @@ export function AboutToday({ runningFrom }: { runningFrom?: ReleaseChannel } = {
   const [checkedAt, setCheckedAt] = useState<string | null>(null)
   const [refusal, setRefusal] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  // The running version (`app_version`) only: null until it answers, and when the read fails the line says unknown.
-  const [live, setLive] = useState<string | null>(null)
-  useEffect(() => { void command<string>('app_version').then((r) => { if (r.ok) setLive(r.value) }) }, [])
+  // The running build (`app_version`) only. A string with no release flag is a dev build. Unknown when the read fails.
+  const [build, setBuild] = useState<{ version: string; release: boolean } | null>(null)
+  useEffect(() => { void command<unknown>('app_version').then((r) => { if (r.ok) setBuild(appVersionFields(r.value)) }) }, [])
   // An older version on the channel picked: the updater's `downgrade_available` answer, never a guess.
   const [down, setDown] = useState<{ version: string; from: ReleaseChannel } | null>(null)
-  const versionLine = live ?? 'unknown'
+  const versionLine = !build ? 'unknown' : build.release ? `Version ${build.version}` : `Development build (${build.version})`
   const newest = down?.version ?? versionLine
   const behind = down !== null
   const from = down?.from ?? runningFrom ?? channel
@@ -70,7 +71,9 @@ export function AboutToday({ runningFrom }: { runningFrom?: ReleaseChannel } = {
     if (!r.ok) { setRefusal(actionFailure('check for updates', r.unsupported ? 'unsupported' : 'failed').text); return }
     if (r.value.status === 'update_available') {
       setOffer({ version: r.value.version, channel: r.value.channel, body: r.value.body, url: r.value.release_notes_url })
-      noteUpdate(r.value.version); go('general'); return
+      if (build?.release === true) { noteUpdate(r.value.version); go('general'); return }
+      setRefusal(`The ${label(r.value.channel)} channel is at version ${r.value.version}. Updates are checked, but installing one replaces this build.`)
+      return
     }
     // A later answer of none (or an older one) ends an offer an earlier check made (another channel's).
     noteUpdate(null)
@@ -96,11 +99,11 @@ export function AboutToday({ runningFrom }: { runningFrom?: ReleaseChannel } = {
     <Page title="About Beebeeb" back={<BackLink to="general">Back</BackLink>}>
       <Group>
         <Row label="Beebeeb Drive" sub="End-to-end encrypted storage"
-          right={<Btn onClick={() => { void navigator.clipboard?.writeText(`Beebeeb Drive${live ? ` ${live}` : ''}`); setCopied(true) }}>{copied ? 'Copied' : 'Copy'}</Btn>} />
+          right={<Btn onClick={() => { void navigator.clipboard?.writeText(`Beebeeb Drive${build ? ` ${versionLine}` : ''}`); setCopied(true) }}>{copied ? 'Copied' : 'Copy'}</Btn>} />
         <Row label="Version" value={versionLine} mono />
       </Group>
       <Group title="Updates" note="Beebeeb checks for updates at launch and every 4 hours.">
-        <Row label="Check for updates" sub={refusal ?? (behind ? `The ${label(channel)} channel is at version ${newest}` : live ? `${live} is the newest version${checkedAt ? ` · checked today, ${checkedAt}` : ''}` : 'Check for a newer version now.')}
+        <Row label="Check for updates" sub={refusal ?? (behind ? `The ${label(channel)} channel is at version ${newest}` : !build ? 'Check for a newer version now.' : build.release ? `${build.version} is the newest version${checkedAt ? ` · checked today, ${checkedAt}` : ''}` : 'Updates are checked, but installing one replaces this build.')}
           right={<Btn onClick={doCheck} disabled={check === 'checking'}>Check now</Btn>} />
         <Row label="Release channel" sub={CHANNELS.find((c) => c.value === channel)?.sub}
           right={<Choice label="Release channel" value={channel} options={CHANNELS} onPick={pickChannel} />} />

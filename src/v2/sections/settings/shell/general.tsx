@@ -1,6 +1,7 @@
 // General (DW-0701, DW-0781), the problem report (DW-0782) and the plan dialog (DW-0708). About is today's
 // (../today/about.tsx). The version and the plan are read (`app_version`, `account_subscription`), never the board's (P1c).
 import { useState } from 'react'
+import { appVersionFields } from '../../../../appVersion'
 import { BILLING_URL, command, type Subscription } from '../../../../desktopApi'
 import type { ProblemReportResult } from '../../../../diagnosticsCopy'
 import { useCapabilities } from '../../../../capabilities'
@@ -15,10 +16,12 @@ import { startGuide } from '../../../guide/Guide'
 import { board } from '../../../board'
 import type { DesktopTheme } from '../../../../desktopApi'
 
-/** The running version (`app_version`); in a frame, the board's. Null until it answers, and when it can't. */
-export function useAppVersion(): string | null {
-  const live = useRead<string>('app_version')
-  return live.state === 'ready' ? live.value : board<{ version: string }>('about')?.version ?? null
+/** The running build (`app_version`). A string with no release flag is a dev build. Null until it answers, and when it can't. */
+export function useAppVersion(): { version: string; release: boolean } | null {
+  const live = useRead<unknown>('app_version')
+  if (live.state === 'ready') return appVersionFields(live.value)
+  const fromBoard = board<{ version: string }>('about')?.version
+  return fromBoard ? { version: fromBoard, release: false } : null
 }
 
 /** DW-0781: a newer version, with the platform's update button (lead ruling M3e item 1). A refusal is said in the banner. */
@@ -52,9 +55,11 @@ export function General({ updateAvailable }: { updateAvailable?: string } = {}) 
   const { config, update } = useConfig()
   const offer = useUpdateOffer()
   const running = useAppVersion()
-  // The version the updater noted; a frame's variant (DW-0781) names the board's.
-  const version = offer ?? updateAvailable ?? null
-  const newest = version !== null
+  // A dev build is not a release: the offer is real, and installing it would replace this build. The banner waits
+  // until the read says this build is a release.
+  const release = running?.release === true
+  const offered = offer ?? updateAvailable ?? null
+  const version = release ? offered : null
   return (
     <Page title="General">
       {version ? <UpdateBanner version={version} /> : null}
@@ -74,7 +79,10 @@ export function General({ updateAvailable }: { updateAvailable?: string } = {}) 
       </Group>
       <Group title="About">
         <Row label="Terms and privacy policy" href="https://beebeeb.io/terms" />
-        <Row label="About Beebeeb" value={running ? (newest ? `${running} · update available` : `Version ${running}`) : newest ? 'Update available' : undefined} mono onClick={() => go('about')} />
+        <Row label="About Beebeeb"
+          sub={running && !release ? 'Updates are checked, but installing one replaces this build.' : undefined}
+          value={!running ? undefined : release ? (version ? `${running.version} · update available` : `Version ${running.version}`) : `Development build (${running.version})`}
+          mono onClick={() => go('about')} />
       </Group>
     </Page>
   )

@@ -217,11 +217,7 @@ pub(super) fn updater_for_release_channel(
 ) -> Result<tauri_plugin_updater::Updater, String> {
     updater_builder_for_release_channel(app, channel)?
         .version_comparator(|_current, release| {
-            // Deliberately ignore Tauri's own `_current` and compare against
-            // real_app_version(), the workflow-provided release version baked
-            // in at compile time. That keeps comparisons aligned with the
-            // channel manifest and preserves legacy prerelease ordering for
-            // users upgrading from pre-build-once releases.
+            // Compare the baked release version, not Tauri's `_current`.
             should_offer_channel_update(real_app_version(), &release.version.to_string())
         })
         .build()
@@ -233,15 +229,13 @@ pub(super) fn manifest_updater_for_release_channel(
     channel: ReleaseChannel,
 ) -> Result<tauri_plugin_updater::Updater, String> {
     updater_builder_for_release_channel(app, channel)?
-        // Manual checks need to see the selected channel's latest manifest
-        // version even when it is equal to or older than the running app.
+        // Manual checks report the selected channel's latest manifest, including an equal or older one.
         .version_comparator(|_current, _release| true)
         .build()
         .map_err(|e| e.to_string())
 }
 
-/// The real release version displayed by the app and compared against channel manifests. Set by release.yml as
-/// $BEEBEEB_RELEASE_VERSION before `cargo build` runs; falls back to the Cargo package version for local/dev builds.
+/// Baked release version, or the Cargo package version when no release was set.
 pub(super) fn real_app_version() -> &'static str {
     option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -367,15 +361,21 @@ pub(super) fn manual_update_result_for_remote(
     }
 }
 
-/// Returns the app version string — displayed in the web UI Settings page.
-#[tauri::command]
-pub(super) fn app_version() -> &'static str {
-    real_app_version()
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub(super) struct AppVersion {
+    pub version: &'static str,
+    pub release: bool,
 }
 
-/// Manually check the currently selected release channel and report an honest
-/// status to Settings. If an update is available, emit the same banner event
-/// used by the background updater so the existing one-click flow takes over.
+#[tauri::command]
+pub(super) fn app_version() -> AppVersion {
+    AppVersion {
+        version: real_app_version(),
+        release: option_env!("BEEBEEB_RELEASE_VERSION").is_some(),
+    }
+}
+
+/// Check the selected channel now. An available update emits the background updater's banner event.
 #[tauri::command]
 pub(super) async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateCheckResult, String> {
     let channel = configured_release_channel();

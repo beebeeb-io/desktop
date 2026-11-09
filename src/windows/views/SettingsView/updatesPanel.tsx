@@ -4,6 +4,7 @@
  */
 import { useCapabilities, canInstallUpdate } from '../../../capabilities'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { appVersionFields } from '../../../appVersion'
 import { command, installDesktopChannelDowngrade, openUrl, type DesktopConfig } from '../../../desktopApi'
 import { RELEASE_CHANNELS } from '../../../settingsConstants'
 import { usePlatformName, thisDeviceNoun } from '../../../platform'
@@ -43,8 +44,8 @@ export function UpdatesPanel({
 
   useEffect(() => {
     let cancelled = false
-    command<string>('app_version').then((r) => {
-      if (!cancelled && r.ok) setVersion(r.value)
+    command<unknown>('app_version').then((r) => {
+      if (!cancelled && r.ok) setVersion(appVersionFields(r.value)?.version ?? null)
     })
     return () => { cancelled = true }
   }, [])

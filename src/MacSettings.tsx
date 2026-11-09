@@ -21,6 +21,7 @@
  * so `tests/macSettingsTabs.test.tsx` can execute them with the component harness and read what a user would read.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import { appVersionFields } from './appVersion'
 import {
   accountSubscription,
   BILLING_URL,
@@ -925,8 +926,8 @@ export function AboutTab({ settings, signedIn }: { settings: SettingsConfig; sig
 
   useEffect(() => {
     let cancelled = false
-    void command<string>('app_version').then((result) => {
-      if (!cancelled && result.ok) setVersion(result.value)
+    void command<unknown>('app_version').then((result) => {
+      if (!cancelled && result.ok) setVersion(appVersionFields(result.value)?.version ?? null)
     })
     return () => {
       cancelled = true
