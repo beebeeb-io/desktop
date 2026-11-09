@@ -455,6 +455,9 @@ pub(super) fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Resu
     Ok(())
 }
 
+#[path = "update_install_guard.rs"]
+mod update_install_guard;
+
 /// Download and install the pending update, then relaunch.
 ///
 /// Called by the frontend when the user clicks "Restart to update" in the
@@ -463,6 +466,7 @@ pub(super) fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Resu
 #[tauri::command]
 pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
+    let _claim = update_install_guard::claim_install()?;
     let channel = configured_release_channel();
     let updater = updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
@@ -518,6 +522,7 @@ pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> 
 #[tauri::command]
 pub(super) async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
+    let _claim = update_install_guard::claim_install()?;
     let channel = configured_release_channel();
     let updater = manifest_updater_for_release_channel(&app, channel)?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
