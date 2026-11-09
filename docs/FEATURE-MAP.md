@@ -9,8 +9,8 @@ The id is the pane, dialog, or section id. Settings ids come from `src/v2/sectio
 | General | general | src/v2/sections/settings/shell/general.tsx | Live | get_desktop_config (theme) and app_version. The Storage location row shows the fixed word Europe and opens region. |
 | Notifications | notifications | src/v2/sections/settings/shell/notifications.tsx | Live | get_desktop_config and set_desktop_config. Each switch is stored. The unread count is account_notifications. |
 | Storage | storage | src/v2/sections/settings/drive/storage.tsx | Live | drive_storage for used and quota, and desktop_storage_summary for this PC. Preview bytes are not reported. Clear previews is unsupported. |
-| Thumbnails and previews | thumbnails | src/v2/sections/settings/drive/thumbnails.tsx | Placeholder | Fixed drawing: 3.1 GB, 2.4 GB, 420 MB, 300 MB, and a 30.9 MB sample. Choices stay in component state. No command reads or saves them. |
-| Compare previews | compare | src/v2/sections/settings/drive/thumbnails.tsx | Placeholder | A gradient and fixed sizes (30.9 MB, 1.0 MB, and the size list). Choose photo is unsupported. |
+| Thumbnails and previews | thumbnails | src/v2/sections/settings/drive/thumbnails.tsx | Live | get_desktop_config and set_desktop_config for photo_previews, preview_size and preview_format. Usage comes from the storage summaries, or says it is not reported yet. Rebuild previews is unsupported and does not start a rebuild. |
+| Compare previews | compare | src/v2/sections/settings/drive/thumbnails.tsx | Live | Compares the saved size and format with the original only when both are known. The frame is blank. Choose photo is unsupported. |
 | Backups | backups | src/v2/sections/settings/backups/index.tsx | Live | get_known_folder_backup, drive_status (the backup view, no meter), drive_sync_problems, and drive_list of the Backups folder. Back up now is unsupported. |
 | Backup failures | backup-failures | src/v2/sections/settings/backups/index.tsx | Live | drive_sync_problems (the backup rows) and drive_sync_retry. |
 | A device's backup | device | src/v2/sections/settings/backups/index.tsx | Live | No device command. The row is the Backups folder drive_list already read (name, child count, modified time). With no device, it says to choose one. |
@@ -31,7 +31,7 @@ The id is the pane, dialog, or section id. Settings ids come from `src/v2/sectio
 | Download limit | limit-downloads | src/v2/sections/settings/drive/storage.tsx | Live | local_cache_limit_bytes through get_desktop_config and set_desktop_config, and desktop_storage_summary for bytes in use. |
 | Free up space | free-up | src/v2/sections/settings/drive/storage.tsx | Live | free_up_space, with the size from desktop_storage_summary. |
 | Turn off File Explorer | explorer-off | src/v2/sections/settings/drive/sync.tsx | Live | unsent_changes for the warning count. Turn off is unsupported and changes nothing. |
-| Apply preview settings | apply | src/v2/sections/settings/drive/thumbnails.tsx | Placeholder | The dialog table entry renders null. The confirm the Thumbnails pane draws uses fixed figures (2,431 photos, 2.4 GB, 1.4 GB). |
+| Apply preview settings | apply | src/v2/sections/settings/drive/thumbnails.tsx | Live | Confirm writes preview_size and preview_format. Cancel writes nothing. New preview bytes say they are not reported yet. |
 | Stop backing up a folder | stop | src/v2/sections/settings/backups/index.tsx | Placeholder | Both actions only close the dialog. No command stops a folder backup. |
 | Delete this backup | delete-backup | src/v2/sections/settings/backups/index.tsx | Missing | No command deletes another device's backup. The dialog refuses and deletes nothing. |
 | Choose a folder to back up | picker | src/v2/sections/settings/backups/index.tsx | Missing | No command adds a folder beyond the known folders. Back up refuses and adds nothing. |
