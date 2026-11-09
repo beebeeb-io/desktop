@@ -1,7 +1,7 @@
 // Search, live: DriveSource.search over the list on this PC, with every hit's folder path in one drive_paths call (B02b). Recent
 // searches stay on this PC (localStorage) and Clear removes them. Esc goes back to the view you came from.
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useDriveSource, type DriveItem, type DriveSource } from '@beebeeb/shared/drive-ui'
+import { DriveSourceError, useDriveSource, type DriveItem, type DriveSource } from '@beebeeb/shared/drive-ui'
 import { throttled } from '../../throttle'
 import type { SectionProps } from '../types'
 import { Menu, type MenuEntry } from '../files/ui'
@@ -9,6 +9,7 @@ import { fileMenu } from '../files/menus'
 import { showToast } from '../../chrome/Toast'
 import { SearchView, type Pill, type SearchHit } from './SearchView'
 import { useDriveExtras } from '../../source/extras'
+import { actionFailure } from '../files/model'
 import { openFailureText } from '../shared/api'
 
 const RECENT_KEY = 'bb.v2.search.recent'
@@ -58,23 +59,32 @@ export default function Section({ nav }: SectionProps) {
   // The first sign-in's list check (B02b drive_status.listing): results may be incomplete while it runs. The count follows
   // the engine's progress, not the query: re-read on each change the engine reports (M3c's leftovers).
   const [loading, setLoading] = useState<ListingProgress | undefined>(undefined)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => followListing(source, () => extras.status().then((s) => s.listing), setLoading), [source, extras])
 
   useEffect(() => {
     const q = query.trim()
     const mine = ++seq.current
     setSelected(null)
-    if (!q) { setHits([]); return }
+    if (!q) { setHits([]); setError(null); return }
     void (async () => {
-      const items = await source.search(q).catch(() => [] as DriveItem[])
-      if (mine !== seq.current) return
-      setHits(items.map((item) => ({ item, where: '' })))
-      // Where each one is: the folder path the list on this PC already has.
-      const wheres = await extras.paths(items.slice(0, MAX_WHERE).map((i) => i.id)).catch(() => ({} as Record<string, string>))
-      if (mine !== seq.current) return
-      setHits(items.map((item) => ({ item, where: wheres[item.id] ?? '' })))
+      try {
+        const items = await source.search(q)
+        if (mine !== seq.current) return
+        setError(null)
+        setHits(items.map((item) => ({ item, where: '' })))
+        // Where each one is: the folder path the list on this PC already has.
+        const wheres = await extras.paths(items.slice(0, MAX_WHERE).map((i) => i.id)).catch(() => ({} as Record<string, string>))
+        if (mine !== seq.current) return
+        setHits(items.map((item) => ({ item, where: wheres[item.id] ?? '' })))
+      } catch (e) {
+        // A failed read leaves the rows already shown. An empty list would look like no matches.
+        if (mine !== seq.current) return
+        setError(actionFailure('search', e instanceof DriveSourceError ? e.code : 'failed').text)
+      }
     })()
-  }, [query, source, extras])
+  }, [query, source, extras, attempt])
 
   const remember = (q: string) => {
     const t = q.trim()
@@ -107,6 +117,7 @@ export default function Section({ nav }: SectionProps) {
     <>
       <SearchView
         query={query} hits={hits} pill={pill} recent={recent} now={now} menuOn={menu?.item.id} loading={loading} selected={selected}
+        error={error} onRetry={() => setAttempt((n) => n + 1)}
         onQuery={setQuery} onPill={setPill} onOpen={open} onSelect={setSelected}
         onContext={(item, x, y) => setMenu({ item, x, y })}
         onClearRecent={() => { setRecent([]); saveRecent([]) }}

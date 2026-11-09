@@ -20,18 +20,53 @@ export function byPill(hits: SearchHit[], pill: Pill): SearchHit[] {
   return hits
 }
 
-/** The name with every match of the query in bold. */
-export function Highlight({ name, query }: { name: string; query: string }): ReactNode {
-  const q = query.trim().toLowerCase()
-  if (!q) return name
-  const out: ReactNode[] = []
-  let i = 0
-  const lower = name.toLowerCase()
-  for (let at = lower.indexOf(q); at !== -1; at = lower.indexOf(q, i)) {
-    out.push(<Fragment key={`t${i}`}>{name.slice(i, at)}</Fragment>, <b key={`b${at}`} className="font-semibold text-ink">{name.slice(at, at + q.length)}</b>)
-    i = at + q.length
+// The same fold as the on-device index (NFKD, drop combining marks, then Unicode lowercase). A JS-only
+// toLowerCase would bold a different span, including for İ and ﬁ.
+const COMBINING = /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]/u
+const stripMarks = (value: string) => {
+  let out = ''
+  for (const ch of value) if (!COMBINING.test(ch)) out += ch
+  return out
+}
+const foldName = (value: string) => stripMarks(value.normalize('NFKD')).toLowerCase()
+
+function foldIndexed(name: string): { text: string; from: number[] } {
+  const pieces: { ch: string; at: number }[] = []
+  for (let i = 0; i < name.length;) {
+    const raw = String.fromCodePoint(name.codePointAt(i)!)
+    for (const ch of stripMarks(raw.normalize('NFKD'))) pieces.push({ ch, at: i })
+    i += raw.length
   }
-  out.push(<Fragment key="end">{name.slice(i)}</Fragment>)
+  const text = pieces.map((piece) => piece.ch).join('').toLowerCase()
+  const from: number[] = []
+  for (const piece of pieces) for (let k = 0; k < piece.ch.toLowerCase().length; k++) from.push(piece.at)
+  return from.length === text.length ? { text, from } : { text, from: [] }
+}
+
+/** The name with every match of the query in bold. The query is text, never HTML. */
+export function Highlight({ name, query }: { name: string; query: string }): ReactNode {
+  const needle = foldName(query.trim()).trim()
+  if (!needle) return name
+  const { text, from } = foldIndexed(name)
+  if (from.length !== text.length) return name
+  const ranges: Array<[number, number]> = []
+  for (let at = text.indexOf(needle), searchFrom = 0; at !== -1; at = text.indexOf(needle, searchFrom)) {
+    const start = from[at]!
+    const last = from[at + needle.length - 1]!
+    ranges.push([start, last + ((name.codePointAt(last) ?? 0) > 0xffff ? 2 : 1)])
+    searchFrom = at + needle.length
+  }
+  if (ranges.length === 0) return name
+  const out: ReactNode[] = []
+  let cursor = 0
+  ranges.forEach(([start, end], n) => {
+    if (end <= cursor) return
+    const fromAt = Math.max(start, cursor)
+    if (fromAt > cursor) out.push(<Fragment key={`t${n}`}>{name.slice(cursor, fromAt)}</Fragment>)
+    out.push(<b key={`b${n}`} className="font-semibold text-ink">{name.slice(fromAt, end)}</b>)
+    cursor = end
+  })
+  if (cursor < name.length) out.push(<Fragment key="end">{name.slice(cursor)}</Fragment>)
   return out
 }
 
@@ -56,6 +91,9 @@ export interface SearchViewProps {
   onContext?: (item: DriveItem, x: number, y: number) => void
   onClearRecent?: () => void
   onEnd?: () => void
+  /** The last search failed. Rows already shown stay; Try again runs the same query. */
+  error?: string | null
+  onRetry?: () => void
 }
 
 export function SearchView(p: SearchViewProps) {
@@ -105,20 +143,29 @@ export function SearchView(p: SearchViewProps) {
       ) : (
         <>
           <div role="group" aria-label="Narrow by type" className="flex flex-none gap-2 px-4 py-2">
-            {PILLS.map((x) => (
-              <button key={x} type="button" aria-pressed={pill === x} onClick={() => p.onPill?.(x)} className={`h-7 rounded-full border px-3 text-[12px] ${pill === x ? 'border-ink-3 bg-paper-3 text-ink' : 'border-line text-ink-2 hover:bg-paper-2'} ${FOCUS}`}>{x}</button>
-            ))}
+            {PILLS.map((x) => {
+              const count = byPill(p.hits, x).length
+              return (
+                <button key={x} type="button" data-pill={x} data-count={count} aria-pressed={pill === x} onClick={() => p.onPill?.(x)} className={`h-7 rounded-full border px-3 text-[12px] ${pill === x ? 'border-ink-3 bg-paper-3 text-ink' : 'border-line text-ink-2 hover:bg-paper-2'} ${FOCUS}`}>{x} <span className="font-mono">{count}</span></button>
+              )
+            })}
           </div>
           {p.loading && (
             <p role="status" data-search-loading className="m-0 mx-4 mb-2 flex items-center gap-2 rounded-md border border-line bg-paper-2 px-3 py-2 text-[12px] leading-4 text-ink-2">
               <Icon name="info" size={13} />
-              <span>Still getting your files ready. Results may be incomplete until the list has loaded: <span className="font-mono">{p.loading.done.toLocaleString('en-US')}</span> of <span className="font-mono">{p.loading.total.toLocaleString('en-US')}</span>.</span>
+              <span>The index is still building: <span className="font-mono">{p.loading.done.toLocaleString('en-US')}</span> of <span className="font-mono">{p.loading.total.toLocaleString('en-US')}</span>.</span>
             </p>
           )}
-          {shown.length === 0 ? (
+          {p.error && (
+            <div role="alert" data-search-error className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-md border border-line bg-paper-2 px-3 py-2 text-[12px] leading-4 text-ink-2">
+              <span>{p.error}</span>
+              <button type="button" onClick={p.onRetry} className={`h-7 shrink-0 rounded-md border border-line bg-paper px-2.5 text-[12px] text-ink hover:bg-paper-3 ${FOCUS}`}>Try again</button>
+            </div>
+          )}
+          {shown.length === 0 && !p.error ? (
             <div data-empty="search" className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
               <div className="mb-1 grid h-16 w-16 place-items-center rounded-2xl border border-line bg-paper-2 text-ink-3"><Icon name="search" size={26} /></div>
-              <h2 className="m-0 text-[15px] font-semibold text-ink">No results for “{query}”</h2>
+              <h2 className="m-0 text-[15px] font-semibold text-ink">No files match</h2>
               <p className="m-0 max-w-[400px] text-[13px] leading-5 text-ink-2">Check the spelling, or try fewer letters. Search only looks at names, not inside files.</p>
             </div>
           ) : (
