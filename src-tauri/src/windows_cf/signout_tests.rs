@@ -90,7 +90,7 @@ fn plain_directory_unsynced_child_preserves_bytes_and_rows() {
     std::fs::write(&child, b"unsynced bytes").unwrap();
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
-        error.to_string().contains("Unsynced files remain"),
+        error.to_string().contains("aren’t on this PC’s list"),
         "must inspect children: {error:?}"
     );
     assert_eq!(std::fs::read(child).unwrap(), b"unsynced bytes");
@@ -115,7 +115,7 @@ fn unsynced_plain_directory_preserves_rows() {
     f.folder("local");
     f.track("local", ItemKind::Folder, FileStatus::Uploading);
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
-    assert!(error.to_string().contains("Pending changes remain"));
+    assert!(error.to_string().contains("haven’t been sent yet"), "{error:?}");
     assert!(f.root.join("local").is_dir());
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
@@ -127,7 +127,7 @@ fn directory_at_file_row_is_not_accepted_as_synced_folder() {
     f.track("local", ItemKind::File, FileStatus::Local);
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
-        error.to_string().contains("Item type changed"),
+        error.to_string().contains("changed kind"),
         "must reject the DB/disk kind mismatch before traversal: {error:?}"
     );
     assert!(f.root.join("local").is_dir());
@@ -151,7 +151,7 @@ fn directory_junction_is_not_traversed_or_removed() {
     f.track("link", ItemKind::Folder, FileStatus::Local);
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
     assert!(
-        !error.to_string().contains("Unsynced files remain"),
+        !error.to_string().contains("aren’t on this PC’s list"),
         "junction was traversed: {error:?}"
     );
     assert!(link.exists());
@@ -174,6 +174,7 @@ fn prepared_directory_cannot_be_replaced_during_cleanup() {
         &known,
         &HashMap::new(),
         &UnknownFiles::Delete,
+        None,
         &mut Vec::new(),
         &mut files,
         &mut directories,
@@ -204,6 +205,7 @@ fn child_arriving_after_prepare_blocks_nonrecursive_deletion() {
         &known,
         &HashMap::new(),
         &UnknownFiles::Delete,
+        None,
         &mut Vec::new(),
         &mut files,
         &mut directories,
@@ -323,8 +325,13 @@ fn round6_foreign_and_dirty_placeholders_keep_bytes() {
         let identity = if foreign { "foreign-id" } else { "server-id" };
         crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, identity).unwrap();
         f.track("server-id", ItemKind::File, FileStatus::Local);
-        let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err().to_string();
-        assert!(error.contains(if foreign { "identity changed" } else { "Unsynced changes" }), "{error}");
+        let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(if foreign { "Beebeeb expected" } else { "been sent" }),
+            "{error}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"must preserve bytes");
         assert_eq!(f.db.list_files().unwrap().len(), 1);
     }
@@ -332,19 +339,36 @@ fn round6_foreign_and_dirty_placeholders_keep_bytes() {
 
 #[test]
 fn round6_unregister_removes_empty_owned_hkcu_key() {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows::Win32::System::Registry::*;
-    use windows::Win32::Foundation::{ERROR_SUCCESS, ERROR_FILE_NOT_FOUND};
     use windows::core::HSTRING;
     let f = Fixture::new();
     let id = crate::windows_cf::shell_sync_root_id(&f.root);
-    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"));
+    let key = HSTRING::from(format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
+    ));
     unsafe {
         let mut handle = HKEY::default();
-        assert_eq!(RegCreateKeyExW(HKEY_CURRENT_USER, &key, 0, None, REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut handle, None), ERROR_SUCCESS);
+        assert_eq!(
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                &key,
+                0,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                KEY_READ,
+                None,
+                &mut handle,
+                None
+            ),
+            ERROR_SUCCESS
+        );
         assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
         let result = crate::windows_cf::unregister_shell_sync_root(&f.root);
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
-        if remaining == ERROR_SUCCESS { assert_eq!(RegCloseKey(handle), ERROR_SUCCESS); }
+        if remaining == ERROR_SUCCESS {
+            assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
+        }
         // Test cleanup even when the baseline leaves the key behind.
         let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
         assert!(result.is_ok(), "unregister: {result:?}");
@@ -353,7 +377,14 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
 }
 
 /// A finalization journal row: the upload `op` of the file at `target` became the server file `server_id`.
-fn journal_finalization(f: &Fixture, op: &str, local_id: &str, server_id: &str, target: &str, payload: &std::path::Path) {
+fn journal_finalization(
+    f: &Fixture,
+    op: &str,
+    local_id: &str,
+    server_id: &str,
+    target: &str,
+    payload: &std::path::Path,
+) {
     f.db.put_upload_finalization(&crate::state_db::UploadFinalization {
         op_id: op.into(),
         local_file_id: local_id.into(),
@@ -379,21 +410,53 @@ fn round6_upload_finalization_preserves_foreign_or_changed_bytes() {
         let path = f.root.join("server-id");
         let payload = f.temp.path().join("uploaded");
         std::fs::write(&path, b"new local edit").unwrap();
-        std::fs::write(&payload, if foreign { b"new local edit".as_slice() } else { b"uploaded original".as_slice() }).unwrap();
-        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, if foreign { "foreign-id" } else { "local-id" }).unwrap();
+        std::fs::write(
+            &payload,
+            if foreign {
+                b"new local edit".as_slice()
+            } else {
+                b"uploaded original".as_slice()
+            },
+        )
+        .unwrap();
+        crate::windows_cf::placeholders::convert_to_unsynced_placeholder(
+            &path,
+            if foreign { "foreign-id" } else { "local-id" },
+        )
+        .unwrap();
         f.track("server-id", ItemKind::File, FileStatus::Local);
         journal_finalization(f, "op", "local-id", "server-id", "server-id", &payload);
         crate::windows_cf::upload_finalization::retry(&f.db, &f.root);
         let identity = if foreign { "foreign-id" } else { "server-id" };
         assert_eq!(
             crate::windows_cf::placeholders::platform_view(&path),
-            PlatformView::Placeholder { on_disk: OnDisk::Wholly, in_sync: false, identity: Some(identity.into()) },
+            PlatformView::Placeholder {
+                on_disk: OnDisk::Wholly,
+                in_sync: false,
+                identity: Some(identity.into())
+            },
             "foreign={foreign}"
         );
-        let reviews: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| row.review).collect();
-        assert_eq!(reviews, if foreign { vec![Some("other_file".to_string())] } else { vec![] }, "foreign={foreign}");
+        let reviews: Vec<_> =
+            f.db.upload_finalizations()
+                .unwrap()
+                .into_iter()
+                .map(|row| row.review)
+                .collect();
+        assert_eq!(
+            reviews,
+            if foreign {
+                vec![Some("other_file".to_string())]
+            } else {
+                vec![]
+            },
+            "foreign={foreign}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"new local edit");
-        assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err(), "foreign={foreign}");
+        assert!(
+            purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err(),
+            "foreign={foreign}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"new local edit", "foreign={foreign}");
     }
 }
@@ -423,7 +486,14 @@ fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     let registered = RegisteredRoot::new();
     let f = &registered.0;
     // In review since an earlier tick of this start: its file moved before it was finalized (F1).
-    journal_finalization(f, "review-op", "review-local", "review-server", "moved-away", &f.temp.path().join("review-payload"));
+    journal_finalization(
+        f,
+        "review-op",
+        "review-local",
+        "review-server",
+        "moved-away",
+        &f.temp.path().join("review-payload"),
+    );
     f.db.mark_upload_finalization_review("review-op", "moved", 1).unwrap();
     crate::windows_cf::upload_finalization::mark_review_retried(&f.root);
     // Pending: the uploaded file is open in another program.
@@ -435,11 +505,19 @@ fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     journal_finalization(f, "pending-op", "local-id", "server-id", "server-id", &payload);
     let reader = std::fs::File::open(&path).unwrap();
     let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete).unwrap_err();
-    assert!(error.to_string().contains("still needs its local identity repaired"), "{error:?}");
-    let rows: Vec<_> = f.db.upload_finalizations().unwrap().into_iter().map(|row| (row.op_id, row.review)).collect();
+    assert!(error.to_string().contains("still open in another app"), "{error:?}");
+    let rows: Vec<_> =
+        f.db.upload_finalizations()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.op_id, row.review))
+            .collect();
     assert_eq!(
         rows,
-        vec![("review-op".to_string(), Some("moved".to_string())), ("pending-op".to_string(), None)],
+        vec![
+            ("review-op".to_string(), Some("moved".to_string())),
+            ("pending-op".to_string(), None)
+        ],
         "a refused sign-out keeps both rows as they were"
     );
     assert_eq!(std::fs::read(&path).unwrap(), b"uploaded bytes");
@@ -459,9 +537,22 @@ fn task_2191_sign_out_keeps_an_unknown_file_as_a_copy() {
     f.track_unknown("docs/a.txt", ItemKind::File, FileStatus::Local);
     let dir = f.temp.path().join("Beebeeb kept files 2026-10-26 1200");
     let kept = purge(&f.db, Some(&f.root), &UnknownFiles::Keep { dir: dir.clone() }).unwrap();
-    assert_eq!(kept, KeptAtSignOut { files: 1, dir: Some(dir.clone()) });
-    assert_eq!(std::fs::read(dir.join("docs").join("a.txt")).unwrap(), b"an edit 0.8.12 never sent");
-    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0, "the sync folder is emptied");
+    assert_eq!(
+        kept,
+        KeptAtSignOut {
+            files: 1,
+            dir: Some(dir.clone())
+        }
+    );
+    assert_eq!(
+        std::fs::read(dir.join("docs").join("a.txt")).unwrap(),
+        b"an edit 0.8.12 never sent"
+    );
+    assert_eq!(
+        std::fs::read_dir(&f.root).unwrap().count(),
+        0,
+        "the sync folder is emptied"
+    );
 }
 
 /// Task 2191: "Delete them" deletes a file of unknown content with the rest, and keeps nothing.
@@ -483,4 +574,81 @@ fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
     f.track("a.txt", ItemKind::File, FileStatus::Local);
     assert!(purge(&f.db, Some(&f.root), &UnknownFiles::Delete).is_err());
     assert!(f.root.join("a.txt").exists(), "nothing deleted");
+}
+
+/// Slice 11: a sign-out that meets work it cannot keep says so in plain words and offers one
+/// plain way forward. It never tells the person to unlock, to sync, to resolve anything, or to
+/// deal with "failed changes": those are our internals, not their job.
+#[test]
+fn sign_out_sentence_never_names_internals() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("a.txt"), b"an edit that has not left").unwrap();
+    f.track("a.txt", ItemKind::File, FileStatus::Uploading);
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Delete)
+        .unwrap_err()
+        .to_string();
+    let lower = error.to_lowercase();
+    for word in ["unlock", "sync", "resolve", "failed changes"] {
+        assert!(
+            !lower.contains(word),
+            "sign-out sentence names an internal, {word:?}: {error}"
+        );
+    }
+    assert!(
+        error.contains("Move them out of the Beebeeb folder"),
+        "exactly one plain alternative: {error}"
+    );
+}
+
+/// Slice 11: unsent work the person cannot settle is kept, named, and never deleted; the
+/// sign-out itself goes ahead. No homework, no internals.
+#[test]
+fn sign_out_keeps_unsent_files_and_names_their_folder() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("a.txt"), b"an edit that has not left").unwrap();
+    f.track("a.txt", ItemKind::File, FileStatus::Uploading);
+    let dir = f.temp.path().join("Beebeeb kept files 2026-11-09 2310");
+    let kept = purge(&f.db, Some(&f.root), &UnknownFiles::Keep { dir: dir.clone() }).unwrap();
+    assert_eq!(
+        kept,
+        KeptAtSignOut {
+            files: 1,
+            dir: Some(dir.clone())
+        }
+    );
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"an edit that has not left");
+    assert_eq!(
+        std::fs::read_dir(&f.root).unwrap().count(),
+        0,
+        "the sync folder is emptied"
+    );
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// Slice 11: when a pending file cannot be copied, the sign-out stops with a plain sentence
+/// about space, and every byte stays where it was.
+#[test]
+fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("a.txt"), b"an edit that has not left").unwrap();
+    f.track("a.txt", ItemKind::File, FileStatus::Uploading);
+    // A file where the folder should be: the copy cannot be made.
+    let dir = f.temp.path().join("occupied");
+    std::fs::write(&dir, b"not a folder").unwrap();
+    let error = purge(&f.db, Some(&f.root), &UnknownFiles::Keep { dir })
+        .unwrap_err()
+        .to_string();
+    let lower = error.to_lowercase();
+    for word in ["unlock", "sync", "resolve", "queue"] {
+        assert!(
+            !lower.contains(word),
+            "copy failure names an internal, {word:?}: {error}"
+        );
+    }
+    assert!(error.contains("space"), "says what to do about it: {error}");
+    assert_eq!(
+        std::fs::read(f.root.join("a.txt")).unwrap(),
+        b"an edit that has not left"
+    );
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
