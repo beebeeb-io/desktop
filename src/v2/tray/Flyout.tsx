@@ -69,7 +69,7 @@ function Row({ row, onRow }: { row: FlyoutRow; onRow: (row: FlyoutRow) => void }
   return (
     <li>
       <button
-        type="button" onClick={() => onRow(row)}
+        type="button" onClick={() => onRow(row)} data-row={row.id}
         className="flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-paper-3 focus-visible:outline-2 focus-visible:outline-ink-3"
       >
         <FileTile name={row.name} />
@@ -107,7 +107,7 @@ function FooterButton({ children, disabled, onClick }: { children: ReactNode; di
   )
 }
 
-export function Flyout({ view, handlers, scrollToEnd = false }: { view: FlyoutView; handlers: FlyoutHandlers; scrollToEnd?: boolean }) {
+export function Flyout({ view, handlers, scrollToEnd = false, notice = null }: { view: FlyoutView; handlers: FlyoutHandlers; scrollToEnd?: boolean; notice?: string | null }) {
   const listRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (scrollToEnd && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
@@ -147,6 +147,7 @@ export function Flyout({ view, handlers, scrollToEnd = false }: { view: FlyoutVi
         {view.reason ? (
           <button type="button" onClick={() => void navigator.clipboard?.writeText(view.reason!)} className="ml-3 mt-3 h-8 text-[12px]! text-ink-3 underline underline-offset-2">Copy details</button>
         ) : null}
+        {notice ? <p role="alert" className="mt-2 text-[12px] leading-4 text-red-text" data-flyout-notice="true">{notice}</p> : null}
       </section>
 
       <section aria-label={LIST_LABEL} className="flex min-h-0 flex-1 flex-col border-t border-line">

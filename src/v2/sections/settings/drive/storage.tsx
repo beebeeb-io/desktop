@@ -1,11 +1,15 @@
 // Drive › Storage (DW-0712) and its dialogs: preview limit (DW-0713), downloaded-files limit (DW-0714), free up (DW-0780).
 import { useState } from 'react'
+import { command } from '../../../../desktopApi'
+import { navigateTo } from '../../../routes'
+import { actionFailure } from '../../files/model'
 import { Btn, Dialog, Group, Meter, Page, Row, Slider, fmtBytes, GB, mono } from '../shell/kit'
 import { FIXTURE_BREAKDOWN, FIXTURE_LOCAL, useConfig } from '../shell/data'
 import { useSettings } from '../shell/context'
 
 export function Storage() {
   const { open } = useSettings()
+  const [refused, setRefused] = useState<string | null>(null)
   const { config } = useConfig()
   const b = FIXTURE_BREAKDOWN
   const limit = config.local_cache_limit_bytes || 50 * GB
@@ -17,7 +21,7 @@ export function Storage() {
           <Meter label="Account storage" fraction={b.usedBytes / b.quotaBytes} amber />
         </div>
         {b.rows.map((r) => (
-          <Row key={r.label} label={r.label} value={fmtBytes(r.bytes)} mono onClick={r.label === 'Trash' ? () => { window.location.search = '?section=trash' } : undefined} />
+          <Row key={r.label} label={r.label} value={fmtBytes(r.bytes)} mono onClick={r.label === 'Trash' ? () => navigateTo({ section: 'trash' }) : undefined} />
         ))}
         <Row label="Storage insights" sub="By type, and your largest files" onClick={() => open('insights')} />
       </Group>
@@ -25,7 +29,9 @@ export function Storage() {
         <Row label="Downloaded files" value={`${fmtBytes(FIXTURE_LOCAL.downloaded)} of ${fmtBytes(limit)}`} mono
           right={<><Btn onClick={() => open('free-up')}>Clear…</Btn><Btn onClick={() => open('limit-downloads')}>Change limit</Btn></>} />
         <Row label="Thumbnails and previews" value={`${fmtBytes(FIXTURE_LOCAL.previews)} of ${fmtBytes(FIXTURE_LOCAL.previewLimit)}`} mono
-          right={<><Btn onClick={() => open('limit-previews')}>Clear</Btn><Btn onClick={() => open('limit-previews')}>Change limit</Btn></>} />
+          right={<><Btn onClick={() => setRefused(actionFailure('clear the previews', 'unsupported').text)}>Clear</Btn><Btn onClick={() => open('limit-previews')}>Change limit</Btn></>} />
+        {/* No command empties the preview cache yet: Clear says so instead of opening the limit (M3e). */}
+        {refused ? <p role="alert" className="px-4 pb-2 text-[12px] text-red-text">{refused}</p> : null}
         <Row label="Available offline" value={fmtBytes(FIXTURE_LOCAL.offline)} mono href="?section=available-offline" />
       </Group>
     </Page>
@@ -60,9 +66,17 @@ export const DownloadLimitDialog = () => (
 
 export function FreeUpDialog() {
   const { close } = useSettings()
+  const [state, setState] = useState<'idle' | 'working' | string>('idle')
+  // Free up space removes the downloaded copies (`free_up_space`, DW-0780#0); a refusal stays in the alert.
+  const free = () => {
+    setState('working')
+    void command('free_up_space').then((r) => { if (r.ok) close(); else setState(actionFailure('free up space', r.unsupported ? 'unsupported' : 'failed').text) })
+  }
+  const failed = state !== 'idle' && state !== 'working' ? state : null
   return (
     <Dialog labelId="free-h" title="Free up 18.4 GB?" onCancel={close}
-      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="amber" onClick={close}>Free up space</Btn></>}>
+      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="amber" onClick={free} disabled={state === 'working'}>Free up space</Btn></>}>
+      {failed ? <p role="alert" className="mb-2 text-[12px] text-red-text">{failed}</p> : null}
       <p>This removes the copies of your files stored on this PC. File Explorer shows them as online only, and they download again when you open them.</p>
       <p className="mt-2">Never removed: Available offline files and any file that is open. Nothing leaves your Beebeeb account.</p>
     </Dialog>

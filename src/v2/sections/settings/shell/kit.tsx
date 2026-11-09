@@ -1,7 +1,10 @@
 // Settings kit for desktop v2 (B12): the page, group card, row, switch, pop-up and dialog every pane is drawn with.
 // One accent: Amber only on the primary action and on encryption state. Sizes, times and codes are mono.
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { BBButton, BBToggle, Icon } from '@beebeeb/shared/design'
+import { Ctx } from './context'
+import { followHref } from './links'
+import { actionFailure } from '../../files/model'
 
 export const mono = 'font-mono tabular-nums'
 
@@ -45,6 +48,8 @@ interface RowProps {
 }
 
 export function Row({ label, sub, value, right, onClick, href, dim, mono: monoValue }: RowProps) {
+  const settings = useContext(Ctx)
+  const [refused, setRefused] = useState<string | null>(null)
   const body = (
     <>
       <div className="min-w-0 flex-1">
@@ -57,7 +62,23 @@ export function Row({ label, sub, value, right, onClick, href, dim, mono: monoVa
     </>
   )
   const cls = `flex min-h-[44px] items-center gap-3 px-4 py-2 text-left ${dim ? 'opacity-50' : ''}`
-  if (href) return <a href={href} className={`${cls} hover:bg-paper-2`}>{body}</a>
+  if (href) {
+    // A link never navigates the web view (M3e): settings pages move inside Settings, another section moves the
+    // window, and the web, mail or Windows Settings open in the OS. A refusal is said under the row.
+    const follow = (e: ReactMouseEvent) => {
+      const went = followHref(href, settings?.go ?? (() => undefined))
+      if (went === false) return
+      e.preventDefault()
+      setRefused(null)
+      if (went) void went.then((r) => setRefused(r.ok ? null : actionFailure(`open ${typeof label === 'string' ? label : 'it'}`, r.unsupported ? 'unsupported' : 'failed').text))
+    }
+    return (
+      <>
+        <a href={href} onClick={follow} className={`${cls} hover:bg-paper-2`}>{body}</a>
+        {refused ? <p role="alert" className="px-4 pb-2 text-[12px] leading-4 text-red-text">{refused}</p> : null}
+      </>
+    )
+  }
   if (onClick) return <button type="button" onClick={onClick} className={`${cls} w-full hover:bg-paper-2`}>{body}</button>
   return <div className={cls} data-testid="row">{body}</div>
 }

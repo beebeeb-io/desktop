@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { clearSession } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
-import { Choice, Dialog, Group, Page, Row, Switch } from '../shell/kit'
+import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
 import { FIXTURE_BACKUP_CODES, FIXTURE_LINK_EXPIRES_AT, FIXTURE_NOW, FIXTURE_SHRED_AFTER } from '../../../source/fixtures/account'
@@ -38,7 +38,6 @@ const FACTOR: Record<string, { title: string; doneState: (s: AccountState) => st
   all_devices_recognized: { title: 'Devices and sessions', doneState: (s) => `${s.devices.length} signed in`, todo: 'Review your active sessions', to: 'devices' },
 }
 
-const DELAYS = [{ value: 'immediate', label: 'Immediately' }, { value: '5', label: '5 min' }, { value: '30', label: '30 min' }, { value: '60', label: '60 min' }] as const
 
 export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const settings = useSettings()
@@ -104,24 +103,16 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   )
 }
 
-/** Drive's App lock row (the securityExtra slot). Windows Hello confirms a change first, as DW-0716 draws it. */
+/**
+ * Drive's App lock row (the securityExtra slot, DW-0716). Blocked (M3e): no setting stores App lock and no command asks
+ * Windows Hello before it changes (auth_v2/hello.rs can verify; the setting it would guard doesn't exist), so nothing
+ * locks Beebeeb's screens yet. The row says it is off and can't be changed here: never a lock that isn't there, nor a
+ * Windows Hello prompt that wasn't asked.
+ */
 function AppLock() {
-  const [on, setOn] = useState(true)
-  const [delay, setDelay] = useState<(typeof DELAYS)[number]['value']>('5')
-  const [hello, setHello] = useState<null | (() => void)>(null)
   return (
-    <Group title="App lock">
-      <Row label="Lock Beebeeb" sub={on ? 'Windows Hello · locks again after' : 'Off: anyone using this PC can open Beebeeb'}
-        right={<>
-          {on ? <Choice label="Lock again after" value={delay} options={[...DELAYS]} onPick={(d) => setHello(() => () => setDelay(d))} /> : null}
-          <Switch label="Lock Beebeeb" on={on} onChange={(v) => setHello(() => () => setOn(v))} />
-        </>} />
-      {hello ? (
-        <Dialog labelId="hello-b14-h" title="Confirm with Windows Hello" onCancel={() => setHello(null)}
-          actions={<><Btn onClick={() => setHello(null)}>Cancel</Btn><Btn variant="amber" onClick={() => { hello(); setHello(null) }}>Continue</Btn></>}>
-          Windows Hello confirms it is you before the lock changes.
-        </Dialog>
-      ) : null}
+    <Group title="App lock" note="App lock isn’t available in this version of Beebeeb yet.">
+      <Row label="Lock Beebeeb" sub="Off: anyone using this PC can open Beebeeb" right={<Switch label="Lock Beebeeb" on={false} disabled />} />
     </Group>
   )
 }

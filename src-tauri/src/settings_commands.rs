@@ -17,7 +17,10 @@ pub(super) fn queued_restore_version_response(
 }
 
 #[tauri::command]
-pub(super) async fn list_file_versions(state: State<'_, AppState>, file_id: String) -> Result<serde_json::Value, String> {
+pub(super) async fn list_file_versions(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<serde_json::Value, String> {
     session_command!(async {
         let acct = state.active_account()?;
         let (token, master_key) = {
@@ -98,7 +101,10 @@ pub(super) fn get_sync_root() -> Result<Option<String>, String> {
 ///
 /// Spec 030 §2 + §3 (lock acquired by the spawned engine).
 #[tauri::command]
-pub(super) async fn pick_sync_root(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub(super) async fn pick_sync_root(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
         let _ = app;
@@ -328,14 +334,6 @@ pub(super) fn show_main_app_window(app: tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
-/// Open (or focus) the main Beebeeb app window and select the consolidated
-/// Settings section. Used by the Windows tray flyout's Settings gear.
-#[tauri::command]
-pub(super) fn show_main_app_settings(app: tauri::AppHandle) -> Result<(), String> {
-    show_main_app_window_with_nav(&app, Some("settings"));
-    Ok(())
-}
-
 // ── IPC commands: Windows tray (WS1) ─────────────────────────────────────────
 
 /// One row in the tray's recent-activity list.
@@ -379,7 +377,12 @@ pub(super) fn tray_recent_activity_from_db(db: &state_db::StateDb) -> Vec<TrayAc
         for row in rows.into_iter().filter(|r| r.needs_attention) {
             // Review of #225: a poison whose file row is gone has no exit (the discard answers `missing`
             // until the next process start clears it): no row, here as on the board.
-            let Some(name) = db.get_file(&row.file_id).ok().flatten().map(|e| entry_basename(&e.path)) else {
+            let Some(name) = db
+                .get_file(&row.file_id)
+                .ok()
+                .flatten()
+                .map(|e| entry_basename(&e.path))
+            else {
                 continue;
             };
             items.push(TrayActivityItem {
@@ -503,9 +506,16 @@ pub(super) fn tray_recent_activity() -> Vec<TrayActivityItem> {
 /// the exclusive handle (whatever was written to it), clears the poison, and fetches it again. The
 /// error is a status word: `not_poisoned`, `in_use` (close the file first), `missing`, or a step.
 #[tauri::command]
-pub(super) async fn discard_and_download_again(file_id: String, runtime: State<'_, popover_data::PopoverRuntime>) -> Result<(), String> {
+pub(super) async fn discard_and_download_again(
+    file_id: String,
+    runtime: State<'_, popover_data::PopoverRuntime>,
+) -> Result<(), String> {
     // Delta review P2-1: an upload of the person's change is in flight; discarding would throw it away.
-    if runtime.transfers.get(&file_id).is_some_and(|t| t.direction == crate::transfer_progress::Direction::Up) {
+    if runtime
+        .transfers
+        .get(&file_id)
+        .is_some_and(|t| t.direction == crate::transfer_progress::Direction::Up)
+    {
         return Err("uploading".to_string());
     }
     #[cfg(target_os = "windows")]
@@ -620,7 +630,9 @@ pub(super) async fn sync_activity_summary(
         let Some(db) = DesktopConfig::load().and_then(|cfg| state_db_for_config(&cfg))? else {
             return Ok(None);
         };
-        db.queue_hold_summary().map(Some).map_err(|e| format!("read the sync queue: {e}"))
+        db.queue_hold_summary()
+            .map(Some)
+            .map_err(|e| format!("read the sync queue: {e}"))
     })
     .await
     .map_err(|e| format!("sync activity task failed: {e}"))??;
@@ -650,7 +662,10 @@ pub(super) const MENU_RESUME_FAILED_SENTENCE: &str = "Beebeeb couldn’t resume 
 /// works with every window closed, so it has no window to put a toast in and the alert is native, like 1885's failed
 /// "Open in Finder" and the Sign-out menu action's. On every platform: the native menu is the one live caller of the
 /// pause commands, and a pause that does nothing must not look like one that worked.
-pub(super) fn menu_pause_failure_alert(result: &Result<(), String>, pausing: bool) -> Option<(&'static str, &'static str)> {
+pub(super) fn menu_pause_failure_alert(
+    result: &Result<(), String>,
+    pausing: bool,
+) -> Option<(&'static str, &'static str)> {
     match (result, pausing) {
         (Ok(()), _) => None,
         (Err(_), true) => Some((MENU_PAUSE_FAILED_TITLE, MENU_PAUSE_FAILED_SENTENCE)),
@@ -1015,8 +1030,14 @@ pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String
     let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
     for kf in known_folder::KNOWN_FOLDERS {
         let enabled = cfg.known_folder_enabled(kf.key);
-        let view = crate::backup::kfm::folder_view(kf.key, kf.display_name, enabled, cfg.known_folder_source.get(kf.key).copied());
-        #[cfg(target_os = "windows")] // never counted inside OneDrive's folder (listing an online-only one can fetch it)
+        let view = crate::backup::kfm::folder_view(
+            kf.key,
+            kf.display_name,
+            enabled,
+            cfg.known_folder_source.get(kf.key).copied(),
+        );
+        #[cfg(target_os = "windows")]
+        // never counted inside OneDrive's folder (listing an online-only one can fetch it)
         let item_count = view
             .source_path
             .as_deref()

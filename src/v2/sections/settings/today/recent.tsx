@@ -4,6 +4,7 @@ import { Group, Page, mono } from '../shell/kit'
 import { NOTICES } from '../../../source/fixtures/settings-today'
 import { BackLink } from './ui'
 import { useSettings } from '../shell/context'
+import { followHref } from '../shell/links'
 
 export function Recent({ empty }: { empty?: boolean } = {}) {
   const { go } = useSettings()
@@ -19,7 +20,7 @@ export function Recent({ empty }: { empty?: boolean } = {}) {
         <Group key={day} title={day}>
           {list.filter((n) => n.day === day).map((n) => (
             <a key={n.id} href={n.href} data-testid="notice" aria-label={`${n.fresh ? 'New. ' : ''}${n.title}. ${n.line}. ${n.time}`}
-              onClick={(e) => { const m = /sub=([a-z-]+)$/.exec(n.href); if (n.href.includes('section=settings') && m) { e.preventDefault(); go(m[1] as never) } }}
+              onClick={(e) => { if (followHref(n.href, go) !== false) e.preventDefault() }}
               className="flex items-start gap-3 px-4 py-2.5 hover:bg-paper-2">
               <Icon name={n.icon} size={16} className="mt-0.5 shrink-0 text-ink-3" />
               <div className="min-w-0 flex-1">

@@ -6,7 +6,8 @@ import type { PaneId } from '../sections/settings/shell/context'
 import { General } from '../sections/settings/shell/general'
 import { Notifications } from '../sections/settings/shell/notifications'
 import { Security } from '../sections/settings/shell/security'
-import { Backups } from '../sections/settings/backups'
+import { BackupFailures, Backups } from '../sections/settings/backups'
+import { FIXTURE_BACKUP_PROBLEMS } from '../sections/settings/shell/data'
 import type { FrameRegistry } from './types'
 
 /** The window with the settings view in it. `tall`: drawn taller than the window so the whole section shows. */
@@ -46,5 +47,5 @@ export const FRAMES: FrameRegistry = {
   'DW-1410': win('backups', { dialog: 'stop:Projects' }),
   'DW-0739': win('device'),
   'DW-0742': win('device', { dialog: 'delete-backup' }),
-  'DW-0741': win('backup-failures'),
+  'DW-0741': win('backup-failures', { override: <BackupFailures problems={FIXTURE_BACKUP_PROBLEMS} /> }),
 }

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { command, DEFAULT_CONFIG, type DesktopConfig } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
 import { GB, MB } from './kit'
+import type { SyncProblem } from '../../../source/extras'
 
 export const FIXTURE_CONFIG: DesktopConfig = { ...DEFAULT_CONFIG, sync_overlays: true, local_cache_limit_bytes: 50 * GB }
 
@@ -97,4 +98,12 @@ export const FIXTURE_DEVICES = [
   { id: 'iphone', name: "Anna's iPhone", status: 'Backed up 12,480 photos · 96 GB' },
   { id: 'ipad', name: "Anna's iPad", status: 'Backed up 4,120 photos · 38 GB' },
   { id: 'old', name: 'Old iPhone', status: 'Backed up 2,040 photos · 11 GB' },
+]
+
+/** DW-0741's list (the board's): three failures with why, and one exclusion by design (no Try again). */
+export const FIXTURE_BACKUP_PROBLEMS: SyncProblem[] = [
+  { id: 'b-render', name: 'Render final.mov', folder: 'Documents', reason: 'the file is open in another app', retryable: true, backup: true },
+  { id: 'b-invoice', name: 'Invoice scan.pdf', folder: 'Desktop', reason: 'this file is damaged', retryable: true, backup: true },
+  { id: 'b-budget', name: 'Budget 2025.xlsx', folder: 'Documents', reason: 'it kept changing while it was backing up', retryable: true, backup: true },
+  { id: 'b-site', name: 'Site walkthrough.mkv', folder: 'Desktop', reason: 'files larger than 4 GB are not backed up from this PC', retryable: false, backup: true },
 ]

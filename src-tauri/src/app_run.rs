@@ -204,6 +204,7 @@ pub fn run() {
             // PKG-SHELL — open the Windows main app window
             show_main_app_window,
             show_main_app_settings,
+            show_tray_flyout, // v2 M3e: the status line shows the flyout (DW-0401#10)
             // WS1 — Windows UI aliases + tray commands
             desktop_config,
             tray_recent_activity,

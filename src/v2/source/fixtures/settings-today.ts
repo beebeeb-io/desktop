@@ -33,10 +33,10 @@ export const BW_DEVICES: BwDevice[] = [
 
 export interface Notice { id: string; day: string; icon: 'users' | 'share' | 'mail' | 'shield'; title: string; line: string; time: string; fresh?: boolean; href: string }
 export const NOTICES: Notice[] = [
-  { id: 'n1', day: 'Today', icon: 'shield', title: "New sign-in on Anna's iPad", line: 'Amsterdam, Netherlands · Beebeeb for iPadOS', time: '08:12', fresh: true, href: '?section=settings&sub=devices' },
+  { id: 'n1', day: 'Today', icon: 'shield', title: "New sign-in on Anna's iPad", line: 'Amsterdam, Netherlands · Beebeeb for iPadOS', time: '08:12', fresh: true, href: '?section=settings&page=devices' },
   { id: 'n2', day: 'Today', icon: 'share', title: 'Lotte de Wit shared Harbourlight shoot with you', line: 'Open it in Shared with me', time: '07:40', fresh: true, href: '?section=shared&sub=with-me' },
   { id: 'n3', day: 'Yesterday', icon: 'mail', title: 'Priya Shah asked for a file in Invoices 2026', line: 'Open the request to answer it', time: '16:05', href: '?section=shared&sub=requests' },
-  { id: 'n4', day: '3 Nov', icon: 'shield', title: 'Security logging is on', line: 'Sign-ins and security changes are recorded', time: '10:31', href: '?section=settings&sub=signin-activity' },
+  { id: 'n4', day: '3 Nov', icon: 'shield', title: 'Security logging is on', line: 'Sign-ins and security changes are recorded', time: '10:31', href: '?section=settings&page=signin-activity' },
 ]
 
 export type Kind = 'Media' | 'Documents' | 'Other'
@@ -60,6 +60,18 @@ export const INSIGHTS = {
     { path: 'Documents/Notes/Interview recordings.m4a', kind: 'Audio', bytes: 640 * MB },
   ],
   largestTotal: 50,
+}
+
+/** INSIGHTS as `account_storage_breakdown` answers it, with the storage summary's numbers beside it: what the dev
+ *  server's host reads back, so the live pane and its frames draw the board's page. The file ids are board files
+ *  (./files.ts), so "Show in Files" lands on a real row in a browser; the paths stay the board's. */
+const KIND_CATEGORY: Record<Kind, 'media' | 'documents' | 'other'> = { Media: 'media', Documents: 'documents', Other: 'other' }
+const LARGEST_IDS = ['i-contract', 'i-agreement', 'p-tram', 'i-harbour', 'i-moodboard', 'p-alfama', 'd-initlabs', 'i-budget', 'p-belem', 'i-notes']
+export const INSIGHTS_BREAKDOWN = {
+  by_category: INSIGHTS.byType.map((t) => ({ category: KIND_CATEGORY[t.kind], bytes: t.bytes, file_count: t.files })),
+  largest_files: INSIGHTS.largest.map((f, i) => ({ file_id: LARGEST_IDS[i], path: f.path, size_bytes: f.bytes, category: /PDF/.test(f.kind) ? 'documents' : /Archive/.test(f.kind) ? 'other' : 'media' })),
+  total_files: INSIGHTS.files,
+  total_bytes: INSIGHTS.usedBytes,
 }
 
 export interface KeepNode { id: string; name: string; gb: number; children?: KeepNode[] }

@@ -170,7 +170,7 @@ export function SetupFlow() {
     case 'backup':
       body = <BackupStep folders={toBackupFolders(known, chosen)} {...backup}
         onToggle={(k, on) => setChosen((c) => { const n = new Set(c); if (on) n.add(k); else n.delete(k); return n })}
-        onAddFolder={() => void command('show_main_app_settings')} onTurnOn={() => void turnOnBackup()}
+        onAddFolder={() => void command('show_main_app_settings', { page: 'backups' })} onTurnOn={() => void turnOnBackup()}
         onNotNow={() => { void markKnownFolderOnboardingSeen(); note('backup', 'Off'); setStep('photos') }} />
       break
     case 'photos':
@@ -191,7 +191,7 @@ export function SetupFlow() {
       body = <LoginStep on={login} onToggle={setLogin} onContinue={() => void loginContinue()} />
       break
     case 'done':
-      body = <DoneStep summary={summary} onRow={() => void command('show_main_app_settings')} onOpen={() => void finish()} />
+      body = <DoneStep summary={summary} onRow={(page) => void command('show_main_app_settings', { page })} onOpen={() => void finish()} />
       break
   }
   return <SetupWindow step={step} explorer={explorer.status} onSkip={step === 'done' || step === 'compare' ? undefined : skip}>{body}</SetupWindow>

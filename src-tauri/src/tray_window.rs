@@ -605,13 +605,91 @@ pub(super) fn show_compact_app_window_with_nav(app: &tauri::AppHandle, nav: Opti
     }
 }
 
-/// What a route-named opener (`show_main_app_window_with_nav`) asks of the Beebeeb window on a Mac: "settings"
-/// opens Settings (the last section used), anything else Home.
+/// What a route-named opener (`show_main_app_window_with_nav`) asks of the Beebeeb window on a Mac: "settings" (or a
+/// settings page, "settings/<page>") opens Settings (the last section used), anything else Home.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(super) fn main_nav_for_route(nav: Option<&str>) -> MainNav {
     match nav {
-        Some("settings") => MainNav::settings(None),
+        Some(nav) if nav == "settings" || nav.starts_with("settings/") => MainNav::settings(None),
         _ => MainNav::Home,
+    }
+}
+
+/// The settings pages an opener in another window may name (desktop v2's `section=settings&page=<page>`, M3e): the
+/// setup window's summary rows, the menu's Check for Updates. The word goes into the window's URL, so only these.
+pub(super) const SETTINGS_PAGES: &[&str] = &[
+    "general",
+    "about",
+    "account",
+    "security",
+    "devices",
+    "notifications",
+    "storage",
+    "backups",
+    "sync",
+    "thumbnails",
+    "bandwidth",
+    "insights",
+    "recent",
+    "location",
+    "diagnostics",
+    "backup-failures",
+];
+
+/// The nav word for Settings, on `page` when one is named: "settings" or "settings/<page>". A page that isn't one of
+/// [`SETTINGS_PAGES`] is refused, never passed on.
+pub(super) fn settings_nav(page: Option<&str>) -> Result<String, String> {
+    match page {
+        None => Ok("settings".to_string()),
+        Some(page) if SETTINGS_PAGES.contains(&page) => Ok(format!("settings/{page}")),
+        Some(_) => Err("That settings page is not available.".to_string()),
+    }
+}
+
+/// Open (or focus) the main Beebeeb app window on Settings: on `page` when one is named (desktop v2's
+/// `section=settings&page=<page>`; the setup window's summary rows open their own page), else General. Used by the
+/// Windows tray flyout's Settings and the setup window. A page that isn't a settings page is refused. (Here, beside
+/// `settings_nav`, since M3e: settings_commands.rs is at its size limit.)
+#[tauri::command]
+pub(super) fn show_main_app_settings(app: tauri::AppHandle, page: Option<String>) -> Result<(), String> {
+    let nav = settings_nav(page.as_deref())?;
+    show_main_app_window_with_nav(&app, Some(&nav));
+    Ok(())
+}
+
+/// Desktop v2 (M3e): the main window's status line shows the b's flyout (DW-0401#10 → DW-1201), the "tray" window
+/// the b's click shows, at the bottom-right of the work area of the display the asking window is on (the click on the
+/// b anchors from the click instead). Windows only: elsewhere the flyout is the Mac's popover or the compact window.
+#[tauri::command]
+pub(super) fn show_tray_flyout(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let flyout = app
+            .get_webview_window("tray")
+            .ok_or_else(|| "The flyout isn't available.".to_string())?;
+        let monitor = window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten())
+            .ok_or_else(|| "No display to show the flyout on.".to_string())?;
+        let area = monitor.work_area();
+        let position = windows_flyout_position_in_work_area(
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            area.size.height,
+            monitor.scale_factor(),
+        );
+        let _ = flyout.set_position(tauri::Position::Physical(position));
+        let _ = flyout.show();
+        let _ = flyout.set_focus();
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, window);
+        Err("The flyout is available on Windows.".into())
     }
 }
 
@@ -643,6 +721,7 @@ pub(super) fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<
         // Preferences and Settings both intentionally focus the same compact app window.
         let compact_nav = match nav {
             Some("settings") | None => None,
+            Some(page) if page.starts_with("settings/") => None,
             Some(other) => Some(other),
         };
         show_compact_app_window_with_nav(app, compact_nav);

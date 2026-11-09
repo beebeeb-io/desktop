@@ -708,5 +708,52 @@
    "role": "button"
   },
   "why": "Continue is on at six digits: the frame's \"71\" typed on to six"
+ },
+ "DW-0401#10": {
+  "verb": "click",
+  "selector": "[data-status-line]",
+  "why": "the status line is one button (M3e): with nothing uploading it shows the b's flyout (another window)"
+ },
+ "DW-0712#2": {
+  "verb": "click",
+  "name": "Clear…",
+  "role": "button",
+  "why": "the downloaded files' Clear… (the ellipsis is part of its name); the previews' plain Clear is another button"
+ },
+ "DW-0751#4": {
+  "verb": "click",
+  "name": "beebeeb.io",
+  "role": "link",
+  "why": "\"Links\" names the More group's website links; beebeeb.io is the one the action's words name (Open the website)"
+ },
+ "DW-0742#0": {
+  "before": [
+   {
+    "fill": "#code",
+    "value": "123456"
+   }
+  ],
+  "verb": "click",
+  "name": "Delete backup",
+  "role": "button",
+  "why": "Delete backup is off until six digits are typed: the person types the code first"
+ },
+ "DW-0784#0": {
+  "verb": "click",
+  "selector": "[role=dialog] [role=tree] [role=checkbox]",
+  "why": "a folder's box in the sheet's tree (the Sync pane's switches behind the sheet are covered by it)"
+ },
+ "DW-0784#1": {
+  "verb": "click",
+  "selector": "[role=dialog] [role=tree] button[aria-label^=\"Open \"], [role=dialog] [role=tree] button[aria-label^=\"Close \"]",
+  "why": "a folder's disclosure is named Open or Close with the folder's name"
+ },
+ "DW-0785#3": {
+  "verb": "click",
+  "selector": "[data-testid=\"device-row\"]",
+  "why": "a device row under Your devices right now is one button"
+ },
+ "DW-0785f#1": {
+  "notAutomatable": "another window, not a control on this page: the flyout says the same with Sync anyway (DW-1222)"
  }
 }

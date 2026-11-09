@@ -1,19 +1,15 @@
 // Drive › Backups on Windows (DW-0737, DW-1411, DW-0738, DW-1410, DW-0739, DW-0742, DW-0741).
 // Folder state comes from the existing engine commands (get/set_known_folder_backup).
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Btn, Dialog, Group, Meter, Page, Row, Switch, mono } from '../shell/kit'
 import { FIXTURE_DEVICES, useKnownFolders } from '../shell/data'
 import { useSettings } from '../shell/context'
+import { useDriveExtras, type SyncProblem } from '../../../source/extras'
+import { actionFailure } from '../../files/model'
 
 export type BackupState = 'idle' | 'running'
 
-export const FAILURES = [
-  { id: 'a', name: 'Render final.mov', folder: 'Documents', why: 'the file is open in another app' },
-  { id: 'b', name: 'Invoice scan.pdf', folder: 'Desktop', why: 'this file is damaged' },
-  { id: 'c', name: 'Budget 2025.xlsx', folder: 'Documents', why: 'it kept changing while it was backing up' },
-]
-
-function StatusCard({ state }: { state: BackupState }) {
+function StatusCard({ state, onBackUpNow }: { state: BackupState; onBackUpNow: () => void }) {
   const { go } = useSettings()
   if (state === 'running') {
     return (
@@ -30,9 +26,9 @@ function StatusCard({ state }: { state: BackupState }) {
       <div className="flex-1">
         <div className="text-[14px] font-medium text-ink">All backed up</div>
         <div className={`text-[12px] text-ink-3`}><span className={mono}>Last backup 09:30 · 27.8 GB</span> from this PC</div>
-        <a href="?section=settings&sub=backup-failures" onClick={(e) => { e.preventDefault(); go('backup-failures') }} className="text-[12px] text-ink-2 underline">Couldn't back up 3 items</a>
+        <a href="?section=settings&page=backup-failures" onClick={(e) => { e.preventDefault(); go('backup-failures') }} className="text-[12px] text-ink-2 underline">Couldn't back up 3 items</a>
       </div>
-      <Btn>Back up now</Btn>
+      <Btn onClick={onBackUpNow}>Back up now</Btn>
     </div>
   )
 }
@@ -40,9 +36,12 @@ function StatusCard({ state }: { state: BackupState }) {
 export function Backups({ state = 'idle' }: { state?: BackupState } = {}) {
   const { go, open } = useSettings()
   const { folders, toggle } = useKnownFolders()
+  // Blocked: no command starts a backup pass now (the engine backs up on its own schedule). Said, never pretended.
+  const [refused, setRefused] = useState<string | null>(null)
   return (
     <Page title="Backups">
-      <StatusCard state={state} />
+      <StatusCard state={state} onBackUpNow={() => setRefused(actionFailure('start a backup now', 'unsupported').text)} />
+      {refused ? <p role="alert" className="-mt-3 px-1 text-[12px] text-red-text">{refused}</p> : null}
       <Group title="This PC" note="OneDrive's folder backup may keep Desktop, Documents and Pictures in the OneDrive folder. Beebeeb backs up the folders in your user folder, not OneDrive's copies; add OneDrive's folder below to back those up too.">
         {folders.map((f) => (
           <Row key={f.key} label={f.display_name}
@@ -59,28 +58,58 @@ export function Backups({ state = 'idle' }: { state?: BackupState } = {}) {
         {FIXTURE_DEVICES.map((d) => <Row key={d.id} label={d.name} sub={d.status} onClick={() => go('device')} />)}
       </Group>
       <Group title="Beebeeb services">
-        <Row label="Mail Backup" value="On" href="?section=settings&sub=mail-backup" />
+        {/* Mail Backup's own page (DW-0740) is a proposal the board leaves out: the row says its state and goes nowhere. */}
+        <Row label="Mail Backup" value="On" />
       </Group>
     </Page>
   )
 }
 
-export function BackupFailures() {
+/**
+ * DW-0741: the backup items Beebeeb stopped trying, from the engine's problems list (`drive_sync_problems`, the backup
+ * ones), each with Try again (`drive_sync_retry`); exclusions are listed apart, without it. An item leaves the list once
+ * it backs up, so Try again marks it as trying and reads the list again; a refusal is said. `problems`: a frame's list.
+ */
+export function BackupFailures({ problems }: { problems?: SyncProblem[] } = {}) {
   const { go } = useSettings()
-  const [list, setList] = useState(FAILURES)
+  const extras = useDriveExtras()
+  const [list, setList] = useState<SyncProblem[] | null>(problems ?? null)
+  const [trying, setTrying] = useState<ReadonlySet<string>>(new Set())
+  const [refused, setRefused] = useState<string | null>(null)
+  const load = useCallback(() => {
+    if (problems) return
+    extras.syncProblems().then((all) => setList(all.filter((p) => p.backup)), () => setRefused(actionFailure('load the list', 'failed').text))
+  }, [extras, problems])
+  useEffect(load, [load])
+  const retry = (ids: string[]) => {
+    setRefused(null)
+    extras.retry(ids).then(
+      () => { setTrying((t) => new Set([...t, ...ids])); load() },
+      () => setRefused(actionFailure('try again', 'failed').text),
+    )
+  }
+  const failures = (list ?? []).filter((p) => p.retryable)
+  const excluded = (list ?? []).filter((p) => !p.retryable)
+  const waiting = failures.filter((f) => !trying.has(f.id))
   return (
     <Page title="Couldn't back up"
-      back={<a href="?section=settings&sub=backups" onClick={(e) => { e.preventDefault(); go('backups') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}
-      action={list.length ? <Btn onClick={() => setList([])}>Try all again</Btn> : undefined}>
-      <p className="text-[13px] text-ink-2">Beebeeb stopped trying these after several tries. Everything else is backed up.</p>
-      <Group>
-        {list.map((f) => (
-          <Row key={f.id} label={f.name} sub={`${f.folder}: ${f.why}`} right={<Btn onClick={() => setList((l) => l.filter((x) => x.id !== f.id))}>Try again</Btn>} />
-        ))}
-      </Group>
-      <Group title="Not backed up, by design">
-        <Row label="Site walkthrough.mkv" sub="Desktop: files larger than 4 GB are not backed up from this PC" />
-      </Group>
+      back={<a href="?section=settings&page=backups" onClick={(e) => { e.preventDefault(); go('backups') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}
+      action={waiting.length ? <Btn onClick={() => retry(waiting.map((f) => f.id))}>Try all again</Btn> : undefined}>
+      <p className="text-[13px] text-ink-2">{list && !failures.length ? 'Everything is backed up.' : 'Beebeeb stopped trying these after several tries. Everything else is backed up.'}</p>
+      {refused ? <p role="alert" className="text-[12px] text-red-text">{refused}</p> : null}
+      {failures.length ? (
+        <Group>
+          {failures.map((f) => (
+            <Row key={f.id} label={f.name} sub={`${f.folder}: ${f.reason}`}
+              right={trying.has(f.id) ? <Btn disabled>Trying again…</Btn> : <Btn onClick={() => retry([f.id])}>Try again</Btn>} />
+          ))}
+        </Group>
+      ) : null}
+      {excluded.length ? (
+        <Group title="Not backed up, by design">
+          {excluded.map((f) => <Row key={f.id} label={f.name} sub={`${f.folder}: ${f.reason}`} />)}
+        </Group>
+      ) : null}
     </Page>
   )
 }
@@ -89,7 +118,7 @@ export function DevicePane() {
   const { go, open } = useSettings()
   return (
     <Page title="Anna's iPad"
-      back={<a href="?section=settings&sub=backups" onClick={(e) => { e.preventDefault(); go('backups') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}>
+      back={<a href="?section=settings&page=backups" onClick={(e) => { e.preventDefault(); go('backups') }} className="mb-2 inline-block text-[13px] text-ink-2 hover:underline">Back</a>}>
       <Group>
         <Row label="Backed up" value="4,120 photos · 38 GB" mono />
         <Row label="Last backup" value="19 Oct" mono />
@@ -121,10 +150,15 @@ export function StopBackupDialog({ arg }: { arg?: string }) {
 export function DeleteBackupDialog() {
   const { close } = useSettings()
   const [code, setCode] = useState('')
+  const [refused, setRefused] = useState<string | null>(null)
   const ok = /^\d{6}$/.test(code)
+  // Blocked: no command deletes another device's backup with a second-factor code yet. The dialog says so and keeps
+  // everything; it never closes as if the backup had gone.
+  const remove = () => setRefused(actionFailure('delete the backup', 'unsupported').text + ' Nothing was deleted.')
   return (
     <Dialog labelId="del-h" title="Delete this backup?" onCancel={close}
-      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="danger" disabled={!ok} onClick={close}>Delete backup</Btn></>}>
+      actions={<><Btn onClick={close}>Cancel</Btn><Btn variant="danger" disabled={!ok} onClick={remove}>Delete backup</Btn></>}>
+      {refused ? <p role="alert" className="mb-2 text-[12px] text-red-text">{refused}</p> : null}
       <p>4,120 photos · 38 GB from Anna's iPad move to Trash. Your other devices get an alert.</p>
       <label className="mt-3 block text-[12px] text-ink-3" htmlFor="code">Authenticator code</label>
       <input id="code" inputMode="numeric" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}

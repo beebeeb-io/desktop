@@ -135,6 +135,55 @@ mod tests {
         assert_eq!((position.x, position.y), (0, 177));
     }
 
+    /// Desktop v2 (M3e): an opener in another window names a settings page; the word goes into the main window's URL,
+    /// so only a known page passes, and anything else is refused instead of opening General as if it had worked. The
+    /// Linux window's route word for any settings page is Settings.
+    #[test]
+    fn a_settings_opener_names_a_known_page_or_is_refused() {
+        assert_eq!(crate::settings_nav(None).as_deref(), Ok("settings"));
+        assert_eq!(crate::settings_nav(Some("backups")).as_deref(), Ok("settings/backups"));
+        assert_eq!(
+            crate::settings_nav(Some("security")).as_deref(),
+            Ok("settings/security")
+        );
+        assert_eq!(crate::settings_nav(Some("about")).as_deref(), Ok("settings/about"));
+        for bad in ["", "Backups", "backups&x=1", "../general", "mail-backup", "general/x"] {
+            assert!(crate::settings_nav(Some(bad)).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            crate::main_nav_for_route(Some("settings/backups")),
+            crate::MainNav::settings(None)
+        );
+        assert_eq!(crate::main_nav_for_route(Some("settingsx")), crate::MainNav::Home);
+    }
+
+    /// Desktop v2 M3e: the status line shows the flyout at the bottom-right of the work area (DW-0401#10 → DW-1201),
+    /// at each scale, on a display whose work area starts away from 0 (a second display, a taskbar on the left), and
+    /// never outside the work area on a display smaller than the flyout.
+    #[test]
+    fn the_flyout_opened_from_the_status_line_sits_at_the_work_areas_bottom_right() {
+        let cases = [
+            (1.0, (0, 0, 1_920, 1_032), (1_556, 440)),
+            (1.5, (0, 0, 2_880, 1_548), (2_334, 660)),
+            (2.0, (3_840, 0, 3_840, 2_064), (6_952, 880)),
+            (1.0, (48, 0, 1_872, 1_080), (1_556, 488)),
+        ];
+        for (scale, (x, y, w, h), expected) in cases {
+            let position = crate::windows_flyout_position_in_work_area(x, y, w, h, scale);
+            assert_eq!(
+                (position.x, position.y),
+                expected,
+                "work area {x},{y} {w}x{h} at {scale}"
+            );
+        }
+        let small = crate::windows_flyout_position_in_work_area(100, 50, 300, 400, 1.0);
+        assert_eq!(
+            (small.x, small.y),
+            (100, 50),
+            "kept inside a work area smaller than the flyout"
+        );
+    }
+
     #[test]
     fn the_main_window_keeps_its_own_frame_so_the_plugin_leaves_it() {
         let labels = crate::window_state_denylist_labels();
