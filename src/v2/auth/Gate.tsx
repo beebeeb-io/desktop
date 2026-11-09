@@ -4,23 +4,27 @@
 // own generic "Account", never the board's example person).
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
-import { clearSession, command } from '../../desktopApi'
+import { clearSession, command, openUrl } from '../../desktopApi'
 import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
-import { unlockWithWindowsHello } from './api'
-import { HelloPrompt } from './parts'
+import { restoreWithPhrase, unlockWithWindowsHello } from './api'
+import { HelloPrompt, SECRET_FIELD } from './parts'
 import { usePrivateScreen } from './privateScreen'
 import { hasNoPlan } from './plan'
 
-type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
+type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'unavailable' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
 async function readGate(): Promise<GateState> {
   const status = await command<{ logged_in: boolean; vault_unlocked?: boolean }>('sync_status')
-  if (!status.ok) return 'ready'
+  // A real host that answers nothing is not signed out and not ready: the window says it cannot check the
+  // session and offers Retry. The browser dev server has no host at all (`unsupported`), so it keeps the
+  // board's fixtures, as before.
+  if (!status.ok) return status.unsupported ? 'ready' : 'unavailable'
+  if (typeof status.value?.logged_in !== 'boolean') return 'unavailable'
   if (!status.value.logged_in) return 'signed-out'
   if (status.value.vault_unlocked === false) return 'locked'
   const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
@@ -42,7 +46,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [check])
   if (signedOutWarning) return <SignedOutWarning sentence={signedOutWarning} onOk={() => { setSignedOutWarning(null); check() }} />
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
-  if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
+  if (state === 'unavailable') return <CheckFailedView onRetry={check} />
+  if (state === 'signed-out') return <AccountEntry startAt="sign-in" onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
   if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
@@ -68,8 +73,17 @@ function GateWindow({ children, sidebarFooter, overlay, dimSidebar = true }: { c
   )
 }
 
-/** DW-0009: app lock. Windows Hello starts by itself; Cancel leaves the window locked and Unlock starts it again. */
-export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error?: string; onUnlock: () => void }) {
+export type LockedMode = 'hello' | 'phrase'
+
+/** DW-0009: app lock. Windows Hello starts by itself; Cancel leaves the window locked and Unlock starts it again.
+ *  When Hello is not set up, the one next action is the recovery phrase. */
+export function LockedView({ prompt, error, mode = 'hello', onUnlock, onPhrase }: {
+  prompt: boolean
+  error?: string
+  mode?: LockedMode
+  onUnlock: () => void
+  onPhrase?: () => void
+}) {
   usePrivateScreen()
   return (
     <GateWindow overlay={prompt ? <HelloPrompt reason="Unlock Beebeeb" /> : undefined}>
@@ -78,7 +92,9 @@ export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error
         <h1 id="locked-heading" className="m-0 text-[18px] font-semibold">Beebeeb is locked</h1>
         <p className="mt-1 mb-5 text-[13px] text-ink-2">Unlock to see your files.</p>
         {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
-        <BBButton variant="amber" onClick={onUnlock}><span className="text-[13px] font-medium">Unlock</span></BBButton>
+        {mode === 'phrase'
+          ? <BBButton variant="amber" onClick={onPhrase ?? onUnlock}><span className="text-[13px] font-medium">Unlock with the recovery phrase</span></BBButton>
+          : <BBButton variant="amber" onClick={onUnlock}><span className="text-[13px] font-medium">Unlock with Windows Hello</span></BBButton>}
       </section>
     </GateWindow>
   )
@@ -87,18 +103,64 @@ export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error
 function LockedWindow({ onUnlocked }: { onUnlocked: () => void }) {
   const [prompt, setPrompt] = useState(false)
   const [error, setError] = useState<string>()
+  const [mode, setMode] = useState<LockedMode>('hello')
+  const [phraseOpen, setPhraseOpen] = useState(false)
   const unlock = useCallback(async () => {
     setPrompt(true)
     setError(undefined)
     const result = await unlockWithWindowsHello()
     setPrompt(false)
     if (result.ok) onUnlocked()
-    else if (result.reason === 'hello_unavailable') setError('Windows Hello isn’t set up on this PC. Set it up in Windows Settings, or sign out and sign in again.')
-    else if (result.reason === 'hello_failed') setError('Windows Hello didn’t recognise you. Nothing was unlocked.')
+    else if (result.reason === 'hello_unavailable') {
+      setMode('phrase')
+      setError('Windows Hello isn’t set up on this PC. Unlock with your recovery phrase instead.')
+    } else if (result.reason === 'hello_failed') setError('Windows Hello didn’t recognise you. Nothing was unlocked.')
+    else setError('Windows Hello didn’t unlock Beebeeb. Nothing was unlocked.')
   }, [onUnlocked])
   // Windows Hello starts by itself when the window opens.
   useEffect(() => { void unlock() }, [unlock])
-  return <LockedView prompt={prompt} error={error} onUnlock={() => void unlock()} />
+  if (phraseOpen) return <PhraseUnlockView onUnlocked={onUnlocked} />
+  return <LockedView prompt={prompt} error={error} mode={mode} onUnlock={() => void unlock()} onPhrase={() => setPhraseOpen(true)} />
+}
+
+/** The fallback when Windows Hello is not set up: the 12 words, one next action, no code rendered raw. */
+function PhraseUnlockView({ onUnlocked }: { onUnlocked: () => void }) {
+  const [phrase, setPhrase] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const words = phrase.trim().split(/\s+/).filter(Boolean)
+  const unlock = useCallback(async () => {
+    setBusy(true)
+    setError(undefined)
+    const result = await restoreWithPhrase(words.join(' '))
+    setBusy(false)
+    if (result.ok) { setPhrase(''); onUnlocked(); return }
+    setError(/too many/i.test(result.reason) ? 'Too many tries. Wait an hour.' : 'That phrase doesn’t open this account. Nothing was unlocked.')
+  }, [words, onUnlocked])
+  return (
+    <GateWindow>
+      <section className="flex max-w-[320px] flex-col items-center text-center" aria-labelledby="phrase-unlock-heading" data-phrase-unlock>
+        <div className="mb-4 grid h-14 w-14 place-items-center rounded-full bg-amber-bg text-amber-deep"><Icon name="lock" size={26} /></div>
+        <h1 id="phrase-unlock-heading" className="m-0 text-[18px] font-semibold">Unlock with your recovery phrase</h1>
+        <p className="mt-1.5 mb-4 text-[13px] leading-[18px] text-ink-2">Type the 12 words you saved when you set up Beebeeb. They never leave this PC.</p>
+        {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
+        <form className="flex w-full flex-col items-center" onSubmit={(e) => { e.preventDefault(); if (words.length === 12 && !busy) void unlock() }}>
+          <label htmlFor="recovery-phrase" className="mb-1 block self-start text-[12px] font-medium text-ink-2">Recovery phrase</label>
+          <input
+            {...SECRET_FIELD}
+            id="recovery-phrase"
+            type="password"
+            value={phrase}
+            onChange={(e) => setPhrase(e.target.value)}
+            className="mb-4 h-8 w-full rounded-md border border-line bg-paper px-2.5 font-mono text-[13px] text-ink outline-none focus:ring-2 focus:ring-amber-deep"
+          />
+          <BBButton type="submit" variant="amber" disabled={words.length !== 12 || busy}>
+            <span className="text-[13px] font-medium">{busy ? 'Unlocking…' : 'Unlock with the recovery phrase'}</span>
+          </BBButton>
+        </form>
+      </section>
+    </GateWindow>
+  )
 }
 
 /** DW-0014: signed in, no plan yet. Plans are only on the website; nothing syncs until there is one. */
@@ -115,11 +177,17 @@ export function NoPlanView({ checking, error, onChoose, onCheckAgain, onSignOut 
       <section className="flex max-w-[380px] flex-col items-center text-center" aria-labelledby="no-plan-heading" data-no-plan>
         <h1 id="no-plan-heading" className="m-0 text-[18px] font-semibold">Choose a plan</h1>
         <p className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">
-          Your account is ready. Choose a plan on beebeeb.io, including the free trial. Beebeeb continues here by itself.
+          Your account is ready, but it has no plan yet. Choose a plan on beebeeb.io, including the free trial. Nothing syncs until a plan is chosen. Beebeeb continues here by itself.
         </p>
         {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
         <div className="flex flex-wrap justify-center gap-2">
-          <BBButton variant="amber" onClick={onChoose}><span className="text-[13px] font-medium">Choose a plan on beebeeb.io</span></BBButton>
+          <a
+            href={PLANS_URL}
+            onClick={(e) => { e.preventDefault(); onChoose() }}
+            className="inline-flex h-8 items-center justify-center rounded-md bg-amber px-3 text-[13px] font-medium text-amber-ink hover:brightness-95 focus-visible:ring-2 focus-visible:ring-amber-deep focus-visible:ring-offset-2"
+          >
+            Choose a plan on beebeeb.io
+          </a>
           <BBButton onClick={onCheckAgain} disabled={checking}><span className="text-[13px] font-medium">{checking ? 'Checking…' : 'Check again'}</span></BBButton>
           <BBButton variant="ghost" onClick={onSignOut}><span className="text-[13px] font-medium">Sign out</span></BBButton>
         </div>
@@ -150,10 +218,24 @@ function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void;
     <NoPlanView
       checking={checking}
       error={failed}
-      onChoose={() => void command('plugin:opener|open_url', { url: PLANS_URL })}
+      onChoose={() => void openUrl(PLANS_URL)}
       onCheckAgain={() => { setChecking(true); onCheckAgain(); window.setTimeout(() => setChecking(false), 800) }}
       onSignOut={() => void signOut()}
     />
+  )
+}
+
+/** The host answered nothing: the window says so and offers Retry. Never Files, never the raw reason. */
+export function CheckFailedView({ onRetry }: { onRetry: () => void }) {
+  return (
+    <GateWindow>
+      <section className="flex max-w-[380px] flex-col items-center text-center" aria-labelledby="check-failed-heading" data-check-failed>
+        <div className="mb-4 grid h-14 w-14 place-items-center rounded-full bg-paper-2 text-ink-2"><Icon name="info" size={26} /></div>
+        <h1 id="check-failed-heading" className="m-0 text-[18px] font-semibold">Beebeeb can’t check the session</h1>
+        <p className="mt-1.5 mb-5 text-[13px] leading-[18px] text-ink-2">This PC didn’t answer. Nothing was opened or changed.</p>
+        <BBButton variant="amber" onClick={onRetry}><span className="text-[13px] font-medium">Retry</span></BBButton>
+      </section>
+    </GateWindow>
   )
 }
 
