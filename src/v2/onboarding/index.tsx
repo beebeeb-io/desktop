@@ -8,7 +8,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { command, getKnownFolderBackup, markKnownFolderOnboardingSeen, setKnownFolderBackup, type KnownFolderStatus } from '../../desktopApi'
 import { startGuide } from '../guide/Guide'
 import {
-  BackupStep, CompareView, DoneStep, ExplorerStep, LockStep, LoginStep, NotificationsStep, PasskeyStep, PhotosStep, SetupWindow,
+  BackupStep, CompareView, DoneStep, ExplorerStep, FolderStep, LockStep, LoginStep, NotificationsStep, PasskeyStep, PhotosStep, SetupWindow,
   type BackupFolder, type ExplorerStatus, type LockAfter, type PreviewSample, type SetupStep, type SetupSummary,
 } from './views'
 import { AccountEntry } from '../auth/create/entry'
@@ -69,6 +69,20 @@ export const NO_FOLDER_YET = 'Beebeeb doesn’t know this PC’s Beebeeb folder 
 export const SHOW_FAILED = 'Couldn’t open the Beebeeb folder in File Explorer. Try again in a moment.'
 /** Try again when the state can't be read: it does not guess which folder to add. */
 export const NO_STATE = 'Beebeeb couldn’t read this PC’s settings, so nothing was tried. Try again in a moment.'
+/** The picker was cancelled: nothing was saved, so the step stays where it is. */
+export const NO_FOLDER_CHOSEN = 'No folder was chosen. Pick a folder for your Beebeeb files.'
+/** The picker or the config write refused the folder. */
+export const FOLDER_REFUSED = 'Beebeeb couldn’t use that folder. Try another one, or skip setup and choose it later in Settings.'
+
+/**
+ * A path the picker can have returned: absolute on Windows (`C:\…`, `\\server\…`) or on this build's platform
+ * (`/…`). The step never invents one, so a null, an empty string or a relative path is no folder at all.
+ */
+export function isRealFolder(path: string | null | undefined): path is string {
+  if (typeof path !== 'string') return false
+  const p = path.trim()
+  return p.length > 0 && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\'))
+}
 
 const SAMPLE: PreviewSample = { label: '4K HEIC', size: '1.0 MB', original: '30.9 MB', photos: 0, local: '0 GB', cloud: '0 GB', space: '20 GB' }
 
@@ -87,8 +101,9 @@ export default function OnboardingApp() {
 }
 
 export function SetupFlow() {
-  const [step, setStep] = useState<SetupStep | 'done' | 'compare'>(() => seed('setup.step', 'passkey'))
+  const [step, setStep] = useState<SetupStep | 'done' | 'compare'>(() => seed('setup.step', 'folder'))
   const [summary, setSummary] = useState<SetupSummary>({ passkey: 'Not now', lock: 'Off', backup: 'Off', previews: '4K HEIC', explorer: 'Adding', notifications: 'On', login: 'On' })
+  const [folder, setFolder] = useState<{ path: string | null; busy: boolean; error: string | null }>({ path: null, busy: false, error: null })
   const [passkey, setPasskey] = useState({ asking: false, password: '', error: null as string | null })
   const [lock, setLock] = useState<{ on: boolean; after: LockAfter }>({ on: true, after: 'Immediately' })
   const [known, setKnown] = useState<KnownFolderStatus[]>([])
@@ -126,6 +141,10 @@ export function SetupFlow() {
     })
     void getKnownFolderBackup().then((r) => { if (r.ok) setKnown(r.value) })
     void command<boolean>('autostart_enabled').then((r) => { if (r.ok) setLogin(r.value) })
+    // An existing config's folder is shown as it is; the step needs no picker then. Only a real path counts.
+    void command<string | null>('get_sync_root').then((r) => {
+      if (r.ok && isRealFolder(r.value)) setFolder((f) => ({ ...f, path: r.value }))
+    })
   }, [readShell, addToExplorer])
   // The state is read again every 2 s only while it can change on screen: the File Explorer step, or a try running
   // (each read loads the config from disk; a try's own answer already brings the new state). #271 review.
@@ -157,6 +176,17 @@ export function SetupFlow() {
 
   const explorer = explorerStatus(shell, trying, refused)
   const skip = () => setStep('done')
+
+  // The picker saves the folder itself (`pick_sync_root` writes desktop.toml), so the step advances only after it
+  // answered with a real path. A cancel or a refusal keeps the step where it is and says why; no path is guessed.
+  const chooseFolder = async () => {
+    setFolder((f) => ({ ...f, busy: true, error: null }))
+    const r = await command<string | null>('pick_sync_root')
+    if (!r.ok) { setFolder((f) => ({ ...f, busy: false, error: FOLDER_REFUSED })); return }
+    if (!isRealFolder(r.value)) { setFolder((f) => ({ ...f, busy: false, error: NO_FOLDER_CHOSEN })); return }
+    setFolder({ path: r.value, busy: false, error: null })
+    setStep('passkey')
+  }
 
   const addPasskey = async () => {
     if (!passkey.asking) { setPasskey((p) => ({ ...p, asking: true })); return }
@@ -195,6 +225,10 @@ export function SetupFlow() {
 
   let body
   switch (step) {
+    case 'folder':
+      body = <FolderStep path={folder.path} busy={folder.busy} error={folder.error}
+        onChoose={() => void chooseFolder()} onContinue={() => setStep('passkey')} />
+      break
     case 'passkey':
       body = <PasskeyStep {...passkey} onPassword={(v) => setPasskey((p) => ({ ...p, password: v, error: null }))} onAdd={() => void addPasskey()} onNotNow={() => setStep('lock')} />
       break
@@ -226,7 +260,8 @@ export function SetupFlow() {
       body = <LoginStep on={login} onToggle={setLogin} onContinue={() => void loginContinue()} />
       break
     case 'done':
-      body = <DoneStep summary={summary} onRow={(page) => void command('show_main_app_settings', { page })} onOpen={() => void finish()} />
+      body = <DoneStep summary={summary} folder={folder.path} onRow={(page) => void command('show_main_app_settings', { page })}
+        onChooseFolder={() => setStep('folder')} onOpen={() => void finish()} />
       break
   }
   return <SetupWindow step={step} explorer={explorer.status} onSkip={step === 'done' || step === 'compare' ? undefined : skip}>{body}</SetupWindow>
