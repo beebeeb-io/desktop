@@ -66,7 +66,9 @@ export function V2Shell() {
     let live = true
     let display: string | null = null
     let email: string | null = null
-    let answered = 0
+    // The row leaves "Account" as soon as the profile read answers: an email is enough to show, and a display name that
+    // lands later refines it. Waiting for both reads would keep "Account" on screen while the name read hangs.
+    let profileAnswered = false
     setAccountName(accountRowLabel(null, null, true))
     const started = performance.now()
     const timer = window.setTimeout(() => {
@@ -74,18 +76,17 @@ export function V2Shell() {
       if (live && performance.now() - started >= PROFILE_TIMEOUT_MS) setAccountName(accountRowLabel(display, email, false))
     }, PROFILE_TIMEOUT_MS)
     const settle = () => {
-      if (answered < 2) return
+      if (!profileAnswered) return
       window.clearTimeout(timer)
       if (live) setAccountName(accountRowLabel(display, email, false))
     }
     void command<{ display_name: string | null }>('account_display_name').then((name) => {
       display = name.ok ? name.value.display_name : null
-      answered += 1
       settle()
     })
     void command<AccountProfile>('account_profile').then((profile) => {
       email = profile.ok ? profile.value.email : null
-      answered += 1
+      profileAnswered = true
       settle()
     })
     return () => { live = false; window.clearTimeout(timer) }

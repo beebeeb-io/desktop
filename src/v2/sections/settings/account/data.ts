@@ -1,7 +1,7 @@
 // B14 data layer: every read and write goes through command() (never the shared API, never a key or token).
 // A plain browser (headless frames, `bun run dev`) has no Rust behind the commands: the panes start from the app's own
 // empty state and show the host's honest refusal, never example rows.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { appVersionFields } from '../../../../appVersion'
 import { command, commandUnavailableLabel, type AccountProfile, type AccountActivity, type AccountSessionList, type CommandResult, type DesktopPlatform, type SecurityScore, type SyncStatus } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
@@ -90,19 +90,29 @@ export function useAccount(scenario: Scenario = 'default') {
   // become that. Null until `account_session_list` answers.
   const [sessionList, setSessionList] = useState<CommandResult<AccountSessionList> | null>(null)
   const [localPc, setLocalPc] = useState<Pick<DevicesPaneInput, 'sync' | 'version' | 'platform'>>({ sync: null, version: null, platform: null })
+  // One timer per hook, not per reload: a retry must cancel the previous read's timer, and a timer that fires after a
+  // newer reload started must not write its error over the newer read's answer.
+  const timer = useRef<number | null>(null)
+  const generation = useRef(0)
   const reload = useCallback(async () => {
     // A profile read that never answers must not leave the page blank: after PROFILE_TIMEOUT_MS it says the network is
     // unreachable (the existing sentence) and offers Try again. A read that answers clears the timer, so a slow but
     // working server is never called unreachable.
+    const gen = ++generation.current
+    if (timer.current !== null) window.clearTimeout(timer.current)
     let profileAnswered = false
     // The literal is PROFILE_TIMEOUT_MS: the test harness runs this hook with only its own bindings, so a module
-    // constant here would be a free name it cannot resolve.
-    const timer = window.setTimeout(() => {
-      if (!profileAnswered) setError('network')
+    // constant here would be a free name it cannot resolve. tests/signedInWindow.test.tsx asserts the delay passed to
+    // setTimeout equals PROFILE_TIMEOUT_MS, so the two cannot drift.
+    timer.current = window.setTimeout(() => {
+      if (gen === generation.current && !profileAnswered) setError('network')
     }, 8000)
     const profileRead = command<AccountProfile>('account_profile').then((r) => {
       profileAnswered = true
-      window.clearTimeout(timer)
+      if (gen === generation.current && timer.current !== null) {
+        window.clearTimeout(timer.current)
+        timer.current = null
+      }
       return r
     })
     const [profile, name, sessions, score, activity, logging, passkeys, sync, version, platform] = await Promise.all([
