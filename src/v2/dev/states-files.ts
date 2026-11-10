@@ -47,8 +47,9 @@ export const FILES_STATES: Record<string, Recipe> = {
   // The copy is made; the pause lets its 3 s "Duplicated" go, so a second Ctrl+D shows as its own message (M3a).
   'DW-0406': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'Ctrl+d' }, { pause: 3300 }] },
   'DW-0407': { q: 'section=files', steps: [{ context: 'row:i-contract' }, { click: menuItem('share') }] },
-  // The live preview shows text and thumbnails; Meeting notes.md stands in for the board's PDF page (same panel).
-  'DW-0408': { q: 'section=files', steps: [{ click: 'row:i-notes' }, { key: 'Space' }], gap: 'the preview panel draws no PDF pages (PreviewHost previews text and thumbnails); Meeting notes.md opens the same panel' },
+  // The preview names Service agreement.pdf; with no PDF page renderer here its body is the honest NoPreview (DW-0408b)
+  // rather than another file's text or a thumbnail posing as page 1.
+  'DW-0408': { q: 'section=files', steps: [{ click: 'row:i-agreement' }, { key: 'Space' }], gap: 'the preview names the PDF and draws no PDF pages yet (no PDF renderer in this build); its body is the NoPreview of DW-0408b' },
   'DW-0408b': { q: 'section=files', steps: [{ click: 'row:i-moodboard' }, { key: 'Space' }] },
   'DW-0409': { q: 'section=files', steps: [{ context: 'row:i-contract' }, { click: menuItem('move') }, { click: '[data-move-folder="f-documents"]' }] },
   'DW-0410': { q: 'section=files', steps: [{ click: 'row:i-contract' }, { key: 'F2' }] },
