@@ -56,7 +56,7 @@ const paneBindings = {
   STATE_TONE: { 'This app': 'text-ink', 'Signed in': 'text-ink-2', 'Not signed in': 'text-ink-3' },
 }
 
-async function openAccount(backend: Record<string, (args: unknown) => unknown>) {
+async function openAccount(backend: Record<string, (args: unknown) => unknown>, beforeFlush?: () => void) {
   const m = mount('v2/sections/settings/account/AccountPane.tsx', 'AccountPane', {
     backend,
     expand: true,
@@ -69,6 +69,7 @@ async function openAccount(backend: Record<string, (args: unknown) => unknown>) 
     bindings: paneBindings,
   })
   mounted.push(m)
+  beforeFlush?.()
   await m.flush()
   return m
 }
@@ -90,6 +91,9 @@ describe('The window says if you are signed in', () => {
 
   test('a profile read that never answers shows the network sentence and Try again, not a blank profile', async () => {
     expect(PROFILE_TIMEOUT_MS).toBe(8000)
+    // The harness fires timers on the next microtask, so the delay itself is what proves the 8 second limit: capture
+    // the delay the hook passes to setTimeout, not just that a timer fired.
+    const delays: number[] = []
     const never = new Promise<never>(() => {})
     const m = await openAccount({
       account_profile: () => never,
@@ -102,6 +106,10 @@ describe('The window says if you are signed in', () => {
       sync_status: () => ({ logged_in: true }),
       app_version: () => ({ version: '0.9.4', release: true }),
       desktop_platform: () => 'linux',
+    }, () => {
+      const w = (globalThis as unknown as { window: { setTimeout: (fn: () => void, ms?: number) => number } }).window
+      const real = w.setTimeout
+      w.setTimeout = (fn, ms) => { delays.push(ms ?? 0); return real(fn) }
     })
     const text = visible(m)
     expect(text).toContain(ERRORS.network)
@@ -109,5 +117,7 @@ describe('The window says if you are signed in', () => {
     // The email is still empty, so the pane does not draw an editable profile.
     expect(text).not.toContain('Add your name')
     expect(text).not.toContain('@')
+    // The harness fires timers on the next microtask, so the delay itself is what proves the 8 second limit.
+    expect(delays).toContain(PROFILE_TIMEOUT_MS)
   })
 })
