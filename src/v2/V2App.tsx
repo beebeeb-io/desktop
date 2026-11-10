@@ -14,6 +14,7 @@ import { useNavigation, type SectionId } from './routes'
 import { useShortcuts, type CommandId } from './shortcuts'
 import { pickSource } from './source'
 import { useDriveExtras } from './source/extras'
+import { command, type AccountProfile } from '../desktopApi'
 import { shareList } from './sections/shared/api'
 import { throttled } from './throttle'
 import { onCount, onRecount, recount } from './chrome/counts'
@@ -55,6 +56,22 @@ export function V2Shell() {
   const [storage, setStorage] = useState<StorageSummary | null>(null)
   const [sync, setSync] = useState<SyncSummary | null>(null)
   const counts = useSidebarCounts(nav.route.section)
+  // The account row's name (DW-0401): the display name, else the profile's email, and "Account" only while the read is
+  // in flight or failed. Re-read on mount and on every section change, so a rename in Settings shows on the way back.
+  const [accountName, setAccountName] = useState('Account')
+  useEffect(() => {
+    let live = true
+    void Promise.all([
+      command<{ display_name: string | null }>('account_display_name'),
+      command<AccountProfile>('account_profile'),
+    ]).then(([name, profile]) => {
+      if (!live) return
+      const display = name.ok ? name.value.display_name?.trim() ?? '' : ''
+      const email = profile.ok ? profile.value.email.trim() : ''
+      setAccountName(display || email || 'Account')
+    })
+    return () => { live = false }
+  }, [nav.route.section])
   // Search is a view over the section it opened from: the sidebar keeps that one current (DW-0801 to DW-0803, M3c).
   const [searchFrom, setSearchFrom] = useState<SectionId>('files')
   if (nav.route.section !== 'search' && nav.route.section !== searchFrom) setSearchFrom(nav.route.section)
@@ -83,7 +100,7 @@ export function V2Shell() {
     <div className="flex h-screen flex-col bg-paper font-sans text-ink">
       <CaptionBar title={title} />
       <div className="flex min-h-0 flex-1">
-        <Sidebar active={sidebarRow(nav.route.section === 'search' ? searchFrom : nav.route.section)} onGo={(section) => nav.go({ section })} storage={storage} accountName="Account" counts={counts} />
+        <Sidebar active={sidebarRow(nav.route.section === 'search' ? searchFrom : nav.route.section)} onGo={(section) => nav.go({ section })} storage={storage} accountName={accountName} counts={counts} />
         <main className="flex min-w-0 flex-1 flex-col">
           <Suspense fallback={null}>
             <Section nav={nav} />
