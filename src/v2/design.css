@@ -56,6 +56,30 @@
   --color-win-dark-tile: oklch(0.3 0.005 250);
   --color-win-dark-line: oklch(0.35 0.005 250);
   --color-win-dark-art: oklch(0.4 0.005 250);
+
+  /* Windows' own UI (data-system-drawn / data-desktop), the same in both themes: the NSIS installer, the sign-in
+     approval toast, and the Windows Hello / Security prompts. These are Windows' own colours, not Beebeeb's, so they
+     follow Windows and never the app's theme. win-accent and win-progress-fill are Windows' own blue and green, not
+     Beebeeb brand colours. */
+  --color-win-ink-strong: #1a1a1a; /* installer window and Hello dialog text */
+  --color-win-ink-3: #5c5c5c; /* installer caption, approval toast and Hello prompt secondary text */
+  --color-win-line-2: #d0d0d0; /* installer dividers and Hello dialog border */
+  --color-win-accent: #0067c0; /* Windows' own blue: installer primary button border and Hello glyph */
+  --color-win-title: #f3f3f3; /* approval toast and Hello prompt surface */
+  --color-win-surface-2: #f0f0f0; /* installer window and button surface */
+  --color-win-button-line-3: #c8c8c8; /* installer disabled button and Hello prompt Cancel border */
+  --color-win-line-3: #e0e0e0; /* Hello prompt footer divider */
+  --color-win-line-soft: #d6d6d6; /* approval toast border */
+  --color-win-line-accent: #c9cdd2; /* approval toast taskbar divider */
+  --color-win-line-strong: #888888; /* installer window outline */
+  --color-win-ink-dim: #a0a0a0; /* installer disabled button text */
+  --color-win-tab: #eef0f3; /* approval toast taskbar */
+  --color-win-row: #ebebeb; /* Hello prompt footer */
+  --color-win-panel: #e6e6e6; /* installer finish page side panel */
+  --color-win-desktop-2: #dfe3e8; /* approval toast desktop behind it */
+  --color-win-button-line-2: #adadad; /* installer button border */
+  --color-win-progress-track: #bcbcbc; /* installer progress track */
+  --color-win-progress-fill: #06b025; /* installer progress fill (Windows' own green) */
 }
 :root {
   --card-r: 12px;
