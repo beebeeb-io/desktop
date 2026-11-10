@@ -283,16 +283,29 @@ async fn breach_check(policy: &SignupPolicy, password: &str) -> Option<BreachChe
 /// DW-A67: change the password (OPAQUE re-registration in core, a step-up per leg).
 /// The new password passes sign-up's gate first (core v0.2.8 item 6): the server's
 /// minimum, and the breach check when the server declares one.
+/// DW-A67: what followed the change. The server has already committed when this answers, so
+/// `signed_in` false means the new token could not be stored (the old one is dead) and
+/// `restart` says whether the engine came back. No key, token, code or path.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordChangedDto {
+    pub status: &'static str,
+    pub signed_in: bool,
+    pub restart: &'static str,
+}
+
 /// The server ends every other session and mints a new one for this device: it is
 /// stored in the credential store and swapped into memory in one session turn, and the
 /// engine restarts with it. No master-key wrap (the key stays in the credential store).
+/// Once the server has committed, a failure to store or restart is reported in the DTO,
+/// never as a failed change: the password did change.
 #[tauri::command]
 pub(super) async fn account_change_password(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     current: String,
     new_password: String,
-) -> Result<(), String> {
+) -> Result<PasswordChangedDto, String> {
     let current = Zeroizing::new(current);
     let new_password = Zeroizing::new(new_password);
     session_command!(async {
@@ -306,7 +319,7 @@ pub(super) async fn account_change_password(
         let AccountOutcome::PasswordChanged { session_token } = outcome else {
             return Err("protocol".to_string());
         };
-        install_rotated_session(app, &state, &acct, &mut turn, &session_token).await
+        Ok(install_rotated_session(app, &state, &acct, &mut turn, &session_token).await)
     })
 }
 
@@ -317,18 +330,23 @@ pub(super) async fn account_change_password(
 /// Windows stores the token before its first await: a Lock or a sign-out cancels a Windows
 /// session command at an await (`SessionCommands::within`), and the server has already ended
 /// the old token, so nothing may come between its answer and the store. The engine then comes
-/// back under the session-transition lock through `start_engine_if_possible`, which stops the
-/// old engine (refusing when that stop is unconfirmed) and starts with the session gate, its
-/// generation and the binding's Windows rules, like every other Windows start. A running R10
-/// ownership proof holds the ended token too: it is stopped under the lock first, as a Lock
-/// and a sign-out stop it.
+/// back under the session-transition lock through `start_engine_if_possible`, which starts
+/// with the session gate, its generation and the binding's Windows rules, like every other
+/// Windows start. The old engine is stopped under that lock first (task 2439 item 1): the
+/// start begins with `if let Ok(cfg) = DesktopConfig::load()`, so a config read failure would
+/// otherwise return before it takes the slot and leave the old engine on the ended token. A
+/// running R10 ownership proof holds the ended token too: it is stopped under the lock first,
+/// as a Lock and a sign-out stop it.
+///
+/// A store or restart failure after the server committed is not an error: the DTO says what
+/// followed, so the pane never claims the password did not change.
 async fn install_rotated_session(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
     acct: &Arc<account::AccountRuntime>,
     turn: &mut account::SessionGeneration,
     new_token: &str,
-) -> Result<(), String> {
+) -> PasswordChangedDto {
     #[cfg(not(target_os = "windows"))]
     {
         let mut slot = acct.engine.lock().await;
@@ -336,7 +354,7 @@ async fn install_rotated_session(
             let _ = stop_engine_in_slot(acct, engine).await;
         }
     }
-    {
+    let stored = (|| -> Result<(), String> {
         let write = claim_session_write(acct, turn).map_err(String::from)?;
         let email = acct
             .session
@@ -351,16 +369,34 @@ async fn install_rotated_session(
         }
         drop(guard);
         drop(write);
+        Ok(())
+    })();
+    if stored.is_err() {
+        // The old token is dead and the new one is not on disk: the person signs in again.
+        return PasswordChangedDto {
+            status: "changed",
+            signed_in: false,
+            restart: "failed",
+        };
     }
     #[cfg(not(target_os = "windows"))]
-    {
-        start_engine_unless_running(app, state.inner()).await
-    }
+    let restart = start_engine_unless_running(app, state.inner()).await;
     #[cfg(target_os = "windows")]
-    {
+    let restart = {
         let transition = SESSION_TRANSITION.lock().await;
         stop_own_data_proofs();
+        {
+            let mut slot = acct.engine.lock().await;
+            if let Some(engine) = slot.take() {
+                let _ = stop_engine_in_slot(acct, engine).await;
+            }
+        }
         start_engine_if_possible(app, state, &transition).await
+    };
+    PasswordChangedDto {
+        status: "changed",
+        signed_in: true,
+        restart: if restart.is_ok() { "ok" } else { "failed" },
     }
 }
 

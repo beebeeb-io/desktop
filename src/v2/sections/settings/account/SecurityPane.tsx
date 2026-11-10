@@ -8,6 +8,7 @@ import { hasTauri } from '../../../source'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
 import { useAccount, run, errorText, NEW_PASSWORD_ERRORS, type AccountState, type Scenario } from './data'
+import { passwordChangeWords, type PasswordChangeResult, type PasswordChangeWords } from './passwordWords'
 import { Activity, BackupCodes, Passkeys, TotpSetup, TotpStatus } from './Factors'
 import { Btn, BackLink, Check, CodeBoxes, Field, PasswordInput, Ring, ago, dateTime, useEscBack } from './ui'
 import { ApproveSignIn } from '../../../auth/Approve'
@@ -47,6 +48,8 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const [codes, setCodes] = useState<string[]>([])
   const [shredAfter, setShredAfter] = useState<string | null>(null)
   const [linkExpires, setLinkExpires] = useState<string | null>(null)
+  // What followed a password change, said on the security page it returns to (task 2439 item 2).
+  const [passwordNotice, setPasswordNotice] = useState<PasswordChangeWords | null>(null)
   const [moving, setMoving] = useState<string | undefined>()
   const setPage = useCallback((p: SecurityPage) => { setPageRaw(p); if (p === 'checkup') void reload() }, [reload])
   const home = useCallback(() => setPage('main'), [setPage])
@@ -55,7 +58,7 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
 
   switch (page) {
     case 'checkup': return <Checkup state={state} onBack={home} go={go} />
-    case 'password': return <ChangePassword onBack={home} onDone={() => { setState((s) => ({ ...s, passwordChangedAt: new Date().toISOString() })); home() }} showError={init.passwordError} />
+    case 'password': return <ChangePassword onBack={home} onDone={(words) => { setState((s) => ({ ...s, passwordChangedAt: new Date().toISOString() })); setPasswordNotice(words); home() }} showError={init.passwordError} />
     case 'totp-setup': return <TotpSetup moving={moving} initialDigits={init.digits} onBack={() => { setMoving(undefined); if (state.totp.on) setPage('totp'); else home() }}
       onCodes={(c) => { setMoving(undefined); setCodes(c); setState((s) => ({ ...s, totp: { ...s.totp, on: true, codesLeft: 8, addedAt: new Date().toISOString() } })); setPage('backup-codes') }} />
     case 'backup-codes': return <BackupCodes codes={codes} onDone={() => { setCodes([]); setPage('totp') }} />
@@ -80,6 +83,12 @@ export function SecurityPane({ init = {} }: { init?: SecurityInit } = {}) {
   const done = state.factors.filter((f) => f.satisfied).length
   return (
     <Page title="Sign-in and security" action={<Btn onClick={() => setPage('checkup')}><span>Security checkup ·{'\u00a0'}<span className="font-mono">{done} of {state.factors.length}</span></span></Btn>}>
+      {passwordNotice ? (
+        <div className="rounded-md border border-line bg-paper-2 px-3 py-2" data-testid="password-changed">
+          <p className="text-[13px] font-medium text-ink">{passwordNotice.headline}</p>
+          {passwordNotice.detail ? <p className="text-[12px] text-ink-2">{passwordNotice.detail}</p> : null}
+        </div>
+      ) : null}
       <AppLock />
       <Group title="Sign-in">
         <Row label="Password" value={state.passwordChangedAt ? `Changed ${ago(state.passwordChangedAt)}` : undefined} onClick={() => setPage('password')} />
@@ -209,13 +218,15 @@ function strength(pw: string): { label: string; ok: boolean } {
   return pw.length >= 16 || kinds >= 3 ? { label: 'Strong', ok: true } : { label: 'Fair: a longer passphrase is stronger', ok: true }
 }
 
-function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onDone: () => void; showError?: boolean }) {
+function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onDone: (words: PasswordChangeWords) => void; showError?: boolean }) {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState(showError ? 'river-lantern-quiet-74' : '')
   const [again, setAgain] = useState(showError ? 'river-lantern-quiet-74' : '')
   const [error, setError] = useState<{ field: 'current' | 'new' | 'again'; text: string } | null>(
     showError ? { field: 'current', text: 'Current password is incorrect. Nothing was changed.' } : null)
   const [busy, setBusy] = useState(false)
+  // The server committed: what followed is said under "Password changed", never as a failed change.
+  const [done, setDone] = useState<PasswordChangeWords | null>(null)
   useEscBack(onBack)
   const s = strength(next)
   const valid = current.length > 0 && s.ok && next === again
@@ -225,11 +236,24 @@ function ChangePassword({ onBack, onDone, showError }: { onBack: () => void; onD
     setBusy(true)
     const c = current
     setCurrent('')
-    const r = await run('account_change_password', { current: c, newPassword: next })
+    const r = await run<PasswordChangeResult>('account_change_password', { current: c, newPassword: next })
     setBusy(false)
-    if (r.ok) { setNext(''); setAgain(''); return onDone() }
+    if (r.ok) {
+      setNext(''); setAgain('')
+      const words = passwordChangeWords(r.value)
+      setDone(words)
+      return onDone(words)
+    }
     if (r.code === 'wrong_password') return setError({ field: 'current', text: 'Current password is incorrect. Nothing was changed.' })
     setError({ field: NEW_PASSWORD_ERRORS.includes(r.code) ? 'new' : 'current', text: errorText(r.code) })
+  }
+  if (done) {
+    return (
+      <Page title="Change password" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
+        <p className="text-[15px] font-medium text-ink">{done.headline}</p>
+        {done.detail ? <p className="text-[13px] text-ink-2">{done.detail}</p> : null}
+      </Page>
+    )
   }
   return (
     <Page title="Change password" back={<BackLink label="Sign-in and security" onBack={onBack} />}>
