@@ -1,6 +1,6 @@
 # 61 — Sort and search match the Files frame
 
-Date: 2026-11-10 (night wave 3)
+Date: 2026-11-10 (night wave 3; evidence re-captured 2026-11-11)
 
 ## What changed
 
@@ -19,13 +19,29 @@ frame.
 
 `/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-toolbar/`
 
-- `red.txt` — `bun test tests/filesToolbar.test.tsx` before the change:
-  1 pass / 2 fail (0 fields named `Search names`; Enter reached no field).
-- `green.txt` — after: 3 pass / 0 fail.
+- `red.txt` — `bun test tests/filesToolbar.test.tsx` against the pre-change
+  `FilesPane.tsx` (HEAD~2), captured `Wed Nov 11 12:05:59 AM CET 2026`:
+  1 pass / 2 fail. The failing assertion:
+
+  ```
+  expect(fields).toHaveLength(1)
+  Expected length: 1
+  Received length: 0
+  ```
+
+  The toolbar control was a `button` whose text is `Search names`, so the field
+  count was 0 and Enter had no field to reach (`onFind` called 0 times).
+- `green.txt` — after: 3 pass / 0 fail (`Wed Nov 11 12:05:24 AM CET 2026`).
 - `searchReal.txt` — `bun test tests/searchReal.test.tsx`: 4 pass / 0 fail.
 - `tsc.txt` — `bunx tsc --noEmit`: exit 0.
-- `walkthrough.mjs` + screenshots: field, Ctrl+F, no Filter, Enter opens
-  search, sort menu labels.
+- `walkthrough.txt` + screenshots (`files-toolbar.png`, `sort-menu.png`,
+  `search-after-enter.png`): 18/18 checks — field, Ctrl+F, no Filter, Enter
+  opens search, sort menu labels.
+
+The "no button named Search names" assertion matches a button whose visible
+text contains `Search names` (the old control read `Search names Ctrl+F`), so
+it fails if the old control survives; verified against the pre-change tree
+(1 button found).
 
 ## Still absent
 

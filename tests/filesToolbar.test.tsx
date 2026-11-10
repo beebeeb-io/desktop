@@ -70,7 +70,9 @@ function searchFields(root: MiniNode): MiniElement[] {
 }
 
 function buttonsNamed(root: MiniNode, name: string): MiniElement[] {
-  return allElements(root).filter((el) => el.tagName === 'BUTTON' && (el.getAttribute('aria-label') === name || el.textContent.trim() === name))
+  // The old search control's text was "Search names Ctrl+F", so an exact match would miss it. A button
+  // counts when its accessible name (aria-label) or its visible text contains the name.
+  return allElements(root).filter((el) => el.tagName === 'BUTTON' && (el.getAttribute('aria-label') === name || el.textContent.includes(name)))
 }
 
 describe('the Files toolbar matches the frame', () => {
