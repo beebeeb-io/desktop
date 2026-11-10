@@ -12,7 +12,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement } from 'react'
-import { clearSession, command } from '../src/desktopApi'
+import { clearSession, command, signOutUnknownFiles } from '../src/desktopApi'
 import { elementsOf, loadComponent, mount, textOf, type Mounted } from './fixtures/componentHarness'
 import { rustStr } from './fixtures/rustConstants'
 
@@ -32,9 +32,9 @@ describe('the no-plan screen\'s sign-out', () => {
   function open(answer: () => unknown) {
     const signedOut: Array<string | null> = []
     const m = mount('v2/auth/Gate.tsx', 'NoPlanWindow', {
-      backend: { clear_session: answer },
+      backend: { sign_out_unknown_files: () => ({ count: 0, folder: null }), clear_session: answer },
       // The view is a plain tag here: the test reads what NoPlanWindow hands it, not how it draws it.
-      bindings: { clearSession, command, PLANS_URL: 'https://beebeeb.io/pricing', NoPlanView: 'no-plan-view' },
+      bindings: { clearSession, signOutUnknownFiles, command, PLANS_URL: 'https://beebeeb.io/pricing', NoPlanView: 'no-plan-view', SignOutUnknownFilesDialog: 'sign-out-unknown-dialog' },
       props: { onCheckAgain() {}, onSignedOut: (warning: string | null) => signedOut.push(warning) },
     })
     mounted.push(m)
@@ -46,7 +46,7 @@ describe('the no-plan screen\'s sign-out', () => {
   test('a warning goes up with the sign-out', async () => {
     const { m, signOut, signedOut } = open(() => WARNED)
     await signOut()
-    expect(m.calls.map((c) => c.name)).toEqual(['clear_session'])
+    expect(m.calls.map((c) => c.name)).toEqual(['sign_out_unknown_files', 'clear_session'])
     expect(signedOut).toEqual([SENTENCE])
   })
 
@@ -103,8 +103,8 @@ describe('the Settings sign-out confirm', () => {
   function open(answer: () => unknown) {
     const assigned: string[] = []
     const m = mount('v2/sections/settings/account/SecurityPane.tsx', 'SignOutDialog', {
-      backend: { clear_session: answer },
-      bindings: { clearSession, hasTauri: () => true, Dialog: 'settings-dialog', Btn: 'settings-btn' },
+      backend: { sign_out_unknown_files: () => ({ count: 0, folder: null }), clear_session: answer },
+      bindings: { clearSession, signOutUnknownFiles, hasTauri: () => true, Dialog: 'settings-dialog', Btn: 'settings-btn', SignOutUnknownFilesDialog: 'sign-out-unknown-dialog' },
       props: { all: false, onCancel() {} },
     })
     mounted.push(m)
@@ -131,7 +131,7 @@ describe('the Settings sign-out confirm', () => {
   test('a warning keeps the dialog, titled Signed out, with the sentence as a status line; OK moves on', async () => {
     const { m, confirm, assigned, actions, dialog } = open(() => WARNED)
     await confirm()
-    expect(m.calls.map((c) => c.name)).toEqual(['clear_session'])
+    expect(m.calls.map((c) => c.name)).toEqual(['sign_out_unknown_files', 'clear_session'])
     expect(dialog().props.title).toBe('Signed out')
     expect(statusLines(m)).toEqual([SENTENCE])
     expect(assigned).toEqual([])
