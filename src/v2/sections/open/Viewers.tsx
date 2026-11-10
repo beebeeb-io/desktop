@@ -3,7 +3,8 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import { Icon } from '@beebeeb/shared/design'
-import { MarkdownSafeLink } from '@beebeeb/shared/drive-ui'
+import { openExternal } from '../../external'
+import { actionFailure } from '../files/model'
 import { BTN, FOCUS, IconButton } from '../files/ui'
 import { HighlightedLine } from './Highlight'
 import { fmtBytes, fmtClock, isNumeric, parseTable } from './model'
@@ -180,9 +181,16 @@ export function CodeViewer({ text, wrap, limit }: { text: string; wrap: boolean;
 
 // ---- Markdown (DW-1513) ----
 export function MarkdownViewer({ text, mode, onOpenFile }: { text: string; mode: 'rendered' | 'source'; onOpenFile?: (name: string) => void }) {
+  const [refusal, setRefusal] = useState<string | null>(null)
   if (mode === 'source') return <CodeViewer text={text} wrap />
+  const openLink = (href: string) => {
+    void openExternal(href).then((r) => {
+      if (!r.ok) setRefusal(actionFailure('open the link', r.unsupported ? 'unsupported' : 'failed').text)
+    })
+  }
   return (
     <div data-viewer="markdown" className="min-h-0 flex-1 overflow-auto bg-paper">
+      {refusal ? <p role="alert" className="mx-auto mt-4 max-w-[680px] px-10 text-[12px] text-red-text">{refusal}</p> : null}
       <article className="mx-auto max-w-[680px] px-10 py-8 text-[14px] leading-7 text-ink">
         <Markdown
           // Raw HTML in a note is shown as text, never run: no rehype-raw, and html nodes render as plain text.
@@ -200,7 +208,12 @@ export function MarkdownViewer({ text, mode, onOpenFile }: { text: string; mode:
                 const name = decodeURIComponent(href.slice('beebeeb://file/'.length))
                 return <a href="#file" data-drive-link className="text-ink underline" onClick={(e) => { e.preventDefault(); onOpenFile?.(name) }}>{children}</a>
               }
-              return <MarkdownSafeLink href={href}>{children}</MarkdownSafeLink>
+              // An http(s) address opens in the OS, never in this window (external.ts). Any other scheme is shown as
+              // plain text: a note cannot make the window navigate somewhere it does not handle.
+              if (href && /^https?:\/\//i.test(href)) {
+                return <a href={href} className="text-ink underline" onClick={(e) => { e.preventDefault(); openLink(href) }}>{children}</a>
+              }
+              return <span>{children}</span>
             },
           }}
           urlTransform={(url) => url}
