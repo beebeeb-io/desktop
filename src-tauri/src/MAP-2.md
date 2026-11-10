@@ -36,6 +36,7 @@ Modules 46–92, sorted by path.
 | `name_alias.rs` | Task 2407, the desktop half of core's task 2404. | — |
 | `native_menu.rs` | `native_menu` items split out of `lib.rs`. | — |
 | `no_fetch_scope.rs` | Task 2284 A1.2: the no-fetch scope. | — |
+| `notifications.rs` | The one notification gate and the one hop to the OS toast. | — |
 | `open_folder_tests.rs` | (no //! header) | — |
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
 | `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (2), Probe (5), Tally (10), Verdict (2), Outcome (1), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
@@ -52,4 +53,3 @@ Modules 46–92, sorted by path.
 | `recovery_phrase_unlock_tests.rs` | (no //! header) | — |
 | `repair_kept_folder_tests.rs` | (no //! header) | — |
 | `reveal_and_open_file_tests.rs` | (no //! header) | — |
-| `root_source.rs` | Scanner input after the lib.rs split (LD-0057 PR 2, spec §4.8): the text the source-reading tests used to `include_str!("lib.rs")`. | — |
