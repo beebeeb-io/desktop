@@ -197,21 +197,21 @@ export function HelloGlyph({ size = 16 }: { size?: number }) {
 export function HelloPrompt({ title = 'Making sure it’s you', reason, state = 'looking', detail }: { title?: string; reason: string; state?: 'looking' | 'failed'; detail?: string }) {
   return (
     <div className="absolute inset-0 z-50 grid place-items-center bg-win-scrim" data-system-prompt>
-      <div role="dialog" aria-label="Windows Security" className="w-[456px] rounded-lg border border-[#d0d0d0] bg-[#f3f3f3] font-sans text-[#1a1a1a] shadow-2xl">
+      <div role="dialog" aria-label="Windows Security" className="w-[456px] rounded-lg border border-win-line-2 bg-win-title font-sans text-win-ink-strong shadow-2xl">
         <div className="px-6 pb-2 pt-5">
-          <div className="text-[12px] text-[#5c5c5c]">Windows Security</div>
+          <div className="text-[12px] text-win-ink-3">Windows Security</div>
           <div className="mt-3 text-[20px] font-semibold">{title}</div>
           <div className="mt-2 text-[13px]">{reason}</div>
-          {detail && <div className="mt-1 text-[13px] text-[#5c5c5c]">{detail}</div>}
+          {detail && <div className="mt-1 text-[13px] text-win-ink-3">{detail}</div>}
           <div className="my-6 flex flex-col items-center gap-3">
-            <span className="text-[#0067c0]"><HelloGlyph size={56} /></span>
+            <span className="text-win-accent"><HelloGlyph size={56} /></span>
             <span className="text-[13px]">{state === 'failed' ? 'Couldn’t recognise you' : 'Looking for you…'}</span>
-            {state === 'failed' && <span className="text-[12px] text-[#5c5c5c]">Try again, or use your PIN.</span>}
+            {state === 'failed' && <span className="text-[12px] text-win-ink-3">Try again, or use your PIN.</span>}
           </div>
-          <div className="text-[13px] text-[#0067c0]">More choices</div>
+          <div className="text-[13px] text-win-accent">More choices</div>
         </div>
-        <div className="flex justify-end gap-2 rounded-b-lg border-t border-[#e0e0e0] bg-[#ebebeb] px-6 py-4">
-          <span className="rounded border border-[#c8c8c8] bg-white px-6 py-1.5 text-[13px]">Cancel</span>
+        <div className="flex justify-end gap-2 rounded-b-lg border-t border-win-line-3 bg-win-row px-6 py-4">
+          <span className="rounded border border-win-button-line-3 bg-white px-6 py-1.5 text-[13px]">Cancel</span>
         </div>
       </div>
     </div>

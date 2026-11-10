@@ -10,15 +10,15 @@ import { Field, HelloGlyph, HelloPrompt, Note, PrimaryButton, SecondaryButton, T
 /** DW-A11: the toast Windows draws bottom-right over whatever is open. Only its content is the app's. */
 export function ApprovalToast({ device, country }: { device: string; country: string }) {
   return (
-    <div className="relative h-screen overflow-hidden bg-[#dfe3e8] font-sans" data-desktop>
-      <div className="absolute bottom-[60px] right-3 w-[364px] rounded-lg border border-[#d6d6d6] bg-[#f3f3f3] p-4 text-[#1a1a1a] shadow-xl" role="status" data-toast>
-        <div className="mb-2 flex items-center gap-2 text-[12px] text-[#5c5c5c]"><BBProductIcon product="drive" size={16} />Beebeeb Drive</div>
+    <div className="relative h-screen overflow-hidden bg-win-desktop-2 font-sans" data-desktop>
+      <div className="absolute bottom-[60px] right-3 w-[364px] rounded-lg border border-win-line-soft bg-win-title p-4 text-win-ink-strong shadow-xl" role="status" data-toast>
+        <div className="mb-2 flex items-center gap-2 text-[12px] text-win-ink-3"><BBProductIcon product="drive" size={16} />Beebeeb Drive</div>
         <div className="text-[14px] font-semibold">Allow Drive on {device}?</div>
         <div className="mt-1 text-[13px] leading-[18px]">
           Someone in {country} asked to sign in to your account. If this wasn’t you, don’t approve it.
         </div>
       </div>
-      <div className="absolute inset-x-0 bottom-0 h-12 border-t border-[#c9cdd2] bg-[#eef0f3]" aria-hidden />
+      <div className="absolute inset-x-0 bottom-0 h-12 border-t border-win-line-accent bg-win-tab" aria-hidden />
     </div>
   )
 }
