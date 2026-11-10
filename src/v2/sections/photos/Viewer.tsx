@@ -17,6 +17,8 @@ export interface ViewerProps {
   now: Date
   /** 'original' with progress draws the thin bar over the photo (DW-0605b). */
   mode: 'preview' | 'original'
+  /** The source is still reading the original: the viewer says so until that open settles. */
+  opening?: boolean
   progress?: { done: number; total: number } | null
   kept?: boolean
   keeping?: boolean
@@ -110,6 +112,11 @@ export function PhotoViewer(p: ViewerProps) {
           <div className="absolute inset-x-0 top-0 h-1 bg-ink/10" role="progressbar" aria-label="Downloading the original" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
             <div className="h-full bg-ink-3" style={{ width: `${pct}%` }} />
           </div>
+        )}
+        {original && p.opening && (
+          <p role="status" data-status="opening-original" className="absolute left-1/2 top-3 z-10 m-0 -translate-x-1/2 rounded-full bg-paper/95 px-3 py-1 text-[12px] text-ink-2 shadow">
+            Opening the original…
+          </p>
         )}
         {video && p.referencePlayer && (
           <div aria-hidden="true" data-reference="windows-player" className="absolute inset-x-8 bottom-4 flex h-11 items-center gap-3 rounded-lg bg-ink/75 px-3 text-paper">
