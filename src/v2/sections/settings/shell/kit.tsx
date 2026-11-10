@@ -90,11 +90,24 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
 
 export interface PopoverRect { top: number; right: number; bottom: number; left: number; width: number; height: number }
 
-/** Where a choice menu opens: under the button, kept on screen. The test calls this, not a copy. */
-export function popoverPlace(buttonRect: PopoverRect, view: { width: number; height: number }): { top: number; left: number } {
+/** Where a choice menu opens: under the button, or above it when there is no room below, and never past the
+ *  window's edge. `menuHeight` is the open list's measured height (0 before its first layout). The cap keeps a
+ *  long menu inside the window as well, so a limit menu at the bottom of Settings still opens in full.
+ *  The test calls this, not a copy. */
+export function popoverPlace(
+  buttonRect: PopoverRect,
+  view: { width: number; height: number },
+  menuHeight = 0,
+): { top: number; left: number; maxHeight: number } {
+  const edge = 8
+  const gap = 4
   const width = Math.max(140, buttonRect.width)
-  const left = Math.max(8, Math.min(buttonRect.right - width, Math.max(8, view.width - width - 8)))
-  return { top: buttonRect.bottom + 4, left }
+  const left = Math.max(edge, Math.min(buttonRect.right - width, Math.max(edge, view.width - width - edge)))
+  const roomBelow = view.height - edge - (buttonRect.bottom + gap)
+  const roomAbove = buttonRect.top - gap - edge
+  const flip = menuHeight > 0 && menuHeight > roomBelow && roomAbove > roomBelow
+  const top = flip ? Math.max(edge, buttonRect.top - gap - menuHeight) : buttonRect.bottom + gap
+  return { top, left, maxHeight: Math.max(0, view.height - edge - top) }
 }
 
 /** A pop-up choice (Theme, Release channel, the lock delay). Closes on pick, Esc or a click outside. */
@@ -109,13 +122,24 @@ export function Choice<T extends string>({ value, options, onPick, label, open: 
   const ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLUListElement>(null)
-  const [place, setPlace] = useState<{ top: number; left: number } | null>(null)
+  const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
+  const [menuHeight, setMenuHeight] = useState(0)
   useLayoutEffect(() => {
     if (!open || !buttonRef.current) { setPlace(null); return }
     const r = buttonRef.current.getBoundingClientRect()
     const view = { width: window.innerWidth || 800, height: window.innerHeight || 600 }
-    setPlace(popoverPlace({ top: r.top, right: r.right, bottom: r.bottom, left: r.left, width: r.width, height: r.height }, view))
-  }, [open])
+    setPlace(popoverPlace({ top: r.top, right: r.right, bottom: r.bottom, left: r.left, width: r.width, height: r.height }, view, menuHeight))
+  }, [open, menuHeight])
+  // The list's own height decides whether it fits below the button: measure it, then place it again. Both
+  // layout effects run before paint, so the menu never shows at the wrong place.
+  useLayoutEffect(() => {
+    if (!open || !place) return
+    const el = menuRef.current
+    if (!el) return
+    // scrollHeight is the list's full content, even while maxHeight caps it, so placement settles in one pass.
+    const h = el.scrollHeight || el.getBoundingClientRect().height
+    if (h > 0 && h !== menuHeight) setMenuHeight(h)
+  }, [open, place, menuHeight])
   useEffect(() => {
     if (!open) return
     const off = (e: MouseEvent) => {
@@ -130,7 +154,7 @@ export function Choice<T extends string>({ value, options, onPick, label, open: 
   }, [open])
   const current = options.find((o) => o.value === value)
   const menu = open && place ? (
-    <ul ref={menuRef} role="listbox" aria-label={label} className="z-30 min-w-[140px] rounded-lg border border-line bg-paper py-1 text-[13px] shadow-lg" style={{ position: 'fixed', top: place.top, left: place.left }}>
+    <ul ref={menuRef} role="listbox" aria-label={label} className="z-30 min-w-[140px] overflow-y-auto rounded-lg border border-line bg-paper py-1 text-[13px] shadow-lg" style={{ position: 'fixed', top: place.top, left: place.left, maxHeight: place.maxHeight }}>
       {options.map((o) => (
         <li key={o.value} role="option" aria-selected={o.value === value}>
           <button type="button" onClick={() => { onPick(o.value); setOpen(false) }}
