@@ -22,7 +22,11 @@ pub struct AccountSession {
     /// RFC3339 or null.
     #[serde(default)]
     pub last_active_at: Option<String>,
-    /// RFC3339.
+    /// RFC3339, when the server sends one. The account-sessions list (`list_sessions`) selects
+    /// only `token AS id, device_name, device_kind, country_code, last_active_at,
+    /// first_seen_recognized` and adds `is_current`; it carries no `created_at`. Requiring it made
+    /// the whole list fail to decode ("missing field `created_at`") and the pane showed no devices.
+    #[serde(default)]
     pub created_at: String,
     pub is_current: bool,
 }

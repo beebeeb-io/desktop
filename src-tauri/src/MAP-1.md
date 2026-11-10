@@ -10,6 +10,7 @@ Modules 1–45, sorted by path.
 | `account_binding.rs` | Ruling R10 (spec 2026-10-06 §5.6): the local data on this computer belongs to the account that created it, and a different account never reu | — |
 | `account_binding_tests.rs` | (no //! header) | — |
 | `account_commands.rs` | `account_commands` items split out of `lib.rs`. | — |
+| `account_commands/tests.rs` | `account_session_list`'s decode: the shape the server's `list_sessions` builds. | — |
 | `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountProfile (9), Subscription (19), BillingUsage (3), AccountAccess (1), UserRegionResponse (4), SetPreferredRegionResponse (2), AccountActivity (2), SecurityScore (4), AccountSessionList (1), RevokeAllResult (1), ClientDeviceList (1), ClientSyncSessionList (1), … (+16 more) |
 | `activity_conflict_commands.rs` | `activity_conflict_commands` items split out of `lib.rs`. | — |
 | `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | DesktopApiError (8), Listing (2), FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, VersionId, ListFilesScope (4), SyncSnapshot (2), SyncOp (3), SyncOps (3), … (+18 more) |
@@ -50,4 +51,3 @@ Modules 1–45, sorted by path.
 | `finder_setup_wiring_tests.rs` | (no //! header) | — |
 | `found_while_paused.rs` | Task 2267 (fix round 2): what the person decides about the changes Beebeeb found while sync was paused. | — |
 | `found_while_paused/tests.rs` | `found_while_paused` unit tests, split out of `found_while_paused.rs`. | — |
-| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Row (6), Op (8), Options (2), Unit, Counts (21), NEEDS_REVIEW, same_leaf, is_parent_404, plan, presend_block, PresendBlock (2) |

@@ -6,6 +6,7 @@ Modules 46–92, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
+| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Row (6), Op (8), Options (2), Unit, Counts (21), NEEDS_REVIEW, same_leaf, is_parent_404, plan, presend_block, PresendBlock (2) |
 | `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
 | `install_guard_tests.rs` | P1c: one in-place install at a time, across every Beebeeb window. | — |
 | `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
@@ -52,4 +53,3 @@ Modules 46–92, sorted by path.
 | `repair_kept_folder_tests.rs` | (no //! header) | — |
 | `reveal_and_open_file_tests.rs` | (no //! header) | — |
 | `root_source.rs` | Scanner input after the lib.rs split (LD-0057 PR 2, spec §4.8): the text the source-reading tests used to `include_str!("lib.rs")`. | — |
-| `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, SendPhaseLink, AttemptSignals (3), ResumeTicket (4), EngineRunner, AbortOutcome (2) |

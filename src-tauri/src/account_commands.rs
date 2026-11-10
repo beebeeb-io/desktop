@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// The last email that signed in on this install, for prefilling the
 /// onboarding sign-in form after a sign-out or a startup-401 auto sign-out
 /// (the keychain account-email credential is erased by sign-out, so this
@@ -183,7 +186,9 @@ pub(super) async fn account_security_score(state: State<'_, AppState>) -> Result
 
 /// `GET /api/v1/account/sessions` — active account sessions.
 #[tauri::command]
-pub(super) async fn account_session_list(state: State<'_, AppState>) -> Result<account_dto::AccountSessionList, String> {
+pub(super) async fn account_session_list(
+    state: State<'_, AppState>,
+) -> Result<account_dto::AccountSessionList, String> {
     session_command!(async {
         api_client_from_session(&state)?
             .account_sessions()
@@ -206,7 +211,9 @@ pub(super) async fn account_revoke_session(state: State<'_, AppState>, session_i
 /// `POST /api/v1/account/sessions/revoke-all-others` — revoke every other
 /// session; returns the count revoked.
 #[tauri::command]
-pub(super) async fn account_revoke_other_sessions(state: State<'_, AppState>) -> Result<account_dto::RevokeAllResult, String> {
+pub(super) async fn account_revoke_other_sessions(
+    state: State<'_, AppState>,
+) -> Result<account_dto::RevokeAllResult, String> {
     session_command!(async {
         api_client_from_session(&state)?
             .revoke_other_sessions()
@@ -228,7 +235,9 @@ pub(super) async fn account_devices(state: State<'_, AppState>) -> Result<accoun
 
 /// `GET /api/v1/clients/sessions` — per-device sync sessions.
 #[tauri::command]
-pub(super) async fn account_client_sessions(state: State<'_, AppState>) -> Result<account_dto::ClientSyncSessionList, String> {
+pub(super) async fn account_client_sessions(
+    state: State<'_, AppState>,
+) -> Result<account_dto::ClientSyncSessionList, String> {
     session_command!(async {
         api_client_from_session(&state)?
             .client_sync_sessions()
@@ -246,10 +255,16 @@ pub(super) async fn account_activity_feed(
     limit: Option<u32>,
 ) -> Result<account_dto::ActivityFeed, String> {
     session_command!(async {
-        let mut feed = api_client_from_session(&state)?.activity_feed(page, limit).await.map_err(|e| e.to_string())?;
+        let mut feed = api_client_from_session(&state)?
+            .activity_feed(page, limit)
+            .await
+            .map_err(|e| e.to_string())?;
         if page.unwrap_or(1) == 1 {
             let bridge = parked_conflict_bridge(&state)?;
-            bridge.append_shared_activity(&mut feed).await.map_err(|e| e.to_string())?;
+            bridge
+                .append_shared_activity(&mut feed)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         Ok(feed)
     })
@@ -295,7 +310,12 @@ pub(super) async fn account_update_notification_preferences(
 }
 
 pub(super) fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> String {
-    if !file_meta["acted_via_share_id"].is_null() || !file_meta["uploaded_by"].is_null() || !file_meta["owner_wrapped_file_key"].is_null() { return owner_keys::blocked_name(id); }
+    if !file_meta["acted_via_share_id"].is_null()
+        || !file_meta["uploaded_by"].is_null()
+        || !file_meta["owner_wrapped_file_key"].is_null()
+    {
+        return owner_keys::blocked_name(id);
+    }
     let from_plain = ["display_name", "decrypted_name", "filename", "file_name", "name"]
         .into_iter()
         .find_map(|key| {
@@ -320,9 +340,13 @@ pub(super) fn trash_name_fallback(file_meta: &serde_json::Value, id: &str) -> St
     format!("Encrypted item {short}…")
 }
 
-pub(super) fn trash_item_from_meta(file_meta: &serde_json::Value, master_key: &[u8; 32]) -> Option<account_dto::DesktopTrashItem> {
+pub(super) fn trash_item_from_meta(
+    file_meta: &serde_json::Value,
+    master_key: &[u8; 32],
+) -> Option<account_dto::DesktopTrashItem> {
     let id = file_meta.get("id").and_then(|v| v.as_str())?.to_string();
-    let name = owner_keys::display_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
+    let name =
+        owner_keys::display_name(file_meta, &id, master_key).unwrap_or_else(|| trash_name_fallback(file_meta, &id));
     let updated_at = file_meta
         .get("updated_at")
         .and_then(|v| {
@@ -491,17 +515,27 @@ pub(super) async fn desktop_confirm_action(
 }
 
 #[tauri::command]
-pub(super) async fn desktop_trash_list(state: State<'_, AppState>) -> Result<Vec<account_dto::DesktopTrashItem>, String> {
+pub(super) async fn desktop_trash_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<account_dto::DesktopTrashItem>, String> {
     session_command!(async {
         let api = api_client_from_session(&state)?;
         let raw = api.list_trashed_files_all().await.map_err(|e| e.to_string())?;
-        let db = DesktopConfig::load().ok().and_then(|cfg| state_db_for_config(&cfg).ok().flatten());
-        Ok(raw.iter().filter_map(|file_meta| {
-            let mut item = trash_item_from_meta(file_meta, api.master_key())?;
-            if let Some(db) = db.as_ref()
-                && let Ok(Some(name)) = owner_keys::stored_name(db, &item.id, api.master_key()) { item.name = name; }
-            Some(item)
-        }).collect())
+        let db = DesktopConfig::load()
+            .ok()
+            .and_then(|cfg| state_db_for_config(&cfg).ok().flatten());
+        Ok(raw
+            .iter()
+            .filter_map(|file_meta| {
+                let mut item = trash_item_from_meta(file_meta, api.master_key())?;
+                if let Some(db) = db.as_ref()
+                    && let Ok(Some(name)) = owner_keys::stored_name(db, &item.id, api.master_key())
+                {
+                    item.name = name;
+                }
+                Some(item)
+            })
+            .collect())
     })
 }
 
@@ -639,7 +673,9 @@ pub(super) fn listable_rows(
     rows: Vec<(state_db::FileEntry, bool)>,
 ) -> Vec<(state_db::FileEntry, bool)> {
     let backups = crate::backup_protect::BackupsTree::read(db);
-    rows.into_iter().filter(|(entry, _)| !backups.is_hidden(&entry.path)).collect()
+    rows.into_iter()
+        .filter(|(entry, _)| !backups.is_hidden(&entry.path))
+        .collect()
 }
 
 /// How many rows past `limit` a recent list reads, so the manifests [`listable_rows`] leaves out (one
@@ -672,7 +708,9 @@ pub(super) fn file_overview_activity(
 pub(super) fn recent_files(db: &state_db::StateDb, limit: usize) -> Result<Vec<account_dto::RecentFile>, String> {
     // The newest `limit` files and the newest `limit` events are all a list of `limit` can hold (and the
     // rows a recent list leaves out).
-    let rows = db.newest_file_rows(limit.saturating_add(HIDDEN_SLACK)).map_err(|e| format!("list files: {e}"))?;
+    let rows = db
+        .newest_file_rows(limit.saturating_add(HIDDEN_SLACK))
+        .map_err(|e| format!("list files: {e}"))?;
     let rows = listable_rows(db, rows);
     Ok(
         account_dto::compute_file_overview(&file_overview_inputs(rows), &file_overview_activity(db, limit)?, limit)
@@ -791,7 +829,10 @@ pub(super) async fn get_active_transfers(
     use crate::transfer_progress::{ATTENTION_CACHE, ATTENTION_READS, attention_for_poll};
     let rows = runtime.transfers.snapshot_dtos();
     let poll = |unlocked: bool, generation: Option<u64>, fresh| {
-        ATTENTION_CACHE.lock().map(|mut cache| attention_for_poll(&mut cache, unlocked, generation, fresh)).unwrap_or_default()
+        ATTENTION_CACHE
+            .lock()
+            .map(|mut cache| attention_for_poll(&mut cache, unlocked, generation, fresh))
+            .unwrap_or_default()
     };
     // The running engine's generation and its DB, the lease dropped at once (review P3-5).
     #[cfg(target_os = "windows")]
@@ -822,7 +863,10 @@ pub(super) async fn get_active_transfers(
 
 /// Is the active account's vault unlocked (a session held)? No account, or a poisoned lock: no.
 pub(super) fn vault_unlocked(state: &AppState) -> bool {
-    state.active_account().ok().is_some_and(|acct| acct.session.lock().is_ok_and(|guard| guard.is_some()))
+    state
+        .active_account()
+        .ok()
+        .is_some_and(|acct| acct.session.lock().is_ok_and(|guard| guard.is_some()))
 }
 
 /// What `get_active_transfers` shows: the board, plus the needs-attention rows (each one names a file
@@ -836,7 +880,11 @@ pub(super) fn shown_transfers(
         // LD-0105 U1: the board's rows carry names now; a locked vault shows no name (lead 2026-11-06).
         return rows
             .into_iter()
-            .map(|row| crate::transfer_progress::ActiveTransferDto { name: String::new(), folder: String::new(), ..row })
+            .map(|row| crate::transfer_progress::ActiveTransferDto {
+                name: String::new(),
+                folder: String::new(),
+                ..row
+            })
             .collect();
     }
     crate::transfer_progress::with_attention(rows, attention)
