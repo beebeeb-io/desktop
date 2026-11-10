@@ -63,7 +63,7 @@ function Win({ p, section = 'files', top, overlay, toast, status, sync = SYNC_OK
   return (
     <DriveSourceProvider source={offline ? SRC_OFFLINE : SRC}>
       <div data-frame-window className="relative flex h-screen flex-col overflow-hidden bg-paper font-sans text-ink">
-        <CaptionBarView title="Beebeeb" />
+        <CaptionBarView title="Beebeeb Drive" />
         <div className="flex min-h-0 flex-1">
           <Sidebar active={section} onGo={noop} storage={STORAGE} accountName="Anna" counts={counts} />
           <main className="flex min-w-0 flex-1 flex-col">

@@ -3,7 +3,7 @@
 // Every item is a link (<a>) so it reads and behaves as navigation.
 
 import type { MouseEvent } from 'react'
-import { Icon, type IconName } from '@beebeeb/shared/design'
+import { BBProductLockup, Icon, type IconName } from '@beebeeb/shared/design'
 import type { StorageSummary } from '@beebeeb/shared/drive-ui'
 import type { SectionId } from '../routes'
 
@@ -95,6 +95,10 @@ export function Sidebar({
   const pct = storage ? Math.min(100, (storage.usedBytes / storage.quotaBytes) * 100) : 0
   return (
     <nav aria-label="Sections" className="flex w-[232px] flex-none flex-col border-r border-line bg-paper-2 px-2 py-3">
+      <div className="mb-3 flex flex-col gap-1.5 px-2.5">
+        <BBProductLockup product="drive" size={24} />
+        <span className="text-[13px] font-medium text-ink">Beebeeb Drive</span>
+      </div>
       <div className="flex flex-col gap-0.5">
         {MAIN.map((item) => <NavLink key={item.section} item={item} active={active === item.section} onGo={onGo} count={counts?.[item.section]} />)}
       </div>
