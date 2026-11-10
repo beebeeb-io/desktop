@@ -157,13 +157,13 @@ describe('#273 finding 11 (New file): a file this window just made opens once th
   })
 })
 
-describe('#273 finding 1: until the page view is drawn in the window, a PDF opens in another app, never a refused frame', () => {
-  test('Open frames no decrypted content, and a PDF gets the open-in-another-app state with its button', () => {
+describe('#273 finding 1: a PDF is drawn in the window by pdf.js, never framed', () => {
+  test('Open frames no decrypted content, and a PDF gets PdfDocument instead of the open-in-another-app state', () => {
     const open = src('v2/sections/open/index.tsx')
     expect(open).not.toContain('<iframe')
-    expect(open).toContain("kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' }")
-    expect(open).toContain(`{kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} />`)
-    expect(open).not.toMatch(/else if \(kind === 'pdf'\) body =/)
+    expect(open).toContain("lazy(() => import('./pdf/PdfDocument')")
+    expect(open).toContain("else if (kind === 'pdf') body = bytes ? <Suspense")
+    expect(open).not.toContain("kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' }")
   })
 })
 
@@ -434,9 +434,10 @@ describe('self-review (code-review high) follow-ups', () => {
     expect(office).toContain('useOwnFind(true, useCallback(() => { frameRef.current?.focus() }, []))')
     expect(office).toMatch(/createKeptCopy\(name, 'edited on this PC'[\s\S]{0,400}const fresh = await source\.readBytes\(fileId\)\n\s+await b\.open\(fresh\.bytes, name\)/)
   })
-  test('a playing video is read once per open; a PDF is not read until the window draws it; Try again without a state says so', () => {
+  test('a playing video is read once per open; a PDF is read for the window to draw; Try again without a state says so', () => {
     expect(src('v2/sections/photos/Viewer.tsx')).toContain('}, [source, extras, id])')
-    expect(src('v2/sections/open/index.tsx')).toContain("kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' }")
+    expect(src('v2/sections/open/index.tsx')).toContain("kind === 'other' || kind === 'raw' ? { kind: 'none' }")
+    expect(src('v2/sections/open/index.tsx')).toContain("kind === 'pdf' && overReadCap(item.size)")
     expect(src('v2/onboarding/index.tsx')).toContain('if (!v) { setShowError(NO_STATE); return }')
     expect(src('v2/onboarding/index.tsx')).not.toContain('setRefused(NO_STATE)')
   })

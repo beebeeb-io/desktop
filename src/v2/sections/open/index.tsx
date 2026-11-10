@@ -1,6 +1,6 @@
 // Open: one file in the Drive window's content area, under the window's toolbar (DW-1501..1527). Office is B08's.
 // Reads and saves only through useDriveSource(). The route is `section=open&id=<file>[&sub=edit]`; `sub=new-file&id=<folder>`.
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { DriveSourceError, MAX_EDITABLE_BYTES, useDriveSource, type DriveItem, type VersionEntry } from '@beebeeb/shared/drive-ui'
 import { useCommand } from '../../shortcuts'
 import type { SectionProps } from '../types'
@@ -13,13 +13,17 @@ import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nam
 import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLargeView } from './States'
 import { useDriveExtras } from '../../source/extras'
 import { isTooLarge } from '../../source/desktop'
-import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, RawViewer, type Track } from './Viewers'
+import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
+import { overReadCap } from './pdf/render'
 import { createKeptCopy, fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, saveNoteText, tagContent, viewerKind } from './model'
 import * as player from './player'
 import { isOfficeFile, NewDocumentFlow, OfficeEditor } from './office'
 import { findGoesTo, useOwnFind } from './find'
 import { useVersionWatch } from './versionWatch'
 import { rawThumbCache } from './thumbCache'
+
+// pdf.js and its worker load only when a PDF is opened: the rest of the window never pays for them.
+const PdfDocument = lazy(() => import('./pdf/PdfDocument').then((m) => ({ default: m.PdfDocument })))
 
 type Loaded =
   | { kind: 'text'; text: string; versionId: string }
@@ -71,8 +75,9 @@ function useLoad(id: string) {
         setPhase({ name: 'loading', item })
         const kind = viewerKind(item.name)
         // A RAW shows the camera's preview (its thumbnail): the file itself is not read.
-        // A PDF is not read either until the window draws its pages (it opens in another app; P1b's pdf.js reads it).
-        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' || kind === 'pdf' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
+        // A PDF is read here and drawn by pdf.js in the window (P1b); over the read cap it is the too-large state.
+        if (kind === 'pdf' && overReadCap(item.size)) return setPhase({ name: 'too-large', item })
+        const data: Loaded = TEXTUAL.has(kind) ? { kind: 'text', ...(await source.readText(id)) } : kind === 'other' || kind === 'raw' ? { kind: 'none' } : { kind: 'bytes', ...(await source.readBytes(id)) }
         if (live) setPhase({ name: 'ready', item, data, version: versionCount })
       } catch (e) {
         if (!live) return
@@ -207,10 +212,13 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   const [wrap, setWrap] = useState(false)
   const [mdMode, setMdMode] = useState<'rendered' | 'source'>('rendered')
   const [share, setShare] = useState(false)
+  const [pdfZoom, setPdfZoom] = useState(1)
+  const [pdfFind, setPdfFind] = useState(false)
+  const [pdfPage, setPdfPage] = useState<{ page: number; total: number } | null>(null)
   const bytes = data.kind === 'bytes' ? data.bytes : null
-  // A PDF is never framed: the window's CSP refuses a `blob:` frame (lead's M3d ruling 5), so it opens in another app
-  // until the page view is drawn in the window (pdf.js, the P1b lane). #273 finding 1.
-  const url = useBlobUrl(bytes, item.mime ?? 'application/octet-stream')
+  // A PDF is never framed: pdf.js draws its pages into a canvas in this window (P1b, M3d fork 1). The blob URL is
+  // only for a picture; a PDF's bytes go to PdfDocument, never to a frame.
+  const url = useBlobUrl(kind === 'image' ? bytes : null, item.mime ?? 'application/octet-stream')
   const text = data.kind === 'text' ? data.text : ''
   const big = (item.size ?? 0) > MAX_EDITABLE_BYTES
   const openElsewhere = () => { source.open(item.id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open it in another app') })) }
@@ -229,7 +237,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
     onBack()
   }, (e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'move it to Trash') }))
 
-  const meta = kind === 'code' || kind === 'text' ? `${languageLabel(item.name)} · ${lineCount(text)} lines · UTF-8` : kind === 'raw' || kind === 'audio' ? <FolderMeta item={item} /> : undefined
+  const meta = kind === 'pdf' && pdfPage ? `Page ${pdfPage.page} of ${pdfPage.total}` : kind === 'code' || kind === 'text' ? `${languageLabel(item.name)} · ${lineCount(text)} lines · UTF-8` : kind === 'raw' || kind === 'audio' ? <FolderMeta item={item} /> : undefined
   const actions = (
     <>
       {kind === 'markdown' && (
@@ -238,7 +246,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
         </span>
       )}
       {(kind === 'code' || kind === 'text') && <><ToolbarButton label="Wrap" pressed={wrap} onClick={() => setWrap((w) => !w)} /><ToolbarButton label="Copy" onClick={copy} /></>}
-      {kind === 'pdf' && <><ToolbarButton label="Open in another app…" onClick={openElsewhere} /><ToolbarButton label="Share" onClick={() => setShare(true)} /></>}
+      {kind === 'pdf' && <><PdfZoom zoom={pdfZoom} onZoom={setPdfZoom} /><ToolbarButton label="Find" shortcut="Ctrl+F" onClick={() => setPdfFind(true)} /><ToolbarButton label="Open in another app…" onClick={openElsewhere} /><ToolbarButton label="Share" onClick={() => setShare(true)} /></>}
       {pictures && <><ToolbarButton label="Share" onClick={() => setShare(true)} /><ToolbarButton label="Offline" onClick={() => void keep()} /><ToolbarButton label="Details" onClick={onDetails} /><ToolbarButton label="Trash" onClick={() => void trash()} /></>}
       {kind === 'archive' && <ToolbarButton label="Open in another app…" onClick={openElsewhere} />}
       {(editable || kind === 'csv') && <ToolbarButton label="Edit" shortcut="Ctrl+E" onClick={kind === 'csv' ? () => nav.go({ section: 'open', id: item.id, sub: 'office' }) : edit} />}
@@ -253,6 +261,7 @@ function Viewer({ item, data, nav, banner, onBack, onDetails, onEdit }: { item: 
   else if (kind === 'markdown') body = <MarkdownViewer text={text} mode={mdMode} onOpenFile={openFile} />
   else if (kind === 'csv') body = <CsvViewer text={text} />
   else if (kind === 'archive') body = <ZipView bytes={bytes} />
+  else if (kind === 'pdf') body = bytes ? <Suspense fallback={<Centered><p className="m-0 text-[13px] text-ink-3">Drawing the pages…</p></Centered>}><PdfDocument bytes={bytes} name={item.name} zoom={pdfZoom} findOpen={pdfFind} onFindOpen={setPdfFind} onPageChange={setPdfPage} onOpenElsewhere={openElsewhere} /></Suspense> : null
   else if (textual) body = <>{big && <OpenInAppNote onOpen={openElsewhere}>Read-only: this file is larger than 2 MB.</OpenInAppNote>}<CodeViewer text={text} wrap={wrap} limit={big ? READ_ONLY_LINES : undefined} />{big && <div className="flex-none border-t border-line px-4 py-1.5 font-mono text-[12px] text-ink-3">Showing the first {Math.min(READ_ONLY_LINES, lineCount(text))} of {lineCount(text).toLocaleString('en-GB')} lines</div>}</>
   else body = <Centered><p className="m-0 text-[13px] text-ink-2">{item.name} opens in another app.</p><ToolbarButton label="Open in another app…" onClick={openElsewhere} /></Centered>
 
