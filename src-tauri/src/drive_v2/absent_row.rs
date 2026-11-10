@@ -41,7 +41,9 @@ fn row(db: &StateDb, id: &str, path: &str, parent: Option<&str>, folder: bool, m
     .unwrap();
 }
 
-/// A folder the server knows (a remote time, not mid-upload, not in conflict) may go to Trash.
+/// Regression guard (not the red-first proof; `check_trashable` already passed this on the base
+/// tree): a folder the server knows (a remote time, not mid-upload, not in conflict) may go to
+/// Trash. `absent_row_leaves` carries the red-first evidence for this slice.
 #[test]
 fn known_folder_is_trashable() {
     let f = fixture();
@@ -110,5 +112,19 @@ fn absent_row_leaves() {
     assert!(
         !listing.items.iter().any(|item| item.id == "stale"),
         "the absent row must not be listed"
+    );
+    // The terminal-failed op must leave with the row: nothing may name a dropped row, and
+    // `waiting_rows` (the sign-out queue) must not keep returning it.
+    assert!(
+        f.db.list_operations_for_file("stale").unwrap().is_empty(),
+        "the dropped row's operation must be gone"
+    );
+    assert!(
+        !f.db
+            .waiting_rows()
+            .unwrap()
+            .iter()
+            .any(|op| op.file_id.as_deref() == Some("stale")),
+        "the dropped row's operation must not be in the waiting queue"
     );
 }
