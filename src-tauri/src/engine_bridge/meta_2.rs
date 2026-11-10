@@ -415,7 +415,13 @@ pub(super) fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let leaf = crate::owner_keys::stored_name(db,file_id,master_key)?.unwrap_or_else(||resolve_relative_path(f,file_id,master_key));
+    let stored = crate::owner_keys::stored_name(db, file_id, master_key)?;
+    // The unavailable label is a display name. Stored as the path, the watcher uploads it as a new file.
+    let leaf = match stored {
+        Some(name) if name == crate::owner_keys::blocked_name(file_id) => String::new(),
+        Some(name) => name,
+        None => resolve_relative_path(f, file_id, master_key),
+    };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
     // tick) rather than seeding a bare parent dir. A leaf that already carries

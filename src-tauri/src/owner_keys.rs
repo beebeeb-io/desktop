@@ -224,6 +224,7 @@ pub(crate) fn safe_display_name(name: &str) -> bool {
 mod activity;
 mod moves;
 mod requests;
+mod snapshot_keep;
 
 #[allow(unused_imports)] pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope, request_upload_fields};
 
@@ -724,9 +725,8 @@ impl crate::engine_bridge::EngineBridge {
                 scope.check()?;
                 row = match canonical {
                     Ok(row) => row,
-                    // The listing/event raced deletion. Omit this obsolete row;
-                    // the delta loop still applies later ops and acknowledges it.
-                    Err(error) if missing(&error) => continue,
+                    Err(error) if missing(&error) && !snapshot_keep::name_opens(&master, id, input) => continue,
+                    Err(error) if missing(&error) => input.clone(),
                     Err(error) => return Err(error),
                 };
                 anyhow::ensure!(row["id"].as_str() == Some(id), "canonical item id mismatch");

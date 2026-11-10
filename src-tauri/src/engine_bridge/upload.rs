@@ -740,13 +740,13 @@ impl EngineBridge {
         if let Some(name) = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
             .ok()
             .flatten()
-            .filter(|name| crate::owner_keys::safe_display_name(name))
+            .filter(|name| name_safe_for_new_item(request_id, name))
         {
             return name;
         }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
-            && crate::owner_keys::safe_display_name(&keys.name.name)
+            && name_safe_for_new_item(request_id, &keys.name.name)
         {
             return keys.name.name;
         }
@@ -966,6 +966,11 @@ impl EngineBridge {
     }
 }
 
+/// A new item's name. The unavailable label is safe as text and must not be uploaded.
+fn name_safe_for_new_item(id: &str, name: &str) -> bool {
+    crate::owner_keys::safe_display_name(name) && name != crate::owner_keys::blocked_name(id)
+}
+
 /// The leaf of the save-as-new item a request row's edit becomes: the row's
 /// own name, marked as an edited copy. `n` makes a second copy distinct.
 fn edited_sibling_name(name: &str, n: u32) -> String {
@@ -985,5 +990,33 @@ fn sibling_path(path: &str, leaf: &str) -> String {
     match path.rsplit_once('/') {
         Some((dir, _)) if !dir.is_empty() => format!("{dir}/{leaf}"),
         _ => leaf.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod new_item_name {
+    use super::EngineBridge;
+    use crate::api_client::ApiClient;
+    use crate::owner_keys::{OwnedKeyRecord, blocked_name};
+    use crate::state_db::StateDb;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_blocked_label_does_not_name_the_new_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let file_id = "10000000-0000-4000-8000-0000000000b2";
+        db.put_owned_key_record(&OwnedKeyRecord {
+            file_id: file_id.into(),
+            name_encrypted: "opaque".into(),
+            blocked_fingerprint: Some("blocked".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "fixture".into(), [7; 32]));
+        let bridge = EngineBridge::new(db, api);
+        let name = bridge.request_row_display_name(file_id).await;
+        assert_ne!(name, blocked_name(file_id), "the unavailable label was used as a new item name");
+        assert_eq!(name, "edited file");
     }
 }

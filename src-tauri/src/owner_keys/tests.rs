@@ -29,5 +29,6 @@ mod prepare;
 mod move_adopt;
 mod request;
 mod review;
+mod snapshot_file;
 
 use harness::*;
