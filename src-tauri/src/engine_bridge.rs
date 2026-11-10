@@ -562,6 +562,7 @@ mod reg_1640;
 mod reg_1640_2;
 mod scan;
 mod review_t3;
+mod blocked_path;
 mod review_2190;
 mod review_2190_2;
 mod errors_types;

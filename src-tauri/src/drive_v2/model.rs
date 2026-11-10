@@ -31,8 +31,14 @@ pub(crate) fn now_iso() -> String {
 
 /// The display name of a row: its path's leaf, or the stable id label the rest of the app uses.
 pub(crate) fn leaf_name(entry: &FileEntry) -> String {
-    crate::vault_tree::folder_leaf_name(&entry.path)
-        .unwrap_or_else(|| crate::vault_tree::folder_fallback_label(&entry.file_id))
+    crate::vault_tree::folder_leaf_name(&entry.path).unwrap_or_else(|| {
+        if entry.is_dir() {
+            crate::vault_tree::folder_fallback_label(&entry.file_id)
+        } else {
+            // Display only. The path stays empty, so this label is never uploaded.
+            crate::owner_keys::blocked_name(&entry.file_id)
+        }
+    })
 }
 
 fn extension(name: &str) -> Option<String> {

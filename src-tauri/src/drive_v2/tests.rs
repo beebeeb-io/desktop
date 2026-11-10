@@ -133,6 +133,18 @@ fn names(items: &[DriveItem]) -> Vec<&str> {
 }
 
 #[test]
+fn an_unnamed_file_is_not_listed_as_a_folder() {
+    let f = fixture();
+    let id = "10000000-0000-4000-8000-0000000000b2";
+    row(&f.db, id, "", None, false, 20, 10, FileStatus::CloudOnly);
+    let root = model::list(&f.db, None, Sort::default(), false).unwrap();
+    let item = root.items.iter().find(|item| item.id == id).expect("the file is missing from the list");
+    assert!(!item.is_folder, "a file was returned as a folder");
+    assert!(!item.name.starts_with("Folder"), "a file was labeled as a folder: {}", item.name);
+    assert_eq!(item.name, crate::owner_keys::blocked_name(id));
+}
+
+#[test]
 fn drive_v2_list_shows_one_folder_from_the_mirror() {
     let f = fixture();
     drive(&f);
