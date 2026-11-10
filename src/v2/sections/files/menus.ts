@@ -4,11 +4,20 @@ import type { MenuEntry } from './ui'
 import { isProtected, orderLabels, SORT_LABEL, type FolderPrefs } from './model'
 import type { SortKey } from '@beebeeb/shared/drive-ui'
 
+/** What the host knows about the item that the row itself does not carry. */
+export interface FileMenuOptions {
+  /** Shared with you: the owner's name is not yours to change, so Rename is left out. */
+  sharedWithMe?: boolean
+  /** The link command can make a link for this item; false leaves Copy link out (a folder it refuses). */
+  linkShare?: boolean
+}
+
 /** DW-0402: the file menu. One item, many items, a folder, and a protected folder each leave out what they must. */
-export function fileMenu(items: DriveItem[]): MenuEntry[] {
+export function fileMenu(items: DriveItem[], options: FileMenuOptions = {}): MenuEntry[] {
   const many = items.length > 1
   const one = items[0]
   const locked = items.some(isProtected)
+  const linkShare = options.linkShare ?? true
   if (locked) {
     return [
       { id: 'open', label: 'Open', shortcut: 'Ctrl+↓' },
@@ -22,7 +31,7 @@ export function fileMenu(items: DriveItem[]): MenuEntry[] {
     { id: 'open', label: 'Open', shortcut: 'Ctrl+↓' },
     { id: 'preview', label: 'Preview', shortcut: 'Space', disabled: items.some((i) => i.isFolder) },
     { id: 'share', label: 'Share…' },
-    { id: 'copy-link', label: 'Copy link' },
+    ...(linkShare ? [{ id: 'copy-link', label: 'Copy link' }] : []),
     { id: 'offline', label: keeping ? 'Remove from this PC' : 'Make available offline' },
     { id: 'reveal', label: 'Show in File Explorer' },
   ]
@@ -30,7 +39,7 @@ export function fileMenu(items: DriveItem[]): MenuEntry[] {
   e[e.length - 1].dividerAfter = true
   e.push({ id: 'move', label: 'Move…' }, { id: 'duplicate', label: 'Duplicate' })
   if (!many) {
-    e.splice(e.findIndex((x) => x.id === 'move'), 0, { id: 'rename', label: 'Rename', shortcut: 'F2' })
+    if (!options.sharedWithMe) e.splice(e.findIndex((x) => x.id === 'move'), 0, { id: 'rename', label: 'Rename', shortcut: 'F2' })
     e.push({ id: 'versions', label: 'Version history…', disabled: !!one?.isFolder })
   }
   e[e.length - 1].dividerAfter = true
