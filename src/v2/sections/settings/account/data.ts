@@ -1,7 +1,7 @@
 // B14 data layer: every read and write goes through command() (never the shared API, never a key or token).
 // A plain browser (headless frames, `bun run dev`) has no Rust behind the commands: the panes start from the app's own
 // empty state and show the host's honest refusal, never example rows.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { appVersionFields } from '../../../../appVersion'
 import { command, commandUnavailableLabel, type AccountProfile, type AccountActivity, type AccountSessionList, type CommandResult, type DesktopPlatform, type SecurityScore, type SyncStatus } from '../../../../desktopApi'
 import { hasTauri } from '../../../source'
@@ -41,6 +41,24 @@ export function initialAccountState(): AccountState {
   }
 }
 
+/**
+ * How long the account row and the Account page wait for `account_profile` before saying the network is unreachable.
+ * A read that answers clears the timer; a read that never answers must not leave the page blank or the row on "Account".
+ */
+export const PROFILE_TIMEOUT_MS = 8000
+
+/**
+ * The sidebar's account row (DW-0401). While the read is in flight it says "Account"; once it answers it shows the
+ * display name, else the email. A failed read with nothing known is `''`: the row is empty and the Account page holds
+ * the error, so "Account" never stays on screen as if it were the person's name.
+ */
+export function accountRowLabel(display: string | null | undefined, email: string | null | undefined, pending: boolean): string {
+  if (pending) return 'Account'
+  const name = display?.trim() ?? ''
+  if (name) return name
+  return email?.trim() ?? ''
+}
+
 const OS: Record<string, string> = { app: 'Desktop app', windows: 'Windows', macos: 'macOS', linux: 'Linux', ios: 'iOS', android: 'Android', web: 'Web', cli: 'Command line' }
 
 /** Server sessions grouped by device name, so the products read as one list (DW-A55). */
@@ -72,9 +90,33 @@ export function useAccount(scenario: Scenario = 'default') {
   // become that. Null until `account_session_list` answers.
   const [sessionList, setSessionList] = useState<CommandResult<AccountSessionList> | null>(null)
   const [localPc, setLocalPc] = useState<Pick<DevicesPaneInput, 'sync' | 'version' | 'platform'>>({ sync: null, version: null, platform: null })
+  // One timer per hook, not per reload: a retry must cancel the previous read's timer, and a timer that fires after a
+  // newer reload started must not write its error over the newer read's answer.
+  const timer = useRef<number | null>(null)
+  const generation = useRef(0)
   const reload = useCallback(async () => {
+    // A profile read that never answers must not leave the page blank: after PROFILE_TIMEOUT_MS it says the network is
+    // unreachable (the existing sentence) and offers Try again. A read that answers clears the timer, so a slow but
+    // working server is never called unreachable.
+    const gen = ++generation.current
+    if (timer.current !== null) window.clearTimeout(timer.current)
+    let profileAnswered = false
+    // The literal is PROFILE_TIMEOUT_MS: the test harness runs this hook with only its own bindings, so a module
+    // constant here would be a free name it cannot resolve. tests/signedInWindow.test.tsx asserts the delay passed to
+    // setTimeout equals PROFILE_TIMEOUT_MS, so the two cannot drift.
+    timer.current = window.setTimeout(() => {
+      if (gen === generation.current && !profileAnswered) setError('network')
+    }, 8000)
+    const profileRead = command<AccountProfile>('account_profile').then((r) => {
+      profileAnswered = true
+      if (gen === generation.current && timer.current !== null) {
+        window.clearTimeout(timer.current)
+        timer.current = null
+      }
+      return r
+    })
     const [profile, name, sessions, score, activity, logging, passkeys, sync, version, platform] = await Promise.all([
-      command<AccountProfile>('account_profile'),
+      profileRead,
       command<{ display_name: string | null }>('account_display_name'),
       command<AccountSessionList>('account_session_list'),
       command<SecurityScore>('account_security_score'),
@@ -105,6 +147,10 @@ export function useAccount(scenario: Scenario = 'default') {
         ? activity.value.events.map((e) => ({ id: e.id, what: e.description, at: e.created_at, country: e.country_code ?? null, address: null }))
         : s.activity,
     }))
+  }, [])
+  // A pending read's timer must not fire after the pane is gone: clear it on unmount, so no setError lands on a dead hook.
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current)
   }, [])
   useEffect(() => { void reload() }, [reload])
   return { state, setState, error, reload, sessionList, localPc }
