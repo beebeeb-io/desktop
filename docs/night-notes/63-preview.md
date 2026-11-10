@@ -27,7 +27,7 @@ The guard is green on the real code, so it was seen to fail on a one-line mutant
 `source.readText` branch).
 
 ```
-date: 2026-11-10T23:31:36+01:00
+date: 2026-11-10T23:43:58+01:00
 command: bun test tests/previewRealFile.test.tsx
 (mutant: const isText = false)
 Expected: "quarterly line 1"
@@ -38,10 +38,10 @@ Received: ""
  2 fail
 ```
 
-The line was restored, then:
+The line was restored (`git diff --stat` empty), then:
 
 ```
-date: 2026-11-10T23:31:48+01:00
+date: 2026-11-10T23:44:09+01:00
 command: bun test tests/previewRealFile.test.tsx
  2 pass
  0 fail
@@ -50,13 +50,13 @@ command: bun test tests/previewRealFile.test.tsx
 The PDF path is unchanged; `tests/pdfPreview.test.tsx` in its own process:
 
 ```
-date: 2026-11-10T23:31:48+01:00
+date: 2026-11-10T23:43:37+01:00
 command: bun test tests/pdfPreview.test.tsx
  2 pass
  0 fail
 ```
 
-`bunx tsc --noEmit` → 0 errors.
+`bunx tsc --noEmit` → 0 errors (exit 0, 2026-11-10T23:43:37+01:00).
 
 ## Where the installed app still waits
 
@@ -66,4 +66,5 @@ is fixed there is no file row to select, so the walkthrough waits on slice 65.
 
 Evidence (absolute paths, outside the repo):
 `/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/preview-file/`
-(`green-first-run.txt`, `mutant-red.txt`, `restored-green.txt`, `pdf-green.txt`, `tsc.txt`).
+(`green-first-run.txt`, `mutant-red.txt`, `restored-green.txt`, `pdf-green.txt`, `tsc.txt`),
+each file starting with its `date -Iseconds` line.
