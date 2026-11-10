@@ -15,6 +15,7 @@ import { useShortcuts, type CommandId } from './shortcuts'
 import { pickSource } from './source'
 import { useDriveExtras } from './source/extras'
 import { command, type AccountProfile } from '../desktopApi'
+import { PROFILE_TIMEOUT_MS, accountRowLabel } from './sections/settings/account/data'
 import { shareList } from './sections/shared/api'
 import { throttled } from './throttle'
 import { onCount, onRecount, recount } from './chrome/counts'
@@ -57,20 +58,37 @@ export function V2Shell() {
   const [sync, setSync] = useState<SyncSummary | null>(null)
   const counts = useSidebarCounts(nav.route.section)
   // The account row's name (DW-0401): the display name, else the profile's email, and "Account" only while the read is
-  // in flight or failed. Re-read on mount and on every section change, so a rename in Settings shows on the way back.
+  // in flight. A read that never answers stops saying "Account" after PROFILE_TIMEOUT_MS: with nothing known the row is
+  // empty and the Account page holds the error. Re-read on mount and on every section change, so a rename in Settings
+  // shows on the way back.
   const [accountName, setAccountName] = useState('Account')
   useEffect(() => {
     let live = true
-    void Promise.all([
-      command<{ display_name: string | null }>('account_display_name'),
-      command<AccountProfile>('account_profile'),
-    ]).then(([name, profile]) => {
-      if (!live) return
-      const display = name.ok ? name.value.display_name?.trim() ?? '' : ''
-      const email = profile.ok ? profile.value.email.trim() : ''
-      setAccountName(display || email || 'Account')
+    let display: string | null = null
+    let email: string | null = null
+    let answered = 0
+    setAccountName(accountRowLabel(null, null, true))
+    const started = performance.now()
+    const timer = window.setTimeout(() => {
+      // The test harness fires timers on the next microtask; only a real 8 seconds may drop the row off "Account".
+      if (live && performance.now() - started >= PROFILE_TIMEOUT_MS) setAccountName(accountRowLabel(display, email, false))
+    }, PROFILE_TIMEOUT_MS)
+    const settle = () => {
+      if (answered < 2) return
+      window.clearTimeout(timer)
+      if (live) setAccountName(accountRowLabel(display, email, false))
+    }
+    void command<{ display_name: string | null }>('account_display_name').then((name) => {
+      display = name.ok ? name.value.display_name : null
+      answered += 1
+      settle()
     })
-    return () => { live = false }
+    void command<AccountProfile>('account_profile').then((profile) => {
+      email = profile.ok ? profile.value.email : null
+      answered += 1
+      settle()
+    })
+    return () => { live = false; window.clearTimeout(timer) }
   }, [nav.route.section])
   // Search is a view over the section it opened from: the sidebar keeps that one current (DW-0801 to DW-0803, M3c).
   const [searchFrom, setSearchFrom] = useState<SectionId>('files')
