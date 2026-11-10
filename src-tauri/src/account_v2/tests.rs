@@ -121,6 +121,17 @@ fn b14_dtos_carry_no_secret_outside_the_allow_list() {
         )
         .is_empty()
     );
+    assert!(
+        offending(
+            "PasswordChangedDto",
+            &PasswordChangedDto {
+                status: "changed",
+                signed_in: true,
+                restart: "ok"
+            }
+        )
+        .is_empty()
+    );
 }
 
 /// The check goes red on a planted field, and the allow-list is per DTO.
@@ -325,12 +336,12 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
                 !rotate[..stored].contains(".await"),
                 "Windows: an await before the new token is stored can cancel the command and lose it:\n{rotate}"
             );
-            // The start stops the old engine itself (and refuses when that stop is unconfirmed); the running
-            // ownership proofs, which hold the ended token too, are stopped under the same lock first.
-            assert!(
-                !rotate.contains(&stop),
-                "Windows: the start stops the engine:\n{rotate}"
-            );
+            // The old engine is stopped under the session-transition lock before the start (task 2439 item 1):
+            // the start's config read can fail before it takes the slot. The running ownership proofs, which
+            // hold the ended token too, are stopped under the same lock first.
+            let stopped = rotate
+                .find(&stop)
+                .unwrap_or_else(|| panic!("Windows: the old engine is stopped under the lock:\n{rotate}"));
             let transition = rotate
                 .find(&squeeze("let transition = SESSION_TRANSITION.lock().await;"))
                 .unwrap_or_else(|| panic!("Windows: the start holds the session-transition lock:\n{rotate}"));
@@ -338,8 +349,8 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
                 .find("stop_own_data_proofs();")
                 .unwrap_or_else(|| panic!("Windows: the ownership proofs are stopped:\n{rotate}"));
             assert!(
-                swapped < transition && transition < proofs && proofs < started,
-                "Windows: swap, lock, stop the proofs, then start:\n{rotate}"
+                swapped < transition && transition < proofs && proofs < stopped && stopped < started,
+                "Windows: swap, lock, stop the proofs, stop the old engine, then start:\n{rotate}"
             );
         } else {
             let stopped = rotate
@@ -358,5 +369,38 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
             "install_rotated_session(app, &state, &acct, &mut turn, &session_token).await"
         )),
         "{command}"
+    );
+}
+
+/// Task 2439 item 1: on Windows the engine holding the ended token is stopped under the session lock
+/// before the start. `start_engine_if_possible` begins with `if let Ok(cfg) = DesktopConfig::load()`,
+/// so a config read failure returns `Ok` before it takes the engine slot: without this stop the old
+/// engine keeps the ended token and the app shows "signed out" after three 401s.
+#[test]
+fn the_password_change_stops_the_old_engine_before_a_config_failure() {
+    use crate::finder_setup_command_tests::{body_between, without_items};
+    use crate::source_pin::squeeze;
+    const TEST: [&str; 2] = ["#[cfg(test)]", "#[cfg(all(test"];
+    const WINDOWS_LEAVES_OUT: [&str; 7] = [
+        "#[cfg(not(target_os = \"windows\"))]",
+        "#[cfg(not(windows))]",
+        "#[cfg(target_os = \"macos\")]",
+        "#[cfg(target_os = \"linux\")]",
+        "#[cfg(unix)]",
+        "#[cfg(all(unix",
+        "#[cfg(any(target_os = \"macos\", target_os = \"linux\"))]",
+    ];
+    let source = include_str!("mod.rs").replace("\r\n", "\n");
+    let windows = without_items(&without_items(&source, &TEST), &WINDOWS_LEAVES_OUT);
+    let rotate = squeeze(body_between(&windows, "async fn install_rotated_session(", "\n}\n"));
+    let stop = rotate
+        .find(&squeeze("stop_engine_in_slot(acct, engine).await"))
+        .unwrap_or_else(|| panic!("Windows: the old engine is stopped under the session lock:\n{rotate}"));
+    let start = rotate
+        .find("start_engine_if_possible(")
+        .unwrap_or_else(|| panic!("Windows: the engine starts again:\n{rotate}"));
+    assert!(
+        stop < start,
+        "Windows: the old engine stops before the start, so a config read failure cannot leave it on the ended token:\n{rotate}"
     );
 }
