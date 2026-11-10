@@ -24,6 +24,24 @@ fn errors_map_to_the_windows_reasons() {
     assert_eq!(reason(404), "not-found");
     assert_eq!(reason(401), "signed-out");
     assert_eq!(reason(500), "server");
+    // A 403 is not asserted here: core's `ShareFlowError::from_status(403)` answers `Unauthorized`
+    // (core rev f76ccfc, `share_flow/mod.rs:139`), which `flow_reason` maps to `signed-out`. That
+    // mapping lives in core, not this repo; follow-up task 2437. This repo's own `set_access_reason`
+    // maps 403 to `failed` and is covered by the test below.
+}
+
+#[test]
+fn a_403_on_set_access_is_not_a_signed_out_session() {
+    assert_eq!(set_access_reason(200), None);
+    assert_eq!(set_access_reason(204), None);
+    assert_eq!(set_access_reason(401), Some("signed-out"));
+    assert_eq!(
+        set_access_reason(403),
+        Some("failed"),
+        "a frozen account is not a signed-out session"
+    );
+    assert_eq!(set_access_reason(404), Some("not-found"));
+    assert_eq!(set_access_reason(500), Some("failed"));
 }
 
 #[test]
