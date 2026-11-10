@@ -4,7 +4,7 @@
 //! The list never loads from the network (DW-0401 Rules): it is the copy on this PC.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -297,6 +297,59 @@ fn prefer(a: &FileEntry, b: &FileEntry) -> bool {
     let known = |e: &FileEntry| e.remote_updated_at > 0;
     let not_local = |e: &FileEntry| e.status != FileStatus::Local;
     (known(a), not_local(a), std::cmp::Reverse(&a.file_id)) > (known(b), not_local(b), std::cmp::Reverse(&b.file_id))
+}
+
+/// Drop the rows a freshly applied snapshot no longer has. `prune_absent` keeps a row whose
+/// operation is still queued; a terminal-failed operation (out of attempts, not paused) is not in
+/// flight, so its row must leave with the snapshot instead of staying forever (slice 58: a failed
+/// upload left an "Unavailable file …" row that could not be trashed). Returns every pruned row,
+/// children before parents, so the caller can remove each on-disk placeholder.
+pub(crate) fn drop_absent_rows(
+    db: &StateDb,
+    seen: &HashSet<String>,
+    snapshot_fetched_at: i64,
+) -> rusqlite::Result<Vec<state_db::PrunedRow>> {
+    let mut pruned = db.prune_absent(seen, snapshot_fetched_at)?;
+    // `prune_absent` refuses an empty snapshot; never drop on one here either.
+    if seen.is_empty() {
+        return Ok(pruned);
+    }
+    // A row leaves only when every op it still has is a terminal failure. `waiting_rows` is the
+    // queue as the sign-out path reads it: one row per op, with its attempts and pause.
+    let mut ops_by_file: HashMap<String, Vec<state_db::WaitingRow>> = HashMap::new();
+    for op in db.waiting_rows()? {
+        if let Some(file_id) = &op.file_id {
+            ops_by_file.entry(file_id.clone()).or_default().push(op);
+        }
+    }
+    for (file_id, ops) in ops_by_file {
+        if seen.contains(&file_id) {
+            continue;
+        }
+        if ops.iter().any(|op| op.paused || op.attempts < op.max_attempts) {
+            continue; // still in flight: the snapshot cannot contradict it
+        }
+        let Some(entry) = db.get_file(&file_id)? else {
+            continue;
+        };
+        if entry.status == FileStatus::Uploading || entry.status == FileStatus::Trashing {
+            continue;
+        }
+        if entry.remote_updated_at >= snapshot_fetched_at {
+            continue; // touched at/after the snapshot: the snapshot predates it
+        }
+        let contract = db.get_file_contract_state(&file_id)?;
+        if contract.is_some_and(|c| c.namespace != Namespace::MyFiles) {
+            continue;
+        }
+        if let Some(parent) = entry.parent_id.as_deref()
+            && db.get_file(parent)?.is_some_and(|p| p.status == FileStatus::Trashing)
+        {
+            continue; // the trash view's content, not a dead row
+        }
+        pruned.extend(db.delete_file_subtree(&file_id)?);
+    }
+    Ok(pruned)
 }
 
 /// The crumbs from the root to `folder` (both included). A cycle or a missing parent ends the walk.

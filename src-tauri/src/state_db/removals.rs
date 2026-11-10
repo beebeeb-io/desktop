@@ -256,6 +256,17 @@ impl StateDb {
             .flatten()
             .flatten()
         };
+        // Slice 58: a removed row must not be named by a queued operation any more. The
+        // reconcile path enforces the same invariant (nothing names a dropped row); a
+        // terminal-failed op would otherwise keep the row in `waiting_rows` forever.
+        let drop_ops = |tx: &rusqlite::Transaction, file_id: &str| -> rusqlite::Result<()> {
+            tx.execute(
+                "DELETE FROM upload_resume WHERE op_id IN (SELECT op_id FROM operation_queue WHERE file_id = ?1)",
+                params![file_id],
+            )?;
+            tx.execute("DELETE FROM operation_queue WHERE file_id = ?1", params![file_id])?;
+            Ok(())
+        };
         if root.is_dir {
             // Normalize BOTH ends (`trim_matches`), matching `placeholder_path_under`
             // / `safe_join_under_root`: a folder row can be stored leading-slash-
@@ -292,6 +303,7 @@ impl StateDb {
                     }
                     let old_parent = old_parent_of(&tx, &d.file_id);
                     tx.execute("DELETE FROM files WHERE file_id = ?1", params![d.file_id])?;
+                    drop_ops(&tx, &d.file_id)?;
                     record_file_change_conn(&tx, &d.file_id, FpChangeKind::Deleted, old_parent)?;
                     removed.push(d);
                 }
@@ -303,6 +315,7 @@ impl StateDb {
         if !has_finder_write_conn(&tx, &root.file_id)? {
             let root_old_parent = old_parent_of(&tx, &root.file_id);
             tx.execute("DELETE FROM files WHERE file_id = ?1", params![root.file_id])?;
+            drop_ops(&tx, &root.file_id)?;
             record_file_change_conn(&tx, &root.file_id, FpChangeKind::Deleted, root_old_parent)?;
             removed.push(root);
         }
