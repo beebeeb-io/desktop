@@ -1,0 +1,31 @@
+/* Desktop's override for the shared CodeMirror theme (task 2321).
+ *
+ * packages/shared/src/drive-ui/editor/editor.css is a generated mirror, so it still derives the editor's
+ * selection and find-match colours from --color-amber. Amber is for encryption state and primary actions;
+ * a text selection and a search hit are chrome, so desktop repaints them as neutral ink/paper mixes here.
+ * The selectors carry `html.v2` so they beat the shared rules on specificity, whatever the CSS order.
+ * Syntax token hues are untouched: they stay as the shared theme defines them.
+ */
+
+html.v2 .bb-editor {
+  --ed-selection: color-mix(in oklab, var(--color-ink) 16%, transparent);
+}
+
+html.v2 .bb-editor .cm-searchMatch {
+  background: color-mix(in oklab, var(--color-ink) 12%, transparent);
+}
+
+html.v2 .bb-editor .cm-searchMatch-selected {
+  background: color-mix(in oklab, var(--color-ink) 26%, transparent);
+}
+
+html.v2 .bb-editor .cm-panel.cm-search input[type='text']:focus {
+  outline: 2px solid color-mix(in oklab, var(--color-ink) 45%, transparent);
+  outline-offset: 1px;
+}
+
+/* CodeMirror's find field carries no `type` attribute, so the shared rule above never reaches it; this one does. */
+html.v2 .bb-editor .cm-panel.cm-search input.cm-textfield:focus {
+  outline: 2px solid color-mix(in oklab, var(--color-ink) 45%, transparent);
+  outline-offset: 1px;
+}
