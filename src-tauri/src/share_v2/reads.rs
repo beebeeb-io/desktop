@@ -211,6 +211,19 @@ pub(crate) async fn share_people(state: State<'_, AppState>, item_id: String) ->
     Ok(members)
 }
 
+/// What the access PATCH's status answers, in the window's `DriveSourceError` words. A 403 on this
+/// route is the server refusing this account (frozen, or not the owner), not an ended session: the
+/// session is still valid, so it is the generic `failed`, never `signed-out` (which clears the
+/// surface and offers sign-in). Only a 401 says the session ended.
+pub(super) fn set_access_reason(status: u16) -> Option<&'static str> {
+    match status {
+        200..=299 => None,
+        404 => Some("not-found"),
+        401 => Some("signed-out"),
+        _ => Some("failed"),
+    }
+}
+
 /// `member_id` is the invite id.
 #[tauri::command]
 pub(crate) async fn share_set_access(
@@ -223,11 +236,9 @@ pub(crate) async fn share_set_access(
     self::item_id(&item_id)?;
     let req = super::safety::set_access_request(&member_id, &permission)?;
     let resp = send(&transport::client()?, &u, req).await?;
-    match resp.status {
-        200..=299 => Ok(()),
-        404 => Err("not-found".into()),
-        401 | 403 => Err("signed-out".into()),
-        _ => Err("failed".into()),
+    match set_access_reason(resp.status) {
+        None => Ok(()),
+        Some(reason) => Err(reason.into()),
     }
 }
 
