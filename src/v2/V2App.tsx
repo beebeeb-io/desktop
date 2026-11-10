@@ -47,6 +47,11 @@ const TITLES: Record<SectionId, string> = {
   open: 'Beebeeb',
 }
 
+/** The window caption: Files is the product's own name, every other section is "<section> - <product>". */
+export function windowTitle(section: SectionId): string {
+  return section === 'files' ? 'Beebeeb Drive' : `${TITLES[section]} - Beebeeb Drive`
+}
+
 /** The sidebar row a section lights: a file open in its viewer or editor is still in Files (M3d). */
 const sidebarRow = (section: SectionId): SectionId => (section === 'open' ? 'files' : section)
 
@@ -113,7 +118,9 @@ export function V2Shell() {
   useShortcuts(onCommand)
 
   const Section = SECTION_COMPONENTS[nav.route.section]
-  const title = nav.route.section === 'files' ? 'Beebeeb' : `${TITLES[nav.route.section]} - Beebeeb`
+  // Kept inline: the component harness executes V2Shell with explicit bindings, so a module-level
+  // call would be undefined there. `windowTitle` is the same expression, exported for the test.
+  const title = nav.route.section === 'files' ? 'Beebeeb Drive' : `${TITLES[nav.route.section]} - Beebeeb Drive`
 
   return (
     <div className="flex h-screen flex-col bg-paper font-sans text-ink">
