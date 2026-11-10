@@ -1,9 +1,10 @@
 // The Office ribbon under the window's toolbar (DW-1507, DW-1550, DW-1508, DW-1559, DW-1509, DW-1560): tabs, the
 // Ctrl+K search pill, Share and Save, then the active tab's controls. The active tab is underlined in ink, never
 // amber (task 2321); Save is a plain button (New stays the window's one amber control).
-import type { ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Icon, type IconName } from '@beebeeb/shared/design'
-import { IMPRESS_LAYOUTS, type OfficeApp } from '@beebeeb/shared/drive-ui'
+import { CURATED_FONT_FAMILIES, FONT_SIZES, IMPRESS_LAYOUTS, WRITER_PARAGRAPH_STYLES, type OfficeApp, type UnoArg } from '@beebeeb/shared/drive-ui'
 import { BTN, FOCUS } from '../../files/ui'
 
 export const OFFICE_TABS: Record<OfficeApp, string[]> = {
@@ -43,6 +44,18 @@ export function Glyph({ name, size = 15 }: { name: string; size?: number }) {
   )
 }
 
+/** A chevron control's list: the choices, and the engine command a choice dispatches. */
+export interface SelectSpec {
+  value: string
+  width: number
+  options: { value: string; label: string }[]
+  /** The `.uno:` command the bridge dispatches for a choice. Absent: the button is disabled. */
+  command?: string
+  args?: (value: string) => UnoArg[]
+  /** Why the button cannot open, shown as its title. */
+  disabledReason?: string
+}
+
 /** One ribbon control. `uno` is the engine command it runs; `text` shows a label beside the glyph. */
 export interface Control {
   id: string
@@ -55,7 +68,7 @@ export interface Control {
   shortcut?: string
   on?: boolean
   off?: boolean
-  select?: { value: string; width: number }
+  select?: SelectSpec
   sep?: boolean
 }
 
@@ -66,8 +79,24 @@ const UNDO: Control[] = [
   { id: 'redo', label: 'Redo', uno: '.uno:Redo', glyph: 'redo', shortcut: 'Ctrl+Y', off: true },
 ]
 const FONT: Control[] = [
-  { id: 'font', label: 'Font', select: { value: 'Inter', width: 92 } },
-  { id: 'size', label: 'Font size', select: { value: '11', width: 48 } },
+  {
+    id: 'font', label: 'Font',
+    select: {
+      value: 'Inter', width: 92,
+      options: CURATED_FONT_FAMILIES.map((f) => ({ value: f, label: f })),
+      command: '.uno:CharFontName',
+      args: (v) => [{ name: 'CharFontName.FamilyName', value: v }],
+    },
+  },
+  {
+    id: 'size', label: 'Font size',
+    select: {
+      value: '11', width: 48,
+      options: FONT_SIZES.map((s) => ({ value: String(s), label: String(s) })),
+      command: '.uno:FontHeight',
+      args: (v) => [{ name: 'FontHeight.Height', value: Number(v) }],
+    },
+  },
 ]
 const BIU: Control[] = [
   { id: 'bold', label: 'Bold', uno: '.uno:Bold', letter: { text: 'B', style: { fontWeight: 800 } }, shortcut: 'Ctrl+B' },
@@ -88,7 +117,12 @@ export function ribbonControls(app: OfficeApp, tab: string): Control[] {
   if (app === 'writer' && tab === 'Review') return [{ id: 'word-count', label: 'Word count…', uno: '.uno:WordCountDialog', icon: 'file-text', text: 'Word count…' }]
   if (app === 'writer') return [
     ...UNDO, sep(1),
-    { id: 'style', label: 'Paragraph style', select: { value: 'Normal text', width: 112 } }, ...FONT, sep(2),
+    { id: 'style', label: 'Paragraph style', select: {
+      value: 'Normal text', width: 112,
+      options: WRITER_PARAGRAPH_STYLES.map((s) => ({ value: s.label, label: s.label })),
+      command: '.uno:StyleApply',
+      args: (v) => WRITER_PARAGRAPH_STYLES.find((s) => s.label === v)?.args ?? [],
+    } }, ...FONT, sep(2),
     ...BIU,
     { id: 'strike', label: 'Strikethrough', uno: '.uno:Strikeout', letter: { text: 'S', style: { textDecoration: 'line-through' } } },
     { id: 'text-colour', label: 'Text colour', uno: '.uno:Color', glyph: 'color' },
@@ -147,15 +181,71 @@ export function ribbonControls(app: OfficeApp, tab: string): Control[] {
 
 const TBTN = `inline-flex h-7 flex-none items-center gap-1.5 rounded-md px-1.5 text-ink hover:bg-paper-3 disabled:opacity-40 disabled:hover:bg-transparent ${FOCUS}`
 
+/** A chevron control: its list is portaled to document.body, so the toolbar's `overflow-hidden` cannot clip it. */
+function SelectButton({ c, onRun }: { c: Control; onRun: (c: Control) => void }) {
+  const spec = c.select!
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLUListElement>(null)
+  const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
+  // No engine command for this control: it cannot open, and its title says why.
+  const disabled = !spec.command || !!spec.disabledReason
+  const disabledReason = spec.disabledReason ?? 'Not available in this version.'
+
+  useLayoutEffect(() => {
+    if (!open || !buttonRef.current) { setPlace(null); return }
+    const r = buttonRef.current.getBoundingClientRect()
+    const view = { width: window.innerWidth || 800, height: window.innerHeight || 600 }
+    const edge = 8
+    const gap = 4
+    const width = Math.max(spec.width, r.width)
+    const left = Math.max(edge, Math.min(r.left, view.width - width - edge))
+    const top = r.bottom + gap
+    setPlace({ top, left, maxHeight: Math.max(0, view.height - edge - top) })
+  }, [open, spec.width])
+
+  useEffect(() => {
+    if (!open) return
+    const off = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false) } }
+    document.addEventListener('mousedown', off)
+    document.addEventListener('keydown', key, true)
+    return () => { document.removeEventListener('mousedown', off); document.removeEventListener('keydown', key, true) }
+  }, [open])
+
+  const menu = open && place ? (
+    <ul ref={menuRef} role="listbox" aria-label={c.label} className="z-30 min-w-[140px] overflow-y-auto rounded-lg border border-line bg-paper py-1 text-[13px] shadow-lg" style={{ position: 'fixed', top: place.top, left: place.left, maxHeight: place.maxHeight }}>
+      {spec.options.map((o) => (
+        <li key={o.value} role="option" aria-selected={o.value === spec.value}>
+          <button type="button" onClick={() => { onRun({ ...c, select: { ...spec, value: o.value } }); setOpen(false) }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-ink hover:bg-paper-2">
+            <span className="w-3">{o.value === spec.value ? <Icon name="check" size={12} /> : null}</span>
+            {o.label}
+          </button>
+        </li>
+      ))}
+    </ul>
+  ) : null
+
+  return (
+    <div className="relative flex-none">
+      <button ref={buttonRef} type="button" data-control={c.id} aria-label={c.label} title={disabled ? disabledReason : c.label}
+        aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((o) => !o)} style={{ minWidth: spec.width }}
+        className={`inline-flex h-6 flex-none items-center gap-1 rounded-md border border-line bg-paper px-2 text-[12px] text-ink disabled:opacity-40 ${FOCUS}`}>
+        <span className="flex-1 truncate text-left">{spec.value}</span><Icon name="chevron-down" size={11} />
+      </button>
+      {menu ? createPortal(menu, document.body) : null}
+    </div>
+  )
+}
+
 function ControlButton({ c, onRun }: { c: Control; onRun: (c: Control) => void }) {
   if (c.sep) return <span aria-hidden="true" className="mx-1 h-5 w-px flex-none bg-line" />
-  if (c.select) {
-    return (
-      <button type="button" aria-label={c.label} title={c.label} onClick={() => onRun(c)} style={{ minWidth: c.select.width }} className={`inline-flex h-6 flex-none items-center gap-1 rounded-md border border-line bg-paper px-2 text-[12px] text-ink ${FOCUS}`}>
-        <span className="flex-1 truncate text-left">{c.select.value}</span><Icon name="chevron-down" size={11} />
-      </button>
-    )
-  }
+  if (c.select) return <SelectButton c={c} onRun={onRun} />
   return (
     <button
       type="button" data-control={c.id} aria-label={c.label} title={c.shortcut ? `${c.label}  ${c.shortcut}` : c.label} aria-pressed={c.on ? true : undefined} disabled={c.off} onClick={() => onRun(c)}

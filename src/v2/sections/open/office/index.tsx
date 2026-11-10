@@ -261,6 +261,11 @@ export function OfficeEditor({ target, nav }: { target: OfficeTarget; nav: Navig
 
   const run = useCallback((command: string, args?: UnoArg[]) => { void bridgeRef.current?.dispatch(command, args) }, [])
   const onControl = (c: Control) => {
+    if (c.select) {
+      // A chevron choice carries the picked value; dispatch the engine command the bridge has for it.
+      if (c.select.command) run(c.select.command, c.select.args?.(c.select.value))
+      return
+    }
     if (c.id === 'insert-table') return setTableDialog(true)
     if (c.id === 'present') return run('.uno:Presentation')
     if (c.id === 'insert-image' || c.id === 'insert-link') return setError('Use Ctrl+K › Insert for images and links.')
