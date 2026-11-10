@@ -223,12 +223,19 @@ pub(crate) async fn share_set_access(
     self::item_id(&item_id)?;
     let req = super::safety::set_access_request(&member_id, &permission)?;
     let resp = send(&transport::client()?, &u, req).await?;
-    match resp.status {
-        200..=299 => Ok(()),
-        404 => Err("not-found".into()),
-        401 | 403 => Err("signed-out".into()),
-        _ => Err("failed".into()),
-    }
+    set_access_reason(resp.status).map_or(Ok(()), |reason| Err(reason.into()))
+}
+
+/// What the set-access PATCH's status answers the window (`None` on success). A 403 here is the
+/// server refusing this account (frozen, not the owner), not an ended session: the session is still
+/// valid, so it is `failed`, while only a 401 means signed-out.
+pub(super) fn set_access_reason(status: u16) -> Option<&'static str> {
+    Some(match status {
+        200..=299 => return None,
+        404 => "not-found",
+        401 => "signed-out",
+        _ => "failed",
+    })
 }
 
 macro_rules! not_yet {

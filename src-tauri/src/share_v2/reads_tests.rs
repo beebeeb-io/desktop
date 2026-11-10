@@ -15,6 +15,20 @@ fn request_shapes() {
 }
 
 #[test]
+fn a_403_on_set_access_is_not_a_signed_out_session() {
+    assert_eq!(set_access_reason(401), Some("signed-out"));
+    assert_eq!(
+        set_access_reason(403),
+        Some("failed"),
+        "a frozen account is not a signed-out session"
+    );
+    assert_eq!(set_access_reason(404), Some("not-found"));
+    assert_eq!(set_access_reason(500), Some("failed"));
+    assert_eq!(set_access_reason(200), None);
+    assert_eq!(set_access_reason(204), None);
+}
+
+#[test]
 fn errors_map_to_the_windows_reasons() {
     let reason = |status: u16| {
         super::flows::flow_reason(ShareFlowError::from_status(&HttpResponse::from_text(
