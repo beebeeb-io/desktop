@@ -2,7 +2,11 @@
 // the existing network sentence with Try again when the profile read never answers. No fixture account.
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createElement, type ReactNode } from 'react'
-import { command } from '../src/desktopApi'
+// settingsPaneSurfaces.test.tsx and wholeAppHonesty.test.ts mock this module for the whole bun process (command
+// answers unsupported for every name). A query-suffixed copy is a separate module instance, so this file keeps the
+// real command whichever file loaded first; settingsPaneSurfaces uses the same trick for its own real import.
+const apiPath = new URL('../src/desktopApi.ts', import.meta.url).pathname
+const { command } = (await import(`${apiPath}?real=1`)) as typeof import('../src/desktopApi')
 import { ERRORS, PROFILE_TIMEOUT_MS, accountRowLabel, errorText, initialAccountState } from '../src/v2/sections/settings/account/data'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 
