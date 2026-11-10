@@ -41,6 +41,24 @@ export function initialAccountState(): AccountState {
   }
 }
 
+/**
+ * How long the account row and the Account page wait for `account_profile` before saying the network is unreachable.
+ * A read that answers clears the timer; a read that never answers must not leave the page blank or the row on "Account".
+ */
+export const PROFILE_TIMEOUT_MS = 8000
+
+/**
+ * The sidebar's account row (DW-0401). While the read is in flight it says "Account"; once it answers it shows the
+ * display name, else the email. A failed read with nothing known is `''`: the row is empty and the Account page holds
+ * the error, so "Account" never stays on screen as if it were the person's name.
+ */
+export function accountRowLabel(display: string | null | undefined, email: string | null | undefined, pending: boolean): string {
+  if (pending) return 'Account'
+  const name = display?.trim() ?? ''
+  if (name) return name
+  return email?.trim() ?? ''
+}
+
 const OS: Record<string, string> = { app: 'Desktop app', windows: 'Windows', macos: 'macOS', linux: 'Linux', ios: 'iOS', android: 'Android', web: 'Web', cli: 'Command line' }
 
 /** Server sessions grouped by device name, so the products read as one list (DW-A55). */
@@ -73,8 +91,22 @@ export function useAccount(scenario: Scenario = 'default') {
   const [sessionList, setSessionList] = useState<CommandResult<AccountSessionList> | null>(null)
   const [localPc, setLocalPc] = useState<Pick<DevicesPaneInput, 'sync' | 'version' | 'platform'>>({ sync: null, version: null, platform: null })
   const reload = useCallback(async () => {
+    // A profile read that never answers must not leave the page blank: after PROFILE_TIMEOUT_MS it says the network is
+    // unreachable (the existing sentence) and offers Try again. A read that answers clears the timer, so a slow but
+    // working server is never called unreachable.
+    let profileAnswered = false
+    // The literal is PROFILE_TIMEOUT_MS: the test harness runs this hook with only its own bindings, so a module
+    // constant here would be a free name it cannot resolve.
+    const timer = window.setTimeout(() => {
+      if (!profileAnswered) setError('network')
+    }, 8000)
+    const profileRead = command<AccountProfile>('account_profile').then((r) => {
+      profileAnswered = true
+      window.clearTimeout(timer)
+      return r
+    })
     const [profile, name, sessions, score, activity, logging, passkeys, sync, version, platform] = await Promise.all([
-      command<AccountProfile>('account_profile'),
+      profileRead,
       command<{ display_name: string | null }>('account_display_name'),
       command<AccountSessionList>('account_session_list'),
       command<SecurityScore>('account_security_score'),

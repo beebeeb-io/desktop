@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { Suspense } from 'react'
 import { command } from '../src/desktopApi'
 import { Sidebar } from '../src/v2/chrome/Sidebar'
+import { PROFILE_TIMEOUT_MS, accountRowLabel } from '../src/v2/sections/settings/account/data'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 
 const mounted: Mounted[] = []
@@ -33,6 +34,8 @@ function shell(backend: Record<string, (args: unknown) => unknown>, nav: Nav): M
     expand: true,
     bindings: {
       command,
+      accountRowLabel,
+      PROFILE_TIMEOUT_MS,
       useDriveSource: () => source,
       useNavigation: () => nav,
       useSidebarCounts: () => ({}),
@@ -88,7 +91,7 @@ describe('the sidebar account row shows your name (DW-0401)', () => {
     }
   })
 
-  test('while the read is in flight, and when it fails, the row says Account and invents no name', async () => {
+  test('while the read is in flight the row says Account; a failed read with nothing known leaves it empty', async () => {
     const pending = shell({
       account_display_name: () => new Promise(() => {}),
       account_profile: () => new Promise(() => {}),
@@ -96,12 +99,13 @@ describe('the sidebar account row shows your name (DW-0401)', () => {
     await pending.flush()
     expect(rowText(pending)).toBe('Account')
 
+    // The account page holds the error; the row does not keep "Account" as if it were the person's name.
     const failed = shell({
       account_display_name: () => { throw new Error('network') },
       account_profile: () => { throw new Error('network') },
     }, nav())
     await failed.flush()
-    expect(rowText(failed)).toBe('Account')
+    expect(rowText(failed)).toBe('')
   })
 
   test('moving to another section re-reads, so a rename shows without a restart', async () => {
