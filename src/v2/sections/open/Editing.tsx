@@ -3,6 +3,7 @@
 import { useRef, type ReactNode } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from '@beebeeb/shared/drive-ui'
+import './editor-chrome.css'
 import { EditorView } from '@codemirror/view'
 import { openSearchPanel } from '@codemirror/search'
 import { BTN, BTN_AMBER, FOCUS, Modal } from '../files/ui'
