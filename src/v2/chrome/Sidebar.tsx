@@ -36,7 +36,7 @@ const TB = 1000 ** 4
  */
 function storageFigure(bytes: number): string {
   if (bytes === 0) return '0 B'
-  const [size, unit] = bytes >= TB ? [TB, 'TB'] : [GB, 'GB']
+  const [size, unit]: [number, string] = bytes >= TB ? [TB, 'TB'] : [GB, 'GB']
   const value = bytes / size
   const text = value < 10 ? value.toFixed(1).replace(/\.0$/, '') : String(Math.round(value))
   return `${text} ${unit}`
