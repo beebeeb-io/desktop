@@ -1,5 +1,6 @@
-// The 12 words are typed on three screens. Each one must keep the window out of capture while it is open, and
-// release that when it closes. The harness runs the real view and the real usePrivateScreen.
+// The 12 words are typed on three screens. Each one tells Rust it is open, and clears that when it closes.
+// Rust must not hide the window from capture: that removes it from the screen the person is typing on.
+// The harness runs the real view and the real usePrivateScreen.
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mount, type Mounted } from './fixtures/componentHarness'
 
@@ -40,8 +41,8 @@ function open(file: string, name: string, props: unknown, bindings: Record<strin
 
 const words = Array.from({ length: 12 }, () => '')
 
-describe('the recovery phrase keeps the screen private', () => {
-  test('setting up this device keeps capture off while the 12 words are typed', async () => {
+describe('the recovery phrase tells Rust the screen is open', () => {
+  test('setting up this device tells Rust it is open while the 12 words are typed', async () => {
     const m = open('v2/auth/Steps.tsx', 'PhraseView', {
       words, unknown: [], state: 'idle', onWords() {}, onRestore() {}, onApproveInstead() {}, onLost() {},
     }, {
@@ -54,7 +55,7 @@ describe('the recovery phrase keeps the screen private', () => {
     expect(seen.at(-1)).toEqual({ name: 'auth_screen_private', args: { on: false } })
   })
 
-  test('confirming the phrase keeps capture off while the words are typed', async () => {
+  test('confirming the phrase tells Rust it is open while the words are typed', async () => {
     const m = open('v2/auth/create/views.tsx', 'ConfirmStep', {
       positions: [1], answers: [''], suggestions: [], active: 0, wrong: false, busy: false,
       onAnswer() {}, onActive() {}, onShowAgain() {}, onConfirm() {},
@@ -68,7 +69,7 @@ describe('the recovery phrase keeps the screen private', () => {
     expect(seen.at(-1)).toEqual({ name: 'auth_screen_private', args: { on: false } })
   })
 
-  test('recovering with the phrase keeps capture off while the words are typed', async () => {
+  test('recovering with the phrase tells Rust it is open while the words are typed', async () => {
     const m = open('v2/auth/forgot/index.tsx', 'RecoverPhraseView', {
       email: 'a@b.c', words, unknown: [], state: 'idle', onEmail() {}, onWords() {}, onVerify() {}, onLost() {},
     }, {

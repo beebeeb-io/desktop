@@ -53,6 +53,19 @@ pub(crate) async fn auth_windows_hello_available() -> bool {
     }
 }
 
+/// Whether this PC holds the vault key for the active account. The answer is a bool. No account, or a check that
+/// did not finish, counts as present so the window stays on the lock instead of asking for the recovery phrase.
+#[tauri::command]
+pub(crate) async fn auth_vault_key_present(state: tauri::State<'_, crate::AppState>) -> Result<bool, String> {
+    let account_id = match state.active_account() {
+        Ok(account) => account.id.as_str().to_string(),
+        Err(_) => return Ok(true),
+    };
+    Ok(tokio::task::spawn_blocking(move || crate::keychain_vault_key_present(&account_id))
+        .await
+        .unwrap_or(true))
+}
+
 /// DW-0009: Windows Hello, then the existing keychain unlock. A cancel or a miss leaves the window locked.
 #[tauri::command]
 pub(crate) async fn auth_unlock_with_windows_hello(

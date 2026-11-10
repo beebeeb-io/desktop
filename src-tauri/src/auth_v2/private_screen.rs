@@ -1,8 +1,8 @@
 //! Screens that show or take a secret (B11 ruling, DW-0009): the 12 words and the lock.
 //!
-//! - `auth_screen_private(on)`: while such a screen is shown, the window is left out of screenshots, screen sharing
-//!   and the Task View / Alt+Tab thumbnails (`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`). Windows-only code;
-//!   it has only been checked on Linux, so it needs the lead's native Windows rung. Elsewhere it is a no-op.
+//! - `auth_screen_private(on)`: the web view calls this while such a screen is showing. It does not hide the window.
+//!   Hiding it from capture also hides it from the screen share the person is using to type the words, so the call
+//!   only clears a leftover capture-exclusion flag (`WDA_NONE`). Elsewhere it is a no-op.
 //! - [`copy_for_60s`]: Rust writes a secret to the clipboard itself and clears it after 60 seconds if the clipboard
 //!   still holds it. The web view never runs the copy and never reads the clipboard. Only a SHA-256 of the copied text
 //!   is kept for the comparison, never the text.
@@ -33,11 +33,13 @@ mod imp {
     use std::ffi::c_void;
 
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_NONE};
 
     pub fn set(raw: isize, on: bool) -> Result<(), String> {
-        let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
-        unsafe { SetWindowDisplayAffinity(HWND(raw as *mut c_void), affinity) }.map_err(|_| "internal".to_string())
+        // `on` stays in the command so the web view can still say the screen opened or closed.
+        // The window stays in capture either way: exclusion removed it from the view the person watches.
+        let _ = on;
+        unsafe { SetWindowDisplayAffinity(HWND(raw as *mut c_void), WDA_NONE) }.map_err(|_| "internal".to_string())
     }
 }
 
@@ -74,6 +76,14 @@ pub(crate) fn copy_for_60s(app: &tauri::AppHandle, text: Zeroizing<String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_stays_in_capture_while_a_secret_is_on_screen() {
+        let src = include_str!("private_screen.rs");
+        let excluded = ["WDA_EXCLUDE", "FROMCAPTURE"].concat();
+        assert!(!src.contains(&excluded), "that flag removes the window from the capture the person is watching");
+        assert!(src.contains("WDA_NONE"));
+    }
 
     #[test]
     fn the_clipboard_is_cleared_only_while_it_still_holds_the_copy() {

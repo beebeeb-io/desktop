@@ -1169,9 +1169,9 @@ pub(super) fn local_data_owner(sources: &LocalSources) -> Result<Option<account_
     }
 }
 
-/// Does the Keychain still hold a vault key for this account slot, in the id-keyed or the legacy store? It never
-/// unlocks and never reads the key (the real Keychain answers from the item's attributes). Fails closed.
-#[cfg(not(target_os = "windows"))]
+/// Does this PC still hold a vault key for this account slot, in the id-keyed or the legacy store? It never
+/// unlocks. A store that can answer without the blob does; otherwise the blob is dropped before the bool returns.
+/// A store that cannot be read counts as holding a key.
 pub(super) fn keychain_vault_key_present(account_id: &str) -> bool {
     vault_key_in_either_layout(
         &platform_keychain_store_for(account_id),
@@ -1181,7 +1181,6 @@ pub(super) fn keychain_vault_key_present(account_id: &str) -> bool {
 
 /// The question over any two stores (the id-keyed layout, then the legacy one), so a test can hold a fake in each. A store that
 /// cannot answer counts as holding a key (`keychain::holds_vault_key`'s fail-closed rule): never a reason to say "no key".
-#[cfg(not(target_os = "windows"))]
 pub(super) fn vault_key_in_either_layout<A: keychain::AuthSecretStore, B: keychain::AuthSecretStore>(
     id_keyed: &A,
     legacy: &B,

@@ -9,12 +9,13 @@ import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
+import { SignInFlow } from './index'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 import { usePrivateScreen } from './privateScreen'
 import { hasNoPlan } from './plan'
 
-type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
+type GateState = 'checking' | 'signed-out' | 'locked' | 'needs-phrase' | 'no-plan' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
@@ -22,7 +23,12 @@ async function readGate(): Promise<GateState> {
   const status = await command<{ logged_in: boolean; vault_unlocked?: boolean }>('sync_status')
   if (!status.ok) return 'ready'
   if (!status.value.logged_in) return 'signed-out'
-  if (status.value.vault_unlocked === false) return 'locked'
+  if (status.value.vault_unlocked === false) {
+    const key = await command<boolean>('auth_vault_key_present')
+    // No key on this PC is the 12 words. A key, or a store that did not answer, stays on the lock.
+    if (key.ok && key.value === false) return 'needs-phrase'
+    return 'locked'
+  }
   const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
   return sub.ok && hasNoPlan(sub.value) ? 'no-plan' : 'ready'
 }
@@ -33,17 +39,37 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // It is held here, not in that screen, because the next check (a focus brings one) unmounts the screen once the session
   // is gone.
   const [signedOutWarning, setSignedOutWarning] = useState<string | null>(null)
-  const check = useCallback(() => { void readGate().then(setState) }, [])
+  // leaveFlow is set only when this sign-in flow finished. A focus event is not that: password sign-in
+  // stores the session before the 12-word step paints, and a focus check would replace that step with the lock.
+  const check = useCallback((leaveFlow = false) => {
+    void readGate().then((next) => {
+      setState((current) => {
+        if (!leaveFlow && current === 'signed-out' && (next === 'locked' || next === 'needs-phrase')) return current
+        return next
+      })
+    })
+  }, [])
   useEffect(() => {
-    check()
+    check(false)
+    const onFocus = () => check(false)
     // "Check again" also runs when Beebeeb comes back to the front (DW-0014); a lock or sign-out elsewhere shows too.
-    window.addEventListener('focus', check)
-    return () => window.removeEventListener('focus', check)
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [check])
-  if (signedOutWarning) return <SignedOutWarning sentence={signedOutWarning} onOk={() => { setSignedOutWarning(null); check() }} />
+  if (signedOutWarning) {
+    return (
+      <SignedOutWarning
+        sentence={signedOutWarning}
+        onOk={() => { setSignedOutWarning(null); check(true) }}
+      />
+    )
+  }
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
-  if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
-  if (state === 'locked') return <LockedWindow onUnlocked={check} />
+  if (state === 'signed-out') return <AccountEntry onSignedIn={() => check(true)} onCreated={() => check(true)} />
+  if (state === 'locked') {
+    return <LockedWindow onUnlocked={() => check(true)} onUsePhrase={() => setState('needs-phrase')} />
+  }
+  if (state === 'needs-phrase') return <SignInFlow startAt="phrase" onSignedIn={() => check(true)} />
   if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
 }
@@ -69,7 +95,12 @@ function GateWindow({ children, sidebarFooter, overlay, dimSidebar = true }: { c
 }
 
 /** DW-0009: app lock. Windows Hello starts by itself; Cancel leaves the window locked and Unlock starts it again. */
-export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error?: string; onUnlock: () => void }) {
+export function LockedView({ prompt, error, onUnlock, onUsePhrase }: {
+  prompt: boolean
+  error?: string
+  onUnlock: () => void
+  onUsePhrase: () => void
+}) {
   usePrivateScreen()
   return (
     <GateWindow overlay={prompt ? <HelloPrompt reason="Unlock Beebeeb" /> : undefined}>
@@ -79,12 +110,15 @@ export function LockedView({ prompt, error, onUnlock }: { prompt: boolean; error
         <p className="mt-1 mb-5 text-[13px] text-ink-2">Unlock to see your files.</p>
         {error && <p role="alert" className="-mt-2 mb-4 text-[12px] text-ink-2">{error}</p>}
         <BBButton variant="amber" onClick={onUnlock}><span className="text-[13px] font-medium">Unlock</span></BBButton>
+        <BBButton variant="ghost" onClick={onUsePhrase}>
+          <span className="text-[13px] font-medium">Use your recovery phrase</span>
+        </BBButton>
       </section>
     </GateWindow>
   )
 }
 
-function LockedWindow({ onUnlocked }: { onUnlocked: () => void }) {
+function LockedWindow({ onUnlocked, onUsePhrase }: { onUnlocked: () => void; onUsePhrase: () => void }) {
   const [prompt, setPrompt] = useState(false)
   const [error, setError] = useState<string>()
   const unlock = useCallback(async () => {
@@ -98,7 +132,7 @@ function LockedWindow({ onUnlocked }: { onUnlocked: () => void }) {
   }, [onUnlocked])
   // Windows Hello starts by itself when the window opens.
   useEffect(() => { void unlock() }, [unlock])
-  return <LockedView prompt={prompt} error={error} onUnlock={() => void unlock()} />
+  return <LockedView prompt={prompt} error={error} onUnlock={() => void unlock()} onUsePhrase={onUsePhrase} />
 }
 
 /** DW-0014: signed in, no plan yet. Plans are only on the website; nothing syncs until there is one. */
