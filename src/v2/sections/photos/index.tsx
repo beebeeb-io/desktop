@@ -11,7 +11,7 @@ import { copyShareLink } from '../files/shareLink'
 import {
   loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, folderKey, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
 } from './model'
-import { useDriveExtras, type PhotoMeta, type PhotoSource } from '../../source/extras'
+import { useDriveExtras, type PhotoMeta, type PhotoSource, type TransferRow } from '../../source/extras'
 import { noteListedPhotos, PhotosView } from './PhotosView'
 import { PhotoViewer } from './Viewer'
 import { DetailsDialog, failedWords, PhotoMove, RenameDialog, ShareDialog, SourcesDialog, type FolderChoice, type SourceChoice } from './Dialogs'
@@ -26,6 +26,8 @@ export default function Section(_props: SectionProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [viewing, setViewing] = useState<string | null>(null)
   const [mode, setMode] = useState<'preview' | 'original'>('preview')
+  // DW-0605b: the original is still being read; `done`/`total` are only what the source reports in its transfer rows.
+  const [opening, setOpening] = useState<{ id: string; done?: number; total?: number } | null>(null)
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [kept, setKept] = useState<Set<string>>(new Set())
   // DW-0608: the message after Offline, for the photo it was asked on.
@@ -58,6 +60,22 @@ export default function Section(_props: SectionProps) {
     load().catch(() => setEntries([]))
     return source.subscribe((e) => { if (e.kind === 'changed') load().catch(() => {}) })
   }, [source, load])
+
+  // The bytes the download row reports while the original is opening; without both numbers the bar stays absent.
+  const openingId = opening?.id ?? null
+  useEffect(() => {
+    if (!openingId) return
+    let live = true
+    const take = (rows: TransferRow[]) => {
+      const row = rows.find((r) => r.direction === 'down' && (r.fileId === openingId || r.id === openingId))
+      const total = row?.total ?? 0
+      if (!row || total <= 0) return
+      setOpening((o) => (o && o.id === openingId ? { ...o, done: Math.max(0, Math.min(row.bytes, total)), total } : o))
+    }
+    extras.transfers().then((rows) => { if (live && Array.isArray(rows)) take(rows) }, () => {})
+    const stop = extras.subscribeTransfers((rows) => { if (live && Array.isArray(rows)) take(rows) })
+    return () => { live = false; stop() }
+  }, [openingId, extras])
 
   const setAcross = (n: Across) => { setAcrossState(n); saveAcross(n) }
   useEffect(() => {
@@ -175,10 +193,24 @@ export default function Section(_props: SectionProps) {
       <>
         <PhotoViewer
           cells={ordered} index={index} now={now} mode={mode} kept={kept.has(id)} keeping={keeping === id && kept.has(id)}
-          onBack={() => { if (dialog) return; setViewing(null); setMode('preview'); setKeeping(null) }}
-          onStep={(d) => { if (dialog) return; const n = ordered[index + d]; if (n) { setViewing(idOf(n)); setKeeping(null) } }}
-          onJump={(i) => { setViewing(idOf(ordered[i])); setKeeping(null) }}
-          onMode={(m) => { setMode(m); if (m === 'original') source.open(id).catch((e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'open the original') })) }}
+          opening={opening?.id === id}
+          progress={opening?.id === id && opening.done !== undefined && opening.total !== undefined && opening.total > 0 ? { done: opening.done, total: opening.total } : null}
+          onBack={() => { if (dialog) return; setViewing(null); setMode('preview'); setKeeping(null); setOpening(null) }}
+          onStep={(d) => { if (dialog) return; const n = ordered[index + d]; if (n) { setViewing(idOf(n)); setKeeping(null); setOpening(null) } }}
+          onJump={(i) => { setViewing(idOf(ordered[i])); setKeeping(null); setOpening(null) }}
+          onMode={(m) => {
+            if (m === 'preview') { setMode('preview'); setOpening(null); return }
+            setMode('original')
+            setOpening({ id })
+            source.open(id).then(
+              () => setOpening((o) => (o && o.id === id ? null : o)),
+              (e: unknown) => {
+                setOpening((o) => (o && o.id === id ? null : o))
+                setMode('preview')
+                showToast({ kind: 'failed', text: failedWords(e, 'open the original') })
+              },
+            )
+          }}
           onMore={(a) => {
             if (a === 'duplicate') source.duplicate([id]).then(() => { showToast({ kind: 'done', text: 'Duplicated' }); return load() }, (e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'duplicate it') }))
             else if (a === 'move') setDialog('move')
