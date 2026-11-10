@@ -601,6 +601,12 @@ impl StateDb {
     ///    NOT in the server snapshot's `seen` set, so without this guard the very
     ///    next snapshot would delete the user's in-flight upload. The
     ///    `operation_queue` join is the authoritative "do not touch" signal.
+    ///    Only an op that can still run protects the row: a terminal failure
+    ///    (`attempts >= max_attempts`, not paused) is not in flight, so its row
+    ///    leaves with the snapshot instead of staying forever (slice 58: a
+    ///    failed upload left an "Unavailable file …" row that could not be
+    ///    trashed). A paused op (waiting for auth or a replaced key) still
+    ///    protects its row.
     /// 3. **Rows still `uploading`** — belt-and-suspenders for the same in-flight
     ///    case, in the narrow window where the queue row was already consumed but
     ///    the re-key hasn't landed.
@@ -656,7 +662,9 @@ impl StateDb {
                    AND (parent_id IS NULL OR parent_id NOT IN
                         (SELECT file_id FROM files WHERE status = 'trashing'))
                    AND file_id NOT IN (
-                       SELECT file_id FROM operation_queue WHERE file_id IS NOT NULL
+                       SELECT file_id FROM operation_queue
+                       WHERE file_id IS NOT NULL
+                         AND (attempts < max_attempts OR paused_reason IS NOT NULL)
                    )",
             )?;
             let rows = stmt.query_map(params![snapshot_fetched_at], |row| {

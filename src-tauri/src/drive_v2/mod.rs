@@ -10,6 +10,8 @@
 //! Errors are `"<code>: <detail>"` with a `DriveSourceError` code; the detail is a fixed word,
 //! never a path or a name.
 
+#[cfg(test)]
+mod absent_row; // slice 58
 mod commands;
 mod dto;
 mod events;
