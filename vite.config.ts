@@ -27,5 +27,11 @@ export default defineConfig({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+    // The same isolation the Tauri main window carries (src-tauri/tauri.conf.json app.security.headers); the test
+    // reads both sides. A plain object, not a function, so a static read of this file sees it.
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
   },
 });
