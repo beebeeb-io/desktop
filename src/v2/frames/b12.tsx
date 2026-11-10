@@ -14,7 +14,7 @@ import type { FrameRegistry } from './types'
 function win(pane: PaneId, opts: { dialog?: string; tall?: boolean; override?: ReactElement } = {}) {
   return () => (
     <div className={`flex ${opts.tall ? 'min-h-screen' : 'h-screen'} flex-col bg-paper font-sans text-ink`}>
-      <CaptionBar title="Settings - Beebeeb" />
+      <CaptionBar title="Settings - Beebeeb Drive" />
       <div className="flex min-h-0 flex-1 flex-col">
         <SettingsView pane={pane} dialog={opts.dialog ?? null} tall={opts.tall} override={opts.override} />
       </div>
