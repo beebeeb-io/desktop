@@ -148,6 +148,10 @@ export function useAccount(scenario: Scenario = 'default') {
         : s.activity,
     }))
   }, [])
+  // A pending read's timer must not fire after the pane is gone: clear it on unmount, so no setError lands on a dead hook.
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current)
+  }, [])
   useEffect(() => { void reload() }, [reload])
   return { state, setState, error, reload, sessionList, localPc }
 }
