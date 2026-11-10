@@ -101,7 +101,7 @@ fn absent_row_leaves() {
     })
     .unwrap();
     let seen: HashSet<String> = ["keep".to_string()].into_iter().collect();
-    let pruned = f.db.prune_absent(&seen, 1_800_000_000).unwrap();
+    let pruned = model::drop_absent_rows(&f.db, &seen, 1_800_000_000).unwrap();
     assert!(
         pruned.iter().any(|r| r.file_id == "stale"),
         "the absent row must be pruned: {pruned:?}"

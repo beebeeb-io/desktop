@@ -12,28 +12,29 @@ Two tests in `src-tauri/src/drive_v2/absent_row.rs`:
   is not returned by `model::list` afterwards, including a row whose stored name
   is the engine's blocked label (`Unavailable file ` plus 16 hex digits).
 
-`absent_row_leaves` was red first, before any product change:
+`absent_row_leaves` was red first, before the drop was added (the probe made
+`drop_absent_rows` return straight after `prune_absent`, the pre-fix behaviour):
 
 ```
-date: Tue Nov 10 12:55:27 PM CET 2026
+date: 2026-11-10T13:33:43+01:00
 command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml absent_row_leaves
 test drive_v2::absent_row::absent_row_leaves ... FAILED
-thread 'drive_v2::absent_row::absent_row_leaves' (3030) panicked at src/drive_v2/absent_row.rs:97:5:
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2670 filtered out; finished in 0.02s
+thread 'drive_v2::absent_row::absent_row_leaves' (3648) panicked at src/drive_v2/absent_row.rs:105:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2670 filtered out; finished in 0.01s
 ```
 
 After the fix:
 
 ```
-date: Tue Nov 10 01:04:27 PM CET 2026
+date: 2026-11-10T13:33:06+01:00
 command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml known_folder_is_trashable
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2670 filtered out
 
-date: Tue Nov 10 01:04:28 PM CET 2026
+date: 2026-11-10T13:34:10+01:00
 command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml absent_row_leaves
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2670 filtered out
 
-date: Tue Nov 10 01:04:12 PM CET 2026
+date: 2026-11-10T13:35:21+01:00
 command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml prune_absent
 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 2659 filtered out
 ```
@@ -48,15 +49,20 @@ and `green.txt`.
 `remote_updated_at == 0` as `Conflict`, so a failed local row cannot be trashed.
 That refusal is unchanged: the row must leave the list instead.
 
-The function that kept the absent row is `StateDb::prune_absent`
-(`state_db/removals.rs`). Its `operation_queue` guard excluded every row with
-any queued op, including an op that had already failed terminally
-(`attempts >= max_attempts`, not paused). A failed upload therefore kept its
-row forever, and the row was absent from every snapshot. The guard now protects
-only an op that can still run (`attempts < max_attempts OR paused_reason IS NOT
-NULL`); a terminal failure no longer keeps the row, so the snapshot's absence
-removes it. A paused op (waiting for auth or a replaced key) still protects its
-row.
+`StateDb::prune_absent` (`state_db/removals.rs`) keeps a row whose
+`operation_queue` still names it, including an op that has already failed
+terminally (`attempts >= max_attempts`, not paused). A failed upload therefore
+kept its row forever, and the row was absent from every snapshot.
+
+The drop is `model::drop_absent_rows` (`drive_v2/model.rs`), called from
+`syncflow::apply_snapshot` (`engine_bridge/syncflow.rs`) in place of the bare
+`prune_absent` call. It first runs `prune_absent` (unchanged) for the rows with
+no op, then drops a row whose every queued op is a terminal failure and that
+passes the same guards `prune_absent` applies: own namespace, not
+`Uploading`/`Trashing`, `remote_updated_at < snapshot_fetched_at`, parent not
+`Trashing`, and never on an empty snapshot. A paused op (waiting for auth or a
+replaced key) or an op with attempts left still protects its row. `removals.rs`
+is not edited.
 
 ## The label written up as a file name
 

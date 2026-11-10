@@ -16,7 +16,7 @@ mod commands;
 mod dto;
 mod events;
 mod fsops;
-mod model;
+pub(crate) mod model;
 mod photo_meta; // v2 b02b
 mod status; // v2 b02b
 mod status_cmds; // v2 b02b
