@@ -26,8 +26,24 @@ const THIS_PC: Item[] = [
   { section: 'available-offline', label: 'Available offline', icon: 'pin' },
 ]
 
-const GB = 1024 ** 3
-const gb = (bytes: number) => (bytes === 0 ? '0 B' : bytes >= 1024 * GB ? `${(bytes / (1024 * GB)).toFixed(0)} TB` : `${Math.round(bytes / GB)} GB`)
+const GB = 1000 ** 3
+const TB = 1000 ** 4
+
+/**
+ * One figure of the meter's line, in decimal units (1 GB = 1000³, 1 TB = 1000⁴). Exactly zero is "0 B";
+ * otherwise GB until the value reaches 1 TB, then TB. Below 10 keeps one decimal (a trailing ".0" is
+ * dropped), 10 and above is a whole number. No MB unit: the meter is billing usage, not a file size.
+ */
+function storageFigure(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const [size, unit] = bytes >= TB ? [TB, 'TB'] : [GB, 'GB']
+  const value = bytes / size
+  const text = value < 10 ? value.toFixed(1).replace(/\.0$/, '') : String(Math.round(value))
+  return `${text} ${unit}`
+}
+
+/** The words under the meter: the account's billing usage, in decimal units. */
+export const storageLine = (usedBytes: number, quotaBytes: number) => `${storageFigure(usedBytes)} of ${storageFigure(quotaBytes)}`
 
 /**
  * What a row's count shows. Sync history's is the problem badge: "the sidebar's red badge counts the problems"
@@ -93,7 +109,7 @@ export function Sidebar({
               <div className="h-full bg-ink-3" style={{ width: `${pct}%` }} />
             </div>
             <div className="mt-1.5 font-mono text-[11px] text-ink-3">
-              {gb(storage.usedBytes)} of {gb(storage.quotaBytes)}
+              {storageLine(storage.usedBytes, storage.quotaBytes)}
             </div>
           </div>
         )}
