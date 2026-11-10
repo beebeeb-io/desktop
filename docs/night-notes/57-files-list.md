@@ -10,14 +10,28 @@ A test named `file_and_folder_both_list_after_the_snapshot_path` built one folde
 `model::list` on their parent returns both. It was run first, before any product change:
 
 ```
-cargo test -j 6 --manifest-path src-tauri/Cargo.toml file_and_folder_both_list
+date: 2026-11-10T11:30:50+01:00
+command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml file_and_folder_both_list
+running 1 test
 test drive_v2::tests::file_and_folder_both_list_after_the_snapshot_path ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2669 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2669 filtered out; finished in 0.03s
 ```
 
 The run was already green, so no product code was changed and the test was removed from
-the tree (it only restated a path that already passes). Evidence:
-`.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-first-run.txt`.
+the tree (it only restated a path that already passes). After removal, the same module
+still passes:
+
+```
+date: 2026-11-10T11:31:12+01:00
+command: cargo test -j 6 --manifest-path src-tauri/Cargo.toml drive_v2::tests
+running 24 tests
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 2645 filtered out; finished in 0.65s
+```
+
+Evidence (absolute paths, outside the repo):
+`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-first-run.txt`
+and
+`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-final-tree.txt`.
 
 ## Where the loss is
 
