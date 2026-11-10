@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { Suspense } from 'react'
 import { command } from '../src/desktopApi'
 import { Sidebar, storageLine } from '../src/v2/chrome/Sidebar'
+import { PROFILE_TIMEOUT_MS, accountRowLabel } from '../src/v2/sections/settings/account/data'
 import { mount, textOf, type Mounted } from './fixtures/componentHarness'
 
 const mounted: Mounted[] = []
@@ -38,6 +39,8 @@ function shell(storage: unknown): Mounted {
       SECTION_COMPONENTS,
       TITLES,
       sidebarRow: (section: string) => section,
+      accountRowLabel,
+      PROFILE_TIMEOUT_MS,
       CaptionBar: () => null,
       Sidebar,
       Suspense,

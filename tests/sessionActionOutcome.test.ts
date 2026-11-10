@@ -286,7 +286,8 @@ describe('source contract: every caller reads the warning', () => {
     // 1683 slice 2: it reads `.warning`, so the census still finds no caller that drops it), MacSettings (lock), the
     // Settings sign-out flow, pages/Account (lock, sign-out), AccountView; and desktop v2 (R1f: both called the raw
     // command and dropped the warning): its Settings sign-out confirm (`SignOutDialog`) and the no-plan screen's sign-out
-    // (`NoPlanWindow`).
-    expect(sites).toBe(10)
+    // (`NoPlanWindow`). Slice 56 gave each of those two v2 sign-outs its own pre-check path, so each now clears once on
+    // the keep-or-delete answer and once on the count-0 path: four v2 sites instead of two.
+    expect(sites).toBe(12)
   })
 })
