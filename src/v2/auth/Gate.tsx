@@ -4,7 +4,8 @@
 // own generic "Account", never the board's example person).
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { BBButton, Icon } from '@beebeeb/shared/design'
-import { clearSession, command } from '../../desktopApi'
+import { clearSession, command, signOutUnknownFiles } from '../../desktopApi'
+import { SignOutUnknownFilesDialog } from '../sections/settings/account/SecurityPane'
 import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
@@ -132,28 +133,57 @@ function NoPlanWindow({ onCheckAgain, onSignedOut }: { onCheckAgain: () => void;
   const [checking, setChecking] = useState(false)
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the gate has no toast host: the screen stays and says why the sign-out did not happen
   const [failed, setFailed] = useState<string | null>(null)
+  // Task 2191: files from before the last update are never copied or deleted silently. The count is asked first; the
+  // answer travels with `clear_session`, so the button waits on the person's choice, not on a copy they did not ask for.
+  const [unknown, setUnknown] = useState<{ count: number; folder: string } | null>(null)
   // Only through desktopApi's wrapper, which parses the outcome; a step it could not confirm (FB-24,
   // tests/sessionActionOutcome.test.ts) goes up with the sign-out, and AuthGate says it.
   // One sign-out at a time: a double click sends one clear_session (#270 follow-up).
   const busy = useRef(false)
+  const [signingOut, setSigningOut] = useState(false)
+  const clear = async (options: { unknownFiles?: 'keep' | 'delete'; keptFolder?: string } = {}) => {
+    if (busy.current) return
+    busy.current = true
+    setSigningOut(true)
+    setFailed(null)
+    try {
+      const r = await clearSession(options)
+      if (r.ok) onSignedOut(r.value.warning?.sentence ?? null)
+      else setFailed(r.reason)
+    } finally { busy.current = false; setSigningOut(false) }
+  }
   const signOut = async () => {
     if (busy.current) return
     busy.current = true
+    setSigningOut(true)
     setFailed(null)
     try {
+      const unknown = await signOutUnknownFiles()
+      if (!unknown.ok) { setFailed(unknown.reason); return }
+      if (unknown.value.count > 0 && unknown.value.folder) {
+        setUnknown({ count: unknown.value.count, folder: unknown.value.folder })
+        return
+      }
       const r = await clearSession()
       if (r.ok) onSignedOut(r.value.warning?.sentence ?? null)
       else setFailed(r.reason)
-    } finally { busy.current = false }
+    } finally { busy.current = false; setSigningOut(false) }
   }
   return (
-    <NoPlanView
-      checking={checking}
-      error={failed}
-      onChoose={() => void command('plugin:opener|open_url', { url: PLANS_URL })}
-      onCheckAgain={() => { setChecking(true); onCheckAgain(); window.setTimeout(() => setChecking(false), 800) }}
-      onSignOut={() => void signOut()}
-    />
+    <>
+      <NoPlanView
+        checking={checking}
+        error={failed}
+        onChoose={() => void command('plugin:opener|open_url', { url: PLANS_URL })}
+        onCheckAgain={() => { setChecking(true); onCheckAgain(); window.setTimeout(() => setChecking(false), 800) }}
+        onSignOut={() => void signOut()}
+      />
+      {unknown ? (
+        <SignOutUnknownFilesDialog count={unknown.count} folder={unknown.folder} error={failed} busy={signingOut}
+          onCancel={() => { setUnknown(null); setFailed(null) }}
+          onChoose={(choice) => void clear(choice === 'keep' ? { unknownFiles: 'keep', keptFolder: unknown.folder } : { unknownFiles: 'delete' })} />
+      ) : null}
+    </>
   )
 }
 

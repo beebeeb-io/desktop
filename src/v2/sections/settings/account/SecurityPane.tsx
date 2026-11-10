@@ -3,7 +3,8 @@
 // Drive's App lock sits above the shared rows (the securityExtra slot, DW-0716).
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '@beebeeb/shared/design'
-import { clearSession } from '../../../../desktopApi'
+import { clearSession, signOutUnknownFiles } from '../../../../desktopApi'
+import { unknownFilesSignOutCopy } from '../../../../signOutUnknownFilesCopy'
 import { hasTauri } from '../../../source'
 import { Dialog, Group, Page, Row, Switch } from '../shell/kit'
 import { useSettings } from '../shell/context'
@@ -129,24 +130,75 @@ function AppLock() {
 /** The v2 window (`platform=windows` loads it; without it the legacy window loads, #270). Its gate checks the session. */
 export const V2_WINDOW = '?window=main-app&platform=windows'
 
+/**
+ * Task 2191's question, in v2's own dialog (the words are `unknownFilesSignOutCopy`'s, shared with the legacy window).
+ * It is asked before `clear_session` runs: on Windows, "keep" copies every unknown file inside the command, so the
+ * person chooses first and the sign-out button is not left waiting on a copy they did not ask for.
+ */
+export function SignOutUnknownFilesDialog({ count, folder, error, busy, onCancel, onChoose }: {
+  count: number
+  folder: string
+  error?: string | null
+  busy?: boolean
+  onCancel: () => void
+  onChoose: (choice: 'keep' | 'delete') => void
+}) {
+  const copy = unknownFilesSignOutCopy(count, folder)
+  return (
+    <Dialog labelId="signout-unknown-h" title={copy.title} onCancel={onCancel}
+      actions={<>
+        <Btn onClick={onCancel} disabled={busy}>{copy.cancelLabel}</Btn>
+        <Btn variant="danger" disabled={busy} onClick={() => onChoose('delete')}>{copy.deleteLabel}</Btn>
+        <Btn variant="amber" disabled={busy} onClick={() => onChoose('keep')}>{copy.keepLabel}</Btn>
+      </>}>
+      <p>{copy.body}</p>
+      <p className="mt-2">{copy.keepNote}</p>
+      <p className="mt-2">{copy.deleteNote}</p>
+      {error ? <p role="alert" className="mt-2 text-[12px] text-red">{error}</p> : null}
+    </Dialog>
+  )
+}
+
 function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }) {
   // eslint-disable-next-line beebeeb/no-ad-hoc-error-surface -- the confirm stays open and says why the sign-out did not happen
   const [error, setError] = useState<string | null>(null)
   // FB-24 (tests/sessionActionOutcome.test.ts): a sign-out that happened but could not confirm one step says which, as a
   // neutral line, before the window moves on. Only through desktopApi's wrapper, which parses the outcome.
   const [warning, setWarning] = useState<string | null>(null)
+  // Task 2191: files from before the last update are never copied or deleted silently. The count is asked first; the
+  // answer travels with `clear_session`, so the button waits on the person's choice, not on a copy they did not ask for.
+  const [unknown, setUnknown] = useState<{ count: number; folder: string } | null>(null)
   // The window again, without the Settings route: its gate reads the signed-out session and shows the sign-in. (It went to
   // `frame=DW-A02/A03` without `platform=windows`, which loaded the legacy window, and a frame is a drawing anyway.)
   const signedOut = () => window.location.assign('?window=main-app&platform=windows')
   // One sign-out at a time: a double click sends one clear_session, and the button waits (#270 follow-up).
   const busy = useRef(false)
   const [signingOut, setSigningOut] = useState(false)
+  const clear = async (options: { unknownFiles?: 'keep' | 'delete'; keptFolder?: string } = {}) => {
+    if (busy.current) return
+    busy.current = true
+    setSigningOut(true)
+    setError(null)
+    try {
+      const r = await clearSession(options)
+      if (!r.ok) setError(r.reason)
+      else if (r.value.warning) setWarning(r.value.warning.sentence)
+      else signedOut()
+    } finally { busy.current = false; setSigningOut(false) }
+  }
   const signOut = async () => {
     if (busy.current) return
     if (!hasTauri()) return onCancel()
     busy.current = true
     setSigningOut(true)
+    setError(null)
     try {
+      const unknown = await signOutUnknownFiles()
+      if (!unknown.ok) { setError(unknown.reason); return }
+      if (unknown.value.count > 0 && unknown.value.folder) {
+        setUnknown({ count: unknown.value.count, folder: unknown.value.folder })
+        return
+      }
       const r = await clearSession()
       if (!r.ok) setError(r.reason)
       else if (r.value.warning) setWarning(r.value.warning.sentence)
@@ -158,6 +210,13 @@ function SignOutDialog({ all, onCancel }: { all: boolean; onCancel: () => void }
       <Dialog labelId="signout-h" title="Signed out" onCancel={signedOut} actions={<Btn onClick={signedOut}>OK</Btn>}>
         <p role="status">{warning}</p>
       </Dialog>
+    )
+  }
+  if (unknown) {
+    return (
+      <SignOutUnknownFilesDialog count={unknown.count} folder={unknown.folder} error={error} busy={signingOut}
+        onCancel={() => { setUnknown(null); setError(null) }}
+        onChoose={(choice) => void clear(choice === 'keep' ? { unknownFiles: 'keep', keptFolder: unknown.folder } : { unknownFiles: 'delete' })} />
     )
   }
   return (

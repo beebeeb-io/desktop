@@ -3,7 +3,7 @@
 // window, each sign-out sends one clear_session on a double click, and "Continue to Drive" opens the v2 window.
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { clearSession, command } from '../src/desktopApi'
+import { clearSession, command, signOutUnknownFiles } from '../src/desktopApi'
 import { elementsOf, mount, type Mounted } from './fixtures/componentHarness'
 
 const mounted: Mounted[] = []
@@ -45,8 +45,8 @@ describe('one sign-out at a time', () => {
     let calls = 0
     let done: (v: unknown) => void = () => {}
     const m = mount('v2/sections/settings/account/SecurityPane.tsx', 'SignOutDialog', {
-      backend: { clear_session: () => { calls += 1; return new Promise((r) => { done = r }) } },
-      bindings: { clearSession, hasTauri: () => true, Dialog: 'settings-dialog', Btn: 'settings-btn' },
+      backend: { sign_out_unknown_files: () => ({ count: 0, folder: null }), clear_session: () => { calls += 1; return new Promise((r) => { done = r }) } },
+      bindings: { clearSession, signOutUnknownFiles, hasTauri: () => true, Dialog: 'settings-dialog', Btn: 'settings-btn', SignOutUnknownFilesDialog: 'sign-out-unknown-dialog' },
       props: { all: false, onCancel() {} },
     })
     mounted.push(m)
@@ -65,8 +65,8 @@ describe('one sign-out at a time', () => {
     let calls = 0
     let done: (v: unknown) => void = () => {}
     const m = mount('v2/auth/Gate.tsx', 'NoPlanWindow', {
-      backend: { clear_session: () => { calls += 1; return new Promise((r) => { done = r }) } },
-      bindings: { clearSession, command, PLANS_URL: 'https://beebeeb.io/pricing', NoPlanView: 'no-plan-view' },
+      backend: { sign_out_unknown_files: () => ({ count: 0, folder: null }), clear_session: () => { calls += 1; return new Promise((r) => { done = r }) } },
+      bindings: { clearSession, signOutUnknownFiles, command, PLANS_URL: 'https://beebeeb.io/pricing', NoPlanView: 'no-plan-view', SignOutUnknownFilesDialog: 'sign-out-unknown-dialog' },
       props: { onCheckAgain() {}, onSignedOut() {} },
     })
     mounted.push(m)
