@@ -536,7 +536,11 @@ function PreviewHost({ item, items, onClose, onSwitch, onOpen, onShare, onKeep }
     let live = true
     setBody(null)
     const isText = /^text\//.test(item.mime ?? '') || /\.(md|txt|json|csv)$/i.test(item.name)
-    if (isText) source.readText(item.id).then((d) => { if (live) setBody({ kind: 'text', text: d.text }) }, () => { if (live) setBody({ kind: 'none' }) })
+    // DW-0408: a PDF has no page renderer here, so it says so instead of drawing a thumbnail as if it were a page (or
+    // reading text that belongs to another file). The board's pages arrive with a PDF renderer.
+    const isPdf = item.mime === 'application/pdf' || /\.pdf$/i.test(item.name)
+    if (isPdf) setBody({ kind: 'none' })
+    else if (isText) source.readText(item.id).then((d) => { if (live) setBody({ kind: 'text', text: d.text }) }, () => { if (live) setBody({ kind: 'none' }) })
     else if (item.hasThumbnail) source.thumbnail(item.id, 'large').then((u) => { if (live) setBody(u ? { kind: 'image', url: u } : { kind: 'none' }) }, () => { if (live) setBody({ kind: 'none' }) })
     else setBody({ kind: 'none' })
     return () => { live = false }
