@@ -173,7 +173,8 @@ fn ctrl_comma_opens_settings_and_esc_returns() {
     go(&mut rt, Section::Photos);
     press(&mut rt, Key::Command(','), ctrl());
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::General));
-    assert!(texts(&rt).iter().any(|t| t == "Settings: General"));
+    // The settings lane draws General now (`frames::settings`): its heading, not the placeholder's.
+    assert!(texts(&rt).iter().any(|t| t == "General"));
     assert!(
         rt.find("sidebar").is_none(),
         "settings has its own sidebar, not Drive's"

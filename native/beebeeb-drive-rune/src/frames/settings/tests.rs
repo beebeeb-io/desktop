@@ -20,6 +20,9 @@ fn runtime(frame: &str) -> Runtime<State> {
         scale: 2.0,
     };
     let mut rt = Runtime::new(state, view, (958.0, 638.0), env);
+    // The app's own wiring (`shell::run`): the shell's keys first, then the frame's.
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(host::poll);
     rt.frame(0.0);
     rt
 }
@@ -39,7 +42,14 @@ fn key(rt: &mut Runtime<State>, key: Key) {
         key,
         mods: Mods::default(),
     });
-    rt.frame(0.0);
+    settle(rt);
+}
+
+/// Lets leaving elements finish leaving: Rune keeps them in the tree while they animate out.
+fn settle(rt: &mut Runtime<State>) {
+    rt.frame(0.016);
+    rt.settle_all();
+    rt.frame(0.016);
 }
 
 fn click(rt: &mut Runtime<State>, key: &str) {
@@ -47,7 +57,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    rt.frame(0.0);
+    settle(rt);
 }
 
 /// Tab until the element keyed `target` has focus; panics when focus never gets there.
@@ -74,8 +84,10 @@ fn the_shell_opens_settings_on_general_and_esc_goes_back_to_drive() {
     let mut rt = runtime("");
     assert!(find(&rt, "set-main").is_none(), "the window starts on Drive");
     // What Ctrl+, does (`shell::host::on_key`).
-    host::dispatch(&mut rt.state, Event::OpenSettings(SettingsPane::General));
-    rt.frame(0.0);
+    rt.update(|s, _| {
+        host::dispatch(s, Event::OpenSettings(SettingsPane::General));
+    });
+    settle(&mut rt);
     assert_eq!(info(&rt, "set-title").text.as_deref(), Some("General"));
     assert!(
         find(&rt, "toolbar").is_none(),
