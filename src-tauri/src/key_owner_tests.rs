@@ -246,6 +246,10 @@ fn a_stale_key_and_a_different_account_the_key_is_removed_and_the_gate_asks_for_
 fn the_same_account_keeps_its_key_and_loads_it() {
     let store = signed_in_as_a();
     store.vault().clear_session_token().unwrap();
+    assert!(
+        !store.has(SESSION_OWNER) && store.has(KEY_OWNER),
+        "the rejected token's tag goes with it; the kept key keeps its own"
+    );
     assert_eq!(
         token_only_sign_in(&store, "tok-a2", "user-a", "a@beebeeb.io"),
         Ok(false)
@@ -403,6 +407,19 @@ fn removing_a_key_never_leaves_another_key_under_its_tag() {
     store.fail_deletes(KEY_OWNER, false);
     put_key(&store, &KEY_B).unwrap();
     assert_eq!(store.vault().vault_key_owner(), Ok(None));
+}
+
+#[test]
+fn a_token_that_cannot_be_removed_still_loses_its_owner_tag() {
+    let store = signed_in_as_a();
+    store.fail_deletes(TOKEN, true);
+    assert!(store.vault().clear_session_token().is_err());
+    assert!(store.has(TOKEN) && !store.has(SESSION_OWNER));
+    assert_eq!(
+        load(&store).unwrap_err(),
+        KEY_NOT_THIS_ACCOUNTS,
+        "unnamed beside a tagged key"
+    );
 }
 
 #[test]
