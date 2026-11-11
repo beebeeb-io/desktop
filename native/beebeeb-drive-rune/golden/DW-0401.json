@@ -246,15 +246,10 @@
       "color": "oklch(0.52 0.01 78)"
     },
     "new-btn": {
-      "x": 221,
-      "y": 33,
-      "w": 1058,
-      "h": 766,
-      "fontSize": 13,
-      "fontWeight": 400,
-      "fontFamily": "Inter",
-      "color": "oklch(0.18 0.01 70)",
-      "bg": "oklch(0.994746 0.00143237 85)"
+      "x": 968,
+      "y": 42,
+      "w": 81,
+      "h": 28
     },
     "col-name": {
       "x": 241,
@@ -560,15 +555,10 @@
       "bg": "oklch(0.82 0.17 84 / 0.18)"
     },
     "encrypted-badge": {
-      "x": 995,
-      "y": 79,
-      "w": 284,
-      "h": 692,
-      "fontSize": 13,
-      "fontWeight": 400,
-      "fontFamily": "Inter",
-      "color": "oklch(0.18 0.01 70)",
-      "bg": "oklch(0.968 0.006 85)"
+      "x": 1012,
+      "y": 304,
+      "w": 161,
+      "h": 24
     },
     "detail-changed": {
       "x": 1012,

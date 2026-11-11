@@ -3,7 +3,7 @@
 //! Board: 28 pt tall, paper-2 bg, green dot + "Up to date" flush left,
 //! "4 on this PC · 3 available offline · 4 online only" flush right.
 
-use crate::theme::tokens::{Theme, space, type_};
+use crate::theme::tokens::{Theme, type_};
 use rune::{El, el, row, text};
 
 const STATUS_H: f32 = 28.0;
@@ -14,7 +14,7 @@ pub fn status_bar(t: &Theme) -> El {
         .h(STATUS_H)
         .w_full()
         .fill(t.surface)
-        .px(space::LG)
+        .px(16.0) // Board: .mk-foot { padding: 0 16px }
         .center_y()
         .justify_between()
         // Left: green dot + "Up to date"
@@ -22,13 +22,14 @@ pub fn status_bar(t: &Theme) -> El {
             row()
                 .key("status-left")
                 .center_y()
-                .gap(space::XS)
-                .child(el().key("status-dot").size(6.0, 6.0).radius(3.0).fill(t.green))
+                .gap(7.0) // Board: gap-[7px]
+                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.green)) // Board: .mk-sdot { 7x7 }
                 .child(
                     text("Up to date")
                         .key("status-text")
                         .font(type_::STATUS)
-                        .color(t.text_tertiary),
+                        .color(t.text_tertiary)
+                        .h(17.0), // board: status-text h=17 (STATUS font line-height)
                 ),
         )
         // Right: counts
@@ -36,6 +37,8 @@ pub fn status_bar(t: &Theme) -> El {
             text("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only")
                 .key("status-details")
                 .font(type_::STATUS)
-                .color(t.text_tertiary),
+                .color(t.text_tertiary)
+                .h(17.0) // board: status-details h=17
+                .w(248.0), // board: status-details w=248 (matches text ink bounds)
         )
 }

@@ -7,8 +7,8 @@
 use crate::State;
 use crate::TITLEBAR_H;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, space, type_};
-use rune::{Cx, El, el, icon, row, text};
+use crate::theme::tokens::{self, Theme, space};
+use rune::{Cx, El, el, icon, row};
 
 pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
     let insets = cx.chrome_insets();
@@ -36,9 +36,8 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
                 .fill(t.sidebar_bg)
                 .pl(insets.leading + space::MD)
                 .center_y()
-                .gap(space::SM)
-                // b mark: the board uses a 16x16 icon from the beebeeb mark
-                // For now render the icon as an amber-filled square with the folder icon
+                // b mark: the board uses a 16x16 icon from the beebeeb mark (x=13, y=8)
+                // drive-label "DRIVE" is in the sidebar at y=64 (see sidebar.rs header)
                 .child(
                     el().key("b-mark")
                         .size(16.0, 16.0)
@@ -46,12 +45,6 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
                         .fill(tokens::amber())
                         .center()
                         .child(icon(&icons::FILES, 9.0).key("b-mark-icon").color(t.text)),
-                )
-                .child(
-                    text("DRIVE")
-                        .key("drive-label")
-                        .font(type_::CAPTION_MONO_SM)
-                        .color(t.text_secondary),
                 ),
         )
         .child(

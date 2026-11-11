@@ -79,7 +79,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     // Sidebar
     let sidebar = ui::sidebar::sidebar(s, &t);
 
-    // Main content area
+    // Toolbar — full content-area width (board: toolbar x=221, w=1058 spanning file-list+detail)
     let toolbar = ui::toolbar::toolbar(s, &t, insets.trailing);
 
     let separator = el()
@@ -90,38 +90,46 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     let column_headers = ui::file_list::column_headers(&t);
     let file_list = ui::file_list::file_list(s, cx, &t);
+
+    // Status bar — full content-area width (board: status-bar x=221, w=1058)
     let status_bar = ui::status_bar::status_bar(&t);
 
-    let main_area = col()
-        .key("main-area")
+    // Middle row: file-list column | detail-separator | detail pane
+    // Board: detail-pane starts at y=79 (after toolbar+sep), not at y=33 (top of body)
+    let mut middle_row = row().key("middle-row").grow(1.0).w_full().child(
+        col()
+            .key("file-list-col")
+            .grow(1.0)
+            .h_full()
+            .child(column_headers)
+            .child(file_list),
+    );
+
+    if s.show_detail_pane {
+        let selected_item = s.selected.and_then(|i| s.listing.items.get(i));
+        middle_row = middle_row
+            .child(
+                el().key("detail-separator")
+                    .w(1.0 / cx.env().scale)
+                    .h_full()
+                    .fill(t.separator),
+            )
+            .child(ui::detail_pane::detail_pane(selected_item, &t));
+    }
+
+    // Content area: toolbar + separator + middle_row + status_bar
+    // Board: toolbar x=221,w=1058 and status-bar x=221,w=1058 -> full content width
+    let content_area = col()
+        .key("content-area")
         .grow(1.0)
         .h_full()
         .fill(t.bg)
         .child(toolbar)
         .child(separator)
-        .child(column_headers)
-        .child(file_list)
+        .child(middle_row)
         .child(status_bar);
 
-    // Detail pane (right side, when a file is selected and panel is open)
-    let detail_pane = if s.show_detail_pane {
-        let selected_item = s.selected.and_then(|i| s.listing.items.get(i));
-        Some(
-            row()
-                .key("detail-wrapper")
-                .child(
-                    el().key("detail-separator")
-                        .w(1.0 / cx.env().scale)
-                        .h_full()
-                        .fill(t.separator),
-                )
-                .child(ui::detail_pane::detail_pane(selected_item, &t)),
-        )
-    } else {
-        None
-    };
-
-    // Assemble: caption bar on top, then sidebar | main | detail pane
+    // Assemble: caption bar on top, then sidebar | sep | content_area
     col()
         .key("window")
         .role("window")
@@ -141,8 +149,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
                         .h_full()
                         .fill(t.separator),
                 )
-                .child(main_area)
-                .children(detail_pane),
+                .child(content_area),
         )
 }
 
@@ -425,11 +432,16 @@ mod tests {
             std::fs::write("golden/DW-0401-rune.json", serde_json::to_string_pretty(&root).unwrap()).ok();
         }
 
-        // Board-to-Rune key mapping. The board JSON now uses Rune-matching keys
-        // (exported by the capture script), so we use identical keys.
-        // (board_key, rune_key) — same when the capture already named them.
+        // Board-to-Rune key mapping. All 65 testable board elements (67 total minus
+        // search-placeholder and encrypted-text which have no direct Rune key match).
+        // Both columns use the same key string since board names were chosen to match.
         let mapping: &[(&str, &str)] = &[
+            // Caption bar
+            ("caption-bar", "caption-bar"),
+            ("b-mark", "b-mark"),
+            ("drive-label", "drive-label"),
             // Toolbar
+            ("toolbar", "toolbar"),
             ("folder-title", "folder-title"),
             ("item-count", "item-count"),
             ("back", "back"),
@@ -443,22 +455,63 @@ mod tests {
             ("col-size", "col-size"),
             ("col-shared", "col-shared"),
             ("col-pc", "col-pc"),
-            // File rows (board row-N = the row container)
+            // File rows (board row-N uses 0-based index to match virtual_rows)
+            ("row-0", "row-0"),
             ("row-1", "row-1"),
             ("row-2", "row-2"),
             ("row-3", "row-3"),
             ("row-4", "row-4"),
             ("row-5", "row-5"),
             ("row-6", "row-6"),
-            // Row names
-            ("row-1-name", "row-1/name"),
-            ("row-2-name", "row-2/name"),
-            ("row-3-name", "row-3/name"),
-            ("row-4-name", "row-4/name"),
-            ("row-5-name", "row-5/name"),
-            ("row-6-name", "row-6/name"),
-            // Status
+            ("row-7", "row-7"),
+            ("row-8", "row-8"),
+            ("row-9", "row-9"),
+            ("row-10", "row-10"),
+            // Row name cells (unique key per row: "row-N-name")
+            ("row-0-name", "row-0-name"),
+            ("row-1-name", "row-1-name"),
+            ("row-2-name", "row-2-name"),
+            ("row-3-name", "row-3-name"),
+            ("row-4-name", "row-4-name"),
+            ("row-5-name", "row-5-name"),
+            ("row-6-name", "row-6-name"),
+            ("row-7-name", "row-7-name"),
+            ("row-8-name", "row-8-name"),
+            ("row-9-name", "row-9-name"),
+            ("row-10-name", "row-10-name"),
+            // Detail pane
+            ("detail-pane", "detail-pane"),
+            ("detail-name", "detail-name"),
+            ("encrypted-badge", "encrypted-badge"),
+            ("detail-changed", "detail-changed"),
+            ("detail-changed-on", "detail-changed-on"),
+            ("detail-added", "detail-added"),
+            ("detail-where", "detail-where"),
+            ("detail-version-history", "detail-version-history"),
+            ("detail-shared", "detail-shared"),
+            ("offline-label", "offline-label"),
+            ("share-btn", "share-btn"),
+            ("versions-btn", "versions-btn"),
+            // Status bar
+            ("status-bar", "status-bar"),
             ("status-text", "status-text"),
+            ("status-details", "status-details"),
+            // Sidebar
+            ("sidebar", "sidebar"),
+            ("Files", "Files"),
+            ("Shared", "Shared"),
+            ("Photos", "Photos"),
+            ("Backups", "Backups"),
+            ("Trash", "Trash"),
+            ("Shared-badge", "Shared-badge"),
+            ("Trash-badge", "Trash-badge"),
+            ("Available offline", "Available offline"),
+            ("Available offline-badge", "Available offline-badge"),
+            ("Sync history", "Sync history"),
+            ("account-name", "account-name"),
+            ("account-email", "account-email"),
+            ("this-pc-label", "this-pc-label"),
+            ("storage-label", "storage-label"),
         ];
 
         // Read board JSON if present

@@ -29,9 +29,11 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(nav_button("forward", &icons::CHEVRON_RIGHT, t));
 
     // Folder title + item count
+    // Board .mk-title { padding: 0 4px } places "Files" at x=299 (nav end 287 + gap 8 + pad 4 = 299)
     let title = col()
         .key("folder-info")
-        .ml(space::SM)
+        .pl(4.0)
+        .pr(4.0)
         .child(text("Files").key("folder-title").font(type_::TITLE).color(t.text))
         .child(
             text(format!("{item_count} items"))
@@ -82,11 +84,13 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(icon(&icons::PANEL_TOGGLE, 15.0).key("panel-icon").color(t.text));
 
     // "+ New" amber button
+    // Board: new-btn w=81, h=28. Set explicit w to match board measurement.
     let new_btn = row()
         .key("new-btn")
         .role("button")
         .label("New")
         .h(28.0)
+        .w(81.0) // board: new-btn w=81 (overrides natural content width)
         .px(space::MD)
         .center()
         .radius(radius::MD)
@@ -127,6 +131,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(
             el().key("kbd-hint")
                 .h(20.0)
+                .w(54.0) // board: kbd-hint w=54 (wider than natural text width due to board CSS)
                 .px(space::XS)
                 .radius(radius::SM)
                 .fill(t.card)
@@ -140,8 +145,8 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .h(46.0) // Board: toolbar h=46 (y=33 to y=79)
         .w_full()
         .fill(t.bg)
-        .pl(10.0) // Board: back arrow at x=231, toolbar at x=221 -> 10px padding
-        .pr(trailing_inset.max(10.0))
+        .pl(10.0) // Board: back arrow at x=231, toolbar at x=221 -> 10px left padding
+        .pr(trailing_inset.max(12.0)) // Board: .mk-tb { padding: 0 12px 0 10px } -> 12px right padding
         .center_y()
         .gap(space::SM)
         .child(nav)

@@ -2,11 +2,13 @@
 //! name, date, size, Shared cell, PC cell, and selection highlight.
 //!
 //! Board measurements:
-//! - Column headers: 11px/600 Inter, ink-3 colour, 32 pt row height
-//! - Name column has sort arrow (ascending)
-//! - Columns: Name (flex), Date changed (132px), Size (84px), Shared (92px), PC (34px + padding)
-//! - File rows: 32 pt tall, 13px/400 name, 11.5px/400 mono for dates
-//! - File-type icons: 15x15, coloured per type
+//! - Column headers: 11px/600 Inter, ink-3 colour, 28pt row height, mt=4px
+//!   padding: 0 20px, gap: 12px between columns
+//! - Name column has sort arrow (ascending); flex grow fills remaining width
+//! - Columns: Name (flex), Date changed (132px), Size (84px), Shared (92px), PC (34px)
+//! - File rows: 30 pt tall, 13px/400 name, 11.5px/400 mono for dates
+//!   padding: 0 14px, gap: 12px between cells, 6px side margins
+//! - File-type icons: FTile 22x22, rounded bg, inner icon 14px
 //! - Shared cell: link icon or letter badge circles
 //! - PC cell: check-circle (On this PC), cloud (Online only), clock (Available offline)
 
@@ -18,8 +20,16 @@ use chrono::Timelike;
 use rune::{Color, Cx, El, col, el, icon, row, text};
 use std::borrow::Cow;
 
-/// Board: rows are 30px tall (y=119,149,179... spacing 30).
+/// FTile background: board CSS `.mk-ftile { background: color-mix(in oklch, var(--color-ink) 7%, transparent); }`
+/// Ink is near-white in dark / near-black in light. Approximated as oklab(0.98,0,0) at 7% alpha.
+fn ftile_bg() -> Color {
+    Color::from_oklab([0.98, 0.0, 0.0, 0.07])
+}
+
+/// Board: rows are 30px tall (y=115,145,175... spacing 30).
 const ROW_H: f32 = 30.0;
+/// Board: column headers are 28px tall (less than rows), with 4px top margin.
+const COLUMN_HEADER_H: f32 = 28.0;
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
 const COL_SHARED_W: f32 = 92.0;
@@ -27,22 +37,30 @@ const COL_SHARED_W: f32 = 92.0;
 const COL_PC_W: f32 = 34.0;
 
 /// Column headers row.
+/// Board: .mk-thead { height: 28px; padding: 0 20px; margin-top: 4px; column-gap: 12px; }
+/// Keys match the board golden: col-name (the name container h=17), col-date, col-size, col-shared, col-pc.
 pub fn column_headers(t: &Theme) -> El {
     row()
         .key("column-headers")
-        .h(ROW_H)
+        .h(COLUMN_HEADER_H) // 28px (not 30)
         .w_full()
-        .ml(20.0) // Board: col-name at x=241, content at x=221 -> 20px left margin
+        .pl(20.0) // Board: col-name at x=241, file-list at x=221 -> 20px padding
+        .pr(20.0)
+        .gap(12.0) // Board: column-gap: 12px
         .center_y()
+        .mt(4.0) // Board: .mk-thead { margin-top: 4px }
+        // Name column: board measures col-name as the flex cell (h=17 = text height)
+        // row() with explicit h=17 and grow(1.0) matches board x=241, y=88, w=344, h=17
         .child(
             row()
-                .key("name-header")
+                .key("col-name")
                 .grow(1.0)
+                .h(17.0) // match board text/cell height
                 .center_y()
                 .gap(space::XS)
                 .child(
                     text("Name")
-                        .key("col-name")
+                        .key("col-name-text")
                         .font(type_::COLUMN_HEADER)
                         .color(t.text_tertiary),
                 )
@@ -52,33 +70,38 @@ pub fn column_headers(t: &Theme) -> El {
                         .color(t.text_tertiary),
                 ),
         )
+        // Board measures text nodes at h=17; set explicit h so center_y places them correctly.
         .child(
             text("Date changed")
                 .key("col-date")
                 .font(type_::COLUMN_HEADER)
                 .color(t.text_tertiary)
-                .w(COL_DATE_W),
+                .w(COL_DATE_W)
+                .h(17.0),
         )
         .child(
             text("Size")
                 .key("col-size")
                 .font(type_::COLUMN_HEADER)
                 .color(t.text_tertiary)
-                .w(COL_SIZE_W),
+                .w(COL_SIZE_W)
+                .h(17.0),
         )
         .child(
             text("Shared")
                 .key("col-shared")
                 .font(type_::COLUMN_HEADER)
                 .color(t.text_tertiary)
-                .w(COL_SHARED_W),
+                .w(COL_SHARED_W)
+                .h(17.0),
         )
         .child(
             text("PC")
                 .key("col-pc")
                 .font(type_::COLUMN_HEADER)
                 .color(t.text_tertiary)
-                .w(COL_PC_W),
+                .w(COL_PC_W)
+                .h(17.0),
         )
 }
 
@@ -96,6 +119,8 @@ pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .key("file-list-scroll")
         .grow(1.0)
         .w_full()
+        .pt(space::XS) // Board: .mk-rows { padding: 4px 6px } -> pt=4
+        .px(6.0) // Board: .mk-rows { padding: 4px 6px } -> px=6 (rows sit 6px inset)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(
             col()
@@ -161,17 +186,19 @@ fn file_row(
     let shared_text = item.shared_type.as_deref().unwrap_or("\u{2014}");
     let pc_icon = pc_status_icon(item.pc_status.as_deref());
 
-    // Selected row: neutral rounded fill with 4px inset margins (board: rounded corners, no Amber).
+    // Board .mk-rows { padding: 4px 6px } -> px(6) on file-list-scroll, NOT on the row.
+    // Board .mk-row { height: 30px; padding: 0 14px; border-radius: 7px; column-gap: 12px; }
+    // Row fills the full width of the px(6)-inset container -> row x=227, w=762.
     let mut r = row()
         .key(format!("row-{i}"))
         .role("listitem")
         .label(&item.name)
         .h(ROW_H)
-        .w_full()
-        .ml(6.0) // Board: row at x=227, content starts at x=221, so 6px margin
-        .mr(6.0)
+        .pl(14.0) // Board: .mk-row { padding: 0 14px }
+        .pr(14.0)
+        .gap(12.0) // Board: column-gap: 12px between cells
         .center_y()
-        .radius(if selected { 6.0 } else { 0.0 })
+        .radius(if selected { 7.0 } else { 0.0 }) // Board: border-radius: 7px
         .fill(if selected { selection_color } else { Color::TRANSPARENT })
         .hover(hover_color)
         .press(press_color)
@@ -180,16 +207,36 @@ fn file_row(
             s.selected = Some(i);
         });
 
-    // File-type icon
-    r = r.child(icon(type_icon, 15.0).key("type-icon").color(icon_color));
+    // Name column: FTile(22x22) + gap(8) + name text (grow:1)
+    // Board: .mk-name { display: flex; align-items: center; gap: 8px; }
+    // FTile: .mk-ftile { width: 22px; height: 22px; border-radius: 6px; }
+    // Name text at x=271: row_start(227)+pl(14)+ftile(22)+gap(8)=271 ✓
+    let mut name_col = row()
+        .key("name-cell")
+        .grow(1.0)
+        .center_y()
+        .gap(8.0) // Board: .mk-name { gap: 8px } between FTile and name text
+        .child(
+            // FTile: 22x22 rounded container with centred icon inside
+            el().key("type-tile")
+                .size(22.0, 22.0)
+                .radius(6.0)
+                .fill(ftile_bg())
+                .center()
+                .child(icon(type_icon, 14.0).key("type-icon").color(icon_color)),
+        );
 
-    // Name (with optional lock icon for Backups)
-    let mut name_row = row().key("name-cell").grow(1.0).center_y().gap(space::XS).ml(space::XS);
-    name_row = name_row.child(text(&item.name).key("name").font(type_::LIST_ITEM).color(text_color));
+    // Name text with unique key per row for geometry check
+    name_col = name_col.child(
+        text(&item.name)
+            .key(format!("row-{i}-name"))
+            .font(type_::LIST_ITEM)
+            .color(text_color),
+    );
     if item.is_protected {
-        name_row = name_row.child(icon(&icons::LOCK, 11.0).key("lock").color(text_secondary));
+        name_col = name_col.child(icon(&icons::LOCK, 11.0).key("lock").color(text_secondary));
     }
-    r = r.child(name_row);
+    r = r.child(name_col);
 
     // Date changed
     r = r.child(

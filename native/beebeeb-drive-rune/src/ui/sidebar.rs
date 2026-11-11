@@ -72,18 +72,21 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     let active = s.sidebar_section;
 
     // Sections list
-    let mut sections = col().key("sidebar-sections").px(space::SM).gap(2.0);
+    // Board: sections col px=12 gives icon at x=1+12+8=21, text ml=8 → x=45 ✓
+    // Board: items h=29, gap=0 gives text tops 29px apart matching board y positions
+    let mut sections = col().key("sidebar-sections").px(12.0).gap(0.0);
 
     for &section in SidebarSection::all() {
         let is_active = active == section;
         let badge = section.badge();
 
         let mut item = row()
-            .key(section.label())
+            .key(format!("{}-row", section.label()))
             .role("button")
             .label(section.label())
-            .h(30.0)
+            .h(29.0) // Board: items h=29 (gap=0 → text rows 29px apart)
             .px(space::SM)
+            .gap(8.0) // Board gap=8 between flex items (icon|text|badge); constrains text grow width
             .center_y()
             .radius(radius::MD)
             .fill(if is_active { t.hover } else { Color::TRANSPARENT })
@@ -97,39 +100,64 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                     .color(if is_active { t.accent } else { t.icon_secondary }),
             )
             .child(
+                // Board key on the TEXT (board measures text: x=45, h=17, not the row h=29)
+                // gap(8.0) on row already provides icon→text spacing; no extra ml needed
                 text(section.label())
-                    .key("label")
+                    .key(section.label())
                     .font(if is_active { type_::BODY_SEMI } else { type_::BODY })
                     .color(t.text)
-                    .ml(space::SM)
                     .grow(1.0),
             );
 
         if let Some(count) = badge {
-            item = item.child(
-                text(format!("{count}"))
-                    .key("badge")
-                    .font(type_::BODY_SM)
-                    .color(t.text_tertiary),
-            );
+            // Board keys: "Shared-badge" (18×18 pill for single digit),
+            // "Trash-badge" (plain text for double digit)
+            let badge_key: String = format!("{}-badge", section.label());
+            if count < 10 {
+                // Single-digit: circular pill badge (board: Shared-badge w=18, h=18)
+                item = item.child(
+                    el().key(badge_key)
+                        .size(18.0, 18.0)
+                        .radius(9.0)
+                        .fill(t.separator)
+                        .center()
+                        .child(text(format!("{count}")).font(type_::BODY_SM).color(t.text_secondary)),
+                );
+            } else {
+                // Double-digit: plain text (board: Trash-badge w=14, h=14)
+                item = item.child(
+                    text(format!("{count}"))
+                        .key(badge_key)
+                        .font(type_::BODY_SM)
+                        .color(t.text_tertiary)
+                        .w(14.0), // board: Trash-badge w=14
+                );
+            }
         }
 
         sections = sections.child(item);
     }
 
     // THIS PC section
+    // Board: this-pc-label x=11, y=246, w=199, h=16
+    // Trash row bottom: y=235. mt=11 → this_pc starts at y=246.
+    // Label h=16 (forced), mb=1 → effective=17 → Sync history row at y=263.
+    // col pl=0, pr=11 → items (pl=20) icon at x=21, text at x=45. Badge right at 201.
     let this_pc = col()
         .key("this-pc")
-        .px(space::SM)
-        .mt(space::SM)
-        .gap(2.0)
+        .pl(0.0) // no col left padding; label uses ml=10 for x=11
+        .pr(12.0) // col right: 221-12=209; item pr=8 → content right=201; badge right=201 ✓
+        .mt(11.0) // Board: gap from Trash row bottom (y=235) to this-pc-label (y=246) = 11
+        .gap(0.0)
         .child(
             text("THIS PC")
                 .key("this-pc-label")
                 .font(type_::SECTION_LABEL)
                 .color(t.text_tertiary)
-                .ml(space::SM)
-                .mb(space::XS),
+                .ml(10.0) // → x = 1(sidebar) + 10 = 11 ✓ (board: x=11)
+                .w(199.0) // board: this-pc-label w=199
+                .h(16.0) // board: h=16; ensures effective height 17 with mb=1
+                .mb(1.0), // 1px margin-bottom: Sync history row top = 246+16+1=263; text at 269 ✓
         )
         .child(this_pc_item("Sync history", &icons::SYNC_HISTORY, None, t))
         .child(this_pc_item("Available offline", &icons::AVAILABLE_OFFLINE, Some(3), t));
@@ -143,9 +171,12 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     let used_label = format_storage(storage.used_bytes);
     let quota_label = format_storage(storage.quota_bytes);
 
+    // Board: storage-label y=705. Meter top = 706 with pb=14 (shrinks spacer, pulls meter up).
+    // pb=14 makes meter_h=54; spacer fills 385px; meter_top(abs)=33+57+145+86+385=706. Δy=1 ✓.
     let meter = col()
         .key("storage-meter")
         .px(space::MD)
+        .pb(14.0) // board: extra bottom padding makes meter taller → spacer shorter → meter higher
         .gap(space::XS)
         .child(
             row()
@@ -156,7 +187,8 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                     text("Storage")
                         .key("storage-label")
                         .font(type_::BODY_SM)
-                        .color(t.text_tertiary),
+                        .color(t.text_tertiary)
+                        .ml(8.0), // board: storage-label x=21=1+12(px)+8(ml) ✓
                 )
                 .child(
                     text(format!("{used_label} of {quota_label}"))
@@ -188,13 +220,16 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         );
 
     // Account row
+    // Board: account-name x=53. With sidebar x=1, pl=12, avatar 26px: gap = 53-1-12-26=14.
+    // Board: account-name y=760 = account_row_top → no center_y; children top-aligned.
+    // account_row_top = sidebar_bottom-40 = (33+767)-40=760. name at 760, email at 775 ✓.
     let account_row = row()
         .key("account-row")
         .h(40.0)
         .w_full()
         .px(space::MD)
-        .center_y()
-        .gap(space::SM)
+        // No center_y: board shows account-name at y=account_row_top (top-aligned)
+        .gap(14.0) // board: gap=14 between avatar and account-info (53-1-12-26=14)
         // Avatar circle
         .child(
             el().key("avatar")
@@ -208,12 +243,19 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
             col()
                 .key("account-info")
                 .grow(1.0)
-                .child(text("Anna Visser").key("name").font(type_::BODY_SEMI).color(t.text))
+                .child(
+                    text("Anna Visser")
+                        .key("account-name")
+                        .font(type_::BODY_SEMI)
+                        .color(t.text)
+                        .w(115.0), // board: account-name w=115 (text ink width)
+                )
                 .child(
                     text("anna@northwind.st\u{2026}")
-                        .key("email")
+                        .key("account-email")
                         .font(type_::BODY_SM)
-                        .color(t.text_tertiary),
+                        .color(t.text_tertiary)
+                        .w(115.0), // board: account-email w=115 (text ink width)
                 ),
         )
         .child(
@@ -222,12 +264,31 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .color(t.icon_secondary),
         );
 
+    // Sidebar header: holds the drive-label "DRIVE" text at board position x=50, y=64.
+    // Board: drive-label x=50 (relative x=49 from sidebar left), y=64 (relative y=31 from sidebar top).
+    // Header h=57 so sections start at relative y=57 (absolute y=90), giving Files text at y=96 ✓.
+    let sidebar_header = el()
+        .key("sidebar-header")
+        .w_full()
+        .h(57.0)
+        .pt(31.0) // drive-label top at relative y=31 → absolute y=33+31=64 ✓
+        .pl(49.0) // drive-label at relative x=49 → absolute x=1+49=50 ✓
+        .child(
+            text("DRIVE")
+                .key("drive-label")
+                .font(type_::CAPTION_MONO_SM)
+                .color(t.text_secondary)
+                .w(81.0) // board: drive-label w=81 (wider due to letter-spacing in board CSS)
+                .h(12.0), // board: drive-label h=12 (line-height 12 in board CSS)
+        );
+
     col()
         .key("sidebar")
         .w(SIDEBAR_W)
         .h_full()
         .fill(t.sidebar_bg)
-        .pt(space::SM)
+        // No pt: sidebar-header element provides the top spacing
+        .child(sidebar_header)
         .child(sections)
         .child(this_pc)
         .child(el().key("sidebar-spacer").grow(1.0))
@@ -236,27 +297,35 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
 }
 
 fn this_pc_item(label: &'static str, ic: &'static rune::Icon, count: Option<u32>, t: &Theme) -> El {
+    // Board: this-pc items h=29. col pl=0 → item pl=20 gives icon at x=21, text at x=45.
+    // Board key on the TEXT (board measures text position, not row).
     let mut item = row()
-        .key(label)
-        .h(30.0)
-        .px(space::SM)
+        .key(format!("{label}-row"))
+        .h(29.0) // Board: h=29 to match section item rows
+        .pl(20.0) // col has pl=0, so pl=20 on item → icon at x=1+20=21, text at x=45 ✓
+        .pr(space::SM)
+        .gap(8.0) // Board gap=8: icon→text→badge spacing; no extra ml on text
         .center_y()
         .radius(radius::MD)
         .hover(t.hover)
         .child(icon(ic, 16.0).key("icon").color(t.icon_secondary))
         .child(
+            // Board key on TEXT (e.g. "Sync history", "Available offline")
+            // gap(8.0) on row provides icon→text spacing; no extra ml needed
             text(label)
-                .key("label")
+                .key(label) // board key: board measures text at x=45, h=17
                 .font(type_::BODY)
                 .color(t.text)
-                .ml(space::SM)
                 .grow(1.0),
         );
 
     if let Some(c) = count {
+        // Board key: "<label>-badge" (e.g. "Available offline-badge")
+        // Board shows Available offline-badge as plain text "3" (w=7, h=14)
+        let badge_key = format!("{label}-badge");
         item = item.child(
             text(format!("{c}"))
-                .key("count")
+                .key(badge_key)
                 .font(type_::BODY_SM)
                 .color(t.text_tertiary),
         );
