@@ -529,11 +529,13 @@ impl PhotosSource for FixturePhotos {
 }
 
 /// A library of `count` photos, 40 to a day: what the grid's virtual rows are measured with.
-/// Not the board's content: it is never drawn in a gated frame.
+/// Not the board's content: it is never drawn in a gated frame; only the tests build one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct LargePhotos {
     count: usize,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl LargePhotos {
     pub const PER_DAY: usize = 40;
 

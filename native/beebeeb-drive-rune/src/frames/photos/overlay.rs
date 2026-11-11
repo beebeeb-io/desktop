@@ -320,6 +320,8 @@ fn list(n: usize, title: Option<&str>, items: Vec<El>, t: &Theme) -> El {
         out = out.child(
             kit::label(format!("ph-list-{n}-title"), title, style::LIST_TITLE, t.text_tertiary)
                 .role("heading")
+                // `.kit-list-title { padding: 0 var(--pad) }`
+                .px(14.0)
                 .w_full(),
         );
     }

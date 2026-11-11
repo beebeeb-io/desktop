@@ -311,7 +311,12 @@ impl Ui {
         }
     }
 
+    /// A double press, Enter or Space on a tile: opens it. Not while selecting: there a press
+    /// checks, and the second press of a double press has already unchecked.
     pub fn open_tile(&mut self, day: usize, index: usize) {
+        if self.selecting {
+            return;
+        }
         if let Some(photo) = self.photo_at(day, index) {
             self.cursor = Some((day, index));
             self.open(photo.id);
@@ -645,13 +650,6 @@ impl Ui {
         true
     }
 
-    pub fn dismiss_toast(&mut self) {
-        self.toast = None;
-        if let Some(viewer) = &mut self.viewer {
-            viewer.gone = None;
-        }
-    }
-
     pub fn play_pause(&mut self) {
         if let Some(viewer) = &mut self.viewer {
             viewer.playing = !viewer.playing;
@@ -840,6 +838,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             None => false,
         },
         _ if space => match ui.cursor {
+            Some((day, index)) if ui.selecting => {
+                ui.press_tile(day, index);
+                true
+            }
             Some((day, index)) => {
                 ui.open_tile(day, index);
                 true
