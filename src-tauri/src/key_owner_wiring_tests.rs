@@ -205,6 +205,12 @@ fn the_one_guard_sits_inside_the_loader_before_the_key_is_read() {
 
 #[test]
 fn a_refused_key_sends_a_mac_to_the_recovery_phrase_like_a_missing_one() {
+    assert!(
+        code_of(&production(), "fn unlock_failure(").contains(&squeeze(
+            "#[cfg(target_os = \"macos\")] if error.contains(\"secret not found\") || error == crate::key_owner::KEY_NOT_THIS_ACCOUNTS { return NO_VAULT_KEY_UNLOCK_ERROR.to_string(); }"
+        )),
+        "the Mac's unlock maps the loader's refusal to its no-key answer"
+    );
     let refused = crate::unlock_failure(KEY_NOT_THIS_ACCOUNTS.to_string());
     if cfg!(target_os = "macos") {
         assert_eq!(refused, crate::NO_VAULT_KEY_UNLOCK_ERROR);
@@ -247,6 +253,83 @@ fn no_owner_id_comes_from_a_cached_profile_and_none_is_logged() {
             rest = &rest[start + "tracing::".len()..];
         }
     }
+}
+
+/// The platform forms are one call each: the core, over the id-keyed layout (a write) or both layouts (a read).
+#[test]
+fn every_platform_form_calls_its_core_on_the_right_layout() {
+    let source = squeeze(include_str!("session_owner.rs"));
+    for (form, call) in [
+        (
+            "fn remove_foreign_vault_key_before_sign_in(",
+            "let mut vault = AuthVault::new(platform_keychain_store_for(account_id)); remove_foreign_key_or_refuse(&mut vault, signing_in_user_id, signing_in_email)",
+        ),
+        (
+            "fn bind_session_owner_in_keychain(",
+            "AuthVault::new(platform_keychain_store_for(account_id)).bind_session_owner(user_id)",
+        ),
+        (
+            "fn bind_session_and_key_owner_in_keychain(",
+            "key_owner::bind_session_and_key(&AuthVault::new(platform_keychain_store_for(account_id)), user_id)",
+        ),
+        (
+            "fn bind_vault_key_to_session_owner_in_keychain(",
+            "key_owner::bind_key_to_session_owner(&AuthVault::new(platform_keychain_store_for(account_id)))",
+        ),
+        (
+            "fn settle_owner_after_probe_in_keychain(",
+            "settle_owner_after_probe_over(both_layouts(account_id), probed_token, server_user_id)",
+        ),
+        (
+            "fn complete_pending_keychain_clear(",
+            "complete_pending_clear_over(both_layouts(account_id));",
+        ),
+        (
+            "fn sign_in_adds_key_to_signed_in_session(",
+            "sign_in_adds_key_over(both_layouts(account_id), profile.map(|profile| profile.user_id.as_str()), vault_unlocked)",
+        ),
+    ] {
+        let at = source.find(&squeeze(form)).unwrap_or_else(|| panic!("{form} exists"));
+        let body = &source[at..];
+        let body = &body[..body[1..].find("pub(crate)fn").map_or(body.len(), |end| end + 1)];
+        assert!(body.contains(&squeeze(call)), "{form}: `{call}` is gone");
+    }
+    assert!(
+        source.contains(&squeeze(
+            "[AuthVault::new(platform_keychain_store_for(account_id)), AuthVault::new(keychain::legacy_platform_keychain_store())]"
+        )),
+        "both layouts: the id-keyed one first, as the loader reads them"
+    );
+}
+
+/// The sign-in's removal, as the command gets it: a key that cannot be removed is the refusal, nothing else is.
+#[test]
+fn a_foreign_key_that_cannot_be_removed_refuses_the_sign_in_with_its_own_sentence() {
+    let store = signed_in_as_a();
+    store.vault().clear_session_token().unwrap();
+    store.fail_deletes(KEY, true);
+    assert_eq!(
+        crate::remove_foreign_key_or_refuse(&mut store.vault(), "user-b", "b@beebeeb.io"),
+        Err(FOREIGN_KEY_NOT_REMOVED.to_string())
+    );
+    assert!(store.has(KEY));
+    store.fail_deletes(KEY, false);
+    assert_eq!(
+        crate::remove_foreign_key_or_refuse(&mut store.vault(), "user-b", "b@beebeeb.io"),
+        Ok(())
+    );
+    assert!(!store.has(KEY) && !store.has(KEY_OWNER));
+    // The account's own key, and an empty store: nothing to refuse, nothing removed.
+    let own = signed_in_as_a();
+    assert_eq!(
+        crate::remove_foreign_key_or_refuse(&mut own.vault(), "user-a", "a@beebeeb.io"),
+        Ok(())
+    );
+    assert!(own.has(KEY));
+    assert_eq!(
+        crate::remove_foreign_key_or_refuse(&mut empty().vault(), "user-b", "b@beebeeb.io"),
+        Ok(())
+    );
 }
 
 // ── the store-level cores the commands call ────────────────────────────────────────────────

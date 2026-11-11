@@ -32,17 +32,14 @@ pub(crate) fn layout_holding_session<S: AuthSecretStore>(
     Ok(None)
 }
 
-/// A token-only sign-in, in its turn and BEFORE its token is stored: a stored vault key that is not provably the
-/// signing-in account's is removed (`key_owner::remove_foreign_key`). While it cannot be removed the sign-in is
-/// refused with [`key_owner::FOREIGN_KEY_NOT_REMOVED`], and the caller revokes the new session.
-pub(crate) fn remove_foreign_vault_key_before_sign_in(
-    _write: &SessionWrite,
-    account_id: &str,
+/// [`remove_foreign_vault_key_before_sign_in`] over any store: `Err` is the refusal's sentence, and the key is still
+/// there.
+pub(crate) fn remove_foreign_key_or_refuse<S: AuthSecretStore>(
+    vault: &mut AuthVault<S>,
     signing_in_user_id: &str,
     signing_in_email: &str,
 ) -> Result<(), String> {
-    let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
-    match key_owner::remove_foreign_key(&mut vault, signing_in_user_id, signing_in_email) {
+    match key_owner::remove_foreign_key(vault, signing_in_user_id, signing_in_email) {
         Ok(true) => {
             tracing::info!("sign-in: a vault key that was not this account's was removed before the token was stored");
             Ok(())
@@ -53,6 +50,19 @@ pub(crate) fn remove_foreign_vault_key_before_sign_in(
             Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string())
         }
     }
+}
+
+/// A token-only sign-in, in its turn and BEFORE its token is stored: a stored vault key that is not provably the
+/// signing-in account's is removed (`key_owner::remove_foreign_key`). While it cannot be removed the sign-in is
+/// refused with [`key_owner::FOREIGN_KEY_NOT_REMOVED`], and the caller revokes the new session.
+pub(crate) fn remove_foreign_vault_key_before_sign_in(
+    _write: &SessionWrite,
+    account_id: &str,
+    signing_in_user_id: &str,
+    signing_in_email: &str,
+) -> Result<(), String> {
+    let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
+    remove_foreign_key_or_refuse(&mut vault, signing_in_user_id, signing_in_email)
 }
 
 /// The owner of the token just stored, in the same turn: `user_id` is the id the server named for that session. A
