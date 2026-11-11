@@ -259,7 +259,8 @@ impl EngineBridge {
                 if upload.file_id != proposed_id {
                     return Err(anyhow::anyhow!(
                         "server_changed_item_id: the upload init answered with an id this device did not choose"
-                    ).into());
+                    )
+                    .into());
                 }
                 let session = UploadResume {
                     op_id: op.op_id.clone(),
@@ -465,7 +466,8 @@ impl EngineBridge {
             _ => None,
         };
         let master_key = self.api.master_key();
-        let landing_material = owned_key_and_pin(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
+        let landing_material =
+            owned_key_and_pin(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -487,8 +489,15 @@ impl EngineBridge {
                 finalization: finalization.as_ref(),
                 now: now_secs(),
             },
-            &|queued, server_id| metadata_rekeyed_with_material(master_key, queued, server_id,
-                (server_id == server_file_id.as_str()).then_some((&landing_material.0, landing_material.1))).map_err(land_error_to_anyhow),
+            &|queued, server_id| {
+                metadata_rekeyed_with_material(
+                    master_key,
+                    queued,
+                    server_id,
+                    (server_id == server_file_id.as_str()).then_some((&landing_material.0, landing_material.1)),
+                )
+                .map_err(land_error_to_anyhow)
+            },
         );
         // Nothing landed: the op is still queued, and the refusal is the queue's again.
         let landed = match landed {
@@ -510,7 +519,11 @@ impl EngineBridge {
         for (successor, reason) in &landed.parked_successors {
             log_parked(successor, Some(server_file_id.as_str()), *reason);
         }
-        self.record_transfer_done(crate::transfer_progress::Direction::Up, server_file_id.as_str(), size_bytes);
+        self.record_transfer_done(
+            crate::transfer_progress::Direction::Up,
+            server_file_id.as_str(),
+            size_bytes,
+        );
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
@@ -567,7 +580,8 @@ impl EngineBridge {
         if !session.metadata_applied {
             let effective_name_encrypted = if server_file_id != local_file_id.as_str() {
                 owned_metadata_for_name(
-                    &self.db, self.api.master_key(),
+                    &self.db,
+                    self.api.master_key(),
                     &server_file_id,
                     metadata_display_name(metadata, op)
                         .as_deref()
@@ -594,11 +608,7 @@ impl EngineBridge {
                     .await?;
             }
             self.api
-                .update_metadata(
-                    &server_file_id,
-                    Some(&effective_name_encrypted),
-                    parent_change,
-                )
+                .update_metadata(&server_file_id, Some(&effective_name_encrypted), parent_change)
                 .await?;
             self.db.set_upload_resume_metadata_applied(&op.op_id)?;
         }
@@ -612,10 +622,17 @@ impl EngineBridge {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
         }
         let first_chunk = session.acked_chunks.max(0) as u64;
-        if !(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2) { return Err(anyhow::anyhow!("a v2 upload must restart in a fresh session").into()) };
+        if !(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2) {
+            return Err(anyhow::anyhow!("a v2 upload must restart in a fresh session").into());
+        };
         let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
-            file_key, &server_file_id, session.payload_size as u64, chunk_size as u64, file)?
-            .with_recorded_pin(pin)?;
+            file_key,
+            &server_file_id,
+            session.payload_size as u64,
+            chunk_size as u64,
+            file,
+        )?
+        .with_recorded_pin(pin)?;
         // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
         // id (the `files` row the activity list reads); a resumed session starts at
         // its acknowledged watermark, not at 0.
@@ -647,8 +664,12 @@ impl EngineBridge {
             .unwrap_or(0);
 
         for chunk_index in 0..chunk_count {
-            let encrypted = writer.next_chunk()?.ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
-            if chunk_index < first_chunk { continue; }
+            let encrypted = writer
+                .next_chunk()?
+                .ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
+            if chunk_index < first_chunk {
+                continue;
+            }
             let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();
             self.api
@@ -737,12 +758,12 @@ impl EngineBridge {
     async fn request_row_display_name(&self, request_id: &str) -> String {
         // The common path: the stored record's name opens under the derived
         // convention, so no network call is made.
-        if let Some(name) = crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
-            .ok()
-            .flatten()
-            .filter(|name| crate::owner_keys::safe_display_name(name))
+        if let Ok(crate::owner_keys::StoredName::Name(name)) =
+            crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
         {
-            return name;
+            if crate::owner_keys::safe_display_name(&name) {
+                return name;
+            }
         }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
@@ -784,8 +805,8 @@ impl EngineBridge {
             // path with no name at all on disk is free; anything present —
             // including a link — is skipped, and an unreadable parent fails
             // closed rather than being called free.
-            let free = std::fs::symlink_metadata(&candidate)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            let free =
+                std::fs::symlink_metadata(&candidate).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
             if self.db.get_file_by_path(&rel).ok().flatten().is_none() && free {
                 break;
             }
@@ -973,7 +994,11 @@ fn edited_sibling_name(name: &str, n: u32) -> String {
         Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => (stem, Some(extension)),
         _ => (name, None),
     };
-    let suffix = if n <= 1 { " (edited)".to_string() } else { format!(" (edited {n})") };
+    let suffix = if n <= 1 {
+        " (edited)".to_string()
+    } else {
+        format!(" (edited {n})")
+    };
     match extension {
         Some(extension) => format!("{stem}{suffix}.{extension}"),
         None => format!("{stem}{suffix}"),
