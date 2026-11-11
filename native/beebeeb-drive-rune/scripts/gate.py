@@ -10,11 +10,13 @@ Four checks, each over every keyed board element (scripts/keymap.js):
             and its vertical centre.
   pixels    the pixels INSIDE the board's box, cropped from both images:
               tile  both crops blurred (anti-aliasing differs between Chromium and Rune),
-                    cut into 8 px tiles; the worst tile's mean difference. A wrong icon, a
-                    missing thumbnail, a wrong fill, text at the other end of its cell.
+                    cut into 8 px tiles, each at the shift that suits it best; the worst
+                    tile's mean difference. A wrong icon, a missing thumbnail, a wrong
+                    fill, text at the other end of its cell. An icon's box is held to
+                    less than half of what text is: vectors rasterise alike.
               edge  the brightness profile across each of the four edges, unblurred; the
                     worst difference. A missing or extra hairline border or separator.
-            The native crop may sit up to 1 px (2 device px) off: what geometry allows.
+            Native pixels may sit up to 1 px (2 device px) off: what geometry allows.
   text      the string, family, size, weight, letter spacing and colour.
   icons     WHICH glyph (the SVG path data), outlined or filled, its state name and colour.
 
@@ -41,7 +43,8 @@ TRACK_TOL = 0.06       # px, letter spacing
 COLOR_TOL = 4          # 0-255 per channel, declared colours
 BLUR = 1.2             # device px
 TILE = 8               # device px
-TILE_TOL = 26.0        # 0-255, worst tile mean of the blurred difference
+TILE_TOL = 26.0        # 0-255, worst tile mean of the blurred difference: text, and boxes that hold text
+ICON_TILE_TOL = 12.0   # the same for an icon's box: two rasterisers draw a vector alike (measured: 5 at most)
 EDGE_TOL = 9.0         # 0-255, worst edge-profile difference
 SHIFT = 2              # device px the native crop may move
 MIN_EDGE = 12          # device px: shorter edges are not edge-checked
@@ -322,13 +325,14 @@ def main():
         # (A box that reaches a window corner holds the page behind the board's rounded frame.)
         # Edges are for boxes: a glyph's or a string's ink runs to its box's edge and is the tile check's.
         edge = px.edge(box) if b["kind"] == "box" and not corner(b) else 0.0
-        if tile > TILE_TOL or edge > EDGE_TOL:
+        tile_tol = ICON_TILE_TOL if b["kind"] == "icon" else TILE_TOL
+        if tile > tile_tol or edge > EDGE_TOL:
             parts = []
-            if tile > TILE_TOL:
-                parts.append(f"tile {tile:.0f} > {TILE_TOL:.0f}")
+            if tile > tile_tol:
+                parts.append(f"tile {tile:.0f} > {tile_tol:.0f}")
             if edge > EDGE_TOL:
                 parts.append(f"edge {edge:.0f} > {EDGE_TOL:.0f}")
-            pix_fail.append((max(tile / TILE_TOL, edge / EDGE_TOL), key, "; ".join(parts)))
+            pix_fail.append((max(tile / tile_tol, edge / EDGE_TOL), key, "; ".join(parts)))
             px.crop_pair(box, fail_dir / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', key)}.png")
 
     geo_fail.sort(key=lambda r: -r[0])
