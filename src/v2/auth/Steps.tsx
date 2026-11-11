@@ -3,6 +3,7 @@
 import { useRef } from 'react'
 import { Icon } from '@beebeeb/shared/design'
 import { digitsOnly, normalizeWord, spreadPaste, totpEntry } from './model'
+import { usePrivateScreen } from './privateScreen'
 import { AuthWindow, Field, Heading, Note, PrimaryButton, SECRET_FIELD, SecondaryButton, StepLockup, TextLink } from './parts'
 
 export function FirstRunView({ onCreate, onSignIn }: { onCreate: () => void; onSignIn: () => void }) {
@@ -101,6 +102,8 @@ export function PhraseView({ words, focus, unknown, state, onWords, onRestore, o
   onApproveInstead: () => void
   onLost: () => void
 }) {
+  // This screen replaces the one before it, so that screen's cleanup has already turned capture exclusion off.
+  usePrivateScreen()
   const filled = words.filter(Boolean).length === 12
   return (
     <AuthWindow>

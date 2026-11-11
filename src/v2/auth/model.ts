@@ -4,9 +4,9 @@
 /** The sign-in form's error state (DW-A19 to DW-A22, DW-A63). */
 export type SignInProblem =
   | { kind: 'invalid' }
-  | { kind: 'locked-hint' }
+  | { kind: 'locked_hint' }
   | { kind: 'offline' }
-  | { kind: 'rate-limited'; seconds: number }
+  | { kind: 'rate_limited'; seconds: number }
   | { kind: 'deleted' }
   | { kind: 'other' }
 
@@ -28,11 +28,11 @@ export function problemFrom(code: string, failures: number): SignInProblem {
   if (code === 'offline') return { kind: 'offline' }
   if (code.startsWith('rate_limited')) {
     const seconds = Number(code.split(':')[1])
-    return { kind: 'rate-limited', seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 30 }
+    return { kind: 'rate_limited', seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 30 }
   }
   if (code === 'account_deleted') return { kind: 'deleted' }
   if (code === 'invalid_credentials' || /invalid email or password/i.test(code)) {
-    return failures >= LOCK_HINT_AFTER ? { kind: 'locked-hint' } : { kind: 'invalid' }
+    return failures >= LOCK_HINT_AFTER ? { kind: 'locked_hint' } : { kind: 'invalid' }
   }
   if (/network error|could not reach/i.test(code)) return { kind: 'offline' }
   return { kind: 'other' }
@@ -42,11 +42,11 @@ export function problemFrom(code: string, failures: number): SignInProblem {
 export function problemText(p: SignInProblem): string {
   switch (p.kind) {
     case 'invalid':
-    case 'locked-hint':
+    case 'locked_hint':
       return 'That email and password don’t match. Nothing was unlocked.'
     case 'offline':
       return 'You’re offline. Nothing was sent.'
-    case 'rate-limited':
+    case 'rate_limited':
       return `Too many tries from this network. Wait ${p.seconds} seconds, then try again.`
     case 'deleted':
       return 'This account has been deleted. We can’t recover it.'
