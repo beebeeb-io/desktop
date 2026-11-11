@@ -172,7 +172,8 @@ Development and diagnostic flags (Rune's `--snap`, `--out`, `--html`, `--script`
 read only in a dev build (`instance::DEV_BUILD`: a debug build, or the `dev-tools` feature); a
 shipped build ignores every one, and Rune is handed an empty argument list (`App::args`).
 
-One instance per identity and user: `control.rs` is the protocol and `platform/windows_control.rs`
+One instance per identity, user AND Windows session (exclusivity across sessions comes from the
+engine/profile lock, which is not linked yet): `control.rs` is the protocol and `platform/windows_control.rs`
 the named pipe (ACL: the current user only). Serving the pipe IS being the instance. A later launch
 hands over one request (`show`, `open <link>`, `quit-for-update`), waits for `ok` and exits; if the
 first instance does not answer in 5 seconds, or the channel is unusable, it says so in a native
