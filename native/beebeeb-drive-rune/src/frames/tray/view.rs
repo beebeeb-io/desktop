@@ -11,6 +11,7 @@ use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, T
 use super::{Host, Ui, icons};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::kit;
+use crate::ui::settings_controls::{self, Emphasis};
 
 /// The flyout's size (`.mk-pop`): fixed in every state (DW-1201).
 pub const SIZE: (f32, f32) = (340.0, 520.0);
@@ -24,8 +25,6 @@ mod type_fly {
     pub const LINE: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
     /// 10.5px/400 mono: the reason, for support (DW-1216).
     pub const CODE: TextStyle = TextStyle::new(10.5, 400.0).family(Family::Mono).lh(16.0);
-    /// 12px/500 on the small button's line (`.kit-btn-sm`, 22 high).
-    pub const BUTTON: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).tracking(-0.06);
     /// 11px/400 mono: the upload speed.
     pub const SPEED: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
     /// 11px/600: "Recent changes" (`.mk-plabel`).
@@ -122,33 +121,14 @@ fn tone(tone: Tone, t: &Theme) -> (Color, Color) {
     }
 }
 
-/// A small button of the kit (`.kit-btn.kit-btn-sm`, 22 high in the flyout): amber when it is
-/// the one main action, paper with a line otherwise. Keys: `<key>`, `<key>-label`.
-fn small_button(key: &str, label: &str, primary: bool, t: &Theme) -> El {
-    let ink = if primary { t.accent_text_on } else { t.text };
-    let b = row()
-        .key(key)
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
+/// A small button of the kit (`ui::settings_controls::button`: `.kit-btn.kit-btn-sm`, 22 high),
+/// with the flyout's focus ring: amber when it is the one main action, paper with a line
+/// otherwise. Keys: `btn-<index>`, `btn-<index>-label`.
+fn small_button(index: usize, label: &str, primary: bool, t: &Theme) -> El {
+    let emphasis = if primary { Emphasis::Primary } else { Emphasis::Plain };
+    settings_controls::button(index, label, None, emphasis, t)
         .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(Cursor::Pointer);
-    let b = if primary {
-        b.fill(t.accent)
-            .hover(oklch(0.78, 0.17, 84.0))
-            .press(oklch(0.74, 0.17, 84.0))
-    } else {
-        b.fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3)
-    };
-    b.child(kit::label(format!("{key}-label"), label, type_fly::BUTTON, ink))
+        .cursor(Cursor::Pointer)
 }
 
 /// A progress bar (`.mk-bar`): `lead` of the track is empty, then `fill` of it is filled.
@@ -219,7 +199,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El
 
     let button = status.action().map(|(action, primary)| {
         (
-            small_button("st-btn", action.label(), primary, t).on_press_tx(host.act(Ui::press_action)),
+            small_button(0, action.label(), primary, t).on_press_tx(host.act(Ui::press_action)),
             // "A button label over 12 characters moves under the text instead of beside it" (DW-1221).
             action.label().chars().count() > 12,
             action,
@@ -558,7 +538,15 @@ fn changes_list<S: 'static>(ui: &Ui, host: Host<S>, t: &Theme) -> El {
         ));
     }
     content = content.child(
-        end.child(small_button("end-btn", "View full history", false, t).on_press_tx(host.act(Ui::open_full_history))),
+        end.child(
+            small_button(
+                usize::from(ui.snapshot().status.action().is_some()),
+                "View full history",
+                false,
+                t,
+            )
+            .on_press_tx(host.act(Ui::open_full_history)),
+        ),
     );
     // The end block stops 6 px short of the list's end (DW-1220).
     content = content.child(el().key("end-room").w_full().h(6.0));

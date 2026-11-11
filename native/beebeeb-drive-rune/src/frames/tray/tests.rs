@@ -231,12 +231,16 @@ fn every_frame_draws_its_words_its_button_and_the_three_buttons() {
             assert_eq!(text(&rt, "st-line"), line, "{frame}");
         }
         match button {
-            None => assert!(!has(&rt, "st-btn"), "{frame} has no button"),
+            // Without one, the only button of the kit left is the list's own.
+            None => assert!(
+                !has(&rt, "btn-0") || text(&rt, "btn-0-label") == "View full history",
+                "{frame}"
+            ),
             Some((label, amber)) => {
-                assert_eq!(text(&rt, "st-btn-label"), label, "{frame}");
-                assert_eq!(info(&rt, "st-btn").fill == t.accent, amber, "{frame}: amber");
-                assert_eq!(info(&rt, "st-btn").role, "button");
-                assert!(info(&rt, "st-btn").focusable, "{frame}: a Tab stop");
+                assert_eq!(text(&rt, "btn-0-label"), label, "{frame}");
+                assert_eq!(info(&rt, "btn-0").fill == t.accent, amber, "{frame}: amber");
+                assert_eq!(info(&rt, "btn-0").role, "button");
+                assert!(info(&rt, "btn-0").focusable, "{frame}: a Tab stop");
             }
         }
         for (i, label) in ["Open Beebeeb", "Open in File Explorer", "Settings"].iter().enumerate() {
@@ -282,7 +286,7 @@ fn long_copy_wraps_and_long_names_are_cut() {
     for (frame, _, _, button) in BUILT {
         let Some((label, _)) = button else { continue };
         let rt = runtime(frame);
-        let (button, line) = (info(&rt, "st-btn").rect, info(&rt, "st-line").rect);
+        let (button, line) = (info(&rt, "btn-0").rect, info(&rt, "st-line").rect);
         let under = button[1] >= line[1] + line[3];
         assert_eq!(under, label.chars().count() > 12, "{frame}: {label}");
         if under {
@@ -369,7 +373,7 @@ fn each_status_button_does_what_the_board_says() {
             Some(action),
             "{frame}"
         );
-        click(&mut rt, "st-btn");
+        click(&mut rt, "btn-0");
         assert_eq!(ui(&mut rt).take_intents(), intents, "{frame}");
         assert_eq!(text(&rt, "st-title"), then, "{frame}");
         // The engine hears every one of them.
@@ -381,7 +385,7 @@ fn each_status_button_does_what_the_board_says() {
 #[test]
 fn choosing_a_plan_leaves_the_flyout_waiting_for_it() {
     let mut rt = runtime("DW-1213");
-    click(&mut rt, "st-btn");
+    click(&mut rt, "btn-0");
     assert_eq!(text(&rt, "st-title"), "Choose a plan");
     assert_eq!(text(&rt, "st-line"), "Waiting for your plan.");
 }
@@ -483,30 +487,32 @@ fn tab_reaches_every_control_in_the_boards_order() {
         press(&mut rt, Key::Tab);
         stops.push(focused(&rt).unwrap_or_default());
     }
-    assert_eq!(stops, ["st-btn", "list-rows", "end-btn", "foot-0", "foot-1", "foot-2"]);
+    assert_eq!(stops, ["btn-0", "list-rows", "btn-1", "foot-0", "foot-1", "foot-2"]);
 
     // The status button by the keyboard: Space on Pause pauses.
     let mut rt = runtime("DW-1203");
-    tab_to(&mut rt, "st-btn");
+    tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(ui(&mut rt).take_intents(), [Intent::PauseSync]);
-    assert_eq!(text(&rt, "st-btn-label"), "Resume");
+    assert_eq!(text(&rt, "btn-0-label"), "Resume");
 }
 
 /// DW-1220: the list ends with where the rest is, and the sentence only when these are the
 /// last 50.
 #[test]
 fn the_list_ends_with_the_way_to_the_full_history() {
+    // The kit numbers its buttons: with no status button, "View full history" is the first.
     let mut rt = runtime("DW-1220");
     assert_eq!(text(&rt, "end-text"), "That's the last 50 changes.");
-    click(&mut rt, "end-btn");
+    assert_eq!(text(&rt, "btn-0-label"), "View full history");
+    click(&mut rt, "btn-0");
     assert_eq!(
         ui(&mut rt).take_intents(),
         [Intent::OpenSyncHistory { problems: false }, Intent::Close]
     );
     // Ten rows of a longer history: the button, without a sentence that would be wrong.
     let rt = runtime("DW-1202");
-    assert!(has(&rt, "end-btn") && !has(&rt, "end-text"));
+    assert!(has(&rt, "btn-0") && !has(&rt, "end-text"));
 }
 
 /// Names and roles (the board's Accessibility notes): a dialog named Beebeeb; the status
@@ -588,7 +594,7 @@ fn a_locked_flyout_shows_no_file_name_anywhere_in_its_tree() {
     assert!(found(&runtime("DW-1202")));
     let rt = runtime("DW-1211");
     assert!(!found(&rt), "a locked flyout holds no file name");
-    assert!(!has(&rt, "row-0") && !has(&rt, "list-rows") && !has(&rt, "end-btn"));
+    assert!(!has(&rt, "row-0") && !has(&rt, "list-rows") && !has(&rt, "btn-1"));
     assert_eq!(text(&rt, "empty-title"), "Recent changes are hidden");
 }
 
@@ -711,7 +717,7 @@ fn resume_in_the_flyout_window_resumes_sync_through_the_shell() {
     rt.frame(0.0);
     assert_eq!(rt.state.model.label, "Paused");
     assert_eq!(text(&rt, "st-title"), "Sync is paused");
-    click(&mut rt, "st-btn");
+    click(&mut rt, "btn-0");
     assert!(!rt.state.inputs.paused, "the engine was asked to resume");
     assert_eq!(rt.state.model.label, "Up to date");
     assert_eq!(text(&rt, "st-title"), "Up to date");

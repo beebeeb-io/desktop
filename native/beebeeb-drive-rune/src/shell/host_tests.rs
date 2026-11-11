@@ -572,21 +572,16 @@ fn the_tray_starts_only_when_wired_and_then_follows_the_model() {
     assert_eq!(shell.tray_model().icon, TrayIconState::NeedsDecision);
 }
 
+/// The flyout draws the tray lane's frames (`registry::FLYOUT`), not the placeholder, in the
+/// state the b shows. Its own tests are `frames/tray/tests.rs`.
 #[test]
-fn the_flyout_draws_its_placeholder_and_says_where_its_state_comes_from() {
+fn the_flyout_draws_the_tray_lanes_frame_in_the_state_the_b_shows() {
     let mut rt = Runtime::new(flyout_window::fixture_state(), flyout_window::view, (340.0, 520.0), ENV);
     rt.frame(0.0);
-    assert!(rt.find("flyout").is_some());
+    assert!(rt.find("fly").is_some(), "the tray lane's flyout");
+    assert!(rt.find("flyout").is_none(), "not the placeholder");
+    assert_eq!(rt.state.model.label, "Up to date");
     let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
-    assert!(texts.iter().any(|t| t == "Flyout"), "{texts:?}");
-    assert!(
-        texts.iter().any(|t| t == "Tray state (fixture engine): Up to date"),
-        "{texts:?}"
-    );
-    assert!(
-        texts
-            .iter()
-            .any(|t| t == "Board: The notification area: the b and its flyout (DW-1201)"),
-        "{texts:?}"
-    );
+    assert!(texts.iter().any(|t| t == "Up to date"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Flyout"), "{texts:?}");
 }

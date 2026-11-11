@@ -198,7 +198,7 @@ turning the switch on then fails with "set for another copy of this app".
 
 - The engine and the session: `FixtureEngine`. No sync, no account, no network.
 - `platform/macos.rs`, `platform/linux.rs`: every call returns `NotBuilt`.
-- The flyout's content and every frame group but Files: the placeholder.
+- Every frame group without a line in `registry.rs`: the placeholder (the flyout's content is `frames/tray`).
 - The mouse's back and forward buttons: Rune delivers only the left and right buttons
   (`crates/rune/src/window/events.rs:461,489` at c92e462); `Event::Back` / `Forward` are ready.
 - The sidebar's highlight for Sync history and Available offline: `ui::sidebar::SidebarSection` has

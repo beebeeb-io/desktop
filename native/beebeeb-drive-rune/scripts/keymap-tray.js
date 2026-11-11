@@ -43,6 +43,9 @@ if (fly) {
   const bar = (key, b) => { box(key, b, { kind_: b ? b.className : '' }); box(`${key}-fill`, b && q('i', b)); };
 
   box('fly', fly);
+  // The kit's small buttons, numbered in document order as `ui::settings_controls::button` keys them:
+  // the status block's one button first (when the state has one), then "View full history".
+  qa('.kit-btn', fly).forEach((b, i) => button(`btn-${i}`, b));
 
   // ---- The status block ----
   const st = q('.mk-pst', fly);
@@ -55,7 +58,6 @@ if (fly) {
   text('st-line', q(':scope > span:not(.font-mono):not(.mk-skel)', tx));
   text('st-code', q(':scope > .font-mono', tx));
   qa('.mk-skel', st).forEach((s, i) => box(`st-skel-${i}`, s));
-  button('st-btn', q('.kit-btn', st));
   bar('st-bar', q('.mk-bar', st));
   const speed = q('[title="Upload speed"]', st);
   if (speed) { icon('st-speed-icon', q('svg', speed)); api.textNode('st-speed', speed, { lh: getComputedStyle(speed).lineHeight }); }
@@ -92,7 +94,7 @@ if (fly) {
   }
   // The end of the list: one line, the way to the rest, and the scroll thumb.
   const end = q('.mk-pend', list);
-  if (end) { text('end-text', q('small', end)); button('end-btn', q('.kit-btn', end)); }
+  if (end) text('end-text', q('small', end));
   box('scroll-thumb', q('.mk-scroll', list));
 
   // ---- The three buttons ----

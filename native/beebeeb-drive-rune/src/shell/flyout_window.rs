@@ -1,6 +1,6 @@
 //! The flyout as a Rune window: borderless, always on top, 340 x 520 points, hidden until the
 //! b is clicked; it closes on Esc and when it loses focus (DW-1201). What it draws is the tray
-//! lane's (`registry::FLYOUT`); until then the placeholder.
+//! lane's (`registry::FLYOUT`: `frames/tray`).
 //!
 //! It takes focus when it opens. A window that never activates cannot hear that the person
 //! clicked elsewhere, and "closes when it loses focus" is the board's rule.
