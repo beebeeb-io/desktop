@@ -433,7 +433,7 @@ pub(crate) fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: boo
         .collect();
     let counts = db.child_counts(&folder_ids).map_err(DriveError::db)?;
     let mut items: Vec<DriveItem> = Vec::with_capacity(all_entries.len());
-    for (entry, pinned) in &all_entries {
+    for (entry, _pinned) in &all_entries {
         let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
         let child_count = if entry.is_dir() {
             Some(counts.get(&entry.file_id).copied().unwrap_or(0))
