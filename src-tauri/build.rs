@@ -1,4 +1,5 @@
 fn main() {
+    refuse_a_release_with_the_placeholder_key();
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.ends_with("apple-darwin") {
         build_macos_file_provider_bridge(&target);
@@ -50,4 +51,16 @@ fn build_macos_file_provider_bridge(target: &str) {
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=FileProvider");
+}
+
+/// Task 2451: a release build (`BEEBEEB_RELEASE_VERSION` set, as `release.yml` and the macOS release script do) is
+/// refused while `updater-v2.pub` still holds the placeholder instead of the next updater public key.
+fn refuse_a_release_with_the_placeholder_key() {
+    println!("cargo:rerun-if-changed=updater-v2.pub");
+    println!("cargo:rerun-if-env-changed=BEEBEEB_RELEASE_VERSION");
+    let key = std::fs::read_to_string("updater-v2.pub").expect("src-tauri/updater-v2.pub");
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION").is_ok_and(|version| !version.is_empty());
+    if release && key.trim_start().starts_with("PLACEHOLDER") {
+        panic!("updater-v2.pub still holds the placeholder: a release build needs the next updater public key");
+    }
 }

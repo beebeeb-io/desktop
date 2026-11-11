@@ -15,15 +15,7 @@ pub(super) async fn run_update_loop(app: tauri::AppHandle) {
 
 pub(super) async fn check_for_update(app: &tauri::AppHandle) {
     let channel = configured_release_channel();
-    let updater = match updater_for_release_channel(app, channel) {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::debug!(channel = %channel.as_str(), "updater not available: {e}");
-            return;
-        }
-    };
-
-    match updater.check().await {
+    match update_window::flow::checked_update(app, channel, update_window::trust::Direction::NewerOnly).await {
         Ok(Some(update)) => {
             tracing::info!(
                 version = %update.version,

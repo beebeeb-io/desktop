@@ -62,6 +62,8 @@ urlencoding = "2"
 # The web client passes salt as standard base64; desktop_login decodes it
 # before feeding it to beebeeb_core::kdf::derive_master_key.
 base64 = "0.22"
+# The verifier Tauri's updater uses (already in the lock through it): the update rules check signatures with it.
+minisign-verify = "0.2.5"
 # Filesystem watcher for the sync-root upload trigger (task 0780). On
 # Windows this drives the cross-platform recommended watcher
 # (ReadDirectoryChanges) so a file dropped in the sync root is detected and
@@ -318,6 +320,8 @@ windows-core-webview2 = { package = "windows-core", version = "0.61" }
 
 [dev-dependencies]
 tempfile = "3"
+# Tests only: signs update fixtures with keys generated inside each test (no key is committed).
+minisign = "0.7"
 # LD-0139: tests only (they build server and browser frames by hand). The browser sign-in's ECDH, HKDF and AES are
 # core's `cli_auth` (`CliEphemeralKey`), so desktop has no `p256`, `hkdf` or AEAD code of its own. Already in
 # Cargo.lock through beebeeb-core.

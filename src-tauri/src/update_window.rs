@@ -2,6 +2,13 @@
 
 use super::*;
 
+pub(crate) mod flow;
+#[cfg(test)]
+mod flow_tests;
+pub(crate) mod trust;
+#[cfg(test)]
+mod trust_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedReleaseVersion {
     pub(super) major: u64,
@@ -194,51 +201,6 @@ pub(super) fn record_installed_release_channel(channel: ReleaseChannel) -> Resul
     })
 }
 
-pub(super) fn updater_builder_for_release_channel(
-    app: &tauri::AppHandle,
-    channel: ReleaseChannel,
-) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
-    use tauri_plugin_updater::UpdaterExt;
-
-    let endpoint = update_manifest_url_for_channel(channel);
-    app.updater_builder()
-        .endpoints(vec![
-            endpoint
-                .parse()
-                .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?,
-        ])
-        .map_err(|e| e.to_string())
-}
-
-pub(super) fn updater_for_release_channel(
-    app: &tauri::AppHandle,
-    channel: ReleaseChannel,
-) -> Result<tauri_plugin_updater::Updater, String> {
-    updater_builder_for_release_channel(app, channel)?
-        .version_comparator(|_current, release| {
-            // Deliberately ignore Tauri's own `_current` and compare against
-            // real_app_version(), the workflow-provided release version baked
-            // in at compile time. That keeps comparisons aligned with the
-            // channel manifest and preserves legacy prerelease ordering for
-            // users upgrading from pre-build-once releases.
-            should_offer_channel_update(real_app_version(), &release.version.to_string())
-        })
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-pub(super) fn manifest_updater_for_release_channel(
-    app: &tauri::AppHandle,
-    channel: ReleaseChannel,
-) -> Result<tauri_plugin_updater::Updater, String> {
-    updater_builder_for_release_channel(app, channel)?
-        // Manual checks need to see the selected channel's latest manifest
-        // version even when it is equal to or older than the running app.
-        .version_comparator(|_current, _release| true)
-        .build()
-        .map_err(|e| e.to_string())
-}
-
 /// The real release version displayed by the app and compared against channel
 /// manifests. Set by release.yml as $BEEBEEB_RELEASE_VERSION before `cargo
 /// build` runs; falls back to the Cargo package version for local/dev builds
@@ -380,10 +342,7 @@ pub(super) fn app_version() -> &'static str {
 #[tauri::command]
 pub(super) async fn check_for_updates_now(app: tauri::AppHandle) -> Result<ManualUpdateCheckResult, String> {
     let channel = configured_release_channel();
-    let updater = manifest_updater_for_release_channel(&app, channel)
-        .map_err(|e| format!("Could not prepare the {} update check: {e}", channel.as_str()))?;
-
-    match updater.check().await {
+    match flow::checked_update(&app, channel, trust::Direction::AnyVersion).await {
         Ok(Some(update)) => {
             let version = update.version.to_string();
             let (result, payload) = manual_update_result_for_remote(
@@ -464,42 +423,11 @@ pub(super) fn in_app_install_refusal(host: desktop_capabilities::HostOs) -> Resu
 pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
     let channel = configured_release_channel();
-    let updater = updater_for_release_channel(&app, channel)?;
-    let update = updater.check().await.map_err(|e| e.to_string())?;
-
-    match update {
-        Some(u) => {
-            tracing::info!(version = %u.version, channel = %channel.as_str(), "downloading update");
-            // Spec §8: the update's from and to versions go to the lifecycle log.
-            let from_version = real_app_version().to_string();
-            let to_version = u.version.to_string();
-            let versions = (from_version.clone(), to_version.clone());
-
-            u.download_and_install(
-                |downloaded, total| {
-                    // Emit progress so the frontend can show a progress bar.
-                    // downloaded: usize, total: Option<u64>
-                    let pct = total
-                        .map(|t| if t > 0 { (downloaded as u64) * 100 / t } else { 0 })
-                        .unwrap_or(0);
-                    tracing::debug!("update download progress: {pct}%");
-                },
-                move || {
-                    tracing::info!("update installed — relaunching");
-                    lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateDownloaded {
-                        from: versions.0,
-                        to: versions.1,
-                    });
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateInstalled {
-                from: from_version,
-                to: to_version,
-            });
-
-            record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+    // Tasks 2449 and 2451: strictly newer, its signature names this file and version, signed by a trusted key.
+    match flow::checked_update(&app, channel, trust::Direction::NewerOnly).await? {
+        Some(update) => {
+            tracing::info!(version = %update.version, channel = %channel.as_str(), "downloading update");
+            flow::download_record_install(update, channel).await?;
             #[cfg(target_os = "macos")]
             note_updater_relaunch(&app);
             app.restart();
@@ -519,8 +447,7 @@ pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> 
 pub(super) async fn install_channel_downgrade(app: tauri::AppHandle, version: String) -> Result<(), String> {
     in_app_install_refusal(desktop_capabilities::host_os())?;
     let channel = configured_release_channel();
-    let updater = manifest_updater_for_release_channel(&app, channel)?;
-    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let update = flow::checked_update(&app, channel, trust::Direction::AnyVersion).await?;
 
     let Some(u) = update else {
         return Err(format!(
@@ -551,40 +478,12 @@ pub(super) async fn install_channel_downgrade(app: tauri::AppHandle, version: St
         channel = %channel.as_str(),
         "downloading downgrade"
     );
-    // Spec §8: the downgrade's from and to versions go to the lifecycle log.
-    let from_version = real_app_version().to_string();
-    let to_version = u.version.to_string();
-    let versions = (from_version.clone(), to_version.clone());
-
-    u.download_and_install(
-        |downloaded, total| {
-            let pct = total
-                .map(|t| if t > 0 { (downloaded as u64) * 100 / t } else { 0 })
-                .unwrap_or(0);
-            tracing::debug!("downgrade download progress: {pct}%");
-        },
-        move || {
-            tracing::info!("downgrade installed — relaunching");
-            lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateDownloaded {
-                from: versions.0,
-                to: versions.1,
-            });
-        },
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    lifecycle_log::event(lifecycle_log::LifecycleEvent::UpdateInstalled {
-        from: from_version,
-        to: to_version,
-    });
-
-    record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
+    flow::download_record_install(u, channel).await?;
     #[cfg(target_os = "macos")]
     note_updater_relaunch(&app);
     app.restart()
 }
 
-/// Toggle "Start at login" autostart setting.
 #[tauri::command]
 pub(super) fn toggle_autostart(app: tauri::AppHandle) -> Result<bool, String> {
     let manager = app.autolaunch();
