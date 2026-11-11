@@ -42,6 +42,24 @@ pub trait AuthSecretStore: Send + Sync {
     fn holds_account_email(&self) -> AuthResult<bool> {
         self.load_account_email().map(|email| email.is_some())
     }
+
+    /// Persist the server user id of the account whose vault key is stored
+    /// (task 2447). A sibling credential entry so a loader can refuse a
+    /// mismatch. Default returns Unsupported for stores that predate it.
+    fn save_vault_key_owner(&self, _user_id: &str) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "vault key owner storage not supported by this store",
+        ))
+    }
+    /// Read the stored vault key owner. `Ok(None)` = "unknown owner" (legacy
+    /// key, pre-task 2447).
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        Ok(None)
+    }
+    /// Remove the stored vault key owner. No-op when absent.
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        Ok(())
+    }
 }
 
 /// One rule for every "is anything of an account left?" probe: present is present; a store that cannot hold secrets
@@ -110,6 +128,31 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.store.save_wrapped_master_key(wrapped)
     }
 
+    /// Persist the server user id that owns the vault key (task 2447).
+    pub fn store_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        if user_id.trim().is_empty() {
+            return Ok(());
+        }
+        self.store.save_vault_key_owner(user_id)
+    }
+
+    /// Read the vault key owner, or `None` for a legacy key (no owner tag).
+    pub fn vault_key_owner(&self) -> AuthResult<Option<String>> {
+        match self.store.load_vault_key_owner() {
+            Ok(owner) => Ok(owner),
+            Err(AuthStoreError::Unsupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Remove only the vault key and its owner tag. Used when a foreign key is
+    /// detected at sign-in time (task 2447).
+    pub fn delete_vault_key_and_owner(&mut self) -> AuthResult<()> {
+        self.store.delete_wrapped_master_key()?;
+        self.store.delete_vault_key_owner()?;
+        Ok(())
+    }
+
     /// Persist the account email alongside the session. Empty/whitespace-only
     /// input is treated as "no email" and skips the write so we never store a
     /// blank credential blob (the backends reject empty blobs anyway).
@@ -165,6 +208,8 @@ impl<S: AuthSecretStore> AuthVault<S> {
         // `delete_account_email` is a no-op success when absent, so this stays
         // idempotent and never fails just because email was never stored.
         self.store.delete_account_email()?;
+        // Task 2447: also drop the vault key owner tag.
+        self.store.delete_vault_key_owner()?;
         Ok(())
     }
 

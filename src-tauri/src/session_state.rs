@@ -510,6 +510,7 @@ pub(super) fn persist_session_to_keychain(
     token: &str,
     master_key: &[u8; 32],
     email: Option<&str>,
+    owner_user_id: Option<&str>,
 ) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
@@ -520,6 +521,12 @@ pub(super) fn persist_session_to_keychain(
     vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))?;
+    // Task 2447: tag the key with its owner.
+    if let Some(user_id) = owner_user_id {
+        if let Err(e) = vault.store_vault_key_owner(user_id) {
+            tracing::warn!(error = %e, "could not persist vault key owner to credential store (non-fatal)");
+        }
+    }
     // The session's own email, after its secrets: the Account page shows it after an auto-unlock on relaunch, and
     // the restore knows the stored session by it. None/empty (a sign-in that could not fetch the account record)
     // writes nothing, so the stored session has no email and stays unidentified until a fetch names it.
@@ -576,16 +583,27 @@ pub(super) fn persist_account_email_to_keychain(
     Ok(())
 }
 
-/// Store the vault key the recovery phrase proved. Only inside a checked turn (`_write`). The key is borrowed: no copy of
-/// it is made here but the one the store wipes (`SecretBytes`).
+/// Store the vault key the recovery phrase (or another trusted path) proved,
+/// bound to its owner's server user id (task 2447). Only inside a checked
+/// turn (`_write`). The key is borrowed: no copy of it is made here but the
+/// one the store wipes (`SecretBytes`).
 pub(super) fn persist_vault_key_to_keychain(
     _write: &SessionWrite,
     account_id: &str,
     master_key: &[u8; 32],
+    owner_user_id: Option<&str>,
 ) -> Result<(), String> {
-    AuthVault::new(platform_keychain_store_for(account_id))
+    let vault = AuthVault::new(platform_keychain_store_for(account_id));
+    vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
-        .map_err(|e| keychain_error("store vault key in Keychain", e))
+        .map_err(|e| keychain_error("store vault key in Keychain", e))?;
+    // Task 2447: tag the key with its owner so a loader can refuse a mismatch.
+    if let Some(user_id) = owner_user_id {
+        if let Err(e) = vault.store_vault_key_owner(user_id) {
+            tracing::warn!(error = %e, "could not persist vault key owner to credential store (non-fatal)");
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn load_session_token_from_keychain(account_id: &str) -> Result<Option<String>, String> {

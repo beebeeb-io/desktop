@@ -39,9 +39,9 @@ impl std::ops::Deref for AccountId {
     }
 }
 
-/// The three secret leaves a store holds per account. Each has ONE wire name;
-/// the platform stores only ever see `leaf()`, so a typo cannot mint a fourth
-/// item.
+/// The secret leaves a store holds per account. Each has ONE wire name;
+/// the platform stores only ever see `leaf()`, so a typo cannot mint an
+/// extra item.
 /// macOS and Windows stores (and the in-memory test store) are the only users:
 /// the Linux build has no credential vault to name items in.
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
@@ -56,18 +56,30 @@ pub enum KeychainAccount {
     /// plaintext config file): account metadata, not key material, so it is a
     /// plain UTF-8 string rather than `SecretBytes`.
     AccountEmail,
+    /// Server user id of the account whose vault key is stored in
+    /// `WrappedMasterKey` (task 2447). A sibling credential entry, not
+    /// derived crypto. An entry with no `VaultKeyOwner` is "unknown owner"
+    /// (legacy, pre-tag). Written whenever the vault key is stored after a
+    /// VERIFIED unlock (recovery phrase, device approval, browser handoff).
+    VaultKeyOwner,
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 impl KeychainAccount {
     #[cfg(test)]
-    pub const ALL: [Self; 3] = [Self::SessionToken, Self::WrappedMasterKey, Self::AccountEmail];
+    pub const ALL: [Self; 4] = [
+        Self::SessionToken,
+        Self::WrappedMasterKey,
+        Self::AccountEmail,
+        Self::VaultKeyOwner,
+    ];
 
     pub const fn leaf(self) -> &'static str {
         match self {
             Self::SessionToken => "session-token",
             Self::WrappedMasterKey => "wrapped-master-key",
             Self::AccountEmail => "account-email",
+            Self::VaultKeyOwner => "vault-key-owner",
         }
     }
 
@@ -137,12 +149,21 @@ mod tests {
                 KeychainAccount::SessionToken => "session-token",
                 KeychainAccount::WrappedMasterKey => "wrapped-master-key",
                 KeychainAccount::AccountEmail => "account-email",
+                KeychainAccount::VaultKeyOwner => "vault-key-owner",
             };
             assert_eq!(account.leaf(), leaf);
             assert_eq!(KeychainAccount::from_leaf(leaf), Some(account));
             leaves.push(leaf);
         }
-        assert_eq!(leaves, ["session-token", "wrapped-master-key", "account-email"]);
+        assert_eq!(
+            leaves,
+            [
+                "session-token",
+                "wrapped-master-key",
+                "account-email",
+                "vault-key-owner"
+            ]
+        );
         assert_eq!(KeychainAccount::from_leaf("master-key"), None);
     }
 

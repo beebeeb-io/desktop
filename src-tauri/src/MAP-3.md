@@ -6,7 +6,7 @@ Modules 93–131, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
-| `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, SendPhaseLink, AttemptSignals (3), ResumeTicket (4), EngineRunner, AbortOutcome (2) |
+| `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, AbortOutcome (2), AttemptSignals (3), EngineRunner, ResumeTicket (4), SendPhaseLink |
 | `selective_sync_wave2_tests.rs` | SelectiveSync wave-2 tests, split out of `tests.rs` (file-size ratchet; moved unchanged). | — |
 | `session_apply.rs` | `session_apply` items split out of `lib.rs`. | — |
 | `session_commands.rs` | Windows command admission, independent of whether a sync root/runner exists. | — |
@@ -42,6 +42,6 @@ Modules 93–131, sorted by path.
 | `vault_lock_commands.rs` | `vault_lock_commands` items split out of `lib.rs`. | — |
 | `vault_tree.rs` | `vault_tree` items split out of `lib.rs`. | — |
 | `vault_unlock.rs` | `vault_unlock` items split out of `lib.rs`. | — |
-| `watcher.rs` | Sync-root upload driver — the UPLOAD trigger for Windows (task 0780). | spawn, NotifyEvent (1), cancel_engine_delete_suppression, suppress_engine_delete |
+| `watcher.rs` | Sync-root upload driver — the UPLOAD trigger for Windows (task 0780). | NotifyEvent (2), spawn, cancel_engine_delete_suppression, suppress_engine_delete |
 | `webview_browser_keys.rs` | A sync app has no use for a web browser's own shortcuts (0.8.15). | — |
 | `write_token.rs` | The write token (spec `docs/specs/2026-10-09-macos-finder-write-versions.md` §5): the content version a reply names a File Provider write's | — |

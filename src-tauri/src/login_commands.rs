@@ -1014,7 +1014,16 @@ pub(super) fn store_recovered_vault_key(
     {
         return Err(UNLOCK_ACCOUNT_CHANGED.to_string());
     }
-    persist_vault_key_to_keychain(&write, account_id, master_key)?;
+    // Task 2447: tag the vault key with its owner. The user_id comes from
+    // the cached profile set at sign-in time; `None` if the profile wasn't
+    // cached (a pre-2447 session) — the key then has "unknown owner" until
+    // the next verified unlock.
+    let owner_user_id = acct
+        .cached_profile
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.user_id.clone()));
+    persist_vault_key_to_keychain(&write, account_id, master_key, owner_user_id.as_deref())?;
     // `desktop_login` already persisted the email when it stored the token, but persist again here (idempotent) so
     // the invariant "a fully-provisioned session has its email in the store" holds even if memory and store drift.
     if let Some(email) = started_email {

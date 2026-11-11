@@ -155,7 +155,10 @@ pub(super) async fn fetch_canonical_profile(session_token: &str) -> Option<accou
     fetch_canonical_profile_at(&runner::api_base_url(), session_token).await
 }
 
-pub(super) async fn fetch_canonical_profile_at(base_url: &str, session_token: &str) -> Option<account_dto::AccountProfile> {
+pub(super) async fn fetch_canonical_profile_at(
+    base_url: &str,
+    session_token: &str,
+) -> Option<account_dto::AccountProfile> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .default_headers(api_client::provenance_headers())
@@ -287,7 +290,11 @@ pub(super) fn name_session_after_profile(
 /// text or the address) and marked on the account, so the next naming trigger (app activation, "Try again", the next
 /// launch's background request) writes it again. A store that cannot hold secrets (Linux) has nothing to retry.
 /// `true` when the Keychain holds it now.
-pub(super) fn write_session_email_to_keychain(_write: &SessionWrite, acct: &account::AccountRuntime, email: &str) -> bool {
+pub(super) fn write_session_email_to_keychain(
+    _write: &SessionWrite,
+    acct: &account::AccountRuntime,
+    email: &str,
+) -> bool {
     match AuthVault::new(platform_keychain_store_for(acct.id.as_str())).store_account_email(email) {
         Ok(()) | Err(keychain::AuthStoreError::Unsupported(_)) => {
             acct.keychain_email_pending.store(false, Ordering::SeqCst);
@@ -416,7 +423,11 @@ impl LogoutOutcome {
 }
 
 /// End `session_token`'s session on the server. Never logs; the token goes only into the request's header.
-pub(super) async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> LogoutOutcome {
+pub(super) async fn revoke_desktop_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> LogoutOutcome {
     let response = match client
         .post(format!("{base_url}/api/v1/auth/logout"))
         .bearer_auth(session_token)
@@ -461,7 +472,11 @@ pub(super) fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize:
     acct.session
         .lock()
         .ok()
-        .and_then(|session| session.as_ref().map(|session| zeroize::Zeroizing::new(session.token.clone())))
+        .and_then(|session| {
+            session
+                .as_ref()
+                .map(|session| zeroize::Zeroizing::new(session.token.clone()))
+        })
         .or_else(|| {
             load_session_token_from_keychain(acct.id.as_str())
                 .ok()
@@ -471,7 +486,9 @@ pub(super) fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize:
 }
 
 /// The session token one Keychain layout holds, if it can say (task 1886: a clear reads what it is about to remove).
-pub(super) fn stored_session_token<S: keychain::AuthSecretStore>(vault: &AuthVault<S>) -> Option<zeroize::Zeroizing<String>> {
+pub(super) fn stored_session_token<S: keychain::AuthSecretStore>(
+    vault: &AuthVault<S>,
+) -> Option<zeroize::Zeroizing<String>> {
     vault
         .session_token()
         .ok()
@@ -495,7 +512,9 @@ pub(super) fn session_tokens_held_here(acct: &AccountRuntime) -> Option<Vec<zero
         AuthVault::new(keychain::legacy_platform_keychain_store()),
     ] {
         match vault.session_token() {
-            Ok(token) => held.extend(token.map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string()))),
+            Ok(token) => {
+                held.extend(token.map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string())))
+            }
             Err(keychain::AuthStoreError::NotFound | keychain::AuthStoreError::Unsupported(_)) => {}
             Err(_) => return None,
         }
@@ -527,9 +546,14 @@ pub(super) async fn revoke_sessions_for_sign_out(tokens: &[&str], base_url: &str
     };
     for &outcome in &outcomes {
         match outcome {
-            LogoutOutcome::Revoked => tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session"),
+            LogoutOutcome::Revoked => {
+                tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session")
+            }
             LogoutOutcome::AlreadyEnded => {
-                tracing::info!(outcome = outcome.code(), "sign-out: the server had already ended the session")
+                tracing::info!(
+                    outcome = outcome.code(),
+                    "sign-out: the server had already ended the session"
+                )
             }
             LogoutOutcome::Refused(status) => tracing::warn!(
                 outcome = outcome.code(),
@@ -572,7 +596,6 @@ pub(super) async fn end_dropped_sessions(acct: &AccountRuntime, dropped: Dropped
     let tokens: Vec<&str> = tokens.iter().map(|token| token.as_str()).collect();
     revoke_sessions_for_sign_out(&tokens, &sign_out_api_base()).await;
 }
-
 
 /// Test builds: run `body` with `base` as the API a sign-out's revoke goes to (task 1886), so a test drives the real
 /// sign-out against a server it started. Only this task sees it. (No Windows test drives a signed-in sign-out.)
@@ -686,7 +709,17 @@ pub(super) fn install_new_session(
         Ok(write) => write,
         Err(changed) => return Ok(NewSession::Refused(changed.sign_in_sentence().to_string())),
     };
-    persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;
+    // Task 2447: the vault key's owner is the profile's user_id (device
+    // approval / browser handoff carry the profile of the approving account).
+    let owner_user_id = profile.as_ref().map(|p| p.user_id.as_str());
+    persist_session_to_keychain(
+        &write,
+        acct.id.as_str(),
+        token,
+        master_key,
+        email.as_deref(),
+        owner_user_id,
+    )?;
     if let Some(profile) = profile
         && let Ok(mut cached) = acct.cached_profile.lock()
     {

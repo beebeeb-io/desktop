@@ -221,6 +221,59 @@ pub fn approve_error(code: &str) -> &'static str {
     "The approval didn\u{2019}t finish. Nothing was shared."
 }
 
+// ── Vault key ownership (task 2447) ────────────────────────────────────────
+//
+// Pure decision functions for the stale-vault-key fix: a stored vault key
+// is bound to the server user id that proved it. Nothing here reads the
+// credential store; the callers pass what they read.
+
+/// Whether a stored vault key should be REMOVED on a token-only sign-in
+/// (password / 2FA). Called BEFORE storing the new session's token, while
+/// the signing-in user's `profile.user_id` is known.
+///
+/// Returns `true` (remove) when the stored key does not belong to the
+/// signing-in user.
+///
+/// Decision (lane A1b, 2026-11-11): an unknown-owner key (legacy, pre-tag)
+/// whose stored email matches the signing-in email is KEPT and tagged after
+/// the next verified unlock, because removing it would force the person to
+/// re-enter 12 words when there is no evidence of a different account.
+pub fn should_remove_stored_vault_key(
+    key_owner: Option<&str>,
+    signing_in_user_id: &str,
+    signing_in_email: &str,
+    stored_email: Option<&str>,
+) -> bool {
+    match key_owner {
+        Some(owner) => owner != signing_in_user_id,
+        None => {
+            // Unknown owner (legacy entry): remove only when the stored
+            // email is known AND differs from the signing-in email.
+            match stored_email {
+                Some(email) if !email.is_empty() => !email.eq_ignore_ascii_case(signing_in_email),
+                // No stored email, or empty: fail safe — keep the key (the
+                // person is not asked for 12 words again on the same email).
+                _ => false,
+            }
+        }
+    }
+}
+
+/// Whether a loaded vault key's owner matches the session it would be
+/// installed into. Called at startup-restore and Hello-unlock time, after
+/// the session's `user_id` is known (from the probe or the cached profile).
+///
+/// Returns `true` when the key may be installed; `false` when it must be
+/// refused and the foreign key removed (gate → `NeedsRecoveryPhrase`).
+pub fn vault_key_owner_matches(key_owner: Option<&str>, session_user_id: &str) -> bool {
+    match key_owner {
+        Some(owner) => owner == session_user_id,
+        // Unknown owner (legacy): allow — the sign-in path is the primary
+        // defense, and a migration should tag it on the next verified unlock.
+        None => true,
+    }
+}
+
 // ── Engine gate ─────────────────────────────────────────────────────────────
 
 /// Whether the engine may start. A caller (the TSX gate, the startup path, or a
@@ -643,5 +696,90 @@ mod tests {
     #[test]
     fn approve_offline() {
         assert!(approve_error("offline").contains("offline"));
+    }
+
+    // ── Vault key ownership (task 2447) ────────────────────────────────
+
+    #[test]
+    fn stale_key_different_owner_is_removed() {
+        assert!(should_remove_stored_vault_key(
+            Some("user-A"),
+            "user-B",
+            "b@example.com",
+            Some("a@example.com"),
+        ));
+    }
+
+    #[test]
+    fn same_owner_key_is_kept() {
+        assert!(!should_remove_stored_vault_key(
+            Some("user-A"),
+            "user-A",
+            "a@example.com",
+            Some("a@example.com"),
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_different_email_is_removed() {
+        assert!(should_remove_stored_vault_key(
+            None,
+            "user-B",
+            "b@example.com",
+            Some("a@example.com"),
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_same_email_is_kept() {
+        assert!(!should_remove_stored_vault_key(
+            None,
+            "user-A",
+            "a@example.com",
+            Some("a@example.com"),
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_same_email_case_insensitive() {
+        assert!(!should_remove_stored_vault_key(
+            None,
+            "user-A",
+            "A@Example.COM",
+            Some("a@example.com"),
+        ));
+    }
+
+    #[test]
+    fn unknown_owner_no_stored_email_is_kept() {
+        // No email to compare → fail safe, keep the key.
+        assert!(!should_remove_stored_vault_key(None, "user-B", "b@example.com", None,));
+    }
+
+    #[test]
+    fn unknown_owner_empty_stored_email_is_kept() {
+        assert!(!should_remove_stored_vault_key(
+            None,
+            "user-B",
+            "b@example.com",
+            Some(""),
+        ));
+    }
+
+    #[test]
+    fn vault_key_owner_match_allows() {
+        assert!(vault_key_owner_matches(Some("user-A"), "user-A"));
+    }
+
+    #[test]
+    fn vault_key_owner_mismatch_refuses() {
+        assert!(!vault_key_owner_matches(Some("user-A"), "user-B"));
+    }
+
+    #[test]
+    fn vault_key_unknown_owner_allows() {
+        // Legacy key with no owner tag → allow (the sign-in path is the
+        // primary defense).
+        assert!(vault_key_owner_matches(None, "user-B"));
     }
 }
