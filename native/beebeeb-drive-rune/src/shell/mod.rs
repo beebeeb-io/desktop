@@ -111,6 +111,21 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("locked", |s| scene(s, Event::Gate(GateState::Locked))),
     ("no-plan", |s| scene(s, Event::Gate(GateState::NoPlan))),
     ("first-run", |s| scene(s, Event::Gate(GateState::FirstRun))),
+    ("DW-A01", |s| crate::frames::signin::set_scene(s, "DW-A01")),
+    ("DW-A02", |s| crate::frames::signin::set_scene(s, "DW-A02")),
+    ("DW-A03", |s| crate::frames::signin::set_scene(s, "DW-A03")),
+    ("DW-A04", |s| crate::frames::signin::set_scene(s, "DW-A04")),
+    ("DW-A05", |s| crate::frames::signin::set_scene(s, "DW-A05")),
+    ("DW-A06", |s| crate::frames::signin::set_scene(s, "DW-A06")),
+    ("DW-A07", |s| crate::frames::signin::set_scene(s, "DW-A07")),
+    ("DW-A08", |s| crate::frames::signin::set_scene(s, "DW-A08")),
+    ("DW-A09", |s| crate::frames::signin::set_scene(s, "DW-A09")),
+    ("DW-A10", |s| crate::frames::signin::set_scene(s, "DW-A10")),
+    ("DW-A18", |s| crate::frames::signin::set_scene(s, "DW-A18")),
+    ("DW-A19", |s| crate::frames::signin::set_scene(s, "DW-A19")),
+    ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
+    ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
+    ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
     // Lane f-shared-search-trash: Shared and Trash, by board frame id.
     ("DW-0501", crate::frames::shared::scenes::dw_0501),
     ("DW-0502", crate::frames::shared::scenes::dw_0502),
@@ -172,7 +187,13 @@ pub fn run() {
     // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
     if launch.tooling
         && launch.rune_args.iter().any(|arg| arg == instance::GATE_EXPORT_FLAG)
-        && let Some(code) = crate::ui::gate::run_from_args(SCENES, state::init, registry::view, FONTS, FAMILIES)
+        && let Some(code) = crate::ui::gate::run_from_args(
+            crate::frames::scenes(SCENES),
+            state::init,
+            registry::view,
+            FONTS,
+            FAMILIES,
+        )
     {
         std::process::exit(code);
     }
@@ -269,7 +290,7 @@ pub fn run() {
     let main_spec = AppSpec::<State> {
         fonts: FONTS,
         families: FAMILIES,
-        scenes: SCENES,
+        scenes: crate::frames::scenes(SCENES),
         min_size: Some(WindowKind::Main.min_size()),
         poll: Some(host::poll),
         on_key: Some(host::on_key),

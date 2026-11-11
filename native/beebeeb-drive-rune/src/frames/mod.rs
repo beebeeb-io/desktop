@@ -1,16 +1,33 @@
-//! Frame groups: one directory per group of board frames, drawn from a `<Group>Source`.
+//! The board's frames, one module per group (one lane each). A group exposes `view`, `on_key`
+//! and a `FRAMES` table of its board frames (frame id, and the scene that shows it).
 //!
-//! Lane f-shared-search-trash: `shared` (DW-05xx), `trash` (DW-0747…, DW-0117). The checklist of
-//! frames, built and not built, is `shared/FRAMES.md`.
+//! A new group adds TWO lines here: its `pub mod`, and its `FRAMES` in [`scenes`]. The shell
+//! names its own scenes once (`shell::SCENES`) and never changes for a new group.
+//!
+//! Lane f-shared-search-trash: `shared` (DW-05xx), `trash` (DW-0747…, DW-0117), drawn from a
+//! `<Group>Source`; their scenes are named in `shell::SCENES`. The checklist of frames, built and
+//! not built, is `shared/FRAMES.md`.
 
+pub mod settings;
 pub mod shared;
+pub mod signin;
 pub mod trash;
+
+use std::sync::OnceLock;
 
 use crate::State;
 use crate::shell::app::{Event, Route, Section};
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
+use crate::ui::gate::Scene;
 use crate::ui::sidebar::SidebarSection;
 use rune::{KeyEvent, Tx};
+
+/// Every scene the app can be rendered in (`--scene`, `scripts/compare.sh`): the shell's own,
+/// then every group's board frames. Built once.
+pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
+    static ALL: OnceLock<Vec<Scene<State>>> = OnceLock::new();
+    ALL.get_or_init(|| [shell, settings::FRAMES].concat())
+}
 
 /// Somewhere a control wants to go that this lane does not draw: the shell's route machine
 /// (or the lane that owns the target frame) picks it up. A control never does nothing, and an
