@@ -233,6 +233,11 @@ pub fn run() {
             get_bandwidth_history,
         ])
         .setup(|app| {
+            // The names compiled in (config dir, credential names, sync-root registration) must belong to the
+            // bundle the OS started; otherwise stop before anything is read or written.
+            crate::app_identity::AppIdentity::CURRENT
+                .check_bundle(&app.config().identifier, &app.package_info().name)
+                .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
             let app_handle = app.handle().clone();
             state_paths::init_from_app(&app_handle).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
             if let Ok(cfg) = DesktopConfig::load()

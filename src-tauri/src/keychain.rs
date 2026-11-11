@@ -8,7 +8,7 @@ use std::fmt;
 
 /// The service every platform store (and the test store) names its items with; the Linux stub has no item to name.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
+const KEYCHAIN_SERVICE: &str = crate::app_identity::AppIdentity::CURRENT.credential_service();
 const MASTER_KEY_BYTES: usize = 32;
 
 #[derive(PartialEq, Eq)]

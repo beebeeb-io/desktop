@@ -14,6 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 use super::DriveError;
 use super::dto::*;
 use super::events;
+use super::first_sync::{ListingAnswer, StorageAnswer, SyncAnswer};
 use super::fsops;
 use super::model::{self, Sort};
 use crate::state_db::{FileEntry, FileStatus, StateDb};
@@ -107,24 +108,45 @@ pub(crate) async fn drive_list(
     state: State<'_, AppState>,
     folder_id: Option<String>,
     sort: Option<Sort>,
-) -> Answer<Listing> {
+) -> Answer<ListingAnswer> {
     require_session(&state)?;
     events::ensure_started(&app);
     let stale = stale(&state);
+    let view = events::engine_view(&state);
     blocking(move || match local()? {
-        Some((db, _)) => model::list(&db, folder_id.as_deref(), sort.unwrap_or_default(), stale),
+        Some((db, _)) => {
+            let listing = model::list(&db, folder_id.as_deref(), sort.unwrap_or_default(), stale)?;
+            let (raw, paused) = view.clone().unwrap_or_default();
+            let phase = model::sync_phase(view.is_some(), &raw, paused, &model::sync_counts(&db));
+            Ok(ListingAnswer::of(listing, first_list_loaded(&db), phase))
+        }
         None if folder_id.is_none() => {
             let root = Crumb {
                 id: None,
                 name: model::ROOT_NAME.to_string(),
             };
-            Ok(Listing {
+            let listing = Listing {
                 folder: root.clone(),
                 path: vec![root],
                 items: Vec::new(),
                 as_of: model::now_iso(),
                 stale: true,
-            })
+            };
+            // No local copy at all: nothing has been loaded on this PC.
+            let (raw, paused) = view.clone().unwrap_or_default();
+            let phase = model::sync_phase(
+                view.is_some(),
+                &raw,
+                paused,
+                &model::SyncCounts {
+                    on_device: 0,
+                    online_only: 0,
+                    moving: 0,
+                    conflicts: 0,
+                    on_hold: 0,
+                },
+            );
+            Ok(ListingAnswer::of(listing, false, phase))
         }
         None => Err(DriveError::NotFound),
     })
@@ -237,7 +259,7 @@ pub(crate) async fn drive_trash(state: State<'_, AppState>) -> Answer<Vec<TrashE
 }
 
 #[tauri::command]
-pub(crate) async fn drive_storage(state: State<'_, AppState>) -> Answer<StorageSummary> {
+pub(crate) async fn drive_storage(state: State<'_, AppState>) -> Answer<StorageAnswer> {
     require_session(&state)?;
     let summary = crate::file_open_commands::desktop_storage_summary(state)
         .await
@@ -247,17 +269,23 @@ pub(crate) async fn drive_storage(state: State<'_, AppState>) -> Answer<StorageS
         None => Ok((0, 0, 0)),
     })
     .await?;
-    Ok(StorageSummary {
+    Ok(StorageAnswer::of(StorageSummary {
         used_bytes: summary.used_bytes,
         quota_bytes: summary.quota_bytes,
         files_bytes: files,
         photos_bytes: photos,
         backups_bytes: backups,
-    })
+    }))
+}
+
+/// Whether the engine has applied a first file list on this PC: it stores its sync cursor then. A cursor that
+/// cannot be read counts as not loaded (the window then says "not loaded yet", never "Nothing here yet").
+fn first_list_loaded(db: &StateDb) -> bool {
+    matches!(db.get_sync_cursor(), Ok(Some(_)))
 }
 
 #[tauri::command]
-pub(crate) async fn drive_sync_summary(app: tauri::AppHandle, state: State<'_, AppState>) -> Answer<SyncSummary> {
+pub(crate) async fn drive_sync_summary(app: tauri::AppHandle, state: State<'_, AppState>) -> Answer<SyncAnswer> {
     events::ensure_started(&app);
     let view = events::engine_view(&state);
     blocking(move || {
@@ -267,18 +295,20 @@ pub(crate) async fn drive_sync_summary(app: tauri::AppHandle, state: State<'_, A
             } else {
                 SyncPhase::Stopped
             };
-            return Ok(SyncSummary {
+            let summary = SyncSummary {
                 phase,
                 on_device: 0,
                 available_offline: 0,
                 online_only: 0,
                 pending: 0,
-            });
+            };
+            return Ok(SyncAnswer::of(summary, false));
         };
         let counts = model::sync_counts(&db);
         let (raw, paused) = view.clone().unwrap_or_default();
         let phase = model::sync_phase(view.is_some(), &raw, paused, &counts);
-        Ok(model::sync_summary(phase, &counts, model::available_offline_count(&db)))
+        let summary = model::sync_summary(phase, &counts, model::available_offline_count(&db));
+        Ok(SyncAnswer::of(summary, first_list_loaded(&db)))
     })
     .await
 }

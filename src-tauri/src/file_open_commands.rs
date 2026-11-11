@@ -362,7 +362,6 @@ pub(super) fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> R
     }
 }
 
-
 /// What [`sync_status`] counts in the state DB: rows moving (downloading + uploading), cloud-only rows (files and
 /// folders, as before task 2243), conflicts, and changes held back.
 pub(super) fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
@@ -405,7 +404,10 @@ pub(super) fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32)
 /// memory, with no config file and no state DB. `AccountSessionBoundary` polls
 /// this every second in every window, hidden ones included, to see a sign-out.
 #[tauri::command]
-pub(super) async fn sync_status(state: State<'_, AppState>, session_only: Option<bool>) -> Result<serde_json::Value, String> {
+pub(super) async fn sync_status(
+    state: State<'_, AppState>,
+    session_only: Option<bool>,
+) -> Result<serde_json::Value, String> {
     // session / engine / engine_state are per-account (decision 0800);
     // `auth_present` stays on `AppState`.
     let acct = state.active_account()?;
@@ -695,7 +697,12 @@ pub(super) async fn popover_snapshot(
         snapshot.update = macos_popover::update_offer();
         #[cfg(target_os = "macos")]
         {
-            let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
+            let sending = state
+                .sign_out
+                .phase
+                .lock()
+                .map(|phase| phase.is_some())
+                .unwrap_or(false);
             if sending {
                 let read = tokio::task::spawn_blocking(read_waiting_changes)
                     .await
@@ -756,7 +763,7 @@ pub(super) fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<Pa
         roots.push(sync_root.to_path_buf());
     }
     if let Some(cache_dir) = dirs::cache_dir() {
-        let beebeeb_cache = cache_dir.join("beebeeb");
+        let beebeeb_cache = cache_dir.join(crate::app_identity::AppIdentity::CURRENT.data_dir_name());
         match beebeeb_cache.canonicalize() {
             Ok(canon) => roots.push(canon),
             Err(_) => roots.push(beebeeb_cache),
@@ -846,7 +853,10 @@ pub(crate) fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
 /// allowed-roots guard is kept: we only touch placeholders under the sync root
 /// (or the engine cache dir), never an arbitrary path from a corrupt DB row.
 #[cfg(target_os = "windows")]
-pub(super) fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) -> Result<FreeUpSpaceResult, String> {
+pub(super) fn free_up_space_windows(
+    db: &state_db::StateDb,
+    sync_root: &std::path::Path,
+) -> Result<FreeUpSpaceResult, String> {
     // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
     // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
     // inside the placeholder in the sync root, and `cache_path` records the
@@ -1072,7 +1082,6 @@ pub(super) fn export_diagnostics_from(sync_root: Option<&Path>, db_path: &Path) 
         "queue": queue,
     }))
 }
-
 
 // ── IPC commands: conflict/version center ───────────────────────────────────
 

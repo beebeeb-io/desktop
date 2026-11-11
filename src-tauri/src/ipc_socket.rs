@@ -24,14 +24,6 @@ use tokio::task::JoinHandle;
 #[cfg(target_os = "macos")]
 pub const MACOS_APP_GROUP_ID: &str = "R8352WDJJR.io.beebeeb.app.fileprovider";
 
-
-
-
-
-
-
-
-
 /// Task 1524: the daemon is sandboxed on macOS (`com.apple.security.app-
 /// sandbox`), so `/tmp` and `$XDG_RUNTIME_DIR` (which macOS never sets in the
 /// first place — that's a Linux/systemd convention) are NOT reachable; only
@@ -54,7 +46,6 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 /// nothing about that collides with `MACOS_IPC_SOCKET_FILENAME`.
 #[cfg(target_os = "macos")]
 const MACOS_HYDRATE_CACHE_DIRNAME: &str = "hydrate-cache";
-
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
@@ -200,9 +191,6 @@ pub(crate) fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io
         .map_err(StagingDirRefusal::into_io_error)
 }
 
-
-
-
 /// Delete every entry directly inside `dir` (files and any stray
 /// subdirectories), leaving `dir` itself in place. Used for the sign-out /
 /// lock / daemon-startup hydrate-cache purge (task 1670 round 2): this
@@ -237,7 +225,6 @@ pub(crate) fn macos_purge_hydrate_cache_dir(dir: &std::path::Path) -> std::io::R
     }
     Ok(removed)
 }
-
 
 /// Remove hydrate-cache entries whose mtime is at least `ttl` old, relative
 /// to `now`. `now`/`ttl` are parameters (never `SystemTime::now()` read
@@ -308,7 +295,6 @@ pub(crate) fn macos_sweep_stale_hydrate_cache_entries(
 #[cfg(target_os = "macos")]
 const MACOS_UPLOAD_STAGING_DIRNAME: &str = "upload-staging";
 
-
 #[cfg(target_os = "macos")]
 pub fn macos_upload_staging_dir() -> std::path::PathBuf {
     macos_upload_staging_dir_in(&macos_real_home_dir())
@@ -327,31 +313,6 @@ pub fn macos_upload_staging_dir() -> std::path::PathBuf {
 /// when the copy is made and no process can set back.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Remove upload-staging entries that have existed for at least `max_age`
 /// before `now`, by their ctime (see the loop). A missing directory is not an error. `now` / `max_age` are
@@ -400,7 +361,6 @@ pub(crate) fn purge_upload_staging(
     }
 }
 
-
 /// Daemon startup: create and harden the upload-staging directory, then purge
 /// copies orphaned by a crash (see [`UPLOAD_STAGING_MAX_AGE`]).
 #[cfg(target_os = "macos")]
@@ -427,7 +387,6 @@ pub(crate) fn macos_sweep_upload_staging() {
     sweep_upload_staging_at(&macos_upload_staging_dir(), "periodic", std::time::SystemTime::now());
 }
 
-
 /// Sign-out and Lock: remove every entry of `dir`, logged. The caller
 /// guarantees that no IPC listener can still be serving (see
 /// [`UploadStagingPurge::Everything`]).
@@ -435,10 +394,6 @@ pub(crate) fn macos_sweep_upload_staging() {
 pub(crate) fn purge_all_upload_staging_at(dir: &std::path::Path, context: &'static str) {
     log_upload_staging_purge(context, purge_upload_staging(dir, UploadStagingPurge::Everything));
 }
-
-
-
-
 
 /// Task 1524 follow-up: resolve the real user home directory from the OS
 /// password database (`getpwuid_r(getuid())` → `pw_dir`), never from `$HOME`.
@@ -475,7 +430,6 @@ pub(crate) fn macos_real_home_dir() -> std::path::PathBuf {
     }
 }
 
-
 /// Linux: unchanged — `$XDG_RUNTIME_DIR` (a systemd-managed, per-user,
 /// tmpfs-backed, already-private directory) with a `/tmp` fallback for
 /// environments without a systemd user session. Linux desktop builds are not
@@ -483,29 +437,9 @@ pub(crate) fn macos_real_home_dir() -> std::path::PathBuf {
 #[cfg(not(target_os = "macos"))]
 pub fn ipc_socket_path() -> std::path::PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(runtime_dir).join("beebeeb-daemon.sock")
+    let socket_name = crate::app_identity::AppIdentity::CURRENT.daemon_socket_name();
+    std::path::PathBuf::from(runtime_dir).join(socket_name)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// The reply to a Finder write, for the engine's own `anyhow` result: the
 /// boundary the engine's tests call. The error is classified once into
@@ -594,12 +528,6 @@ fn refused_write_reply(op: &'static str, error: IpcError) -> IpcResponse {
     }
 }
 
-
-
-
-
-
-
 #[cfg(test)]
 thread_local! {
     static BUILDER_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -683,16 +611,6 @@ fn presentation_warned() -> std::sync::MutexGuard<'static, PresentationWarned> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 #[path = "ipc_socket_framing_tests.rs"]
 mod framing_tests;
@@ -766,13 +684,13 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    mod root_payloads;
     mod macos_socket_cache;
     mod payload_contracts;
+    mod root_payloads;
     // LD-0113 D2: the payload of a protected item.
     mod ld0113_protect;
-    mod upload_staging;
     mod presentation_write;
+    mod upload_staging;
 }
 
 mod error;
@@ -786,17 +704,17 @@ use requests::*;
 
 mod protocol;
 use protocol::*;
-pub use protocol::{IpcRequest, IpcResponse, FileProviderItemPayload, FileProviderChangePayload};
-pub(crate) use protocol::{FP_TRASH_APPLE, CAP_WRITE};
+pub(crate) use protocol::{CAP_WRITE, FP_TRASH_APPLE};
+pub use protocol::{FileProviderChangePayload, FileProviderItemPayload, IpcRequest, IpcResponse};
 
 mod payloads;
+pub(crate) use payloads::file_entry_payload_for_db;
 #[cfg(test)]
 use payloads::*;
-pub(crate) use payloads::{file_entry_payload_for_db};
 
 mod thumbnails;
 use thumbnails::*;
-pub(crate) use thumbnails::{thumbnail_variant, persist_thumbnail_plaintext};
+pub(crate) use thumbnails::{persist_thumbnail_plaintext, thumbnail_variant};
 
 mod macos_paths;
 // Only the macOS paths use these.
@@ -805,28 +723,28 @@ use macos_paths::*;
 
 mod macos_staging;
 use macos_staging::*;
-pub(crate) use macos_staging::{StagingDirRefusal, StagingDir, WriteContentsPolicy, StagedContents};
+pub(crate) use macos_staging::{StagedContents, StagingDir, StagingDirRefusal, WriteContentsPolicy};
 // The staging admission is exercised by the upload-staging tests.
 #[cfg(test)]
 pub(crate) use macos_staging::{ContentsRefusal, open_staged_contents};
 
 mod server;
-#[cfg(test)]
-use server::*;
 pub use server::serve_ipc;
 #[cfg(test)]
 pub use server::serve_ipc_at;
 #[cfg(test)]
 pub(crate) use server::serve_ipc_at_with_ready;
+#[cfg(test)]
+use server::*;
 
 mod hydrate;
-use hydrate::*;
 #[cfg(test)]
 pub(crate) use hydrate::hydrate_failure_reply;
+use hydrate::*;
 
 mod write_path;
+pub(crate) use write_path::file_status_response;
 use write_path::*;
-pub(crate) use write_path::{file_status_response};
 
 mod listing;
 use listing::*;
