@@ -26,7 +26,7 @@ engine.two_factor(code)?;                    // after TwoFactor
 engine.unlock_with_phrase(phrase)?;          // after RecoveryPhrase
 engine.start_sync(sync_root)?;               // SyncStart::{Started, AlreadyRunning, NoSession}
 engine.listing(None, Sort::default(), 0, 200)?; // the Files rows: Backups root first, each row marked
-engine.pause(); engine.resume(); engine.stop(); engine.lock(); engine.sign_out_keeping_local_data()?;
+engine.pause()?; engine.resume()?; engine.stop(); engine.lock(); engine.sign_out_keeping_local_data()?;
 ```
 
 **Threading.**
@@ -37,7 +37,8 @@ engine.pause(); engine.resume(); engine.stop(); engine.lock(); engine.sign_out_k
 | `restore`, `gate` | credential store only (DPAPI or the Keychain can take a moment) | the caller |
 | `sign_in_password`, `two_factor`, `unlock_with_phrase`, `sign_out_keeping_local_data` | yes: the network (30 s per request at most) and the password's key derivation | the caller, waiting on the runtime |
 | `start_sync`, `stop`, `lock` | until the engine exists, or its task has ended | the caller, waiting on the runtime |
-| `pause`, `resume`, `is_paused` | no | the caller |
+| `pause`, `resume` | one small file write (`desktop.toml`, under the config-write lock), then a `PauseChanged` event | the caller |
+| `is_paused`, `is_syncing` | no | the caller |
 | `listing`, `state_db` | a local database read | the caller |
 | the sync engine itself | never returns to you | the runtime's threads |
 

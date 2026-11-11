@@ -351,10 +351,24 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     }
 
     // Pause, resume, stop.
-    host.engine.pause();
+    host.engine.pause().unwrap();
     assert!(host.engine.is_paused() && host.engine.is_syncing());
-    host.engine.resume();
+    assert!(
+        DesktopConfig::load().unwrap().pause_sync,
+        "the pause is written, so a restart stays paused"
+    );
+    host.engine.resume().unwrap();
     assert!(!host.engine.is_paused());
+    assert!(!DesktopConfig::load().unwrap().pause_sync);
+    let pauses: Vec<String> = host
+        .messages
+        .try_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EngineEvent::PauseChanged(change)) => Some(serde_json::to_string(&change).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pauses, [r#"{"state":"paused"}"#, r#"{"state":"idle"}"#]);
     assert_eq!(host.engine.stop(), SyncStop::Stopped);
     assert!(!host.engine.is_syncing());
     assert_eq!(host.engine.stop(), SyncStop::WasNotRunning);

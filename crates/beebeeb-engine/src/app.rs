@@ -465,6 +465,17 @@ impl<C: CredentialStores> Engine<C> {
             if slot.is_some() {
                 return Ok(SyncStart::AlreadyRunning);
             }
+            // A restart while paused stays paused: the flag follows the file, under the config-write lock.
+            {
+                let flag = &self.acct.sync_paused;
+                let _ = crate::config::DesktopConfig::path().and_then(|path| {
+                    crate::config::DesktopConfig::update_at_then(
+                        &path,
+                        |_| (false, ()),
+                        |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+                    )
+                });
+            }
             let (keys, identity) = match start::keys_for_engine_start(&self.acct) {
                 Ok(read) => read,
                 Err(start::EngineStartBlocked::NoSession) => return Ok(SyncStart::NoSession),
@@ -495,13 +506,35 @@ impl<C: CredentialStores> Engine<C> {
         })
     }
 
-    /// Pause sync (the engine keeps running and sends nothing). Not written to `desktop.toml` by this handle.
-    pub fn pause(&self) {
-        self.acct.sync_paused.store(true, Ordering::SeqCst);
+    /// Pause sync (the engine keeps running and sends nothing). Written to `desktop.toml`, so a restart stays
+    /// paused; the in-memory flag is stored from the file, under the config-write lock.
+    pub fn pause(&self) -> Result<(), String> {
+        self.set_paused(true)
     }
 
-    pub fn resume(&self) {
-        self.acct.sync_paused.store(false, Ordering::SeqCst);
+    pub fn resume(&self) -> Result<(), String> {
+        self.set_paused(false)
+    }
+
+    fn set_paused(&self, paused: bool) -> Result<(), String> {
+        let flag = &self.acct.sync_paused;
+        crate::config::DesktopConfig::update_at_then(
+            &crate::config::DesktopConfig::path()?,
+            |cfg| {
+                cfg.pause_sync = paused;
+                (true, ())
+            },
+            |cfg| flag.store(cfg.pause_sync, Ordering::Relaxed),
+        )?;
+        self.host
+            .event(crate::host::EngineEvent::PauseChanged(crate::host::PauseChanged {
+                state: if paused {
+                    crate::host::PauseState::Paused
+                } else {
+                    crate::host::PauseState::Idle
+                },
+            }));
+        Ok(())
     }
 
     pub fn is_paused(&self) -> bool {
