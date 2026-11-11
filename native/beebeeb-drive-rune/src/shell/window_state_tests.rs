@@ -268,3 +268,87 @@ fn load_and_save_use_one_file_and_refuse_an_oversized_one() {
     assert!(load(&path).is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Review test 10: the first save, with nothing saved before, of a maximized window.
+#[test]
+fn a_first_save_while_maximized_keeps_the_maximized_flag_and_a_sane_rectangle() {
+    let now = Observed {
+        maximized: true,
+        ..observed(0, 0, 2560, 1400)
+    };
+    let saved = merge_for_save(None, now).unwrap();
+    assert!(saved.maximized);
+    assert_eq!((saved.w, saved.h), (2560, 1400));
+    // And the next normal rectangle replaces it.
+    let later = merge_for_save(Some(saved), observed(100, 100, 1280, 800)).unwrap();
+    assert_eq!(
+        (later.x, later.y, later.w, later.h, later.maximized),
+        (100, 100, 1280, 800, false)
+    );
+    // Minimized with nothing saved: still nothing.
+    let minimized = Observed {
+        minimized: true,
+        ..observed(-32000, -32000, 160, 28)
+    };
+    assert_eq!(merge_for_save(None, minimized), None);
+}
+
+#[test]
+fn the_old_apps_frame_is_read_in_points_and_becomes_pixels_on_its_display() {
+    let monitors = [primary(), right_4k()];
+    let text = r#"{"x":100.0,"y":80.0,"w":1280.0,"h":800.0,"maximized":false}"#;
+    let on_primary = import_legacy_frame(text, &monitors).unwrap();
+    let p = primary();
+    assert_eq!(on_primary.scale, p.scale);
+    assert_eq!(on_primary.x, (100.0 * p.scale).round() as i32);
+    assert_eq!(on_primary.w, (1280.0 * p.scale).round() as u32);
+    assert!(!on_primary.maximized);
+    // A frame whose centre is on the second display takes that display's scale.
+    let r = right_4k();
+    // (In this format each display is its pixels divided by its own scale, so the second
+    // display's points overlap the primary's; a point past the primary's width is only on it.)
+    let (lx, ly) = (2000.0_f64, 50.0_f64);
+    assert!(lx + 500.0 < f64::from(r.x + r.w as i32) / r.scale);
+    let text = format!(r#"{{"x":{lx},"y":{ly},"w":1000.0,"h":700.0,"maximized":true}}"#);
+    let on_right = import_legacy_frame(&text, &monitors).unwrap();
+    assert_eq!(on_right.scale, r.scale);
+    assert_eq!(on_right.x, (lx * r.scale).round() as i32);
+    assert!(on_right.maximized);
+    // Off every display: the primary's scale; `restore` recentres it.
+    let lost = import_legacy_frame(r#"{"x":-90000.0,"y":5.0,"w":1280.0,"h":800.0}"#, &monitors).unwrap();
+    assert_eq!(lost.scale, p.scale);
+    for bad in [
+        "",
+        "not json",
+        "{}",
+        "[]",
+        r#"{"x":1,"y":2,"w":0,"h":5}"#,
+        r#"{"x":1,"y":2,"w":5}"#,
+        r#"{"x":"1","y":2,"w":5,"h":5}"#,
+        r#"{"x":1e300,"y":2,"w":5,"h":5}"#,
+    ] {
+        assert_eq!(import_legacy_frame(bad, &monitors), None, "{bad}");
+    }
+    assert!(import_legacy_frame(&" ".repeat(70_000), &monitors).is_none());
+}
+
+#[test]
+fn the_old_frame_file_is_read_only_while_this_app_has_no_file_and_is_never_written() {
+    let dir = std::env::temp_dir().join(format!("beebeeb-shell-legacy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (own, legacy) = (dir.join(FILE_NAME), dir.join(LEGACY_FRAME_FILE_NAME));
+    assert_eq!(read_legacy_once(&own, &legacy), None, "no old file");
+    let text = r#"{"x":10.0,"y":20.0,"w":1280.0,"h":800.0,"maximized":false}"#;
+    std::fs::write(&legacy, text).unwrap();
+    assert_eq!(read_legacy_once(&own, &legacy).as_deref(), Some(text));
+    // Once this app has saved its own file, the old one is never read again.
+    save(&own, &SavedWindows::new()).unwrap();
+    assert_eq!(read_legacy_once(&own, &legacy), None);
+    assert_eq!(
+        std::fs::read_to_string(&legacy).unwrap(),
+        text,
+        "the old file is untouched"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

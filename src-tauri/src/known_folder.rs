@@ -32,12 +32,30 @@ pub struct KnownFolder {
 /// the UI lists them. `Downloads` is included even though OneDrive historically
 /// did not back it up — decision 0797 lists it explicitly.
 pub const KNOWN_FOLDERS: &[KnownFolder] = &[
-    KnownFolder { key: "desktop", display_name: "Desktop" },
-    KnownFolder { key: "documents", display_name: "Documents" },
-    KnownFolder { key: "pictures", display_name: "Pictures" },
-    KnownFolder { key: "music", display_name: "Music" },
-    KnownFolder { key: "videos", display_name: "Videos" },
-    KnownFolder { key: "downloads", display_name: "Downloads" },
+    KnownFolder {
+        key: "desktop",
+        display_name: "Desktop",
+    },
+    KnownFolder {
+        key: "documents",
+        display_name: "Documents",
+    },
+    KnownFolder {
+        key: "pictures",
+        display_name: "Pictures",
+    },
+    KnownFolder {
+        key: "music",
+        display_name: "Music",
+    },
+    KnownFolder {
+        key: "videos",
+        display_name: "Videos",
+    },
+    KnownFolder {
+        key: "downloads",
+        display_name: "Downloads",
+    },
 ];
 
 /// Look up a known folder by its stable key. `None` for an unknown key (e.g. a
@@ -122,43 +140,7 @@ fn backup_source_key_for_device(rel_path: &str, device: Option<&str>) -> Option<
 
 // ── The old mirror's device segment ────────────────────────────────────────
 
-/// Sanitize a raw device name into a single safe path segment for the backup
-/// destination `<sync_root>\Backups\<device>\<DisplayName>`.
-///
-/// The device name comes from `runner::device_name()` — normally a tame
-/// hostname, but we never trust it to be path-safe. We collapse it to a single
-/// segment that cannot escape its parent or split into nested folders:
-///
-/// - any path separator (`/` or `\`) becomes `_` (no nesting, no traversal);
-/// - any other path-special / control char (`:`, `*`, `?`, `"`, `<`, `>`, `|`,
-///   and ASCII control bytes) becomes `_` (so the segment is a valid Windows
-///   filename);
-/// - leading/trailing dots and whitespace are trimmed (Windows strips trailing
-///   dots/spaces, and a leading dot would hide the folder);
-/// - the reserved `.`/`..` traversal names, or an empty result, fall back to
-///   the literal `"device"`.
-///
-/// Pure + total: no I/O, no panics. Unit-tested on every platform.
-pub fn sanitize_device_segment(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        let mapped = match ch {
-            '/' | '\\' => '_',
-            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        };
-        out.push(mapped);
-    }
-    // Trim leading/trailing dots and whitespace (a leading '.' would hide the
-    // folder; trailing dots/spaces are stripped by the Windows filesystem and
-    // would otherwise create a name that doesn't round-trip).
-    let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
-        return "device".to_string();
-    }
-    trimmed.to_string()
-}
+pub use beebeeb_engine::known_folder::sanitize_device_segment;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
@@ -167,9 +149,8 @@ mod windows_impl {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
-        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
-        FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT_PATH, KF_FLAG_DONT_VERIFY,
-        SHGetKnownFolderPath,
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
+        KF_FLAG_DEFAULT_PATH, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
     };
     use windows::core::GUID;
 
@@ -258,7 +239,10 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), 6, "keys must be unique");
         // Lookups resolve.
-        assert_eq!(known_folder_by_key("documents").map(|f| f.display_name), Some("Documents"));
+        assert_eq!(
+            known_folder_by_key("documents").map(|f| f.display_name),
+            Some("Documents")
+        );
         assert!(known_folder_by_key("nope").is_none());
     }
 
@@ -287,12 +271,18 @@ mod tests {
         assert_eq!(backup_source_key_for_rel_path("report.pdf", "Legion"), None);
         // A user folder that merely happens to be named `Backups` but doesn't
         // match the device/display-name shape (display name isn't a catalog one).
-        assert_eq!(backup_source_key_for_rel_path("Backups/Legion/Holiday/pic.jpg", "Legion"), None);
+        assert_eq!(
+            backup_source_key_for_rel_path("Backups/Legion/Holiday/pic.jpg", "Legion"),
+            None
+        );
         // `Backups` with too few segments to identify a folder.
         assert_eq!(backup_source_key_for_rel_path("Backups/Legion", "Legion"), None);
         assert_eq!(backup_source_key_for_rel_path("Backups", "Legion"), None);
         // A different first segment.
-        assert_eq!(backup_source_key_for_rel_path("Documents/Music/song.mp3", "Legion"), None);
+        assert_eq!(
+            backup_source_key_for_rel_path("Documents/Music/song.mp3", "Legion"),
+            None
+        );
     }
 
     #[test]
@@ -317,7 +307,10 @@ mod tests {
     /// `Backups/unknown` included.
     #[test]
     fn an_unreadable_hostname_tags_no_backup_path() {
-        assert_eq!(backup_source_key_for_device("Backups/unknown/Documents/a.txt", None), None);
+        assert_eq!(
+            backup_source_key_for_device("Backups/unknown/Documents/a.txt", None),
+            None
+        );
         assert_eq!(backup_source_key_for_device("Backups/PC-1/Documents/a.txt", None), None);
         assert_eq!(
             backup_source_key_for_device("Backups/PC-1/Documents/a.txt", Some("PC-1")).as_deref(),

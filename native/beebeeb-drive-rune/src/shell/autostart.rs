@@ -13,11 +13,16 @@
 //!
 //! [`needs_rewrite`] says when a value the old app left behind should be replaced by ours.
 
+use super::identity::AppIdentity;
+
 /// Under `HKEY_CURRENT_USER`.
 pub const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 /// Task Manager's "Startup apps" switch: a 12-byte value, first byte 2 or 6 for on, 3 for off.
 pub const STARTUP_APPROVED_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
-pub const VALUE_NAME: &str = "Beebeeb";
+/// The value's name: this identity's (`"Beebeeb"` for the real app, as the plugin wrote it).
+pub const fn value_name(identity: AppIdentity) -> &'static str {
+    identity.run_value_name()
+}
 /// What a start at login passes, so the app knows to stay in the notification area.
 pub const AUTOSTART_FLAG: &str = "--autostart";
 /// What `auto-launch` writes to mark the entry enabled in Task Manager.
@@ -57,13 +62,17 @@ pub fn quote_arg(arg: &str) -> String {
 
 /// The Run value for this executable. The path is always quoted, with or without a space.
 pub fn command_line(exe: &str) -> String {
-    let exe = quote_arg(exe);
-    let exe = if exe.starts_with('"') {
-        exe
+    format!("{} {AUTOSTART_FLAG}", quote_arg_always(exe))
+}
+
+/// [`quote_arg`], in quotes also when the argument needs none.
+pub fn quote_arg_always(arg: &str) -> String {
+    let quoted = quote_arg(arg);
+    if quoted.starts_with('"') {
+        quoted
     } else {
-        format!("\"{exe}\"")
-    };
-    format!("{exe} {AUTOSTART_FLAG}")
+        format!("\"{quoted}\"")
+    }
 }
 
 /// Whether the entry is on: the Run value exists, and Task Manager has not switched it off
@@ -102,6 +111,54 @@ pub fn needs_rewrite(run_value: Option<&str>, exe: &str) -> bool {
     run_value.is_some_and(|value| value != command_line(exe) && points_at(value, exe))
 }
 
+/// What the person, or the app at start, wants of the Run value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wish {
+    /// The Settings switch, on.
+    Enable,
+    /// The Settings switch, off.
+    Disable,
+    /// At start: bring the 0.8.x app's entry FOR THIS PROGRAM into this app's shape.
+    Adopt,
+}
+
+/// The one registry change a wish may make to this identity's Run value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunChange {
+    Write(String),
+    Delete,
+    Leave,
+}
+
+/// The value exists and starts a program at another path: another install of this identity
+/// (the installed app, seen from a development build; an old copy). It is not this program's
+/// to overwrite or delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnedByAnotherInstall;
+
+/// Decides the change. `existing`: this identity's Run value as it is now; `exe`: this
+/// program's own path. Whatever the wish, a value that starts another program is never
+/// written over and never deleted.
+pub fn plan(wish: Wish, existing: Option<&str>, exe: &str) -> Result<RunChange, OwnedByAnotherInstall> {
+    if exe.is_empty() {
+        return Ok(RunChange::Leave);
+    }
+    let ours = existing.map(|value| points_at(value, exe));
+    match (wish, ours) {
+        (Wish::Enable, None) => Ok(RunChange::Write(command_line(exe))),
+        (Wish::Enable, Some(false)) => Err(OwnedByAnotherInstall),
+        (Wish::Enable | Wish::Adopt, Some(true)) => {
+            if existing == Some(command_line(exe).as_str()) {
+                Ok(RunChange::Leave)
+            } else {
+                Ok(RunChange::Write(command_line(exe)))
+            }
+        }
+        (Wish::Disable, Some(true)) => Ok(RunChange::Delete),
+        (Wish::Disable, _) | (Wish::Adopt, _) => Ok(RunChange::Leave),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,7 +190,7 @@ mod tests {
     #[test]
     fn the_key_and_value_are_the_ones_the_tauri_plugin_writes() {
         assert_eq!(RUN_KEY, "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-        assert_eq!(VALUE_NAME, "Beebeeb");
+        assert_eq!(value_name(AppIdentity::Real), "Beebeeb");
     }
 
     #[test]
@@ -174,5 +231,49 @@ mod tests {
         assert!(!needs_rewrite(None, exe));
         assert!(!points_at("", exe));
         assert!(!points_at("anything", ""));
+    }
+
+    /// P2-3: a build at another path never overwrites or deletes the value.
+    #[test]
+    fn a_build_at_another_path_never_overwrites_or_deletes() {
+        let installed = "C:\\Program Files\\Beebeeb\\beebeeb-desktop.exe";
+        let dev = "C:\\dev\\target\\debug\\beebeeb-drive.exe";
+        for existing in [
+            command_line(installed),
+            format!("{installed} "),
+            format!("\"{installed}\""),
+        ] {
+            assert_eq!(plan(Wish::Enable, Some(&existing), dev), Err(OwnedByAnotherInstall));
+            assert_eq!(plan(Wish::Disable, Some(&existing), dev), Ok(RunChange::Leave));
+            assert_eq!(plan(Wish::Adopt, Some(&existing), dev), Ok(RunChange::Leave));
+        }
+    }
+
+    #[test]
+    fn this_programs_own_value_is_written_rewritten_and_deleted() {
+        let exe = "C:\\Program Files\\Beebeeb\\beebeeb-desktop.exe";
+        let ours = command_line(exe);
+        assert_eq!(plan(Wish::Enable, None, exe), Ok(RunChange::Write(ours.clone())));
+        assert_eq!(plan(Wish::Enable, Some(&ours), exe), Ok(RunChange::Leave));
+        // The 0.8.x plugin's bare value for this program.
+        let bare = format!("{exe} ");
+        assert_eq!(plan(Wish::Enable, Some(&bare), exe), Ok(RunChange::Write(ours.clone())));
+        assert_eq!(plan(Wish::Adopt, Some(&bare), exe), Ok(RunChange::Write(ours.clone())));
+        assert_eq!(plan(Wish::Adopt, Some(&ours), exe), Ok(RunChange::Leave));
+        // Off stays off at start.
+        assert_eq!(plan(Wish::Adopt, None, exe), Ok(RunChange::Leave));
+        assert_eq!(plan(Wish::Disable, Some(&ours), exe), Ok(RunChange::Delete));
+        assert_eq!(plan(Wish::Disable, Some(&bare), exe), Ok(RunChange::Delete));
+        assert_eq!(plan(Wish::Disable, None, exe), Ok(RunChange::Leave));
+        // No known path of its own: touch nothing.
+        for wish in [Wish::Enable, Wish::Disable, Wish::Adopt] {
+            assert_eq!(plan(wish, Some(&ours), ""), Ok(RunChange::Leave));
+        }
+    }
+
+    #[test]
+    fn each_identity_has_its_own_value_name() {
+        assert_eq!(value_name(AppIdentity::Real), "Beebeeb");
+        assert_eq!(value_name(AppIdentity::Test), "Beebeeb Test");
     }
 }

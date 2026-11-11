@@ -11,7 +11,9 @@
 //! | `surfaces.rs`, `window_state.rs` | the two windows, and where the main one was |
 //! | `tray.rs`, `tray_icon.rs` | the b: its model and its pixels |
 //! | `flyout.rs`, `flyout_window.rs` | the flyout: where it opens, and its window |
-//! | `instance.rs`, `deeplink.rs`, `autostart.rs` | starting up, links, start at login |
+//! | `identity.rs` | which app this build is (real or test): every per-app name |
+//! | `instance.rs`, `control.rs` | the command line, one instance, the control channel |
+//! | `deeplink.rs`, `autostart.rs` | links, start at login |
 //! | `platform/` | the OS seam: `windows` real, `macos` and `linux` stubs |
 
 pub mod actions;
@@ -19,11 +21,15 @@ pub mod app;
 // The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod autostart;
+// The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod control;
 pub mod deeplink;
 pub mod files_frame;
 pub mod flyout;
 pub mod flyout_window;
 pub mod host;
+pub mod identity;
 pub mod instance;
 pub mod placeholder;
 pub mod platform;
@@ -34,9 +40,13 @@ pub mod tray;
 // Rendered by `platform/windows.rs`; tested (and looked at) on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod tray_icon;
+// The pure half of `platform/windows_tray.rs`; tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod tray_win;
 pub mod window_state;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use rune::{App, AppSpec, Titlebar, WindowSpec};
 use surfaces::WindowKind;
@@ -44,9 +54,12 @@ use surfaces::WindowKind;
 use crate::source::{DriveSource, LargeFixtureSource};
 use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
 use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
+use control::Reply;
 use flyout_window::FlyoutState;
 use host::{Shell, Wiring};
-use instance::Start;
+use identity::AppIdentity;
+use instance::{Claim, Plan, Start};
+use platform::ServeError;
 use state::State;
 
 /// Titlebar height in points — the single source of truth used by both
@@ -74,7 +87,7 @@ const SCENES: &[(&str, fn(&mut State))] = &[
     ("dark", |_| {}),
     ("large-folder", |s| {
         let source = Box::new(LargeFixtureSource::new(5000));
-        s.listing = source.list(None);
+        (s.listing, s.list_error) = state::load(source.as_ref(), None);
         s.source = source;
         s.selected = None;
         s.show_detail_pane = false;
@@ -96,48 +109,136 @@ const SCENES: &[(&str, fn(&mut State))] = &[
     ("signed-out", |s| scene(s, Event::Gate(GateState::SignedOut))),
     ("locked", |s| scene(s, Event::Gate(GateState::Locked))),
     ("no-plan", |s| scene(s, Event::Gate(GateState::NoPlan))),
+    ("first-run", |s| scene(s, Event::Gate(GateState::FirstRun))),
 ];
 
 fn scene(s: &mut State, event: Event) {
     host::dispatch(s, event);
 }
 
+/// How long the control channel's thread waits for the window thread to take a request
+/// before it answers "busy".
+const CONTROL_ACK_WAIT: Duration = Duration::from_secs(3);
+/// How long a later launch waits for the running instance's answer before it says that it is
+/// not answering. Longer than [`CONTROL_ACK_WAIT`], so a "busy" arrives as such.
+const CONTROL_SEND_WAIT: Duration = Duration::from_secs(5);
+
+/// The control channel's handler: hands the request to the window thread and waits for it to
+/// be taken, so the caller's acknowledgement means "the app has it", not "a pipe exists".
+fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>) -> platform::ControlHandler {
+    Arc::new(move |request| {
+        let main = target.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        // Not up yet (the first moments of a start).
+        let Some(main) = main else { return Reply::Busy };
+        let (done, taken) = mpsc::channel();
+        main.update(move |s: &mut State, tx| {
+            host::on_control(s, request, tx);
+            let _ = done.send(());
+        });
+        match taken.recv_timeout(CONTROL_ACK_WAIT) {
+            Ok(()) => Reply::Ok,
+            Err(_) => Reply::Busy,
+        }
+    })
+}
+
 /// Starts the app and returns when it quits.
 ///
-/// In order: read the launch arguments; unless this is a Rune tooling run (`--snap`, …), make
-/// this the one running instance (a later launch hands over its arguments and exits) and
+/// In order: read the launch arguments (`instance::parse_args`: a link silences every other
+/// flag; a shipped build ignores every dev flag); unless this is a tooling run of a dev build,
+/// claim this identity's control channel (serving it IS being the one instance; a later launch
+/// hands over one request, waits for the answer and exits, or says why it could not) and
 /// refuse to start beside another agent that holds the profile's sync lock; then run the two
 /// windows, in the notification area when Windows started the app at login.
 pub fn run() {
-    let launch = instance::parse_args(std::env::args().skip(1));
+    let identity = AppIdentity::CURRENT;
+    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD);
     let platform = platform::current();
     // The engine lane replaces this with the real engine; nothing else in `run` changes.
     let engine: Arc<dyn EngineActions> = Arc::new(FixtureEngine::ready());
-    let first_instance = launch.tooling || rune::single_instance(instance::APP_ID);
-    let holder = if first_instance && !launch.tooling {
-        engine.profile_holder()
+
+    let control_target = Arc::new(Mutex::new(None));
+    let (claim, _control_server) = if launch.tooling {
+        (Claim::First, None)
     } else {
-        None
-    };
-    let (tooling, show_window) = match instance::decide(&launch, first_instance, holder) {
-        Start::Forwarded => return,
-        Start::HeldBy(holder) => {
-            platform.show_start_refusal(&instance::held_message(&holder));
-            return;
+        match platform.serve_control(identity, control_handler(control_target.clone())) {
+            Ok(server) => (Claim::First, Some(server)),
+            Err(ServeError::AlreadyRunning) => (Claim::Running, None),
+            Err(ServeError::NotBuilt(what)) => {
+                host::log(format!(
+                    "not built yet: {what}; nothing keeps a second instance from starting"
+                ));
+                (Claim::First, None)
+            }
+            Err(ServeError::Os(error)) => {
+                host::log(format!("the control channel could not be created ({error})"));
+                (Claim::Unavailable, None)
+            }
         }
-        Start::Tooling => (true, true),
-        Start::Run { show_window } => (false, show_window),
     };
-    let actions: Arc<dyn ShellActions> = Arc::new(HostActions::new(engine, platform.clone()));
+    let start = match instance::plan(&launch, claim, identity) {
+        Plan::Tooling => None,
+        Plan::ExitQuietly => return,
+        Plan::BeTheApp => Some(instance::start(&launch, engine.profile_holder())),
+        Plan::Hand(request) => Some(instance::after_hand(platform.send_control(
+            identity,
+            &request,
+            CONTROL_SEND_WAIT,
+        ))),
+        Plan::Refuse(refusal) => Some(Start::Refuse(refusal)),
+    };
+    let (tooling, show_window) = match start {
+        None => (true, true),
+        Some(Start::Run { show_window }) => (false, show_window),
+        Some(Start::Forwarded) => return,
+        Some(Start::Refuse(refusal)) => {
+            let message = instance::refusal_message(&refusal, identity);
+            host::log(&message);
+            if instance::refusal_is_shown(&launch) {
+                platform.show_start_refusal(identity.product_name(), &message);
+            }
+            // The installer and scripts read this: the request was NOT carried out.
+            std::process::exit(1);
+        }
+    };
+    let actions: Arc<dyn ShellActions> = Arc::new(HostActions::new(engine.clone(), platform.clone()));
+
+    // `--db` (dev builds only; a shipped build never parses it).
+    let source: Option<Box<dyn DriveSource>> = match launch.db.clone() {
+        None => None,
+        Some(Err(error)) => {
+            eprintln!("beebeeb-drive: {error}");
+            std::process::exit(2);
+        }
+        Some(Ok(path)) => match crate::source_engine::EngineSource::open(&path) {
+            Ok(source) => Some(Box::new(source)),
+            Err(error) => {
+                // A fixed word and the path the person typed; never a name from the database.
+                eprintln!("beebeeb-drive: cannot open --db {}: {error}", path.display());
+                std::process::exit(2);
+            }
+        },
+    };
 
     // Where the main window was. A tooling run reads and writes nothing.
-    let state_file = if tooling {
+    let dirs = if tooling {
         None
     } else {
-        rune::dirs::AppDirs::new(instance::APP_ID).map(|dirs| dirs.state().join(window_state::FILE_NAME))
+        rune::dirs::AppDirs::new(identity.state_dir_id())
     };
+    let state_file = dirs.as_ref().map(|dirs| dirs.state().join(window_state::FILE_NAME));
     let saved = state_file.as_deref().map(window_state::load).unwrap_or_default();
     let saved_main = saved.get(WindowKind::Main.key()).copied();
+    // The 0.8.x app's frame, once: only while this app has no window file of its own.
+    let legacy_frame = match (&dirs, &state_file) {
+        (Some(dirs), Some(own)) if saved_main.is_none() => {
+            window_state::read_legacy_once(own, &dirs.config().join(window_state::LEGACY_FRAME_FILE_NAME))
+        }
+        _ => None,
+    };
+    // Signed out, the one window opens as the first-run window (960 x 640), not where the
+    // main window was.
+    let first_kind = surfaces::kind_for(&app::AppMachine::for_session(engine.session()).screen());
 
     let main_spec = AppSpec::<State> {
         fonts: FONTS,
@@ -147,8 +248,8 @@ pub fn run() {
         poll: Some(host::poll),
         on_key: Some(host::on_key),
         ..AppSpec::new(
-            "Beebeeb Drive",
-            WindowKind::Main.default_size(),
+            identity.main_window_title(),
+            first_kind.default_size(),
             state::init,
             registry::view,
         )
@@ -159,7 +260,7 @@ pub fn run() {
         min_size: Some(WindowKind::Flyout.min_size()),
         on_key: Some(flyout_window::on_key),
         ..AppSpec::new(
-            "Beebeeb",
+            identity.flyout_window_title(),
             WindowKind::Flyout.default_size(),
             flyout_window::fixture_state,
             flyout_window::view,
@@ -168,7 +269,10 @@ pub fn run() {
 
     let window = Arc::new(Mutex::new(None));
     let window_slot = window.clone();
+    // Rune reads only what `parse_args` let through: nothing in a shipped build, nothing on a
+    // command line that carries a link.
     let mut main_app = App::new(main_spec)
+        .args(launch.rune_args.clone())
         .titlebar(Titlebar::new(TITLEBAR_H))
         .on_open_url(host::on_open_url)
         .on_reopen(host::on_reopen)
@@ -177,6 +281,7 @@ pub fn run() {
         });
     let flyout_platform = platform.clone();
     let mut flyout_app = App::new(flyout_spec)
+        .args(launch.rune_args.clone())
         .on_focus(flyout_window::on_focus)
         .on_window(move |native| flyout_platform.adopt_flyout_window(native));
     if !tooling {
@@ -199,7 +304,13 @@ pub fn run() {
         state_file,
     };
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
-    let main_app = main_app.init(move || state::init_with(Shell::new(shell_actions, shell_platform, wiring)));
+    let main_app = main_app.init(move || {
+        let shell = Shell::new(shell_actions, shell_platform, wiring);
+        match source {
+            Some(source) => state::init_from(shell, source, None),
+            None => state::init_with(shell),
+        }
+    });
     let flyout_main = main.clone();
     let flyout_app = flyout_app.init(move || FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at));
 
@@ -210,19 +321,33 @@ pub fn run() {
             Err(error) => host::log(format!("start at login was not checked ({error})")),
         }
         // Runs on the UI thread once the event loop is up, window or not.
-        main.update(|s, _| s.shell.start_tray());
+        main.update(|s, _| {
+            s.shell.start_tray();
+            s.shell.start_sync();
+        });
+        // From here a later launch's request reaches the window thread.
+        *control_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(main.clone());
     }
 
     rune::run_windows(move |displays| {
-        let restored = window_state::restore(
-            saved_main.as_ref(),
-            &surfaces::monitors(displays),
-            surfaces::MAIN_MIN_SIZE,
-        );
-        let main_app = main_app.maximized(restored.maximized);
+        let monitors = surfaces::monitors(displays);
+        let first_place = saved_main.or_else(|| {
+            legacy_frame
+                .as_deref()
+                .and_then(|text| window_state::import_legacy_frame(text, &monitors))
+        });
+        let (main_app, main_options) = if first_kind == WindowKind::Main {
+            let restored = window_state::restore(first_place.as_ref(), &monitors, surfaces::MAIN_MIN_SIZE);
+            (
+                main_app.maximized(restored.maximized),
+                surfaces::main_options(&restored),
+            )
+        } else {
+            (main_app, surfaces::first_run_options())
+        };
         vec![
             WindowSpec::from_app(WindowKind::Main.key(), main_app)
-                .options(surfaces::main_options(&restored))
+                .options(main_options)
                 .boxed(),
             WindowSpec::from_app(WindowKind::Flyout.key(), flyout_app)
                 .options(surfaces::flyout_options())

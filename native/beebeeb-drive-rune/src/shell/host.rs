@@ -12,10 +12,12 @@ use rune::{AppHandle, Key, KeyEvent, Tx, WindowHandle};
 
 use super::actions::{FixtureEngine, HostActions, ShellActions};
 use super::app::{AppMachine, Dialog, Event, Intent, Outcome, Route, Section, SettingsPane};
+use super::control::Request;
 use super::flyout::{self, Toggle};
 use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
-use super::platform::{self, Platform, PlatformError, TrayEvent, TrayIcon};
+use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
+use super::surfaces::WindowKind;
 use super::tray::{LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
@@ -55,11 +57,16 @@ pub struct Shell {
     wiring: Wiring,
     /// The sidebar's own selection as the shell last saw it (see [`poll`]).
     sidebar_seen: SidebarSection,
+    /// Which kind the one window currently has the size of (`surfaces::kind_for`).
+    window_kind: WindowKind,
+    /// The quit hook stopped the engine; a cancelled Windows shutdown starts it again.
+    stopped_for_quit: bool,
 }
 
 impl Shell {
     pub fn new(actions: Arc<dyn ShellActions>, platform: Arc<dyn Platform>, wiring: Wiring) -> Shell {
-        let app = AppMachine::new(actions.gate_state());
+        let app = AppMachine::for_session(actions.session());
+        let window_kind = surfaces::kind_for(&app.screen());
         let tray_inputs = actions.tray_inputs();
         let tray_model = tray_model(&tray_inputs);
         Shell {
@@ -71,6 +78,8 @@ impl Shell {
             tray_inputs,
             wiring,
             sidebar_seen: SidebarSection::Files,
+            window_kind,
+            stopped_for_quit: false,
         }
     }
 
@@ -91,17 +100,30 @@ impl Shell {
         &self.tray_model
     }
 
-    /// Whether the b is in the notification area. Without it, closing the window must quit:
-    /// there would be no way back to the app.
+    /// Whether the b is IN the notification area right now: the platform's own answer, not
+    /// "a tray object exists". Without it, closing the window must quit: there would be no
+    /// way back to the app, and no way to quit it.
     pub fn has_tray(&self) -> bool {
-        self.tray.is_some()
+        self.tray.as_ref().is_some_and(|tray| tray.present())
+    }
+
+    /// Which kind of window the one window is right now (main, or first-run).
+    pub fn window_kind(&self) -> WindowKind {
+        self.window_kind
+    }
+
+    /// Asks the engine to start syncing; refused while another agent holds the profile.
+    pub fn start_sync(&self) {
+        if let Err(error) = self.actions.start_sync() {
+            log(format!("sync was not started ({error:?})"));
+        }
     }
 
     /// Reads the session and the engine again and brings the gate, the b and the flyout in
     /// line. The engine lane calls this (through `AppHandle::update`) on every status event.
     /// True when the window's screen changed.
     pub fn refresh(&mut self) -> bool {
-        let changed = self.app.apply(Event::Gate(self.actions.gate_state())) == Outcome::Changed;
+        let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();
         if inputs != self.tray_inputs {
             // The flyout reads the inputs themselves (counts), not only what the b shows.
@@ -116,6 +138,11 @@ impl Shell {
             if let Some(tray) = &self.tray {
                 tray.apply(&self.tray_model);
             }
+            // Signed out, a click on the b opens the window on sign-in: the flyout has
+            // nothing to show for an account that is gone.
+            if self.tray_model.left_click == LeftClick::OpenSignIn {
+                self.hide_flyout();
+            }
         }
         changed
     }
@@ -124,9 +151,30 @@ impl Shell {
     /// DPI-aware by the time the icon's size is read.
     pub fn start_tray(&mut self) {
         let Some(main) = self.wiring.main.clone() else { return };
-        let handler = Arc::new(move |event: TrayEvent| main.update(move |s: &mut State, tx| on_tray(s, event, tx)));
+        self.attach_tray(Arc::new(move |event: TrayEvent| {
+            main.update(move |s: &mut State, tx| on_tray(s, event, tx))
+        }));
+    }
+
+    /// Whether closing the main window ends the app: when there is no b in the notification
+    /// area to come back through (and to quit from).
+    pub fn close_quits(&self) -> bool {
+        !self.has_tray()
+    }
+
+    fn attach_tray(&mut self, handler: TrayHandler) {
         match self.platform.create_tray(&self.tray_model, handler) {
-            Ok(tray) => self.tray = Some(tray),
+            Ok(tray) => {
+                let present = tray.present();
+                // Kept also when the icon could not be added: it retries by itself (a timer,
+                // and `TaskbarCreated` when Explorer comes back) and reports `Presence`.
+                self.tray = Some(tray);
+                if !present {
+                    log("the b is not in the notification area yet; until it is, closing the window quits");
+                    // A start at login has no window; without a b the app would be unreachable.
+                    self.open_main();
+                }
+            }
             Err(error) => {
                 match error {
                     PlatformError::NotBuilt(what) => log(format!("not built yet: {what}; closing the window quits")),
@@ -168,6 +216,10 @@ impl Shell {
 
     /// Remembers where the main window is, for the next start. Called before it closes.
     pub fn save_window_place(&mut self) {
+        // The first-run window's place is not the main window's.
+        if self.window_kind != WindowKind::Main {
+            return;
+        }
         let Some(path) = self.wiring.state_file.clone() else {
             return;
         };
@@ -248,7 +300,16 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// Runs at the start of every frame. `ui::sidebar` (not the shell's to edit) selects a
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
-pub fn poll(s: &mut State, _seconds: f64, _tx: &mut Tx) -> bool {
+pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    // The one window is the first-run window (960 x 640) or the main window, by the screen.
+    let kind = surfaces::kind_for(&s.shell.app.screen());
+    if kind != s.shell.window_kind {
+        let saved_main = s.shell.wiring.saved.get(surfaces::MAIN_KEY);
+        if let Some(size) = surfaces::size_on_change(s.shell.window_kind, kind, saved_main) {
+            tx.resize_window_instant(size);
+        }
+        s.shell.window_kind = kind;
+    }
     if s.sidebar_section == s.shell.sidebar_seen {
         return false;
     }
@@ -285,9 +346,13 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             _ => return true,
         }
     }
-    let group = registry::group_for(&s.shell.app);
-    match registry::frame(group).and_then(|frame| frame.on_key) {
-        Some(frame_keys) => frame_keys(s, ev, tx),
+    // A dialog in front takes the keys; the frame behind it gets none.
+    let keys = match registry::dialog_group_for(&s.shell.app) {
+        Some(dialog) => registry::dialog_frame(dialog).and_then(|frame| frame.on_key),
+        None => registry::frame(registry::group_for(&s.shell.app)).and_then(|frame| frame.on_key),
+    };
+    match keys {
+        Some(keys) => keys(s, ev, tx),
         None => false,
     }
 }
@@ -301,6 +366,37 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
             LeftClick::ToggleFlyout => s.shell.toggle_flyout(anchor),
         },
         TrayEvent::Menu(action) => on_menu(s, action, tx),
+        // The icon went (Explorer stopped) while the window is closed: never a live process
+        // with no surface. It came back: nothing to do.
+        TrayEvent::Presence(false) => {
+            let hidden = s.shell.wiring.main.as_ref().is_some_and(|main| !main.is_visible());
+            if hidden {
+                log("the b left the notification area; opening the window");
+                s.shell.open_main();
+            }
+        }
+        TrayEvent::Presence(true) => {}
+        TrayEvent::ShutdownCancelled => {
+            if std::mem::take(&mut s.shell.stopped_for_quit) {
+                s.shell.actions.resume_after_cancelled_quit();
+            }
+        }
+        // `taskkill` without /F, Restart Manager: quit cleanly instead of ignoring it.
+        TrayEvent::CloseRequested => tx.quit(),
+    }
+}
+
+/// One request from the control channel (a later launch, the installer), on the UI thread.
+/// Untrusted: `Request` can only be one of three things, and a link only ever navigates.
+pub fn on_control(s: &mut State, request: Request, tx: &mut Tx) {
+    match request {
+        Request::Show => s.shell.open_main(),
+        Request::Open(link) => on_open_url(s, &link, tx),
+        // The normal quit path: `on_quit` stops the engine, then the app exits.
+        Request::QuitForUpdate => {
+            s.shell.hide_flyout();
+            tx.quit();
+        }
     }
 }
 
@@ -337,15 +433,27 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
 /// window leaves the b running"); with no b to come back through, closing quits.
 pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
-    if !s.shell.has_tray() {
+    if s.shell.close_quits() {
         tx.quit();
     }
 }
 
+/// The quit hook: every quit comes through here (the b's menu, the installer's
+/// `quit-for-update`, a close with no b, a Windows shutdown).
+///
+/// Rune also runs it when Windows only ASKS to shut down (`WM_QUERYENDSESSION`), and another
+/// app may refuse. So nothing here is final: the tray is asked to take its icon away (not
+/// dropped: a dropped tray could never come back), and the engine is stopped through the one
+/// hook that has a counterpart. If the shutdown is cancelled the tray puts the icon back and
+/// sends `TrayEvent::ShutdownCancelled`, which resumes the engine. The icon is finally removed
+/// when the shell is dropped with the root state.
 pub fn on_quit(s: &mut State, _tx: &mut Tx) {
     s.shell.save_window_place();
-    // Dropping the tray removes the icon now, not when Windows next hovers over it.
-    s.shell.tray = None;
+    s.shell.actions.stop_for_quit();
+    s.shell.stopped_for_quit = true;
+    if let Some(tray) = &s.shell.tray {
+        tray.remove_for_quit();
+    }
 }
 
 /// A second launch without a link (Windows), or the Dock icon (macOS): the main window comes

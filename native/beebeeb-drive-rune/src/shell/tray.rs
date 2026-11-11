@@ -4,6 +4,8 @@
 //! The precedence and the words are `src-tauri/src/tray_window.rs`'s `tray_menu_state`, so 0.9
 //! says what 0.8.x said for the same state. The menu is the board's (DW-1231), not 0.8.x's.
 
+use super::identity::AppIdentity;
+
 /// What the sync engine last said, as far as the b needs it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EngineState {
@@ -11,7 +13,7 @@ pub enum EngineState {
     Idle,
     Syncing,
     Offline,
-    /// Stopped: an error the engine could not get past, or storage full.
+    /// Stopped: an error the engine could not get past (DW-1207, "Sync stopped").
     Error,
 }
 
@@ -19,11 +21,18 @@ pub enum EngineState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrayInputs {
     pub signed_in: bool,
+    /// Signed out because the session ended after 90 days without use; the key and the file
+    /// list are still on this PC, so only the password is needed (DW-1219). `signed_in` is
+    /// false with it.
+    pub session_expired: bool,
     pub locked: bool,
     pub paused: bool,
     /// Beebeeb is in File Explorer (the sync root is registered).
     pub explorer_ready: bool,
     pub update_available: bool,
+    /// The account's storage is full (DW-1209, "Your storage is full"). It can hold while the
+    /// engine is offline or stopped, and wins over both (DW-1201's order).
+    pub storage_full: bool,
     pub conflicts: u32,
     pub engine: EngineState,
     pub files_remaining: Option<u32>,
@@ -40,7 +49,7 @@ pub enum TrayIconState {
     Paused,
     /// An orange ! badge.
     NeedsDecision,
-    /// A red ! badge: stopped, storage full, signed out.
+    /// A red ! badge: stopped, storage full, signed out after 90 days.
     Stopped,
     /// Faded and crossed out.
     Offline,
@@ -116,8 +125,9 @@ pub enum MenuEntry {
     Separator,
 }
 
-/// What a left click on the b does (DW-1201: "Signed out: a click on the b opens the window on
-/// sign-in instead of the flyout").
+/// What a left click on the b does. DW-1201: "Signed out: a click on the b opens the window on
+/// sign-in (DW-A02) instead of the flyout." DW-1230: "Signed out after 90 days: the red !
+/// badge, […] a click opens the flyout with Sign in (DW-1219)."
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftClick {
     ToggleFlyout,
@@ -129,34 +139,56 @@ pub struct TrayModel {
     pub icon: TrayIconState,
     /// The state in two or three words.
     pub label: &'static str,
-    /// "Beebeeb" plus the state; Narrator reads it.
-    pub tooltip: &'static str,
+    /// The app's name plus the state (DW-1230: "\"Beebeeb\" plus the state, e.g. \"Beebeeb:
+    /// needs a decision\""); Narrator reads it.
+    pub tooltip: String,
     pub menu: Vec<MenuEntry>,
     pub left_click: LeftClick,
 }
 
 pub fn tray_model(inputs: &TrayInputs) -> TrayModel {
+    tray_model_for(inputs, AppIdentity::CURRENT)
+}
+
+/// The order is DW-1201's: "update required, locked, checking, no plan, signed out after 90
+/// days, couldn't add to File Explorer (each reason), adding to File Explorer, paused, storage
+/// full, offline, stopped; then needs a decision and update available over any of the quieter
+/// states; then storage almost full, syncing, up to date." The states of that list this model
+/// has inputs for are in that order below; a plain signed-out PC (no account at all) comes
+/// first, since none of the others can hold without an account.
+///
+/// The words after the app's name are the board's names for the states (DW-1230's six, and
+/// the flyout titles "Signed out" DW-1219, "Your storage is full" DW-1209).
+pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
     use TrayIconState as I;
-    let (icon, label, tooltip) = if !inputs.signed_in {
-        (I::Stopped, "Signed out", "Beebeeb: not signed in")
+    let (icon, label, state) = if inputs.session_expired {
+        // DW-1230: "Signed out after 90 days: the red ! badge […] because it needs Anna".
+        (I::Stopped, "Signed out", "signed out")
+    } else if !inputs.signed_in {
+        // No account on this PC: nothing is wrong, so no badge (DW-1230 gives the red ! only
+        // to "signed out after 90 days").
+        (I::UpToDate, "Signed out", "signed out")
     } else if inputs.locked {
-        // Locked keeps the plain b: it needs no attention from the notification area.
-        (I::UpToDate, "Locked", "Beebeeb: locked")
+        // DW-1230: "Locked, no plan, update available and storage almost full keep the plain b".
+        (I::UpToDate, "Locked", "locked")
     } else if inputs.paused {
-        (I::Paused, "Paused", "Beebeeb: paused")
+        (I::Paused, "Paused", "paused")
+    } else if inputs.storage_full {
+        (I::Stopped, "Storage full", "storage full")
     } else if inputs.engine == EngineState::Offline {
-        (I::Offline, "Offline", "Beebeeb: no connection")
+        (I::Offline, "Offline", "offline")
     } else if inputs.engine == EngineState::Error {
-        (I::Stopped, "Stopped and storage full", "Beebeeb: stopped")
+        (I::Stopped, "Stopped", "stopped")
     } else if inputs.conflicts > 0 {
-        (I::NeedsDecision, "Needs a decision", "Beebeeb: needs a decision")
+        (I::NeedsDecision, "Needs a decision", "needs a decision")
     } else if inputs.update_available {
-        (I::UpToDate, "Update available", "Beebeeb: update available")
+        (I::UpToDate, "Update available", "update available")
     } else if inputs.engine == EngineState::Syncing || inputs.files_remaining.unwrap_or(0) > 0 {
-        (I::Syncing, "Syncing", "Beebeeb: syncing")
+        (I::Syncing, "Syncing", "syncing")
     } else {
-        (I::UpToDate, "Up to date", "Beebeeb: up to date")
+        (I::UpToDate, "Up to date", "up to date")
     };
+    let tooltip = format!("{}: {state}", identity.product_name());
     let item = |action, label, enabled| MenuEntry::Item { action, label, enabled };
     let pause = if inputs.paused {
         item(MenuAction::ResumeSyncing, "Resume syncing", inputs.signed_in)
@@ -179,7 +211,7 @@ pub fn tray_model(inputs: &TrayInputs) -> TrayModel {
         // Quit lives only here, and always works.
         item(MenuAction::Quit, "Quit Beebeeb", true),
     ];
-    let left_click = if inputs.signed_in {
+    let left_click = if inputs.signed_in || inputs.session_expired {
         LeftClick::ToggleFlyout
     } else {
         LeftClick::OpenSignIn
@@ -217,141 +249,165 @@ mod tests {
 
     #[test]
     fn each_state_has_its_icon_and_tooltip() {
-        let cases: [(TrayInputs, TrayIconState, &str); 9] = [
-            (TrayInputs::default(), TrayIconState::Stopped, "Beebeeb: not signed in"),
+        let with = |change: fn(&mut TrayInputs)| {
+            let mut inputs = signed_in();
+            change(&mut inputs);
+            inputs
+        };
+        let cases: [(TrayInputs, TrayIconState, &str, &str); 11] = [
+            // No account on this PC: the plain b, no badge (DW-1230).
+            (
+                TrayInputs::default(),
+                TrayIconState::UpToDate,
+                "Signed out",
+                "Beebeeb: signed out",
+            ),
+            // Signed out after 90 days: the red ! (DW-1230, DW-1219).
             (
                 TrayInputs {
-                    locked: true,
-                    ..signed_in()
+                    session_expired: true,
+                    explorer_ready: true,
+                    ..TrayInputs::default()
                 },
+                TrayIconState::Stopped,
+                "Signed out",
+                "Beebeeb: signed out",
+            ),
+            (
+                with(|i| i.locked = true),
                 TrayIconState::UpToDate,
+                "Locked",
                 "Beebeeb: locked",
             ),
             (
-                TrayInputs {
-                    paused: true,
-                    ..signed_in()
-                },
+                with(|i| i.paused = true),
                 TrayIconState::Paused,
+                "Paused",
                 "Beebeeb: paused",
             ),
             (
-                TrayInputs {
-                    engine: EngineState::Offline,
-                    ..signed_in()
-                },
-                TrayIconState::Offline,
-                "Beebeeb: no connection",
+                with(|i| i.storage_full = true),
+                TrayIconState::Stopped,
+                "Storage full",
+                "Beebeeb: storage full",
             ),
             (
-                TrayInputs {
-                    engine: EngineState::Error,
-                    ..signed_in()
-                },
+                with(|i| i.engine = EngineState::Offline),
+                TrayIconState::Offline,
+                "Offline",
+                "Beebeeb: offline",
+            ),
+            (
+                with(|i| i.engine = EngineState::Error),
                 TrayIconState::Stopped,
+                "Stopped",
                 "Beebeeb: stopped",
             ),
             (
-                TrayInputs {
-                    conflicts: 2,
-                    ..signed_in()
-                },
+                with(|i| i.conflicts = 2),
                 TrayIconState::NeedsDecision,
+                "Needs a decision",
                 "Beebeeb: needs a decision",
             ),
             (
-                TrayInputs {
-                    update_available: true,
-                    ..signed_in()
-                },
+                with(|i| i.update_available = true),
                 TrayIconState::UpToDate,
+                "Update available",
                 "Beebeeb: update available",
             ),
             (
-                TrayInputs {
-                    engine: EngineState::Syncing,
-                    ..signed_in()
-                },
+                with(|i| i.engine = EngineState::Syncing),
                 TrayIconState::Syncing,
+                "Syncing",
                 "Beebeeb: syncing",
             ),
-            (signed_in(), TrayIconState::UpToDate, "Beebeeb: up to date"),
+            (
+                signed_in(),
+                TrayIconState::UpToDate,
+                "Up to date",
+                "Beebeeb: up to date",
+            ),
         ];
-        for (inputs, icon, tooltip) in cases {
-            let model = tray_model(&inputs);
-            assert_eq!((model.icon, model.tooltip), (icon, tooltip), "{inputs:?}");
-            assert!(model.tooltip.starts_with("Beebeeb: "));
+        for (inputs, icon, label, tooltip) in cases {
+            let model = tray_model_for(&inputs, AppIdentity::Real);
+            assert_eq!(
+                (model.icon, model.label, model.tooltip.as_str()),
+                (icon, label, tooltip),
+                "{inputs:?}"
+            );
+            // The icon group's caption is never one state's name.
+            assert_ne!(model.label, "Stopped and storage full");
+            let test = tray_model_for(&inputs, AppIdentity::Test);
+            assert_eq!(test.tooltip, tooltip.replacen("Beebeeb", "Beebeeb Test", 1));
         }
         // Files still to move count as syncing even before the engine says so.
-        let model = tray_model(&TrayInputs {
-            files_remaining: Some(3),
-            ..signed_in()
-        });
+        let model = tray_model(&with(|i| i.files_remaining = Some(3)));
         assert_eq!(model.icon, TrayIconState::Syncing);
     }
 
+    /// DW-1201: "locked, […] signed out after 90 days, […] paused, storage full, offline,
+    /// stopped; then needs a decision and update available […]; then […] syncing, up to date."
     #[test]
-    fn the_first_state_in_the_order_wins() {
-        let everything = TrayInputs {
+    fn the_first_state_in_the_boards_order_wins() {
+        let mut inputs = TrayInputs {
             signed_in: true,
+            session_expired: false,
             locked: true,
             paused: true,
             explorer_ready: true,
             update_available: true,
+            storage_full: true,
             conflicts: 4,
             engine: EngineState::Offline,
             files_remaining: Some(9),
         };
-        assert_eq!(tray_model(&everything).label, "Locked");
+        let label = |inputs: &TrayInputs| tray_model(inputs).label;
+        assert_eq!(label(&inputs), "Locked");
+        inputs.locked = false;
+        assert_eq!(label(&inputs), "Paused");
+        inputs.paused = false;
+        // Storage full before offline.
+        assert_eq!(label(&inputs), "Storage full");
+        inputs.storage_full = false;
+        assert_eq!(label(&inputs), "Offline");
+        inputs.storage_full = true;
+        inputs.engine = EngineState::Error;
+        assert_eq!(label(&inputs), "Storage full", "and before stopped");
+        inputs.storage_full = false;
+        assert_eq!(label(&inputs), "Stopped");
+        inputs.engine = EngineState::Syncing;
+        assert_eq!(label(&inputs), "Needs a decision");
+        inputs.conflicts = 0;
+        assert_eq!(label(&inputs), "Update available");
+        inputs.update_available = false;
+        assert_eq!(label(&inputs), "Syncing");
+        inputs.engine = EngineState::Idle;
+        inputs.files_remaining = None;
+        assert_eq!(label(&inputs), "Up to date");
+        inputs.signed_in = false;
+        inputs.locked = true;
+        inputs.paused = true;
         assert_eq!(
-            tray_model(&TrayInputs {
-                locked: false,
-                ..everything.clone()
-            })
-            .label,
-            "Paused"
+            (label(&inputs), tray_model(&inputs).icon),
+            ("Signed out", TrayIconState::UpToDate)
         );
+        inputs.session_expired = true;
         assert_eq!(
-            tray_model(&TrayInputs {
-                locked: false,
-                paused: false,
-                ..everything.clone()
-            })
-            .label,
-            "Offline"
+            (label(&inputs), tray_model(&inputs).icon),
+            ("Signed out", TrayIconState::Stopped)
         );
-        let online = TrayInputs {
-            locked: false,
-            paused: false,
-            engine: EngineState::Syncing,
-            ..everything.clone()
+    }
+
+    /// DW-1201 and DW-1230: which signed-out state opens what.
+    #[test]
+    fn plain_signed_out_opens_sign_in_and_an_expired_session_opens_the_flyout() {
+        assert_eq!(tray_model(&TrayInputs::default()).left_click, LeftClick::OpenSignIn);
+        let expired = TrayInputs {
+            session_expired: true,
+            ..TrayInputs::default()
         };
-        assert_eq!(tray_model(&online).label, "Needs a decision");
-        assert_eq!(
-            tray_model(&TrayInputs {
-                conflicts: 0,
-                ..online.clone()
-            })
-            .label,
-            "Update available"
-        );
-        assert_eq!(
-            tray_model(&TrayInputs {
-                conflicts: 0,
-                update_available: false,
-                ..online
-            })
-            .label,
-            "Syncing"
-        );
-        assert_eq!(
-            tray_model(&TrayInputs {
-                signed_in: false,
-                ..everything
-            })
-            .label,
-            "Signed out"
-        );
+        assert_eq!(tray_model(&expired).left_click, LeftClick::ToggleFlyout);
+        assert_eq!(tray_model(&signed_in()).left_click, LeftClick::ToggleFlyout);
     }
 
     #[test]

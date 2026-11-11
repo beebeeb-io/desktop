@@ -1,7 +1,12 @@
 //! Linux: compiles, runs the window, and says "not built yet" for the rest. The headless gates
 //! and the dev loop run here; no Linux release of the native app is planned.
 
-use super::{Platform, PlatformError, TrayHandler, TrayIcon};
+use std::time::Duration;
+
+use super::{ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon};
+use crate::shell::control::Request;
+use crate::shell::identity::AppIdentity;
+use crate::shell::instance::Delivery;
 use crate::shell::tray::TrayModel;
 use crate::shell::tray_icon::TaskbarTheme;
 
@@ -23,7 +28,19 @@ impl Platform for LinuxPlatform {
     fn set_autostart(&self, _enabled: bool) -> Result<(), PlatformError> {
         Err(PlatformError::NotBuilt("start at login on Linux"))
     }
-    fn show_start_refusal(&self, message: &str) {
-        eprintln!("Beebeeb: {message}");
+    fn show_start_refusal(&self, title: &str, message: &str) {
+        eprintln!("{title}: {message}");
+    }
+    fn serve_control(
+        &self,
+        _identity: AppIdentity,
+        _handler: ControlHandler,
+    ) -> Result<Box<dyn ControlServer>, ServeError> {
+        Err(ServeError::NotBuilt(
+            "the control channel (one instance) on this platform",
+        ))
+    }
+    fn send_control(&self, _identity: AppIdentity, _request: &Request, _timeout: Duration) -> Delivery {
+        Delivery::Unreachable
     }
 }

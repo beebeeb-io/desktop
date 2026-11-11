@@ -1,8 +1,12 @@
 //! App state and routing as one explicit machine. Pure: no Rune, no OS, no clock.
 //!
-//! The board allows two surfaces: the one window and the flyout (DW-1201, "At most two Beebeeb
-//! surfaces"). So Settings, sign-in, the viewer and the conflict choice are states of the main
-//! window, never windows of their own (DW-0701: "never a separate window").
+//! The board allows two surfaces at a time: the one window and the flyout (DW-1201, "At most
+//! two Beebeeb surfaces"). Settings, the viewer and the conflict choice are states of the main
+//! window, never windows of their own (DW-0701: "never a separate window"). Sign-in and the
+//! first-run steps are drawn in the first-run window (960 x 640, `surfaces::WindowKind::FirstRun`),
+//! which comes before the main window and is never open beside it; this machine names those
+//! states too ([`Screen::SignIn`], [`GateState::FirstRun`]), and `surfaces::kind_for` says
+//! which window a screen belongs to.
 //!
 //! What the window shows is [`AppMachine::screen`], decided in this order:
 //! 1. the session gate ([`GateState`]): signed out shows sign-in, the other not-ready states
@@ -186,6 +190,42 @@ pub enum GateState {
     NoPlan,
     /// Signed in, the credential store could not say whether the key is there.
     KeyStoreUnavailable,
+    /// Signed in and unlocked, setup on this PC is not finished: the first-run steps (DW-0201
+    /// to DW-0208, "A window of its own between sign-in and the main window"). Not a variant
+    /// of `gate.rs` yet: the first-run lane adds it there.
+    FirstRun,
+}
+
+/// The account's id as the session gives it (the user id). Opaque here; never logged.
+pub type AccountId = String;
+
+/// What the session lane reports: the gate, and WHOSE session it is. The account is part of
+/// the input so that a change of account is seen even when no sign-out was observed between
+/// two samples (`Ready(A)` then `Ready(B)`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub gate: GateState,
+    /// `None` exactly when signed out.
+    pub account: Option<AccountId>,
+}
+
+impl Session {
+    pub fn signed_out() -> Session {
+        Session {
+            gate: GateState::SignedOut,
+            account: None,
+        }
+    }
+
+    pub fn of(gate: GateState, account: impl Into<AccountId>) -> Session {
+        if gate == GateState::SignedOut {
+            return Session::signed_out();
+        }
+        Session {
+            gate,
+            account: Some(account.into()),
+        }
+    }
 }
 
 /// A dialog in front of the window's content. One at a time.
@@ -243,8 +283,11 @@ pub enum Event {
     Escape,
     /// From outside the window; kept for later while the gate is closed.
     Request(Intent),
-    /// The session changed.
+    /// The session's gate changed, for the same account.
     Gate(GateState),
+    /// What the session lane reports (gate and account). The shell sends this on every
+    /// refresh; a change of account clears everything the last account left in the window.
+    Session(Session),
 }
 
 /// What an event did.
@@ -265,6 +308,7 @@ pub const HISTORY_LIMIT: usize = 100;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppMachine {
     gate: GateState,
+    account: Option<AccountId>,
     back: Vec<Route>,
     current: Route,
     forward: Vec<Route>,
@@ -276,8 +320,13 @@ pub struct AppMachine {
 impl AppMachine {
     /// Starts on Files with an empty history.
     pub fn new(gate: GateState) -> AppMachine {
+        AppMachine::for_session(Session::of(gate, ""))
+    }
+
+    pub fn for_session(session: Session) -> AppMachine {
         AppMachine {
-            gate,
+            gate: session.gate,
+            account: session.account,
             back: Vec::new(),
             current: Route::section(Section::Files),
             forward: Vec::new(),
@@ -332,6 +381,7 @@ impl AppMachine {
     pub fn apply(&mut self, event: Event) -> Outcome {
         match event {
             Event::Gate(gate) => self.set_gate(gate),
+            Event::Session(session) => self.set_session(session),
             Event::Request(intent) => self.request(intent),
             _ if self.gate != GateState::Ready => Outcome::Refused,
             Event::Escape => self.escape(),
@@ -458,6 +508,48 @@ impl AppMachine {
         }
     }
 
+    /// The session as the session lane reports it. Another account than the one the window
+    /// was showing (also with no sign-out seen in between) starts from nothing: no place, no
+    /// history, no dialog, no settings pane, no waiting intent of any kind.
+    fn set_session(&mut self, session: Session) -> Outcome {
+        let session = Session {
+            // No account is signed out, whatever the gate says.
+            account: session.account.filter(|_| session.gate != GateState::SignedOut),
+            ..session
+        };
+        let other_account = match (&self.account, &session.account) {
+            (Some(was), Some(now)) => was != now,
+            _ => false,
+        };
+        if other_account {
+            self.forget_account();
+            self.pending = None;
+        }
+        let gate = match session.account {
+            Some(account) => {
+                self.account = Some(account);
+                session.gate
+            }
+            // `set_gate(SignedOut)` forgets the account.
+            None => GateState::SignedOut,
+        };
+        let outcome = self.set_gate(gate);
+        if other_account { Outcome::Changed } else { outcome }
+    }
+
+    /// Whose session the window shows; `None` when signed out.
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
+    fn forget_account(&mut self) {
+        self.back.clear();
+        self.forward.clear();
+        self.current = Route::section(Section::Files);
+        self.settings = None;
+        self.dialog = None;
+    }
+
     fn set_gate(&mut self, gate: GateState) -> Outcome {
         if gate == self.gate {
             return Outcome::Unchanged;
@@ -467,11 +559,8 @@ impl AppMachine {
             GateState::SignedOut => {
                 // Nothing of the account outlives its session: not the place, not the
                 // history, not a waiting intent that names its data.
-                self.back.clear();
-                self.forward.clear();
-                self.current = Route::section(Section::Files);
-                self.settings = None;
-                self.dialog = None;
+                self.account = None;
+                self.forget_account();
                 if self.pending.as_ref().is_some_and(Intent::names_account_data) {
                     self.pending = None;
                 }

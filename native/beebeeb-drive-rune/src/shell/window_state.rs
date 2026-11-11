@@ -231,6 +231,63 @@ pub fn from_json(text: &str) -> SavedWindows {
     out
 }
 
+/// The 0.8.x (Tauri) app's kept main-window frame, in that app's config folder
+/// (`%APPDATA%/<identifier>/main-window-frame.json`, installer spec "Paths the native app
+/// must keep reading"). Read ONCE, as the first position, when this app has no window file of
+/// its own yet; never written, never deleted. (The window-state plugin's `.window-state.json`
+/// is ignored, as the spec says.)
+pub const LEGACY_FRAME_FILE_NAME: &str = "main-window-frame.json";
+
+/// Reads the 0.8.x frame file: `{"x","y","w","h"}` in logical points per display (a display is
+/// its physical frame divided by its own scale) and `"maximized"`. It becomes a
+/// [`SavedWindow`] in physical pixels at the scale of the display that holds the frame's
+/// centre (the primary when none does); [`restore`] then checks it against the displays like
+/// any saved place. Anything that is not a usable frame is no frame.
+pub fn import_legacy_frame(text: &str, monitors: &[Monitor]) -> Option<SavedWindow> {
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return None;
+    }
+    let v = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let number = |name: &str| v[name].as_f64().filter(|n| n.is_finite() && n.abs() < 1e7);
+    let (x, y, w, h) = (number("x")?, number("y")?, number("w")?, number("h")?);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let holds = |m: &&Monitor| {
+        let (mx, my) = (f64::from(m.x) / m.scale, f64::from(m.y) / m.scale);
+        let (mw, mh) = (f64::from(m.w) / m.scale, f64::from(m.h) / m.scale);
+        cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
+    };
+    let scale = monitors
+        .iter()
+        .find(holds)
+        .or_else(|| monitors.iter().find(|m| m.primary))
+        .or(monitors.first())
+        .map_or(1.0, |m| m.scale);
+    let saved = SavedWindow {
+        x: (x * scale).round() as i32,
+        y: (y * scale).round() as i32,
+        w: (w * scale).round() as u32,
+        h: (h * scale).round() as u32,
+        scale,
+        maximized: v["maximized"].as_bool().unwrap_or(false),
+    };
+    saved.is_sane().then_some(saved)
+}
+
+/// The 0.8.x frame file's text, if this app has no window file yet and the old one is there.
+/// `own`: this app's window file; `legacy`: the old app's frame file.
+pub fn read_legacy_once(own: &Path, legacy: &Path) -> Option<String> {
+    if own.exists() {
+        return None;
+    }
+    match std::fs::metadata(legacy) {
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_FILE_BYTES => std::fs::read_to_string(legacy).ok(),
+        _ => None,
+    }
+}
+
 pub fn load(path: &Path) -> SavedWindows {
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() && meta.len() <= MAX_FILE_BYTES => {}

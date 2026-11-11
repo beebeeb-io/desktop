@@ -19,8 +19,8 @@
 //! registry entries are [`scheme_registration`], for the installer to write.
 
 use super::app::{Intent, Route, Section, SettingsPane};
+use super::identity::AppIdentity;
 
-pub const SCHEME: &str = "beebeeb";
 /// Longer links are refused before anything looks at them.
 pub const MAX_LEN: usize = 512;
 pub const MAX_ID_LEN: usize = 64;
@@ -56,14 +56,19 @@ pub fn is_item_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_ID_LEN && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// A link for THIS build's identity.
 pub fn parse(link: &str) -> Result<Intent, DeepLinkError> {
+    parse_for(link, AppIdentity::CURRENT)
+}
+
+pub fn parse_for(link: &str, identity: AppIdentity) -> Result<Intent, DeepLinkError> {
     if link.len() > MAX_LEN {
         return Err(DeepLinkError::TooLong);
     }
     let Some((scheme, rest)) = link.split_once("://") else {
         return Err(DeepLinkError::NotOurScheme);
     };
-    if !scheme.eq_ignore_ascii_case(SCHEME) {
+    if !scheme.eq_ignore_ascii_case(identity.url_scheme()) {
         return Err(DeepLinkError::NotOurScheme);
     }
     // Everything a link of ours can contain. No percent-encoding: nothing on the list needs
@@ -131,17 +136,22 @@ pub struct RegistryValue {
     pub data: String,
 }
 
-/// What registers `beebeeb://` for this user on Windows, for the installer (and its removal on
-/// uninstall: delete `Software\Classes\beebeeb`). The shell does not write these itself: adding
-/// a scheme the 0.8.x app never had is a product decision, and an installer owns uninstall.
+/// What registers the scheme for this user on Windows, for the installer (and its removal on
+/// uninstall: delete `Software\Classes\<scheme>`). **Not written in 0.9.0** (the scheme stays
+/// unregistered); the shell never writes these itself.
+///
+/// The command is `"<exe>" --open-link "%1"`. Windows substitutes `%1` verbatim, so a link
+/// that contains a quote can close the argument and append others; that is why the app takes a
+/// link ONLY after `--open-link`, and honours no other flag on a command line that has it
+/// (`instance::parse_args`).
 #[allow(dead_code)] // for the installer lane; pinned by a test below
-pub fn scheme_registration(exe: &str) -> Vec<RegistryValue> {
-    let root = format!("Software\\Classes\\{SCHEME}");
+pub fn scheme_registration(identity: AppIdentity, exe: &str) -> Vec<RegistryValue> {
+    let root = format!("Software\\Classes\\{}", identity.url_scheme());
     vec![
         RegistryValue {
             key: root.clone(),
             name: "",
-            data: "URL:Beebeeb".into(),
+            data: identity.url_scheme_label().into(),
         },
         RegistryValue {
             key: root.clone(),
@@ -151,7 +161,11 @@ pub fn scheme_registration(exe: &str) -> Vec<RegistryValue> {
         RegistryValue {
             key: format!("{root}\\shell\\open\\command"),
             name: "",
-            data: format!("{} \"%1\"", super::autostart::quote_arg(exe)),
+            data: format!(
+                "{} {} \"%1\"",
+                super::autostart::quote_arg_always(exe),
+                super::instance::OPEN_LINK_FLAG
+            ),
         },
     ]
 }
@@ -282,11 +296,33 @@ mod tests {
     }
 
     #[test]
-    fn the_scheme_registration_quotes_the_exe_and_passes_one_argument() {
-        let values = scheme_registration("C:\\Program Files\\Beebeeb\\Beebeeb.exe");
+    fn the_scheme_registration_passes_the_link_only_after_open_link() {
+        let values = scheme_registration(AppIdentity::Real, "C:\\Program Files\\Beebeeb\\Beebeeb.exe");
         assert_eq!(values.len(), 3);
+        assert_eq!(values[0].data, "URL:Beebeeb");
         assert_eq!(values[1].name, "URL Protocol");
         assert_eq!(values[2].key, "Software\\Classes\\beebeeb\\shell\\open\\command");
-        assert_eq!(values[2].data, "\"C:\\Program Files\\Beebeeb\\Beebeeb.exe\" \"%1\"");
+        assert_eq!(
+            values[2].data,
+            "\"C:\\Program Files\\Beebeeb\\Beebeeb.exe\" --open-link \"%1\""
+        );
+        // A path without a space is quoted too.
+        let values = scheme_registration(AppIdentity::Test, "C:\\b\\Beebeeb.exe");
+        assert_eq!(values[2].key, "Software\\Classes\\beebeeb-test\\shell\\open\\command");
+        assert_eq!(values[2].data, "\"C:\\b\\Beebeeb.exe\" --open-link \"%1\"");
+    }
+
+    #[test]
+    fn a_link_of_the_other_identity_is_not_ours() {
+        assert!(parse_for("beebeeb://open", AppIdentity::Real).is_ok());
+        assert_eq!(
+            parse_for("beebeeb://open", AppIdentity::Test),
+            Err(DeepLinkError::NotOurScheme)
+        );
+        assert!(parse_for("beebeeb-test://open", AppIdentity::Test).is_ok());
+        assert_eq!(
+            parse_for("beebeeb-test://open", AppIdentity::Real),
+            Err(DeepLinkError::NotOurScheme)
+        );
     }
 }

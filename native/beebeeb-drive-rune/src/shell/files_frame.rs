@@ -34,7 +34,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.separator);
 
     let column_headers = ui::file_list::column_headers(&t);
-    let file_list = ui::file_list::file_list(s, cx, &t);
+    // A folder that could not be read says so. It never draws as an empty folder.
+    let file_list = match s.list_error {
+        Some(error) => rune::col().key("file-list-error").grow(1.0).w_full().px(16.0).child(
+            rune::text(error.message())
+                .key("file-list-error-text")
+                .color(t.text_secondary),
+        ),
+        None => ui::file_list::file_list(s, cx, &t),
+    };
 
     // Status bar — full content-area width (board: status-bar x=221, w=1058)
     let status_bar = ui::status_bar::status_bar(&t);
@@ -121,7 +129,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Enter => {
             if let Some(idx) = s.selected {
                 if s.listing.items[idx].is_folder {
-                    s.listing = s.source.list(Some(&s.listing.items[idx].id));
+                    let folder_id = s.listing.items[idx].id.clone();
+                    (s.listing, s.list_error) = crate::shell::state::load(s.source.as_ref(), Some(&folder_id));
                     s.selected = None;
                 }
             }
@@ -138,17 +147,45 @@ mod tests {
     use crate::source::{BoardFixtureSource, DriveSource, LargeFixtureSource};
     use rune::{Env, Runtime};
 
+    /// A folder that cannot be read draws the reason, and no rows: it never looks like an empty folder.
+    #[test]
+    fn an_unreadable_folder_draws_its_reason_instead_of_rows() {
+        use crate::source::{self, DriveSource, Listing};
+        struct Broken;
+        impl DriveSource for Broken {
+            fn list(&self, _: Option<&str>) -> Result<Listing, source::SourceError> {
+                Err(source::SourceError::Unreadable)
+            }
+            fn storage(&self) -> Option<source::StorageSummary> {
+                None
+            }
+        }
+        let env = Env {
+            system_dark: false,
+            scale: 1.0,
+        };
+        let mut state = init();
+        (state.listing, state.list_error) = crate::shell::state::load(&Broken, None);
+        state.source = Box::new(Broken);
+        state.selected = None;
+        assert_eq!(state.list_error, Some(source::SourceError::Unreadable));
+        let mut rt = Runtime::new(state, view, (1280.0, 800.0), env);
+        rt.frame(0.0);
+        assert!(rt.find("file-list-error-text").is_some(), "the reason is drawn");
+        assert!(rt.find("file-list").is_none(), "and no (empty) list is");
+    }
+
     #[test]
     fn board_fixture_has_11_items() {
         let source = BoardFixtureSource::new();
-        let listing = source.list(None);
+        let listing = source.list(None).unwrap();
         assert_eq!(listing.items.len(), 11, "board DW-0401 has exactly 11 items");
     }
 
     #[test]
     fn board_fixture_names_match_board() {
         let source = BoardFixtureSource::new();
-        let listing = source.list(None);
+        let listing = source.list(None).unwrap();
         let names: Vec<&str> = listing.items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(
             names,
@@ -232,7 +269,7 @@ mod tests {
     #[test]
     fn large_fixture_5000_rows() {
         let source = LargeFixtureSource::new(5000);
-        let listing = source.list(None);
+        let listing = source.list(None).unwrap();
         assert_eq!(listing.items.len(), 5000);
     }
 

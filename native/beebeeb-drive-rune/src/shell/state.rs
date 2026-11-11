@@ -14,7 +14,11 @@ pub struct State {
     // --- Files (DW-0401): read by `ui/**` ---
     pub(crate) source: Box<dyn DriveSource>,
     pub(crate) listing: Listing,
+    /// Why `listing` could not be read, when it could not: the window shows this instead of rows.
+    pub(crate) list_error: Option<source::SourceError>,
     pub(crate) storage: source::StorageSummary,
+    /// `false`: the source cannot know the account's storage (a `--db` source never asks the server).
+    pub(crate) storage_known: bool,
     pub(crate) selected: Option<usize>,
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
@@ -30,14 +34,43 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    let source = Box::new(BoardFixtureSource::new());
-    let listing = source.list(None);
+    init_from(shell, Box::new(BoardFixtureSource::new()), Some(6))
+}
+
+/// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
+pub(crate) fn load(source: &dyn DriveSource, folder_id: Option<&str>) -> (Listing, Option<source::SourceError>) {
+    match source.list(folder_id) {
+        Ok(listing) => (listing, None),
+        Err(error) => {
+            let root = source::Crumb {
+                id: None,
+                name: "Files".into(),
+            };
+            let unread = Listing {
+                folder: root.clone(),
+                path: vec![root],
+                items: Vec::new(),
+            };
+            (unread, Some(error))
+        }
+    }
+}
+
+/// `selected`: the board fixture has Contract draft.pdf (index 6) selected per the board; a real
+/// database starts with nothing selected.
+pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<usize>) -> State {
+    let (listing, list_error) = load(source.as_ref(), None);
     let storage = source.storage();
     State {
         source,
         listing,
-        storage,
-        selected: Some(6), // Contract draft.pdf (index 6) selected per the board
+        list_error,
+        storage_known: storage.is_some(),
+        storage: storage.unwrap_or(source::StorageSummary {
+            used_bytes: 0,
+            quota_bytes: 0,
+        }),
+        selected,
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,

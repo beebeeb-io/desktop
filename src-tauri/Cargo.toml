@@ -13,6 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# The engine without Tauri (state database, view models): shared with the native Rune shell. `src/lib.rs` re-exports its
+# modules under their old paths. docs/superpowers/specs/2026-11-11-native-engine-boundary.md
+beebeeb-engine = { path = "../crates/beebeeb-engine" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
@@ -330,6 +333,8 @@ windows-core-webview2 = { package = "windows-core", version = "0.61" }
 
 [dev-dependencies]
 tempfile = "3"
+# The engine's test helpers (`*_for_test`, injected failures) for this crate's tests. A feature only.
+beebeeb-engine = { path = "../crates/beebeeb-engine", features = ["test-support"] }
 # LD-0139: tests only (they build server and browser frames by hand). The browser sign-in's ECDH, HKDF and AES are
 # core's `cli_auth` (`CliEphemeralKey`), so desktop has no `p256`, `hkdf` or AEAD code of its own. Already in
 # Cargo.lock through beebeeb-core.

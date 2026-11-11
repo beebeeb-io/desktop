@@ -299,3 +299,96 @@ fn a_request_from_outside_replaces_an_open_dialog_and_leaves_settings_for_a_conf
     assert_eq!(m.dialog(), None);
     assert_eq!(m.apply(Event::Request(Intent::Go(files()))), Outcome::Unchanged);
 }
+
+fn session(gate: GateState, account: &str) -> Event {
+    Event::Session(Session::of(gate, account))
+}
+
+/// P2-6. Account A to account B with NO sign-out observed in between (a fast sign-out and
+/// sign-in between two samples): nothing of A's stays.
+#[test]
+fn another_account_without_an_observed_sign_out_starts_from_nothing() {
+    let mut m = AppMachine::for_session(Session::of(GateState::Ready, "user-a"));
+    go(&mut m, Route::section(Section::Photos));
+    go(&mut m, Route::folder(Section::Files, "a-folder"));
+    m.apply(Event::OpenItem("a-file".into()));
+    m.apply(Event::Back);
+    m.apply(Event::OpenSettings(SettingsPane::Security));
+    m.apply(Event::OpenDialog(Dialog::Conflict {
+        file: Some("a-file".into()),
+    }));
+    assert!(m.dialog().is_some());
+
+    assert_eq!(m.apply(session(GateState::Ready, "user-b")), Outcome::Changed);
+    assert_eq!(m.account(), Some("user-b"));
+    assert_eq!(
+        m.screen(),
+        Screen::Drive(files()),
+        "A's folder and A's settings pane are gone"
+    );
+    assert_eq!(m.dialog(), None);
+    assert!(!m.can_go_back() && !m.can_go_forward(), "A's history is gone");
+    assert_eq!(m.apply(Event::Back), Outcome::Unchanged);
+    assert_eq!(m.apply(Event::Forward), Outcome::Unchanged);
+    assert_eq!(m.screen(), Screen::Drive(files()));
+}
+
+/// The same through a not-ready gate: `Ready(A)`, `Locked(B)`, `Ready(B)`. A's place does
+/// not come back at B's unlock, and an intent that waited for A is not played for B.
+#[test]
+fn another_account_behind_a_closed_gate_gets_none_of_the_first_ones_place_or_intents() {
+    let mut m = AppMachine::for_session(Session::of(GateState::Ready, "user-a"));
+    go(&mut m, Route::folder(Section::Files, "a-folder"));
+    m.apply(session(GateState::Locked, "user-a"));
+    assert_eq!(
+        m.apply(Event::Request(Intent::Go(Route::folder(Section::Shared, "a-shared")))),
+        Outcome::Deferred
+    );
+    assert_eq!(
+        m.apply(Event::Request(Intent::Settings(SettingsPane::Storage))),
+        Outcome::Deferred
+    );
+    assert!(m.pending().is_some());
+
+    assert_eq!(m.apply(session(GateState::Locked, "user-b")), Outcome::Changed);
+    assert_eq!(m.pending(), None, "no waiting intent of any kind survives the account");
+    assert_eq!(m.apply(session(GateState::Ready, "user-b")), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::Drive(files()));
+    assert!(!m.can_go_back());
+}
+
+#[test]
+fn the_same_account_keeps_its_place_and_a_session_event_is_also_the_gate() {
+    let mut m = AppMachine::for_session(Session::of(GateState::Ready, "user-a"));
+    go(&mut m, Route::section(Section::Photos));
+    assert_eq!(m.apply(session(GateState::Ready, "user-a")), Outcome::Unchanged);
+    assert_eq!(m.apply(session(GateState::Locked, "user-a")), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::Gate(GateState::Locked));
+    assert_eq!(m.apply(session(GateState::Ready, "user-a")), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::Drive(Route::section(Section::Photos)));
+    assert!(m.can_go_back());
+    // Signed out, then the same account again: sign-out already forgot the place.
+    assert_eq!(m.apply(Event::Session(Session::signed_out())), Outcome::Changed);
+    assert_eq!((m.account(), m.screen()), (None, Screen::SignIn));
+    assert_eq!(m.apply(session(GateState::Ready, "user-a")), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::Drive(files()));
+    // A session that names no account is signed out, whatever gate it claims.
+    let nameless = Session {
+        gate: GateState::Ready,
+        account: None,
+    };
+    assert_eq!(m.apply(Event::Session(nameless)), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::SignIn);
+    assert_eq!(Session::of(GateState::SignedOut, "user-a"), Session::signed_out());
+}
+
+/// The first-run steps are a gate state of their own, after sign-in and before the main window.
+#[test]
+fn the_first_run_gate_has_its_own_screen_and_nothing_of_the_account_behind_it() {
+    let mut m = AppMachine::for_session(Session::of(GateState::FirstRun, "user-a"));
+    assert_eq!(m.screen(), Screen::Gate(GateState::FirstRun));
+    assert_eq!(go(&mut m, Route::section(Section::Photos)), Outcome::Refused);
+    assert_eq!(m.apply(Event::OpenSettings(SettingsPane::General)), Outcome::Refused);
+    assert_eq!(m.apply(session(GateState::Ready, "user-a")), Outcome::Changed);
+    assert_eq!(m.screen(), Screen::Drive(files()));
+}

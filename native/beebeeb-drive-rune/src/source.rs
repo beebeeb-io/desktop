@@ -61,9 +61,30 @@ pub struct StorageSummary {
 }
 
 /// The data contract the UI consumes.
+/// Why a folder could not be listed. A source that cannot read says so; it never answers with an empty folder,
+/// because "no files" and "your files cannot be read" must not look the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceError {
+    /// The folder is not there any more (deleted or moved elsewhere), or the id is not a folder.
+    NotFound,
+    /// The data behind the source could not be read.
+    Unreadable,
+}
+
+impl SourceError {
+    /// What the window says in place of the rows.
+    pub fn message(self) -> &'static str {
+        match self {
+            SourceError::NotFound => "This folder is not here any more.",
+            SourceError::Unreadable => "Your files cannot be read right now.",
+        }
+    }
+}
+
 pub trait DriveSource: Send + 'static {
-    fn list(&self, folder_id: Option<&str>) -> Listing;
-    fn storage(&self) -> StorageSummary;
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError>;
+    /// `None`: this source cannot know the account's used and total bytes (they are the server's).
+    fn storage(&self) -> Option<StorageSummary>;
 }
 
 /// Format bytes as "84 KB", "1.2 MB", "3.1 GB" etc. Shared by file_list and detail_pane.
@@ -96,213 +117,219 @@ impl BoardFixtureSource {
 }
 
 impl DriveSource for BoardFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
-        use rune::oklch;
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let listing = {
+            use rune::oklch;
 
-        let items = vec![
-            DriveItem {
-                id: "f-backups".into(),
-                parent_id: None,
-                name: "Backups".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(4),
-                modified_at: "2026-11-05T07:02:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: true,
-            },
-            DriveItem {
-                id: "f-docs".into(),
-                parent_id: None,
-                name: "Documents".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(48),
-                modified_at: "2026-11-04T16:40:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-invoices".into(),
-                parent_id: None,
-                name: "Invoices 2026".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(11),
-                modified_at: "2026-10-28T10:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "PS".into(),
-                    color: oklch(0.88, 0.05, 150.0),
-                }],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-lisbon".into(),
-                parent_id: None,
-                name: "Lisbon trip".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(212),
-                modified_at: "2026-10-12T14:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![
-                    SharedBadge {
-                        initials: "JI".into(),
-                        color: oklch(0.88, 0.05, 25.0),
-                    },
-                    SharedBadge {
-                        initials: "MD".into(),
-                        color: oklch(0.88, 0.05, 250.0),
-                    },
-                ],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-shoots".into(),
-                parent_id: None,
-                name: "Shoot selects".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(64),
-                modified_at: "2026-10-03T09:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "LD".into(),
-                    color: oklch(0.88, 0.05, 60.0),
-                }],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "budget".into(),
-                parent_id: None,
-                name: "Budget 2026.xlsx".into(),
-                is_folder: false,
-                size: Some(86016),
-                child_count: None,
-                modified_at: "2026-11-05T09:12:00Z".into(),
-                mime: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into()),
-                has_thumbnail: false,
-                shared_type: Some("Link".into()),
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "contract".into(),
-                parent_id: None,
-                name: "Contract draft.pdf".into(),
-                is_folder: false,
-                size: Some(1258291),
-                child_count: None,
-                modified_at: "2026-11-04T16:42:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "SO".into(),
-                    color: oklch(0.88, 0.05, 150.0),
-                }],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "harbour".into(),
-                parent_id: None,
-                name: "Harbour.heic".into(),
-                is_folder: false,
-                size: Some(3250585),
-                child_count: None,
-                modified_at: "2026-11-02T14:00:00Z".into(),
-                mime: Some("image/heic".into()),
-                has_thumbnail: true,
-                shared_type: Some("Link".into()),
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "brand".into(),
-                parent_id: None,
-                name: "Northwind brand guide.pdf".into(),
-                is_folder: false,
-                size: Some(8808038),
-                child_count: None,
-                modified_at: "2026-10-21T11:00:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "q4plan".into(),
-                parent_id: None,
-                name: "Q4 plan.key".into(),
-                is_folder: false,
-                size: Some(23068672),
-                child_count: None,
-                modified_at: "2026-10-15T10:00:00Z".into(),
-                mime: Some("application/x-iwork-keynote-sffkey".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "rent".into(),
-                parent_id: None,
-                name: "Studio rent 2026.pdf".into(),
-                is_folder: false,
-                size: Some(319488),
-                child_count: None,
-                modified_at: "2026-10-02T08:00:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-        ];
+            let items = vec![
+                DriveItem {
+                    id: "f-backups".into(),
+                    parent_id: None,
+                    name: "Backups".into(),
+                    is_folder: true,
+                    size: None,
+                    child_count: Some(4),
+                    modified_at: "2026-11-05T07:02:00Z".into(),
+                    mime: None,
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![],
+                    pc_status: Some("on_this_pc".into()),
+                    is_protected: true,
+                },
+                DriveItem {
+                    id: "f-docs".into(),
+                    parent_id: None,
+                    name: "Documents".into(),
+                    is_folder: true,
+                    size: None,
+                    child_count: Some(48),
+                    modified_at: "2026-11-04T16:40:00Z".into(),
+                    mime: None,
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![],
+                    pc_status: Some("on_this_pc".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "f-invoices".into(),
+                    parent_id: None,
+                    name: "Invoices 2026".into(),
+                    is_folder: true,
+                    size: None,
+                    child_count: Some(11),
+                    modified_at: "2026-10-28T10:00:00Z".into(),
+                    mime: None,
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![SharedBadge {
+                        initials: "PS".into(),
+                        color: oklch(0.88, 0.05, 150.0),
+                    }],
+                    pc_status: Some("on_this_pc".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "f-lisbon".into(),
+                    parent_id: None,
+                    name: "Lisbon trip".into(),
+                    is_folder: true,
+                    size: None,
+                    child_count: Some(212),
+                    modified_at: "2026-10-12T14:00:00Z".into(),
+                    mime: None,
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![
+                        SharedBadge {
+                            initials: "JI".into(),
+                            color: oklch(0.88, 0.05, 25.0),
+                        },
+                        SharedBadge {
+                            initials: "MD".into(),
+                            color: oklch(0.88, 0.05, 250.0),
+                        },
+                    ],
+                    pc_status: Some("online_only".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "f-shoots".into(),
+                    parent_id: None,
+                    name: "Shoot selects".into(),
+                    is_folder: true,
+                    size: None,
+                    child_count: Some(64),
+                    modified_at: "2026-10-03T09:00:00Z".into(),
+                    mime: None,
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![SharedBadge {
+                        initials: "LD".into(),
+                        color: oklch(0.88, 0.05, 60.0),
+                    }],
+                    pc_status: Some("online_only".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "budget".into(),
+                    parent_id: None,
+                    name: "Budget 2026.xlsx".into(),
+                    is_folder: false,
+                    size: Some(86016),
+                    child_count: None,
+                    modified_at: "2026-11-05T09:12:00Z".into(),
+                    mime: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into()),
+                    has_thumbnail: false,
+                    shared_type: Some("Link".into()),
+                    shared_badges: vec![],
+                    pc_status: Some("on_this_pc".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "contract".into(),
+                    parent_id: None,
+                    name: "Contract draft.pdf".into(),
+                    is_folder: false,
+                    size: Some(1258291),
+                    child_count: None,
+                    modified_at: "2026-11-04T16:42:00Z".into(),
+                    mime: Some("application/pdf".into()),
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![SharedBadge {
+                        initials: "SO".into(),
+                        color: oklch(0.88, 0.05, 150.0),
+                    }],
+                    pc_status: Some("online_only".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "harbour".into(),
+                    parent_id: None,
+                    name: "Harbour.heic".into(),
+                    is_folder: false,
+                    size: Some(3250585),
+                    child_count: None,
+                    modified_at: "2026-11-02T14:00:00Z".into(),
+                    mime: Some("image/heic".into()),
+                    has_thumbnail: true,
+                    shared_type: Some("Link".into()),
+                    shared_badges: vec![],
+                    pc_status: Some("available_offline".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "brand".into(),
+                    parent_id: None,
+                    name: "Northwind brand guide.pdf".into(),
+                    is_folder: false,
+                    size: Some(8808038),
+                    child_count: None,
+                    modified_at: "2026-10-21T11:00:00Z".into(),
+                    mime: Some("application/pdf".into()),
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![],
+                    pc_status: Some("available_offline".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "q4plan".into(),
+                    parent_id: None,
+                    name: "Q4 plan.key".into(),
+                    is_folder: false,
+                    size: Some(23068672),
+                    child_count: None,
+                    modified_at: "2026-10-15T10:00:00Z".into(),
+                    mime: Some("application/x-iwork-keynote-sffkey".into()),
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![],
+                    pc_status: Some("available_offline".into()),
+                    is_protected: false,
+                },
+                DriveItem {
+                    id: "rent".into(),
+                    parent_id: None,
+                    name: "Studio rent 2026.pdf".into(),
+                    is_folder: false,
+                    size: Some(319488),
+                    child_count: None,
+                    modified_at: "2026-10-02T08:00:00Z".into(),
+                    mime: Some("application/pdf".into()),
+                    has_thumbnail: false,
+                    shared_type: None,
+                    shared_badges: vec![],
+                    pc_status: Some("available_offline".into()),
+                    is_protected: false,
+                },
+            ];
 
-        Listing {
-            folder: Crumb {
-                id: None,
-                name: "Files".into(),
-            },
-            path: vec![Crumb {
-                id: None,
-                name: "Files".into(),
-            }],
-            items,
-        }
+            Listing {
+                folder: Crumb {
+                    id: None,
+                    name: "Files".into(),
+                },
+                path: vec![Crumb {
+                    id: None,
+                    name: "Files".into(),
+                }],
+                items,
+            }
+        };
+        Ok(listing)
     }
 
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
-            used_bytes: 240_000_000_000,    // 240 GB
-            quota_bytes: 1_000_000_000_000, // 1 TB
-        }
+    fn storage(&self) -> Option<StorageSummary> {
+        let storage = {
+            StorageSummary {
+                used_bytes: 240_000_000_000,    // 240 GB
+                quota_bytes: 1_000_000_000_000, // 1 TB
+            }
+        };
+        Some(storage)
     }
 }
 
@@ -405,23 +432,29 @@ impl LargeFixtureSource {
 }
 
 impl DriveSource for LargeFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
-        Listing {
-            folder: Crumb {
-                id: None,
-                name: "Files".into(),
-            },
-            path: vec![Crumb {
-                id: None,
-                name: "Files".into(),
-            }],
-            items: self.items.clone(),
-        }
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let listing = {
+            Listing {
+                folder: Crumb {
+                    id: None,
+                    name: "Files".into(),
+                },
+                path: vec![Crumb {
+                    id: None,
+                    name: "Files".into(),
+                }],
+                items: self.items.clone(),
+            }
+        };
+        Ok(listing)
     }
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
-            used_bytes: 240_000_000_000,
-            quota_bytes: 1_000_000_000_000,
-        }
+    fn storage(&self) -> Option<StorageSummary> {
+        let storage = {
+            StorageSummary {
+                used_bytes: 240_000_000_000,
+                quota_bytes: 1_000_000_000_000,
+            }
+        };
+        Some(storage)
     }
 }

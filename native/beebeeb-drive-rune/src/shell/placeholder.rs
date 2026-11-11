@@ -95,6 +95,13 @@ pub fn window(s: &State, cx: &mut Cx<State>, group: FrameGroup) -> El {
         .child(body.child(content))
 }
 
+/// A dialog's card until its lane registers one: the notice, and nothing behind it (the
+/// shell draws the frame behind and the scrim).
+pub fn dialog(cx: &mut Cx<State>, group: FrameGroup) -> El {
+    let t = tokens::theme(cx.system_dark());
+    notice(&t, group, None, false)
+}
+
 /// The flyout with the placeholder as its content. The one line of state it shows is the
 /// shell's own tray model, and it says where that comes from.
 pub fn flyout(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {

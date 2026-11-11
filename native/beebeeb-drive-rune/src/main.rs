@@ -13,6 +13,10 @@
 
 mod shell;
 mod source;
+// The engine lane's read API (PR 280): only `EngineSource::open` and `list` have a caller
+// outside its tests so far (`--db`, dev builds).
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+mod source_engine;
 mod theme;
 mod ui;
 

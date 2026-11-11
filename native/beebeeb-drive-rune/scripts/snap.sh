@@ -41,7 +41,7 @@ export CARGO_TARGET_DIR
 BIN="$CARGO_TARGET_DIR/release/beebeeb-drive"
 if [ ! -f "$BIN" ]; then
     echo "Building release..."
-    (cd "$CRATE_DIR" && cargo build --release)
+    (cd "$CRATE_DIR" && cargo build --release --features dev-tools)
 fi
 
 mkdir -p "$EVIDENCE_DIR"

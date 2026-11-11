@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::app::GateState;
+use super::app::{AccountId, GateState, Session};
 use super::instance::ProfileHolder;
 use super::platform::{Platform, PlatformError};
 use super::tray::{EngineState, TrayInputs};
@@ -26,6 +26,7 @@ impl From<PlatformError> for ActionError {
     fn from(error: PlatformError) -> ActionError {
         match error {
             PlatformError::NotBuilt(what) => ActionError::NotBuilt(what),
+            PlatformError::NotOurs(what) => ActionError::NotAvailable(what),
             PlatformError::Os(message) => ActionError::Failed(message),
         }
     }
@@ -33,20 +34,38 @@ impl From<PlatformError> for ActionError {
 
 /// The engine and the session, as the shell needs them.
 pub trait EngineActions: Send + Sync {
-    fn gate_state(&self) -> GateState;
+    /// The gate AND whose session it is (the user id), read together. The shell samples this;
+    /// the account is what lets it see a change of account it never saw a sign-out for.
+    fn session(&self) -> Session;
     /// What the b shows. Cheap: called on every refresh.
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
     /// Opens File Explorer at the Beebeeb location (DW-1180).
     fn open_in_file_explorer(&self) -> Result<(), ActionError>;
-    /// Another agent holding this profile's sync lock (`lockfile.rs`), if one is alive.
+    /// Another agent holding this profile's sync lock (`lockfile.rs`), if one is alive: a
+    /// Tauri 0.8.x app of the same identity, or `bb watch`.
     fn profile_holder(&self) -> Option<ProfileHolder>;
+    /// Starts syncing. Only ever called through [`ShellActions::start_sync`], which refuses
+    /// while [`EngineActions::profile_holder`] names another agent.
+    fn start_sync(&self) -> Result<(), ActionError>;
+    /// The app is quitting (the b's menu, the installer's `quit-for-update`, a Windows
+    /// shutdown): stop the engine and park uploads. Must return promptly and be safe to call
+    /// twice.
+    fn stop_for_quit(&self);
+    /// A Windows shutdown that ran [`EngineActions::stop_for_quit`] was cancelled: carry on.
+    fn resume_after_cancelled_quit(&self);
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
 pub trait ShellActions: Send + Sync {
-    fn gate_state(&self) -> GateState;
+    fn session(&self) -> Session;
+    /// Starts syncing, unless another agent (a Tauri 0.8.x app of the same identity, `bb
+    /// watch`) holds the profile's sync lock: then it refuses and the engine is not asked.
+    fn start_sync(&self) -> Result<(), ActionError>;
+    /// The normal quit path's engine hook; see [`EngineActions::stop_for_quit`].
+    fn stop_for_quit(&self);
+    fn resume_after_cancelled_quit(&self);
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
@@ -69,8 +88,22 @@ impl HostActions {
 }
 
 impl ShellActions for HostActions {
-    fn gate_state(&self) -> GateState {
-        self.engine.gate_state()
+    fn session(&self) -> Session {
+        self.engine.session()
+    }
+    fn start_sync(&self) -> Result<(), ActionError> {
+        if self.engine.profile_holder().is_some() {
+            return Err(ActionError::NotAvailable(
+                "another Beebeeb program holds this profile's sync lock",
+            ));
+        }
+        self.engine.start_sync()
+    }
+    fn stop_for_quit(&self) {
+        self.engine.stop_for_quit();
+    }
+    fn resume_after_cancelled_quit(&self) {
+        self.engine.resume_after_cancelled_quit();
     }
     fn tray_inputs(&self) -> TrayInputs {
         self.engine.tray_inputs()
@@ -100,10 +133,14 @@ pub enum FixtureCall {
     Pause,
     Resume,
     OpenInFileExplorer,
+    StartSync,
+    StopForQuit,
+    ResumeAfterCancelledQuit,
 }
 
 struct Fixture {
     gate: GateState,
+    account: AccountId,
     inputs: TrayInputs,
     holder: Option<ProfileHolder>,
     calls: Vec<FixtureCall>,
@@ -137,6 +174,7 @@ impl FixtureEngine {
         FixtureEngine {
             state: Mutex::new(Fixture {
                 gate,
+                account: "fixture-account".into(),
                 inputs,
                 holder: None,
                 calls: Vec::new(),
@@ -155,6 +193,11 @@ impl FixtureEngine {
         state.inputs.locked = gate == GateState::Locked;
     }
 
+    /// Another account is signed in now (the gate stays as it is).
+    pub fn set_account(&self, account: &str) {
+        self.lock().account = account.to_owned();
+    }
+
     pub fn set_inputs(&self, inputs: TrayInputs) {
         self.lock().inputs = inputs;
     }
@@ -169,8 +212,19 @@ impl FixtureEngine {
 }
 
 impl EngineActions for FixtureEngine {
-    fn gate_state(&self) -> GateState {
-        self.lock().gate
+    fn session(&self) -> Session {
+        let state = self.lock();
+        Session::of(state.gate, state.account.clone())
+    }
+    fn start_sync(&self) -> Result<(), ActionError> {
+        self.lock().calls.push(FixtureCall::StartSync);
+        Ok(())
+    }
+    fn stop_for_quit(&self) {
+        self.lock().calls.push(FixtureCall::StopForQuit);
+    }
+    fn resume_after_cancelled_quit(&self) {
+        self.lock().calls.push(FixtureCall::ResumeAfterCancelledQuit);
     }
     fn tray_inputs(&self) -> TrayInputs {
         self.lock().inputs.clone()
@@ -234,7 +288,7 @@ mod tests {
     fn engine_actions_are_refused_while_signed_out() {
         let engine = Arc::new(FixtureEngine::signed_out());
         let host = HostActions::new(engine.clone(), Arc::new(FakePlatform::default()));
-        assert_eq!(host.gate_state(), GateState::SignedOut);
+        assert_eq!(host.session(), Session::signed_out());
         assert!(matches!(host.pause_sync(), Err(ActionError::NotAvailable(_))));
         assert!(matches!(host.resume_sync(), Err(ActionError::NotAvailable(_))));
         assert!(matches!(
@@ -279,10 +333,47 @@ mod tests {
     fn the_gate_follows_the_session() {
         let (engine, _, host) = host();
         engine.set_gate(GateState::Locked);
-        assert_eq!(host.gate_state(), GateState::Locked);
+        assert_eq!(host.session(), Session::of(GateState::Locked, "fixture-account"));
         assert!(host.tray_inputs().locked);
         engine.set_gate(GateState::SignedOut);
         assert!(!host.tray_inputs().signed_in);
-        assert_eq!(host.gate_state(), GateState::SignedOut);
+        assert_eq!(host.session(), Session::signed_out());
+    }
+
+    /// P2-9: the native app does not start syncing while a Tauri 0.8.x app of the same
+    /// identity holds the sync lock; the engine is not even asked.
+    #[test]
+    fn sync_does_not_start_while_another_agent_holds_the_profile() {
+        let (engine, _, host) = host();
+        engine.set_profile_holder(Some(ProfileHolder {
+            agent: "desktop".into(),
+            pid: 4242,
+        }));
+        assert!(matches!(host.start_sync(), Err(ActionError::NotAvailable(_))));
+        assert!(engine.calls().is_empty(), "the engine was not asked");
+        engine.set_profile_holder(None);
+        host.start_sync().unwrap();
+        assert_eq!(engine.calls(), vec![FixtureCall::StartSync]);
+    }
+
+    #[test]
+    fn the_session_names_its_account_and_signed_out_names_none() {
+        let (engine, _, host) = host();
+        assert_eq!(host.session().account.as_deref(), Some("fixture-account"));
+        engine.set_account("user-b");
+        assert_eq!(host.session(), Session::of(GateState::Ready, "user-b"));
+        engine.set_gate(GateState::SignedOut);
+        assert_eq!(host.session().account, None);
+    }
+
+    #[test]
+    fn the_quit_hooks_reach_the_engine() {
+        let (engine, _, host) = host();
+        host.stop_for_quit();
+        host.resume_after_cancelled_quit();
+        assert_eq!(
+            engine.calls(),
+            vec![FixtureCall::StopForQuit, FixtureCall::ResumeAfterCancelledQuit]
+        );
     }
 }

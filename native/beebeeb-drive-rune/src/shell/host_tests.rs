@@ -6,6 +6,7 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::super::actions::{FixtureCall, FixtureEngine};
 use super::super::app::{GateState, Screen};
+use super::super::control::Request;
 use super::super::flyout_window;
 use super::super::platform::fake::FakePlatform;
 use super::super::registry::{self, FrameGroup};
@@ -188,19 +189,88 @@ fn ctrl_comma_opens_settings_and_esc_returns() {
 fn ctrl_slash_opens_the_shortcuts_dialog_and_esc_closes_it() {
     let (_, _, mut rt) = fixture();
     press(&mut rt, Key::Command('/'), ctrl());
-    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::ShortcutsDialog);
+    assert_eq!(
+        registry::dialog_group_for(&rt.state.shell.app),
+        Some(FrameGroup::ShortcutsDialog)
+    );
     press(&mut rt, Key::Escape, Mods::default());
+    assert_eq!(registry::dialog_group_for(&rt.state.shell.app), None);
     assert_eq!(
         registry::group_for(&rt.state.shell.app),
         FrameGroup::Section(Section::Files)
     );
 }
 
+/// P2-8. A dialog draws OVER the frame behind it: Files stays drawn, the scrim covers the
+/// window, the dialog's card is on top, and the frame behind gets no keys.
+#[test]
+fn a_dialog_is_layered_over_the_frame_behind_it() {
+    let (_, _, mut rt) = fixture();
+    let selected = rt.state.selected;
+    press(&mut rt, Key::Command('/'), ctrl());
+    // Behind: the Files frame, still the group of the state and still in the tree.
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::Section(Section::Files)
+    );
+    assert!(rt.find("file-list").is_some(), "Files is still drawn behind the dialog");
+    assert!(rt.find("sidebar").is_some());
+    // In front: the scrim over the whole window, then the card.
+    let rect_of = |rt: &Runtime<State>, key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .map(|e| e.rect)
+            .expect(key)
+    };
+    assert_eq!(
+        rect_of(&rt, "dialog-scrim"),
+        rect_of(&rt, "window"),
+        "the scrim covers the window"
+    );
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("file-list") && e.inert)
+    );
+    assert!(rt.find("dialog-layer").is_some());
+    assert!(texts(&rt).contains(&"Commands and keyboard shortcuts".to_owned()));
+    // The frame behind takes no keys while the dialog is open.
+    press(&mut rt, Key::Down, Mods::default());
+    assert_eq!(rt.state.selected, selected);
+    press(&mut rt, Key::Escape, Mods::default());
+    assert!(rt.find("dialog-scrim").is_none());
+    assert!(rt.find("file-list").is_some());
+    press(&mut rt, Key::Down, Mods::default());
+    assert_ne!(rt.state.selected, selected, "and gets them again once it is closed");
+}
+
+/// A dialog over Settings: closing it leaves Settings open.
+#[test]
+fn closing_a_dialog_does_not_close_what_is_behind_it() {
+    let (_, _, mut rt) = fixture();
+    press(&mut rt, Key::Command(','), ctrl());
+    press(&mut rt, Key::Command('/'), ctrl());
+    assert!(rt.find("dialog-scrim").is_some());
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::Settings(SettingsPane::General)
+    );
+    press(&mut rt, Key::Escape, Mods::default());
+    assert!(rt.find("dialog-scrim").is_none());
+    assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::General));
+    assert_eq!(registry::scrim(false).a, 0.28);
+    assert_eq!(registry::scrim(true).a, 0.55);
+}
+
 #[test]
 fn ctrl_slash_works_where_slash_is_a_shifted_key() {
     let (_, _, mut rt) = fixture();
     press(&mut rt, Key::Command('/'), Mods { shift: true, ..ctrl() });
-    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::ShortcutsDialog);
+    assert_eq!(
+        registry::dialog_group_for(&rt.state.shell.app),
+        Some(FrameGroup::ShortcutsDialog)
+    );
 }
 
 #[test]
@@ -332,6 +402,152 @@ fn closing_the_window_without_a_b_has_nowhere_to_come_back_from() {
     let (_, _, rt) = fixture();
     // The fixture shell has no tray: `on_close` then quits (see its doc). With one, it stays.
     assert!(!rt.state.shell.has_tray());
+    assert!(rt.state.shell.close_quits());
+}
+
+fn no_events() -> platform::TrayHandler {
+    Arc::new(|_| {})
+}
+
+/// P2-1. A tray whose icon was never added is not a b: closing the window quits. When the
+/// icon appears, closing keeps the app; when it goes again, closing quits again.
+#[test]
+fn a_tray_whose_icon_was_not_added_is_not_a_way_back() {
+    let platform = Arc::new(FakePlatform::without_notification_area());
+    let mut shell = Shell::fixture_on(Arc::new(FixtureEngine::ready()), platform.clone());
+    shell.attach_tray(no_events());
+    assert!(shell.tray.is_some(), "the tray exists and keeps trying");
+    assert!(!shell.has_tray(), "but there is no icon");
+    assert!(shell.close_quits(), "never a live process with no surface");
+    platform.icon_present.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(shell.has_tray());
+    assert!(!shell.close_quits());
+    platform.icon_present.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(shell.close_quits());
+    // A platform with no tray at all.
+    let mut shell = Shell::fixture_on(Arc::new(FixtureEngine::ready()), Arc::new(FakePlatform::unbuilt()));
+    shell.attach_tray(no_events());
+    assert!(shell.tray.is_none() && shell.close_quits());
+}
+
+/// P2-2. The quit hook (which Rune also runs when Windows only ASKS to shut down) takes the
+/// icon away without dropping the tray and stops the engine; a cancelled shutdown resumes it,
+/// and the b is still the way back.
+#[test]
+fn the_quit_hook_keeps_the_tray_so_a_cancelled_shutdown_can_bring_the_b_back() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut shell = Shell::fixture_on(engine.clone(), platform.clone());
+    shell.attach_tray(no_events());
+    let mut rt = runtime(state::init_with(shell));
+    rt.update(on_quit);
+    assert!(
+        rt.state.shell.tray.is_some(),
+        "the tray is not dropped in the query phase"
+    );
+    assert_eq!(*platform.removed_for_quit.lock().unwrap(), 1);
+    assert_eq!(engine.calls(), vec![FixtureCall::StopForQuit]);
+    // Another app refused the shutdown.
+    rt.update(|s, tx| on_tray(s, TrayEvent::ShutdownCancelled, tx));
+    assert_eq!(
+        engine.calls(),
+        vec![FixtureCall::StopForQuit, FixtureCall::ResumeAfterCancelledQuit]
+    );
+    assert!(rt.state.shell.has_tray() && !rt.state.shell.close_quits());
+    // A second cancel (nothing was stopped) resumes nothing.
+    rt.update(|s, tx| on_tray(s, TrayEvent::ShutdownCancelled, tx));
+    assert_eq!(engine.calls().len(), 2);
+}
+
+/// P2-6 at the shell: the engine reports another account between two refreshes, with no
+/// sign-out in between.
+#[test]
+fn another_account_between_two_refreshes_clears_the_window() {
+    let (engine, _, mut rt) = fixture();
+    go(&mut rt, Section::Photos);
+    press(&mut rt, Key::Command(','), ctrl());
+    engine.set_account("user-b");
+    rt.update(|s, _| assert!(s.shell.refresh(), "the screen changed"));
+    assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Files))
+    );
+    assert!(!rt.state.shell.app.can_go_back());
+    rt.update(|s, _| assert!(!s.shell.refresh(), "and stays put for the same account"));
+}
+
+/// P2-4. What the control channel may ask: show, a link (navigation only), quit.
+#[test]
+fn a_control_request_shows_navigates_or_quits_and_nothing_else() {
+    let (engine, _, mut rt) = fixture();
+    rt.update(|s, tx| on_control(s, Request::Show, tx));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Files))
+    );
+    rt.update(|s, tx| on_control(s, Request::Open("beebeeb://open/photos".into()), tx));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Photos))
+    );
+    // A link that is not on the list (it cannot come out of `Request::decode`, and is still
+    // checked again here) changes nothing.
+    rt.update(|s, tx| on_control(s, Request::Open("beebeeb://quit".into()), tx));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Photos))
+    );
+    assert!(engine.calls().is_empty(), "no request reaches the engine by itself");
+    // quit-for-update is the normal quit: the hook is what stops the engine.
+    rt.update(|s, tx| on_control(s, Request::QuitForUpdate, tx));
+    rt.update(on_quit);
+    assert_eq!(engine.calls(), vec![FixtureCall::StopForQuit]);
+}
+
+/// The first-run window: signed out and the first-run gate belong to it; the one window takes
+/// its size when the kind changes, and its place is never saved as the main window's.
+#[test]
+fn the_window_becomes_the_first_run_window_and_back() {
+    let (engine, _, mut rt) = fixture();
+    assert_eq!(rt.state.shell.window_kind(), surfaces::WindowKind::Main);
+    engine.set_gate(GateState::FirstRun);
+    rt.update(|s, _| assert!(s.shell.refresh()));
+    settle(&mut rt);
+    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::FirstRun);
+    assert_eq!(rt.state.shell.window_kind(), surfaces::WindowKind::FirstRun);
+    assert!(texts(&rt).contains(&"First run".to_owned()), "the honest placeholder");
+    assert!(
+        rt.find("file-list").is_none(),
+        "nothing of the account is drawn behind the gate"
+    );
+    engine.set_gate(GateState::SignedOut);
+    rt.update(|s, _| assert!(s.shell.refresh()));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.window_kind(), surfaces::WindowKind::FirstRun);
+    engine.set_gate(GateState::Ready);
+    rt.update(|s, _| assert!(s.shell.refresh()));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.window_kind(), surfaces::WindowKind::Main);
+    // A shell that starts signed out starts as the first-run window.
+    let shell = Shell::fixture_on(Arc::new(FixtureEngine::signed_out()), Arc::new(FakePlatform::default()));
+    assert_eq!(shell.window_kind(), surfaces::WindowKind::FirstRun);
+}
+
+/// P2-9. Starting sync goes through the action that refuses while the old app holds the lock.
+#[test]
+fn the_shell_does_not_start_sync_over_another_agents_lock() {
+    let engine = Arc::new(FixtureEngine::ready());
+    engine.set_profile_holder(Some(crate::shell::instance::ProfileHolder {
+        agent: "desktop".into(),
+        pid: 4242,
+    }));
+    let shell = Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default()));
+    shell.start_sync();
+    assert!(engine.calls().is_empty());
+    engine.set_profile_holder(None);
+    shell.start_sync();
+    assert_eq!(engine.calls(), vec![FixtureCall::StartSync]);
 }
 
 #[test]
