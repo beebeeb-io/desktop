@@ -365,7 +365,7 @@ pub(crate) async fn download_record_install(
         (Err(error), None) => Err(error),
         (Err(error), Some(quiet)) => {
             let stopped = quiet.stopped_an_engine;
-            quiet.resume();
+            drop(quiet);
             tracing::error!(%error, stopped, "the native installer did not take over after the pre-flight");
             Err(if stopped {
                 format!(

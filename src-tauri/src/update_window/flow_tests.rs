@@ -333,5 +333,4 @@ fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
         at("update.install(bytes)"),
     ];
     assert!(order.is_sorted(), "{order:?}");
-    assert!(body.contains("quiet.resume()"), "a failed install gives the pause back");
 }

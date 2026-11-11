@@ -60,23 +60,22 @@ fn only_an_upload_that_has_not_failed_counts_as_in_flight() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_upload_in_flight_puts_the_update_off_and_leaves_the_pause_as_it_was() {
+async fn an_upload_in_flight_puts_the_update_off_and_never_touches_the_pause() {
     let acct = AccountRuntime::new(AccountId::new_v4());
     let board = TransferBoard::new();
     let upload = board.begin("u1", Direction::Up, 10);
-    for was_paused in [false, true] {
-        acct.sync_paused.store(was_paused, Ordering::SeqCst);
+    for paused in [false, true] {
+        acct.sync_paused.store(paused, Ordering::SeqCst);
         let refused = quiet_engine(&acct, Some(&board), Duration::from_secs(5))
             .await
             .err()
             .expect("an upload is in flight");
         assert!(refused.starts_with("update_sync_not_quiet: "), "{refused}");
         assert!(refused.contains("still uploading 1 file"), "{refused}");
-        assert_eq!(acct.sync_paused.load(Ordering::SeqCst), was_paused);
+        assert_eq!(acct.sync_paused.load(Ordering::SeqCst), paused);
         assert!(acct.engine.try_lock().is_ok(), "the engine slot is free again");
     }
-    // The upload finishes while the pre-flight waits: it goes on, and holds the slot with new work held back.
-    acct.sync_paused.store(false, Ordering::SeqCst);
+    // The upload finishes while the pre-flight waits: it goes on, and holds the engine slot.
     let finish = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         drop(upload);
@@ -88,12 +87,11 @@ async fn an_upload_in_flight_puts_the_update_off_and_leaves_the_pause_as_it_was(
     assert!(!quiet.stopped_an_engine, "no engine was running");
     assert!(
         acct.sync_paused.load(Ordering::SeqCst),
-        "new work is held back until the installer takes over"
+        "the pause is the person's, before and after"
     );
     assert!(acct.engine.try_lock().is_err(), "nothing starts an engine meanwhile");
-    // The install did not happen: the pause goes back, the slot is free.
-    quiet.resume();
-    assert!(!acct.sync_paused.load(Ordering::SeqCst));
+    // The install did not happen: the slot is free again.
+    drop(quiet);
     assert!(acct.engine.try_lock().is_ok());
     // No board at all (no popover runtime): nothing to wait for.
     assert!(quiet_engine(&acct, None, Duration::from_secs(5)).await.is_ok());
