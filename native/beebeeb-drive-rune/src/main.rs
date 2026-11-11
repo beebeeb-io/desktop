@@ -17,6 +17,8 @@
 //! cargo run -p beebeeb-drive-rune -- --snap DW-0401.png --size 1280x800 --scale 2 --theme light
 //! ```
 
+#[cfg(feature = "feedback")]
+mod feedback;
 mod source;
 mod theme;
 mod ui;
@@ -47,6 +49,8 @@ pub struct State {
     search: TextEdit,
     sidebar_section: SidebarSection,
     show_detail_pane: bool,
+    #[cfg(feature = "feedback")]
+    feedback: feedback::Feedback,
 }
 
 fn init() -> State {
@@ -61,6 +65,8 @@ fn init() -> State {
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,
+        #[cfg(feature = "feedback")]
+        feedback: feedback::Feedback::new(),
     }
 }
 
@@ -223,7 +229,12 @@ fn main() {
         ..AppSpec::new("Beebeeb Drive", (1280.0, 800.0), init, view)
     };
 
-    App::new(spec).titlebar(Titlebar::new(TITLEBAR_H)).run();
+    #[cfg(feature = "feedback")]
+    let spec = feedback::hook_spec(spec);
+    let app = App::new(spec).titlebar(Titlebar::new(TITLEBAR_H));
+    #[cfg(feature = "feedback")]
+    let app = feedback::install(app);
+    app.run();
 }
 
 /// Export Rune element geometry as JSON for the geometry check.
