@@ -200,8 +200,9 @@ pub fn heading(title: &str, sub: Option<&str>, trailing: Option<El>, t: &Theme) 
             .key("set-h-line")
             .w_full()
             .center_y()
+            .justify_between()
             .gap(12.0)
-            .child(title_el.grow(1.0))
+            .child(title_el)
             .child(trailing),
         None => title_el.w_full(),
     };
@@ -259,31 +260,59 @@ pub fn ring(key: &str, d: f32, width: f32, fraction: f32, color: Color, t: &Them
             })
             .collect()
     };
-    let full = fraction >= 1.0;
     let mut shape = Shape::new()
         .view_box(d, d)
         .stroke_with(arc(0.0, 1.0), true, width, LineCap::Butt, t.separator);
-    shape = shape.stroke_with(
-        arc(0.0, fraction.clamp(0.0005, 1.0)),
-        full,
-        width,
-        LineCap::Round,
-        color,
-    );
+    if fraction >= 1.0 {
+        shape = shape.stroke_with(arc(0.0, 1.0), true, width, LineCap::Butt, color);
+    } else {
+        // Part of the circle, with round ends: filled as its own outline. (Rune's stroke of an
+        // OPEN line with round caps is anti-aliased differently from its closed strokes and
+        // its fills, and from the board's: see the PR's Rune notes.)
+        let fraction = fraction.max(0.0005);
+        let half = width / 2.0;
+        let at = |turn: f32, radius: f32| -> [f32; 2] {
+            let a = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            [c + radius * a.cos(), c + radius * a.sin()]
+        };
+        let steps = (fraction * 192.0).ceil().max(1.0) as usize;
+        let mut outline: Vec<[f32; 2]> = Vec::with_capacity(2 * steps + 40);
+        outline.extend((0..=steps).map(|i| at(fraction * i as f32 / steps as f32, r + half)));
+        // The cap at the far end: half a turn around the end of the centre line, outer to inner.
+        let cap = |turn: f32, outward_first: bool| -> Vec<[f32; 2]> {
+            let centre = at(turn, r);
+            let base = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            (1..16)
+                .map(|i| {
+                    let sweep = std::f32::consts::PI * i as f32 / 16.0;
+                    let a = if outward_first {
+                        base + sweep
+                    } else {
+                        base + std::f32::consts::PI + sweep
+                    };
+                    [centre[0] + half * a.cos(), centre[1] + half * a.sin()]
+                })
+                .collect()
+        };
+        outline.extend(cap(fraction, true));
+        outline.extend(
+            (0..=steps)
+                .rev()
+                .map(|i| at(fraction * i as f32 / steps as f32, r - half)),
+        );
+        outline.extend(cap(0.0, false));
+        shape = shape.fill(outline, color);
+    }
     canvas(shape).key(key.to_string()).a11y_hidden().size(d, d)
 }
 
 /// What a row starts with.
 #[derive(Clone, Debug)]
 pub enum Lead {
-    None,
     /// An 18 pt glyph in a 30 pt column (`.kit-item-icon`).
     Icon(&'static Icon),
     /// A person's initials, 32 pt across (`.kit-avatar`); `hue` is the tint's hue.
-    Avatar {
-        initials: String,
-        hue: f32,
-    },
+    Avatar { initials: String, hue: f32 },
     /// A 28 pt toned tile (`.kit-tile`).
     Tile(&'static Icon, Tone),
 }
@@ -407,7 +436,6 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
         );
     }
     r = match &it.lead {
-        Lead::None => r,
         Lead::Icon(icon) => r.child(el().key(format!("{key}-icon-box")).w(30.0).center().child(kit::glyph(
             format!("{key}-icon"),
             icon,
@@ -461,6 +489,7 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Look {
     /// The one primary action of a view: Amber.
+    #[allow(dead_code)] // Save, Send code, Change password: the pages FRAMES.md lists as not built
     Primary,
     /// Any other action: paper with a drawn border.
     Plain,
@@ -493,7 +522,8 @@ pub fn button(
         Look::Primary => (t.accent, t.accent_text_on),
         Look::Plain => (t.paper, t.text),
         Look::Quiet => (Color::TRANSPARENT, t.text_secondary),
-        Look::Danger => (t.red, t.white),
+        // `--color-red-fill`, the same in both themes.
+        Look::Danger => (rune::oklch(0.55, 0.2, 25.0), t.white),
     };
     let (h, style) = match size {
         Size::Small => (22.0, type_::BUTTON_SM.lh(17.1429)),

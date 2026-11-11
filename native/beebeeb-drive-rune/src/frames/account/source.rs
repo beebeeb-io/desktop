@@ -380,6 +380,7 @@ impl BoardAccount {
     }
 
     /// Uses up a confirmation: `true` once, for the purpose it was granted for.
+    #[cfg_attr(not(test), allow(dead_code))] // the guarded actions (password, two-factor, delete) are not built yet
     pub fn redeem(&mut self, confirmation: StepUp, purpose: Purpose) -> bool {
         let wanted = (confirmation.handle(), purpose);
         match self.granted.iter().position(|g| *g == wanted) {
