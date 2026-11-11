@@ -38,6 +38,7 @@ pub mod engine_status;
 pub mod finder_setup;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod found_while_paused;
+pub mod free_up_space;
 pub mod held_queue;
 pub mod hexfmt;
 pub mod host;
@@ -91,7 +92,10 @@ pub mod watcher;
 pub mod windows_cf;
 pub mod write_token;
 
-pub use local_state::purge_macos_hydrate_cache;
+pub use free_up_space::free_up_space_blocking;
+#[cfg(target_os = "windows")]
+pub use free_up_space::free_up_space_windows;
+pub use local_state::{is_disposable_cache_path, purge_macos_hydrate_cache};
 pub use path_safety::{is_contained, reject_unsafe_rel_path};
 // LD-0105 D2 (W3): the one player allowlist. It lives under `windows_cf/` but is pure and compiled everywhere.
 pub mod finder_show;

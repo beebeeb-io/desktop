@@ -259,7 +259,7 @@ mod finder_setup_commands;
 use finder_setup_commands::*;
 mod file_open_commands;
 use file_open_commands::*;
-pub(crate) use file_open_commands::{FreeUpSpaceResult, free_up_space_blocking, is_contained, reject_unsafe_rel_path};
+pub(crate) use file_open_commands::{is_contained, reject_unsafe_rel_path};
 mod passkey_commands; // v2 b15
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
