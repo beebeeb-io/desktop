@@ -28,6 +28,82 @@ pub enum Body {
     TooLarge { size: u64, free: u64 },
     /// DW-1518: decrypting failed. The copy in Beebeeb is untouched.
     Failed,
+    /// DW-1512, DW-1527: text or code, decrypted in memory.
+    Text(TextDoc),
+}
+
+/// Which of the theme's inks a run of text is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    /// Keywords, names, bold words.
+    Strong,
+    Plain,
+    /// Comments, Markdown marks.
+    Faint,
+    /// Strings.
+    Green,
+    /// Numbers.
+    Red,
+}
+
+/// A run of one line in one ink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub text: String,
+    pub ink: Ink,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+/// A text file as the viewer draws it: the lines it holds, coloured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextDoc {
+    pub lines: Vec<Vec<Run>>,
+    /// The file is over the editor's limit (2 MB): read-only, the first lines only (DW-1527).
+    pub truncated: Option<Truncated>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Truncated {
+    /// Lines held (500).
+    pub shown: u32,
+    /// Lines in the file.
+    pub total: u32,
+}
+
+impl TextDoc {
+    /// The text as it is in the file: what Copy puts on the clipboard.
+    pub fn plain(&self) -> String {
+        let mut out = String::new();
+        for line in &self.lines {
+            for run in line {
+                out.push_str(&run.text);
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// A text with no colours: every line one plain run (what a file without a tokenizer shows).
+#[cfg_attr(not(test), allow(dead_code))] // the engine's source uses it
+pub fn plain_lines(text: &str) -> Vec<Vec<Run>> {
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![Run {
+                    text: line.to_string(),
+                    ink: Ink::Plain,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                }]
+            }
+        })
+        .collect()
 }
 
 /// Why a file could not be opened at all.
@@ -42,6 +118,7 @@ pub trait ViewerSource {
     /// followed by [`ViewerSource::poll`].
     fn open(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
     /// Progress of the open file since the last call, if anything changed.
+    #[cfg_attr(not(test), allow(dead_code))] // called by `viewers::poll`, which waits for the shell
     fn poll(&mut self, file_id: &str) -> Option<Body>;
     /// Stop decrypting. Nothing is kept half-decrypted.
     fn cancel(&mut self, file_id: &str);
@@ -60,6 +137,10 @@ pub mod board {
     pub const TOO_LARGE: &str = "studio-walkthrough-4k.mov";
     /// DW-1518.
     pub const FAILED: &str = "invoice-0139.pdf";
+    /// DW-1512.
+    pub const CODE: &str = "export_invoices.py";
+    /// DW-1527.
+    pub const LOG: &str = "server.log";
 }
 
 /// The board's samples. `calls` records what the viewer asked, for tests.
@@ -105,6 +186,27 @@ impl FixtureViewerSource {
                 "Invoice 0139.pdf",
                 "PDF \u{00B7} 220 KB",
                 Body::Failed,
+            ),
+            board::CODE => f(
+                &["Files", "Documents"],
+                "export_invoices.py",
+                "Python \u{00B7} 25 lines \u{00B7} UTF-8",
+                Body::Text(TextDoc {
+                    lines: super::fixture_text::python(),
+                    truncated: None,
+                }),
+            ),
+            board::LOG => f(
+                &["Files", "Documents"],
+                "server.log",
+                "Log \u{00B7} 6.4 MB \u{00B7} read-only",
+                Body::Text(TextDoc {
+                    lines: super::fixture_text::log(),
+                    truncated: Some(Truncated {
+                        shown: 500,
+                        total: 41_206,
+                    }),
+                }),
             ),
             _ => return None,
         })
@@ -164,6 +266,19 @@ pub fn progress_words(done: u64, total: u64) -> String {
         (done / unit).to_string()
     };
     format!("{part} of {whole}")
+}
+
+/// "41,206": a count with thousands separators.
+pub fn count_words(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The whole percent done, as the bar draws it.

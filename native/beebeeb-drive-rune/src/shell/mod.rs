@@ -129,6 +129,8 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1516", |s| crate::frames::viewers::set_scene(s, "DW-1516")),
     ("DW-1517", |s| crate::frames::viewers::set_scene(s, "DW-1517")),
     ("DW-1518", |s| crate::frames::viewers::set_scene(s, "DW-1518")),
+    ("DW-1512", |s| crate::frames::viewers::set_scene(s, "DW-1512")),
+    ("DW-1527", |s| crate::frames::viewers::set_scene(s, "DW-1527")),
 ];
 
 fn scene(s: &mut State, event: Event) {

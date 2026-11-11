@@ -14,10 +14,12 @@
 //! opens a file with [`open`].
 
 mod chrome;
+mod fixture_text;
 pub mod icons;
 pub mod source;
 mod states;
 mod style;
+mod text;
 
 #[cfg(test)]
 mod tests;
@@ -42,6 +44,10 @@ pub enum Intent {
     ReportProblem,
     /// DW-1520: New's menu.
     NewMenu,
+    /// DW-1523: the editor on this file.
+    Edit,
+    /// The system's "Open with" for this file, decrypted for the app the person picks.
+    OpenInAnotherApp,
 }
 
 pub struct Ui {
@@ -49,6 +55,8 @@ pub struct Ui {
     pub file: OpenFile,
     /// The details panel (Alt+Shift+P).
     pub show_details: bool,
+    /// Long lines wrap (DW-1512's Wrap / No wrap).
+    pub wrap: bool,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -62,6 +70,7 @@ impl Ui {
             source,
             file,
             show_details: false,
+            wrap: false,
             focus: None,
             intents: Vec::new(),
         })
@@ -99,7 +108,16 @@ impl Ui {
         }
     }
 
+    /// Edit (Ctrl+E): the editor, DW-1523 (the shell opens it). A file over the editor's limit
+    /// stays read-only (DW-1527), so there it does nothing.
+    pub fn edit(&mut self) {
+        if matches!(&self.file.body, Body::Text(doc) if doc.truncated.is_none()) {
+            self.intent(Intent::Edit);
+        }
+    }
+
     /// The engine's progress since the last call. `true`: the view must run again.
+    #[cfg_attr(not(test), allow(dead_code))] // called by `poll`, which waits for the shell
     pub fn pump(&mut self) -> bool {
         match self.source.poll(&self.file.id) {
             Some(body) => {
@@ -172,9 +190,16 @@ fn close_stale(s: &mut State) {
     }
 }
 
+/// Copy: the open text file's text goes on the clipboard, at the person's own press.
+pub fn copy_text(s: &mut State, tx: &mut Tx) {
+    if let Some(Body::Text(doc)) = s.viewer.as_ref().map(|ui| &ui.file.body) {
+        tx.copy(doc.plain());
+    }
+}
+
 /// The engine's answers that arrive between presses, and the route leaving the file. `true`:
 /// the view must run again. For `shell::host::poll`.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
+#[allow(dead_code)] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let had = s.viewer.is_some();
     sync(s);
@@ -198,11 +223,23 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 
 fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
+    if let Body::Text(doc) = &ui.file.body {
+        return chrome::window(
+            s,
+            cx,
+            ui,
+            text::tools(doc, ui.wrap, &t),
+            text::banner(doc, &t),
+            text::body(doc, &t),
+            &text::status(doc),
+            &t,
+        );
+    }
     let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     };
-    chrome::window(s, cx, ui, Vec::new(), body, &status, &t)
+    chrome::window(s, cx, ui, Vec::new(), None, body, &status, &t)
 }
 
 /// The viewer's keys. The shell's own ran first (`host::on_key`): Esc and Alt+Left already
@@ -214,6 +251,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         // Alt+Shift+P: the details panel.
         Key::Text(key) if key.eq_ignore_ascii_case("p") && ev.mods.alt && ev.mods.shift && !ev.mods.cmd => {
             ui.toggle_details();
+            true
+        }
+        // Ctrl+E: edit.
+        Key::Command('e') if !ev.mods.alt && !ev.mods.shift => {
+            ui.edit();
             true
         }
         _ => false,
@@ -234,6 +276,8 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1516" => board::DECRYPTING,
         "DW-1517" => board::TOO_LARGE,
         "DW-1518" => board::FAILED,
+        "DW-1512" => board::CODE,
+        "DW-1527" => board::LOG,
         _ => return None,
     })
 }

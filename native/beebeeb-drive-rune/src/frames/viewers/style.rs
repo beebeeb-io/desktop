@@ -21,6 +21,26 @@ pub const BUTTON_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).trackin
 /// `.kit-btn-md` label: 13px/500.
 pub const BUTTON_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
 
+/// The text of a file: JetBrains Mono 12.5px on 21px.
+pub const CODE: TextStyle = TextStyle::new(12.5, 400.0)
+    .family(Family::Mono)
+    .lh(21.0)
+    .features("'calt' 1, 'liga' 1");
+/// A keyword: 650.
+pub const CODE_BOLD: TextStyle = TextStyle::new(12.5, 650.0)
+    .family(Family::Mono)
+    .lh(21.0)
+    .features("'calt' 1, 'liga' 1");
+/// `.kit-seg-sm [role=tab]`: 12px/550.
+pub const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(17.0);
+/// A shortcut after a button's word: mono 10px/500.
+pub const BUTTON_HINT: TextStyle = TextStyle::new(10.0, 500.0)
+    .family(Family::Mono)
+    .lh(14.2857)
+    .tracking(-0.06);
+/// `.mk-banner .tx`: 12.5px on 17px.
+pub const BANNER: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+
 fn pick(t: &Theme, light: &str, dark: &str) -> Color {
     rune::color::hex(if t.dark { dark } else { light }).unwrap_or(Color::BLACK)
 }
@@ -62,4 +82,26 @@ pub fn bar_track(t: &Theme) -> Color {
         a: 23.0 / 255.0,
         ..pick(t, "#16160B", "#E9E9DE")
     }
+}
+
+/// `.mk-banner`'s wash.
+pub fn banner(t: &Theme) -> Color {
+    Color {
+        a: 15.0 / 255.0,
+        ..pick(t, "#111111", "#EEDDDD")
+    }
+}
+
+/// The line the caret is on, in the editor.
+pub fn current_line(t: &Theme) -> Color {
+    Color {
+        a: 15.0 / 255.0,
+        ..pick(t, "#111111", "#EEDDDD")
+    }
+}
+
+/// A keyed text exactly as wide as its glyphs. Rune rounds a text's width up to half a point;
+/// in a row of several texts the board's fractions add up, so the texts say their own width.
+pub fn fitted(key: impl Into<String>, words: &str, text_style: TextStyle, color: Color) -> rune::El {
+    crate::ui::kit::label(key, words, text_style, color).w(rune::text::advance(words, text_style))
 }

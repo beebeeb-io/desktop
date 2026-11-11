@@ -5,15 +5,16 @@ Markdown editing" (8): 22 frames, plus the Windows entry state of "Office: Docs,
 2026-11-11: office documents are not edited in the app in 0.9.0; a link that opens the web app).
 
 Built = drawn from `viewers::Ui`, reachable by its controls, a scene, gated in light and dark.
+5 of 23 are built (lane f-viewers, 2026-11-11); the other 18 are open and each line below is the checklist.
 The gate state per frame is in the PR body.
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-1516 | A large file: "Decrypting on this PC", the size done, a bar, Cancel | not built |
-| DW-1517 | Too large to preview with the space this PC has: the numbers, Free up space…, Download to… | not built |
-| DW-1518 | Decrypting failed: nothing changed; Try again, Report a problem | not built |
-| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | not built |
-| DW-1527 | A text file over 2 MB: read-only, the first 500 lines, Open in another app… | not built |
+| DW-1516 | A large file: "Decrypting on this PC", the size done, a bar, Cancel | built |
+| DW-1517 | Too large to preview with the space this PC has: the numbers, Free up space…, Download to… | built |
+| DW-1518 | Decrypting failed: nothing changed; Try again, Report a problem | built |
+| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | built; gate not green (4 pixel checks light, 2 dark: see the PR body) |
+| DW-1527 | A text file over 2 MB: read-only, the first 500 lines, Open in another app… | built |
 | DW-1513 | Markdown rendered, Rendered / Source, Edit Ctrl+E, the details panel | not built |
 | DW-1519 | A newer version arrived while reading: a banner with Show it | not built |
 | DW-1523 | The editor: mono, line numbers, Markdown marks dimmed, the caret, Save Ctrl+S | not built |

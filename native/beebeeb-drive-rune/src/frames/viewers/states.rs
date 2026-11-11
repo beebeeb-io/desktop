@@ -77,6 +77,7 @@ pub fn status(body: &Body) -> Option<Status> {
             text: "Not decrypted: nothing changed".into(),
             details: "The copy in Beebeeb is unchanged".into(),
         },
+        Body::Text(_) => return None,
     })
 }
 
@@ -120,14 +121,8 @@ fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
                         .fill(t.text_secondary),
                 ),
         )
-        .child(
-            button("state-btn-0", "Cancel", ButtonKind::Ghost, true, t).on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.cancel();
-                }
-                super::close(s);
-            }),
-        );
+        // Closing cancels: nothing is kept half-decrypted.
+        .child(button("state-btn-0", "Cancel", ButtonKind::Ghost, true, t).on_press(super::close));
     stage(content, t)
 }
 
@@ -201,5 +196,6 @@ pub fn body(file: &OpenFile, t: &Theme) -> Option<El> {
         Body::Decrypting { done, total } => decrypting(file, *done, *total, t),
         Body::TooLarge { size, free } => too_large(file, *size, *free, t),
         Body::Failed => failed(t),
+        Body::Text(_) => return None,
     })
 }

@@ -35,25 +35,21 @@ const SEARCH_PLACEHOLDER: &str = "Search names";
 
 /// The path and the line under it (`.mk-title` with `.mk-crumbs`).
 fn title(file: &OpenFile, t: &Theme) -> El {
-    let mut crumbs = row().key("crumbs").center_y().gap(4.0);
+    let mut crumbs = row().key("crumbs").w_full().min_w(0.0).center_y().gap(4.0);
     for (i, folder) in file.path.iter().enumerate() {
         crumbs = crumbs
-            .child(kit::label(
+            .child(style::fitted(
                 format!("crumb-{i}"),
-                folder.clone(),
+                folder,
                 style::CRUMB,
                 t.text_tertiary,
             ))
-            .child(kit::glyph(
-                format!("crumb-sep-{i}"),
-                &icons::CHEVRON_RIGHT,
-                12.0,
-                t.text_tertiary,
-            ));
+            // When the toolbar is full the separators give way first, as the board's do.
+            .child(kit::glyph(format!("crumb-sep-{i}"), &icons::CHEVRON_RIGHT, 12.0, t.text_tertiary).shrink());
     }
-    crumbs = crumbs.child(kit::label(
+    crumbs = crumbs.child(style::fitted(
         "crumb-name",
-        file.name.clone(),
+        &file.name,
         style::CRUMB_NAME,
         t.text_tertiary,
     ));
@@ -62,7 +58,7 @@ fn title(file: &OpenFile, t: &Theme) -> El {
         .role("group")
         .label(format!("{}, {}", file.name, file.facts))
         .px(4.0)
-        .min_w(0.0)
+        .shrink()
         .child(crumbs)
         .child(kit::label("item-count", file.facts.clone(), type_::TITLE_SUB, t.text_tertiary).w_full())
 }
@@ -82,6 +78,8 @@ pub fn toolbar(s: &State, ui: &Ui, tools: Vec<El>, t: &Theme) -> El {
         );
 
     let more = tool_button("more-btn", "More actions", &icons::MORE, 17.0, ToolState::Idle, t);
+    // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
+    let file_tools = row().key("file-tools").center_y().gap(6.0).children(tools).child(more);
 
     // The folder's view switch does nothing for an open file: drawn, dimmed, not operable.
     let view_toggle = el()
@@ -152,7 +150,7 @@ pub fn toolbar(s: &State, ui: &Ui, tools: Vec<El>, t: &Theme) -> El {
             }
         })
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
+        .child(style::fitted("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
 
     kit::note_text(
@@ -204,8 +202,7 @@ pub fn toolbar(s: &State, ui: &Ui, tools: Vec<El>, t: &Theme) -> El {
         .child(nav)
         .child(title(&ui.file, t))
         .child(el().key("toolbar-spacer").grow(1.0))
-        .children(tools)
-        .child(more)
+        .child(file_tools)
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
@@ -272,15 +269,28 @@ pub fn status_bar(status: &Status, t: &Theme) -> El {
 }
 
 /// The window with an open file in its content area: `body` between the toolbar and the status line.
-pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, tools: Vec<El>, body: El, status: &Status, t: &Theme) -> El {
-    let main = col()
+pub fn window(
+    s: &State,
+    cx: &mut Cx<State>,
+    ui: &Ui,
+    tools: Vec<El>,
+    banner: Option<El>,
+    body: El,
+    status: &Status,
+    t: &Theme,
+) -> El {
+    let mut main = col()
         .key("content-area")
         .role("main")
         .grow(1.0)
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, tools, t))
+        .child(toolbar(s, ui, tools, t));
+    if let Some(banner) = banner {
+        main = main.child(banner);
+    }
+    let main = main
         .child(row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body))
         .child(status_bar(status, t));
 
