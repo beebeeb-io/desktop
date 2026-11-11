@@ -146,6 +146,8 @@ pub const FRAMES: &[Frame] = &[
         on_key: Some(files_frame::on_key),
         feedback: FeedbackPolicy::Allowed,
     },
+    crate::frames::this_pc::SYNC_HISTORY,
+    crate::frames::this_pc::AVAILABLE_OFFLINE,
     // Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
     Frame {
         group: FrameGroup::SignIn,

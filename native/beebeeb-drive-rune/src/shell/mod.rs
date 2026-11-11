@@ -126,6 +126,16 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
     ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
     ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
+    // Lane f-backups-history: Sync history and Available offline, by board frame id.
+    ("DW-1301", crate::frames::this_pc::scenes::dw_1301),
+    ("DW-1302", crate::frames::this_pc::scenes::dw_1302),
+    ("DW-1303", crate::frames::this_pc::scenes::dw_1303),
+    ("DW-0428", crate::frames::this_pc::scenes::dw_0428),
+    ("DW-1304", crate::frames::this_pc::scenes::dw_1304),
+    ("DW-1305", crate::frames::this_pc::scenes::dw_1305),
+    ("DW-0715", crate::frames::this_pc::scenes::dw_0715),
+    ("DW-1306", crate::frames::this_pc::scenes::dw_1306),
+    ("DW-0120", crate::frames::this_pc::scenes::dw_0120),
 ];
 
 fn scene(s: &mut State, event: Event) {

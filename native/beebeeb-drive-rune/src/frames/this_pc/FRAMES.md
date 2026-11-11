@@ -11,15 +11,15 @@ light and dark. The gate lines per frame are in the PR body.
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-1301 | Sync history: every change of the last 30 days, grouped by day, the problem row with Try again | not built |
-| DW-1302 | Sync history, filter This PC | not built |
-| DW-1303 | Sync history, filter Other devices | not built |
-| DW-0428 | Sync history, filter Problems: the Can't sync bar, Try again per item, Try all again | not built |
-| DW-1304 | Sync history, "contract" in Search history | not built |
-| DW-1305 | Sync history on a PC that just signed in: No changes yet | not built |
-| DW-0715 | Available offline: what stays on this PC, sizes, Remove all from this PC | not built |
-| DW-1306 | Available offline: the row menu (Open, Show in File Explorer, Remove from this PC) | not built |
-| DW-0120 | Available offline, nothing kept yet | not built |
+| DW-1301 | Sync history: every change of the last 30 days, grouped by day, the problem row with Try again | built; dark 0, light 1 pixel line open (`status-dot`) |
+| DW-1302 | Sync history, filter This PC | built; dark 0, light 1 pixel line open (`status-dot`) |
+| DW-1303 | Sync history, filter Other devices | built; dark 0, light 1 pixel line open (`status-dot`) |
+| DW-0428 | Sync history, filter Problems: the Can't sync bar, Try again per item, Try all again | built; dark 0, light 1 pixel line open (`status-dot`) |
+| DW-1304 | Sync history, "contract" in Search history | built; the caret is open (`search-caret` and the 3 boxes around it): a headless render has no focus |
+| DW-1305 | Sync history on a PC that just signed in: No changes yet | built, 0 |
+| DW-0715 | Available offline: what stays on this PC, sizes, Remove all from this PC | built, 0 |
+| DW-1306 | Available offline: the row menu (Open, Show in File Explorer, Remove from this PC) | built; `status-details` open: the board's status line here is Files' ("4 on this PC …"), DW-0715's is the section's |
+| DW-0120 | Available offline, nothing kept yet | built, 0 |
 
 ## Backups on Windows (a section of the settings view)
 
@@ -32,3 +32,12 @@ light and dark. The gate lines per frame are in the PR body.
 | DW-0739 | Another device's backup (Anna's iPad) | not built |
 | DW-0742 | Delete this backup? with the authenticator code | not built |
 | DW-0741 | Couldn't back up: three failures with Try again, one exclusion without | not built |
+
+Built: 9 of 16 (all of This PC). Not built: the 7 Backups frames (they are a section of the settings
+view; the settings shell, PR 292, was not on `v2-native` while this lane ran).
+
+States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
+a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"
+emits `Intent::AskRemoveAll` and removes only after `Ui::remove_all_confirmed` (the ask has no
+frame); the history's right-click menu (Show in File Explorer · Show in Beebeeb · Copy name) has
+no frame and is not built.
