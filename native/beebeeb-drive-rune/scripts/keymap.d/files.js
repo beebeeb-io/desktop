@@ -26,3 +26,26 @@ if (toast) {
     api.textNode('toast-action-text', q('b', span));
   } else api.text('toast-text', span);
 }
+
+// ---- The path in the toolbar's title (`.mk-crumbs`): Files > Lisbon trip ----
+const crumbs = q('.mk-title .mk-crumbs');
+if (crumbs) {
+  qa(':scope > i', crumbs).forEach((c, i) => api.text(`crumb-${i}`, c));
+  qa(':scope > svg', crumbs).forEach((c, i) => api.icon(`crumb-sep-${i}`, c));
+  api.text('crumb-here', q(':scope > span', crumbs));
+}
+
+// ---- An empty folder (`.kit-empty`) ----
+const empty = q('.mk-body .kit-empty');
+if (empty) {
+  api.box('empty', empty);
+  api.box('empty-tile', q('.kit-tile', empty));
+  api.icon('empty-icon', q('.kit-tile svg', empty));
+  api.text('empty-title', q('.t-title', empty));
+  api.text('empty-text', q('.t-sub', empty));
+  const add = q('button', empty);
+  api.box('empty-add', add);
+  api.icon('empty-add-icon', q('svg', add));
+  api.text('empty-add-label', q('span', add));
+  api.text('empty-hint', q('.t-cap', empty));
+}

@@ -7,12 +7,17 @@ use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
-use rune::{El, col, el, row, text_input};
+use rune::{El, TextStyle, col, el, row, text_input};
 
 use super::MenuKind;
 
 /// The search field's placeholder: one string for the field and for the gate's note.
 const SEARCH_PLACEHOLDER: &str = "Search names";
+
+/// `.mk-crumbs i`: a folder above this one.
+const CRUMB: TextStyle = TextStyle::new(11.0, 500.0).lh(13.0).tracking(-0.11);
+/// `.mk-crumbs > span`: the folder shown.
+const CRUMB_HERE: TextStyle = TextStyle::new(11.0, 650.0).lh(13.0).tracking(-0.11);
 
 pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     let item_count = s.listing.items.len();
@@ -34,29 +39,72 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
             )
             .shortcut_hint("Alt+Left")
             .on_press(|s: &mut State| {
-                s.go_back();
+                s.back();
             }),
         )
         .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
+            tool_button(
+                "forward",
+                "Forward",
+                &icons::CHEVRON_RIGHT,
+                16.0,
+                if s.can_go_forward() {
+                    ToolState::Idle
+                } else {
+                    ToolState::Off
+                },
+                t,
+            )
+            .shortcut_hint("Alt+Right")
+            .on_press(|s: &mut State| {
+                s.forward();
+            }),
         );
 
-    let title = col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .child(kit::label("folder-title", s.listing.folder.name.clone(), type_::TITLE, t.text).truncate())
-        .child(kit::label(
-            "item-count",
-            if item_count == 1 {
-                "1 item".to_string()
+    let count = match item_count {
+        0 => "No items".to_string(),
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
+    };
+    let mut title = col().key("folder-info").px(4.0).min_w(0.0);
+    title = if s.listing.path.len() > 1 {
+        // Inside a folder the title is the path (`.mk-crumbs`): each folder above is a way up.
+        let mut crumbs = row()
+            .key("crumbs")
+            .role("navigation")
+            .label("Path")
+            .center_y()
+            .gap(4.0)
+            .min_w(0.0);
+        let last = s.listing.path.len() - 1;
+        for (i, crumb) in s.listing.path.iter().enumerate() {
+            if i < last {
+                crumbs = crumbs
+                    .child(
+                        kit::label(format!("crumb-{i}"), crumb.name.clone(), CRUMB, t.text_tertiary)
+                            .role("link")
+                            .focusable(true)
+                            .on_press(move |s: &mut State| s.open_crumb(i)),
+                    )
+                    .child(kit::glyph(
+                        format!("crumb-sep-{i}"),
+                        &icons::CHEVRON_RIGHT,
+                        12.0,
+                        t.text_tertiary,
+                    ));
             } else {
-                format!("{item_count} items")
-            },
-            type_::TITLE_SUB,
-            t.text_tertiary,
-        ));
+                crumbs = crumbs.child(
+                    kit::label("crumb-here", crumb.name.clone(), CRUMB_HERE, t.text_tertiary)
+                        .truncate()
+                        .min_w(0.0),
+                );
+            }
+        }
+        title.child(crumbs)
+    } else {
+        title.child(kit::label("folder-title", s.listing.folder.name.clone(), type_::TITLE, t.text).truncate())
+    }
+    .child(kit::label("item-count", count, type_::TITLE_SUB, t.text_tertiary));
 
     let view_toggle = segmented(
         "view-toggle",

@@ -242,3 +242,112 @@ impl FilesSource for FilesFixture {
         self.calls.push(Call::Sort(sort));
     }
 }
+
+/// The board's folders: `BoardFixtureSource` holds the root (DW-0401); this honours the folder id.
+/// Lisbon trip holds the seven rows of DW-0420, "New folder" nothing (DW-1106); a folder the board
+/// never opens lists nothing rather than invented rows. An id that is no folder: `NotFound`.
+pub struct BoardDrive {
+    root: crate::source::BoardFixtureSource,
+}
+
+/// The folder DW-0417 makes and DW-1106 shows.
+pub const NEW_FOLDER_ID: &str = "f-new";
+
+impl BoardDrive {
+    pub fn new() -> Self {
+        BoardDrive {
+            root: crate::source::BoardFixtureSource::new(),
+        }
+    }
+}
+
+impl Default for BoardDrive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn lisbon_trip(parent: &str) -> Vec<DriveItem> {
+    let item = |id: &str, name: &str, modified: &str| DriveItem {
+        id: id.into(),
+        parent_id: Some(parent.into()),
+        name: name.into(),
+        is_folder: false,
+        size: None,
+        child_count: None,
+        modified_at: modified.into(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: Some("online_only".into()),
+        is_protected: false,
+    };
+    let folder = |id: &str, name: &str, modified: &str, count: i64| DriveItem {
+        is_folder: true,
+        child_count: Some(count),
+        ..item(id, name, modified)
+    };
+    let file = |id: &str, name: &str, modified: &str, size: i64, mime: &str| DriveItem {
+        size: Some(size),
+        mime: Some(mime.into()),
+        has_thumbnail: mime.starts_with("image/") || mime.starts_with("video/"),
+        ..item(id, name, modified)
+    };
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = |n: f64| (n * MB) as i64;
+    vec![
+        folder("f-day1", "Day 1", "2026-10-09T10:00:00Z", 48),
+        folder("f-day2", "Day 2", "2026-10-10T10:00:00Z", 61),
+        DriveItem {
+            pc_status: Some("on_this_pc".into()),
+            ..file(
+                "tickets",
+                "Tickets.pdf",
+                "2026-10-08T10:00:00Z",
+                220 * 1024,
+                "application/pdf",
+            )
+        },
+        file("alfama", "Alfama.heic", "2026-10-09T10:00:00Z", mb(3.4), "image/heic"),
+        file("belem", "Belem.heic", "2026-10-09T10:00:00Z", mb(4.1), "image/heic"),
+        file(
+            "tram28",
+            "Tram 28.mov",
+            "2026-10-10T10:00:00Z",
+            mb(82.0),
+            "video/quicktime",
+        ),
+        file("sunset", "Sunset.heic", "2026-10-10T10:00:00Z", mb(3.8), "image/heic"),
+    ]
+}
+
+impl crate::source::DriveSource for BoardDrive {
+    fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+        use crate::source::{Crumb, Listing, SourceError};
+        let root = self.root.list(None)?;
+        let Some(id) = folder_id else { return Ok(root) };
+        let name = if id == NEW_FOLDER_ID {
+            "New folder".to_string()
+        } else {
+            root.items
+                .iter()
+                .find(|i| i.id == id && i.is_folder)
+                .map(|i| i.name.clone())
+                .ok_or(SourceError::NotFound)?
+        };
+        let folder = Crumb {
+            id: Some(id.to_string()),
+            name,
+        };
+        Ok(Listing {
+            path: vec![root.folder.clone(), folder.clone()],
+            folder,
+            items: if id == "f-lisbon" { lisbon_trip(id) } else { Vec::new() },
+        })
+    }
+
+    fn storage(&self) -> Option<crate::source::StorageSummary> {
+        self.root.storage()
+    }
+}

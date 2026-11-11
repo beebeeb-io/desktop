@@ -88,6 +88,8 @@ pub enum Intent {
     Open(String),
     ShowInFileExplorer(String),
     CopyLink(String),
+    /// Upload these files from this PC into the folder with this id (`None`: the root).
+    Upload(Option<String>, Vec<std::path::PathBuf>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +124,8 @@ pub struct Actions {
     /// A board frame that draws only the lower part of the window (DW-0107, DW-0108): how many
     /// points of the window's top are out of the picture. 0 in the app.
     pub board_crop_top: f32,
+    /// The folders Back left, nearest last: where Forward goes. Opening a folder empties it.
+    pub forward: Vec<Option<String>>,
 }
 
 impl Default for Actions {
@@ -138,6 +142,7 @@ impl Default for Actions {
             intents: Vec::new(),
             window: (1278.0, 798.0),
             board_crop_top: 0.0,
+            forward: Vec::new(),
         }
     }
 }
@@ -279,20 +284,69 @@ impl State {
         tx.wake_after(stay);
     }
 
+    /// What every change of folder resets: the selection, what Undo holds, an open menu.
+    fn entered(&mut self) {
+        self.actions.selection.clear();
+        self.actions.anchor = None;
+        self.actions.undo.clear();
+        self.actions.menu = None;
+        self.selected = None;
+    }
+
+    /// Show the folder with this id (`None`: the root), leaving the one shown to Back.
+    pub fn open_folder(&mut self, id: Option<String>) {
+        self.files.back.push(self.listing.folder.id.clone());
+        self.actions.forward.clear();
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
+        self.entered();
+    }
+
+    /// Back, leaving the folder shown to Forward.
+    pub fn back(&mut self) -> bool {
+        let here = self.listing.folder.id.clone();
+        if !self.go_back() {
+            return false;
+        }
+        self.actions.forward.push(here);
+        self.entered();
+        true
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.actions.forward.is_empty()
+    }
+
+    /// Forward: the folder Back left.
+    pub fn forward(&mut self) -> bool {
+        let Some(id) = self.actions.forward.pop() else {
+            return false;
+        };
+        self.files.back.push(self.listing.folder.id.clone());
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
+        self.entered();
+        true
+    }
+
+    /// A click on a folder of the path: up to it. The folders passed stay behind for Back.
+    pub fn open_crumb(&mut self, index: usize) {
+        if let Some(crumb) = self.listing.path.get(index) {
+            let id = crumb.id.clone();
+            if id != self.listing.folder.id {
+                self.open_folder(id);
+            }
+        }
+    }
+
     /// Open: a folder opens in place; a file goes to its app.
     pub fn open_row(&mut self, row: usize) -> bool {
         let Some(item) = self.listing.items.get(row) else {
             return false;
         };
-        if item.is_folder {
-            self.selected = Some(row);
-            let opened = self.open_selected();
-            self.actions.selection.clear();
-            self.actions.anchor = None;
-            self.actions.undo.clear();
-            return opened;
-        }
         let id = item.id.clone();
+        if item.is_folder {
+            self.open_folder(Some(id));
+            return true;
+        }
         self.intent(Intent::Open(id));
         false
     }
@@ -576,5 +630,8 @@ pub const SCENES: &[(&str, fn(&mut State))] = &[
         s.clear_selection();
         s.actions.board_crop_top = 240.0;
         s.actions.toast = Some(Toast::Trashed);
+    }),
+    ("DW-1106", |s| {
+        s.open_folder(Some(source::NEW_FOLDER_ID.to_string()));
     }),
 ];

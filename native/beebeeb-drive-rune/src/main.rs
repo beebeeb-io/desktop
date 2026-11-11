@@ -109,7 +109,7 @@ fn init() -> State {
                 std::process::exit(2);
             }
         },
-        None => Box::new(BoardFixtureSource::new()),
+        None => Box::new(frames::files::source::BoardDrive::new()),
     };
     let (listing, list_error) = load(source.as_ref(), None);
     let storage = source.storage();

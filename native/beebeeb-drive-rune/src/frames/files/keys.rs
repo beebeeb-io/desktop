@@ -15,7 +15,7 @@
 //! | Ctrl+Shift+N, Ctrl+N, Ctrl+O | New folder, New file, Upload files |
 //! | Ctrl+1..5 | Files, Shared, Photos, Backups, Trash; Ctrl+6, Ctrl+7 Sync history, Available offline; Ctrl+, Settings |
 //! | Alt+Shift+P | the details panel |
-//! | Alt+Left, Backspace | back |
+//! | Alt+Left, Backspace; Alt+Right | back; forward |
 //! | Ctrl+F | Search names |
 //! | Escape | close the menu, else clear the selection |
 
@@ -171,8 +171,9 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.open_file_menu(menu_point(s));
             true
         }
-        Key::Left if m.alt => s.go_back(),
-        Key::Backspace => s.go_back(),
+        Key::Left if m.alt => s.back(),
+        Key::Right if m.alt => s.forward(),
+        Key::Backspace => s.back(),
         Key::Escape if !s.selected_rows().is_empty() => {
             s.clear_selection();
             true

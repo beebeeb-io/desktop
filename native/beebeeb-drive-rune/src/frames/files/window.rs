@@ -6,11 +6,14 @@ use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
-use crate::ui::{caption, file_list, menu, status_line, toast};
+use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
 use rune::{Cx, El, Tx, col, el, row};
 
 /// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
 pub fn pc_summary(s: &State) -> String {
+    if s.listing.items.is_empty() {
+        return "Nothing in this folder yet".to_string();
+    }
     let count = |status: &str| {
         s.listing
             .items
@@ -125,26 +128,71 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
     }
 }
 
+/// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
+fn empty_folder(t: &Theme) -> El {
+    let body = empty::empty_state(
+        "empty",
+        &icons::FILES,
+        "Nothing here yet",
+        "Add files or photos, and they're encrypted on this PC before they upload.",
+        t,
+    )
+    .child(
+        col()
+            .key("empty-actions")
+            .mt(8.0)
+            .gap(8.0)
+            .items_center()
+            .child(
+                button::outline_button("empty-add", "Add files", Some(&icons::PLUS), button::Size::Md, t)
+                    .expanded(false)
+                    .on_press(|s: &mut State| s.toggle_menu(MenuKind::New)),
+            )
+            .child(kit::label(
+                "empty-hint",
+                "or drop files here from File Explorer",
+                empty::CAP,
+                t.text_tertiary,
+            )),
+    );
+    el().key("empty-area")
+        .grow(1.0)
+        .h_full()
+        .center()
+        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], _tx: &mut Tx| {
+            let folder = s.listing.folder.id.clone();
+            s.intent(super::Intent::Upload(folder, files.to_vec()));
+        })
+        .child(body)
+}
+
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
 
-    let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full().child(
-        col()
-            .key("file-list-col")
-            .grow(1.0)
-            .min_w(0.0)
-            .h_full()
-            .child(file_list::column_headers(&t))
-            // A folder that could not be read says so. It never draws as an empty folder.
-            .child(match s.list_error {
-                Some(error) => file_list::list_error(error, &t),
-                None => list::rows(s, cx, &t),
-            }),
-    );
-    if s.show_detail_pane {
-        let selected = s.selected.and_then(|i| s.listing.items.get(i));
-        let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
-        body = body.child(details::details_pane(facts, &t));
+    let empty = s.list_error.is_none() && s.listing.items.is_empty();
+    let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
+    if empty {
+        // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
+        body = body.child(empty_folder(&t));
+    } else {
+        body = body.child(
+            col()
+                .key("file-list-col")
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .child(file_list::column_headers(&t))
+                // A folder that could not be read says so. It never draws as an empty folder.
+                .child(match s.list_error {
+                    Some(error) => file_list::list_error(error, &t),
+                    None => list::rows(s, cx, &t),
+                }),
+        );
+        if s.show_detail_pane {
+            let selected = s.selected.and_then(|i| s.listing.items.get(i));
+            let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
+            body = body.child(details::details_pane(facts, &t));
+        }
     }
 
     let mut main = col()

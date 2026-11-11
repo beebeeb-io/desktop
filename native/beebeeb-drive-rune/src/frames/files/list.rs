@@ -32,6 +32,11 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .py(4.0)
         .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        // Files dragged in from File Explorer upload into the folder shown (DW-0481).
+        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], _tx: &mut Tx| {
+            let folder = s.listing.folder.id.clone();
+            s.intent(super::Intent::Upload(folder, files.to_vec()));
+        })
         .child(
             col()
                 .key("file-list")
