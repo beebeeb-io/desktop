@@ -106,12 +106,63 @@ pub struct About {
     pub build: String,
     /// The encryption core's revision, as short as the board shows it.
     pub core: String,
-    /// What the last check found, in the row's words.
-    pub last_check: String,
+    /// Where the check for a newer version stands (the row's second line).
+    pub check: UpdateCheck,
     pub channel: Channel,
+    /// The chosen channel's newest version is older than the one running (DW-0789, Rules).
+    pub older: Option<OlderChannel>,
     pub notes: ReleaseNotes,
     /// The foot line under More: the company.
     pub company: String,
+}
+
+/// Where the check for a newer version stands (DW-0751, Rules: "while checking the row says
+/// Checking…; a check that fails says so with Try again").
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UpdateCheck {
+    /// The last check's answer, in the row's words.
+    Checked(String),
+    /// Asked, not answered yet.
+    Checking,
+    /// The last check did not get an answer.
+    Failed,
+}
+
+impl UpdateCheck {
+    /// The row's second line. The two fixed sentences are the 0.8 desktop app's
+    /// (`src/macSettingsModel.ts`, `updateRow`), which the board's rule cites.
+    pub fn says(&self) -> &str {
+        match self {
+            Self::Checked(words) => words,
+            Self::Checking => "Checking…",
+            Self::Failed => "Couldn’t check for updates. Try again in a moment.",
+        }
+    }
+}
+
+/// The chosen channel carries an older version than the one this PC runs (DW-0789, Rules).
+/// The row informs and links the notes; nothing is installed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OlderChannel {
+    /// The chosen channel and its newest version.
+    pub channel: Channel,
+    pub version: String,
+    /// What this PC runs, and the channel it came from.
+    pub runs: String,
+    pub from: Channel,
+}
+
+impl OlderChannel {
+    pub fn title(&self) -> String {
+        format!("The {} channel is at version {}", self.channel.label(), self.version)
+    }
+    pub fn says(&self) -> String {
+        format!(
+            "This PC runs {}, from the {} channel. Read the release notes before you go back to an older version.",
+            self.runs,
+            self.from.label()
+        )
+    }
 }
 
 /// One place new files can be stored (DW-0788): the account's default, or a country.
@@ -140,8 +191,10 @@ pub struct Locations {
 }
 
 impl Locations {
-    pub fn chosen(&self) -> &Location {
-        &self.choices[self.chosen.min(self.choices.len() - 1)]
+    /// The stored choice. `None`: the list is empty, which no pane may draw as a list
+    /// (an answer without choices is shown as a list that could not load).
+    pub fn chosen(&self) -> Option<&Location> {
+        self.choices.get(self.chosen).or_else(|| self.choices.last())
     }
 }
 
@@ -176,8 +229,21 @@ pub struct RecentAlert {
     pub time: String,
     /// Not seen yet: marked "New" until this page has been opened.
     pub new: bool,
-    /// The board frame the alert leads to.
-    pub leads_to: &'static str,
+    /// Where a press on the alert leads.
+    pub leads_to: AlertTarget,
+}
+
+/// Where a recent alert leads: a place in the app, never a board frame id (the panes map it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlertTarget {
+    /// Settings › Devices and sessions.
+    DevicesAndSessions,
+    /// Shared.
+    Shared,
+    /// Shared › Requests.
+    SharedRequests,
+    /// Settings › Security › the security log.
+    SecurityLog,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -189,6 +255,21 @@ pub enum AlertKind {
 }
 
 pub trait SettingsSource {
+    /// `true` only for a source whose values are sample content (`BoardSettings`): a build
+    /// that ships must never open settings on one.
+    fn sample(&self) -> bool {
+        false
+    }
+    /// `false`: nothing answers yet (`Unwired`), and settings draws no pane at all.
+    fn wired(&self) -> bool {
+        true
+    }
+    /// Engine: the Recent notifications page has been opened and left: nothing on it is new
+    /// any more, and the count on the Notifications row is 0.
+    fn mark_recent_seen(&mut self);
+    /// Engine: ask the updater whether a newer version exists, now. The check stands at
+    /// `UpdateCheck::Checking` until it answers.
+    fn check_for_updates(&mut self);
     /// Engine: the account's notifications, newest first, grouped by day ("Today",
     /// "Yesterday", "3 Nov"). Empty: nothing to show.
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)>;
@@ -245,8 +326,9 @@ impl BoardSettings {
                 version: "0.9.1".into(),
                 build: "311".into(),
                 core: "2084927".into(),
-                last_check: "0.9.1 is the newest version · checked today, 09:12".into(),
+                check: UpdateCheck::Checked("0.9.1 is the newest version · checked today, 09:12".into()),
                 channel: Channel::Stable,
+                older: None,
                 notes: ReleaseNotes {
                     version: "0.9.2".into(),
                     channel: Channel::Stable,
@@ -263,6 +345,26 @@ impl BoardSettings {
             notifications: board_notifications(),
             recent: board_recent(),
         }
+    }
+
+    /// DW-0751, Rules: the last check for a newer version failed.
+    #[cfg(test)]
+    pub fn with_check_failed(mut self) -> Self {
+        self.about.check = UpdateCheck::Failed;
+        self
+    }
+
+    /// DW-0789, Rules: this PC runs 0.9.1 from Beta, and Stable (chosen) is at 0.9.0.
+    #[cfg(test)]
+    pub fn with_older_channel(mut self) -> Self {
+        self.about.channel = Channel::Stable;
+        self.about.older = Some(OlderChannel {
+            channel: Channel::Stable,
+            version: "0.9.0".into(),
+            runs: "0.9.1".into(),
+            from: Channel::Beta,
+        });
+        self
     }
 
     /// DW-0781: version 0.9.2 can be downloaded.
@@ -390,7 +492,7 @@ fn board_recent() -> Vec<(String, Vec<RecentAlert>)> {
                     "From Germany. Not you? Sign it out in Devices and sessions.",
                     "08:12",
                     true,
-                    "DW-A55",
+                    AlertTarget::DevicesAndSessions,
                 ),
                 alert(
                     AlertKind::Share,
@@ -398,7 +500,7 @@ fn board_recent() -> Vec<(String, Vec<RecentAlert>)> {
                     "6 files, in Shared.",
                     "07:40",
                     true,
-                    "DW-0501",
+                    AlertTarget::Shared,
                 ),
             ],
         ),
@@ -410,7 +512,7 @@ fn board_recent() -> Vec<(String, Vec<RecentAlert>)> {
                 "Approve or decline it in Shared, Requests.",
                 "16:05",
                 false,
-                "DW-0503",
+                AlertTarget::SharedRequests,
             )],
         ),
         (
@@ -421,7 +523,7 @@ fn board_recent() -> Vec<(String, Vec<RecentAlert>)> {
                 "Sign-ins and security changes are recorded from now on.",
                 "10:31",
                 false,
-                "DW-A77",
+                AlertTarget::SecurityLog,
             )],
         ),
     ]
@@ -437,6 +539,20 @@ impl BoardSettings {
 }
 
 impl SettingsSource for BoardSettings {
+    fn sample(&self) -> bool {
+        true
+    }
+    fn mark_recent_seen(&mut self) {
+        for (_, alerts) in &mut self.recent {
+            for alert in alerts {
+                alert.new = false;
+            }
+        }
+        self.notifications.new_recent = 0;
+    }
+    fn check_for_updates(&mut self) {
+        self.about.check = UpdateCheck::Checking;
+    }
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
         self.recent.clone()
     }
@@ -483,8 +599,13 @@ impl SettingsSource for BoardSettings {
     fn general(&self) -> General {
         let mut g = self.general.clone();
         // General names a country only once the account has chosen one.
-        if let Some(l) = self.locations.as_ref().filter(|l| !l.chosen().default) {
-            g.storage_location = l.chosen().name.clone();
+        if let Some(place) = self
+            .locations
+            .as_ref()
+            .and_then(Locations::chosen)
+            .filter(|c| !c.default)
+        {
+            g.storage_location = place.name.clone();
         }
         g
     }
@@ -495,6 +616,85 @@ impl SettingsSource for BoardSettings {
         self.about.clone()
     }
     fn set_channel(&mut self, channel: Channel) {
-        self.about.channel = channel;
+        // DW-0789, Rules: another channel forgets the last check's answer and checks again.
+        if channel != self.about.channel {
+            self.about.channel = channel;
+            self.about.older = None;
+            self.about.check = UpdateCheck::Checking;
+        }
+    }
+}
+
+/// The source of a build that ships before the engine lane has wired settings: it answers
+/// nothing, and `frames::settings::view` draws the shell's "not built yet" frame instead of a
+/// pane. No value of it is ever shown.
+pub struct Unwired;
+
+impl SettingsSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn mark_recent_seen(&mut self) {}
+    fn check_for_updates(&mut self) {}
+    fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
+        Vec::new()
+    }
+    fn notifications(&self) -> Notifications {
+        Notifications {
+            allowed_in_windows: true,
+            allow: false,
+            new_recent: 0,
+            groups: Vec::new(),
+        }
+    }
+    fn set_allow_notifications(&mut self, _on: bool) {}
+    fn set_alert(&mut self, _group: usize, _index: usize, _on: bool) {}
+    fn locations(&self) -> Option<Locations> {
+        None
+    }
+    fn choose_location(&mut self, _index: usize) -> bool {
+        false
+    }
+    fn set_only_here(&mut self, _on: bool) {}
+    fn reload_locations(&mut self) {}
+    fn about(&self) -> About {
+        About {
+            product: String::new(),
+            tagline: String::new(),
+            version: String::new(),
+            build: String::new(),
+            core: String::new(),
+            check: UpdateCheck::Failed,
+            channel: Channel::Stable,
+            older: None,
+            notes: ReleaseNotes {
+                version: String::new(),
+                channel: Channel::Stable,
+                released: String::new(),
+                lines: Vec::new(),
+            },
+            company: String::new(),
+        }
+    }
+    fn set_channel(&mut self, _channel: Channel) {}
+    fn general(&self) -> General {
+        General {
+            theme: ThemeChoice::System,
+            storage_location: String::new(),
+            version: String::new(),
+            update: Update::Current,
+        }
+    }
+    fn set_theme(&mut self, _theme: ThemeChoice) {}
+}
+
+/// The source settings starts on. A development build (and every test and headless render)
+/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
+/// values are never shown as a person's own. The engine lane replaces this.
+pub fn first(dev_build: bool) -> Box<dyn SettingsSource> {
+    if dev_build {
+        Box::new(BoardSettings::new())
+    } else {
+        Box::new(Unwired)
     }
 }

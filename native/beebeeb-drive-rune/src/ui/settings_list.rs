@@ -8,13 +8,15 @@
 //! | Chevron (opens a pane) | `Trailing::Chevron` | `item-<L>-<I>-chev` |
 //! | Leaves the app (a web page) | `Trailing::External` | `item-<L>-<I>-ext` |
 //! | The chosen one of several | `Trailing::Check` | `item-<L>-<I>-check` |
-//! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret` |
+//! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret`, `-menu-at` |
 //! | Switch | `item_with(.., vec![switch("item-<L>-<I>", ..)], ..)` | `item-<L>-<I>-switch`, `-knob` |
 //!
 //! A row is 28 pt, 40 pt with a second line; the board rules a row off from the one
-//! above only where the two are siblings in its markup (`Item::ruled`). What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
+//! above only where the two are siblings in its markup (`Item::ruled`). What a row IS decides how it behaves: `Role::Link` and `Role::Radio` rows take
 //! the press, focus and hover; a `Role::Plain` row is text, and a control inside it (a
-//! switch, a pop-up button) is the thing that takes focus.
+//! switch, a button) is the thing that takes focus. A row with a pop-up button is ONE control,
+//! `Role::PopUp`: the row takes the press and the focus, and the pop-up button inside it is
+//! its picture (never a second Tab stop).
 
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
@@ -42,8 +44,9 @@ pub enum Role {
     Plain,
     /// Shows another pane or page.
     Link,
-    /// Does something here.
-    Button,
+    /// Opens a menu of choices (the row holds a `Trailing::Pop`): Space, Enter and the
+    /// arrows Up and Down open it.
+    PopUp,
     /// One of several choices; `true` for the chosen one.
     Radio(bool),
 }
@@ -56,10 +59,13 @@ pub enum Trailing {
     Chevron,
     External,
     Check,
-    /// A pop-up button showing the current choice; `open` while its menu shows.
+    /// A pop-up button showing the current choice; `open` while its menu shows. `menu_at`
+    /// is where the menu's top-left corner goes, from the row's own (the row marks the point
+    /// with an element keyed `item-<L>-<I>-menu-at`, for `El::anchored`).
     Pop {
         choice: String,
         open: bool,
+        menu_at: (f32, f32),
     },
 }
 
@@ -130,13 +136,12 @@ impl Item {
 }
 
 /// A pop-up button (`.mk-pop2`): the current choice and a caret, raised a little off the
-/// card. Keys: `<key>-pop`, `<key>-pop-label`, `<key>-pop-caret`.
-pub fn pop_button(key: &str, name: &str, choice: &str, open: bool, t: &Theme) -> El {
+/// card. It is the picture of its row's control: the ROW takes the press and the focus
+/// (`Role::PopUp`), so this has no role, no name and no Tab stop of its own.
+/// Keys: `<key>-pop`, `<key>-pop-label`, `<key>-pop-caret`.
+pub fn pop_button(key: &str, choice: &str, t: &Theme) -> El {
     row()
         .key(format!("{key}-pop"))
-        .role("button")
-        .label(format!("{name}: {choice}"))
-        .expanded(open)
         .h(24.0)
         .pl(9.0)
         .pr(6.0)
@@ -146,9 +151,6 @@ pub fn pop_button(key: &str, name: &str, choice: &str, open: bool, t: &Theme) ->
         .fill(t.card)
         .box_shadow(kit::drop(0.5, 1.5, t.shadow_raised.alpha(0.18)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
         .child(kit::label(format!("{key}-pop-label"), choice, POP, t.text))
         .child(kit::glyph(
             format!("{key}-pop-caret"),
@@ -217,13 +219,28 @@ pub fn item_with(list: usize, index: usize, it: &Item, extra: Vec<El>, t: &Theme
             .hover(t.hover)
             .press(t.press)
             .focusable(true),
-        Role::Button => r
-            .role("button")
-            .label(it.name())
-            .hover(t.hover)
-            .press(t.press)
-            .focusable(true),
+        Role::PopUp => {
+            let open = it
+                .trailing
+                .iter()
+                .any(|piece| matches!(piece, Trailing::Pop { open: true, .. }));
+            r.role("combobox")
+                .label(it.name())
+                .expanded(open)
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+        }
     };
+    for piece in &it.trailing {
+        if let Trailing::Pop { menu_at, .. } = piece {
+            r = r.child(
+                el().key(format!("{key}-menu-at"))
+                    .pin(Some(menu_at.0), Some(menu_at.1), None, None)
+                    .size(0.0, 0.0),
+            );
+        }
+    }
     if it.ruled {
         r = r.child(
             el().key(format!("{key}-rule"))
@@ -257,7 +274,7 @@ pub fn item_with(list: usize, index: usize, it: &Item, extra: Vec<El>, t: &Theme
             Trailing::Chevron => kit::glyph(format!("{key}-chev"), &ic::CHEV_RIGHT, 14.0, t.text_quaternary),
             Trailing::External => kit::glyph(format!("{key}-ext"), &ic::EXTERNAL, 14.0, t.text),
             Trailing::Check => kit::glyph(format!("{key}-check"), &ic::CHECK, 16.0, t.text),
-            Trailing::Pop { choice, open } => pop_button(&key, &it.title, choice, *open, t),
+            Trailing::Pop { choice, .. } => pop_button(&key, choice, t),
         });
     }
     for child in extra {

@@ -11,7 +11,7 @@
 //! | Sidebar heading | `nav_title(text, t)` | `side-title-<slug>` |
 //! | Sidebar | `sidebar(back, sections, foot, t)` | `sidebar`, `side-foot-box`, `side-foot` |
 //! | Pane | `pane(children, t)` | `set-main`, `set-col` |
-//! | Way back to the parent pane | `crumb(label, t)` | `crumb-row`, `crumb-icon`, `crumb` |
+//! | Way back to the parent pane | `crumb(label, t, back)` | `crumb-row`, `crumb-icon`, `crumb` |
 //! | Pane heading | `heading(title, sub, t)` | `set-title`, `set-sub` |
 //!
 //! Nothing here knows which panes exist or what a press does: a frame attaches `.on_press`.
@@ -140,7 +140,8 @@ pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) 
 }
 
 /// A pane (`.mk-set-main` > `.mk-set-col`): the ground, 22 pt above and 30 pt beside a
-/// 540 pt column whose children sit 14 pt apart.
+/// 540 pt column whose children sit 14 pt apart. A pane taller than the window scrolls
+/// (the board draws those frames taller than the window "so the whole section shows").
 pub fn pane(children: Vec<El>, t: &Theme) -> El {
     let mut column = col().key("set-col").w(COLUMN_W).gap(14.0);
     for child in children {
@@ -151,16 +152,19 @@ pub fn pane(children: Vec<El>, t: &Theme) -> El {
         .role("main")
         .grow(1.0)
         .min_w(0.0)
+        .min_h(0.0)
         .h_full()
         .fill(t.surface)
         .py(22.0)
         .px(30.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(column)
 }
 
 /// The way back to the pane this one opened from, above the heading ("‹ General").
-/// A link. Keys: `crumb-row`, `crumb-icon`, `crumb`.
-pub fn crumb(label: &str, t: &Theme) -> El {
+/// A link; `back` is what a press does (on the link itself: the element that takes the
+/// focus is the one that takes the press). Keys: `crumb-row`, `crumb-icon`, `crumb`.
+pub fn crumb<S: 'static>(label: &str, t: &Theme, back: impl Fn(&mut S) + 'static) -> El {
     row().key("crumb-line").child(
         row()
             .key("crumb-row")
@@ -172,6 +176,7 @@ pub fn crumb(label: &str, t: &Theme) -> El {
             .hover(t.hover)
             .press(t.press)
             .focusable(true)
+            .on_press(back)
             .child(kit::glyph(
                 "crumb-icon",
                 &crate::theme::icons_settings::BACK,

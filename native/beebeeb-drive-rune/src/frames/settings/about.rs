@@ -11,10 +11,12 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::{El, col};
 
+use super::source::UpdateCheck;
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 
-/// Where the Release channel menu drops, in the window's body (the board's place).
-const CHANNEL_MENU_AT: (f32, f32) = (702.0, 313.0);
+/// Where the Release channel menu drops, from its row's top-left corner (the board's place,
+/// DW-0789: the menu at 702, 345 over the row at 254, 344).
+const CHANNEL_MENU_AT: (f32, f32) = (448.0, 1.0);
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let a = ui.source.about();
@@ -59,43 +61,68 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    let updates = lists::list(
-        1,
-        Some("Updates"),
-        vec![
-            lists::item_with(
-                1,
-                0,
-                &Item::new(Some(&ic::DOWNLOAD_TRAY), "Check for updates").sub(a.last_check.clone()),
-                vec![
-                    controls::button(1, "Check now", None, Emphasis::Plain, t)
-                        .on_press(|s: &mut State| s.settings.ask(Intent::CheckForUpdates)),
-                ],
-                t,
-            ),
+    // While a check runs the row says so and the button waits (DW-0751, Rules).
+    let checking = a.check == UpdateCheck::Checking;
+    let mut check_now = controls::button(1, "Check now", None, Emphasis::Plain, t);
+    check_now = if checking {
+        check_now.disabled(true).focusable(false)
+    } else {
+        check_now.on_press(|s: &mut State| s.settings.check_for_updates())
+    };
+    let mut update_rows = vec![
+        lists::item_with(
+            1,
+            0,
+            &Item::new(Some(&ic::DOWNLOAD_TRAY), "Check for updates").sub(a.check.says()),
+            vec![check_now],
+            t,
+        ),
+        lists::item(
+            1,
+            1,
+            &Item::new(Some(&ic::SYNC), "Release channel")
+                .sub(a.channel.says())
+                .trailing(Trailing::Pop {
+                    choice: a.channel.label().into(),
+                    open: menu_open,
+                    menu_at: CHANNEL_MENU_AT,
+                })
+                .role(Role::PopUp),
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Channel)),
+    ];
+    // The chosen channel is behind this PC's version: said, with the way to the notes; nothing
+    // is installed and nothing is offered (DW-0789, Rules).
+    if let Some(older) = &a.older {
+        update_rows.push(
             lists::item(
                 1,
-                1,
-                &Item::new(Some(&ic::SYNC), "Release channel")
-                    .sub(a.channel.says())
-                    .trailing(Trailing::Pop {
-                        choice: a.channel.label().into(),
-                        open: menu_open,
-                    })
-                    .role(Role::Button),
-                t,
-            )
-            .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Channel)),
-            lists::item(
-                1,
-                2,
-                &Item::new(Some(&ic::DOCUMENT), "Release notes")
-                    .sub("What changed in each version")
-                    .opens(),
+                update_rows.len(),
+                &Item::new(Some(&ic::INFO), older.title())
+                    .sub(older.says())
+                    .opens()
+                    .ruled(),
                 t,
             )
             .on_press(|s: &mut State| super::go(s, "DW-0789b")),
-        ],
+        );
+    }
+    update_rows.push(
+        lists::item(
+            1,
+            update_rows.len(),
+            &Item::new(Some(&ic::DOCUMENT), "Release notes")
+                .sub("What changed in each version")
+                .opens(),
+            t,
+        )
+        .on_press(|s: &mut State| super::go(s, "DW-0789b")),
+    );
+    let updates = lists::list(
+        1,
+        Some("Updates"),
+        update_rows,
         Some("Beebeeb checks for updates at launch and every 4 hours."),
         t,
     );
@@ -130,7 +157,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     );
 
     let children = vec![
-        shell::crumb("General", t).on_press(|s: &mut State| super::go(s, "DW-0701")),
+        shell::crumb("General", t, |s: &mut State| super::go(s, "DW-0701")),
         shell::heading("About Beebeeb", None, t),
         product,
         versions,
@@ -141,7 +168,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 
     let overlay = match ui.dialog {
         Some(Dialog::ReleaseNotes) => Some(release_notes(ui, t)),
-        _ => super::menu_overlay(ui, MenuKind::Channel, CHANNEL_MENU_AT, t),
+        _ => super::menu_overlay(ui, MenuKind::Channel, t),
     };
     (shell::pane(children, t), overlay)
 }
@@ -165,10 +192,12 @@ fn release_notes(ui: &SettingsUi, t: &Theme) -> El {
         ),
     ];
     let foot = vec![
-        dialogs::button(2, "Restart to update", Weight::Primary, t).on_press(|s: &mut State| {
-            s.settings.dialog = None;
-            s.settings.ask(Intent::DownloadUpdate);
-        }),
+        dialogs::button(2, "Restart to update", Weight::Primary, t)
+            .default_button()
+            .on_press(|s: &mut State| {
+                s.settings.dialog = None;
+                s.settings.ask(Intent::DownloadUpdate);
+            }),
         dialogs::button(3, "Close", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
     dialogs::dialog(&title, 480.0, &title, Some(&sub), body, foot, t)

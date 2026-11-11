@@ -15,14 +15,18 @@ use super::SettingsUi;
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let mut children = vec![
-        shell::crumb("General", t).on_press(|s: &mut State| super::go(s, "DW-0701")),
+        shell::crumb("General", t, |s: &mut State| super::go(s, "DW-0701")),
         shell::heading(
             "Storage location",
             Some("Where Beebeeb stores the files you add from now on. Every location is in the EU."),
             t,
         ),
     ];
-    let Some(l) = ui.source.locations() else {
+    // No answer, or an answer without a single choice: said, with a way to ask again. Never
+    // an empty list, and never a guess at what the choice was.
+    let answer = ui.source.locations();
+    let chosen = answer.as_ref().and_then(|l| l.chosen().cloned());
+    let (Some(l), Some(chosen)) = (answer, chosen) else {
         let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
             .on_press(|s: &mut State| s.settings.source.reload_locations());
         children.push(notices::problem(
@@ -35,8 +39,6 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ));
         return (shell::pane(children, t), None);
     };
-    let chosen = l.chosen().clone();
-
     if l.unavailable {
         let rest = if l.only_here {
             "Uploads wait until it is."

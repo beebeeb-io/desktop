@@ -12,8 +12,9 @@ use super::source::Update;
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 
-/// Where the Theme menu drops, in the window's body: over its pop-up button, the board's place.
-const THEME_MENU_AT: (f32, f32) = (700.0, 86.0);
+/// Where the Theme menu drops, from its row's top-left corner: over its pop-up button, the
+/// board's place (DW-0787: the menu at 700, 118 over the row at 254, 115).
+const THEME_MENU_AT: (f32, f32) = (446.0, 3.0);
 
 /// The pane, and the menu over it when one is open.
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -32,8 +33,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .trailing(Trailing::Pop {
                         choice: g.theme.label().into(),
                         open: menu_open,
+                        menu_at: THEME_MENU_AT,
                     })
-                    .role(Role::Button),
+                    .role(Role::PopUp),
                 t,
             )
             .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Theme)),
@@ -143,7 +145,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     }
     children.extend([help, privacy, about]);
 
-    let menu = super::menu_overlay(ui, MenuKind::Theme, THEME_MENU_AT, t);
+    let menu = super::menu_overlay(ui, MenuKind::Theme, t);
     let overlay = match ui.dialog {
         Some(Dialog::ReportProblem) => Some(report_problem(t)),
         _ => menu,
@@ -203,10 +205,12 @@ fn report_problem(t: &Theme) -> El {
         ),
     ];
     let foot = vec![
-        dialogs::button(0, "Save and write email", Weight::Primary, t).on_press(|s: &mut State| {
-            s.settings.ask(Intent::SaveBundleAndWriteEmail);
-            super::go(s, "DW-0790b");
-        }),
+        dialogs::button(0, "Save and write email", Weight::Primary, t)
+            .default_button()
+            .on_press(|s: &mut State| {
+                s.settings.ask(Intent::SaveBundleAndWriteEmail);
+                super::go(s, "DW-0790b");
+            }),
         dialogs::button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
     dialogs::dialog("Report a problem", 460.0, "Report a problem", None, body, foot, t)

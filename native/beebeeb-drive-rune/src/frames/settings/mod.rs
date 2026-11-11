@@ -5,9 +5,14 @@
 //! stays, the settings sidebar and one pane take the place of the Drive sidebar and the list.
 //! `State::settings` holds that state; `view` draws it; `on_key` is its keyboard.
 //!
+//! **Whether settings shows, and which section, is the shell's route** (`Screen::Settings`):
+//! this lane keeps no flag of its own for it. `SettingsUi` holds only what is open INSIDE a
+//! section (a sub-pane, a menu, a dialog, a toast), and it is forgotten whenever the window
+//! leaves settings, whoever asked (`SettingsUi::reset`).
+//!
 //! For the shell lane: `FRAMES` is the table of what is built (frame id, and the scene that
-//! shows it on a fresh `State`); `SettingsUi::intents` is what settings asks the shell to do
-//! (leave settings, show a frame another lane owns, open a web page).
+//! shows it on a fresh `State`); `SettingsUi::take_intents` is what settings asks the shell to
+//! do (show a frame another lane owns, open a web page, start a download).
 
 pub mod about;
 pub mod general;
@@ -20,13 +25,13 @@ mod tests;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
-use crate::shell::host;
+use crate::shell::{host, instance, placeholder, registry};
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
-use rune::{Cx, El, Key, KeyEvent, Tx, col, row};
+use rune::{Align, Cx, El, Key, KeyEvent, Side, Tx, col, row};
 
-use source::{BoardSettings, Channel, SettingsSource, ThemeChoice};
+use source::{AlertTarget, BoardSettings, Channel, SettingsSource, ThemeChoice};
 
 /// A pane of settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -62,6 +67,15 @@ impl MenuKind {
         match self {
             Self::Theme => "Theme",
             Self::Channel => "Release channel",
+        }
+    }
+    /// The key of the point in the menu's own row where its top-left corner goes
+    /// (`settings_list::Trailing::Pop::menu_at`): the menu follows its row when the pane scrolls
+    /// or the window is another size.
+    pub fn anchor(self) -> &'static str {
+        match self {
+            Self::Theme => "item-0-0-menu-at",
+            Self::Channel => "item-1-1-menu-at",
         }
     }
 }
@@ -103,10 +117,11 @@ pub enum Intent {
     OpenWindowsNotificationSettings,
 }
 
-/// The settings state of the window.
+/// The most requests kept for the shell while nothing takes them: the oldest fall off.
+pub const INTENT_LIMIT: usize = 32;
+
+/// What is open inside settings. (Whether the window shows settings is the shell's route.)
 pub struct SettingsUi {
-    /// `true` while the window shows settings instead of Drive.
-    pub open: bool,
     pub pane: Pane,
     pub menu: Option<Menu>,
     pub dialog: Option<Dialog>,
@@ -119,69 +134,54 @@ pub struct SettingsUi {
 impl Default for SettingsUi {
     fn default() -> Self {
         Self {
-            open: false,
             pane: Pane::General,
             menu: None,
             dialog: None,
             toast: None,
-            source: Box::new(BoardSettings::new()),
+            // Sample content only where tooling runs; a build that ships starts unwired.
+            source: source::first(instance::DEV_BUILD),
             intents: Vec::new(),
         }
     }
 }
 
 impl SettingsUi {
-    /// Ctrl+, and the gear: settings opens on General.
+    /// The window left settings (Back to Drive, Esc, another section's lane, a link): nothing
+    /// stays open for the next visit, which starts on the section's own pane.
+    pub fn reset(&mut self) {
+        self.show(Pane::General);
+    }
+
+    /// Show `pane` with nothing over it. Leaving Recent notifications marks its alerts seen
+    /// (DW-0791: "New ones are marked until this page has been opened").
     pub fn show(&mut self, pane: Pane) {
-        self.open = true;
+        if self.pane == Pane::Recent && pane != Pane::Recent {
+            self.source.mark_recent_seen();
+        }
         self.pane = pane;
         self.menu = None;
         self.dialog = None;
-    }
-
-    /// Back to Drive, and Esc: the window as it was.
-    pub fn leave(&mut self) {
-        self.open = false;
-        self.menu = None;
-        self.dialog = None;
-    }
-
-    /// Go where a row, a button or a sidebar item points (a board frame id): a state of
-    /// this lane's panes, or an intent for the shell.
-    pub fn go(&mut self, frame: &'static str) {
-        self.menu = None;
-        self.dialog = None;
         self.toast = None;
-        match frame {
-            "DW-0401" => self.leave(),
-            "DW-0701" | "DW-0781" => self.pane = Pane::General,
-            "DW-0782" => {
-                self.pane = Pane::General;
-                self.dialog = Some(Dialog::ReportProblem);
-            }
-            "DW-0787" => {
-                self.pane = Pane::General;
-                self.toggle_menu(MenuKind::Theme);
-            }
-            "DW-0751" => self.pane = Pane::About,
-            "DW-0750" | "DW-0750b" => self.pane = Pane::Notifications,
-            "DW-0791" | "DW-0791b" => self.pane = Pane::Recent,
-            "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => self.pane = Pane::StorageLocation,
-            "DW-0789" => {
-                self.pane = Pane::About;
-                self.toggle_menu(MenuKind::Channel);
-            }
-            "DW-0789b" => {
-                self.pane = Pane::About;
-                self.dialog = Some(Dialog::ReleaseNotes);
-            }
-            other => self.intents.push(Intent::Show(other)),
-        }
+    }
+
+    /// What settings asked of the shell since the last call, oldest first.
+    pub fn take_intents(&mut self) -> Vec<Intent> {
+        std::mem::take(&mut self.intents)
     }
 
     pub fn ask(&mut self, intent: Intent) {
         self.menu = None;
+        // Nothing takes these yet (the shell lane's); never more than the newest few are kept.
+        if self.intents.len() >= INTENT_LIMIT {
+            self.intents.remove(0);
+        }
         self.intents.push(intent);
+    }
+
+    /// About › Check now: the row says Checking… until the updater answers.
+    pub fn check_for_updates(&mut self) {
+        self.source.check_for_updates();
+        self.ask(Intent::CheckForUpdates);
     }
 
     /// The theme the window draws in: the person's choice, or the system's.
@@ -225,18 +225,27 @@ impl SettingsUi {
         };
     }
 
-    /// Take item `index` of a menu, and close it.
+    /// Take item `index` of a menu, and close it. An index the menu does not have chooses nothing.
     pub fn choose(&mut self, kind: MenuKind, index: usize) {
         match kind {
-            MenuKind::Theme => self.source.set_theme(ThemeChoice::ALL[index.min(2)]),
-            MenuKind::Channel => self.source.set_channel(Channel::ALL[index.min(2)]),
+            MenuKind::Theme => {
+                if let Some(theme) = ThemeChoice::ALL.get(index) {
+                    self.source.set_theme(*theme);
+                }
+            }
+            MenuKind::Channel => {
+                if let Some(channel) = Channel::ALL.get(index) {
+                    self.source.set_channel(*channel);
+                }
+            }
         }
         self.menu = None;
     }
 }
 
-/// The menu `kind` at `at` in the window's body, when it is the open one.
-pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, at: (f32, f32), t: &Theme) -> Option<El> {
+/// The menu `kind`, when it is the open one: its top-left corner on the point its row marks
+/// (`MenuKind::anchor`), so it stays with its pop-up button wherever the row is drawn.
+pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
     let open = ui.menu.filter(|m| m.kind == kind)?;
     let chosen = ui.chosen(kind);
     let items = kind
@@ -250,7 +259,7 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, at: (f32, f32), t: &Theme) 
         .collect();
     Some(
         controls::menu(0, kind.name(), 130.0, items, t)
-            .absolute(at.0, at.1)
+            .anchored(kind.anchor(), Side::Bottom, Align::Start, 0.0)
             .modal(true, |s: &mut State| s.settings.menu = None),
     )
 }
@@ -301,8 +310,55 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
 ];
 
 fn open_on(s: &mut State, frame: &'static str) {
-    s.settings.show(Pane::General);
+    s.settings.reset();
     go(s, frame);
+}
+
+/// The section of this lane the shell's route shows, if it shows one.
+fn routed(s: &State) -> Option<Pane> {
+    match s.shell.app.screen() {
+        Screen::Settings(SettingsPane::General) => Some(Pane::General),
+        Screen::Settings(SettingsPane::Notifications) => Some(Pane::Notifications),
+        _ => None,
+    }
+}
+
+/// A board frame of this lane's as a state of settings: the pane, and what is open over it.
+fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
+    Some(match frame {
+        "DW-0701" | "DW-0781" => (Pane::General, None, None),
+        "DW-0782" => (Pane::General, Some(Dialog::ReportProblem), None),
+        "DW-0787" => (Pane::General, None, Some(MenuKind::Theme)),
+        "DW-0751" => (Pane::About, None, None),
+        "DW-0789" => (Pane::About, None, Some(MenuKind::Channel)),
+        "DW-0789b" => (Pane::About, Some(Dialog::ReleaseNotes), None),
+        "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
+        "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
+        "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
+        _ => return None,
+    })
+}
+
+/// Brings what this lane holds in line with the shell's route. The shell calls it after every
+/// change of route (`shell::host::dispatch`), because the route moves without a word to this
+/// lane (Ctrl+, a link, the b's menu, Esc): what was open inside ANOTHER section, or before
+/// the window left settings, is forgotten, so nothing is still open on the next visit.
+pub fn sync(s: &mut State) {
+    match routed(s) {
+        Some(section) if s.settings.pane.section() == section => {}
+        Some(section) => s.settings.show(section),
+        None => s.settings.reset(),
+    }
+}
+
+/// The frame a recent alert leads to.
+pub fn frame_of(target: AlertTarget) -> &'static str {
+    match target {
+        AlertTarget::DevicesAndSessions => "DW-A55",
+        AlertTarget::Shared => "DW-0501",
+        AlertTarget::SharedRequests => "DW-0503",
+        AlertTarget::SecurityLog => "DW-A77",
+    }
 }
 
 /// The shell's name for a section of this lane's panes.
@@ -328,21 +384,36 @@ pub fn go(s: &mut State, frame: &'static str) {
         "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
         _ => None,
     };
-    s.settings.go(frame);
     if let Some(pane) = foreign {
+        s.settings.reset();
         host::dispatch(s, Event::OpenSettings(pane));
         return;
     }
-    let in_settings = matches!(s.shell.app.screen(), Screen::Settings(_));
-    if !s.settings.open {
-        if in_settings {
+    if frame == "DW-0401" {
+        s.settings.reset();
+        // Only settings is this lane's to close: in Drive, Esc belongs to what is open there.
+        if matches!(s.shell.app.screen(), Screen::Settings(_)) {
             host::dispatch(s, Event::Escape);
         }
         return;
     }
-    let want = shell_pane(s.settings.pane.section());
+    let Some((pane, dialog, menu)) = local(frame) else {
+        // Not a frame of this lane's: asked of the shell, and the window stays where it is.
+        let ui = &mut s.settings;
+        (ui.dialog, ui.toast) = (None, None);
+        ui.ask(Intent::Show(frame));
+        return;
+    };
+    // The shell's route first (it follows the pane's section), then what is open inside it.
+    let want = shell_pane(pane.section());
     if s.shell.app.screen() != Screen::Settings(want) {
         host::dispatch(s, Event::OpenSettings(want));
+    }
+    let ui = &mut s.settings;
+    ui.show(pane);
+    ui.dialog = dialog;
+    if let Some(kind) = menu {
+        ui.toggle_menu(kind);
     }
 }
 
@@ -468,14 +539,19 @@ fn sidebar(section: Pane, t: &Theme) -> El {
 /// The window while settings is open.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.settings;
+    // Nothing answers for settings yet (a build that ships before the engine lane wires it):
+    // the shell's "not built yet" frame, never a pane of sample values.
+    if !ui.source.wired() {
+        return placeholder::window(s, cx, registry::group_for(&s.shell.app));
+    }
+    // Keyboard as Windows has it: Tab visits every control, Space and Enter press the focused
+    // one (Rune's default leaves Enter on a button to the default button, as macOS does).
+    cx.web_focus();
     let t = tokens::theme(ui.dark(cx.system_dark()));
     // The shell says which section shows. What this lane has open inside a section counts
-    // only while it belongs to that section and was opened from here.
-    let section = match s.shell.app.screen() {
-        Screen::Settings(SettingsPane::Notifications) => Pane::Notifications,
-        _ => Pane::General,
-    };
-    let inside = ui.open && ui.pane.section() == section;
+    // only while it belongs to that section (`sync` forgets the rest on the next input).
+    let section = routed(s).unwrap_or(Pane::General);
+    let inside = ui.pane.section() == section;
     let pane = if inside { ui.pane } else { section };
     let (pane_el, overlay) = match pane {
         Pane::General => general::pane(ui, &t),
@@ -511,6 +587,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// A menu takes the arrows, Home, End and Enter. Everything else is Rune's (Tab, Space,
 /// Enter on the focused control).
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    sync(s);
     let ui = &mut s.settings;
     if let Some(Menu { kind, hot }) = ui.menu {
         let last = kind.labels().len() - 1;

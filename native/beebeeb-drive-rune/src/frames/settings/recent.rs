@@ -16,7 +16,7 @@ use super::source::AlertKind;
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let days = ui.source.recent_alerts();
     let mut children = vec![
-        shell::crumb("Notifications", t).on_press(|s: &mut State| super::go(s, "DW-0750")),
+        shell::crumb("Notifications", t, |s: &mut State| super::go(s, "DW-0750")),
         shell::heading("Recent notifications", Some("Recent alerts from your account."), t),
     ];
     if days.is_empty() {
@@ -55,7 +55,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     type_::CAPTION.family(Family::Mono),
                     t.text_tertiary,
                 ));
-                let leads_to = a.leads_to;
+                let leads_to = super::frame_of(a.leads_to);
                 lists::item_with(
                     l,
                     i,
