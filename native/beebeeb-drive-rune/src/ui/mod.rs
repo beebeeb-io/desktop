@@ -13,6 +13,7 @@ pub mod settings_dialog;
 pub mod settings_list;
 pub mod settings_notice;
 pub mod settings_shell;
+pub mod setup;
 pub mod sidebar;
 pub mod status_bar;
 pub mod toolbar;

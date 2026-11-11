@@ -1,0 +1,1021 @@
+{
+ "frame": "DW-0206",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "step-0-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 139.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-0-check": {
+   "kind": "icon",
+   "x": 30,
+   "y": 143.84,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "step-0": {
+   "kind": "text",
+   "x": 54,
+   "y": 139.34,
+   "w": 83.16,
+   "h": 14.5,
+   "text": "Add a passkey",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-1-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 167.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-1-check": {
+   "kind": "icon",
+   "x": 30,
+   "y": 171.84,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "step-1": {
+   "kind": "text",
+   "x": 54,
+   "y": 167.34,
+   "w": 81.33,
+   "h": 14.5,
+   "text": "Lock Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-2-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 195.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-2-check": {
+   "kind": "icon",
+   "x": 30,
+   "y": 199.84,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "step-2": {
+   "kind": "text",
+   "x": 54,
+   "y": 195.34,
+   "w": 117.3,
+   "h": 14.5,
+   "text": "Back up your folders",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-3-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 223.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-3-check": {
+   "kind": "icon",
+   "x": 30,
+   "y": 227.84,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "step-3": {
+   "kind": "text",
+   "x": 54,
+   "y": 223.34,
+   "w": 144.71,
+   "h": 14.5,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-4-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 251.34,
+   "w": 18,
+   "h": 18,
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "css": {
+    "radius": "1.67772e+07px"
+   }
+  },
+  "step-4-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 253.84,
+   "w": 6,
+   "h": 13,
+   "text": "5",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-4": {
+   "kind": "text",
+   "x": 54,
+   "y": 251.34,
+   "w": 139.65,
+   "h": 14.5,
+   "text": "Beebeeb in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-5-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 279.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-5-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 281.84,
+   "w": 6,
+   "h": 13,
+   "text": "6",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-5": {
+   "kind": "text",
+   "x": 54,
+   "y": 279.34,
+   "w": 71.58,
+   "h": 14.5,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-6-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 307.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.92 0.006 85 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-6-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 309.84,
+   "w": 6,
+   "h": 13,
+   "text": "7",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-6": {
+   "kind": "text",
+   "x": 54,
+   "y": 307.34,
+   "w": 75.48,
+   "h": 14.5,
+   "text": "Open at login",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "side-status-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 596,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "side-status": {
+   "kind": "text",
+   "x": 48,
+   "y": 596.5,
+   "w": 138.71,
+   "h": 13,
+   "text": "Beebeeb is in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "skip": {
+   "kind": "text",
+   "x": 878.38,
+   "y": 48,
+   "w": 59.62,
+   "h": 15,
+   "text": "Skip setup",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "nav": {
+   "kind": "box",
+   "x": 419,
+   "y": 221.25,
+   "w": 220,
+   "h": 176.5,
+   "bg": [
+    22,
+    22,
+    22,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px, oklch(0 0 none / 0.04) 0px 1px 2px 0px",
+    "pad": "8px",
+    "gap": "2px"
+   }
+  },
+  "nav-0-icon": {
+   "kind": "icon",
+   "x": 437,
+   "y": 235.75,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M4 11l8-7 8 7",
+    "M6 9.5V20h12V9.5",
+    "M10 20v-5h4v5"
+   ],
+   "filled": false,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ]
+  },
+  "nav-0": {
+   "kind": "text",
+   "x": 461,
+   "y": 234.75,
+   "w": 36.43,
+   "h": 17,
+   "text": "Home",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "nav-1-icon": {
+   "kind": "icon",
+   "x": 437,
+   "y": 265.75,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21"
+   ],
+   "filled": false,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ]
+  },
+  "nav-1": {
+   "kind": "text",
+   "x": 461,
+   "y": 264.75,
+   "w": 43.28,
+   "h": 17,
+   "text": "Gallery",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "nav-on": {
+   "kind": "box",
+   "x": 427,
+   "y": 289.25,
+   "w": 204,
+   "h": 28,
+   "bg": [
+    233,
+    233,
+    233,
+    23
+   ],
+   "css": {
+    "radius": "4px",
+    "pad": "0px 10px",
+    "gap": "9px"
+   }
+  },
+  "nav-2-icon": {
+   "kind": "icon",
+   "x": 437,
+   "y": 295.75,
+   "w": 15,
+   "h": 15,
+   "icon": [],
+   "filled": false,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ]
+  },
+  "nav-2": {
+   "kind": "text",
+   "x": 461,
+   "y": 294.75,
+   "w": 54.74,
+   "h": 17,
+   "text": "Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "nav-3-icon": {
+   "kind": "icon",
+   "x": 437,
+   "y": 338.25,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ]
+  },
+  "nav-3": {
+   "kind": "text",
+   "x": 461,
+   "y": 337.25,
+   "w": 50.84,
+   "h": 17,
+   "text": "Desktop",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "nav-4-icon": {
+   "kind": "icon",
+   "x": 437,
+   "y": 368.25,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"
+   ],
+   "filled": false,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ]
+  },
+  "nav-4": {
+   "kind": "text",
+   "x": 461,
+   "y": 367.25,
+   "w": 69.93,
+   "h": 17,
+   "text": "Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "nav-sep": {
+   "kind": "box",
+   "x": 435,
+   "y": 324.25,
+   "w": 188,
+   "h": 0.5,
+   "bg": [
+    230,
+    230,
+    222,
+    31
+   ],
+   "css": {}
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 300,
+   "h": 606,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.92 0.006 85)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 247.5,
+   "h": 15,
+   "text": "Set up Drive on this PC",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 300,
+   "y": 32,
+   "w": 658,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "title": {
+   "kind": "text",
+   "x": 419,
+   "y": 146.25,
+   "w": 420,
+   "h": 28,
+   "text": "Beebeeb is in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "start"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 419,
+   "y": 180.25,
+   "w": 420,
+   "h": 30,
+   "text": "Your Beebeeb files show in File Explorer's navigation pane, and in other apps' Open and Save As dialogs.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 419,
+   "y": 453.75,
+   "w": 420,
+   "h": 32,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 601.16,
+   "y": 460,
+   "w": 55.66,
+   "h": 19.5,
+   "text": "Continue",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "btn-1": {
+   "kind": "box",
+   "x": 419,
+   "y": 491.75,
+   "w": 420,
+   "h": 32,
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-1-label": {
+   "kind": "text",
+   "x": 564.85,
+   "y": 498,
+   "w": 128.3,
+   "h": 19.5,
+   "text": "Show in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "note-0": {
+   "kind": "text",
+   "x": 419,
+   "y": 408.75,
+   "w": 420,
+   "h": 28,
+   "text": "Anyone who can use this PC while it's signed in can open these files in File Explorer. File Explorer follows Windows' lock, not Beebeeb's.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  }
+ },
+ "theme": "dark"
+}

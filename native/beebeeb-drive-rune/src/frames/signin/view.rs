@@ -13,6 +13,8 @@ use crate::ui::kit;
 const PRODUCT: &str = "Drive";
 const ONE_ACCOUNT: &str = "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.";
 const GENERIC_FAILURE: &str = "We couldn't sign you in. Nothing was unlocked.";
+const LOCK_NOTE: &str =
+    "Five wrong tries lock an account for 30\u{a0}s to 15\u{a0}min. We email its owner an unlock link.";
 
 pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
@@ -290,10 +292,19 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             Tone::Neutral,
             &icons::INFO,
             None,
-            Some("Five wrong tries lock an account for 30 s to 15 min. We email its owner an unlock link."),
+            // The board keeps "30 s" and "15 min" together (no-break spaces), so the line turns after "to".
+            Some(LOCK_NOTE),
             false,
             t,
         ));
+        // The gate compares strings with their spaces normalised, as the board's export does.
+        kit::note_text(
+            "banner-0-text",
+            "banner-0-text",
+            &LOCK_NOTE.replace('\u{a0}', " "),
+            type_au::BANNER_TEXT,
+            t.text_secondary,
+        );
     }
     c = c.child(
         row()
@@ -509,10 +520,13 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                             type_au::SUB,
                             t.text_tertiary,
                         );
+                        // As wide as its words, not a device pixel more: the row is centred, and a
+                        // wider text moves the ring beside it off the board's place.
                         rune::text("Expires in ")
                             .key("status-expires-box")
                             .font(type_au::SUB)
                             .color(t.text_tertiary)
+                            .w(rune::text::advance("Expires in ", type_au::SUB))
                             .a11y_hidden()
                     })
                     .child(
@@ -522,21 +536,21 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                             type_au::SUB_MONO,
                             t.text_tertiary,
                         )
+                        .w(rune::text::advance(&clock(ui.seconds_left()), type_au::SUB_MONO))
                         .a11y_hidden(),
                     ),
             )
-            .child(au::pill(
-                "status-pill",
+            .child({
                 // The countdown goes on while the connection is down (DW-A07).
-                if ui.reconnecting() {
+                let words = if ui.reconnecting() {
                     "Reconnecting\u{2026}"
                 } else {
                     "Waiting for approval"
-                },
-                Tone::Neutral,
-                true,
-                t,
-            ))
+                };
+                // 8 + the dot's 6 + 5 + the words + 8 (`.kit-pill`), to the fraction of a point.
+                au::pill("status-pill", words, Tone::Neutral, true, t)
+                    .w(27.0 + rune::text::advance(words, type_au::PILL))
+            })
     };
     c = c.child(stack.child(status.key("status")));
     if let Some(request) = ui.request() {

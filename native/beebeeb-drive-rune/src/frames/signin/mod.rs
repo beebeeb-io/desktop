@@ -17,6 +17,7 @@
 
 pub mod icons;
 pub mod qr;
+pub mod setup;
 pub mod source;
 mod view;
 
