@@ -282,9 +282,18 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
     })
 }
 
-/// Put the window in a board frame's state (`shell/mod.rs` `SCENES`).
+/// Put the window in a board frame's state.
 pub fn set_scene(s: &mut State, frame: &str) {
     if let Some(file) = scene_file(frame) {
         open(s, file);
     }
 }
+
+/// The group's board frames and the scene that shows each (`frames::scenes`).
+pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
+    ("DW-1516", |s| set_scene(s, "DW-1516")),
+    ("DW-1517", |s| set_scene(s, "DW-1517")),
+    ("DW-1518", |s| set_scene(s, "DW-1518")),
+    ("DW-1512", |s| set_scene(s, "DW-1512")),
+    ("DW-1527", |s| set_scene(s, "DW-1527")),
+];
