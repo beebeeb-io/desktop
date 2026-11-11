@@ -64,7 +64,7 @@ if (tb) {
   const nav = qa(':scope > .inline-flex > .mk-tbtn', tb);
   ['back', 'forward'].forEach((k, i) => { api.box(k, nav[i]); api.icon(`${k}-icon`, nav[i] && q('svg', nav[i])); });
   api.text('folder-title', q('.mk-title b', tb));
-  api.text('item-count', q('.mk-title span', tb));
+  api.text('item-count', q('.mk-title > span:not(.mk-crumbs)', tb) || q('.mk-title span', tb)); // an open file's title is its path (.mk-crumbs): the line under it
   const group = q('.mk-tgroup', tb);
   if (group) {
     api.box('view-toggle', group);
