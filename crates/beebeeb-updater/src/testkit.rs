@@ -290,13 +290,16 @@ pub enum Did {
     ResumedEngine,
 }
 
+/// Runs inside `launch`, with the staged installer's path.
+pub type DuringLaunch = Box<dyn FnMut(&Path)>;
+
 #[derive(Default)]
 pub struct FakeApply {
     pub did: Vec<Did>,
     pub refuse: bool,
     pub engine_will_not_stop: bool,
     /// Runs inside `launch`, while the updater still holds the staged file.
-    pub during_launch: Option<Box<dyn FnMut(&Path)>>,
+    pub during_launch: Option<DuringLaunch>,
 }
 
 impl FakeApply {

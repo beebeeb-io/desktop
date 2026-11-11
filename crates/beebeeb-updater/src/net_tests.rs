@@ -20,11 +20,13 @@ const SIZE: usize = 200_000;
 /// What the server sends for one request: the whole response, head included.
 type Route = Box<dyn Fn(&str, Option<u64>) -> Vec<u8> + Send>;
 
+/// Every request: path and the `Range` start, if any.
+type RequestLog = Arc<Mutex<Vec<(String, Option<u64>)>>>;
+
 struct Server {
     port: u16,
     certificate_pem: String,
-    /// Every request: path and the `Range` start, if any.
-    log: Arc<Mutex<Vec<(String, Option<u64>)>>>,
+    log: RequestLog,
 }
 
 fn respond(status: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
@@ -49,7 +51,7 @@ impl Server {
         let acceptor = native_tls::TlsAcceptor::new(identity).expect("a TLS acceptor");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a local port");
         let port = listener.local_addr().expect("address").port();
-        let log = Arc::new(Mutex::new(Vec::new()));
+        let log: RequestLog = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&log);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
