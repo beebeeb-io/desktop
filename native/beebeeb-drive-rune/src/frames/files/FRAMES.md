@@ -3,31 +3,32 @@
 Windows frames of the FRAMES.md groups "Files: the full Drive in the window", "Browse files" and
 "Folders, Backups and uploads", plus the list's states drawn under "Global elements on Windows".
 Status is `built` (gated light and dark, both truth lines at 0 failing) or `not built`.
+State at the end of this lane's second run: 10 built here (plus DW-0401, built before), 39 not built.
 
 | Frame | Group | What it is | Status |
 | --- | --- | --- | --- |
 | `DW-0401` | Files | The Windows app's main view: the whole account's files, from the copy on this PC, with what is on this PC at a glance. | built (design-system lane, PR 286) |
-| `DW-0402` | Files | Every action on a file, where a Windows user looks for it. | not built |
-| `DW-0403` | Files | Act on several files at once. | not built |
-| `DW-0404` | Files | Choose the order of the list, the same choices as the iPhone. | not built |
-| `DW-0405` | Files | Trash without a question, because Undo and Trash both bring it back. | not built |
-| `DW-0406` | Files | Duplicate makes the copy at once, next to the original. | not built |
-| `DW-0407` | Files | Share a file with a link, or invite someone. | not built |
-| `DW-0408` | Files | Look at a file without leaving Beebeeb: Preview in the window; Open hands it to its app. | not built |
+| `DW-0402` | Files | Every action on a file, where a Windows user looks for it. | built (light and dark: 0 failing on all six) |
+| `DW-0403` | Files | Act on several files at once. | not built: golden captured; needs the selection bar and the two stacked pages (one rotated: the gate reads a layout box, not the turned one) |
+| `DW-0404` | Files | Choose the order of the list, the same choices as the iPhone. | built (light and dark: 0 failing on all six) |
+| `DW-0405` | Files | Trash without a question, because Undo and Trash both bring it back. | built (light and dark: 0 failing on all six) |
+| `DW-0406` | Files | Duplicate makes the copy at once, next to the original. | built (light and dark: 0 failing on all six) |
+| `DW-0407` | Files | Share a file with a link, or invite someone. | not built as a frame (the dialog is the Shared lane's); the entry point works: Share… emits `Intent::Frame("DW-0407")` |
+| `DW-0408` | Files | Look at a file without leaving Beebeeb: Preview in the window; Open hands it to its app. | not built; Space and Preview emit `Intent::Frame("DW-0408")` |
 | `DW-0408b` | Files | Preview on a file Windows cannot preview: say so, instead of a blank panel. | not built |
-| `DW-0409` | Files | Move the selection to another folder. | not built |
-| `DW-0410` | Files | Rename where the name is, as File Explorer does. | not built |
-| `DW-0410b` | Files | A name that is already used in the folder: say so and keep the old name. | not built |
-| `DW-0411` | Files | Everything about one file, the same rows as the iPhone's Details. | not built |
-| `DW-0412` | Files | Keep a file on this PC, also without a connection. | not built |
-| `DW-0413` | Files | Go back to an earlier version without losing the current one. | not built |
-| `DW-0414` | Files | Everything that adds to the folder you're in: the one amber control. | not built |
-| `DW-0415` | Files | Pick files from this PC to upload to the folder you're in. | not built |
+| `DW-0409` | Files | Move the selection to another folder. | not built; Move… emits `Intent::Frame("DW-0409")` |
+| `DW-0410` | Files | Rename where the name is, as File Explorer does. | not built: golden captured; F2 and Rename emit `Intent::Frame("DW-0410")` |
+| `DW-0410b` | Files | A name that is already used in the folder: say so and keep the old name. | not built: golden captured |
+| `DW-0411` | Files | Everything about one file, the same rows as the iPhone's Details. | not built; Alt+Enter and Details emit `Intent::Frame("DW-0411")` |
+| `DW-0412` | Files | Keep a file on this PC, also without a connection. | not built: golden captured; the action works (state, toast "Keeping on this PC"), the row's progress bar and "Syncing" are not drawn |
+| `DW-0413` | Files | Go back to an earlier version without losing the current one. | not built; Version history… emits `Intent::Frame("DW-0413")` |
+| `DW-0414` | Files | Everything that adds to the folder you're in: the one amber control. | built (light and dark: 0 failing on all six) |
+| `DW-0415` | Files | Pick files from this PC to upload to the folder you're in. | not built; Ctrl+O and Upload files… emit `Intent::Frame("DW-0415")` |
 | `DW-0416` | Files | Pick photos to upload: the file picker's Photos section, which needs no Photos access. | not built |
-| `DW-0417` | Files | Make a folder in the folder you're in. | not built |
-| `DW-0480` | Files | Upload a whole folder, with everything in it, keeping its structure. | not built |
-| `DW-0481` | Files | Drag files from File Explorer into the list to upload them. | not built |
-| `DW-0420` | Folders | The same view one level deeper. | not built |
+| `DW-0417` | Files | Make a folder in the folder you're in. | not built: golden captured; Ctrl+Shift+N and New folder emit `Intent::Frame("DW-0417")` |
+| `DW-0480` | Files | Upload a whole folder, with everything in it, keeping its structure. | not built; Upload a folder… emits `Intent::Frame("DW-0480")` |
+| `DW-0481` | Files | Drag files from File Explorer into the list to upload them. | not built as a frame (drop highlight, drag badge); a drop works: `Intent::Upload(folder, files)` |
+| `DW-0420` | Folders | The same view one level deeper. | not built: golden captured; the fixture lists the folder's 7 rows and the path title is drawn; the four photo thumbnails and the video mark are not |
 | `DW-0420b` | Folders | Long content: a folder of 212 items scrolled two-thirds down, and names longer than a row. | not built |
 | `DW-0421` | Folders | The grid: thumbnails first, the way the iPhone's grid shows them. | not built |
 | `DW-0422` | Folders | Every device's backup and every Beebeeb service, in one protected folder. | not built |
@@ -37,20 +38,20 @@ Status is `built` (gated light and dark, both truth lines at 0 failing) or `not 
 | `DW-0426` | Folders | Uploads in progress, in their folder and in the status line. | not built |
 | `DW-0427` | Folders | Every upload with its state: what needs attention, what is moving, what waits. | not built |
 | `DW-0429` | Folders | A file changed in two places at once: nothing is overwritten until Anna picks. | not built |
-| `DW-1101` | Browse | The first screen of the window: folders first, then files; New is the one amber thing. | not built |
+| `DW-1101` | Browse | The first screen of the window: folders first, then files; New is the one amber thing. | built (light and dark: 0 failing on all six) |
 | `DW-1102` | Browse | A folder remembers its own view: here, a grid with the details panel on a photo. | not built |
 | `DW-1103` | Browse | View and sort from a right-click on the list's background. | not built |
-| `DW-1104` | Browse | Right-click is the PC's press and hold: the file menu on Harbour.heic. | not built |
+| `DW-1104` | Browse | Right-click is the PC's press and hold: the file menu on Harbour.heic. | built (light and dark: 0 failing on all six) |
 | `DW-1105` | Browse | Instant search on the list already on this PC, and a plain note of what it can't do. | not built |
-| `DW-1106` | Browse | A folder with nothing in it yet. | not built |
+| `DW-1106` | Browse | A folder with nothing in it yet. | built (light and dark: 0 failing on all six) |
 | `DW-1107` | Browse | The first sign-in on a PC: the list downloads and is decrypted here, and Beebeeb can be used before it's finished. | not built |
 | `DW-1108` | Browse | Offline, everything stays visible; only what isn't on this PC is dimmed and says why. | not built |
 | `DW-1109` | Browse | The session ended after 90Â days without use: the list and the key are still here, so only the password is needed. | not built |
 | `DW-1110` | Browse | Trying to delete Mail Backup: the protected folder message. | not built |
 | `DW-0101` | List states | No connection: the list stays and says how old it is. | not built |
 | `DW-0102` | List states | Some items can't sync: say how many, and that the rest is fine. | not built |
-| `DW-0107` | List states | A short confirmation that needs nothing. | not built |
-| `DW-0108` | List states | A message with Undo stays a little longer. | not built |
+| `DW-0107` | List states | A short confirmation that needs nothing. | built (light and dark: 0 failing on all six) |
+| `DW-0108` | List states | A message with Undo stays a little longer. | built (light and dark: 0 failing on all six) |
 | `DW-0109` | List states | Something failed: say what, and how to fix it. | not built |
 | `DW-0114` | List states | A new account has no files yet: one way forward. | not built |
 | `DW-0118` | List states | After the first sign-in the list loads in the background; the window works at once. | not built |

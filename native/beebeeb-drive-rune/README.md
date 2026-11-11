@@ -72,9 +72,9 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 
 ## Adding a frame
 
-1. **Scene**: add `("<frame-id>", |s| { … })` to `SCENES` in `src/main.rs`: what the frame sets on a fresh `State`.
-   That is the one line a frame adds to `main.rs`.
-2. **Keys**: open `scripts/keymap.js`. Everything the Files window draws is keyed there already, by the board's
+1. **Scene**: add `("<frame-id>", |s| { … })` to your group's `SCENES` (`src/frames/<group>/mod.rs`; `main.rs`
+   joins the groups' tables): what the frame sets on a fresh `State`.
+2. **Keys**: open `scripts/keymap.js` (a frame group adds its own file in `scripts/keymap.d/`, read after it). Everything the Files window draws is keyed there already, by the board's
    class names. For what your frame draws in addition, add `api.box` / `api.text` / `api.textNode` / `api.icon`
    lines, by class name, never by position or by string. Key every element a person can see: each icon, each text,
    each box with a fill or a border.
@@ -106,6 +106,11 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 | Details panel | `detail_pane::pane(t)`, `preview`, `page_preview`, `encrypted_badge`, `meta_row`, `switch_card`, `switch`, `action_button` | see each function's doc |
 | Avatar, mark, shadows | `kit::avatar`, `kit::mark`, `kit::ring`, `kit::ring_inset`, `kit::drop` | the key you pass |
 | Status line | `status_bar::status_bar(t)` | `status-bar`, `status-dot`, `status-text`, `status-details` |
+| Status line, own words | `status_line::status_line(state, details, t)` | the same keys |
+| Menu | `menu::menu(key, name, width, entries, hot, t, pick, hover, close)`, `menu::Entry` | `<key>`, `<key>-item-<i>` (+`-label`, `-shortcut`, `-check`), `<key>-sep-<j>` |
+| Toast | `toast::layer(toast::toast(icon, tone, message, action, t))` | `toast`, `toast-icon`, `toast-text`, `toast-action`, `toast-action-text` |
+| Outline button | `button::outline_button(key, label, icon, t)` | `<key>`, `<key>-icon`, `<key>-label` |
+| Empty state | `empty::empty_state(key, icon, title, sentence, t)` | `<key>`, `<key>-tile`, `<key>-icon`, `<key>-title`, `<key>-text` |
 
 A hairline is `kit::HAIR` (half a point) in `t.separator`: `.border_sides([..], t.separator).border_layout()` for a
 CSS border, `.box_shadow(kit::ring_inset(t.separator))` for a CSS `inset 0 0 0 .5px` ring.
@@ -119,6 +124,8 @@ src/
   theme/
     tokens.rs       the board's colours (light and dark), type scale, radii, spacing
     icons.rs        the board's SVG icons, and the Beebeeb mark
+  frames/
+    files/          the Files frames: menus, selection, toasts, folders (FRAMES.md is the checklist)
   ui/
     kit.rs          label / glyph / avatar / mark / shadows, and the notes the gate reads
     gate.rs         --gate-export: the native element tree as JSON
