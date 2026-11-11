@@ -8,6 +8,9 @@ use rune::{Color, El, Icon, col, el, row, text_input};
 
 use super::kit;
 
+/// The search field's placeholder: one string for the field and for the gate's note.
+const SEARCH_PLACEHOLDER: &str = "Search names";
+
 /// How a toolbar button (`.mk-tbtn`) shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolState {
@@ -218,7 +221,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     kit::note_text(
         "search-placeholder",
         "search-input",
-        "Search names",
+        SEARCH_PLACEHOLDER,
         type_::SEARCH,
         t.text_tertiary,
     );
@@ -242,7 +245,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
                 .shortcut_hint("Ctrl+F")
                 .single_line()
                 .color(t.text)
-                .placeholder("Search names", t.text_tertiary)
+                .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
                 .on_edit(|s: &mut State| &mut s.search)
                 .grow(1.0),
         )

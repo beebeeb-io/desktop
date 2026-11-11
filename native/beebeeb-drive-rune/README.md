@@ -30,10 +30,10 @@ scripts/compare.sh DW-0401                 # light
 scripts/compare.sh DW-0401 --theme dark    # dark
 ```
 
-Its last line is the truth line. A frame is done when all four counts of failures are 0, in both themes:
+Its last line is the truth line. A frame is done when all six counts of failures are 0, in both themes:
 
 ```
-DW-0401 geometry: 220 checked, 0 failing · pixels: 220 checked, 0 failing · text: 97 checked, 0 failing · icons: 51 checked, 0 failing
+DW-0401 geometry: 220 checked, 0 failing · pixels: 220 checked, 0 failing · text: 97 checked, 0 failing · icons: 51 checked, 0 failing · fills: 44 checked, 0 failing · frame tiles: 63481 checked, 0 failing
 ```
 
 | Check | What it compares, per keyed element | A failure reads |

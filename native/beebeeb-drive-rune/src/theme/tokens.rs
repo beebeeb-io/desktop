@@ -147,6 +147,8 @@ pub struct Theme {
     pub field: Color,
     /// `--color-paper`: an outlined button's fill.
     pub paper: Color,
+    /// `--color-paper-2`: the caption band (the ground in light, one step up from it in dark).
+    pub paper2: Color,
     /// `--color-paper-3`: a switch's off track.
     pub paper3: Color,
     /// `--color-white`, in both themes: a page preview, a switch knob.
@@ -244,6 +246,7 @@ pub fn theme(dark: bool) -> Theme {
             status_bar_bg: paper2,
             field: paper3,
             paper,
+            paper2,
             paper3,
             white,
             text: ink,
@@ -299,6 +302,7 @@ pub fn theme(dark: bool) -> Theme {
             status_bar_bg: card,
             field,
             paper,
+            paper2,
             paper3,
             white,
             text: ink,

@@ -3,7 +3,8 @@
 
 Usage: gate.py <board.json> <board.png> <native.json> <native.png> <out-dir> <stem>
 
-Four checks, each over every keyed board element (scripts/keymap.js):
+Six checks: four over every keyed board element (scripts/keymap.js), fills over every keyed box
+the board gives a background, frame tiles over the whole picture:
 
   geometry  the box: x, y, w, h within 1 px. A text's box is its line box, whose height is
             the font's and not the layout's, so a text is held to x, w (2 px: two shapers)
@@ -19,9 +20,11 @@ Four checks, each over every keyed board element (scripts/keymap.js):
             Native pixels may sit up to 1 px (2 device px) off: what geometry allows.
   text      the string, family, size, weight, letter spacing and colour.
   icons     WHICH glyph (the SVG path data), outlined or filled, its state name and colour.
+  fills     a box's declared background colour against the native element's fill.
+  frame     every 8 px tile of the whole frame, keyed or not.
 
 Prints one table per failing check and the truth line:
-  geometry: N checked, M failing · pixels: N checked, M failing · text: N checked, M failing · icons: N checked, M failing
+  geometry: … · pixels: … · text: … · icons: … · fills: … · frame tiles: N checked, M failing
 Exit 0 only when every M is 0 and every N is above 0.
 
 Also writes <stem>-side-by-side.png, <stem>-tiles.png (every 8 px tile of the whole frame
@@ -98,6 +101,19 @@ def text_check(b, n):
     if chan_delta(b["color"], n.get("color")) > COLOR_TOL:
         issues.append(f"colour {n.get('color')} (board {b['color'][:3]})")
     return issues
+
+
+def fill_check(b, n):
+    """A box's declared fill: the board's computed background against the native element's fill."""
+    want, got = b["bg"], n.get("fill")
+    if got is None:
+        return [f"no fill (board {want})"]
+    opaque = want[3] >= 250
+    # A translucent wash is quantised to 8 bits on both sides: hold its alpha tightly, its colour loosely.
+    tol = COLOR_TOL if opaque else 12
+    if abs(want[3] - got[3]) > COLOR_TOL or chan_delta(want, got) > tol:
+        return [f"fill {got} (board {want})"]
+    return []
 
 
 def norm_path(d):
@@ -294,8 +310,8 @@ def main():
         print(f"gate: {px.size_issue}")
         return 2
 
-    geo_fail, pix_fail, text_fail, icon_fail = [], [], [], []
-    geo_n = pix_n = text_n = icon_n = 0
+    geo_fail, pix_fail, text_fail, icon_fail, fill_fail = [], [], [], [], []
+    geo_n = pix_n = text_n = icon_n = fill_n = 0
     corner = lambda b: (b["x"] < CORNER or b["x"] + b["w"] > board["width"] - CORNER) and (b["y"] < CORNER or b["y"] + b["h"] > board["height"] - CORNER)
 
     for key, b in b_els.items():
@@ -313,7 +329,12 @@ def main():
             issues = ["MISSING in the native tree"] if n is None else text_check(b, n)
             if issues:
                 text_fail.append((key, "; ".join(issues)))
-        elif b["kind"] == "icon":
+        elif b["kind"] == "box" and "bg" in b:
+            fill_n += 1
+            issues = ["MISSING in the native tree"] if n is None else fill_check(b, n)
+            if issues:
+                fill_fail.append((key, "; ".join(issues)))
+        if b["kind"] == "icon":
             icon_n += 1
             issues = ["MISSING in the native tree"] if n is None else icon_check(b, n)
             if issues:
@@ -324,7 +345,7 @@ def main():
         tile = px.tile(box)
         # (A box that reaches a window corner holds the page behind the board's rounded frame.)
         # Edges are for boxes: a glyph's or a string's ink runs to its box's edge and is the tile check's.
-        edge = px.edge(box) if b["kind"] == "box" and not corner(b) else 0.0
+        edge = px.edge(box) if b["kind"] == "box" and not (corner(b) and min(b["w"], b["h"]) < 5 * CORNER) else 0.0
         tile_tol = ICON_TILE_TOL if b["kind"] == "icon" else TILE_TOL
         if tile > tile_tol or edge > EDGE_TOL:
             parts = []
@@ -341,6 +362,7 @@ def main():
     table("pixel failures (worst first; crops in fail/<key>.png, board | native)", [(k, d) for _, k, d in pix_fail])
     table("text failures", text_fail)
     table("icon failures", icon_fail)
+    table("fill failures", fill_fail)
 
     side = Image.new("RGB", (px.board.size[0] * 2 + 16, px.board.size[1]), (255, 0, 255))
     side.paste(px.board, (0, 0))
@@ -349,14 +371,15 @@ def main():
     total_tiles, over_tiles = px.frame_tiles(out / f"{stem}-tiles.png")
 
     extra = sorted(set(n_els) - set(b_els))
-    print(f"\nframe tiles (the whole frame, keyed or not): {total_tiles} checked, {over_tiles} failing -> {out / (stem + '-tiles.png')}")
+    print(f"\nframe tiles map (the whole frame, keyed or not): {out / (stem + '-tiles.png')}")
     print(f"native keys the board does not export: {len(extra)}")
     line = (f"geometry: {geo_n} checked, {len(geo_fail)} failing · pixels: {pix_n} checked, {len(pix_fail)} failing · "
-            f"text: {text_n} checked, {len(text_fail)} failing · icons: {icon_n} checked, {len(icon_fail)} failing")
+            f"text: {text_n} checked, {len(text_fail)} failing · icons: {icon_n} checked, {len(icon_fail)} failing · "
+            f"fills: {fill_n} checked, {len(fill_fail)} failing · frame tiles: {total_tiles} checked, {over_tiles} failing")
     print(f"\n{stem} {line}")
     (out / f"{stem}-gate.txt").write_text(f"{stem} {line}\n", encoding="utf-8")
-    failing = len(geo_fail) + len(pix_fail) + len(text_fail) + len(icon_fail)
-    if min(geo_n, pix_n, text_n, icon_n) == 0:
+    failing = len(geo_fail) + len(pix_fail) + len(text_fail) + len(icon_fail) + len(fill_fail) + over_tiles
+    if min(geo_n, pix_n, text_n, icon_n, fill_n, total_tiles) == 0:
         print("gate: a check ran over 0 elements: that is a RED, not a pass")
         return 1
     return 1 if failing else 0

@@ -30,7 +30,7 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
         .label("Title bar")
         .w_full()
         .h(TITLEBAR_H)
-        .fill(t.surface)
+        .fill(t.paper2)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.card_border)
         .border_layout()
         .window_drag()

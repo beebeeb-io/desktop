@@ -16,8 +16,9 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         tx.focus(SEARCH_KEY, true);
         return true;
     }
-    // Typing in a field is the field's.
-    if tx.focused() == Some(SEARCH_KEY) {
+    // The list's keys are the list's: with focus on a row or nowhere. A focused field, button or
+    // switch keeps Enter, Backspace and the arrows for itself.
+    if tx.focused().is_some_and(|key| !key.starts_with("row-")) {
         return false;
     }
     match ev.key {
