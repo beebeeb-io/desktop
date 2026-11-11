@@ -40,7 +40,7 @@ Modules 46–92, sorted by path.
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
 | `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (3), Probe (5), Tally (10), Verdict (2), Outcome (1), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
 | `owner_backfill_tests.rs` | (no //! header) | — |
-| `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | — |
+| `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | AccountScope (4), normalize_wrap |
 | `passkey_commands.rs` | v2 B15: the four passkey commands (crypto review 2026-11-08, rule 6), thin wrappers over core's passkey flows (`beebeeb_core::passkey`). | — |
 | `passkey_windows.rs` | v2 B15: the Windows platform call for core's passkey flows: webauthn.dll `WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAs | — |
 | `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageUsage (2), StorageCache, clear_storage, StorageDto (4), … (+16 more) |
