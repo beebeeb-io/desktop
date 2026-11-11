@@ -68,8 +68,8 @@ actually verifies the signature of the current GitHub release (it needs network 
 4. Open a pull request that says what changed and why.
 
 Every pull request runs **Desktop CI** (`.github/workflows/ci.yml`): the frontend suite (`bun test`, `tsc`,
-ESLint), `cargo test --locked` on Linux, Windows and macOS (plus `cargo check --all-targets` on Windows and
-macOS), and the File Provider Swift job on macOS. The release workflow runs the full test gate again before
+ESLint), `cargo test --locked` on Linux, Windows and macOS (every target is compiled once, by the test build; a
+change to docs or design files only skips these three jobs), and the File Provider Swift job on macOS. The release workflow runs the full test gate again before
 anything is built. Paste your own counts into the pull request description as well: they show what you ran.
 Every review conversation must be resolved before a pull request can merge, and every merge is done by a
 person.
