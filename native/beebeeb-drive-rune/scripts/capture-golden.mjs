@@ -13,7 +13,7 @@
 // Keys come from `keymap()` below, by the board's own class names. A frame that draws
 // something new adds its keys there (see README "Add a frame").
 import { createRequire } from 'module';
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
@@ -84,16 +84,18 @@ try {
       if ((cs.position === 'sticky' || cs.position === 'fixed') && !screen.contains(el)) el.style.display = 'none';
     }
     if (dark) screen.classList.add('dark');
-    screen.scrollIntoView({ block: 'start' });
+    screen.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' }); // instant: a smooth scroll of the frame's row is still moving when the box is read
     window.scrollBy(0, -20);
     const r = screen.getBoundingClientRect();
-    return { x: r.x + screen.clientLeft + window.scrollX, y: r.y + screen.clientTop + window.scrollY, width: screen.clientWidth, height: screen.clientHeight };
+    // Viewport coordinates, for a viewport screenshot: a full-page one re-lays the page out and a frame
+    // further along its row (a horizontal scroller) is no longer where this box says.
+    return { x: r.x + screen.clientLeft, y: r.y + screen.clientTop, width: screen.clientWidth, height: screen.clientHeight };
   }, { frameId, dark });
   await page.waitForTimeout(400);
 
   const stem = dark ? `${frameId}-dark` : frameId;
   const png = join(outDir, `${stem}-board.png`);
-  await page.screenshot({ path: png, clip, fullPage: true });
+  await page.screenshot({ path: png, clip });
 
   const geo = await page.evaluate(({ frameId, keymapSrc }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);
@@ -155,7 +157,7 @@ try {
     // eslint-disable-next-line no-new-func
     new Function('win', 'api', keymapSrc)(screen, api);
     return { frame: frameId, width: screen.clientWidth, height: screen.clientHeight, elements: out, problems };
-  }, { frameId, keymapSrc: readFileSync(join(HERE, 'keymap.js'), 'utf-8') });
+  }, { frameId, keymapSrc: ['keymap.js', ...readdirSync(HERE).filter((f) => /^keymap-.+\.js$/.test(f)).sort()].map((f) => readFileSync(join(HERE, f), 'utf-8')).join('\n') });
 
   const flat = JSON.stringify(geo);
   if (/â€|Â·/.test(flat)) { console.error('capture-golden: mojibake in the exported text (the board must be served as utf-8)'); code = 1; }
