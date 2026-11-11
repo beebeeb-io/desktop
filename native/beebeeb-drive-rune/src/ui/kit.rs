@@ -58,11 +58,25 @@ pub fn label(key: impl Into<String>, content: impl Into<String>, style: TextStyl
     text(content).key(key).font(style).color(color)
 }
 
-/// A keyed icon that draws in its own colours (the brand mark).
-pub fn emblem(key: impl Into<String>, ic: &'static Icon, size: f32) -> El {
+/// The Beebeeb mark, `size` points across, in the brand's own two colours (the same in
+/// both themes): 16 in the caption, 24 in the sidebar.
+pub fn mark(key: impl Into<String>, size: f32) -> El {
+    use crate::theme::icons::{MARK, MARK_B, MARK_DOT, MARK_FOLDER, MARK_RING};
     let key = key.into();
-    note(&key, |n| n.icon = Some(ic));
-    icon(ic, size).key(key)
+    note(&key, |n| n.icon = Some(&MARK));
+    let amber = rune::color::hex("#F5B800").unwrap_or(Color::BLACK);
+    let ink = rune::color::hex("#1A1714").unwrap_or(Color::BLACK);
+    let layer = |name: &'static str, ic: &'static Icon, c: Color| icon(ic, size).key(name).color(c).absolute(0.0, 0.0);
+    el().key(key)
+        .role("image")
+        .label("Beebeeb")
+        .size(size, size)
+        .radius(size * 102.0 / 512.0)
+        .fill(amber)
+        .child(layer("mark-b", &MARK_B, ink))
+        .child(layer("mark-ring", &MARK_RING, amber))
+        .child(layer("mark-dot", &MARK_DOT, ink))
+        .child(layer("mark-folder", &MARK_FOLDER, amber))
 }
 
 /// A keyed icon: which glyph, how large, in which colour.

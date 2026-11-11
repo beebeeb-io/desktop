@@ -44,6 +44,7 @@ TILE = 8               # device px
 TILE_TOL = 26.0        # 0-255, worst tile mean of the blurred difference
 EDGE_TOL = 9.0         # 0-255, worst edge-profile difference
 SHIFT = 2              # device px the native crop may move
+MIN_EDGE = 12          # device px: shorter edges are not edge-checked
 CORNER = 8             # px: the OS rounds the window's corners; the board's corner pixels are page
 
 
@@ -141,25 +142,38 @@ class Pixels:
         return max(0, x0), max(0, y0), min(w, max(x1, x0 + 1)), min(h, max(y1, y0 + 1))
 
     @staticmethod
-    def worst_tile(a, b):
+    def tile_map(a, b):
+        """Per 8 px tile, the mean difference of two blurred crops (the strongest channel)."""
         diff = ImageChops.difference(a, b)
         w, h = diff.size
         tiles = diff.resize((max(1, round(w / TILE)), max(1, round(h / TILE))), Image.BOX)
-        return max(max(px) for px in tiles.getdata())
+        r, g, bl = tiles.split()
+        return ImageChops.lighter(ImageChops.lighter(r, g), bl)
 
     def tile(self, box):
-        x0, y0, x1, y1 = box
+        """The worst tile, each tile at the shift (within SHIFT device px) that suits it best:
+        two text engines place each word a fraction of a pixel apart."""
         w, h = self.board.size
-        a = self.board_blur.crop(box)
-        best = 255.0
+        # A box at the frame's edge gives up SHIFT px there, so every tile can still move every way.
+        x0, y0 = max(box[0], SHIFT), max(box[1], SHIFT)
+        x1, y1 = min(box[2], w - SHIFT), min(box[3], h - SHIFT)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        a = self.board_blur.crop((x0, y0, x1, y1))
+        best = None
         for dy in range(-SHIFT, SHIFT + 1):
             for dx in range(-SHIFT, SHIFT + 1):
-                if x0 + dx < 0 or y0 + dy < 0 or x1 + dx > w or y1 + dy > h:
-                    continue
-                best = min(best, self.worst_tile(a, self.native_blur.crop((x0 + dx, y0 + dy, x1 + dx, y1 + dy))))
-                if best == 0:
-                    return 0.0
-        return float(best)
+                m = self.tile_map(a, self.native_blur.crop((x0 + dx, y0 + dy, x1 + dx, y1 + dy)))
+                best = m if best is None else ImageChops.darker(best, m)
+        # The OS rounds the window's corners; the board's corner pixels are the page behind it.
+        c = int(CORNER * self.scale)
+        tw, th = best.size
+        for cx0, cy0 in ((0, 0), (w - c, 0), (0, h - c), (w - c, h - c)):
+            ix0, iy0, ix1, iy1 = max(x0, cx0), max(y0, cy0), min(x1, cx0 + c), min(y1, cy0 + c)
+            if ix0 < ix1 and iy0 < iy1:
+                fx, fy = tw / (x1 - x0), th / (y1 - y0)
+                best.paste(0, (math.floor((ix0 - x0) * fx), math.floor((iy0 - y0) * fy), math.ceil((ix1 - x0) * fx), math.ceil((iy1 - y0) * fy)))
+        return float(best.getextrema()[1])
 
     def _profile(self, img, box, side):
         """Mean brightness of the lines parallel to one edge, from 3 px outside to 6 px inside."""
@@ -169,7 +183,7 @@ class Pixels:
         span_y = (y0 + (y1 - y0) // 5, max(y0 + (y1 - y0) // 5 + 1, y1 - (y1 - y0) // 5))
         depth = min(6, (y1 - y0) // 2 if side in "tb" else (x1 - x0) // 2)
         out = []
-        for o in range(-4, depth + 2):
+        for o in range(-4 - SHIFT, depth + 2 + SHIFT):
             if side == "t":
                 line = (span_x[0], y0 + o, span_x[1], y0 + o + 1)
             elif side == "b":
@@ -185,18 +199,23 @@ class Pixels:
         return out
 
     def edge(self, box):
+        """The worst edge-profile difference. Each edge may sit up to SHIFT device px off on its own:
+        two layout engines round a box's edges to the pixel grid differently."""
         worst = 0.0
+        x0, y0, x1, y1 = box
         for side in "tblr":
+            # An edge shorter than MIN_EDGE is all rounded corner: its anti-aliasing, not a border.
+            if (x1 - x0 if side in "tb" else y1 - y0) < MIN_EDGE:
+                continue
             pb = self._profile(self.board_l, box, side)
             pn = self._profile(self.native_l, box, side)
             best = 255.0
-            for s in (-1, 0, 1):
+            for s in range(-SHIFT, SHIFT + 1):
                 d = 0.0
-                for i in range(1, len(pb) - 1):
+                for i in range(SHIFT, len(pb) - SHIFT):
                     a, b = pb[i], pn[i + s]
-                    if a is None or b is None:
-                        continue
-                    d = max(d, abs(a - b))
+                    if a is not None and b is not None:
+                        d = max(d, abs(a - b))
                 best = min(best, d)
             worst = max(worst, best)
         return worst
@@ -215,22 +234,30 @@ class Pixels:
         out.save(path)
 
     def frame_tiles(self, path):
-        """Every tile of the whole frame, no shift: the map of what differs anywhere."""
-        diff = ImageChops.difference(self.board_blur, self.native_blur)
-        w, h = diff.size
-        tw, th = w // TILE, h // TILE
-        tiles = diff.resize((tw, th), Image.BOX)
+        """Every tile of the whole frame: the map of what differs anywhere, keyed or not."""
+        w, h = self.board.size
+        m = SHIFT
+        inner = (m, m, w - m, h - m)
+        a = self.board_blur.crop(inner)
+        best = None
+        for dy in range(-SHIFT, SHIFT + 1):
+            for dx in range(-SHIFT, SHIFT + 1):
+                t = self.tile_map(a, self.native_blur.crop((m + dx, m + dy, w - m + dx, h - m + dy)))
+                best = t if best is None else ImageChops.darker(best, t)
+        tw, th = best.size
+        data = best.tobytes()
         over = 0
         shade = self.native.copy().convert("RGBA")
         draw = ImageDraw.Draw(shade, "RGBA")
         c = int(CORNER * self.scale / TILE) + 1
-        for i, px in enumerate(tiles.getdata()):
+        sx, sy = (w - 2 * m) / tw, (h - 2 * m) / th
+        for i in range(tw * th):
             tx, ty = i % tw, i // tw
             if (tx < c or tx >= tw - c) and (ty < c or ty >= th - c):
                 continue
-            if max(px) > TILE_TOL:
+            if data[i] > TILE_TOL:
                 over += 1
-                draw.rectangle((tx * TILE, ty * TILE, tx * TILE + TILE - 1, ty * TILE + TILE - 1), fill=(255, 0, 0, 110))
+                draw.rectangle((m + tx * sx, m + ty * sy, m + (tx + 1) * sx - 1, m + (ty + 1) * sy - 1), fill=(255, 0, 0, 110))
         shade.convert("RGB").save(path)
         return tw * th, over
 
@@ -292,8 +319,9 @@ def main():
         pix_n += 1
         box = px.device_box(b)
         tile = px.tile(box)
-        # A box that reaches a window corner holds the page behind the board's rounded frame.
-        edge = 0.0 if corner(b) else px.edge(box)
+        # (A box that reaches a window corner holds the page behind the board's rounded frame.)
+        # Edges are for boxes: a glyph's or a string's ink runs to its box's edge and is the tile check's.
+        edge = px.edge(box) if b["kind"] == "box" and not corner(b) else 0.0
         if tile > TILE_TOL or edge > EDGE_TOL:
             parts = []
             if tile > TILE_TOL:
@@ -317,7 +345,7 @@ def main():
     total_tiles, over_tiles = px.frame_tiles(out / f"{stem}-tiles.png")
 
     extra = sorted(set(n_els) - set(b_els))
-    print(f"\nframe tiles (whole frame, unshifted, informative): {total_tiles} tiles, {over_tiles} over {TILE_TOL:.0f} -> {out / (stem + '-tiles.png')}")
+    print(f"\nframe tiles (the whole frame, keyed or not): {total_tiles} checked, {over_tiles} failing -> {out / (stem + '-tiles.png')}")
     print(f"native keys the board does not export: {len(extra)}")
     line = (f"geometry: {geo_n} checked, {len(geo_fail)} failing · pixels: {pix_n} checked, {len(pix_fail)} failing · "
             f"text: {text_n} checked, {len(text_fail)} failing · icons: {icon_n} checked, {len(icon_fail)} failing")

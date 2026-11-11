@@ -170,7 +170,7 @@ pub fn brand(product: &str, t: &Theme) -> El {
         .py(2.0)
         .gap(6.461_54)
         .center_y()
-        .child(kit::emblem("brand-mark", &icons::MARK, 24.0))
+        .child(kit::mark("brand-mark", 24.0))
         .child(
             col()
                 .key("brand-text")

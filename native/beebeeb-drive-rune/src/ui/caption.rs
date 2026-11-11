@@ -37,7 +37,7 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
         .center_y()
         .gap(9.0)
         .pl(insets.leading + 12.0)
-        .child(kit::emblem("cap-mark", &icons::MARK, 16.0))
+        .child(kit::mark("cap-mark", 16.0))
         .child(
             kit::label("cap-title", "Beebeeb Drive", type_::BODY, t.text_secondary)
                 .grow(1.0)

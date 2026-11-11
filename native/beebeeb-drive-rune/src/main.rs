@@ -118,10 +118,9 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 const FAMILIES: (&str, &str) = ("Inter", "JetBrains Mono");
 
 static FONTS: &[&[u8]] = &[
-    include_bytes!("../assets/fonts/inter-latin-400-normal.ttf"),
-    include_bytes!("../assets/fonts/inter-latin-500-normal.ttf"),
-    include_bytes!("../assets/fonts/inter-latin-600-normal.ttf"),
-    include_bytes!("../assets/fonts/inter-latin-700-normal.ttf"),
+    // Inter, variable (optical size 14-32, weight 100-900): the build the board draws with, so
+    // the wordmark's optical size and the 650 weights are the board's.
+    include_bytes!("../assets/fonts/inter-latin-variable-opsz-wght.ttf"),
     include_bytes!("../assets/fonts/jetbrains-mono-latin-400-normal.ttf"),
     include_bytes!("../assets/fonts/jetbrains-mono-latin-500-normal.ttf"),
     include_bytes!("../assets/fonts/jetbrains-mono-latin-600-normal.ttf"),

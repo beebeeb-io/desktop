@@ -77,8 +77,8 @@ pub mod type_ {
     pub const SECTION_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
     /// 10px/650: avatar initials in the account row (`avatar_initials(size)` for other sizes)
     pub const AVATAR_INITIALS: TextStyle = TextStyle::new(10.0, 650.0);
-    /// 10.5px/600: count pill in the sidebar (`.mk-badge`)
-    pub const BADGE: TextStyle = TextStyle::new(10.5, 600.0).lh(13.0);
+    /// 10.5px/600, tabular figures: count pill in the sidebar (`.mk-badge`)
+    pub const BADGE: TextStyle = TextStyle::new(10.5, 600.0).lh(13.0).features("'tnum' 1");
     /// 11px/400: small body (the account's e-mail, the toolbar's item count)
     pub const BODY_SM: TextStyle = TextStyle::new(11.0, 400.0).lh(14.0);
     /// 11px/500: caption (`.t-cap`)

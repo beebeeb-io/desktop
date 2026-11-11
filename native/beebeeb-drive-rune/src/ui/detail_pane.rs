@@ -254,6 +254,7 @@ pub fn action_button(key: &str, label: &str, ic: &'static Icon, t: &Theme) -> El
         .radius(radius::MD)
         .fill(t.paper)
         .border(1.0, t.card_border)
+        .border_layout()
         .hover(t.hover)
         .press(t.press)
         .focusable(true)

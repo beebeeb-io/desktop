@@ -59,10 +59,15 @@ const port = server.address().port;
 // Text as Windows and macOS draw it: fractional advances, no hinting. Linux FreeType's default
 // (hinted, whole-pixel advances: JetBrains Mono 11px comes out 7px a character, not 6.6) is
 // what no user of the app will ever see.
-const browser = await chromium.launch({ headless: true, args: ['--font-render-hinting=none', '--enable-font-subpixel-positioning', '--disable-lcd-text'] });
+// A REAL 200 % display, not an emulated one: with Playwright's `deviceScaleFactor` the page lays out at
+// 100 % and is scaled up, so every `.5px` hairline comes out a whole CSS pixel (two device pixels).
+const browser = await chromium.launch({ headless: true, args: ['--force-device-scale-factor=2', '--window-size=1600,1200',
+  '--font-render-hinting=none', '--enable-font-subpixel-positioning', '--disable-lcd-text'] });
 let code = 0;
 try {
-  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 }, deviceScaleFactor: 2 });
+  const page = await browser.newPage({ viewport: null });
+  const dpr = await page.evaluate(() => window.devicePixelRatio);
+  if (dpr !== 2) { console.error(`capture-golden: the browser runs at ${dpr}x, not 2x`); process.exit(2); }
   await page.goto(`http://127.0.0.1:${port}/board.html`, { waitUntil: 'networkidle', timeout: 60000 });
   const platform = frameId.startsWith('DM-') ? 'macOS' : 'Windows';
   for (const tab of await page.$$('.kit-switch a, .kit-tabs a')) {
