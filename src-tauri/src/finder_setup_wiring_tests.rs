@@ -548,9 +548,9 @@ fn every_window_shown_is_also_focused_so_the_ready_poll_resumes() {
     }
     // 12 when f7b counted them (2026-10-09). Task 1683 slice 1 replaced the Settings window's two with the Beebeeb
     // window's two (`show_main_window`) and added the reopen's (`reopen_main_window`): 13. Desktop v2 M3e added the
-    // status line's flyout (`show_tray_flyout`, Windows): 14. It focuses the flyout after show(), which the flyout
-    // needs anyway to close on blur.
-    assert_eq!(windows.len(), 14, "the window show() sites: {windows:?}");
+    // status line's flyout (`show_tray_flyout`, Windows): 14. Commit 48267631 added `report_tray_refusal` which
+    // opens the flyout to report a tray menu failure (show + set_focus, same rule): 15.
+    assert_eq!(windows.len(), 15, "the window show() sites: {windows:?}");
     assert_eq!(unhides, 1, "the one app unhide, in unhide_app");
     assert_eq!(notifications, 3, "the three notification builders");
     // The menu's three sign-out message dialogs, and (task 1882, rebase 2026-10-10) the kept-folder alert,
