@@ -507,7 +507,16 @@ async fn a_row_with_a_parked_change_keeps_its_place_until_the_change_is_gone() {
         50,
     );
     let other_before = db.get_file(OTHER).unwrap().unwrap();
-    let version_before = db.get_file_contract_state(OTHER).unwrap().unwrap().current_version;
+    let contract_before = db.get_file_contract_state(OTHER).unwrap().unwrap();
+    // macOS only (spec §6.3.2, `apply_snapshot_version`, since before the heal): EVERY snapshot raises a row's
+    // version to the node's, and sets its size unless a Finder write is queued, in any status but `Trashing` and
+    // `Conflict`; `local_base_version`, the stale marker a parked write is decided against, is never written there.
+    // That rule runs before the heal's guard and is not the heal's: the test states it instead of hiding it.
+    let (size_after, version_after) = if cfg!(target_os = "macos") {
+        (9000, 5)
+    } else {
+        (other_before.size_bytes, contract_before.current_version)
+    };
 
     assert!(runner_tick(&bridge, dir.path(), T0).await);
     assert_eq!(db.get_file(FOLDER).unwrap().unwrap().path, "Docs", "the rest is named");
@@ -523,16 +532,20 @@ async fn a_row_with_a_parked_change_keeps_its_place_until_the_change_is_gone() {
         (
             other_label.as_str(),
             &FileStatus::Error,
-            other_before.size_bytes,
+            size_after,
             other_before.modified_at,
             other_before.remote_updated_at
         ),
         "the row with a parked change is not touched"
     );
+    let contract = db.get_file_contract_state(OTHER).unwrap().unwrap();
     assert_eq!(
-        db.get_file_contract_state(OTHER).unwrap().unwrap().current_version,
-        version_before,
-        "its version neither"
+        contract.current_version, version_after,
+        "its version as before (macOS: raised, see above)"
+    );
+    assert_eq!(
+        contract.local_base_version, contract_before.local_base_version,
+        "the base its content was agreed on is never touched, on any OS"
     );
     let op = db
         .get_operation("op-parked")
@@ -675,4 +688,36 @@ async fn a_pass_cut_short_after_the_blocks_were_lifted_is_still_owed() {
     assert_eq!(server.snapshots(), 1);
     assert_eq!(db.get_file(FOLDER).unwrap().unwrap().path, "Docs");
     assert!(db.name_heal_done().unwrap());
+}
+
+/// The macOS snapshot rule (spec §6.3.2), run here on every OS: on a row at its label with a parked change it
+/// raises the version and the size and nothing else. The place, the status, the base the content was agreed on and
+/// the base the parked change was queued on all stay, so the change is still sent on its own base.
+#[tokio::test]
+async fn the_macos_snapshot_version_rule_leaves_a_parked_change_its_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = super::snapshot_names_2446::offline_bridge(dir.path());
+    store_blocked(&bridge, dir.path(), healthy_rows()).await;
+    let db = bridge.db();
+    let label = crate::owner_keys::blocked_name(OTHER);
+    seed_bridge_entry(&bridge, OTHER, &label, None, FileStatus::Error, false, 50);
+    enqueue_test_operation(&bridge, "op-parked", OperationKind::UploadVersion, OTHER, 100);
+    let op_before = db.get_operation("op-parked").unwrap().unwrap();
+    let contract_before = db.get_file_contract_state(OTHER).unwrap().unwrap();
+
+    db.apply_snapshot_version(OTHER, contract_before.current_version + 4, 9000, false)
+        .unwrap();
+    let row = db.get_file(OTHER).unwrap().unwrap();
+    assert_eq!(
+        (row.path.as_str(), &row.status, row.size_bytes),
+        (label.as_str(), &FileStatus::Error, 9000)
+    );
+    let contract = db.get_file_contract_state(OTHER).unwrap().unwrap();
+    assert_eq!(contract.current_version, contract_before.current_version + 4);
+    assert_eq!(contract.local_base_version, contract_before.local_base_version);
+    let op = db.get_operation("op-parked").unwrap().unwrap();
+    assert_eq!(
+        (op.base_version, op.target_path),
+        (op_before.base_version, op_before.target_path)
+    );
 }
