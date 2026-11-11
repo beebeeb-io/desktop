@@ -149,8 +149,8 @@ pub(crate) enum Line {
 }
 
 /// The two keys this build trusts, each for its own line. A signature by one of them on the other's line is
-/// refused: the legacy key has no password and was a repository secret (see task 2451), so it must never be able
-/// to sign a native release; and nothing signed by the v2 key belongs on the legacy feed.
+/// refused: the legacy key must never be able to sign a native release (see task 2451), and nothing signed by the
+/// v2 key belongs on the legacy feed.
 pub(crate) struct TrustedKeys {
     legacy: TrustedKey,
     native: Option<TrustedKey>,
