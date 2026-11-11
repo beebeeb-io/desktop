@@ -85,7 +85,9 @@ fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
 /// area), so the next key is still the list's.
 fn focus_list(s: &State, tx: &mut Tx) {
     tx.focus(
-        if s.listing.items.is_empty() && s.can_add() {
+        if s.list_error.is_some() {
+            "file-list-error"
+        } else if s.listing.items.is_empty() && s.can_add() {
             "empty-area"
         } else {
             "rows"
@@ -142,7 +144,7 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // The list's keys are the list's: with focus on a row or nowhere.
     if tx
         .focused()
-        .is_some_and(|key| !key.starts_with("row-") && key != "rows" && key != "empty-area")
+        .is_some_and(|key| !matches!(key, "rows" | "empty-area" | "file-list-error"))
     {
         return false;
     }

@@ -183,7 +183,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .child(list::column_headers(s.actions.sort, &t))
                 // A folder that could not be read says so. It never draws as an empty folder.
                 .child(match s.list_error {
-                    Some(error) => file_list::list_error(error, &t),
+                    // It holds the keyboard while it shows, so Back still works from the keys.
+                    Some(error) => file_list::list_error(error, &t).focusable(true).no_focus_ring(),
                     None => list::rows(s, cx, &t),
                 }),
         );
