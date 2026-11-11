@@ -1,3 +1,4 @@
-//! The board's frames, one module per group.
+//! The frames of the app, one module per group of the board.
 
 pub mod files;
+pub mod signin;

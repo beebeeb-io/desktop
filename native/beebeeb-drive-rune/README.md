@@ -74,7 +74,7 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 
 1. **Scene**: add `("<frame-id>", |s| { … })` to your group's `SCENES` (`src/frames/<group>/mod.rs`; `shell::scenes`
    joins the groups' tables: one line per group): what the frame sets on a fresh `State`.
-2. **Keys**: open `scripts/keymap.js` (a frame group adds its own file in `scripts/keymap.d/`, read after it). Everything the Files window draws is keyed there already, by the board's
+2. **Keys**: open `scripts/keymap.js` (a frame group adds its own file `scripts/keymap-<group>.js`, read after it). Everything the Files window draws is keyed there already, by the board's
    class names. For what your frame draws in addition, add `api.box` / `api.text` / `api.textNode` / `api.icon`
    lines, by class name, never by position or by string. Key every element a person can see: each icon, each text,
    each box with a fill or a border.

@@ -111,6 +111,21 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("locked", |s| scene(s, Event::Gate(GateState::Locked))),
     ("no-plan", |s| scene(s, Event::Gate(GateState::NoPlan))),
     ("first-run", |s| scene(s, Event::Gate(GateState::FirstRun))),
+    ("DW-A01", |s| crate::frames::signin::set_scene(s, "DW-A01")),
+    ("DW-A02", |s| crate::frames::signin::set_scene(s, "DW-A02")),
+    ("DW-A03", |s| crate::frames::signin::set_scene(s, "DW-A03")),
+    ("DW-A04", |s| crate::frames::signin::set_scene(s, "DW-A04")),
+    ("DW-A05", |s| crate::frames::signin::set_scene(s, "DW-A05")),
+    ("DW-A06", |s| crate::frames::signin::set_scene(s, "DW-A06")),
+    ("DW-A07", |s| crate::frames::signin::set_scene(s, "DW-A07")),
+    ("DW-A08", |s| crate::frames::signin::set_scene(s, "DW-A08")),
+    ("DW-A09", |s| crate::frames::signin::set_scene(s, "DW-A09")),
+    ("DW-A10", |s| crate::frames::signin::set_scene(s, "DW-A10")),
+    ("DW-A18", |s| crate::frames::signin::set_scene(s, "DW-A18")),
+    ("DW-A19", |s| crate::frames::signin::set_scene(s, "DW-A19")),
+    ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
+    ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
+    ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
 ];
 
 /// The shell's scenes, then each frame group's (`frames::<group>::SCENES`): ONE line per group.
