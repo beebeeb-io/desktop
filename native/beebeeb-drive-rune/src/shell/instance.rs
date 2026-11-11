@@ -1,4 +1,5 @@
-//! One Beebeeb per identity and user: the pure half of starting up.
+//! One Beebeeb per identity, user AND Windows session (exclusivity across sessions comes from the
+//! engine/profile lock, not linked yet): the pure half of starting up.
 //!
 //! Three mechanisms:
 //! - **The control channel** (`control.rs`; a named pipe on Windows, open to this user only).
@@ -31,6 +32,11 @@ pub const DB_FLAG: &str = "--db";
 /// Development only: the frame gate's element export (`ui::gate::run_from_args`).
 pub const GATE_EXPORT_FLAG: &str = "--gate-export";
 
+/// Development only, and only in a build with the `feedback` feature: where the live feedback
+/// mode writes its notes (`feedback/paths.rs`).
+#[cfg(feature = "feedback")]
+pub const FEEDBACK_DIR_FLAG: &str = "--feedback-dir";
+
 /// Whether this build honours development and diagnostic flags (Rune's `--snap`, `--out`,
 /// `--html`, `--script`, …, and `--db`): debug builds, and release builds made with the
 /// `dev-tools` feature. A shipped build is neither, and ignores every one of them.
@@ -51,6 +57,9 @@ pub struct Launch {
     pub tooling: bool,
     /// `--db <path>` (dev builds only). `Err`: the flag was given without a path.
     pub db: Option<Result<PathBuf, &'static str>>,
+    /// `--feedback-dir <path>` (dev builds with the `feedback` feature only).
+    #[cfg(feature = "feedback")]
+    pub feedback_dir: Option<PathBuf>,
     /// What Rune may read (`App::args`): empty unless this is a dev build without a link.
     pub rune_args: Vec<String>,
 }
@@ -112,6 +121,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
     let mut launch = Launch::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        #[cfg(feature = "feedback")]
+        if dev && arg == FEEDBACK_DIR_FLAG {
+            launch.feedback_dir = args
+                .next()
+                .filter(|dir| !dir.is_empty() && !dir.starts_with("--"))
+                .map(PathBuf::from);
+            continue;
+        }
         if arg == AUTOSTART_FLAG {
             launch.autostart = true;
         } else if arg == QUIT_FOR_UPDATE_FLAG {
@@ -133,6 +150,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
         launch.tooling = false;
         launch.db = None;
         launch.rune_args.clear();
+        #[cfg(feature = "feedback")]
+        {
+            launch.feedback_dir = None;
+        }
     }
     launch
 }

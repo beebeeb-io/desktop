@@ -12,6 +12,8 @@
 //!
 //! Lanes: add ONE `mod` line for your module below, in alphabetical order, and nothing else.
 
+#[cfg(feature = "feedback")]
+mod feedback;
 mod shell;
 mod source;
 // The engine lane's read API (PR 280): only `EngineSource::open` and `list` have a caller

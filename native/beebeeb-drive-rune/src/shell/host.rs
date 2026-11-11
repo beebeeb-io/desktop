@@ -325,7 +325,19 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
 ///
 /// Alt+Left / Alt+Right: back and forward. Ctrl+,: Settings. Ctrl+/: the shortcuts list.
 /// Esc: closes the front-most thing. Everything else goes to the frame.
+///
+/// A build with the `feedback` feature gives the live feedback mode the key first: its two
+/// hotkeys (F8, Shift+F8; none of the shell's or the board's), and every key while its comment
+/// mode is on. Otherwise the key goes on to [`shell_keys`] unchanged.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    #[cfg(feature = "feedback")]
+    return crate::feedback::on_key(s, ev, tx, shell_keys);
+    #[cfg(not(feature = "feedback"))]
+    shell_keys(s, ev, tx)
+}
+
+/// The shell's own shortcuts, then the frame's keys.
+fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let plain_alt = ev.mods.alt && !ev.mods.cmd && !ev.mods.shift;
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
     // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.

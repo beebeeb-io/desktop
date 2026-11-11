@@ -325,8 +325,8 @@ fn the_apps_own_pipe_reads_back_as_this_users_only() {
 
 /// The other descriptors one account can stage, each read back from the real pipe and each
 /// refused for its own reason, with nothing written: no access list at all; a denial beside
-/// the user's entry; and (where this account may set it: an elevated administrator, as on the
-/// build VM) an owner that is not this user. The last is the nearest a single account gets to
+/// the user's entry; and an owner that is not this user (the test needs an elevated administrator,
+/// as on the build VM, and FAILS anywhere else: the case is never skipped). The last is the nearest a single account gets to
 /// "another user created the pipe".
 #[test]
 fn every_other_descriptor_is_refused_for_its_reason_and_gets_no_request() {
@@ -355,11 +355,9 @@ fn every_other_descriptor_is_refused_for_its_reason_and_gets_no_request() {
         let name = test_name(&format!("squat-{what}"));
         let squatter = match squat(&name, &sddl) {
             Ok(squatter) => squatter,
-            // ERROR_INVALID_OWNER: this account may not make the Administrators group an owner.
-            Err(1307) if what == "owner" => {
-                eprintln!("2455-OWNER-CASE-NOT-RUN: this account cannot set another owner");
-                continue;
-            }
+            // No case is skipped. The `owner` case needs an account that may make the
+            // Administrators group an owner (an elevated administrator, as on the build VM);
+            // anywhere else it fails here with ERROR_INVALID_OWNER (1307), and so does the test.
             Err(error) => panic!("{what}: the pipe could not be made: Win32 error {error}"),
         };
         {
@@ -378,7 +376,7 @@ fn every_other_descriptor_is_refused_for_its_reason_and_gets_no_request() {
         checked += 1;
         eprintln!("2455-CASE-RAN: {what}");
     }
-    assert!(checked >= 3, "{checked} of 4 descriptors were checked");
+    assert_eq!(checked, 4, "every descriptor was checked, the owner case too");
 }
 
 /// A panic in the handler is a "busy" answer, not the end of the channel.

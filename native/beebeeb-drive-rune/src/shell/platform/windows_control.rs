@@ -26,8 +26,11 @@
 //!
 //! What this does not defend against: another process of the SAME user that creates the name
 //! first with the same owner and access list (it would be taken for the running instance, and
-//! a launch would hand it one of the three verbs and exit). Such a process can already do
-//! anything this app can. And an administrator, who can set any owner on any object.
+//! a launch would hand it one of the three verbs and exit). That includes a LOW-INTEGRITY
+//! process of this user (a sandboxed one): it passes all three facts, although it cannot do
+//! everything this app can; the check does not read the server's integrity label. Refusing a
+//! server whose label is below medium is a follow-up. And an administrator, who can set any
+//! owner on any object.
 
 use std::ptr;
 use std::sync::Arc;
@@ -44,8 +47,8 @@ use windows_sys::Win32::Security::Authorization::{
     SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetTokenInformation, IsValidSid,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetLengthSid, GetTokenInformation,
+    IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     TokenSessionId, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -115,6 +118,10 @@ impl Drop for LocalMem {
 /// The ACE type of "this SID is granted these rights" (`ACCESS_ALLOWED_ACE_TYPE` in winnt.h;
 /// its module in `windows-sys` is not one this crate builds).
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// Where the SID starts in an ACCESS_ALLOWED_ACE: after the 4-byte header and the 4-byte mask.
+const ACE_SID_OFFSET: u16 = 8;
+/// The smallest such entry: those 8 bytes and a SID with no sub-authority (8 bytes).
+const MIN_ALLOWED_ACE_SIZE: u16 = 16;
 
 /// A SID as text (`S-1-5-21-…`).
 ///
@@ -272,13 +279,23 @@ fn pipe_security(pipe: &Handle) -> Result<(String, Option<Vec<AccessEntry>>), St
         // SAFETY: GetAce returned a pointer to an entry inside the live ACL; every entry
         // starts with an ACE_HEADER (read unaligned: the ACL is a byte layout).
         let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
-        let grants =
-            header.AceType == ACCESS_ALLOWED_ACE_TYPE && usize::from(header.AceSize) >= size_of::<ACCESS_ALLOWED_ACE>();
-        if grants {
-            // SAFETY: an entry of this type and at least this size is an ACCESS_ALLOWED_ACE
+        if header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+            // The entry must hold its header, its mask and at least the smallest SID, and the
+            // SID must end inside the entry: nothing past the entry's own size is read.
+            if header.AceSize < MIN_ALLOWED_ACE_SIZE {
+                return Err("an access list entry is too short for a SID".into());
+            }
+            // SAFETY: an entry of this type and at least 16 bytes is an ACCESS_ALLOWED_ACE
             // whose SID starts at its `SidStart` field; only that field's address is taken.
             let sid: PSID = unsafe { ptr::addr_of_mut!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }.cast();
-            // SAFETY: `sid` points into the live descriptor; `sid_text` validates it first.
+            // SAFETY: the entry holds at least 8 bytes at `sid` (checked above), and
+            // GetLengthSid reads only the SID's second byte (its sub-authority count).
+            let sid_len = unsafe { GetLengthSid(sid) };
+            if sid_len > u32::from(header.AceSize - ACE_SID_OFFSET) {
+                return Err("an access list entry's SID does not fit in the entry".into());
+            }
+            // SAFETY: `sid` points into the live descriptor and its stated length lies inside
+            // its entry (checked above); `sid_text` validates it before converting.
             let sid = unsafe { sid_text(sid) }.map_err(|e| format!("an access list entry: {e}"))?;
             entries.push(AccessEntry { allows: true, sid });
         } else {
