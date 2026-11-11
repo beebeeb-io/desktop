@@ -648,9 +648,17 @@ pub(crate) async fn apply_session(
         SESSION_COMMANDS.ensure_reactivation_allowed()?;
         windows_cf::ensure_reactivation_allowed()?;
     }
+    // Task 2447: Windows refuses a sign-in while one is present, with one exception: the signed-in account, still
+    // locked (a password sign-in waiting for its key), is given its key by a sign-in that brings it. Only when the
+    // server named the SAME user id for both sessions; anything else is refused as before.
     #[cfg(target_os = "windows")]
     if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
-        return Err("Sign out of the current account before signing in again.".into());
+        let acct = state.active_account()?;
+        let vault_unlocked = acct.session.lock().map(|session| session.is_some()).unwrap_or(true);
+        if !sign_in_adds_key_to_signed_in_session(acct.id.as_str(), profile.as_ref(), vault_unlocked) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+        tracing::info!("the signed-in account received its vault key from a sign-in that brought it");
     }
 
     #[cfg(target_os = "windows")]
@@ -710,6 +718,12 @@ pub(super) fn install_new_session(
         Err(changed) => return Ok(NewSession::Refused(changed.sign_in_sentence().to_string())),
     };
     persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;
+    // Task 2447: token and key arrived together for the account the server named for this token (`profile`): both
+    // are bound to its user id. With no profile (the fetch failed) both stay unknown; the next start's probe names
+    // the session.
+    if let Some(profile) = profile.as_ref() {
+        bind_session_and_key_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
+    }
     if let Some(profile) = profile
         && let Ok(mut cached) = acct.cached_profile.lock()
     {

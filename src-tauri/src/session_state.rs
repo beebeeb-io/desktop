@@ -645,6 +645,15 @@ pub(super) fn load_session_from_vault<S: keychain::AuthSecretStore>(
     else {
         return Ok(None);
     };
+    // Task 2447: whose key is this? Asked before the key is read, here, where every loader of token + key passes
+    // (startup restore, unlock, re-sign-in; both layouts). Another account's key, or a tagged key next to a session
+    // nobody named, is refused; an untagged key (from before the tags) loads as it always did.
+    if !crate::key_owner::stored_key_ownership(&vault)
+        .map_err(|e| keychain_error("read the vault key's owner", e))?
+        .may_load()
+    {
+        return Err(crate::key_owner::KEY_NOT_THIS_ACCOUNTS.to_string());
+    }
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;

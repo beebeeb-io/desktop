@@ -543,7 +543,7 @@ pub(super) const NO_VAULT_KEY_UNLOCK_ERROR: &str =
 /// `restore_session_inner`): the token is there and the key is not.
 pub(super) fn unlock_failure(error: String) -> String {
     #[cfg(target_os = "macos")]
-    if error.contains("secret not found") {
+    if error.contains("secret not found") || error == crate::key_owner::KEY_NOT_THIS_ACCOUNTS {
         return NO_VAULT_KEY_UNLOCK_ERROR.to_string();
     }
     error

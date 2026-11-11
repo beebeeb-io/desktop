@@ -172,6 +172,38 @@ impl AuthSecretStore for MacOsKeychainStore {
     fn holds_account_email(&self) -> AuthResult<bool> {
         macos_keychain::exists(&self.account_path(KeychainAccount::AccountEmail))
     }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        macos_keychain::save(&self.account_path(KeychainAccount::VaultKeyOwner), user_id.as_bytes())
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(&self.account_path(KeychainAccount::VaultKeyOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        macos_keychain::delete(&self.account_path(KeychainAccount::VaultKeyOwner))
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        macos_keychain::save(&self.account_path(KeychainAccount::SessionOwner), user_id.as_bytes())
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(&self.account_path(KeychainAccount::SessionOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        macos_keychain::delete(&self.account_path(KeychainAccount::SessionOwner))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -349,6 +381,38 @@ impl AuthSecretStore for WindowsCredentialStore {
 
     fn delete_account_email(&self) -> AuthResult<()> {
         windows_credentials::delete(&self.account_path(KeychainAccount::AccountEmail))
+    }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        windows_credentials::save(&self.account_path(KeychainAccount::VaultKeyOwner), user_id.as_bytes())
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(&self.account_path(KeychainAccount::VaultKeyOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        windows_credentials::delete(&self.account_path(KeychainAccount::VaultKeyOwner))
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        windows_credentials::save(&self.account_path(KeychainAccount::SessionOwner), user_id.as_bytes())
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(&self.account_path(KeychainAccount::SessionOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        windows_credentials::delete(&self.account_path(KeychainAccount::SessionOwner))
     }
 }
 
@@ -536,6 +600,38 @@ impl AuthSecretStore for TestKeychainStore {
 
     fn delete_account_email(&self) -> AuthResult<()> {
         self.delete(KeychainAccount::AccountEmail)
+    }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.save(KeychainAccount::VaultKeyOwner, user_id.as_bytes())
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        self.load(KeychainAccount::VaultKeyOwner)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::VaultKeyOwner)
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.save(KeychainAccount::SessionOwner, user_id.as_bytes())
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        self.load(KeychainAccount::SessionOwner)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::SessionOwner)
     }
 }
 

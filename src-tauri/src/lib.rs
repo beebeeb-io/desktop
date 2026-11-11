@@ -200,6 +200,10 @@ macro_rules! session_command {
 mod session_state;
 use session_state::*;
 pub use session_state::{AppState, Session};
+// Task 2447: whose vault key is stored next to whose session token: the rules, then their credential-store side.
+mod key_owner;
+mod session_owner;
+use session_owner::*;
 mod login_commands;
 pub(crate) use login_commands::open_onboarding_window_impl;
 use login_commands::*;
