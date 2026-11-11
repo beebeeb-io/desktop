@@ -106,7 +106,10 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         assert_eq!(rt.find("not-built").is_none(), built, "{section:?}");
         unbuilt += usize::from(!built);
     }
-    assert_eq!(unbuilt, 6, "six sections wait for their lanes");
+    assert_eq!(
+        unbuilt, 4,
+        "four sections wait for their lanes (Sync history and Available offline are built)"
+    );
     for gate in [
         GateState::SignedOut,
         GateState::Locked,

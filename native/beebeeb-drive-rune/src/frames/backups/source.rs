@@ -71,8 +71,8 @@ pub struct Device {
     pub photos: u32,
     /// "38 GB" (DW-0739); the list (DW-0737) shows the count only.
     pub size: Option<String>,
-    /// "Today", "19 Oct".
-    pub last_backup: String,
+    /// "Today", "19 Oct"; `None` for a device that is not signed in (the board shows only that).
+    pub last_backup: Option<String>,
     pub signed_in: bool,
 }
 
@@ -210,13 +210,13 @@ impl BackupsSource for FixtureSource {
     }
 
     fn devices(&self) -> Vec<Device> {
-        let device = |id: &str, name: &str, kind, photos, size: Option<&str>, last: &str, signed_in| Device {
+        let device = |id: &str, name: &str, kind, photos, size: Option<&str>, last: Option<&str>, signed_in| Device {
             id: id.into(),
             name: name.into(),
             kind,
             photos,
             size: size.map(str::to_string),
-            last_backup: last.into(),
+            last_backup: last.map(str::to_string),
             signed_in,
         };
         vec![
@@ -226,7 +226,7 @@ impl BackupsSource for FixtureSource {
                 DeviceKind::Phone,
                 12_418,
                 None,
-                "Today",
+                Some("Today"),
                 true,
             ),
             device(
@@ -235,10 +235,10 @@ impl BackupsSource for FixtureSource {
                 DeviceKind::Tablet,
                 4_120,
                 Some("38 GB"),
-                "19 Oct",
+                Some("19 Oct"),
                 true,
             ),
-            device("old-iphone", "Old iPhone", DeviceKind::Phone, 8_204, None, "", false),
+            device("old-iphone", "Old iPhone", DeviceKind::Phone, 8_204, None, None, false),
         ]
     }
 
@@ -309,6 +309,10 @@ mod tests {
         assert_eq!(source.folders().len(), 7);
         assert_eq!(source.folders().iter().filter(|f| f.on && !f.chosen_by_you).count(), 3);
         assert_eq!(source.devices().len(), 3);
+        assert!(source.mail_backup_on());
+        let mut running = FixtureSource::board();
+        running.back_up_now();
+        assert!(matches!(running.status(), Status::Running { .. }));
         assert_eq!(source.not_backed_up().iter().filter(|f| !f.excluded).count(), 3);
         assert_eq!(source.not_backed_up().iter().filter(|f| f.excluded).count(), 1);
         assert!(matches!(
