@@ -333,7 +333,11 @@ fn every_other_descriptor_is_refused_for_its_reason_and_gets_no_request() {
     use crate::shell::control::NotOurs;
     let sid = current_user_sid().unwrap();
     let cases = [
-        ("null-dacl", "D:NO_ACCESS_CONTROL".to_owned(), NotOurs::NoAccessList),
+        (
+            "null-dacl",
+            format!("O:{sid}D:NO_ACCESS_CONTROL"),
+            NotOurs::NoAccessList,
+        ),
         (
             "extra-entry",
             format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GR;;;AU)"),
