@@ -139,9 +139,14 @@ fn welcome_buttons_work_from_the_keyboard() {
 fn tab_order_is_continue_other_device_email_password_sign_in() {
     let mut rt = runtime("DW-A02");
     let mut order = Vec::new();
-    for _ in 0..9 {
+    // Where no system draws the caption buttons (this headless run), the caption's own three
+    // come first; on Windows they are the system's and are not Tab stops.
+    while order.len() < 9 {
         press(&mut rt, Key::Tab);
-        order.push(focused(&rt).unwrap_or_default());
+        let key = focused(&rt).unwrap_or_default();
+        if !key.starts_with("cap-") {
+            order.push(key);
+        }
     }
     assert_eq!(
         order,
@@ -268,6 +273,7 @@ fn windows_hello_is_asked_every_time_and_its_answers_are_frames() {
     assert_eq!(info(&rt6, "banner-0").role, "status", "cancelling is not an error");
     click(&mut rt6, "btn-1");
     assert_eq!(ui(&mut rt6).screen, Screen::SignIn, "Use another way to sign in");
+    tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::SignIn, "Escape goes back");
 }
@@ -412,7 +418,6 @@ fn the_links_leave_for_their_frames() {
         vec![Intent::ForgotPassword, Intent::UsePasskey, Intent::CreateAccount]
     );
     let mut rt = runtime("DW-A07");
-    eprintln!("{:?}", info(&rt, "back-link"));
     click(&mut rt, "back-link");
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }

@@ -336,7 +336,8 @@ impl SignInSource for FixtureSignInSource {
     fn begin_device_request(&mut self) {
         self.called("device_request");
         self.queue.push_back(SignInEvent::DeviceRequested(Ok(Self::request())));
-        if let Some(status) = self.script.device.clone() {
+        // The scripted answer is for one request: a new code waits, as a real one does.
+        if let Some(status) = self.script.device.take() {
             self.queue.push_back(SignInEvent::Device(status));
         }
     }
