@@ -81,6 +81,19 @@ fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
     row.is_some()
 }
 
+/// After the folder changed: the keyboard stays in the list (its first row, or the empty folder's
+/// area), so the next key is still the list's.
+fn focus_list(s: &State, tx: &mut Tx) {
+    tx.focus(
+        if s.listing.items.is_empty() {
+            "empty-area"
+        } else {
+            "row-0"
+        },
+        false,
+    );
+}
+
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.actions.menu.is_some() {
         return menu_key(s, ev, tx);
@@ -107,6 +120,15 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    // Back and Forward are the window's, wherever focus is (but a field keeps its own Alt+arrows).
+    let in_field = tx.focused() == Some(SEARCH_KEY);
+    if m.alt && !in_field && matches!(ev.key, Key::Left | Key::Right) {
+        let moved = if ev.key == Key::Left { s.back() } else { s.forward() };
+        if moved {
+            focus_list(s, tx);
+        }
+        return moved;
+    }
     if m.alt && m.shift && matches!(&ev.key, Key::Text(p) if p.eq_ignore_ascii_case("p")) {
         s.show_detail_pane = !s.show_detail_pane;
         return true;
@@ -116,7 +138,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 
 fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // The list's keys are the list's: with focus on a row or nowhere.
-    if tx.focused().is_some_and(|key| !key.starts_with("row-")) {
+    if tx
+        .focused()
+        .is_some_and(|key| !key.starts_with("row-") && key != "empty-area")
+    {
         return false;
     }
     let m = ev.mods;
@@ -151,7 +176,13 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         Key::Enter => match s.selected {
-            Some(row) => s.open_row(row),
+            Some(row) => {
+                let opened = s.open_row(row);
+                if opened {
+                    focus_list(s, tx);
+                }
+                opened
+            }
             None => false,
         },
         Key::Text(ref space) if space == " " && s.selected.is_some() => {
@@ -171,9 +202,13 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.open_file_menu(menu_point(s));
             true
         }
-        Key::Left if m.alt => s.back(),
-        Key::Right if m.alt => s.forward(),
-        Key::Backspace => s.back(),
+        Key::Backspace => {
+            let moved = s.back();
+            if moved {
+                focus_list(s, tx);
+            }
+            moved
+        }
         Key::Escape if !s.selected_rows().is_empty() => {
             s.clear_selection();
             true

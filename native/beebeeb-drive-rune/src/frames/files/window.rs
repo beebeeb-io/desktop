@@ -127,6 +127,10 @@ fn empty_folder(t: &Theme) -> El {
             )),
     );
     el().key("empty-area")
+        .role("list")
+        .label("Nothing here yet")
+        .focusable(true)
+        .no_focus_ring()
         .grow(1.0)
         .h_full()
         .center()
