@@ -274,7 +274,8 @@ pub struct NoteMeta {
 
 pub fn app_json() -> Value {
     json!({
-        "name": "Beebeeb Drive",
+        "name": crate::shell::identity::AppIdentity::CURRENT.main_window_title(),
+        "id": crate::shell::identity::AppIdentity::CURRENT.bundle_identifier(),
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("BEEBEEB_BUILD_COMMIT").unwrap_or("unknown"),
         "build_kind": option_env!("BEEBEEB_BUILD_KIND").unwrap_or("dev"),

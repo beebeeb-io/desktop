@@ -7,9 +7,9 @@ use rune::{AppSpec, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, col, te
 use serde_json::Value;
 
 use super::model::{self, BLANK_RGBA, NOTE_SCHEMA, REDACTED, Rgba, Status, StatusState};
-use super::{Feedback, Mode, capture, paths};
+use super::{Feedback, Mode, capture};
 use crate::State;
-use crate::source::{DriveSource, LargeFixtureSource};
+use crate::source::LargeFixtureSource;
 
 pub(super) const SIZE: (f32, f32) = (1280.0, 800.0);
 pub(super) const SCALE: f32 = 2.0;
@@ -25,13 +25,12 @@ pub(super) fn text_system() -> rune::text::TextSystem {
 }
 
 pub(super) fn runtime_with(inbox: &Path, dark: bool, change: impl FnOnce(&mut State)) -> Runtime<State> {
-    let spec = super::hook_spec(
-        AppSpec {
-            on_key: Some(crate::on_key),
-            ..AppSpec::new("test", SIZE, crate::init, crate::view)
-        },
-        crate::feedback_frame,
-    );
+    // As `shell::run` builds the main window: the shell's handlers, wrapped.
+    let spec = super::hook_spec(AppSpec {
+        on_key: Some(crate::shell::host::on_key),
+        poll: Some(crate::shell::host::poll),
+        ..AppSpec::new("test", SIZE, crate::init, crate::view)
+    });
     let mut state = crate::init();
     state.feedback = Feedback::with_inbox(Some(inbox.to_path_buf()));
     change(&mut state);
@@ -451,7 +450,7 @@ fn the_mode_does_not_care_which_source_feeds_the_list() {
     let inbox = temp_inbox("large");
     let mut rt = runtime_with(&inbox, true, |s| {
         let source = Box::new(LargeFixtureSource::new(5000));
-        s.listing = source.list(None);
+        (s.listing, s.list_error) = crate::load(source.as_ref(), None);
         s.source = source;
         s.selected = None;
         s.show_detail_pane = false;
@@ -673,48 +672,6 @@ fn status_json_parses_every_state_and_ignores_garbage() {
     assert_eq!(Status::parse(r#"{"state":"fixing"}"#).unwrap().chip(), "Being fixed");
 }
 
-#[test]
-fn the_inbox_is_the_flag_then_the_env_then_the_apps_data_folder() {
-    let env = |pairs: &'static [(&'static str, &'static str)]| {
-        move |k: &str| {
-            pairs
-                .iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| std::ffi::OsString::from(v))
-        }
-    };
-    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let base: &[(&str, &str)] = &[("HOME", "/home/t"), ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local")];
-    let both: &[(&str, &str)] = &[
-        ("HOME", "/home/t"),
-        ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local"),
-        (paths::DIR_ENV, "/env/inbox"),
-    ];
-    let test_id: &[(&str, &str)] = &[
-        ("HOME", "/home/t"),
-        ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local"),
-        (paths::APP_ID_ENV, "io.beebeeb.app.test"),
-    ];
-    assert_eq!(
-        paths::inbox_from(&args(&["app", paths::DIR_FLAG, "/flag/inbox"]), env(both)),
-        Some(PathBuf::from("/flag/inbox"))
-    );
-    assert_eq!(
-        paths::inbox_from(&args(&["app"]), env(both)),
-        Some(PathBuf::from("/env/inbox"))
-    );
-    let default = paths::inbox_from(&args(&["app"]), env(base)).unwrap();
-    assert!(
-        default.ends_with("feedback/inbox") && default.to_string_lossy().contains(paths::DEFAULT_APP_ID),
-        "{default:?}"
-    );
-    let test = paths::inbox_from(&args(&["app"]), env(test_id)).unwrap();
-    assert!(
-        test.to_string_lossy().contains("io.beebeeb.app.test"),
-        "the test build's own id: {test:?}"
-    );
-}
-
 /// Notes never leave this PC: the module has no networking API in it at all.
 #[test]
 fn the_module_has_no_network_code() {
@@ -754,7 +711,10 @@ fn the_module_has_no_network_code() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 7, "mod, model, capture, paths, ui, tests, guard_tests");
+    assert_eq!(
+        checked, 9,
+        "mod, model, capture, frame, paths, ui, tests, guard_tests, shell_tests"
+    );
     // The check can fail: the same scan finds a socket in a line that has one.
     let mutant = format!("let s = {}::connect(addr);", banned[1]);
     assert!(banned.iter().any(|b| mutant.contains(b.as_str())));
@@ -764,11 +724,12 @@ fn the_module_has_no_network_code() {
 /// `FEEDBACK_EVIDENCE_DIR` when it is set, else to a temp folder.
 #[test]
 fn evidence_pngs() {
+    // `temp_inbox` empties its folder: ask for it once, before anything is put beside it.
+    let inbox = temp_inbox("evidence");
     let out = std::env::var_os("FEEDBACK_EVIDENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| temp_inbox("evidence").with_file_name("evidence"));
+        .unwrap_or_else(|| inbox.with_file_name("evidence"));
     std::fs::create_dir_all(&out).unwrap();
-    let inbox = temp_inbox("evidence");
     let mut rt = runtime(&inbox);
     let shot = |rt: &mut Runtime<State>, name: &str| {
         // Past the entrance fades: the picture is the mode at rest.

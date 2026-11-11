@@ -14,7 +14,6 @@ fn git(args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_KIND");
-    println!("cargo:rerun-if-env-changed=BEEBEEB_APP_ID");
     if let Some(log) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {
         println!("cargo:rerun-if-changed={log}");
     }

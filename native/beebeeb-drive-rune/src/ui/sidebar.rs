@@ -1,19 +1,13 @@
-//! Sidebar: section items with icon/label/count badge, THIS PC section,
-//! storage meter, and account row.
-//!
-//! Board measurements (from Playwright geometry export):
-//! - Sidebar width: 220 pt (board: x=1, w=220)
-//! - Section items: 30 pt tall, 12 pt font, icon 16x16
-//! - Section label "THIS PC": 10 pt/600, ink-3 colour
-//! - Storage meter: 4 pt bar, "240 GB of 1 TB" + breakdown
-//! - Account row: avatar 26x26, name 12/600, email 11/400
+//! Sidebar (`.mk-side`): the brand block, the sections, "This PC", the storage meter and
+//! the account row.
 
 use crate::State;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, space, type_};
-use rune::{Color, El, col, el, icon, row, text};
+use crate::theme::tokens::{Theme, radius, type_};
+use rune::{Color, El, Span, col, el, row};
 
-/// Board: sidebar element is 220px wide (from golden/DW-0401.json: sidebar w=220).
+use super::kit;
+
 const SIDEBAR_W: f32 = 220.0;
 
 /// Which sidebar section is active.
@@ -57,7 +51,8 @@ impl SidebarSection {
         }
     }
 
-    /// Badge count from the board: Shared 1, Trash 12, others none.
+    /// The count beside a section. Shared's is a pill (a request is waiting for an answer),
+    /// Trash's a plain figure.
     pub fn badge(self) -> Option<u32> {
         match self {
             Self::Shared => Some(1),
@@ -65,276 +60,337 @@ impl SidebarSection {
             _ => None,
         }
     }
+
+    /// The board's tooltip: the name and its shortcut.
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            Self::Files => "Ctrl+1",
+            Self::Shared => "Ctrl+2",
+            Self::Photos => "Ctrl+3",
+            Self::Backups => "Ctrl+4",
+            Self::Trash => "Ctrl+5",
+        }
+    }
+}
+
+/// How a sidebar item shows its count.
+#[derive(Clone, Copy)]
+pub enum Count {
+    /// A pill: something waits for the person (`.mk-badge`).
+    Pill(u32),
+    /// A plain figure (`.mk-side-count`).
+    Plain(u32),
+}
+
+/// One sidebar item (`.mk-side-item`): icon, label, optional count. Keys: `<label>-row`,
+/// `<label>-icon`, `<label>`, `<label>-badge`.
+pub fn side_item(
+    label: &'static str,
+    ic: &'static rune::Icon,
+    count: Option<Count>,
+    on: bool,
+    shortcut: &str,
+    t: &Theme,
+) -> El {
+    let mut item = row()
+        .key(format!("{label}-row"))
+        .role("button")
+        .label(label)
+        .shortcut_hint(shortcut)
+        .help(format!("{label}  {shortcut}"))
+        .h(28.0)
+        .px(9.0)
+        .gap(9.0)
+        .center_y()
+        .radius(radius::CONTROL)
+        .fill(if on { t.selection } else { Color::TRANSPARENT })
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .child(kit::glyph(
+            format!("{label}-icon"),
+            ic,
+            16.0,
+            if on { t.text } else { t.text_tertiary },
+        ))
+        .child(
+            kit::label(
+                label,
+                label,
+                type_::LIST_ITEM,
+                if on { t.text } else { t.text_secondary },
+            )
+            .grow(1.0)
+            .truncate(),
+        );
+    match count {
+        Some(Count::Pill(n)) => {
+            item = item.child(
+                el().key(format!("{label}-pill"))
+                    .min_w(18.0)
+                    .h(18.0)
+                    .px(5.0)
+                    .radius(9.0)
+                    .fill(t.badge)
+                    .center()
+                    .child(kit::label(
+                        format!("{label}-badge"),
+                        n.to_string(),
+                        type_::BADGE,
+                        t.text,
+                    )),
+            );
+        }
+        Some(Count::Plain(n)) => {
+            item = item.child(kit::label(
+                format!("{label}-badge"),
+                n.to_string(),
+                type_::KBD,
+                t.text_tertiary,
+            ));
+        }
+        None => {}
+    }
+    item
+}
+
+/// The brand block (`.mk-side-brand`): the mark, the wordmark with its Amber ".io", and the
+/// product's name under it.
+pub fn brand(product: &str, t: &Theme) -> El {
+    let word = "beebeeb.io";
+    let io = Span {
+        start: 7,
+        end: word.len() as u32,
+        color: Some(t.accent),
+        ..Span::default()
+    };
+    row()
+        .key("brand")
+        .px(8.0)
+        .py(2.0)
+        .gap(6.461_54)
+        .center_y()
+        .child(kit::mark("brand-mark", 24.0))
+        .child(
+            col()
+                .key("brand-text")
+                .gap(1.846_15)
+                .child(kit::label("brand-word", word, type_::WORDMARK, t.text).spans(vec![io]))
+                .child(kit::label(
+                    "drive-label",
+                    product.to_uppercase(),
+                    type_::CAPTION_MONO_SM,
+                    t.text_secondary,
+                )),
+        )
 }
 
 pub fn sidebar(s: &State, t: &Theme) -> El {
     let storage = s.storage;
     let active = s.sidebar_section;
 
-    // Sections list
-    // Board: sections col px=12 gives icon at x=1+12+8=21, text ml=8 → x=45 ✓
-    // Board: items h=29, gap=0 gives text tops 29px apart matching board y positions
-    let mut sections = col().key("sidebar-sections").px(12.0).gap(0.0);
-
+    let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
-        let is_active = active == section;
-        let badge = section.badge();
-
-        let mut item = row()
-            .key(format!("{}-row", section.label()))
-            .role("button")
-            .label(section.label())
-            .h(29.0) // Board: items h=29 (gap=0 → text rows 29px apart)
-            .px(space::SM)
-            .gap(8.0) // Board gap=8 between flex items (icon|text|badge); constrains text grow width
-            .center_y()
-            .radius(radius::MD)
-            .fill(if is_active { t.hover } else { Color::TRANSPARENT })
-            .hover(t.hover)
-            .press(t.press)
-            .focusable(true)
-            .on_press(move |s: &mut State| s.sidebar_section = section)
-            .child(
-                icon(section.icon(), 16.0)
-                    .key("icon")
-                    .color(if is_active { t.accent } else { t.icon_secondary }),
-            )
-            .child(
-                // Board key on the TEXT (board measures text: x=45, h=17, not the row h=29)
-                // gap(8.0) on row already provides icon→text spacing; no extra ml needed
-                text(section.label())
-                    .key(section.label())
-                    .font(if is_active { type_::BODY_SEMI } else { type_::BODY })
-                    .color(t.text)
-                    .grow(1.0),
-            );
-
-        if let Some(count) = badge {
-            // Board keys: "Shared-badge" (18×18 pill for single digit),
-            // "Trash-badge" (plain text for double digit)
-            let badge_key: String = format!("{}-badge", section.label());
-            if count < 10 {
-                // Single-digit: circular pill badge (board: Shared-badge w=18, h=18)
-                item = item.child(
-                    el().key(badge_key)
-                        .size(18.0, 18.0)
-                        .radius(9.0)
-                        .fill(t.separator)
-                        .center()
-                        .child(text(format!("{count}")).font(type_::BODY_SM).color(t.text_secondary)),
-                );
+        let count = section.badge().map(|n| {
+            if section == SidebarSection::Shared {
+                Count::Pill(n)
             } else {
-                // Double-digit: plain text (board: Trash-badge w=14, h=14)
-                item = item.child(
-                    text(format!("{count}"))
-                        .key(badge_key)
-                        .font(type_::BODY_SM)
-                        .color(t.text_tertiary)
-                        .w(14.0), // board: Trash-badge w=14
-                );
+                Count::Plain(n)
             }
-        }
-
-        sections = sections.child(item);
+        });
+        sections = sections.child(
+            side_item(
+                section.label(),
+                section.icon(),
+                count,
+                active == section,
+                section.shortcut(),
+                t,
+            )
+            .on_press(move |s: &mut State| s.sidebar_section = section),
+        );
     }
 
-    // THIS PC section
-    // Board: this-pc-label x=11, y=246, w=199, h=16
-    // Trash row bottom: y=235. mt=11 → this_pc starts at y=246.
-    // Label h=16 (forced), mb=1 → effective=17 → Sync history row at y=263.
-    // col pl=0, pr=11 → items (pl=20) icon at x=21, text at x=45. Badge right at 201.
     let this_pc = col()
         .key("this-pc")
-        .pl(0.0) // no col left padding; label uses ml=10 for x=11
-        .pr(12.0) // col right: 221-12=209; item pr=8 → content right=201; badge right=201 ✓
-        .mt(11.0) // Board: gap from Trash row bottom (y=235) to this-pc-label (y=246) = 11
-        .gap(0.0)
-        .child(
-            text("THIS PC")
-                .key("this-pc-label")
-                .font(type_::SECTION_LABEL)
-                .color(t.text_tertiary)
-                .ml(10.0) // → x = 1(sidebar) + 10 = 11 ✓ (board: x=11)
-                .w(199.0) // board: this-pc-label w=199
-                .h(16.0) // board: h=16; ensures effective height 17 with mb=1
-                .mb(1.0), // 1px margin-bottom: Sync history row top = 246+16+1=263; text at 269 ✓
+        .gap(1.0)
+        .child(el().key("this-pc-title").px(10.0).pb(3.0).child(kit::label(
+            "this-pc-label",
+            "THIS PC",
+            type_::SECTION_LABEL,
+            t.text_tertiary,
+        )))
+        .child(side_item(
+            "Sync history",
+            &icons::SYNC_HISTORY,
+            None,
+            false,
+            "Ctrl+6",
+            t,
+        ))
+        .child(side_item(
+            "Available offline",
+            &icons::AVAILABLE_OFFLINE,
+            Some(Count::Plain(3)),
+            false,
+            "Ctrl+7",
+            t,
+        ));
+
+    let nav = col()
+        .key("sidebar-nav")
+        .role("navigation")
+        .label("Sections")
+        .gap(12.0)
+        .grow(1.0)
+        .min_h(0.0)
+        .child(sections)
+        .child(this_pc);
+
+    // Storage meter (`.mk-store`). The split is the board's sample: Files 24 GB, Photos 216 GB.
+    const FILES_BYTES: i64 = 24_000_000_000;
+    let quota = storage.quota_bytes.max(1) as f64;
+    let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
+    let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
+    let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
+    let storage_value = if s.storage_known {
+        format!(
+            "{} of {}",
+            format_storage(storage.used_bytes),
+            format_storage(storage.quota_bytes)
         )
-        .child(this_pc_item("Sync history", &icons::SYNC_HISTORY, None, t))
-        .child(this_pc_item("Available offline", &icons::AVAILABLE_OFFLINE, Some(3), t));
-
-    // Storage meter
-    let used_pct = if storage.quota_bytes > 0 {
-        (storage.used_bytes as f64 / storage.quota_bytes as f64).min(1.0)
     } else {
-        0.0
+        // No figure without the server (a `--db` source never asks it).
+        "Unavailable".to_string()
     };
-    let used_label = format_storage(storage.used_bytes);
-    let quota_label = format_storage(storage.quota_bytes);
-
-    // Board: storage-label y=705. Meter top = 706 with pb=14 (shrinks spacer, pulls meter up).
-    // pb=14 makes meter_h=54; spacer fills 385px; meter_top(abs)=33+57+145+86+385=706. Δy=1 ✓.
-    let meter = col()
+    let mut meter = col()
         .key("storage-meter")
-        .px(space::MD)
-        .pb(14.0) // board: extra bottom padding makes meter taller → spacer shorter → meter higher
-        .gap(space::XS)
+        .role("group")
+        .label(format!("Storage: {storage_value}"))
+        .gap(5.0)
+        .px(4.0)
         .child(
             row()
                 .key("storage-header")
                 .justify_between()
-                .w_full()
-                .child(
-                    text("Storage")
-                        .key("storage-label")
-                        .font(type_::BODY_SM)
-                        .color(t.text_tertiary)
-                        .ml(8.0), // board: storage-label x=21=1+12(px)+8(ml) ✓
-                )
-                .child(
-                    text(format!("{used_label} of {quota_label}"))
-                        .key("storage-value")
-                        .font(type_::BODY_SM)
-                        .color(t.text_tertiary),
-                ),
+                .child(kit::label("storage-label", "Storage", type_::CAPTION, t.text_secondary))
+                .child(kit::label(
+                    "storage-value",
+                    storage_value.clone(),
+                    type_::KBD,
+                    t.text_tertiary,
+                )),
         )
         .child(
-            el().key("meter-track")
+            row()
+                .key("meter-track")
                 .w_full()
-                .h(4.0)
-                .radius(2.0)
+                .h(5.0)
+                .radius(2.5)
+                .clip_rounded(2.5)
                 .fill(t.separator)
+                // Neutral fills: Amber is only encryption state and the primary action.
+                .child(el().key("meter-fill-0").h_full().w(track_w * files_frac).fill(t.text))
                 .child(
-                    el().key("meter-fill")
-                        .h(4.0)
-                        .radius(2.0)
-                        // Neutral fill: Amber is only encryption state + the primary action.
-                        .fill(t.text_quaternary)
-                        .w((SIDEBAR_W - space::MD * 2.0) * used_pct as f32),
+                    el().key("meter-fill-1")
+                        .h_full()
+                        .w(track_w * photos_frac)
+                        .fill(t.text_quaternary),
                 ),
-        )
-        .child(
-            text("Files 24 GB  Photos 216 GB")
-                .key("storage-breakdown")
-                .font(type_::BODY_SM)
-                .color(t.text_quaternary),
         );
+    // The split, like the total, is the server's: nothing is shown in its place.
+    if s.storage_known {
+        meter = meter.child(
+            row()
+                .key("storage-breakdown")
+                .justify_between()
+                .child(kit::label(
+                    "storage-files",
+                    format!("Files {}", format_storage(FILES_BYTES)),
+                    type_::KBD,
+                    t.text_tertiary,
+                ))
+                .child(kit::label(
+                    "storage-photos",
+                    format!("Photos {}", format_storage((storage.used_bytes - FILES_BYTES).max(0))),
+                    type_::KBD,
+                    t.text_tertiary,
+                )),
+        );
+    }
 
-    // Account row
-    // Board: account-name x=53. With sidebar x=1, pl=12, avatar 26px: gap = 53-1-12-26=14.
-    // Board: account-name y=760 = account_row_top → no center_y; children top-aligned.
-    // account_row_top = sidebar_bottom-40 = (33+767)-40=760. name at 760, email at 775 ✓.
-    let account_row = row()
+    let account = row()
         .key("account-row")
-        .h(40.0)
-        .w_full()
-        .px(space::MD)
-        // No center_y: board shows account-name at y=account_row_top (top-aligned)
-        .gap(14.0) // board: gap=14 between avatar and account-info (53-1-12-26=14)
-        // Avatar circle
-        .child(
-            el().key("avatar")
-                .size(26.0, 26.0)
-                .radius(13.0)
-                .fill(t.separator_strong)
-                .center()
-                .child(text("AV").key("initials").font(type_::AVATAR_INITIALS).color(t.text)),
-        )
+        .center_y()
+        .gap(8.0)
+        .pt(2.0)
+        .px(2.0)
+        .child(kit::avatar(
+            "avatar",
+            "AV",
+            26.0,
+            rune::oklch(0.88, 0.05, 250.0),
+            t.card,
+            t,
+        ))
         .child(
             col()
                 .key("account-info")
                 .grow(1.0)
+                .min_w(0.0)
+                .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
                 .child(
-                    text("Anna Visser")
-                        .key("account-name")
-                        .font(type_::BODY_SEMI)
-                        .color(t.text)
-                        .w(115.0), // board: account-name w=115 (text ink width)
-                )
-                .child(
-                    text("anna@northwind.st\u{2026}")
-                        .key("account-email")
-                        .font(type_::BODY_SM)
-                        .color(t.text_tertiary)
-                        .w(115.0), // board: account-email w=115 (text ink width)
+                    kit::label(
+                        "account-email",
+                        "anna@northwind.studio",
+                        type_::BODY_SM,
+                        t.text_tertiary,
+                    )
+                    .truncate(),
                 ),
         )
         .child(
-            icon(&icons::SETTINGS, 15.0)
-                .key("settings-icon")
-                .color(t.icon_secondary),
+            el().key("settings-btn")
+                .role("button")
+                .label("Settings")
+                .shortcut_hint("Ctrl+,")
+                .help("Settings  Ctrl+,")
+                .size(26.0, 26.0)
+                .radius(radius::CONTROL)
+                .center()
+                .hover(t.selection)
+                .press(t.press)
+                .focusable(true)
+                .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
         );
 
-    // Sidebar header: holds the drive-label "DRIVE" text at board position x=50, y=64.
-    // Board: drive-label x=50 (relative x=49 from sidebar left), y=64 (relative y=31 from sidebar top).
-    // Header h=57 so sections start at relative y=57 (absolute y=90), giving Files text at y=96 ✓.
-    let sidebar_header = el()
-        .key("sidebar-header")
-        .w_full()
-        .h(57.0)
-        .pt(31.0) // drive-label top at relative y=31 → absolute y=33+31=64 ✓
-        .pl(49.0) // drive-label at relative x=49 → absolute x=1+49=50 ✓
-        .child(
-            text("DRIVE")
-                .key("drive-label")
-                .font(type_::CAPTION_MONO_SM)
-                .color(t.text_secondary)
-                .w(81.0) // board: drive-label w=81 (wider due to letter-spacing in board CSS)
-                .h(12.0), // board: drive-label h=12 (line-height 12 in board CSS)
-        );
+    let foot = col()
+        .key("sidebar-foot")
+        .gap(10.0)
+        .pt(10.0)
+        .px(6.0)
+        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout()
+        .child(meter)
+        .child(account);
 
     col()
         .key("sidebar")
         .w(SIDEBAR_W)
         .h_full()
         .fill(t.sidebar_bg)
-        // No pt: sidebar-header element provides the top spacing
-        .child(sidebar_header)
-        .child(sections)
-        .child(this_pc)
-        .child(el().key("sidebar-spacer").grow(1.0))
-        .child(meter)
-        .child(account_row)
+        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
+        .border_layout()
+        .gap(12.0)
+        .pt(12.0)
+        .px(10.0)
+        .pb(10.0)
+        .child(brand("Drive", t))
+        .child(nav)
+        .child(foot)
 }
 
-fn this_pc_item(label: &'static str, ic: &'static rune::Icon, count: Option<u32>, t: &Theme) -> El {
-    // Board: this-pc items h=29. col pl=0 → item pl=20 gives icon at x=21, text at x=45.
-    // Board key on the TEXT (board measures text position, not row).
-    let mut item = row()
-        .key(format!("{label}-row"))
-        .h(29.0) // Board: h=29 to match section item rows
-        .pl(20.0) // col has pl=0, so pl=20 on item → icon at x=1+20=21, text at x=45 ✓
-        .pr(space::SM)
-        .gap(8.0) // Board gap=8: icon→text→badge spacing; no extra ml on text
-        .center_y()
-        .radius(radius::MD)
-        .hover(t.hover)
-        .child(icon(ic, 16.0).key("icon").color(t.icon_secondary))
-        .child(
-            // Board key on TEXT (e.g. "Sync history", "Available offline")
-            // gap(8.0) on row provides icon→text spacing; no extra ml needed
-            text(label)
-                .key(label) // board key: board measures text at x=45, h=17
-                .font(type_::BODY)
-                .color(t.text)
-                .grow(1.0),
-        );
-
-    if let Some(c) = count {
-        // Board key: "<label>-badge" (e.g. "Available offline-badge")
-        // Board shows Available offline-badge as plain text "3" (w=7, h=14)
-        let badge_key = format!("{label}-badge");
-        item = item.child(
-            text(format!("{c}"))
-                .key(badge_key)
-                .font(type_::BODY_SM)
-                .color(t.text_tertiary),
-        );
-    }
-
-    item
-}
-
-/// Format bytes as "240 GB", "1 TB", etc. (base-10 for the board's display).
+/// Format bytes as "240 GB", "1 TB" (base 10, as the board shows storage).
 fn format_storage(bytes: i64) -> String {
     const GB: i64 = 1_000_000_000;
     const TB: i64 = 1_000_000_000_000;
@@ -344,14 +400,14 @@ fn format_storage(bytes: i64) -> String {
         if (tb - tb.round()).abs() < 0.05 {
             format!("{} TB", tb.round() as i64)
         } else {
-            format!("{:.1} TB", tb)
+            format!("{tb:.1} TB")
         }
     } else if bytes >= GB {
         let gb = bytes as f64 / GB as f64;
-        if (gb - gb.round()).abs() < 0.5 {
+        if (gb - gb.round()).abs() < 0.05 {
             format!("{} GB", gb.round() as i64)
         } else {
-            format!("{:.1} GB", gb)
+            format!("{gb:.1} GB")
         }
     } else {
         format!("{} MB", bytes / 1_000_000)

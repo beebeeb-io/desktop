@@ -1,0 +1,626 @@
+name: Desktop release (native Windows)
+
+# The release path of the NATIVE Windows app (0.9.0 and later): native/beebeeb-drive-rune packaged by
+# packaging/windows/build-installer.ps1 (plain makensis, no Tauri bundler) and published to the v2 channel manifests
+# (desktop/v2/<channel>.json) that the bridge release 0.8.25 and every native build read.
+#
+# It is a separate workflow on purpose: release.yml stays the 0.8.x path, byte for byte, and the manifests 0.8.24
+# and older read (desktop/latest.json, beta.json, alpha.json) are never written here, so a native build can never
+# reach a client that did not pass through the bridge. Design, decisions and what is still open:
+# docs/superpowers/specs/2026-11-11-native-installer-updater.md.
+#
+# Same gates as release.yml: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
+# branch point, the Authenticode gate, the updater-signature key guard.
+#
+# Signing boundary (spec section 6, "The signing boundary"): the two jobs that sign, `build` and `publish-manifest`,
+# name the GitHub environment `desktop-release`, and the updater key of the native line exists only as that
+# environment's secrets UPDATER_V2_PRIVATE_KEY / UPDATER_V2_PRIVATE_KEY_PASSWORD. The environment's rules (required
+# reviewer, branches main and release/* only) are what holds: a run from another branch gets no key, whatever its
+# copy of this file says. The checks in this file (the ref rule, the branch point, the tag) are the second line.
+# No step that holds a key installs dependencies.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Plain semver version to release or promote, 0.9.0 or later
+        required: true
+        type: string
+      channel:
+        description: v2 channel manifest to publish
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+      publish_existing:
+        description: Publish only the selected v2 channel manifest for an existing desktop-v<version> release
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  validate-release-inputs:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate version and channel
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Desktop release version '$RELEASE_VERSION' must be plain semver like 0.9.0."
+            exit 1
+          fi
+          IFS=. read -r major minor _ <<< "$RELEASE_VERSION"
+          if (( major == 0 && minor < 9 )); then
+            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version: release it with release.yml. This workflow publishes native builds, 0.9.0 and later."
+            exit 1
+          fi
+          case "$RELEASE_CHANNEL" in
+            alpha|beta|stable) ;;
+            *) echo "::error::Desktop release channel '$RELEASE_CHANNEL' must be alpha, beta, or stable."; exit 1 ;;
+          esac
+
+      - name: Checkout the ref rules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # Building and promoting both sign. Neither runs from a branch that is not a release ref: main is protected
+      # by pull requests, and a release/* branch is held to its reviewed branch point by the next job. The
+      # `desktop-release` environment enforces the same list in the repository settings. The rule is a script with
+      # its own self-test (also run on every pull request, ci.yml).
+      - name: Refuse a ref that is not a release ref
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          bash scripts/native-release-ref-check.sh --self-test
+          bash scripts/native-release-ref-check.sh ref "$REF"
+
+      # The public key the native line trusts is pinned in a second place: a change to the committed file that
+      # does not also change this line (and the same line in tests/nativeChannelManifest.test.ts) stops here.
+      - name: Refuse another updater public key than the pinned one
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8e8ab5cb63a9e1e467135a79dabb9dd9f58895f547a078fd7d61a24244ad3284  crates/beebeeb-updater/keys/updater-v2.pub' | sha256sum --check --strict
+
+  validate-release-notes:
+    name: Validate release notes
+    if: ${{ !inputs.publish_existing }}
+    needs: validate-release-inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse while RELEASE_BLOCKERS.md lists a Windows item
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          items="$(bash scripts/release-blockers-check.sh windows)" || rc=$?
+          if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+            echo "::error::release-blockers-check.sh exited $rc (expected 0 or 1). Refusing the release. See docs/RELEASING.md."
+            exit 1
+          fi
+          if [[ -n "$items" ]]; then
+            echo "::error file=RELEASE_BLOCKERS.md::RELEASE_BLOCKERS.md lists release blockers binding Windows. See docs/RELEASING.md."
+            printf '%s\n' "$items"
+            exit 1
+          fi
+          echo "RELEASE_BLOCKERS.md lists no item for windows"
+
+      # A native release is Windows only: the notes carry the "macOS: not in this release" line (--no-macos), and
+      # every sentence about updating names Windows. Authored notes stay mandatory (docs/RELEASING.md).
+      - name: Validate authored release notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md --no-macos
+
+  test:
+    name: Run release test gate
+    if: ${{ !inputs.publish_existing }}
+    needs: validate-release-notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Release script tests
+        run: bun test tests/nativeChannelManifest.test.ts tests/releaseChannelChecks.test.ts
+
+      # The count line is asserted: a run that executed no test is a failure, not a pass.
+      - name: Updater tests
+        working-directory: crates/beebeeb-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
+          test "$(cargo tree --locked -e normal | grep -c tauri)" -eq 0
+          # The key the native line trusts is committed, is a key, and is not the 0.8.x key: named here so that a
+          # filter which matched no test is a failure.
+          grep -Eq '^test signature::tests::a_release_build_has_the_v2_key \.\.\. ok$' "$RUNNER_TEMP/updater-test.log"
+
+  # Runs for a promotion (publish_existing) too: promoting signs a manifest, so it is held to the same branch rule.
+  verify-branch-point:
+    name: Verify release branch point
+    if: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    needs: validate-release-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release branch started from reviewed commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          MAIN_REF: origin/main
+        run: bash scripts/verify-release-branch-point.sh
+
+  build:
+    name: Build native Windows
+    if: >-
+      ${{
+        !cancelled() &&
+        !inputs.publish_existing &&
+        needs.test.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped')
+      }}
+    needs:
+      - test
+      - verify-branch-point
+    runs-on: windows-latest
+    # The signing trust boundary: Azure trusts only this environment's OIDC subject, and the native line's updater
+    # key is this environment's secret.
+    environment: desktop-release
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # The native crate pins its own toolchain (native/beebeeb-drive-rune/rust-toolchain.toml); rustup installs it
+      # on the first cargo call in that directory.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The compile runs BEFORE the Azure login (release.yml's measured timing constraint: the OIDC assertion is
+      # valid about 5 minutes, so nothing slow may sit between the login and the first signature).
+      #
+      # BEEBEEB_BUILD_NOT_BEFORE is the time of the commit this build is made from (reproducible: the same commit
+      # gives the same binary rule), baked into the updater (crates/beebeeb-updater host::BUILD_NOT_BEFORE): the
+      # build refuses to install from any manifest signed before it. Its own manifest is signed later in this run,
+      # so it passes. The crate's build script stops the build on a value that is not a plausible time.
+      - name: Build the native app
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        env:
+          BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          BEEBEEB_BUILD_NOT_BEFORE="$(git log -1 --format=%ct HEAD)"
+          export BEEBEEB_BUILD_NOT_BEFORE
+          echo "commit time (not-before): $BEEBEEB_BUILD_NOT_BEFORE"
+          echo "BUILD_NOT_BEFORE=$BEEBEEB_BUILD_NOT_BEFORE" >> "$GITHUB_ENV"
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      # What is checked is the binary that ships, not the environment it was meant to be built in: it must carry
+      # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
+      # 2026-11-11, the day the v2 key was made). A binary without the mark has no updater in it, or was built
+      # without the time and would refuse every update: neither is released.
+      - name: Refuse a binary that does not report the commit's time as its build time
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe
+          marks="$(grep -a -o 'beebeeb-updater-not-before=[0-9a-z]*;' "$exe" | sort -u || true)"
+          echo "marks in the binary: ${marks:-none}"
+          if [[ "$marks" != "beebeeb-updater-not-before=${BUILD_NOT_BEFORE};" ]]; then
+            echo "::error::the built binary does not report build time $BUILD_NOT_BEFORE (found: ${marks:-no mark})."
+            exit 1
+          fi
+          if (( BUILD_NOT_BEFORE < 1794355200 )); then
+            echo "::error::build time $BUILD_NOT_BEFORE is before 2026-11-11: not a plausible commit time."
+            exit 1
+          fi
+
+      # NSIS is pinned, not taken from the runner image: NSIS 3.11 as released (the archive Tauri's bundler pins
+      # too), checked by SHA-256 before it is unpacked; build-installer.ps1 checks the compiler and the stub it packs
+      # into the installer again, file by file. The helper plugin is the one the 0.8.x installer already carries
+      # (nsis_tauri_utils 0.5.3); build-installer.ps1 refuses any other file by SHA-256.
+      - name: Fetch pinned NSIS and the NSIS helper plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.11.zip'
+          Invoke-WebRequest -Uri 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip' -OutFile $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne 'c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1') { throw "nsis-3.11.zip has sha256 $hash" }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nsis')
+          $nsis = Join-Path $env:RUNNER_TEMP 'nsis\nsis-3.11'
+          if (!(Test-Path (Join-Path $nsis 'makensis.exe'))) { throw 'the NSIS archive has no makensis.exe' }
+          $dir = Join-Path $env:RUNNER_TEMP 'nsis-plugins'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll' -OutFile (Join-Path $dir 'nsis_tauri_utils.dll')
+          "NSIS_DIR=$nsis" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NSIS_PLUGIN_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Azure login for Artifact Signing (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Signs the app binary, the uninstaller and the installer (scripts/windows/sign-artifact.ps1) and fails
+      # closed: release mode refuses to run without BEEBEEB_REQUIRE_SIGNING=1.
+      - name: Build and sign the installer
+        shell: powershell
+        env:
+          BEEBEEB_REQUIRE_SIGNING: '1'
+        run: |
+          & .\packaging\windows\build-installer.ps1 -Mode release -Version $env:RELEASE_VERSION `
+            -Exe 'native\beebeeb-drive-rune\target\x86_64-pc-windows-msvc\release\beebeeb-drive.exe' `
+            -OutDir 'release-assets' -NsisDir $env:NSIS_DIR -PluginDir $env:NSIS_PLUGIN_DIR
+          if ($LASTEXITCODE -ne 0) { throw "build-installer.ps1 failed (exit $LASTEXITCODE)" }
+          Remove-Item -Recurse -Force 'release-assets\stage-release'
+
+      - name: Authenticode gate - self-test
+        shell: powershell
+        run: |
+          & .\scripts\windows\verify-authenticode.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "verify-authenticode self-test failed: the gate accepted a bad fixture (exit $LASTEXITCODE)" }
+
+      - name: Authenticode gate - verify release artifacts
+        shell: powershell
+        run: |
+          $assets = @(Get-ChildItem 'release-assets/*' -File | Where-Object { $_.Name -match '\.exe$' })
+          Write-Host ("installer assets: {0}" -f $assets.Count)
+          if ($assets.Count -ne 1) { throw "expected exactly 1 Windows installer asset (NSIS .exe), found $($assets.Count)" }
+          & .\scripts\windows\verify-authenticode.ps1 -Files @($assets.FullName) -ExtractInstallers @($assets.FullName)
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode gate failed (exit $LASTEXITCODE): refusing to publish unsigned or wrongly-signed Windows artifacts" }
+
+      # The updater signature: the native line's own key (UPDATER_V2_PRIVATE_KEY, password-protected, a secret of
+      # this environment only), in the format 0.8.x's signer writes. A client on 0.8.24 or older trusts only the
+      # 0.8.x key, so it cannot verify this installer. The key reaches the signer through the environment only,
+      # never a command line; the step installs nothing (the dependencies came in "Install dependencies", which
+      # holds no key). The Tauri CLI is used as a signing tool here; nothing of Tauri is in the app.
+      - name: Sign the installer for the updater
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATER_V2_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATER_V2_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::UPDATER_V2_PRIVATE_KEY and UPDATER_V2_PRIVATE_KEY_PASSWORD must be secrets of the desktop-release environment."
+            exit 1
+          fi
+          installer="release-assets/Beebeeb_${RELEASE_VERSION}_x64-setup.exe"
+          test -s "$installer"
+          bun run tauri signer sign "$installer" > /dev/null
+          test -s "$installer.sig"
+
+      - name: Verify the installer's updater signature against the committed v2 key
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="Beebeeb_${RELEASE_VERSION}_x64-setup.exe"
+          pub=crates/beebeeb-updater/keys/updater-v2.pub
+          node scripts/check-updater-signature-key.mjs --pubkey-file "$pub" --sig "release-assets/$name.sig"
+          node scripts/native-channel-manifest.mjs --verify "release-assets/$name" --sig "release-assets/$name.sig" --signed-name "$name" --pubkey "$pub"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beebeeb-desktop-windows-native
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    if: ${{ !inputs.publish_existing }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+
+      # make_latest is false here: GitHub's "Latest" is what beebeeb.io/download offers. A native release becomes
+      # "Latest" only when its stable manifest is published (job mark-latest; Guus, 2026-11-11).
+      - name: Create release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: desktop-v${{ inputs.version }}
+          name: Beebeeb Desktop ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          make_latest: 'false'
+          fail_on_unmatched_files: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Signs and publishes one channel's manifest: after a build, or alone to promote an existing build
+  # (publish_existing). Either way it signs with the native line's key, so either way it is the environment's job:
+  # the same reviewer approves a promotion as a release, and a withdrawal is a promotion (a newer signed manifest
+  # that points at the build to go back to; removing a manifest withdraws nothing, spec section 7 R7).
+  publish-manifest:
+    name: Publish v2 update manifest
+    if: >-
+      ${{
+        always() &&
+        needs.validate-release-inputs.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped') &&
+        (inputs.publish_existing || needs.release.result == 'success')
+      }}
+    needs:
+      - validate-release-inputs
+      - verify-branch-point
+      - release
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    # One publish at a time, in the order they were started: two runs that finish out of order would leave the
+    # older manifest on the host, and clients that saw the newer one would refuse it as stale.
+    concurrency:
+      group: desktop-native-publish-manifest
+      cancel-in-progress: false
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VER: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+      TAG: desktop-v${{ inputs.version }}
+      # Where releases.beebeeb.io is served from (scripts/publish-release-files.sh): the checkout of
+      # beebeeb-io/releases today; an S3-compatible bucket or an rsync target on our own hosting once the repository
+      # variable is set (decision 2450). The files are signed before this step and the host never holds a key.
+      PUBLISH_TARGET: ${{ vars.DESKTOP_RELEASE_PUBLISH_TARGET || 'dir:releases-repo' }}
+    steps:
+      # Scripts, the signer (bun.lock) and the public key come from the commit this run was dispatched on: the
+      # reviewed head of main or of a release/* branch. The release tag is NEVER checked out: `ref: desktop-v0.9.0`
+      # resolves a branch of that name before the tag, and any writer can push such a branch, whose code would
+      # then run in the step that holds the v2 key. The tag only names the build whose assets are published, and
+      # is read by its full name (refs/tags/…) in scripts/native-release-ref-check.sh.
+      - name: Checkout the dispatched commit (scripts, signer, public key)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: desktop-src
+
+      # What gets a signed manifest is a build this repository released from reviewed history: refs/tags/<tag>
+      # exists, no branch carries its name, its commit is in the history of the dispatched commit, and it has a
+      # published, non-draft GitHub release.
+      - name: Refuse a tag that is not on this release ref or has no published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git -C desktop-src rev-parse HEAD)" != "$HEAD_SHA" ]]; then
+            echo "::error::the checkout is not the dispatched commit $HEAD_SHA."
+            exit 1
+          fi
+          tag_sha="$(bash desktop-src/scripts/native-release-ref-check.sh tag desktop-src "$TAG" "$HEAD_SHA")"
+          mkdir -p work
+          gh api "repos/$REPO/releases/tags/$TAG" > work/release.json
+          if [[ "$(jq -r '.draft' work/release.json)" != "false" || "$(jq -r '.tag_name' work/release.json)" != "$TAG" ]]; then
+            echo "::error::$TAG has no published GitHub release."
+            exit 1
+          fi
+          echo "$TAG is $tag_sha, in the history of $HEAD_SHA, with a published release"
+
+      - name: Checkout releases repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          repository: beebeeb-io/releases
+          ref: main
+          token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          persist-credentials: false
+          path: releases-repo
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # Before any step holds the signing key, and never in one that does.
+      - name: Install dependencies (no key in this step)
+        working-directory: desktop-src
+        run: bun install --frozen-lockfile
+
+      # The installer and its signature come from the GitHub release this workflow created (assets API, the
+      # authenticated route release.yml uses), and the installer is published under our own host name:
+      # releases.beebeeb.io/desktop/artifacts/<version>/ (spec section 6).
+      - name: Fetch the release's installer, signature and notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          jq -r '.body // ""' work/release.json > work/notes.md
+          installer="Beebeeb_${VER}_x64-setup.exe"
+          for name in "$installer" "$installer.sig"; do
+            id=$(jq -r --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' work/release.json)
+            if [[ -z "$id" ]]; then
+              echo "::error::$name is not an uploaded asset of $TAG"
+              exit 1
+            fi
+            gh api "repos/$REPO/releases/assets/$id" -H 'Accept: application/octet-stream' > "work/$name"
+            test -s "work/$name"
+          done
+
+      # The script verifies the fetched installer against its signature and the committed v2 key before writing
+      # anything: a truncated or replaced asset, or one the 0.8.x key signed, gets no manifest and is not published.
+      - name: Generate the v2 channel manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="Beebeeb_${VER}_x64-setup.exe"
+          case "$CHANNEL" in
+            stable) file=stable.json ;;
+            beta) file=beta.json ;;
+            alpha) file=alpha.json ;;
+            *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;;
+          esac
+          mkdir -p "stage/desktop/v2" "stage/desktop/artifacts/$VER"
+          node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
+            --installer "work/$installer" --sig "work/$installer.sig" --notes work/notes.md \
+            --pubkey desktop-src/crates/beebeeb-updater/keys/updater-v2.pub --out "stage/desktop/v2/$file"
+          cp "work/$installer" "stage/desktop/artifacts/$VER/$installer"
+          echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
+
+      # The manifest is signed too (the native updater refuses an unsigned one): the native line's key, the same
+      # tool, and the signed file name is the channel's manifest file, which is what ties a manifest to its
+      # channel. This step runs the signer and nothing else: no install, no network.
+      - name: Sign the manifest
+        working-directory: desktop-src
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATER_V2_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATER_V2_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::UPDATER_V2_PRIVATE_KEY and UPDATER_V2_PRIVATE_KEY_PASSWORD must be secrets of the desktop-release environment."
+            exit 1
+          fi
+          bun run tauri signer sign "../stage/desktop/v2/$MANIFEST_FILE" > /dev/null
+
+      - name: Verify the manifest's signature against the committed v2 key
+        working-directory: desktop-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="../stage/desktop/v2/$MANIFEST_FILE"
+          pub=crates/beebeeb-updater/keys/updater-v2.pub
+          test -s "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --pubkey-file "$pub" --sig "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --pubkey-file "$pub" --manifest "$manifest"
+          node scripts/native-channel-manifest.mjs --verify "$manifest" --sig "$manifest.sig" --signed-name "$MANIFEST_FILE" --pubkey "$pub"
+
+      # Artefacts first, manifests last; a published artefact is never replaced by other bytes.
+      - name: Publish the staged files
+        shell: bash
+        env:
+          AWS_ENDPOINT_URL: ${{ vars.DESKTOP_RELEASE_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.DESKTOP_RELEASE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DESKTOP_RELEASE_S3_SECRET }}
+        run: |
+          set -euo pipefail
+          bash desktop-src/scripts/publish-release-files.sh --self-test
+          bash desktop-src/scripts/publish-release-files.sh stage "$PUBLISH_TARGET"
+
+      - name: Commit and push to releases repo
+        if: ${{ startsWith(env.PUBLISH_TARGET, 'dir:') }}
+        working-directory: releases-repo
+        shell: bash
+        env:
+          RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          # The token is read from the environment when git asks for it: never on a command line, never in a file.
+          git config credential.helper '!f() { echo username=x-access-token; echo "password=$RELEASES_PUSH_TOKEN"; }; f'
+          git remote set-url origin "https://github.com/beebeeb-io/releases.git"
+          git add "desktop/v2/$MANIFEST_FILE" "desktop/v2/$MANIFEST_FILE.sig" "desktop/artifacts/$VER"
+          if git diff --cached --quiet; then
+            echo "desktop/v2/$MANIFEST_FILE already up to date"
+          else
+            git commit -m "desktop: publish native $CHANNEL manifest $TAG"
+            git push
+          fi
+
+  # Guus, 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
+  # make_latest false; this job marks it when its STABLE manifest has been published. Its own job: the job that
+  # holds the signing key keeps `contents: read`.
+  mark-latest:
+    name: Mark the stable release as Latest
+    if: ${{ always() && inputs.channel == 'stable' && needs.publish-manifest.result == 'success' }}
+    needs: publish-manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark desktop-v<version> as the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          id="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')"
+          gh api -X PATCH "repos/$REPO/releases/$id" -f make_latest=true --jq '.tag_name'

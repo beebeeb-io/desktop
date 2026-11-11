@@ -17,11 +17,6 @@ fn focused_key(rt: &Runtime<State>) -> Option<String> {
 
 #[test]
 fn comment_mode_is_denied_unless_the_frame_opted_in() {
-    assert_eq!(
-        super::FrameInfo::unknown().feedback,
-        super::Policy::Denied("this screen has not opted in"),
-        "a frame nobody registered is denied"
-    );
     let inbox = temp_inbox("denied");
     let mut rt = runtime(&inbox);
     rt.state.feedback.frame_override = Some(super::FrameInfo::denied("DW-0101", "sign-in", "it shows your password"));

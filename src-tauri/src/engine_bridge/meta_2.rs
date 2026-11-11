@@ -13,15 +13,7 @@ pub(super) fn legacy_item_identifiers(entry: &FileEntry, contract: &FileContract
     ]
 }
 
-pub(crate) fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
-    version_identifier.and_then(|value| {
-        value
-            .split(':')
-            .next()
-            .and_then(|part| part.parse::<i64>().ok())
-            .filter(|version| *version > 0)
-    })
-}
+pub(crate) use beebeeb_engine::write_token::parse_base_version_number;
 
 pub(super) fn operation_metadata(op: &PendingOperation) -> Result<serde_json::Value, EngineError> {
     Ok(op

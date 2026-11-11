@@ -60,10 +60,31 @@ pub struct StorageSummary {
     pub quota_bytes: i64,
 }
 
+/// Why a folder could not be listed. A source that cannot read says so; it never answers with an empty folder,
+/// because "no files" and "your files cannot be read" must not look the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceError {
+    /// The folder is not there any more (deleted or moved elsewhere), or the id is not a folder.
+    NotFound,
+    /// The data behind the source could not be read.
+    Unreadable,
+}
+
+impl SourceError {
+    /// What the window says in place of the rows.
+    pub fn message(self) -> &'static str {
+        match self {
+            SourceError::NotFound => "This folder is not here any more.",
+            SourceError::Unreadable => "Your files cannot be read right now.",
+        }
+    }
+}
+
 /// The data contract the UI consumes.
 pub trait DriveSource: Send + 'static {
-    fn list(&self, folder_id: Option<&str>) -> Listing;
-    fn storage(&self) -> StorageSummary;
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError>;
+    /// `None`: this source cannot know the account's used and total bytes (they are the server's).
+    fn storage(&self) -> Option<StorageSummary>;
 }
 
 /// Format bytes as "84 KB", "1.2 MB", "3.1 GB" etc. Shared by file_list and detail_pane.
@@ -96,196 +117,155 @@ impl BoardFixtureSource {
 }
 
 impl DriveSource for BoardFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
         use rune::oklch;
+
+        // The board's avatar hues (`.kit-avatar.hue-a…d`). Only the hue is data: the design
+        // system picks the tint's lightness and chroma per theme (`ui::file_list::avatar_tint`).
+        let hue = |h: f32| oklch(0.88, 0.05, h);
+        let (hue_a, hue_b, hue_c, hue_d) = (hue(250.0), hue(160.0), hue(20.0), hue(300.0));
+        let badge = |initials: &str, color| SharedBadge {
+            initials: initials.into(),
+            color,
+        };
+        let folder = |id: &str, name: &str, count: i64, modified: &str, badges: Vec<SharedBadge>, pc: &str| DriveItem {
+            id: id.into(),
+            parent_id: None,
+            name: name.into(),
+            is_folder: true,
+            size: None,
+            child_count: Some(count),
+            modified_at: modified.into(),
+            mime: None,
+            has_thumbnail: false,
+            shared_type: None,
+            shared_badges: badges,
+            pc_status: Some(pc.into()),
+            is_protected: false,
+        };
+        #[allow(clippy::too_many_arguments)]
+        let file = |id: &str,
+                    name: &str,
+                    size: i64,
+                    modified: &str,
+                    mime: &str,
+                    link: bool,
+                    badges: Vec<SharedBadge>,
+                    pc: &str| DriveItem {
+            id: id.into(),
+            parent_id: None,
+            name: name.into(),
+            is_folder: false,
+            size: Some(size),
+            child_count: None,
+            modified_at: modified.into(),
+            mime: Some(mime.into()),
+            has_thumbnail: mime.starts_with("image/"),
+            shared_type: link.then(|| "Link".to_string()),
+            shared_badges: badges,
+            pc_status: Some(pc.into()),
+            is_protected: false,
+        };
+        // PC column, as the board draws each row (frames.json DW-0401: "online only,
+        // downloaded, available offline"): `online_only`, `on_this_pc`, `available_offline`.
+        let (online, downloaded, kept) = ("online_only", "on_this_pc", "available_offline");
+        const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        const KEY: &str = "application/x-iwork-keynote-sffkey";
 
         let items = vec![
             DriveItem {
-                id: "f-backups".into(),
-                parent_id: None,
-                name: "Backups".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(4),
-                modified_at: "2026-11-05T07:02:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
                 is_protected: true,
+                ..folder("f-backups", "Backups", 4, "2026-11-05T07:02:00Z", vec![], online)
             },
-            DriveItem {
-                id: "f-docs".into(),
-                parent_id: None,
-                name: "Documents".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(48),
-                modified_at: "2026-11-04T16:40:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-invoices".into(),
-                parent_id: None,
-                name: "Invoices 2026".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(11),
-                modified_at: "2026-10-28T10:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "PS".into(),
-                    color: oklch(0.88, 0.05, 150.0),
-                }],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-lisbon".into(),
-                parent_id: None,
-                name: "Lisbon trip".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(212),
-                modified_at: "2026-10-12T14:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![
-                    SharedBadge {
-                        initials: "JI".into(),
-                        color: oklch(0.88, 0.05, 25.0),
-                    },
-                    SharedBadge {
-                        initials: "MD".into(),
-                        color: oklch(0.88, 0.05, 250.0),
-                    },
-                ],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "f-shoots".into(),
-                parent_id: None,
-                name: "Shoot selects".into(),
-                is_folder: true,
-                size: None,
-                child_count: Some(64),
-                modified_at: "2026-10-03T09:00:00Z".into(),
-                mime: None,
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "LD".into(),
-                    color: oklch(0.88, 0.05, 60.0),
-                }],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "budget".into(),
-                parent_id: None,
-                name: "Budget 2026.xlsx".into(),
-                is_folder: false,
-                size: Some(86016),
-                child_count: None,
-                modified_at: "2026-11-05T09:12:00Z".into(),
-                mime: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into()),
-                has_thumbnail: false,
-                shared_type: Some("Link".into()),
-                shared_badges: vec![],
-                pc_status: Some("on_this_pc".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "contract".into(),
-                parent_id: None,
-                name: "Contract draft.pdf".into(),
-                is_folder: false,
-                size: Some(1258291),
-                child_count: None,
-                modified_at: "2026-11-04T16:42:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![SharedBadge {
-                    initials: "SO".into(),
-                    color: oklch(0.88, 0.05, 150.0),
-                }],
-                pc_status: Some("online_only".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "harbour".into(),
-                parent_id: None,
-                name: "Harbour.heic".into(),
-                is_folder: false,
-                size: Some(3250585),
-                child_count: None,
-                modified_at: "2026-11-02T14:00:00Z".into(),
-                mime: Some("image/heic".into()),
-                has_thumbnail: true,
-                shared_type: Some("Link".into()),
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "brand".into(),
-                parent_id: None,
-                name: "Northwind brand guide.pdf".into(),
-                is_folder: false,
-                size: Some(8808038),
-                child_count: None,
-                modified_at: "2026-10-21T11:00:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "q4plan".into(),
-                parent_id: None,
-                name: "Q4 plan.key".into(),
-                is_folder: false,
-                size: Some(23068672),
-                child_count: None,
-                modified_at: "2026-10-15T10:00:00Z".into(),
-                mime: Some("application/x-iwork-keynote-sffkey".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
-            DriveItem {
-                id: "rent".into(),
-                parent_id: None,
-                name: "Studio rent 2026.pdf".into(),
-                is_folder: false,
-                size: Some(319488),
-                child_count: None,
-                modified_at: "2026-10-02T08:00:00Z".into(),
-                mime: Some("application/pdf".into()),
-                has_thumbnail: false,
-                shared_type: None,
-                shared_badges: vec![],
-                pc_status: Some("available_offline".into()),
-                is_protected: false,
-            },
+            folder("f-docs", "Documents", 48, "2026-11-04T16:40:00Z", vec![], kept),
+            folder(
+                "f-invoices",
+                "Invoices 2026",
+                11,
+                "2026-10-28T10:00:00Z",
+                vec![badge("PS", hue_c)],
+                kept,
+            ),
+            folder(
+                "f-lisbon",
+                "Lisbon trip",
+                212,
+                "2026-10-12T14:00:00Z",
+                vec![badge("JM", hue_c), badge("MD", hue_a)],
+                online,
+            ),
+            folder(
+                "f-shoots",
+                "Shoot selects",
+                64,
+                "2026-10-03T09:00:00Z",
+                vec![badge("LD", hue_d)],
+                online,
+            ),
+            file(
+                "budget",
+                "Budget 2026.xlsx",
+                86_016,
+                "2026-11-05T09:12:00Z",
+                XLSX,
+                true,
+                vec![],
+                kept,
+            ),
+            file(
+                "contract",
+                "Contract draft.pdf",
+                1_258_291,
+                "2026-11-04T16:42:00Z",
+                "application/pdf",
+                false,
+                vec![badge("SO", hue_b)],
+                online,
+            ),
+            // 1 Nov 2026 is the Sunday before the fixture's "today" (Thursday 5 Nov).
+            file(
+                "harbour",
+                "Harbour.heic",
+                3_250_585,
+                "2026-11-01T14:00:00Z",
+                "image/heic",
+                true,
+                vec![],
+                downloaded,
+            ),
+            file(
+                "brand",
+                "Northwind brand guide.pdf",
+                8_808_038,
+                "2026-10-21T11:00:00Z",
+                "application/pdf",
+                false,
+                vec![],
+                downloaded,
+            ),
+            file(
+                "q4plan",
+                "Q4 plan.key",
+                23_697_818,
+                "2026-10-15T10:00:00Z",
+                KEY,
+                false,
+                vec![],
+                downloaded,
+            ),
+            file(
+                "rent",
+                "Studio rent 2026.pdf",
+                319_488,
+                "2026-10-02T08:00:00Z",
+                "application/pdf",
+                false,
+                vec![],
+                downloaded,
+            ),
         ];
 
-        Listing {
+        Ok(Listing {
             folder: Crumb {
                 id: None,
                 name: "Files".into(),
@@ -295,14 +275,14 @@ impl DriveSource for BoardFixtureSource {
                 name: "Files".into(),
             }],
             items,
-        }
+        })
     }
 
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
+    fn storage(&self) -> Option<StorageSummary> {
+        Some(StorageSummary {
             used_bytes: 240_000_000_000,    // 240 GB
             quota_bytes: 1_000_000_000_000, // 1 TB
-        }
+        })
     }
 }
 
@@ -405,8 +385,8 @@ impl LargeFixtureSource {
 }
 
 impl DriveSource for LargeFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
-        Listing {
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        Ok(Listing {
             folder: Crumb {
                 id: None,
                 name: "Files".into(),
@@ -416,12 +396,12 @@ impl DriveSource for LargeFixtureSource {
                 name: "Files".into(),
             }],
             items: self.items.clone(),
-        }
+        })
     }
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
+    fn storage(&self) -> Option<StorageSummary> {
+        Some(StorageSummary {
             used_bytes: 240_000_000_000,
             quota_bytes: 1_000_000_000_000,
-        }
+        })
     }
 }

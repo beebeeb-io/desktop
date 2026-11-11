@@ -14,7 +14,6 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -235,43 +234,7 @@ pub(crate) fn rename_material(
     ))
 }
 
-/// Where core found a request row's name (P2-2): a derived owner convention,
-/// the content key `C` the uploader sealed it under, or an upper-repair name
-/// (READ-ONLY: no rename, no new version; an edit is saved as a new item).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RequestNameKey {
-    /// Derived under the canonical string id.
-    Derived,
-    /// Derived under the legacy 16-byte binary UUID.
-    DerivedBinary,
-    /// The 2236 request-upload content key `C`.
-    Content,
-    /// Derived under the uppercase id. READ-ONLY.
-    UpperRepair,
-}
-
-/// Core's resolution of a request row's name: what authenticated it and the
-/// chunk-format code its envelope records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestName {
-    pub key: RequestNameKey,
-    /// [`beebeeb_core::chunk_stream::ExpectedChunkFormat`]'s stable code.
-    pub pin: u8,
-}
-
-impl From<beebeeb_core::owned_keys::KeyOrigin> for RequestNameKey {
-    fn from(origin: beebeeb_core::owned_keys::KeyOrigin) -> Self {
-        use beebeeb_core::owned_keys::KeyOrigin;
-        match origin {
-            KeyOrigin::Derived => Self::Derived,
-            KeyOrigin::DerivedBinary => Self::DerivedBinary,
-            KeyOrigin::DerivedUpperRepair => Self::UpperRepair,
-            // The name authenticated under the content key `C`; a name read
-            // through an L8/L7 envelope is not a request row's name at all.
-            KeyOrigin::RequestContent | KeyOrigin::OwnerWrap | KeyOrigin::FolderWrap => Self::Content,
-        }
-    }
-}
+pub use beebeeb_engine::owner_keys::{RequestName, RequestNameKey};
 
 /// Core's resolution of a request row's name, in the shape the durable
 /// record keeps (P2-2).

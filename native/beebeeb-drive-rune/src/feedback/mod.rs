@@ -8,12 +8,15 @@
 //! This module has no network code (a test greps for it): the app itself sends a note nowhere.
 
 pub mod capture;
+pub mod frame;
 pub mod model;
 pub mod paths;
 mod ui;
 
 #[cfg(test)]
 mod guard_tests;
+#[cfg(test)]
+mod shell_tests;
 #[cfg(test)]
 mod tests;
 
@@ -41,14 +44,11 @@ pub const PANEL_KEY_LABEL: &str = "Shift+F8";
 /// At most this many thumbnails are decoded for the panel (newest notes first).
 const MAX_THUMBS: usize = 40;
 
-/// Whether comment mode may run on a frame. A frame that says nothing is denied.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Policy {
-    Allowed,
-    Denied(&'static str),
-}
+/// Whether comment mode may run on a frame: what the frame's group declares in its ONE line of
+/// the shell's frame registry (`shell::registry::FRAMES`). A frame that says nothing is denied.
+pub use crate::shell::registry::FeedbackPolicy as Policy;
 
-/// The frame on screen, as the app (later: the shell's route registry) reports it.
+/// The frame on screen, as the shell's route machine and frame registry report it (`frame.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameInfo {
     pub id: String,
@@ -56,6 +56,7 @@ pub struct FrameInfo {
     pub feedback: Policy,
 }
 
+#[cfg(test)]
 impl FrameInfo {
     pub fn allowed(id: &str, route: &str) -> FrameInfo {
         FrameInfo {
@@ -71,10 +72,6 @@ impl FrameInfo {
             route: route.into(),
             feedback: Policy::Denied(reason),
         }
-    }
-
-    fn unknown() -> FrameInfo {
-        FrameInfo::denied("unknown", "", "this screen has not opted in")
     }
 }
 
@@ -304,10 +301,11 @@ fn decode_later(path: PathBuf, max: u32) -> Pixels {
 
 struct Inner {
     view: fn(&State, &mut Cx<State>) -> El,
-    on_key: Option<fn(&mut State, &KeyEvent, &mut Tx) -> bool>,
     poll: Option<fn(&mut State, f64, &mut Tx) -> bool>,
-    frame: fn(&State) -> FrameInfo,
 }
+
+/// The app's own key handler: what a key reaches when the feedback mode does not take it.
+pub type AppKeys = fn(&mut State, &KeyEvent, &mut Tx) -> bool;
 
 static INNER: OnceLock<Inner> = OnceLock::new();
 
@@ -315,28 +313,27 @@ fn inner() -> &'static Inner {
     INNER.get().expect("feedback::hook_spec ran before the first frame")
 }
 
-/// Wraps the app's `view`, `on_key` and `poll` with comment mode. `frame` says which frame is on
-/// screen and whether it opted in. The first call wins.
-pub fn hook_spec(mut spec: AppSpec<State>, frame: fn(&State) -> FrameInfo) -> AppSpec<State> {
+/// Wraps the main window's `view` and `poll` with comment mode (`shell::run` calls it; the
+/// keys come through the shell's `host::on_key`, which hands them to [`on_key`]). The first
+/// call wins.
+pub fn hook_spec(mut spec: AppSpec<State>) -> AppSpec<State> {
     INNER.get_or_init(|| Inner {
         view: spec.view,
-        on_key: spec.on_key,
         poll: spec.poll,
-        frame,
     });
     spec.view = view;
-    spec.on_key = Some(on_key);
     spec.poll = Some(poll);
     spec
 }
 
-/// The frame on screen. Without a hook, or on a frame that has not opted in: denied.
+/// The frame on screen: where the shell's route machine is, and what that frame group's line
+/// in the frame registry says about comment mode. No line, or no opt-in: denied.
 pub fn frame_of(s: &State) -> FrameInfo {
     #[cfg(test)]
     if let Some(f) = &s.feedback.frame_override {
         return f.clone();
     }
-    INNER.get().map_or_else(FrameInfo::unknown, |i| (i.frame)(s))
+    frame::on_screen(&s.shell.app)
 }
 
 /// Attaches the compositor that reads the live window's tree and pixels.
@@ -354,7 +351,9 @@ fn is_key(ev: &KeyEvent, key: &(Key, bool)) -> bool {
     ev.key == key.0 && ev.mods.shift == key.1
 }
 
-pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+/// Every key of the main window, before the shell's own shortcuts (`shell::host::on_key`):
+/// the two hotkeys, and everything while comment mode is on. Any other key goes on to `app`.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx, app: AppKeys) -> bool {
     if is_key(ev, &COMMENT_KEY) {
         let frame = frame_of(s);
         let fb = &mut s.feedback;
@@ -401,7 +400,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 return true;
             }
             // Short-circuit order matters: the app's handler always runs.
-            inner().on_key.is_some_and(|f| f(s, ev, tx)) | had_notice
+            app(s, ev, tx) | had_notice
         }
     }
 }
@@ -503,6 +502,7 @@ fn frame_summary(s: &State, frame: &FrameInfo) -> Value {
         "id": frame.id,
         "route": frame.route,
         "state": {
+            "group": frame::group_name(&s.shell.app),
             "sidebar_section": s.sidebar_section.label(),
             "folder": s.listing.folder.name,
             "path": s.listing.path.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),

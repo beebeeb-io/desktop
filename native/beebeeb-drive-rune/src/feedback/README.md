@@ -15,7 +15,12 @@ the feature contains none of this (`scripts/check-feedback-absent.sh`).
 | `Enter` / `Shift+Enter` / `Esc` | save / new line / cancel (Esc again leaves comment mode) |
 | `Shift+F8`, or the "Feedback" entry (Tab reaches it) | the notes panel |
 
-`F8` is on no board frame (`design/desktop-v2/frames.json`). The two hotkeys are `COMMENT_KEY` and `PANEL_KEY` in `mod.rs`: one place.
+`F8` is on no board frame (`design/desktop-v2/frames.json`) and is none of the shell's shortcuts
+(Alt+Left, Alt+Right, Ctrl+, , Ctrl+/, Esc). The two hotkeys are `COMMENT_KEY` and `PANEL_KEY` in
+`mod.rs`: one place. Keys reach the mode through the shell's `host::on_key`, before the shell's
+own shortcuts: while comment mode is on it owns the keyboard, so none of them moves the app
+under it; while it is off, every key but the two hotkeys goes on unchanged
+(`the_hotkeys_and_the_shells_shortcuts_do_not_collide`).
 
 ```mermaid
 flowchart LR
@@ -30,9 +35,12 @@ flowchart LR
 
 ## Where notes go
 `--feedback-dir <path>`, else `BEEBEEB_FEEDBACK_DIR`, else `%LOCALAPPDATA%\<app id>\feedback\inbox`
-(Linux/macOS: the app's data folder). The app id is `BEEBEEB_APP_ID` at run time, else the
-`BEEBEEB_APP_ID` the build was compiled with, else the TEST identity `io.beebeeb.app.test`:
-never the real app's data folder by default. One folder per note, `<UTC timestamp>-<short id>/`,
+(Linux/macOS: that id's data folder). `--feedback-dir` is a development flag under the rule of the
+shell's other tooling flags (`shell/instance.rs`: a debug build, or the `dev-tools` feature); any
+other build ignores it, and a command line that carries a link honours nothing else. The app id
+is the shell's (`shell/identity.rs`, `AppIdentity::feedback_dir_id`): the TEST identity
+`io.beebeeb.app.test`, also in a build that has the real identifier, so a note never lands in the
+real app's data folder by default. One folder per note, `<UTC timestamp>-<short id>/`,
 written as `.tmp-<id>/` and renamed when complete. The folder's name is the note's id.
 
 The inbox holds at most 200 notes and 1 GB. A new note over the cap removes the oldest notes
@@ -48,8 +56,8 @@ panel shows "N of 200". Temp folders a crash left behind are removed after ten m
 | `status.json` | written later by the lead's tool |
 
 ### `note.json` (`schema: "beebeeb-feedback-note/1"`)
-`schema`, `id`, `created_at` (UTC, RFC 3339), `app` {`name`, `version`, `commit`, `build_kind`},
-`platform` {`os`, `scale`, `theme`, `window_size` {`w`, `h`}}, `frame` {`id`, `route`, `state` {…}},
+`schema`, `id`, `created_at` (UTC, RFC 3339), `app` {`name`, `id`, `version`, `commit`, `build_kind`} (name and id: the shell's identity),
+`platform` {`os`, `scale`, `theme`, `window_size` {`w`, `h`}}, `frame` {`id`, `route`, `state` {`group`, …}},
 `element` {`key_path`, `key`, `role`, `label`, `text`, `secure`, `box` {`x`,`y`,`w`,`h`}, `visible_box`, `fill`, `text_colour`, `radius`, `opacity`, `focused`},
 `comment`, `tags` (of "Looks wrong", "Does not work", "Text", "Idea"), `files` {`window_png`, `element_png`, `tree_json`}.
 Boxes are window points. `app.commit` comes from `build.rs` (`BEEBEEB_BUILD_COMMIT`, else `git rev-parse HEAD`).
@@ -64,8 +72,11 @@ The panel reads the folder again at most every 2 s, and only while it is open.
   opens a note, its text is sent to the AI provider, and its screenshots only if the session
   opens them (`feedback.sh show <id> --with-screenshots`). The panel says this.
 - Screenshots show decrypted file names and the account email.
-- **Default deny.** Comment mode runs only on a frame that opted in (`FrameInfo::allowed`). Any
-  other frame, and any frame nobody registered, shows "Comment mode is off on this screen".
+- **Default deny.** Comment mode runs only on a frame group whose ONE line in the shell's frame
+  registry says `feedback: FeedbackPolicy::Allowed` (`shell/registry.rs`; today: Files). Any other
+  frame shows "Comment mode is off on this screen: <reason>": a group with no line, a group whose
+  line says `Denied("…")`, and any dialog in front that has not opted in itself. Sign-in, first
+  run, the locked screen and the recovery phrase are denied with a reason that names the secret.
 - A secure element never has its text in `note.json` or `tree.json` (`"[redacted: secure field]"`,
   label dropped) and its box is painted flat grey in both PNGs. Secure means: Rune says so
   (`El::secure`, a secure `TextEdit`), or its key starts with `secure-`, or any ancestor is secure.
@@ -91,9 +102,13 @@ A frame gets comment mode only by opting in, and opting in is a promise:
 3. **Keep secrets still.** Do not animate, scale, rotate or blur an element that holds a secret;
    a capture is refused while anything moves, and a scaled secure element refuses every note.
 
-Then register the frame: its id and route, and `Allowed` or `Denied("reason")`. Until lane S1's
-route registry lands, that is `feedback_frame` in `main.rs`. Sign-in, recovery-phrase, pairing
-and app-lock frames stay denied unless all three duties are met and reviewed.
+Then say so in your group's registry line: `feedback: FeedbackPolicy::Allowed` (until then:
+`FeedbackPolicy::Denied("why, in the person's words")`), and add your group to the list in
+`shell_tests.rs` (`sign_in_and_first_run_are_denied…`), which counts the allowed lines. The frame
+id and the route in a note come from the shell (`frame.rs`: `FrameGroup::frame_id`, and the
+route machine's section or pane; never the id or name of a folder or file). Sign-in,
+recovery-phrase, pairing and app-lock frames stay denied unless all three duties are met and
+reviewed.
 
 ## Packaging
 Run `scripts/check-feedback-absent.sh --artifact <exe>` on the EXACT file that ships (the signed
@@ -101,9 +116,17 @@ exe in the installer, not a build folder). The gate mode (`--release`) builds it
 in a separate target dir and never touches the binary a release would pick up.
 
 ## Hook-up outside this folder
-`main.rs`: `mod feedback`, the `State.feedback` field and its `init` line, `feedback_frame` (which frame is on screen, allowed or denied), `feedback::hook_spec(spec, feedback_frame)`,
-`feedback::install(app)` (all `#[cfg(feature = "feedback")]`). `Cargo.toml`: the feature and the
-optional `png` and `wgpu` (both already in the tree through rune). `build.rs`: the commit stamp. `frame_summary` in `mod.rs` adds what `State` holds.
+All `#[cfg(feature = "feedback")]`, or data a build without the feature does not read:
+- `main.rs`: `mod feedback`.
+- `shell/state.rs`: the `State.feedback` field and its line in `init_from`.
+- `shell/mod.rs` (`run`): `paths::set_flag_dir`, `feedback::hook_spec(main_spec)` (the main
+  window's view and poll) and `feedback::install(main_app)` (the capture's compositor).
+- `shell/host.rs`: `on_key` hands every key to `feedback::on_key` first.
+- `shell/registry.rs`: `FeedbackPolicy`, the `feedback` field of `Frame` and `DialogFrame`, and
+  `FrameGroup::frame_id`. `shell/identity.rs`: `feedback_dir_id`. `shell/instance.rs`:
+  `--feedback-dir` and `Launch::feedback_dir`.
+- `Cargo.toml`: the feature and the optional `wgpu` (already in the tree through rune).
+  `build.rs`: the commit stamp. `frame_summary` in `mod.rs` adds what `State` holds.
 
 ## Rune limitations (rev c92e462)
 - **No capture of a live window.** Running handlers and views hold no `Runtime`

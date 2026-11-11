@@ -1,295 +1,173 @@
 #!/usr/bin/env node
-// Clean golden capture + geometry export with Rune-matching keys.
-// Keys map to Rune's element.key values for the geometry check.
-import { chromium } from 'playwright';
-import { writeFileSync, mkdirSync, readFileSync } from 'fs';
-import { join } from 'path';
+// capture-golden.mjs <frame-id> [--dark] [--out <dir>] [--board <dir>]
+//
+// Exports one board frame as the golden for the three gates:
+//   golden/<frame-id>[-dark]-board.png   the window's client area at 2x
+//   golden/<frame-id>[-dark].json        every keyed element: box, text, typography, colours, icon paths
+//
+// The board draws a 1 px window frame around the screen (the OS draws that one on a real
+// PC), so the golden is the screen's PADDING box and every coordinate is relative to it.
+// For a 1280x800 board frame that is a 1278x798 client area: render the native side at
+// that size.
+//
+// Keys come from `keymap()` below, by the board's own class names. A frame that draws
+// something new adds its keys there (see README "Add a frame").
+import { createRequire } from 'module';
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
+import { dirname, join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 
-const outDir = process.argv[2] || '/tmp/board-extract/golden';
-mkdirSync(outDir, { recursive: true });
+const HERE = dirname(fileURLToPath(import.meta.url));
+const args = process.argv.slice(2);
+const flag = (name) => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
+const outDir = resolve(flag('--out') || join(HERE, '..', 'golden'));
+const boardDir = resolve(flag('--board') || process.env.BB_BOARD_DIR || '/home/guus/code/beebeeb.io/design/desktop-v2');
+const dark = args.includes('--dark');
+const frameId = args.find((a) => !a.startsWith('--'));
+if (!frameId) { console.error('usage: capture-golden.mjs <frame-id> [--dark] [--out dir] [--board dir]'); process.exit(64); }
 
-const boardDir = '/home/guus/code/beebeeb.io/design/desktop-v2';
+// Playwright is not a dependency of this crate: take it from PLAYWRIGHT_DIR, or the first known install.
+function loadPlaywright() {
+  const roots = [process.env.PLAYWRIGHT_DIR, '/home/guus/code/beebeeb.io/repos/web/node_modules',
+    '/home/guus/code/beebeeb.io/node_modules', '/tmp/bunx-1000-playwright@latest/node_modules'].filter(Boolean);
+  for (const root of roots) {
+    for (const name of ['playwright', '@playwright/test', 'playwright-core']) {
+      if (existsSync(join(root, name))) { try { return createRequire(join(root, 'x.js'))(name); } catch { /* next */ } }
+    }
+  }
+  console.error(`capture-golden: Playwright not found (set PLAYWRIGHT_DIR to a node_modules that has it); looked in ${roots.join(', ')}`);
+  process.exit(2);
+}
+const { chromium } = loadPlaywright();
+
+mkdirSync(outDir, { recursive: true });
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.woff2': 'font/woff2' };
 const server = createServer((req, res) => {
-  const path = boardDir + (req.url === '/' ? '/board.html' : req.url);
+  const rel = decodeURIComponent(req.url.split('?')[0]);
+  const path = join(boardDir, rel === '/' ? 'board.html' : rel);
+  if (!path.startsWith(boardDir)) { res.writeHead(403); return res.end(); }
   try {
     const data = readFileSync(path);
-    const ct = path.endsWith('.html') ? 'text/html; charset=utf-8'
-             : path.endsWith('.js') ? 'text/javascript; charset=utf-8'
-             : path.endsWith('.css') ? 'text/css; charset=utf-8'
-             : path.endsWith('.woff2') ? 'font/woff2'
-             : 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': ct });
+    res.writeHead(200, { 'Content-Type': types[path.slice(path.lastIndexOf('.'))] || 'application/octet-stream' });
     res.end(data);
   } catch { res.writeHead(404); res.end('Not found'); }
 });
-await new Promise(resolve => server.listen(9881, resolve));
+await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+const port = server.address().port;
 
-const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage({ viewport: { width: 1600, height: 1200 }, deviceScaleFactor: 2 });
-await page.goto('http://127.0.0.1:9881/board.html', { waitUntil: 'networkidle', timeout: 60000 });
-
-// Navigate to Windows > DW-0401
-for (const tab of await page.$$('.kit-switch a, .kit-tabs a')) {
-  if ((await tab.textContent())?.trim() === 'Windows') { await tab.click(); await page.waitForTimeout(2000); break; }
-}
-const link = await page.$('a:has-text("DW-0401")');
-if (link) { await link.click(); await page.waitForTimeout(3000); }
-
-// Hide every sticky/fixed element outside the frame
-await page.evaluate(() => {
-  for (const el of document.querySelectorAll('*')) {
-    const cs = getComputedStyle(el);
-    if ((cs.position === 'sticky' || cs.position === 'fixed') && !el.closest('#DW-0401 .kit-screen'))
-      el.style.display = 'none';
+// Text as Windows and macOS draw it: fractional advances, no hinting. Linux FreeType's default
+// (hinted, whole-pixel advances: JetBrains Mono 11px comes out 7px a character, not 6.6) is
+// what no user of the app will ever see.
+// A REAL 200 % display, not an emulated one: with Playwright's `deviceScaleFactor` the page lays out at
+// 100 % and is scaled up, so every `.5px` hairline comes out a whole CSS pixel (two device pixels).
+const browser = await chromium.launch({ headless: true, args: ['--force-device-scale-factor=2', '--window-size=1600,1200',
+  '--font-render-hinting=none', '--enable-font-subpixel-positioning', '--disable-lcd-text'] });
+let code = 0;
+try {
+  const page = await browser.newPage({ viewport: null });
+  const dpr = await page.evaluate(() => window.devicePixelRatio);
+  if (dpr !== 2) { console.error(`capture-golden: the browser runs at ${dpr}x, not 2x`); process.exit(2); }
+  await page.goto(`http://127.0.0.1:${port}/board.html`, { waitUntil: 'networkidle', timeout: 60000 });
+  const platform = frameId.startsWith('DM-') ? 'macOS' : 'Windows';
+  for (const tab of await page.$$('.kit-switch a, .kit-tabs a')) {
+    if ((await tab.textContent())?.trim() === platform) { await tab.click(); break; }
   }
-  const cap = document.querySelector('#DW-0401 > figcaption');
-  if (cap) cap.style.display = 'none';
-});
-await page.waitForTimeout(300);
+  await page.waitForSelector(`[id="${frameId}"] .kit-screen`, { timeout: 15000 });
+  await page.evaluate(() => document.fonts.ready);
 
-// Screenshot the window
-const winEl = await page.$('#DW-0401 .kit-screen');
-if (!winEl) { console.error('not found'); process.exit(1); }
-await winEl.screenshot({ path: join(outDir, 'DW-0401-board.png') });
+  // Only the frame's own screen stays; sticky board chrome would be drawn over it.
+  const clip = await page.evaluate(({ frameId, dark }) => {
+    const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);
+    for (const el of document.querySelectorAll('*')) {
+      const cs = getComputedStyle(el);
+      if ((cs.position === 'sticky' || cs.position === 'fixed') && !screen.contains(el)) el.style.display = 'none';
+    }
+    if (dark) screen.classList.add('dark');
+    screen.scrollIntoView({ block: 'start' });
+    window.scrollBy(0, -20);
+    const r = screen.getBoundingClientRect();
+    return { x: r.x + screen.clientLeft + window.scrollX, y: r.y + screen.clientTop + window.scrollY, width: screen.clientWidth, height: screen.clientHeight };
+  }, { frameId, dark });
+  await page.waitForTimeout(400);
 
-// Verify size
-const { execSync } = await import('child_process');
-const dims = execSync(`python3 -c "from PIL import Image; i=Image.open('${join(outDir, 'DW-0401-board.png')}'); print(f'{i.size[0]}x{i.size[1]}')"`, { encoding: 'utf-8' }).trim();
-console.log(`Screenshot: ${dims}`);
-if (dims !== '2560x1600') {
-  execSync(`python3 -c "
-from PIL import Image
-img = Image.open('${join(outDir, 'DW-0401-board.png')}')
-img = img.crop((0, 0, 2560, 1600))
-img.save('${join(outDir, 'DW-0401-board.png')}')
-print(f'Cropped to {img.size}')
-"`, { stdio: 'inherit' });
-}
+  const stem = dark ? `${frameId}-dark` : frameId;
+  const png = join(outDir, `${stem}-board.png`);
+  await page.screenshot({ path: png, clip, fullPage: true });
 
-// Assert UTF-8
-const ft = await winEl.evaluate(el => el.innerText);
-if (ft.includes('â€"') || ft.includes('Â·')) { console.error('mojibake'); process.exit(1); }
-if (!ft.includes('·')) { console.error('missing ·'); process.exit(1); }
-console.log('UTF-8 OK');
-
-// ---- Geometry export ----
-const geo = await page.evaluate(() => {
-  const win = document.querySelector('#DW-0401 .kit-screen');
-  const wr = win.getBoundingClientRect();
-  const r = el => {
-    const b = el.getBoundingClientRect();
-    return {
-      x: Math.round((b.x - wr.x) * 10) / 10,
-      y: Math.round((b.y - wr.y) * 10) / 10,
-      w: Math.round(b.width * 10) / 10,
-      h: Math.round(b.height * 10) / 10,
+  const geo = await page.evaluate(({ frameId, keymapSrc }) => {
+    const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);
+    const sr = screen.getBoundingClientRect();
+    const ox = sr.x + screen.clientLeft, oy = sr.y + screen.clientTop;
+    const round = (v) => Math.round(v * 100) / 100;
+    const box = (b) => ({ x: round(b.x - ox), y: round(b.y - oy), w: round(b.width), h: round(b.height) });
+    const probe = document.createElement('canvas'); probe.width = probe.height = 1;
+    const pctx = probe.getContext('2d', { willReadFrequently: true });
+    // Computed colours come back in the notation they were written in (oklch, color-mix): resolve to sRGB bytes.
+    const rgba = (css) => {
+      pctx.clearRect(0, 0, 1, 1); pctx.fillStyle = '#000'; pctx.fillStyle = css; pctx.fillRect(0, 0, 1, 1);
+      const d = pctx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3]];
     };
-  };
-  const s = el => {
-    const cs = getComputedStyle(el);
-    return {
-      fontSize: parseFloat(cs.fontSize),
-      fontWeight: parseInt(cs.fontWeight),
-      fontFamily: cs.fontFamily?.split(',')[0]?.trim().replace(/['"]/g, ''),
-      color: cs.color,
-      bg: cs.backgroundColor === 'rgba(0, 0, 0, 0)' ? undefined : cs.backgroundColor,
+    const typo = (el) => {
+      const cs = getComputedStyle(el);
+      const mono = /mono/i.test(cs.fontFamily.split(',')[0]);
+      return { family: mono ? 'mono' : 'sans', fontFamily: cs.fontFamily.split(',')[0].trim().replace(/['"]/g, ''),
+        size: parseFloat(cs.fontSize), weight: parseInt(cs.fontWeight, 10), color: rgba(cs.color),
+        tracking: cs.letterSpacing === 'normal' ? 0 : round(parseFloat(cs.letterSpacing)) };
     };
-  };
+    const rendered = (s, el) => {
+      const t = getComputedStyle(el).textTransform; s = s.replace(/\s+/g, ' ').trim();
+      return t === 'uppercase' ? s.toUpperCase() : t === 'lowercase' ? s.toLowerCase() : s;
+    };
+    const out = {}; const problems = [];
+    const put = (key, rec) => { if (out[key]) problems.push(`duplicate key ${key}`); out[key] = rec; };
+    const api = {
+      // A box: position and size, its fill, and (px) the pixels inside it.
+      box(key, el, extra = {}) {
+        if (!el) return;
+        const cs = getComputedStyle(el); const bg = rgba(cs.backgroundColor);
+        put(key, { kind: 'box', ...box(el.getBoundingClientRect()), ...(bg[3] ? { bg } : {}), ...extra });
+      },
+      // An element whose whole content is one string.
+      text(key, el, extra = {}) {
+        if (!el) return;
+        put(key, { kind: 'text', ...box(el.getBoundingClientRect()), text: rendered(el.textContent, el), ...typo(el), ...extra });
+      },
+      // A bare text node between other children ("New" between its two icons).
+      textNode(key, parent, extra = {}) {
+        if (!parent) return;
+        const node = [...parent.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim());
+        if (!node) { problems.push(`no text node for ${key}`); return; }
+        const range = document.createRange(); range.selectNodeContents(node);
+        put(key, { kind: 'text', ...box(range.getBoundingClientRect()), text: rendered(node.textContent, parent), ...typo(parent), ...extra });
+      },
+      // An icon: its box, its colour and WHICH glyph (the path data), filled or outlined.
+      icon(key, svg, extra = {}) {
+        if (!svg) return;
+        const shapes = [...svg.querySelectorAll('path, rect, circle, line, polyline, polygon, ellipse')];
+        const d = shapes.map((s) => s.tagName === 'path' ? s.getAttribute('d') : `${s.tagName}:${[...s.attributes].filter((a) => !/^(fill|stroke|class|style)/.test(a.name)).map((a) => `${a.name}=${a.value}`).join(',')}`);
+        const first = shapes[0] && getComputedStyle(shapes[0]);
+        const filled = !!first && first.fill !== 'none' && svg.getAttribute('fill') === 'none';
+        put(key, { kind: 'icon', ...box(svg.getBoundingClientRect()), icon: d, filled, color: rgba(getComputedStyle(svg).color), ...extra });
+      },
+      problems,
+    };
+    // eslint-disable-next-line no-new-func
+    new Function('win', 'api', keymapSrc)(screen, api);
+    return { frame: frameId, width: screen.clientWidth, height: screen.clientHeight, elements: out, problems };
+  }, { frameId, keymapSrc: readFileSync(join(HERE, 'keymap.js'), 'utf-8') });
 
-  const out = {};
-  const add = (k, el, extra) => { if (el) out[k] = { ...r(el), ...s(el), ...extra }; };
-
-  // Helper: first text node matching str in container, optionally filtered by x range
-  const findText = (root, str, minX, maxX) => {
-    const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    while (tw.nextNode()) {
-      if (tw.currentNode.textContent.trim() === str) {
-        const el = tw.currentNode.parentElement;
-        const pos = r(el);
-        if (minX !== undefined && pos.x < minX) continue;
-        if (maxX !== undefined && pos.x > maxX) continue;
-        return el;
-      }
-    }
-    return null;
-  };
-
-  // ---- Caption bar (kit-wincap) ----
-  const wincap = win.querySelector('.kit-wincap');
-  add('caption-bar', wincap);
-
-  // Brand block: "beebeeb.io" + "DRIVE"
-  const bMark = win.querySelector('.kit-wincap svg, .mk-side svg');
-  if (bMark) add('b-mark', bMark.closest('span') || bMark.parentElement);
-  add('drive-label', findText(win, 'DRIVE') || findText(win, 'Drive'));
-
-  // ---- Sidebar (mk-side) ----
-  const sidebar = win.querySelector('.mk-side, aside');
-  add('sidebar', sidebar);
-
-  // Sidebar section text labels (use the text element directly, not the collapsed parent)
-  for (const label of ['Files', 'Shared', 'Photos', 'Backups', 'Trash']) {
-    const el = findText(sidebar, label, 0, 220);
-    if (el) add(label, el, { text: label });
-  }
-  // Badges
-  add('Shared-badge', findText(sidebar, '1', 170, 220));
-  add('Trash-badge', findText(sidebar, '12', 170, 220));
-
-  // THIS PC
-  const thisPc = findText(sidebar, 'This PC') || findText(sidebar, 'THIS PC');
-  add('this-pc-label', thisPc, { text: 'THIS PC' });
-
-  add('Sync history', findText(sidebar, 'Sync history'), { text: 'Sync history' });
-  const ao = findText(sidebar, 'Available offline');
-  add('Available offline', ao, { text: 'Available offline' });
-  add('Available offline-badge', findText(sidebar, '3', 185, 220));
-
-  // Storage
-  add('storage-label', findText(sidebar, 'Storage'));
-  // Account
-  add('account-name', findText(sidebar, 'Anna Visser'));
-  add('account-email', findText(sidebar, 'anna@northwind.studio'));
-
-  // ---- Toolbar ----
-  const toolbar = win.querySelector('.mk-main') || win.querySelector('.mk-body');
-  add('toolbar', win.querySelector('.mk-toolbar') || (() => {
-    // toolbar is the row between the caption and the column headers
-    const body = win.querySelector('.mk-main, .mk-body');
-    if (body) {
-      for (const ch of body.children) {
-        const cr = r(ch);
-        if (cr.y < 50 && cr.h < 60 && cr.h > 30) return ch;
-      }
-    }
-    return null;
-  })());
-
-  add('folder-title', findText(win, 'Files', 250, 400));
-  add('item-count', findText(win, '11 items'));
-  add('kbd-hint', findText(win, 'Ctrl+F'));
-  add('search-placeholder', findText(win, 'Search names'));
-
-  // + New button
-  const newText = findText(win, 'New', 900, 1100);
-  if (newText) {
-    let btn = newText;
-    for (let i = 0; i < 3; i++) {
-      const p = btn.parentElement;
-      if (p) { btn = p; const cs = getComputedStyle(btn); if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') break; }
-    }
-    add('new-btn', btn);
-  }
-
-  // ---- Column headers ----
-  add('col-name', findText(win, 'Name', 230, 350));
-  add('col-date', findText(win, 'Date changed'));
-  add('col-size', findText(win, 'Size', 700, 800));
-  add('col-shared', findText(win, 'Shared', 820, 950));
-  add('col-pc', findText(win, 'PC', 930, 960));
-
-  // ---- File rows ----
-  const names = ['Backups', 'Documents', 'Invoices 2026', 'Lisbon trip', 'Shoot selects',
-    'Budget 2026.xlsx', 'Contract draft.pdf', 'Harbour.heic',
-    'Northwind brand guide.pdf', 'Q4 plan.key', 'Studio rent 2026.pdf'];
-  for (let i = 0; i < names.length; i++) {
-    const nameEl = findText(win, names[i], 250, 500);
-    if (!nameEl) continue;
-    add(`row-${i}-name`, nameEl, { text: names[i] });
-    // Walk up to the row div (mk-row)
-    let row = nameEl;
-    for (let j = 0; j < 5; j++) {
-      if (row.parentElement) {
-        row = row.parentElement;
-        const rr = r(row);
-        if (rr.w > 500 && rr.h >= 28 && rr.h <= 40) break;
-      }
-    }
-    add(`row-${i}`, row);
-  }
-
-  // ---- Detail pane ----
-  add('detail-name', findText(win, 'Contract draft.pdf', 950, 1280));
-  add('encrypted-text', findText(win, 'End-to-end encrypted'));
-  // The encrypted badge container
-  const e2e = findText(win, 'End-to-end encrypted');
-  if (e2e) {
-    let badge = e2e;
-    for (let i = 0; i < 3; i++) {
-      const p = badge.parentElement;
-      if (p) { badge = p; const cs = getComputedStyle(badge); if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') break; }
-    }
-    add('encrypted-badge', badge);
-  }
-
-  // Detail metadata labels
-  for (const label of ['Changed', 'Changed on', 'Added', 'Where', 'Version history']) {
-    add(`detail-${label.toLowerCase().replace(/ /g, '-')}`, findText(win, label, 990, 1120));
-  }
-  add('detail-shared', findText(win, 'Shared', 990, 1120));
-
-  // Available offline (detail)
-  add('offline-label', findText(win, 'Available offline', 990, 1280));
-
-  // Share... / Version history buttons in detail
-  add('share-btn', findText(win, 'Share…', 990, 1280));
-  add('versions-btn', findText(win, 'Version history', 1100, 1280));
-
-  // ---- Status bar ----
-  add('status-text', findText(win, 'Up to date'));
-  // Right side counts
-  const tw = document.createTreeWalker(win, NodeFilter.SHOW_TEXT);
-  while (tw.nextNode()) {
-    const t = tw.currentNode.textContent.trim();
-    if (t.includes('4 on this PC')) {
-      add('status-details', tw.currentNode.parentElement);
-      break;
-    }
-  }
-  // Status bar container
-  const stText = findText(win, 'Up to date');
-  if (stText) {
-    let bar = stText;
-    for (let i = 0; i < 4; i++) {
-      if (bar.parentElement) {
-        bar = bar.parentElement;
-        const br = r(bar);
-        if (br.w > 800 && br.h < 40 && br.h > 20) { add('status-bar', bar); break; }
-      }
-    }
-  }
-
-  // Find the detail pane container
-  const dn = findText(win, 'Contract draft.pdf', 950, 1280);
-  if (dn) {
-    let pane = dn;
-    for (let i = 0; i < 8; i++) {
-      if (pane.parentElement) {
-        pane = pane.parentElement;
-        const pr = r(pane);
-        if (pr.h > 500 && pr.w > 200 && pr.w < 400) { add('detail-pane', pane); break; }
-      }
-    }
-  }
-
-  return {
-    width: Math.round(wr.width),
-    height: Math.round(wr.height),
-    elementCount: Object.keys(out).length,
-    elements: out,
-  };
-});
-
-writeFileSync(join(outDir, 'DW-0401.json'), JSON.stringify(geo, null, 2));
-console.log(`Geometry: ${geo.elementCount} elements`);
-
-// Summary
-for (const [k, v] of Object.entries(geo.elements).sort((a, b) => a[0].localeCompare(b[0]))) {
-  const t = v.text ? ` "${v.text.substring(0, 25)}"` : '';
-  console.log(`  ${k.padEnd(30)} x=${String(v.x).padEnd(6)} y=${String(v.y).padEnd(6)} w=${String(v.w).padEnd(6)} h=${String(v.h).padEnd(5)} ${v.fontSize}px/${v.fontWeight} ${v.fontFamily}${t}`);
+  const flat = JSON.stringify(geo);
+  if (/â€|Â·/.test(flat)) { console.error('capture-golden: mojibake in the exported text (the board must be served as utf-8)'); code = 1; }
+  for (const p of geo.problems) { console.error(`capture-golden: ${p}`); code = 1; }
+  const count = Object.keys(geo.elements).length;
+  if (count === 0) { console.error('capture-golden: the keymap matched nothing in this frame'); code = 1; }
+  delete geo.problems;
+  geo.theme = dark ? 'dark' : 'light';
+  writeFileSync(join(outDir, `${stem}.json`), JSON.stringify(geo, null, 1) + '\n');
+  console.log(`golden: ${stem}: ${count} keyed elements, client ${geo.width}x${geo.height}, ${png}`);
+} finally {
+  await browser.close();
+  server.close();
 }
-
-server.close();
-await browser.close();
-console.log('Done');
+process.exit(code);
