@@ -31,6 +31,9 @@ jobs:
   sign:
     name: Sign Beebeeb.app.tar.gz
     runs-on: ubuntu-latest
+    # The updater key is read only through the GitHub environment `desktop-release` (its deployment
+    # branches and protection rules), like the `build` job of release.yml. See task 2451.
+    environment: desktop-release
     steps:
       - name: Download updater artifact from the release
         env:
@@ -48,16 +51,25 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
+      # The signer is installed here, in a step that does not hold the key: nothing is downloaded
+      # in the step that does.
+      - name: Install the Tauri CLI (no key in this step)
+        run: |
+          set -euo pipefail
+          mkdir signer
+          cd signer
+          printf '{"private":true}\n' > package.json
+          bun add --exact @tauri-apps/cli@2.11.4
+          ./node_modules/.bin/tauri --version
+
       - name: Sign with the updater private key
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          bunx --bun @tauri-apps/cli@2.11.4 signer sign \
-            -k "$TAURI_SIGNING_PRIVATE_KEY" \
-            -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            dl/Beebeeb.app.tar.gz
+          # The key and its password are read from the environment by the signer; they are not arguments.
+          ./signer/node_modules/.bin/tauri signer sign dl/Beebeeb.app.tar.gz
           test -f dl/Beebeeb.app.tar.gz.sig
 
       - name: Upload signature to the release
