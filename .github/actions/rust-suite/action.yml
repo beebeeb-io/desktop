@@ -15,8 +15,11 @@ inputs:
     description: Shared key of the dependency cache (one per crate and OS).
     required: true
   test-threads:
-    description: libtest threads. The suite waits (sockets, SQLite, timers) far more than it computes, so more threads than cores is faster.
-    default: "16"
+    description: >
+      libtest threads; empty = libtest's default (one per core). More threads than cores is faster (the suite waits
+      far more than it computes) but NOT safe on a small runner: with 16 threads on the 3-core macOS runner a
+      real-time test saw a 15 s stall and failed. Set it only for a runner with cores to spare.
+    default: ""
 
 runs:
   using: composite
@@ -37,7 +40,7 @@ runs:
           echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         fi
-        echo "RUST_TEST_THREADS=${{ inputs.test-threads }}" >> "$GITHUB_ENV"
+        if [ -n "${{ inputs.test-threads }}" ]; then echo "RUST_TEST_THREADS=${{ inputs.test-threads }}" >> "$GITHUB_ENV"; fi
         # Temporary test files (hundreds of SQLite databases, one fsync per commit) go to memory on Linux.
         # Config stays out of the runner's real home there. TEMP/TMP are Windows', TMPDIR is Linux' and macOS'.
         tmp="$RUNNER_TEMP/beebeeb-tmp"
@@ -63,7 +66,7 @@ runs:
       with:
         workspaces: ${{ inputs.crate-dir }}
         shared-key: ${{ inputs.cache-key }}
-        save-if: true # MEASUREMENT COMMIT ONLY: reverted to pushes-only in this pull request's last commit
+        save-if: ${{ github.event_name == 'push' }}
         cache-on-failure: true
 
     - name: Test count guard self-test

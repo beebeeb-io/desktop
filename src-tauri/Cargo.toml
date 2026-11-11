@@ -358,7 +358,7 @@ custom-protocol = ["tauri/custom-protocol"]
 
 # Fast tests and a usable dev app (docs/ci/2026-11-11-rust-ci-speed.md): the crypto, KDF, hash and SQLite crates are
 # compiled optimised in the dev and test profiles. At opt-level 0 the Argon2id derivations (core's production
-# parameters) and OPAQUE logins made 7 tests cost 170 s; optimised they cost 16 s (measured, Legion). Only these
+# parameters) and OPAQUE logins made 6 tests cost 170 s; optimised they cost 16 s (measured, Legion). Only these
 # third-party crates change: no KDF parameter, no crypto code, no release setting. A name that matches no package is a
 # cargo warning, so a renamed dependency shows up in the build log. The cost is 54 CPU-seconds on a clean build
 # (measured), paid once per dependency cache; an unchanged dependency is never rebuilt.
