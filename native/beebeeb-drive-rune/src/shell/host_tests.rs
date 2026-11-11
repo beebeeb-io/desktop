@@ -171,12 +171,14 @@ fn plain_arrows_still_belong_to_the_files_frame() {
 fn ctrl_comma_opens_settings_and_esc_returns() {
     let (_, _, mut rt) = fixture();
     go(&mut rt, Section::Photos);
+    assert!(rt.find("Photos-row").is_some(), "Drive's sidebar, before");
     press(&mut rt, Key::Command(','), ctrl());
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::General));
     // The settings lane draws General now (`frames::settings`): its heading, not the placeholder's.
     assert!(texts(&rt).iter().any(|t| t == "General"));
+    // Both sidebars are keyed `sidebar` (the board's name for either): tell them by their items.
     assert!(
-        rt.find("sidebar").is_none(),
+        rt.find("Photos-row").is_none() && rt.find("settings-nav").is_some(),
         "settings has its own sidebar, not Drive's"
     );
     press(&mut rt, Key::Escape, Mods::default());
