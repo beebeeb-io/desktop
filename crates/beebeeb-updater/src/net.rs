@@ -35,7 +35,7 @@ impl HttpsClient {
     }
 
     /// The released client's rules, also trusting one certificate made inside a test (the local TLS server's).
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn trusting(certificate_pem: &[u8]) -> Self {
         let root = reqwest::Certificate::from_pem(certificate_pem).expect("a test certificate");
         let client = builder()
