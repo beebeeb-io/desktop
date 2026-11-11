@@ -2,7 +2,9 @@
 
 use std::fs;
 
-use crate::machine::{CHECK_INTERVAL_SECS, CHUNK_BYTES, Event, Failure, Intent, MAX_INTERRUPTIONS, State};
+use crate::machine::{
+    CHECK_INTERVAL_SECS, CHUNK_BYTES, Event, Failure, Intent, MAX_INTERRUPTIONS, RETRY_AFTER_FAILURE_SECS, State,
+};
 use crate::manifest::{Channel, MAX_MANIFEST_BYTES};
 use crate::policy::Refusal;
 use crate::testkit::{
@@ -435,6 +437,8 @@ fn server_trouble_is_reported_as_what_it_was() {
         },
         "a manifest without its signature is no manifest"
     );
+    assert!(!updater.background_check_due(), "but the next one waits a while");
+    updater.clock.0.set(updater.clock.0.get() + RETRY_AFTER_FAILURE_SECS);
     assert!(
         updater.background_check_due(),
         "a failed check does not count as a check"
@@ -452,7 +456,7 @@ fn server_trouble_is_reported_as_what_it_was() {
 
     updater.http.files.insert(manifest, vec![b' '; MAX_MANIFEST_BYTES + 1]);
     assert_eq!(
-        settle(&mut updater, CHECK),
+        settle(&mut updater, MANUAL_CHECK),
         State::Failed {
             failure: Failure::Refused(Refusal::ManifestUnreadable),
             resume: None
@@ -497,6 +501,11 @@ fn a_check_that_cannot_be_recorded_fails() {
             failure: Failure::Disk,
             resume: None
         }
+    );
+    updater.clock.0.set(updater.clock.0.get() + RETRY_AFTER_FAILURE_SECS);
+    assert!(
+        updater.background_check_due(),
+        "a check that was not recorded does not count as one"
     );
 }
 
@@ -569,4 +578,72 @@ fn a_newer_release_replaces_what_was_staged_for_an_older_one() {
         State::ReadyToRestart { .. }
     ));
     assert_eq!(world.staged(), [artifact_name("0.9.2")]);
+}
+
+#[test]
+fn a_background_check_never_takes_away_an_offer_or_a_staged_update() {
+    let world = World::new();
+    let mut updater = world.updater("0.9.0", "0.9.1");
+    available(&mut updater);
+    let offered = updater.state().clone();
+    // Offline now: a background check would end in Failed and lose the offer.
+    updater.http.next(&manifest_url(Channel::Stable), Serve::Unreachable);
+    assert_eq!(updater.step(CHECK), &offered);
+
+    let ready = settle(&mut updater, Event::Download);
+    assert!(matches!(ready, State::ReadyToRestart { .. }));
+    assert_eq!(updater.step(CHECK), &ready, "\"Restart to update\" stays");
+    assert!(
+        matches!(updater.step(MANUAL_CHECK), State::Checking { .. }),
+        "the person's own check always runs"
+    );
+}
+
+#[test]
+fn a_background_check_keeps_a_download_that_can_be_resumed() {
+    let world = World::new();
+    let mut updater = world.updater("0.9.0", "0.9.1");
+    let url = artifact_url("0.9.1");
+    for _ in 0..MAX_INTERRUPTIONS {
+        updater.http.next(&url, Serve::Unreachable);
+    }
+    available(&mut updater);
+    let stopped = settle(&mut updater, Event::Download);
+    assert!(matches!(stopped, State::Failed { resume: Some(_), .. }));
+    assert_eq!(updater.step(CHECK), &stopped);
+}
+
+#[test]
+fn a_staged_file_that_cannot_be_read_is_kept_not_deleted() {
+    let world = World::new();
+    let mut updater = world.updater("0.9.0", "0.9.1");
+    available(&mut updater);
+    let State::ReadyToRestart { installer, .. } = settle(&mut updater, Event::Download) else {
+        panic!("expected a staged installer")
+    };
+
+    // Unreadable for a moment (here: moved away, as a scanner's lock would make it): nothing is deleted or started.
+    let aside = world.dir.path().join("held-by-a-scanner");
+    fs::rename(&installer, &aside).expect("move aside");
+    assert!(matches!(
+        updater.step(Event::Apply),
+        State::Failed {
+            failure: Failure::Disk,
+            resume: Some(_)
+        }
+    ));
+    assert!(updater.apply.launched.is_empty());
+    assert!(aside.exists());
+
+    fs::rename(&aside, &installer).expect("move back");
+    let before = updater.http.log.len();
+    assert!(matches!(
+        settle(&mut updater, Event::Download),
+        State::ReadyToRestart { .. }
+    ));
+    assert_eq!(
+        updater.http.log.len(),
+        before,
+        "the file on disk is used; nothing is downloaded again"
+    );
 }

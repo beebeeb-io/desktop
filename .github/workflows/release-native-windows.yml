@@ -135,7 +135,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
           test "$(cargo tree --locked -e normal | grep -c tauri)" -eq 0
 
@@ -385,6 +385,8 @@ jobs:
             test -s "work/$name"
           done
 
+      # The script verifies the fetched installer against its signature and the baked key before writing anything:
+      # a truncated or replaced asset gets no manifest and is not published.
       - name: Generate the v2 channel manifest
         shell: bash
         run: |
@@ -399,7 +401,7 @@ jobs:
           mkdir -p "stage/desktop/v2" "stage/desktop/artifacts/$VER"
           node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
             --installer "work/$installer" --sig "work/$installer.sig" --notes work/notes.md \
-            --out "stage/desktop/v2/$file"
+            --config desktop-src/src-tauri/tauri.conf.json --out "stage/desktop/v2/$file"
           cp "work/$installer" "stage/desktop/artifacts/$VER/$installer"
           echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
 
@@ -442,7 +444,9 @@ jobs:
           set -euo pipefail
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git remote set-url origin "https://x-access-token:${RELEASES_PUSH_TOKEN}@github.com/beebeeb-io/releases.git"
+          # The token is read from the environment when git asks for it: never on a command line, never in a file.
+          git config credential.helper '!f() { echo username=x-access-token; echo "password=$RELEASES_PUSH_TOKEN"; }; f'
+          git remote set-url origin "https://github.com/beebeeb-io/releases.git"
           git add "desktop/v2/$MANIFEST_FILE" "desktop/v2/$MANIFEST_FILE.sig" "desktop/artifacts/$VER"
           if git diff --cached --quiet; then
             echo "desktop/v2/$MANIFEST_FILE already up to date"

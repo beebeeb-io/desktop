@@ -6,7 +6,7 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 |---|---|
 | `installer.nsi`, `utils.nsh`, `English.nsh` | The installer script Tauri generated for 0.8.x, kept line for line; the changes are listed at the top of `installer.nsi`. |
 | `hooks.nsh` | Our hooks: remove the WebView2 profile after install, the staged updates on uninstall. |
-| `build-installer.ps1` | Builds the installer. `-Mode test` ("Beebeeb Test", `io.beebeeb.app.test`, unsigned) or `-Mode release` (signed, fails closed). |
+| `build-installer.ps1` | Builds the installer; refuses a script that still handles WebView2. `-Mode test` ("Beebeeb Test", `io.beebeeb.app.test`, unsigned) or `-Mode release` (signed, fails closed). |
 | `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
@@ -19,7 +19,9 @@ Needs: NSIS 3 and `nsis_tauri_utils.dll` 0.5.3. Both are in `%LOCALAPPDATA%\taur
 
 ## A. Test installer of the native app: build, install, verify, uninstall, verify
 
-PowerShell, from a clone of this branch (for example `C:\bb-win\native\desktop`).
+PowerShell, from a clone of this branch (for example `C:\bb-win\native\desktop`). **Quit the real Beebeeb first:**
+the test build is also `beebeeb-desktop.exe`, and the installer and uninstaller close every process of that name for
+this user (the Tauri test build does the same today).
 
 ```powershell
 # 1. Build the native binary (its own toolchain: native\beebeeb-drive-rune\rust-toolchain.toml).
@@ -35,8 +37,8 @@ $installer = Join-Path $PWD 'out\Beebeeb Test_0.9.0_x64-setup.exe'
 
 # 3. Install silently (per user, no prompt) and wait for it.
 Start-Process -FilePath $installer -ArgumentList '/S' -Wait
-# 4. Verify: must end with "VERIFY installed: 15 passed, 0 failed".
-.\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed -Installer $installer
+# 4. Verify: must end with "VERIFY installed: 14 passed, 0 failed".
+.\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 
 # 5. Start it once, look at it, quit it. Then: no WebView2 process may belong to it, and no profile may appear.
 Start-Process "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop.exe"
@@ -54,8 +56,9 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 Prove the checker can fail before trusting it: run step 4 with `-Version 9.9.9` (must print `FAIL  uninstall entry:
 DisplayVersion` and exit 1), and step 7 while the app is still installed (must fail 5 of 6).
 
-The silent uninstall keeps the data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`) on purpose. The real Beebeeb
-(`%LOCALAPPDATA%\Beebeeb`, `io.beebeeb.app`) is not touched by any step; the two builds do share the credentials
+The silent uninstall keeps the data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`) on purpose. The real Beebeeb's
+files and registry entries (`%LOCALAPPDATA%\Beebeeb`, `io.beebeeb.app`) are not touched by any step, but a running
+real Beebeeb is closed (see above), and the two builds share the credentials
 (`io.beebeeb.app/...` in Credential Manager) and `%APPDATA%\beebeeb\desktop.toml`, as the Tauri test build does
 today (spec §3).
 

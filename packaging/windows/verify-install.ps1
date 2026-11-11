@@ -4,7 +4,8 @@
 
 .DESCRIPTION
   -Phase installed    files, uninstall entry (exactly one), install-location key, Start-menu and desktop shortcut,
-                      and no WebView2: none in the installer, none in the binary, no EBWebView profile left.
+                      and no WebView2: none in the binary, no EBWebView profile left. (That the installer itself
+                      carries none is checked by build-installer.ps1 on the script: the built file is compressed.)
   -Phase uninstalled  the install folder, the uninstall entry, the shortcuts and the autostart entry are gone, and
                       the app's data folder is still there if it was (a silent uninstall never deletes data).
 
@@ -12,14 +13,13 @@
   number of checks (a run that checked nothing is a failure).
 
 .EXAMPLE
-  .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed -Installer '.\out\Beebeeb Test_0.9.0_x64-setup.exe'
+  .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 #>
 [CmdletBinding()]
 param(
   [ValidateSet('test', 'release')][string]$Mode = 'test',
   [Parameter(Mandatory = $true)][string]$Version,
-  [ValidateSet('installed', 'uninstalled')][string]$Phase = 'installed',
-  [string]$Installer = ''
+  [ValidateSet('installed', 'uninstalled')][string]$Phase = 'installed'
 )
 
 Set-StrictMode -Version Latest
@@ -66,7 +66,7 @@ function UninstallEntries {
   }
   return ,$found
 }
-# True when the file holds the text, as ASCII or UTF-16LE. Reads the whole file: installers and the app are tens of MiB.
+# True when the file holds the text, as ASCII or UTF-16LE. Reads the whole file (the app is tens of MiB).
 function FileContains([string]$Path, [string]$Text) {
   $bytes = [IO.File]::ReadAllBytes($Path)
   $latin = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
@@ -93,10 +93,6 @@ if ($Phase -eq 'installed') {
   $webviewInBinary = (Test-Path -LiteralPath $exe) -and ((FileContains $exe 'WebView2Loader') -or (FileContains $exe 'EBWebView'))
   Check 'the binary does not load WebView2' (!$webviewInBinary)
   Check 'no WebView2 profile is left in the app data folder' (!(Test-Path -LiteralPath (Join-Path $dataDir 'EBWebView')))
-  if ($Installer) {
-    $expected++
-    Check 'the installer carries no WebView2 bootstrapper or download' (!((FileContains $Installer 'MicrosoftEdgeWebview2Setup') -or (FileContains $Installer 'LinkId=2124703')))
-  }
 } else {
   $expected = 6
   Check 'the install folder is gone' (!(Test-Path -LiteralPath $installDir))

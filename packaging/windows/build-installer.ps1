@@ -7,6 +7,8 @@
 
   -Mode test     "Beebeeb Test", identifier io.beebeeb.app.test, unsigned. Installs beside the real Beebeeb
                  (%LOCALAPPDATA%\Beebeeb Test), as tools/agent-team/testbuild.ps1 does for the Tauri build.
+                 QUIT THE REAL BEEBEEB FIRST: both are beebeeb-desktop.exe, and the installer and uninstaller
+                 close every process of that name for this user (the Tauri test build does the same today).
   -Mode release  "Beebeeb", identifier io.beebeeb.app. The app binary, the uninstaller and the installer are
                  Authenticode-signed through scripts/windows/sign-artifact.ps1 (Azure Artifact Signing, ambient az
                  login); refuses to run unless BEEBEEB_REQUIRE_SIGNING=1, so a release installer is never unsigned.
@@ -50,6 +52,20 @@ if (!(Test-Path -LiteralPath $plugin)) { Fail "no nsis_tauri_utils.dll in $Plugi
 $pluginHash = (Get-FileHash -LiteralPath $plugin -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($pluginHash -ne $PluginSha256) { Fail "nsis_tauri_utils.dll is not 0.5.3 (sha256 $pluginHash)" }
 
+# Absolute paths from here on: makensis runs with packaging\windows as its working directory.
+New-Item -ItemType Directory -Force $OutDir | Out-Null
+$OutDir = (Resolve-Path -LiteralPath $OutDir).Path
+$Exe = (Resolve-Path -LiteralPath $Exe).Path
+$PluginDir = (Resolve-Path -LiteralPath $PluginDir).Path
+
+# The installer must not fetch or carry WebView2. The built installer is LZMA-compressed, so this is checked on
+# the script that builds it: no download call and no bootstrapper name outside a comment.
+foreach ($source in 'installer.nsi', 'hooks.nsh', 'utils.nsh') {
+  $code = Get-Content -LiteralPath (Join-Path $PSScriptRoot $source) | Where-Object { $_ -notmatch '^\s*;' }
+  $hits = @($code | Select-String -Pattern 'NSISdl::|MicrosoftEdgeWebview2|LinkId=2124703|EdgeUpdate' -CaseSensitive:$false)
+  if ($hits.Count -ne 0) { Fail "$source still handles WebView2: $($hits[0].Line.Trim())" }
+}
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $icon = Join-Path $repo 'src-tauri\icons\icon.ico'
 if (!(Test-Path -LiteralPath $icon)) { Fail "no icon at $icon" }
@@ -71,7 +87,7 @@ if ($Mode -eq 'release') {
   if ($env:BEEBEEB_REQUIRE_SIGNING -ne '1') { Fail 'release mode needs BEEBEEB_REQUIRE_SIGNING=1 (a release installer is never unsigned)' }
   # The binary must say what it is: the version it reports is what Explorer and the uninstall entry show beside it.
   $info = (Get-Item -LiteralPath $staged).VersionInfo
-  if ($info.ProductName -ne 'Beebeeb' -or "$($info.ProductVersion)" -notlike "$Version*") {
+  if ($info.ProductName -ne 'Beebeeb' -or "$($info.ProductVersion)" -notin @($Version, "$Version.0")) {
     Fail "the binary's version resource says '$($info.ProductName)' '$($info.ProductVersion)', expected 'Beebeeb' '$Version' (the native crate must embed icon and version)"
   }
   & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signScript $staged

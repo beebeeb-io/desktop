@@ -19,8 +19,10 @@
 # Cache headers (s3 target; a web server sets the same by path): artefacts are immutable (their name carries the
 # version), manifests and signatures are revalidated after 5 minutes.
 #
-# Refuses a staging tree with anything but desktop/artifacts/<version>/<file> and desktop/v2/<channel>.json[.sig],
-# and refuses to overwrite a published artefact with different bytes (dir target).
+# Refuses a staging tree with anything but desktop/artifacts/<version>/<file> and desktop/v2/<channel>.json[.sig].
+# A published artefact is never replaced: its name carries the version and it is served as immutable. The dir
+# target refuses other bytes under the same name; the s3 and rsync targets keep the file that is already there
+# (a manifest for other bytes then fails in every client, loudly, instead of in some caches only).
 # `--self-test` proves the refusals and the order in a temp dir and prints "publish-release-files: N passed, 0 failed".
 set -euo pipefail
 
@@ -60,11 +62,19 @@ publish() {
         ;;
       s3://*)
         local cache='public, max-age=300, must-revalidate'
-        [[ "$file" =~ $ARTIFACT_RE ]] && cache='public, max-age=31536000, immutable'
+        if [[ "$file" =~ $ARTIFACT_RE ]]; then
+          cache='public, max-age=31536000, immutable'
+          if aws s3 ls "${target%/}/$file" > /dev/null 2>&1; then
+            echo "kept $file (already published)"
+            continue
+          fi
+        fi
         aws s3 cp --only-show-errors --cache-control "$cache" "$staging/$file" "${target%/}/$file"
         ;;
       rsync:*)
-        rsync --relative --times "$staging/./$file" "${target#rsync:}/"
+        local keep=()
+        [[ "$file" =~ $ARTIFACT_RE ]] && keep=(--ignore-existing)
+        rsync --relative --times "${keep[@]}" "$staging/./$file" "${target#rsync:}/"
         ;;
       *) fail "unknown target '$target' (dir:<path>, s3://<bucket>[/<prefix>] or rsync:<user@host:/path>)" ;;
     esac

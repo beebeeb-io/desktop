@@ -261,7 +261,7 @@ S3-compatible bucket; `rsync:…`: our own web server), chosen by the repository
 | R5 | Two uninstall entries (NSIS + MSI, or old + new) | same `UNINSTKEY`; the WiX branch removes an MSI install | `verify-install.ps1` "exactly one uninstall entry"; rehearsal variant B |
 | R6 | The native engine cannot open a state written by an old Tauri build | only 0.8.25+ is an upgrade source (§2 b) | engine lane; rehearsal's `state.db` fingerprint before/after |
 | R7 | A bad 0.9.0 reaches everyone | alpha, then beta, then stable (build once, promote by manifest); withdraw by removing the v2 manifest | `publish_existing` |
-| R8 | Rollback to an old signed build through the update server | §4 rules 1, 3, 7 | `policy_tests.rs`, `machine_tests.rs` (29 of 29 mutants killed) |
+| R8 | Rollback to an old signed build through the update server | §4 rules 1, 3, 7 | `policy_tests.rs`, `machine_tests.rs` (34 of 34 mutants killed) |
 | R9 | A partial or swapped file is run; `EBWebView` stays locked | `.part` until verified, verified again at Apply; best-effort removal, repeated by the next install | `machine_tests.rs`; `verify-install.ps1` |
 
 Rehearsal and the lead's commands: `packaging/windows/README.md`.

@@ -24,6 +24,9 @@ pub const CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_INTERRUPTIONS: u32 = 3;
 /// A background check is due this long after the last successful one (0.8.x checks every 4 hours).
 pub const CHECK_INTERVAL_SECS: u64 = 4 * 60 * 60;
+/// After a check that failed, the next background check waits this long: a release host in trouble is not asked
+/// again on every timer tick by every install.
+pub const RETRY_AFTER_FAILURE_SECS: u64 = 15 * 60;
 
 /// A response to one GET. `offset` is where `body` starts in the whole file (0 for a 200, the range start for a
 /// 206) and `total` is the whole file's length when the server states it.
@@ -176,9 +179,12 @@ pub struct Updater<H, C, S, A> {
     pub(crate) apply: A,
     persisted: Persisted,
     state: State,
-    /// The open download. Not part of `State`: the UI's copy stays plain data.
+    /// The open download and the part file it is written to. Not part of `State`: the UI's copy stays plain data.
     body: Option<Box<dyn Read + Send>>,
+    part: Option<fs::File>,
     interruptions: u32,
+    /// When the last check started, in this run only (a restart may check at once).
+    last_attempt: Option<u64>,
 }
 
 impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
@@ -193,7 +199,9 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             persisted,
             state: State::Idle,
             body: None,
+            part: None,
             interruptions: 0,
+            last_attempt: None,
         }
     }
 
@@ -201,16 +209,15 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         &self.state
     }
 
-    /// True when no check has passed in the last [`CHECK_INTERVAL_SECS`] (or the clock went backwards).
+    /// True when no check has passed in the last [`CHECK_INTERVAL_SECS`] and none was tried in the last
+    /// [`RETRY_AFTER_FAILURE_SECS`]. A clock that went backwards never silences checks.
     pub fn background_check_due(&self) -> bool {
-        match self.persisted.last_check {
-            None => true,
-            Some(last) => self
-                .clock
-                .now()
-                .checked_sub(last)
-                .is_none_or(|elapsed| elapsed >= CHECK_INTERVAL_SECS),
-        }
+        let now = self.clock.now();
+        let at_least = |since: Option<u64>, wait: u64| {
+            since.is_none_or(|then| now.checked_sub(then).is_none_or(|elapsed| elapsed >= wait))
+        };
+        at_least(self.persisted.last_check, CHECK_INTERVAL_SECS)
+            && at_least(self.last_attempt, RETRY_AFTER_FAILURE_SECS)
     }
 
     /// Applies one event. An event that means nothing in the current state changes nothing.
@@ -225,6 +232,15 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
                 | State::Restarting { .. }),
                 Event::Check { .. },
             ) => busy,
+            // A background check never takes away what the person is looking at: an offer, a download that can be
+            // resumed, or a staged update waiting for "Restart to update". A manual check is the person's own.
+            (
+                kept @ (State::Available { .. } | State::ReadyToRestart { .. } | State::Failed { resume: Some(_), .. }),
+                Event::Check {
+                    intent: Intent::Background,
+                    ..
+                },
+            ) => kept,
             (_, Event::Check { channel, intent }) => State::Checking { channel, intent },
             (State::Checking { channel, intent }, Event::Tick) => self.run_check(channel, intent),
             (State::Available { offer }, Event::Download) if !offer.downgrade => self.begin_download(offer),
@@ -269,6 +285,7 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             failure: Failure::Refused(refusal),
             resume: None,
         };
+        self.last_attempt = Some(self.clock.now());
         let url = self.manifest_url(channel);
         if policy::trusted_file_name(&url, &self.config.trust.allowed_hosts).is_none() {
             return refused(Refusal::UntrustedAddress);
@@ -297,19 +314,22 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             Err(refusal) => return refused(refusal),
         };
 
-        self.persisted.seen.insert(
+        // Recorded on disk first: a check that could not be recorded did not happen, in memory either.
+        let mut recorded = self.persisted.clone();
+        recorded.seen.insert(
             channel,
             HighWater {
                 manifest_time: checked.manifest_time,
             },
         );
-        self.persisted.last_check = Some(self.clock.now());
-        if !self.store.save(&self.persisted) {
+        recorded.last_check = Some(self.clock.now());
+        if !self.store.save(&recorded) {
             return State::Failed {
                 failure: Failure::Disk,
                 resume: None,
             };
         }
+        self.persisted = recorded;
         let up_to_date = State::UpToDate {
             installed: self.config.installed,
             channel,
@@ -373,7 +393,7 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
     }
 
     fn begin_download(&mut self, offer: Offer) -> State {
-        self.body = None;
+        self.close_download();
         self.interruptions = 0;
         if fs::create_dir_all(&self.config.staging_dir).is_err() {
             return State::Failed {
@@ -402,11 +422,12 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
     fn download_tick(&mut self, offer: Offer, mut received: u64) -> State {
         let total = offer.size;
         if received == total {
-            self.body = None;
+            self.close_download();
             return State::Verifying { offer };
         }
         let part = self.part_path(&offer);
-        if self.body.is_none() {
+        if self.body.is_none() || self.part.is_none() {
+            self.close_download();
             let response = match self.http.get(&offer.url, received) {
                 Ok(response) => response,
                 Err(Unreachable) => return self.interrupted(offer, received),
@@ -437,7 +458,13 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
                     resume: None,
                 };
             }
-            self.body = Some(response.body);
+            let Ok(file) = fs::OpenOptions::new().create(true).append(true).open(&part) else {
+                return State::Failed {
+                    failure: Failure::Disk,
+                    resume: Some(offer),
+                };
+            };
+            (self.body, self.part) = (Some(response.body), Some(file));
         }
 
         // Never more than the manifest's length: what a server sends beyond it is not read.
@@ -447,13 +474,13 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             Ok(0) | Err(_) => return self.interrupted(offer, received),
             Ok(read) => read,
         };
-        let appended = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&part)
-            .and_then(|mut file| file.write_all(&chunk[..read]));
+        let appended = self
+            .part
+            .as_mut()
+            .expect("the part file was opened above")
+            .write_all(&chunk[..read]);
         if appended.is_err() {
-            self.body = None;
+            self.close_download();
             return State::Failed {
                 failure: Failure::Disk,
                 resume: Some(offer),
@@ -462,16 +489,21 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         received += read as u64;
         self.interruptions = 0;
         if received == total {
-            self.body = None;
+            self.close_download();
             return State::Verifying { offer };
         }
         State::Downloading { offer, received, total }
     }
 
+    /// Drops the connection and closes the part file (flushed: `File` writes are unbuffered).
+    fn close_download(&mut self) {
+        (self.body, self.part) = (None, None);
+    }
+
     /// The connection ended before the file did. The next `Tick` asks for the rest; after [`MAX_INTERRUPTIONS`] in
     /// a row without a new byte the download stops, keeping what it has for a later [`Event::Download`].
     fn interrupted(&mut self, offer: Offer, received: u64) -> State {
-        self.body = None;
+        self.close_download();
         self.interruptions += 1;
         let total = offer.size;
         if self.interruptions >= MAX_INTERRUPTIONS {
@@ -500,9 +532,19 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
 
     fn verify(&mut self, offer: Offer) -> State {
         let (part, staged) = (self.part_path(&offer), self.final_path(&offer));
-        if let Err(failure) = self.staged_file_is_signed(&part, &offer) {
-            let _ = fs::remove_file(&part);
-            return State::Failed { failure, resume: None };
+        match self.staged_file_is_signed(&part, &offer) {
+            Ok(()) => {}
+            // The file could not be read just now (a scanner holds it, say): it is kept and checked again later.
+            Err(Failure::Disk) => {
+                return State::Failed {
+                    failure: Failure::Disk,
+                    resume: Some(offer),
+                };
+            }
+            Err(failure) => {
+                let _ = fs::remove_file(&part);
+                return State::Failed { failure, resume: None };
+            }
         }
         if fs::rename(&part, &staged).is_err() {
             return State::Failed {
@@ -518,9 +560,18 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
 
     fn apply(&mut self, offer: Offer, installer: PathBuf) -> State {
         // Checked again at the moment of use: the file sat in a folder the person's other programs can write.
-        if let Err(failure) = self.staged_file_is_signed(&installer, &offer) {
-            let _ = fs::remove_file(&installer);
-            return State::Failed { failure, resume: None };
+        match self.staged_file_is_signed(&installer, &offer) {
+            Ok(()) => {}
+            Err(Failure::Disk) => {
+                return State::Failed {
+                    failure: Failure::Disk,
+                    resume: Some(offer),
+                };
+            }
+            Err(failure) => {
+                let _ = fs::remove_file(&installer);
+                return State::Failed { failure, resume: None };
+            }
         }
         if self.apply.launch(&installer, &offer) {
             State::Restarting { offer }
