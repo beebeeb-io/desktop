@@ -479,8 +479,9 @@ fn becoming_active_and_updates_reach_the_reconciler_and_the_log() {
         // Tasks 2449/2451: both commands install through the one record-first path, which writes both events.
         assert!(body.contains("flow::download_record_install("), "{signature}");
     }
-    let flow = include_str!("update_window/flow.rs");
-    let install = body_between(flow, "async fn download_record_install(", "\n}\n");
+    // A Windows checkout may hold CRLF line endings; `production_source` already reads them as LF.
+    let flow = include_str!("update_window/flow.rs").replace("\r\n", "\n");
+    let install = body_between(&flow, "async fn download_record_install(", "\n}\n");
     assert!(install.contains("LifecycleEvent::UpdateDownloaded"));
     assert!(install.contains("LifecycleEvent::UpdateInstalled"));
 }
