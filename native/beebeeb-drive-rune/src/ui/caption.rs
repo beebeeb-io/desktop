@@ -1,60 +1,84 @@
-//! Caption bar: the Beebeeb "b" mark + "Beebeeb Drive" title, with window drag
-//! and Windows minimize/maximize/close buttons (drawn by Rune's Titlebar).
+//! Caption bar (`.kit-wincap`): the Beebeeb mark, the window title, and the window's
+//! minimize / maximize / close buttons. The whole band drags the window; a double click
+//! maximizes it (Rune's `.window_drag()`).
 //!
-//! Board: 32 pt tall, sidebar-coloured left half with the b mark and "DRIVE" label,
-//! transparent right half for drag + caption buttons.
+//! On Windows, Rune's `Titlebar` draws the three caption buttons itself over the trailing
+//! edge: 46 pt each at any DPI, the close button red under the pointer, the snap-layouts
+//! flyout over maximize, named Minimize / Maximize or Restore / Close for assistive
+//! technology. This band only keeps `Cx::chrome_insets().trailing` clear for them. Where no
+//! system draws them (a headless render, a platform without `App::titlebar`), the band draws
+//! its own three, as on the board, and they work.
 
 use crate::State;
 use crate::TITLEBAR_H;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, space};
-use rune::{Cx, El, el, icon, row};
+use crate::theme::tokens::{Theme, type_};
+use rune::{Color, Cx, El, Icon, Tx, el, row};
+
+use super::kit;
+
+/// A caption button is 46 pt wide on Windows 11 (and on the board).
+pub const CAPTION_BUTTON_W: f32 = 46.0;
 
 pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
     let insets = cx.chrome_insets();
-    let dark = cx.system_dark();
+    cx.caption_color(if t.dark { Color::WHITE } else { Color::BLACK });
 
-    // Caption icon colour for Windows buttons
-    cx.caption_color(if dark { rune::Color::WHITE } else { rune::Color::BLACK });
-
-    // The board shows: [b logo] [DRIVE label] ... [drag area] ... [min][max][close]
-    // The b logo + DRIVE text is in the sidebar-bg area on the left.
-    // Rune draws the actual caption buttons; we reserve `insets.trailing` for them.
-
-    row()
+    let mut bar = row()
         .key("caption-bar")
+        .role("group")
+        .label("Title bar")
         .w_full()
         .h(TITLEBAR_H)
+        .fill(t.paper2)
+        .border_sides([0.0, 0.0, 1.0, 0.0], t.card_border)
+        .border_layout()
         .window_drag()
         .center_y()
+        .gap(9.0)
+        .pl(insets.leading + 12.0)
+        .child(kit::mark("cap-mark", 16.0))
         .child(
-            // Sidebar-coloured left portion
-            row()
-                .key("caption-left")
-                .w(220.0) // sidebar width (board: 220px)
-                .h(TITLEBAR_H)
-                .fill(t.sidebar_bg)
-                .pl(insets.leading + space::MD)
-                .center_y()
-                // b mark: the board uses a 16x16 icon from the beebeeb mark (x=13, y=8)
-                // drive-label "DRIVE" is in the sidebar at y=64 (see sidebar.rs header)
-                .child(
-                    el().key("b-mark")
-                        .size(16.0, 16.0)
-                        .radius(3.0)
-                        .fill(tokens::amber())
-                        .center()
-                        .child(icon(&icons::FILES, 9.0).key("b-mark-icon").color(t.text)),
-                ),
-        )
-        .child(
-            // Main area: title text
-            row()
-                .key("caption-main")
+            kit::label("cap-title", "Beebeeb Drive", type_::BODY, t.text_secondary)
                 .grow(1.0)
-                .h(TITLEBAR_H)
-                .fill(t.bg)
-                .center_y()
-                .pl(space::MD),
-        )
+                .truncate(),
+        );
+
+    if insets.height > 0.0 {
+        // The system's caption buttons (or the Mac's traffic lights at the leading edge).
+        bar = bar.child(el().key("cap-system").w(insets.trailing).h_full());
+    } else {
+        bar = bar.child(
+            row()
+                .key("cap-buttons")
+                .h_full()
+                .child(
+                    caption_button("cap-min", "Minimize", &icons::CAPTION_MINIMIZE, false, t)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.minimize()),
+                )
+                .child(
+                    caption_button("cap-max", "Maximize", &icons::CAPTION_MAXIMIZE, false, t)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.toggle_maximized()),
+                )
+                .child(
+                    caption_button("cap-close", "Close", &icons::CAPTION_CLOSE, true, t)
+                        .on_press_tx(|_: &mut State, tx: &mut Tx| tx.close_window()),
+                ),
+        );
+    }
+    bar
+}
+
+fn caption_button(key: &'static str, name: &'static str, ic: &'static Icon, close: bool, t: &Theme) -> El {
+    let glyph = kit::glyph(format!("{key}-icon"), ic, 10.0, t.text);
+    el().key(key)
+        .role("button")
+        .label(name)
+        .w(CAPTION_BUTTON_W)
+        .h_full()
+        .center()
+        .no_window_drag()
+        .hover(if close { t.caption_close } else { t.caption_hover })
+        .press(if close { t.caption_close.alpha(0.9) } else { t.press })
+        .child(if close { glyph.group_color(Color::WHITE) } else { glyph })
 }

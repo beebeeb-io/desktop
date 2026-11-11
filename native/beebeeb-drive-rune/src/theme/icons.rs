@@ -236,3 +236,60 @@ pub static DOT_GREEN: Icon = Icon {
     view: 24.0,
     body: r#"<circle cx="12" cy="12" r="4" fill="currentColor"></circle>"#,
 };
+
+// ---------------------------------------------------------------------------
+// Brand mark and the PC column's kept state
+// ---------------------------------------------------------------------------
+
+/// The Beebeeb mark: the "b" on Amber with the folder dot. Draws in its own colours
+/// (the brand's, the same in both themes), at any size: 16 in the caption, 24 in the sidebar.
+pub static MARK: Icon = Icon {
+    name: "mark",
+    view: 512.0,
+    body: r##"<rect width="512" height="512" rx="102" fill="#F5B800"></rect><g fill="#1A1714" transform="translate(116.8 360.7) scale(0.1723 -0.1723)"><path d="M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z"></path></g><circle cx="378" cy="378" r="104" fill="#F5B800"></circle><circle cx="378" cy="378" r="88" fill="#1A1714"></circle><g transform="translate(326 326) scale(4.3333)" fill="none" stroke="#F5B800" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></g>"##,
+};
+
+/// Available offline, kept: the disc, solid (`.mk-mac.is-kept svg path:first-child { fill }`).
+pub static AVAILABLE_OFFLINE_DISC: Icon = Icon {
+    name: "available-offline-disc",
+    view: 24.0,
+    body: r#"<g fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z"></path></g>"#,
+};
+
+/// Available offline, kept: the arrow, drawn in the surface colour over the disc.
+pub static AVAILABLE_OFFLINE_ARROW: Icon = icon24!(
+    "available-offline-arrow",
+    r#"<path d="M12 7.8v7.4"></path><path d="M8.8 12l3.2 3.2 3.2-3.2"></path>"#
+);
+
+// The mark's layers, each one colour, so it draws from the glyph atlas like every other icon
+// (Rune paints a multi-colour body only with its `svg` feature, which this crate leaves off).
+// `ui::kit::mark` stacks them; `MARK` above stays the whole drawing, which the gate compares.
+
+/// The mark's "b" (ink).
+pub static MARK_B: Icon = Icon {
+    name: "mark-b",
+    view: 512.0,
+    body: r#"<g fill="currentColor" transform="translate(116.8 360.7) scale(0.1723 -0.1723)"><path d="M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z"></path></g>"#,
+};
+
+/// The ring around the mark's dot (Amber).
+pub static MARK_RING: Icon = Icon {
+    name: "mark-ring",
+    view: 512.0,
+    body: r#"<circle cx="378" cy="378" r="104" fill="currentColor"></circle>"#,
+};
+
+/// The mark's dot (ink).
+pub static MARK_DOT: Icon = Icon {
+    name: "mark-dot",
+    view: 512.0,
+    body: r#"<circle cx="378" cy="378" r="88" fill="currentColor"></circle>"#,
+};
+
+/// The folder in the mark's dot (Amber).
+pub static MARK_FOLDER: Icon = Icon {
+    name: "mark-folder",
+    view: 512.0,
+    body: r#"<g transform="translate(326 326) scale(4.3333)" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></g>"#,
+};
