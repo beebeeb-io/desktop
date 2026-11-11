@@ -82,6 +82,9 @@ fn a_click_selects_the_row_it_lands_on() {
     let mut rt = runtime(false);
     click(&mut rt, "row-2-date");
     assert_eq!(rt.state.selected, Some(2));
+    // The fill is the presented colour, which springs: let it land.
+    rt.frame(1.0);
+    rt.frame(1.0);
     assert!(info(&rt, "row-2").fill.a > 0.0, "the selected row is filled");
     assert_eq!(info(&rt, "row-6").fill.a, 0.0, "and the row selected before is not");
 }
