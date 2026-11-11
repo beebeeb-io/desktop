@@ -1,0 +1,253 @@
+//! Settings lists (`.kit-list`): a small heading, a card of rows, a foot note.
+//!
+//! | Piece | Function | Keys it gives |
+//! | --- | --- | --- |
+//! | List | `list(index, title, rows, foot, t)` | `list-<L>-title`, `list-<L>-body`, `list-<L>-foot` |
+//! | Row | `item(list, index, &Item, t)` | `item-<L>-<I>`, `-icon`, `-title`, `-sub`, and per trailing piece below |
+//! | Value | `Trailing::Value` / `Mono` | `item-<L>-<I>-value` |
+//! | Chevron (opens a pane) | `Trailing::Chevron` | `item-<L>-<I>-chev` |
+//! | Leaves the app (a web page) | `Trailing::External` | `item-<L>-<I>-ext` |
+//! | The chosen one of several | `Trailing::Check` | `item-<L>-<I>-check` |
+//! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret` |
+//! | Switch | `Trailing::Switch` | `item-<L>-<I>-switch`, `-knob` |
+//!
+//! A row is 28 pt, 40 pt with a second line. Rows are separated by a hairline that starts
+//! 10 pt in. What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
+//! the press, focus and hover; a `Role::Plain` row is text, and a control inside it (a
+//! switch, a pop-up button) is the thing that takes focus.
+
+use crate::theme::icons_settings as ic;
+use crate::theme::tokens::{Theme, radius, type_};
+use rune::tok::Family;
+use rune::{El, Icon, TextStyle, col, el, row};
+
+use super::settings_shell::SUB;
+use super::{detail_pane, kit};
+
+/// 10px/600 on a 13px line, tracked .01em: a list's heading (`.kit-list-title`).
+pub const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
+/// 13px/400 on a 17px line: a row's value (`.kit-item-value`).
+pub const VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+/// 12.5px/400 mono: a machine's value in a row (`.kit-item-value.font-mono`).
+pub const VALUE_MONO: TextStyle = TextStyle::new(12.5, 400.0).family(Family::Mono).lh(17.0);
+/// 12.5px/400: a pop-up button's choice (`.mk-pop2`).
+pub const POP: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+/// 12px/400 on a 16px line: a list's foot note (`.kit-list-foot`).
+pub const FOOT: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+
+/// What a row is to a person and to assistive technology.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    /// Text; any control inside it takes the press.
+    Plain,
+    /// Shows another pane or page.
+    Link,
+    /// Does something here.
+    Button,
+}
+
+/// What sits at a row's trailing edge, in order.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Trailing {
+    Value(String),
+    Mono(String),
+    Chevron,
+    External,
+    Check,
+    /// A pop-up button showing the current choice; `open` while its menu shows.
+    Pop {
+        choice: String,
+        open: bool,
+    },
+    Switch(bool),
+}
+
+/// One row of a settings list.
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub icon: Option<&'static Icon>,
+    pub title: String,
+    pub sub: Option<String>,
+    pub trailing: Vec<Trailing>,
+    pub role: Role,
+}
+
+impl Item {
+    pub fn new(icon: Option<&'static Icon>, title: impl Into<String>) -> Self {
+        Self {
+            icon,
+            title: title.into(),
+            sub: None,
+            trailing: Vec::new(),
+            role: Role::Plain,
+        }
+    }
+    pub fn sub(mut self, sub: impl Into<String>) -> Self {
+        self.sub = Some(sub.into());
+        self
+    }
+    pub fn trailing(mut self, t: Trailing) -> Self {
+        self.trailing.push(t);
+        self
+    }
+    /// A row that opens a pane: a chevron at the end, a link.
+    pub fn opens(mut self) -> Self {
+        self.trailing.push(Trailing::Chevron);
+        self.role = Role::Link;
+        self
+    }
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// The row in words: the title, then what it currently says.
+    pub fn name(&self) -> String {
+        let mut name = self.title.clone();
+        for t in &self.trailing {
+            match t {
+                Trailing::Value(v) | Trailing::Mono(v) => name = format!("{name}, {v}"),
+                Trailing::Pop { choice, .. } => name = format!("{name}, {choice}"),
+                Trailing::Check => name = format!("{name}, chosen"),
+                Trailing::External => name = format!("{name}, opens in the browser"),
+                Trailing::Chevron | Trailing::Switch(_) => {}
+            }
+        }
+        if let Some(sub) = &self.sub {
+            name = format!("{name}. {sub}");
+        }
+        name
+    }
+}
+
+/// A pop-up button (`.mk-pop2`): the current choice and a caret, raised a little off the
+/// card. Keys: `<key>-pop`, `<key>-pop-label`, `<key>-pop-caret`.
+pub fn pop_button(key: &str, name: &str, choice: &str, open: bool, t: &Theme) -> El {
+    row()
+        .key(format!("{key}-pop"))
+        .role("button")
+        .label(format!("{name}: {choice}"))
+        .expanded(open)
+        .h(24.0)
+        .pl(9.0)
+        .pr(6.0)
+        .gap(4.0)
+        .center_y()
+        .radius(radius::MD)
+        .fill(t.card)
+        .box_shadow(kit::drop(0.5, 1.5, t.shadow_raised.alpha(0.18)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .child(kit::label(format!("{key}-pop-label"), choice, POP, t.text))
+        .child(kit::glyph(
+            format!("{key}-pop-caret"),
+            &ic::CARET_DOWN,
+            12.0,
+            t.text_tertiary,
+        ))
+}
+
+/// One row (`.kit-item`). Keys: `item-<L>-<I>` and the pieces named in the module's table.
+/// The row's own press is the caller's (`.on_press`), for `Role::Link` and `Role::Button`.
+pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
+    let key = format!("item-{list}-{index}");
+    let mut r = row()
+        .key(key.clone())
+        .w_full()
+        .min_h(if it.sub.is_some() { 40.0 } else { 28.0 })
+        .px(10.0)
+        .gap(8.0)
+        .center_y();
+    r = match it.role {
+        Role::Plain => r.role("listitem").label(it.name()),
+        Role::Link => r
+            .role("link")
+            .label(it.name())
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true),
+        Role::Button => r
+            .role("button")
+            .label(it.name())
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true),
+    };
+    if index > 0 {
+        // `.kit-item + .kit-item::before`: a hairline from 10 pt in to the card's edge.
+        r = r.child(
+            el().key(format!("{key}-rule"))
+                .pin(Some(10.0), Some(0.0), Some(0.0), None)
+                .h(kit::HAIR)
+                .fill(t.separator),
+        );
+    }
+    if let Some(icon) = it.icon {
+        r = r.child(el().key(format!("{key}-icon-box")).w(30.0).center().child(kit::glyph(
+            format!("{key}-icon"),
+            icon,
+            18.0,
+            t.text_secondary,
+        )));
+    }
+    let mut words = col()
+        .key(format!("{key}-text"))
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(1.0)
+        .child(kit::label(format!("{key}-title"), it.title.clone(), type_::ITEM_TITLE, t.text).truncate());
+    if let Some(sub) = &it.sub {
+        words = words.child(kit::label(format!("{key}-sub"), sub.clone(), SUB, t.text_tertiary).truncate());
+    }
+    r = r.child(words);
+    for piece in &it.trailing {
+        r = r.child(match piece {
+            Trailing::Value(v) => kit::label(format!("{key}-value"), v.clone(), VALUE, t.text_tertiary),
+            Trailing::Mono(v) => kit::label(format!("{key}-value"), v.clone(), VALUE_MONO, t.text_tertiary),
+            Trailing::Chevron => kit::glyph(format!("{key}-chev"), &ic::CHEV_RIGHT, 14.0, t.text_quaternary),
+            Trailing::External => kit::glyph(format!("{key}-ext"), &ic::EXTERNAL, 14.0, t.text),
+            Trailing::Check => kit::glyph(format!("{key}-check"), &ic::CHECK, 16.0, t.text),
+            Trailing::Pop { choice, open } => pop_button(&key, &it.title, choice, *open, t),
+            Trailing::Switch(on) => detail_pane::switch(&key, &it.title, *on, t),
+        });
+    }
+    r
+}
+
+/// A list (`.kit-list`): the heading, the card with its rows, the foot note.
+/// Keys: `list-<L>-title`, `list-<L>-body`, `list-<L>-foot`.
+pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
+    let mut l = col().key(format!("list-{index}")).role("group").gap(6.0);
+    if let Some(title) = title {
+        l = l
+            .label(title)
+            .child(el().key(format!("list-{index}-title-box")).px(14.0).child(kit::label(
+                format!("list-{index}-title"),
+                title,
+                LIST_TITLE,
+                t.text_tertiary,
+            )));
+    }
+    let mut body = col()
+        .key(format!("list-{index}-body"))
+        .role("list")
+        .w_full()
+        .radius(radius::LG)
+        .clip_rounded(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
+    for r in rows {
+        body = body.child(r);
+    }
+    l = l.child(body);
+    if let Some(foot) = foot {
+        l = l.child(
+            el().key(format!("list-{index}-foot-box"))
+                .px(14.0)
+                .child(kit::label(format!("list-{index}-foot"), foot, FOOT, t.text_tertiary).wrap()),
+        );
+    }
+    l
+}

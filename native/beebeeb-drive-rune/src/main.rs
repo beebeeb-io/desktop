@@ -17,6 +17,7 @@
 //! cargo run -p beebeeb-drive-rune -- --snap DW-0401.png --size 1280x800 --scale 2 --theme light
 //! ```
 
+mod frames;
 mod source;
 mod source_engine;
 mod theme;
@@ -53,6 +54,8 @@ pub struct State {
     show_detail_pane: bool,
     /// What the Files window keeps beside the listing (`ui::FilesUi`).
     files: ui::FilesUi,
+    /// Settings, a state of this window (`frames::settings`).
+    settings: frames::settings::SettingsUi,
 }
 
 /// `--db <path>`: show the files of that `state.db` (opened read-only) instead of the fixture.
@@ -125,6 +128,7 @@ fn init() -> State {
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,
         files: ui::FilesUi::default(),
+        settings: frames::settings::SettingsUi::default(),
     }
 }
 
@@ -133,6 +137,9 @@ fn init() -> State {
 // ---------------------------------------------------------------------------
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
+    if s.settings.open {
+        return frames::settings::view(s, cx);
+    }
     ui::window::files_window(s, cx)
 }
 
@@ -141,6 +148,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 // ---------------------------------------------------------------------------
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if s.settings.open || ev.is_command(',') {
+        return frames::settings::on_key(s, ev, tx);
+    }
     ui::keys::on_key(s, ev, tx)
 }
 
@@ -176,6 +186,9 @@ const SCENES: &[ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
     }),
     ("DW-0401", |_| {}),
+    ("DW-0701", |s| _ = frames::settings::scene("DW-0701", s)),
+    ("DW-0781", |s| _ = frames::settings::scene("DW-0781", s)),
+    ("DW-0787", |s| _ = frames::settings::scene("DW-0787", s)),
 ];
 
 fn main() {

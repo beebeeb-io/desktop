@@ -1,0 +1,1643 @@
+{
+ "frame": "DW-0787",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "sidebar": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 224,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "Back to Drive-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 44,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Back to Drive-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 50.5,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Back to Drive": {
+   "kind": "text",
+   "x": 43,
+   "y": 49.5,
+   "w": 161.5,
+   "h": 17,
+   "text": "Back to Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "General-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 101,
+   "w": 203.5,
+   "h": 28,
+   "bg": [
+    22,
+    22,
+    11,
+    23
+   ],
+   "on": true
+  },
+  "General-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 107,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "General": {
+   "kind": "text",
+   "x": 44,
+   "y": 106.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "General",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "Account-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 130,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Account-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 136,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Account": {
+   "kind": "text",
+   "x": 44,
+   "y": 135.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Security-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 159,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Security-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 165,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Security": {
+   "kind": "text",
+   "x": 44,
+   "y": 164.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Security",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Devices and sessions-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 188,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Devices and sessions-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 194,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Devices and sessions": {
+   "kind": "text",
+   "x": 44,
+   "y": 193.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Devices and sessions",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Notifications-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 217,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Notifications-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 223,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Notifications": {
+   "kind": "text",
+   "x": 44,
+   "y": 222.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Storage-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 274,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Storage-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 280,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Storage": {
+   "kind": "text",
+   "x": 44,
+   "y": 279.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Storage",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Backups-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 303,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Backups-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 309,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Backups": {
+   "kind": "text",
+   "x": 44,
+   "y": 308.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Backups",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Sync and File Explorer-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 332,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Sync and File Explorer-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 338,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Sync and File Explorer": {
+   "kind": "text",
+   "x": 44,
+   "y": 337.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Sync and File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Thumbnails and previews-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 361,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Thumbnails and previews-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 367,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Thumbnails and previews": {
+   "kind": "text",
+   "x": 44,
+   "y": 366.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "Bandwidth-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 390,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Bandwidth-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 396,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Bandwidth": {
+   "kind": "text",
+   "x": 44,
+   "y": 395.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Bandwidth",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "side-title-settings": {
+   "kind": "text",
+   "x": 20,
+   "y": 84.5,
+   "w": 55.72,
+   "h": 12,
+   "text": "SETTINGS",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "side-title-drive": {
+   "kind": "text",
+   "x": 20,
+   "y": 257.5,
+   "w": 33.34,
+   "h": 12,
+   "text": "DRIVE",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "side-foot-box": {
+   "kind": "box",
+   "x": 10,
+   "y": 589.5,
+   "w": 203.5,
+   "h": 38.5
+  },
+  "side-foot": {
+   "kind": "text",
+   "x": 16,
+   "y": 600.5,
+   "w": 174.48,
+   "h": 27,
+   "text": "Settings open inside the app. Esc goes back.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "set-main": {
+   "kind": "box",
+   "x": 224,
+   "y": 32,
+   "w": 734,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "set-title": {
+   "kind": "text",
+   "x": 254,
+   "y": 54,
+   "w": 540,
+   "h": 28,
+   "text": "General",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48
+  },
+  "list-0-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 96.5,
+   "w": 59.99,
+   "h": 12,
+   "text": "Appearance",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-0-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 115,
+   "w": 540,
+   "h": 40,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "item-0-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 115,
+   "w": 540,
+   "h": 40,
+   "selected": false
+  },
+  "item-0-0-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 126,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 3.5v17",
+    "M12 7.5h4.6",
+    "M12 11.5h6.9",
+    "M12 15.5h5.8"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-0-0-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 118.5,
+   "w": 399.15,
+   "h": 17,
+   "text": "Theme",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-0-0-sub": {
+   "kind": "text",
+   "x": 302,
+   "y": 136.5,
+   "w": 399.15,
+   "h": 15,
+   "text": "Follows Windows.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-0-pop": {
+   "kind": "box",
+   "x": 709.15,
+   "y": 123,
+   "w": 74.85,
+   "h": 24,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "item-0-0-pop-label": {
+   "kind": "text",
+   "x": 718.15,
+   "y": 127.5,
+   "w": 43.85,
+   "h": 15,
+   "text": "System",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-0-pop-caret": {
+   "kind": "icon",
+   "x": 766,
+   "y": 129,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M7 10l5 5 5-5"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "list-1-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 169.5,
+   "w": 22.63,
+   "h": 12,
+   "text": "Help",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-1-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 188,
+   "w": 540,
+   "h": 96,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "item-1-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 188,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-1-0-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 193,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-1-0-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 193.5,
+   "w": 460,
+   "h": 17,
+   "text": "Show the guide again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-1-0-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 195,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "item-1-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 216,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-1-1-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 221,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.6A8.4 8.4 0 1 1 21 11.5z"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-1-1-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 221.5,
+   "w": 460,
+   "h": 17,
+   "text": "Help and report a problem",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-1-1-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 223,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "item-1-2": {
+   "kind": "box",
+   "x": 254,
+   "y": 244,
+   "w": 540,
+   "h": 40,
+   "selected": false
+  },
+  "item-1-2-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 255,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M22 12h-4l-3 9L9 3l-3 9H2"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-1-2-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 247.5,
+   "w": 460,
+   "h": 17,
+   "text": "Diagnostics",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-1-2-sub": {
+   "kind": "text",
+   "x": 302,
+   "y": 265.5,
+   "w": 460,
+   "h": 15,
+   "text": "App activity and a support bundle",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-1-2-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 257,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "list-2-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 298.5,
+   "w": 82.2,
+   "h": 12,
+   "text": "Privacy and data",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-2-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 317,
+   "w": 540,
+   "h": 84,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "item-2-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 317,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-2-0-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 322,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-0-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 322.5,
+   "w": 460,
+   "h": 17,
+   "text": "Privacy",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-2-0-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 324,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "item-2-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 345,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-2-1-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 350,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-1-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 350.5,
+   "w": 460,
+   "h": 17,
+   "text": "Export my data",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-2-1-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 352,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "item-2-2": {
+   "kind": "box",
+   "x": 254,
+   "y": 373,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-2-2-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 378,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-2-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 378.5,
+   "w": 408.48,
+   "h": 17,
+   "text": "Storage location",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-2-2-value": {
+   "kind": "text",
+   "x": 718.48,
+   "y": 378.5,
+   "w": 43.52,
+   "h": 17,
+   "text": "Europe",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-2-2-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 380,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "list-3-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 415.5,
+   "w": 29.76,
+   "h": 12,
+   "text": "About",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-3-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 434,
+   "w": 540,
+   "h": 56,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "item-3-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 434,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-3-0-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 439,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-3-0-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 439.5,
+   "w": 460,
+   "h": 17,
+   "text": "Terms and privacy policy",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-3-0-ext": {
+   "kind": "icon",
+   "x": 770,
+   "y": 441,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M14 4h6v6",
+    "M20 4l-9 9",
+    "M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "item-3-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 462,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-3-1-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 467,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-3-1-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 467.5,
+   "w": 374.91,
+   "h": 17,
+   "text": "About Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-3-1-value": {
+   "kind": "text",
+   "x": 684.91,
+   "y": 467.5,
+   "w": 77.09,
+   "h": 17,
+   "text": "Version 0.9.1",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-3-1-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 469,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "menu-0": {
+   "kind": "box",
+   "x": 700,
+   "y": 118,
+   "w": 130,
+   "h": 98,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "menu-0-item-0": {
+   "kind": "box",
+   "x": 704,
+   "y": 122,
+   "w": 122,
+   "h": 30,
+   "bg": [
+    18,
+    18,
+    9,
+    28
+   ],
+   "hot": true
+  },
+  "menu-0-item-0-check": {
+   "kind": "icon",
+   "x": 713,
+   "y": 131,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "menu-0-item-0-label": {
+   "kind": "text",
+   "x": 736,
+   "y": 128.5,
+   "w": 78,
+   "h": 17,
+   "text": "System",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-0-item-1": {
+   "kind": "box",
+   "x": 704,
+   "y": 152,
+   "w": 122,
+   "h": 30,
+   "hot": false
+  },
+  "menu-0-item-1-label": {
+   "kind": "text",
+   "x": 736,
+   "y": 158.5,
+   "w": 78,
+   "h": 17,
+   "text": "Light",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-0-item-2": {
+   "kind": "box",
+   "x": 704,
+   "y": 182,
+   "w": 122,
+   "h": 30,
+   "hot": false
+  },
+  "menu-0-item-2-label": {
+   "kind": "text",
+   "x": 736,
+   "y": 188.5,
+   "w": 78,
+   "h": 17,
+   "text": "Dark",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  }
+ },
+ "theme": "light"
+}
