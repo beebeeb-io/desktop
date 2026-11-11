@@ -91,7 +91,8 @@ fn the_real_store_is_named_nowhere_but_keychain_rs_and_every_vault_uses_the_two_
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        if name != "keychain.rs" {
+        // The store's one home moved to the engine crate with the rest of `keychain` (engine step 2).
+        if name != format!("{}keychain.rs", crate::source_census::ENGINE_PREFIX) {
             for real in ["MacOsKeychainStore", "macos_keychain"] {
                 assert!(!code.contains(real), "{name} names the real Keychain store ({real})");
             }

@@ -14,8 +14,8 @@
  * mocked `desktopLogin`/`desktopLogin2fa` pair — no Tauri runtime needed.
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
 import { SIGN_IN_OUTCOME_UNREADABLE } from '../src/accountSwitchCopy'
+import { rustSourceWithIncludes } from './fixtures/rustConstants'
 import { settledFrom, submitPassword, submitTotpCode, type SignInApi } from '../src/onboardingSignIn'
 
 /** What Rust's `LoginOutcome` always sends: all five fields (lib.rs `login_outcome_json_is_the_frontends_contract`). */
@@ -161,9 +161,12 @@ describe('settledFrom (R8)', () => {
   })
 
   test('reads every JSON shape the Rust LoginOutcome contract pins (lib.rs), and none is unreadable', () => {
-    const lib = readFileSync(new URL('../src-tauri/src/reauth_tests.rs', import.meta.url), 'utf8')
+    // `reauth_tests.rs` is a list of `include!`d parts since its split by line count: read back as one file.
+    const lib = rustSourceWithIncludes('reauth_tests.rs')
     const start = lib.indexOf('fn login_outcome_json_is_the_frontends_contract()')
-    const body = lib.slice(start, lib.indexOf('\n    }\n', start))
+    expect(start).toBeGreaterThan(-1)
+    // The parts are top-level text of the module since the split: the function closes at column 0.
+    const body = lib.slice(start, lib.indexOf('\n}\n', start))
     const shapes = [...body.matchAll(/r#"(\{.*?\})"#/g)].map((m) => JSON.parse(m[1]))
     expect(shapes.length).toBeGreaterThanOrEqual(7)
     const settled = shapes.map((shape) => settledFrom(shape))
