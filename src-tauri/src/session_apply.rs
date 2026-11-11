@@ -155,7 +155,10 @@ pub(super) async fn fetch_canonical_profile(session_token: &str) -> Option<accou
     fetch_canonical_profile_at(&runner::api_base_url(), session_token).await
 }
 
-pub(super) async fn fetch_canonical_profile_at(base_url: &str, session_token: &str) -> Option<account_dto::AccountProfile> {
+pub(super) async fn fetch_canonical_profile_at(
+    base_url: &str,
+    session_token: &str,
+) -> Option<account_dto::AccountProfile> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .default_headers(api_client::provenance_headers())
@@ -287,7 +290,11 @@ pub(super) fn name_session_after_profile(
 /// text or the address) and marked on the account, so the next naming trigger (app activation, "Try again", the next
 /// launch's background request) writes it again. A store that cannot hold secrets (Linux) has nothing to retry.
 /// `true` when the Keychain holds it now.
-pub(super) fn write_session_email_to_keychain(_write: &SessionWrite, acct: &account::AccountRuntime, email: &str) -> bool {
+pub(super) fn write_session_email_to_keychain(
+    _write: &SessionWrite,
+    acct: &account::AccountRuntime,
+    email: &str,
+) -> bool {
     match AuthVault::new(platform_keychain_store_for(acct.id.as_str())).store_account_email(email) {
         Ok(()) | Err(keychain::AuthStoreError::Unsupported(_)) => {
             acct.keychain_email_pending.store(false, Ordering::SeqCst);
@@ -416,7 +423,11 @@ impl LogoutOutcome {
 }
 
 /// End `session_token`'s session on the server. Never logs; the token goes only into the request's header.
-pub(super) async fn revoke_desktop_session(client: &reqwest::Client, base_url: &str, session_token: &str) -> LogoutOutcome {
+pub(super) async fn revoke_desktop_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_token: &str,
+) -> LogoutOutcome {
     let response = match client
         .post(format!("{base_url}/api/v1/auth/logout"))
         .bearer_auth(session_token)
@@ -461,7 +472,11 @@ pub(super) fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize:
     acct.session
         .lock()
         .ok()
-        .and_then(|session| session.as_ref().map(|session| zeroize::Zeroizing::new(session.token.clone())))
+        .and_then(|session| {
+            session
+                .as_ref()
+                .map(|session| zeroize::Zeroizing::new(session.token.clone()))
+        })
         .or_else(|| {
             load_session_token_from_keychain(acct.id.as_str())
                 .ok()
@@ -471,7 +486,9 @@ pub(super) fn session_token_for_revoke(acct: &AccountRuntime) -> Option<zeroize:
 }
 
 /// The session token one Keychain layout holds, if it can say (task 1886: a clear reads what it is about to remove).
-pub(super) fn stored_session_token<S: keychain::AuthSecretStore>(vault: &AuthVault<S>) -> Option<zeroize::Zeroizing<String>> {
+pub(super) fn stored_session_token<S: keychain::AuthSecretStore>(
+    vault: &AuthVault<S>,
+) -> Option<zeroize::Zeroizing<String>> {
     vault
         .session_token()
         .ok()
@@ -495,7 +512,9 @@ pub(super) fn session_tokens_held_here(acct: &AccountRuntime) -> Option<Vec<zero
         AuthVault::new(keychain::legacy_platform_keychain_store()),
     ] {
         match vault.session_token() {
-            Ok(token) => held.extend(token.map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string()))),
+            Ok(token) => {
+                held.extend(token.map(|token| zeroize::Zeroizing::new(token.expose_for_request().to_string())))
+            }
             Err(keychain::AuthStoreError::NotFound | keychain::AuthStoreError::Unsupported(_)) => {}
             Err(_) => return None,
         }
@@ -527,9 +546,14 @@ pub(super) async fn revoke_sessions_for_sign_out(tokens: &[&str], base_url: &str
     };
     for &outcome in &outcomes {
         match outcome {
-            LogoutOutcome::Revoked => tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session"),
+            LogoutOutcome::Revoked => {
+                tracing::info!(outcome = outcome.code(), "sign-out: the server ended the session")
+            }
             LogoutOutcome::AlreadyEnded => {
-                tracing::info!(outcome = outcome.code(), "sign-out: the server had already ended the session")
+                tracing::info!(
+                    outcome = outcome.code(),
+                    "sign-out: the server had already ended the session"
+                )
             }
             LogoutOutcome::Refused(status) => tracing::warn!(
                 outcome = outcome.code(),
@@ -573,7 +597,6 @@ pub(super) async fn end_dropped_sessions(acct: &AccountRuntime, dropped: Dropped
     revoke_sessions_for_sign_out(&tokens, &sign_out_api_base()).await;
 }
 
-
 /// Test builds: run `body` with `base` as the API a sign-out's revoke goes to (task 1886), so a test drives the real
 /// sign-out against a server it started. Only this task sees it. (No Windows test drives a signed-in sign-out.)
 #[cfg(all(test, not(target_os = "windows")))]
@@ -594,6 +617,17 @@ pub(super) fn sign_out_api_base() -> String {
 }
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
+
+/// Windows: a sign-in that arrives while a session is present is refused, whoever it is for and whatever the
+/// credential store says about either session, as 0.8.24 did (lead ruling on the review of task 2447: no exception
+/// for "the same account, still locked"). A flag that cannot be read refuses.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn refuse_sign_in_while_signed_in(state: &AppState) -> Result<(), String> {
+    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+        return Err("Sign out of the current account before signing in again.".into());
+    }
+    Ok(())
+}
 
 /// Persist a freshly-authenticated session and start the engine.
 ///
@@ -626,9 +660,7 @@ pub(crate) async fn apply_session(
         windows_cf::ensure_reactivation_allowed()?;
     }
     #[cfg(target_os = "windows")]
-    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
-        return Err("Sign out of the current account before signing in again.".into());
-    }
+    refuse_sign_in_while_signed_in(state)?;
 
     #[cfg(target_os = "windows")]
     AUTH_ATTEMPTS.validate(attempt)?;
@@ -687,6 +719,12 @@ pub(super) fn install_new_session(
         Err(changed) => return Ok(NewSession::Refused(changed.sign_in_sentence().to_string())),
     };
     persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;
+    // Task 2447: token and key arrived together for the account the server named for this token (`profile`): both
+    // are bound to its user id. With no profile (the fetch failed) both stay unknown; the next start's probe names
+    // the session.
+    if let Some(profile) = profile.as_ref() {
+        bind_session_and_key_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
+    }
     if let Some(profile) = profile
         && let Ok(mut cached) = acct.cached_profile.lock()
     {

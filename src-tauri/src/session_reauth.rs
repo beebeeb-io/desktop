@@ -146,6 +146,8 @@ pub(super) fn reauth_swap_token(
     .map_err(ReauthError::before_store)?;
     persist_session_token_to_keychain(&write, acct.id.as_str(), token, email.as_deref())
         .map_err(ReauthError::before_store)?;
+    // Task 2447: the new token's owner, as the server named it for this sign-in.
+    bind_session_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
     // From here the new token is the stored one: a failure below is not a sign-in to revoke.
     let mut vault_unlocked = replace_session_token_in_memory(&write, acct, token).map_err(ReauthError::after_store)?;
     if vault_unlocked {
@@ -346,6 +348,8 @@ pub(super) fn reauth_swap_token_without_key(
     delete_vault_key_from_keychain(&write, acct.id.as_str()).map_err(ReauthError::before_store)?;
     persist_session_token_to_keychain(&write, acct.id.as_str(), token, email.as_deref())
         .map_err(ReauthError::before_store)?;
+    // Task 2447: the new token's owner, as the server named it for this sign-in.
+    bind_session_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
     if let Ok(mut cached) = acct.cached_profile.lock() {
         *cached = Some(profile.clone());
     }
@@ -419,8 +423,6 @@ pub(super) const FINDER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration:
 /// inside (38 s, see [`FINDER_LOCK_TIMEOUT`]) and then its own `RemoveDomain` (15 s) = 53 s.
 #[cfg(target_os = "macos")]
 pub(super) const FINDER_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-
 
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn signal_lock_holds_the_engine_slot() {

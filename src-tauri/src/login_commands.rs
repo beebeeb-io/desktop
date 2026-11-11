@@ -18,6 +18,11 @@ pub(super) async fn restore_stored_session(state: &AppState, acct: &AccountRunti
         return false;
     }
 
+    // Task 2447: a clear that failed earlier is finished here, before anything is read or a sign-in is offered.
+    #[cfg(target_os = "windows")]
+    if let Ok(write) = claim_session_write(acct, &mut turn) {
+        complete_pending_keychain_clear(&write, acct.id.as_str());
+    }
     let email = acct.auth_email.lock().ok().and_then(|guard| guard.clone());
     let loaded = load_session_from_keychain(acct.id.as_str(), email);
     // R10: local data from before the account binding is adopted, once, by the account whose vault key this
@@ -37,16 +42,20 @@ pub(super) async fn restore_stored_session(state: &AppState, acct: &AccountRunti
         // Leave onboarding to prompt for sign-in. Not an error.
         Ok(None) => return false,
         Err(error) => {
-            // The token IS present but `unlock()` failed. Two very different cases:
+            // The token IS present but the load failed. Three very different cases:
             //   1. Key genuinely ABSENT — `AuthStoreError::NotFound` (Display:
             //      "secret not found"). This is the legitimate "this PC has your
             //      session but not your vault key" state; onboarding's recovery-
             //      phrase step must appear. Expected → log at debug, not warn.
-            //   2. A real credential-store / backend failure (locked keychain,
+            //   2. The loader's guard refused the key (task 2447: it is not this session's
+            //      account's). Not a store failure; the recovery-phrase step appears too.
+            //   3. A real credential-store / backend failure (locked keychain,
             //      DPAPI error, deserialisation). Worth a warning so the user can
             //      see why auto-unlock didn't happen — but must NOT block startup.
             if error.contains("secret not found") {
                 tracing::debug!(%error, "no vault key to auto-unlock at startup; recovery-phrase unlock required");
+            } else if error == crate::key_owner::KEY_NOT_THIS_ACCOUNTS {
+                tracing::warn!("startup restore: the stored vault key is not this session's account's; not loaded");
             } else {
                 tracing::warn!(%error, "credential-store error while attempting auto-unlock at startup");
             }
@@ -94,6 +103,16 @@ pub(super) async fn restore_stored_session(state: &AppState, acct: &AccountRunti
             tracing::info!("the session changed while the startup probe waited; nothing restored");
             return false;
         };
+        // Task 2447: the server just named the account of the stored token. That id becomes the session's recorded
+        // owner, and the stored key is judged against it (not against anything this computer remembered): a key that
+        // is another account's is not installed, and the window asks for the recovery phrase.
+        if let Some(profile) = probed.as_ref()
+            && !settle_owner_after_probe_in_keychain(&write, acct.id.as_str(), token.as_str(), &profile.user_id)
+                .may_load()
+        {
+            tracing::warn!("startup restore: the stored vault key is not this session's account's; not installed");
+            return false;
+        }
         match acct.session.lock() {
             Ok(mut guard) => *guard = Some(session),
             Err(_) => {
@@ -156,7 +175,6 @@ pub(super) static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic:
 /// popover tests' feet (a fetch count that was 1 became 2, in about one full run in ten).
 #[cfg(test)]
 pub(super) static EPOCH_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
 
 pub(super) fn bump_vault_epoch() {
     #[cfg(test)]
@@ -747,7 +765,12 @@ pub(super) fn store_first_sign_in(
     profile: account_dto::AccountProfile,
 ) -> Result<(), String> {
     let write = claim_session_write(acct, turn)?;
+    // Task 2447: a vault key that is not provably this account's goes before the token is stored, and while it cannot
+    // be removed nothing is stored (the caller revokes the new session). Then the token, then its owner: the id the
+    // server named in this sign-in's own answer (`profile`).
+    remove_foreign_vault_key_before_sign_in(&write, acct.id.as_str(), &profile.user_id, email)?;
     persist_session_token_to_keychain(&write, acct.id.as_str(), token, Some(email))?;
+    bind_session_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
     if let Ok(mut guard) = acct.cached_profile.lock() {
         *guard = Some(profile);
     }
@@ -1106,6 +1129,9 @@ pub(super) fn store_recovered_vault_key(
         return Err(UNLOCK_ACCOUNT_CHANGED.to_string());
     }
     persist_vault_key_to_keychain(&write, account_id, master_key)?;
+    // Task 2447: the server proved this key is the account's of `started_token`, which is still the stored token
+    // (checked above, in this turn). The key takes that session's recorded owner; an unknown one leaves it untagged.
+    bind_vault_key_to_session_owner_in_keychain(&write, account_id);
     // `desktop_login` already persisted the email when it stored the token, but persist again here (idempotent) so
     // the invariant "a fully-provisioned session has its email in the store" holds even if memory and store drift.
     if let Some(email) = started_email {
