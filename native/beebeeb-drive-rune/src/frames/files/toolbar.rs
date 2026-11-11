@@ -9,7 +9,7 @@ use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
 use rune::{El, TextStyle, col, el, row, text_input};
 
-use super::MenuKind;
+use super::{Intent, MenuKind};
 
 /// The search field's placeholder: one string for the field and for the gate's note.
 const SEARCH_PLACEHOLDER: &str = "Search names";
@@ -111,7 +111,9 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         "View",
         vec![
             segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t),
+            // The grid is another frame of this window (DW-1102), not built here.
+            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)
+                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1102"))),
         ],
         t,
     );
@@ -155,6 +157,8 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
 
     // Ringed while its menu is open (DW-0414: `box-shadow: 0 0 0 3px` amber at 32 %).
     let adding = s.actions.menu.is_some_and(|m| m.kind == MenuKind::New);
+    // Dimmed where nothing can be added (`.mk-new.is-off`): Backups, a service folder, Trash, Shared with me.
+    let can_add = s.can_add();
     let new_btn = row()
         .key("new-btn")
         .expanded(adding)
@@ -168,13 +172,18 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .center_y()
         .radius(radius::CONTROL)
         .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(|s: &mut State| s.toggle_menu(MenuKind::New))
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
         .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
+    let new_btn = if can_add {
+        new_btn
+            .hover(t.press)
+            .press(t.press)
+            .focusable(true)
+            .on_press(|s: &mut State| s.toggle_menu(MenuKind::New))
+    } else {
+        new_btn.opacity(0.4).disabled(true)
+    };
 
     kit::note_text(
         "search-placeholder",

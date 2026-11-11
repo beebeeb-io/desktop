@@ -3,7 +3,7 @@
 Windows frames of the FRAMES.md groups "Files: the full Drive in the window", "Browse files" and
 "Folders, Backups and uploads", plus the list's states drawn under "Global elements on Windows".
 Status is `built` (gated light and dark, both truth lines at 0 failing) or `not built`.
-State at the end of this lane's second run: 10 built here (plus DW-0401, built before), 39 not built.
+State after the review delta (2026-11-11): 11 built here (plus DW-0401, built before), 38 not built.
 
 | Frame | Group | What it is | Status |
 | --- | --- | --- | --- |
@@ -52,7 +52,7 @@ State at the end of this lane's second run: 10 built here (plus DW-0401, built b
 | `DW-0102` | List states | Some items can't sync: say how many, and that the rest is fine. | not built |
 | `DW-0107` | List states | A short confirmation that needs nothing. | built (light and dark: 0 failing on all six) |
 | `DW-0108` | List states | A message with Undo stays a little longer. | built (light and dark: 0 failing on all six) |
-| `DW-0109` | List states | Something failed: say what, and how to fix it. | not built |
+| `DW-0109` | List states | Something failed: say what, and how to fix it. | built (light and dark: 0 failing on all six): the message of a failed action, with Try again |
 | `DW-0114` | List states | A new account has no files yet: one way forward. | not built |
 | `DW-0118` | List states | After the first sign-in the list loads in the background; the window works at once. | not built |
 | `DW-0119` | List states | Thumbnails arrive one by one: plain tiles until then. | not built |

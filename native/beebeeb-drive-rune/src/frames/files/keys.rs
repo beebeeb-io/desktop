@@ -1,4 +1,4 @@
-//! The Files frames' keyboard. The list's keys work with focus on a row or nowhere; an open menu
+//! The Files frames' keyboard. The list's keys work with focus on the list or nowhere; an open menu
 //! takes the arrows, Enter and Escape; a focused field, button or switch keeps its own keys.
 //!
 //! | Key | Does |
@@ -7,19 +7,19 @@
 //! | Home, End | the first, the last row |
 //! | Ctrl+A | select every row |
 //! | Enter | open: a folder in place, a file in its app |
-//! | Space | Preview (DW-0408) |
+//! | Space | Preview (DW-0408) of a file; nothing on a folder |
 //! | Alt+Enter, F2 | Details (DW-0411), Rename (DW-0410) |
 //! | Delete | Move to Trash, with Undo |
 //! | Ctrl+Z, Ctrl+D | Undo the move to Trash; Duplicate |
-//! | Menu, Shift+F10 | the file menu (on a focused row Rune sends them to its `on_secondary_press`; with focus nowhere, here) |
-//! | Ctrl+Shift+N, Ctrl+N, Ctrl+O | New folder, New file, Upload files |
-//! | Ctrl+1..5 | Files, Shared, Photos, Backups, Trash; Ctrl+6, Ctrl+7 Sync history, Available offline; Ctrl+, Settings |
+//! | Menu, Shift+F10 | the file menu, at the selected row |
+//! | Ctrl+Shift+N, Ctrl+N, Ctrl+O | New folder, New file, Upload files (nothing in a folder that takes no additions) |
+//! | Ctrl+1..5 | Files, Shared, Photos, Backups, Trash; Ctrl+6, Ctrl+7 Sync history (DW-1301), Available offline (DW-0715); Ctrl+, Settings (DW-0701) |
 //! | Alt+Shift+P | the details panel |
 //! | Alt+Left, Backspace; Alt+Right | back; forward |
 //! | Ctrl+F | Search names |
 //! | Escape | close the menu, else clear the selection |
 
-use super::{Intent, MenuKind};
+use super::Intent;
 use crate::State;
 use crate::ui::file_list::ROW_H;
 use crate::ui::keys::SEARCH_KEY;
@@ -29,11 +29,7 @@ use rune::{Key, KeyEvent, Tx};
 
 fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(open) = s.actions.menu else { return false };
-    let entries = match open.kind {
-        MenuKind::File => super::menus::file_menu(s),
-        MenuKind::Sort => super::menus::sort_menu(s.actions.sort),
-        MenuKind::New => super::menus::new_menu(),
-    };
+    let entries = s.menu_entries(open.kind);
     let hot = match ev.key {
         Key::Down => menu::step(&entries, open.hot, 1),
         Key::Up => menu::step(&entries, open.hot, -1),
@@ -54,7 +50,7 @@ fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             let typed = typed.to_lowercase();
             let from = open.hot.map_or(0, |h| h + 1);
             (0..entries.len()).map(|n| (from + n) % entries.len()).find(|&i| {
-                matches!(entries[i], menu::Entry::Item { label, .. }
+                matches!(entries[i], menu::Entry::Item { label, off: false, .. }
                     if !typed.trim().is_empty() && label.to_lowercase().starts_with(&typed))
             })
         }
@@ -63,6 +59,10 @@ fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     };
     if let (Some(hot), Some(open)) = (hot, s.actions.menu.as_mut()) {
         open.hot = Some(hot);
+        // Keyboard focus goes with the highlight, so a screen reader says the item it is on.
+        if let Some(key) = menu::item_key("menu", &entries, hot) {
+            tx.focus(key, false);
+        }
     }
     true
 }
@@ -81,14 +81,14 @@ fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
     row.is_some()
 }
 
-/// After the folder changed: the keyboard stays in the list (its first row, or the empty folder's
+/// After the folder changed: the keyboard stays in the list (the table, or the empty folder's
 /// area), so the next key is still the list's.
 fn focus_list(s: &State, tx: &mut Tx) {
     tx.focus(
-        if s.listing.items.is_empty() {
+        if s.listing.items.is_empty() && s.can_add() {
             "empty-area"
         } else {
-            "row-0"
+            "rows"
         },
         false,
     );
@@ -106,6 +106,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if let Key::Command(c) = ev.key {
         match c {
+            // Nothing is added to Backups, a service folder, Trash or Shared with me (DW-0414).
+            'n' | 'o' if !s.can_add() => return false,
             'n' if m.shift => s.intent(Intent::Frame("DW-0417")),
             'n' => s.intent(Intent::Frame("DW-1521")),
             'o' => s.intent(Intent::Frame("DW-0415")),
@@ -114,8 +116,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 None => return false,
             },
             '6' => s.intent(Intent::Frame("DW-1301")),
-            '7' => s.intent(Intent::Frame("DW-1304")),
-            ',' => s.intent(Intent::Frame("DW-0901")),
+            '7' => s.intent(Intent::Frame("DW-0715")),
+            ',' => s.intent(Intent::Frame("DW-0701")),
             _ => return list_key(s, ev, tx),
         }
         return true;
@@ -140,7 +142,7 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // The list's keys are the list's: with focus on a row or nowhere.
     if tx
         .focused()
-        .is_some_and(|key| !key.starts_with("row-") && key != "empty-area")
+        .is_some_and(|key| !key.starts_with("row-") && key != "rows" && key != "empty-area")
     {
         return false;
     }
@@ -169,26 +171,20 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.select_all();
             true
         }
-        Key::Command('z') => s.undo(),
+        Key::Command('z') => s.undo(tx),
         Key::Command('d') => s.duplicate_selected(tx),
         Key::Enter if m.alt && s.selected.is_some() => {
             s.intent(Intent::Frame("DW-0411"));
             true
         }
-        Key::Enter => match s.selected {
-            Some(row) => {
-                let opened = s.open_row(row);
-                if opened {
-                    focus_list(s, tx);
-                }
-                opened
+        Key::Enter if s.selected.is_some() => {
+            if s.open_selection(tx) {
+                focus_list(s, tx);
             }
-            None => false,
-        },
-        Key::Text(ref space) if space == " " && s.selected.is_some() => {
-            s.intent(Intent::Frame("DW-0408"));
             true
         }
+        // Preview: of a file. On a folder Space does nothing (DW-0402: "Preview is dimmed").
+        Key::Text(ref space) if space == " " && s.selected.is_some() => s.preview(),
         Key::Function(2) if s.selected.is_some() => {
             s.intent(Intent::Frame("DW-0410"));
             true

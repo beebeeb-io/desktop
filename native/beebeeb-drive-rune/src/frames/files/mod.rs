@@ -2,7 +2,8 @@
 //!
 //! `view` is the Files window with what these frames add; `on_key` its keyboard; `SCENES` the
 //! board frames this group builds, by frame id (what each sets on a fresh `State`).
-//! Data: the listing comes from `crate::source::DriveSource`, everything else from `source::FilesSource`.
+//! Data: the listing comes from `crate::source::DriveSource`, everything else from `source::FilesSource`
+//! (counts, the account, the sync state; every action is a call on it, answered in a toast).
 
 pub mod details;
 pub mod keys;
@@ -14,6 +15,8 @@ pub mod toolbar;
 pub mod window;
 
 #[cfg(test)]
+mod review_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;
@@ -21,17 +24,16 @@ use std::collections::BTreeSet;
 use crate::State;
 use crate::source::DriveItem;
 use rune::Tx;
-use source::{FilesFixture, FilesSource};
+use source::{Action, ActionError, Change, FilesFixture, FilesSource, NoEngine};
 
 pub use window::view;
 
 /// The design system's own Files window and keyboard, which these frames supersede (same pieces,
-/// plus menus, selection and toasts). Named here so they stay compiled and checked until the
-/// design-system lane folds the variants in (PR body: "Requests to the design-system lane").
-const _: (
-    fn(&State, &mut rune::Cx<State>) -> rune::El,
-    fn(&mut State, &rune::KeyEvent, &mut Tx) -> bool,
-) = (crate::ui::window::files_window, crate::ui::keys::on_key);
+/// plus menus, selection and toasts; the shell's Files line draws these frames). Named here so they
+/// stay compiled and checked until the design-system lane folds the variants in (PR body:
+/// "Requests to the design-system lane").
+const _: crate::shell::registry::FrameFn = crate::ui::window::files_window;
+const _: crate::shell::registry::KeyFn = crate::ui::keys::on_key;
 
 /// Which menu is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,17 +81,11 @@ impl Default for Sort {
     }
 }
 
-/// What an action asks of the rest of the app: another lane's frame, or the system.
+/// What an action asks of the rest of the app: a board frame this group does not draw (a dialog,
+/// a viewer, a picker, another section). Where the shell has a route for it, it goes there too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
-    /// Go to a board frame this group does not draw (a dialog, a viewer, a picker, another section).
     Frame(&'static str),
-    /// Open the file with this id in its app.
-    Open(String),
-    ShowInFileExplorer(String),
-    CopyLink(String),
-    /// Upload these files from this PC into the folder with this id (`None`: the root).
-    Upload(Option<String>, Vec<std::path::PathBuf>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +98,29 @@ pub enum Toast {
     Keeping,
     /// "Link copied" (DW-0107).
     LinkCopied,
+    /// "Couldn't rename. Check your connection." with Try again (DW-0109).
+    Failed(Action, ActionError),
+}
+
+impl Toast {
+    /// How long it stays (DW-0107: 3 s; DW-0108: 6 s, for Undo; DW-0109: 8 s, or until Try again).
+    pub fn stays(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Toast::Trashed => 6,
+            Toast::Failed(..) => 8,
+            _ => 3,
+        })
+    }
+
+    /// The sentence of a failure: what did not happen and, where there is one, the way to fix it.
+    /// Never a code (DW-0109).
+    pub fn failure(action: Action, why: ActionError) -> String {
+        let fix = match why {
+            ActionError::Offline => " Check your connection.",
+            _ => "",
+        };
+        format!("Couldn't {}.{fix}", action.words())
+    }
 }
 
 /// What the Files frames keep beside the listing.
@@ -115,10 +134,14 @@ pub struct Actions {
     pub selection: BTreeSet<usize>,
     /// Where a Shift range starts.
     pub anchor: Option<usize>,
+    /// The sort of the folder shown (each folder has its own: `FilesSource::sort_of`).
     pub sort: Sort,
-    /// What Undo puts back: the rows as they were, with their places.
+    /// What Undo puts back: the rows as they were, with their places. Emptied by whatever is done next.
     pub undo: Vec<(usize, DriveItem)>,
+    /// The last frames asked for, oldest first (at most [`INTENTS_KEPT`]).
     pub intents: Vec<Intent>,
+    /// An upload that failed: what Try again uploads.
+    pub retry_upload: Option<(Option<String>, Vec<std::path::PathBuf>)>,
     /// The window's size, for keeping a menu inside it.
     pub window: (f32, f32),
     /// A board frame that draws only the lower part of the window (DW-0107, DW-0108): how many
@@ -128,10 +151,12 @@ pub struct Actions {
     pub forward: Vec<Option<String>>,
 }
 
-impl Default for Actions {
-    fn default() -> Self {
+pub const INTENTS_KEPT: usize = 32;
+
+impl Actions {
+    pub fn new(source: Box<dyn FilesSource>) -> Self {
         Actions {
-            source: Box::new(FilesFixture::default()),
+            source,
             menu: None,
             toast: None,
             toast_until: None,
@@ -140,11 +165,30 @@ impl Default for Actions {
             sort: Sort::default(),
             undo: Vec::new(),
             intents: Vec::new(),
+            retry_upload: None,
             window: (1278.0, 798.0),
             board_crop_top: 0.0,
             forward: Vec::new(),
         }
     }
+}
+
+/// A window with nothing behind it but its listing: no counts, no account, and every action refused
+/// (`source::NoEngine`). The engine lane puts its own `FilesSource` here; the board's sample is
+/// [`board_fixture`], and only that.
+impl Default for Actions {
+    fn default() -> Self {
+        Actions::new(Box::new(NoEngine))
+    }
+}
+
+/// The board's sample window: its folders (`source::BoardDrive`) and its account, counts and
+/// actions (`source::FilesFixture`). What headless renders, the gate and the tests start from.
+pub fn board_fixture(mut s: State) -> State {
+    s.source = Box::new(source::BoardDrive::new());
+    (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
+    s.actions = Actions::new(Box::new(FilesFixture::default()));
+    s
 }
 
 impl State {
@@ -264,12 +308,10 @@ impl State {
         self.actions.menu = None;
     }
 
-    /// Close the menu and give the keyboard back to the list: the row the menu was for.
+    /// Close the menu and give the keyboard back to the list.
     pub fn close_menu_tx(&mut self, tx: &mut Tx) {
         self.actions.menu = None;
-        if let Some(row) = self.selected {
-            tx.focus(format!("row-{row}"), false);
-        }
+        tx.focus("rows", false);
     }
 
     /// The toast to draw now: none once its time is over.
@@ -280,25 +322,126 @@ impl State {
         }
     }
 
+    /// Ask for a frame this group does not draw. The shell's route machine takes the ones it has a
+    /// place for (Settings, Sync history, Available offline); every one is kept for the lane that
+    /// draws it.
     pub(super) fn intent(&mut self, intent: Intent) {
+        use crate::shell::app::{Event, Route, Section, SettingsPane};
+        let Intent::Frame(frame) = &intent;
+        let event = match *frame {
+            "DW-0701" => Some(Event::OpenSettings(SettingsPane::General)),
+            "DW-1301" => Some(Event::Navigate(Route::section(Section::SyncHistory))),
+            "DW-0715" => Some(Event::Navigate(Route::section(Section::AvailableOffline))),
+            _ => None,
+        };
+        if self.actions.intents.len() >= INTENTS_KEPT {
+            self.actions.intents.remove(0);
+        }
         self.actions.intents.push(intent);
+        if let Some(event) = event {
+            crate::shell::host::dispatch(self, event);
+        }
     }
 
-    /// Show a toast, and take it away again after its time (6 s with Undo, 3 s without: DW-0405).
+    /// May things be added to the folder shown? Not when it could not be read, and not to a
+    /// folder the source protects (DW-0414: "New is dimmed in Backups, service folders, Trash…").
+    pub fn can_add(&self) -> bool {
+        self.list_error.is_none() && self.actions.source.can_add(self.listing.folder.id.as_deref())
+    }
+
+    fn selected_items(&self) -> Vec<DriveItem> {
+        self.selected_rows()
+            .into_iter()
+            .map(|i| self.listing.items[i].clone())
+            .collect()
+    }
+
+    /// Something else was done: Ctrl+Z no longer brings the trashed rows back (DW-0108).
+    fn forget_undo(&mut self) {
+        self.actions.undo.clear();
+    }
+
+    /// An action did not happen: say so (DW-0109). A protected folder says why in its own frame (DW-1110).
+    fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
+        if why == ActionError::Protected {
+            self.intent(Intent::Frame("DW-1110"));
+        } else {
+            self.show_toast(Toast::Failed(action, why), tx);
+        }
+    }
+
+    /// Show a toast, and take it away again after its time.
     fn show_toast(&mut self, toast: Toast, tx: &mut Tx) {
-        let stay = std::time::Duration::from_secs(if toast == Toast::Trashed { 6 } else { 3 });
+        let stay = toast.stays();
         self.actions.toast = Some(toast);
         self.actions.toast_until = Some(std::time::Instant::now() + stay);
         tx.wake_after(stay);
     }
 
-    /// What every change of folder resets: the selection, what Undo holds, an open menu.
+    /// Take what accepted actions changed (`FilesSource::changes`) into the rows: a copy stands
+    /// next to its original, selected. Returns whether a copy arrived, and what failed after all.
+    pub fn take_changes(&mut self) -> (bool, Vec<(Action, ActionError)>) {
+        let mut copies = Vec::new();
+        let mut failures = Vec::new();
+        for change in self.actions.source.changes() {
+            match change {
+                Change::Copied { after, item } => {
+                    // A copy made in a folder that is no longer shown is there when it is shown again.
+                    if let Some(at) = self.listing.items.iter().position(|i| i.id == after) {
+                        copies.push(item.id.clone());
+                        self.listing.items.insert(at + 1, *item);
+                    }
+                }
+                Change::Failed(action, why) => failures.push((action, why)),
+            }
+        }
+        if !copies.is_empty() {
+            self.select_ids(&copies);
+        }
+        (!copies.is_empty(), failures)
+    }
+
+    /// [`State::take_changes`], with its messages: "Duplicated", or what failed. The engine lane
+    /// calls this from its `handle.update` when the source has news.
+    pub fn apply_changes(&mut self, tx: &mut Tx) {
+        let (copied, failures) = self.take_changes();
+        if copied {
+            self.show_toast(Toast::Duplicated, tx);
+        }
+        if let Some(&(action, why)) = failures.last() {
+            self.failed(action, why, tx);
+        }
+    }
+
+    /// Select the rows with these ids; the keyboard is on the last of them.
+    fn select_ids(&mut self, ids: &[String]) {
+        let rows: BTreeSet<usize> = self
+            .listing
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| ids.contains(&item.id))
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = rows.iter().next_back().copied();
+        self.actions.anchor = self.selected;
+        self.actions.selection = rows;
+    }
+
+    /// What every change of folder resets: the selection, what Undo holds, an open menu. The rows
+    /// stand in the order this folder was left with (DW-0404: "Each folder remembers its own sort").
     fn entered(&mut self) {
         self.actions.selection.clear();
         self.actions.anchor = None;
         self.actions.undo.clear();
         self.actions.menu = None;
         self.selected = None;
+        self.actions.sort = self
+            .actions
+            .source
+            .sort_of(self.listing.folder.id.as_deref())
+            .unwrap_or_default();
+        self.apply_sort();
     }
 
     /// Show the folder with this id (`None`: the root), leaving the one shown to Back.
@@ -345,30 +488,68 @@ impl State {
         }
     }
 
-    /// Open: a folder opens in place; a file goes to its app.
-    pub fn open_row(&mut self, row: usize) -> bool {
-        let Some(item) = self.listing.items.get(row) else {
-            return false;
+    /// Open the selection: one folder opens in place; files go to their apps, all of them.
+    /// Returns whether the folder shown changed.
+    pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        let items = self.selected_items();
+        let lead = self.selected.and_then(|i| self.listing.items.get(i)).cloned();
+        let files: Vec<DriveItem> = items.iter().filter(|i| !i.is_folder).cloned().collect();
+        let folder = match (&items[..], &lead) {
+            ([only], _) if only.is_folder => Some(only.id.clone()),
+            // Several folders and no file: the one the keyboard is on.
+            (_, Some(lead)) if files.is_empty() && lead.is_folder => Some(lead.id.clone()),
+            _ => None,
         };
-        let id = item.id.clone();
-        if item.is_folder {
+        if let Some(id) = folder {
             self.open_folder(Some(id));
             return true;
         }
-        self.intent(Intent::Open(id));
+        if files.is_empty() {
+            return false;
+        }
+        self.forget_undo();
+        if let Err(why) = self.actions.source.open(&files) {
+            self.failed(Action::Open, why, tx);
+        }
         false
     }
 
+    /// A double-click: this row alone, opened.
+    pub fn open_row(&mut self, row: usize, tx: &mut Tx) -> bool {
+        if row >= self.listing.items.len() {
+            return false;
+        }
+        self.select_only(row);
+        self.open_selection(tx)
+    }
+
+    /// Preview in the window (DW-0408): of a file. A folder has none (DW-0402: "Preview is dimmed").
+    pub fn can_preview(&self) -> bool {
+        self.selected
+            .and_then(|i| self.listing.items.get(i))
+            .is_some_and(|item| !item.is_folder)
+    }
+
+    pub fn preview(&mut self) -> bool {
+        if !self.can_preview() {
+            return false;
+        }
+        self.intent(Intent::Frame("DW-0408"));
+        true
+    }
+
     /// Move the selection to Trash, without a question: Undo and Trash both bring it back.
+    /// Like the other actions it answers whether anything is to be drawn: a change, or the message of a failure.
     pub fn trash_selection(&mut self, tx: &mut Tx) -> bool {
         let rows = self.selected_rows();
-        let items: Vec<DriveItem> = rows.iter().map(|&i| self.listing.items[i].clone()).collect();
-        if items.is_empty() || self.actions.source.trash(&items).is_err() {
-            // A protected folder says why in its own frame (DW-1110).
-            if items.iter().any(|i| i.is_protected) {
-                self.intent(Intent::Frame("DW-1110"));
-            }
+        let items = self.selected_items();
+        if items.is_empty() {
             return false;
+        }
+        if let Err(why) = self.actions.source.trash(&items) {
+            self.failed(Action::Trash, why, tx);
+            // Handled: there is a message to draw.
+            return true;
         }
         for &i in rows.iter().rev() {
             self.listing.items.remove(i);
@@ -379,74 +560,193 @@ impl State {
         true
     }
 
-    /// Undo the last Move to Trash: every row back where it was.
-    pub fn undo(&mut self) -> bool {
+    /// Undo the last Move to Trash: every row back where it was (in the order the folder has now).
+    pub fn undo(&mut self, tx: &mut Tx) -> bool {
         let rows = std::mem::take(&mut self.actions.undo);
         if rows.is_empty() {
             return false;
         }
         let items: Vec<DriveItem> = rows.iter().map(|(_, item)| item.clone()).collect();
-        if self.actions.source.restore(&items).is_err() {
+        if let Err(why) = self.actions.source.restore(&items) {
             self.actions.undo = rows;
-            return false;
+            self.failed(Action::Restore, why, tx);
+            // Handled: there is a message to draw.
+            return true;
         }
-        let mut last = None;
+        let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
         for (i, item) in rows {
             let at = i.min(self.listing.items.len());
             self.listing.items.insert(at, item);
-            last = Some(at);
         }
         self.actions.toast = None;
-        if let Some(row) = last {
-            self.select_only(row);
-        }
+        self.select_ids(&ids);
+        // The rows may have been put in another order since: the old places mean nothing then.
+        self.apply_sort();
         true
     }
 
-    /// Duplicate the row the keyboard is on: the copy stands next to it, selected.
+    /// Duplicate the selection: each copy stands next to its original, selected (DW-0406).
     pub fn duplicate_selected(&mut self, tx: &mut Tx) -> bool {
-        let Some(row) = self.selected.filter(|&i| i < self.listing.items.len()) else {
+        let items = self.selected_items();
+        if items.is_empty() {
             return false;
-        };
+        }
         let names: Vec<&str> = self.listing.items.iter().map(|i| i.name.as_str()).collect();
-        let Ok(copy) = self.actions.source.duplicate(&self.listing.items[row], &names) else {
-            return false;
-        };
-        self.listing.items.insert(row + 1, copy);
-        self.select_only(row + 1);
-        self.show_toast(Toast::Duplicated, tx);
+        if let Err(why) = self.actions.source.duplicate(&items, &names) {
+            self.failed(Action::Duplicate, why, tx);
+            // Handled: there is a message to draw.
+            return true;
+        }
+        self.forget_undo();
+        self.apply_changes(tx);
         true
     }
 
-    /// Make available offline, or Remove from this PC when it already is.
+    /// Does Make available offline read Remove from this PC? When everything selected already is kept.
+    pub fn selection_is_kept(&self) -> bool {
+        let items = self.selected_items();
+        !items.is_empty()
+            && items
+                .iter()
+                .all(|i| i.pc_status.as_deref() == Some("available_offline"))
+    }
+
+    /// Make the selection available offline, or Remove from this PC when all of it already is.
     pub fn toggle_keep_offline(&mut self, tx: &mut Tx) -> bool {
-        let Some(row) = self.selected.filter(|&i| i < self.listing.items.len()) else {
-            return false;
-        };
-        let keep = self.listing.items[row].pc_status.as_deref() != Some("available_offline");
-        if self
-            .actions
-            .source
-            .keep_offline(&self.listing.items[row], keep)
-            .is_err()
-        {
+        let rows = self.selected_rows();
+        let items = self.selected_items();
+        if items.is_empty() {
             return false;
         }
-        self.listing.items[row].pc_status = Some(if keep { "available_offline" } else { "online_only" }.into());
+        let keep = !self.selection_is_kept();
+        if let Err(why) = self.actions.source.keep_offline(&items, keep) {
+            let action = if keep {
+                Action::KeepOffline
+            } else {
+                Action::RemoveOffline
+            };
+            self.failed(action, why, tx);
+            return true;
+        }
+        self.forget_undo();
+        for i in rows {
+            self.listing.items[i].pc_status = Some(if keep { "available_offline" } else { "online_only" }.into());
+        }
         if keep {
             self.show_toast(Toast::Keeping, tx);
         }
         true
     }
 
-    /// Change the sort and put the rows in that order. Backups stays the first row whatever the sort (DW-0404).
+    /// Copy the selection's share link. "Link copied" is said once it is on the clipboard, not before.
+    pub fn copy_link(&mut self, tx: &mut Tx) -> bool {
+        let items = self.selected_items();
+        if items.is_empty() {
+            return false;
+        }
+        self.forget_undo();
+        match self.actions.source.copy_link(&items) {
+            Ok(()) => self.show_toast(Toast::LinkCopied, tx),
+            Err(why) => self.failed(Action::CopyLink, why, tx),
+        }
+        true
+    }
+
+    pub fn show_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        let items = self.selected_items();
+        if items.is_empty() {
+            return false;
+        }
+        if let Err(why) = self.actions.source.show_in_file_explorer(&items) {
+            self.failed(Action::ShowInFileExplorer, why, tx);
+        }
+        true
+    }
+
+    /// Files dropped from File Explorer: into `folder` (`None`: the root). A folder that takes
+    /// nothing refuses the drop, silently (DW-0481: "the row does not light up").
+    pub fn upload(&mut self, folder: Option<String>, files: &[std::path::PathBuf], tx: &mut Tx) -> bool {
+        if files.is_empty() || self.list_error.is_some() || !self.actions.source.can_add(folder.as_deref()) {
+            return false;
+        }
+        self.forget_undo();
+        if let Err(why) = self.actions.source.upload(folder.as_deref(), files) {
+            self.actions.retry_upload = Some((folder, files.to_vec()));
+            self.failed(Action::Upload, why, tx);
+            return false;
+        }
+        true
+    }
+
+    /// Try again, on the message of a failure: the same action, on what is selected now.
+    pub fn retry(&mut self, tx: &mut Tx) {
+        let Some(Toast::Failed(action, _)) = self.actions.toast.take() else {
+            return;
+        };
+        match action {
+            Action::Trash => {
+                self.trash_selection(tx);
+            }
+            Action::Restore => {
+                self.undo(tx);
+            }
+            Action::Duplicate => {
+                self.duplicate_selected(tx);
+            }
+            Action::KeepOffline | Action::RemoveOffline => {
+                self.toggle_keep_offline(tx);
+            }
+            Action::CopyLink => {
+                self.copy_link(tx);
+            }
+            Action::Open => {
+                self.open_selection(tx);
+            }
+            Action::ShowInFileExplorer => {
+                self.show_in_file_explorer(tx);
+            }
+            Action::Upload => {
+                if let Some((folder, files)) = self.actions.retry_upload.take() {
+                    self.upload(folder, &files, tx);
+                }
+            }
+            Action::Rename => self.intent(Intent::Frame("DW-0410")),
+        }
+    }
+
+    /// Change this folder's sort and put the rows in that order.
     pub fn set_sort(&mut self, sort: Sort) {
-        let lead = self
-            .selected
-            .and_then(|i| self.listing.items.get(i))
-            .map(|i| i.id.clone());
         self.actions.sort = sort;
-        self.actions.source.sort(sort);
+        self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
+        self.forget_undo();
+        self.apply_sort();
+    }
+
+    /// A click on a column header: sort by it; a second click reverses the order (DW-0404).
+    pub fn sort_by_column(&mut self, by: SortBy) {
+        let sort = self.actions.sort;
+        self.set_sort(if sort.by == by {
+            Sort {
+                reversed: !sort.reversed,
+                ..sort
+            }
+        } else {
+            Sort {
+                by,
+                reversed: false,
+                ..sort
+            }
+        });
+    }
+
+    /// Put the rows in the folder's order; what was selected stays selected. Backups stays the
+    /// first row whatever the sort (DW-0404).
+    pub fn apply_sort(&mut self) {
+        let sort = self.actions.sort;
+        let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
+        let lead = self.selected.and_then(|i| id_of(self, i));
+        let anchor = self.actions.anchor.and_then(|i| id_of(self, i));
+        let selected: Vec<String> = self.actions.selection.iter().filter_map(|&i| id_of(self, i)).collect();
         let kind = |i: &DriveItem| {
             i.name
                 .rsplit_once('.')
@@ -472,55 +772,49 @@ impl State {
             let by = if sort.reversed { by.reverse() } else { by };
             pinned.then(folders).then(by).then(name)
         });
-        self.actions.selection.clear();
-        self.actions.anchor = None;
-        self.selected = lead.and_then(|id| self.listing.items.iter().position(|i| i.id == id));
-        if let Some(row) = self.selected {
-            self.actions.selection.insert(row);
-        }
+        let row_of = |s: &State, id: &String| s.listing.items.iter().position(|i| &i.id == id);
+        self.selected = lead.and_then(|id| row_of(self, &id));
+        self.actions.anchor = anchor.and_then(|id| row_of(self, &id));
+        self.actions.selection = selected.iter().filter_map(|id| row_of(self, id)).collect();
     }
 
-    /// Run the entry `index` of the open menu.
-    pub fn pick_menu(&mut self, index: usize, tx: &mut Tx) {
-        let Some(open) = self.actions.menu else { return };
-        let entries = match open.kind {
+    /// The entries of the open menu.
+    pub fn menu_entries(&self, kind: MenuKind) -> Vec<crate::ui::menu::Entry> {
+        match kind {
             MenuKind::File => menus::file_menu(self),
             MenuKind::Sort => menus::sort_menu(self.actions.sort),
             MenuKind::New => menus::new_menu(),
-        };
-        let Some(id) = entries.get(index).and_then(crate::ui::menu::Entry::id) else {
+        }
+    }
+
+    /// Run the entry `index` of the open menu. A dimmed entry does nothing and the menu stays.
+    pub fn pick_menu(&mut self, index: usize, tx: &mut Tx) {
+        let Some(open) = self.actions.menu else { return };
+        let entries = self.menu_entries(open.kind);
+        let Some(id) = entries.get(index).filter(|e| !e.is_off()).and_then(|e| e.id()) else {
             return;
         };
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
             self.close_menu_tx(tx);
         }
-        let lead = self
-            .selected
-            .and_then(|i| self.listing.items.get(i))
-            .map(|i| i.id.clone());
         let sort = self.actions.sort;
         match id {
             "open" => {
-                if let Some(row) = self.selected {
-                    self.open_row(row);
-                }
+                self.open_selection(tx);
             }
-            "preview" => self.intent(Intent::Frame("DW-0408")),
+            "preview" => {
+                self.preview();
+            }
             "share" => self.intent(Intent::Frame("DW-0407")),
             "copy-link" => {
-                if let Some(id) = lead {
-                    self.intent(Intent::CopyLink(id));
-                    self.show_toast(Toast::LinkCopied, tx);
-                }
+                self.copy_link(tx);
             }
             "keep-offline" => {
                 self.toggle_keep_offline(tx);
             }
             "show-in-explorer" => {
-                if let Some(id) = lead {
-                    self.intent(Intent::ShowInFileExplorer(id));
-                }
+                self.show_in_file_explorer(tx);
             }
             "details" => self.intent(Intent::Frame("DW-0411")),
             "rename" => self.intent(Intent::Frame("DW-0410")),
@@ -568,8 +862,8 @@ impl State {
 }
 
 /// The board frames this group builds: frame id, and what it sets on a fresh `State`.
-/// `main.rs` lists them in `SCENES`; the shell's registry can take the same table.
-pub const SCENES: &[(&str, fn(&mut State))] = &[
+/// The shell joins this table to its own (`shell::scenes`).
+pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1101", |s| {
         s.clear_selection();
         s.show_detail_pane = false;
@@ -620,9 +914,8 @@ pub const SCENES: &[(&str, fn(&mut State))] = &[
     ("DW-0406", |s| {
         s.select_only(6);
         let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
-        if let Ok(copy) = s.actions.source.duplicate(&s.listing.items[6], &names) {
-            s.listing.items.insert(7, copy);
-            s.select_only(7);
+        let original = s.listing.items[6].clone();
+        if s.actions.source.duplicate(&[original], &names).is_ok() && s.take_changes().0 {
             s.actions.toast = Some(Toast::Duplicated);
         }
     }),
@@ -638,6 +931,13 @@ pub const SCENES: &[(&str, fn(&mut State))] = &[
         s.clear_selection();
         s.actions.board_crop_top = 240.0;
         s.actions.toast = Some(Toast::Trashed);
+    }),
+    // DW-0109: the message of a failure, the board's sample ("Couldn't rename. Check your connection.").
+    ("DW-0109", |s| {
+        s.show_detail_pane = false;
+        s.clear_selection();
+        s.actions.board_crop_top = 240.0;
+        s.actions.toast = Some(Toast::Failed(Action::Rename, ActionError::Offline));
     }),
     ("DW-1106", |s| {
         s.open_folder(Some(source::NEW_FOLDER_ID.to_string()));

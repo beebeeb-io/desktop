@@ -514,12 +514,16 @@ version = "0.0.1"
 dependencies = [
  "beebeeb-engine",
  "chrono",
+ "png",
+ "raw-window-handle",
  "rune",
  "rune-kit",
  "rune-notify",
  "rusqlite",
  "serde_json",
  "tempfile",
+ "wgpu",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{MenuKind, Toast, details, list, menus};
+use super::{Intent, MenuKind, Toast, details, list, menus};
 use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
@@ -43,8 +43,12 @@ fn close(s: &mut State, tx: &mut Tx) {
     s.close_menu_tx(tx);
 }
 
-fn undo(s: &mut State, _tx: &mut Tx) {
-    s.undo();
+fn undo(s: &mut State, tx: &mut Tx) {
+    s.undo(tx);
+}
+
+fn retry(s: &mut State, tx: &mut Tx) {
+    s.retry(tx);
 }
 
 /// The open menu, where the board puts it: the file menu at its point, Sort and New under the toolbar.
@@ -62,10 +66,11 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
             .items_start()
             .child(surface)
     };
-    let (name, width, entries) = match open.kind {
-        MenuKind::File => ("File", menus::FILE_MENU_W, menus::file_menu(s)),
-        MenuKind::Sort => ("Sort", menus::SORT_MENU_W, menus::sort_menu(s.actions.sort)),
-        MenuKind::New => ("New", menus::NEW_MENU_W, menus::new_menu()),
+    let entries = s.menu_entries(open.kind);
+    let (name, width) = match open.kind {
+        MenuKind::File => ("File", menus::FILE_MENU_W),
+        MenuKind::Sort => ("Sort", menus::SORT_MENU_W),
+        MenuKind::New => ("New", menus::NEW_MENU_W),
     };
     // The menu is modal, so what is outside it hears no key: its keys are heard on the menu itself.
     let surface =
@@ -84,7 +89,12 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             &icons::TRASH,
             toast::Tone::Neutral,
             "Moved to Trash",
-            Some(("Undo Ctrl+Z", undo)),
+            Some(toast::ToastAction {
+                text: "Undo Ctrl+Z",
+                name: "Undo",
+                shortcut: Some("Ctrl+Z"),
+                run: undo,
+            }),
             t,
         ),
         Toast::Duplicated => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Duplicated", None, t),
@@ -96,6 +106,18 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             t,
         ),
         Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
+        Toast::Failed(action, why) => toast::toast(
+            &icons_files::ALERT,
+            toast::Tone::Failed,
+            &Toast::failure(action, why),
+            Some(toast::ToastAction {
+                text: "Try again",
+                name: "Try again",
+                shortcut: None,
+                run: retry,
+            }),
+            t,
+        ),
     }
 }
 
@@ -134,9 +156,9 @@ fn empty_folder(t: &Theme) -> El {
         .grow(1.0)
         .h_full()
         .center()
-        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], _tx: &mut Tx| {
+        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
             let folder = s.listing.folder.id.clone();
-            s.intent(super::Intent::Upload(folder, files.to_vec()));
+            s.upload(folder, files, tx);
         })
         .child(body)
 }
@@ -144,7 +166,9 @@ fn empty_folder(t: &Theme) -> El {
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
 
-    let empty = s.list_error.is_none() && s.listing.items.is_empty();
+    // "Nothing here yet · Add files" is for a folder that takes files. One that takes none
+    // (Backups, a service folder) shows its headers over no rows.
+    let empty = s.listing.items.is_empty() && s.can_add();
     let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
     if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
@@ -156,7 +180,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .h_full()
-                .child(file_list::column_headers(&t))
+                .child(list::column_headers(s.actions.sort, &t))
                 // A folder that could not be read says so. It never draws as an empty folder.
                 .child(match s.list_error {
                     Some(error) => file_list::list_error(error, &t),
@@ -179,7 +203,21 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
         .child(body)
-        .child(status_line::status_line("Up to date", &pc_summary(s), &t));
+        .child({
+            // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
+            let state = s.actions.source.sync_state();
+            let details = pc_summary(s);
+            let name = match &state {
+                Some(state) => format!("{state}. {details}"),
+                None => details.clone(),
+            };
+            status_line::status_line(state.as_deref(), &details, &t)
+                .role("button")
+                .label(name)
+                .description("Shows sync status")
+                .focusable(true)
+                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1201")))
+        });
     if let Some(kind) = s.live_toast() {
         main = main.child(toast::layer(toast_of(kind, &t)));
     }

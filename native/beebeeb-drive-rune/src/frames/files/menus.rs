@@ -14,23 +14,19 @@ pub const SORT_MENU_W: f32 = 190.0;
 /// - several selected items leave out Rename, Version history… and Details;
 /// - Make available offline reads Remove from this PC when the item already is.
 ///
-/// A folder's Preview stays in the menu (the board dims it; picking it does nothing for a folder).
+/// A folder's Preview stays in the menu, dimmed: it cannot be picked ("Open goes into it and Preview is dimmed").
 pub fn file_menu(s: &State) -> Vec<Entry> {
     let rows = s.selected_rows();
     let items: Vec<_> = rows.iter().filter_map(|&i| s.listing.items.get(i)).collect();
     let several = items.len() > 1;
     let open = Entry::keyed("open", "Open", "Enter");
-    let preview = Entry::keyed("preview", "Preview", "Space");
+    let preview = Entry::keyed("preview", "Preview", "Space").dimmed(!s.can_preview());
     let explorer = Entry::item("show-in-explorer", "Show in File Explorer");
     let details = Entry::keyed("details", "Details", "Alt+Enter");
     if items.iter().any(|i| i.is_protected) {
         return vec![open, preview, Entry::Sep, explorer, details];
     }
-    let kept = !several
-        && items
-            .first()
-            .is_some_and(|i| i.pc_status.as_deref() == Some("available_offline"));
-    let keep = if kept {
+    let keep = if s.selection_is_kept() {
         Entry::item("keep-offline", "Remove from this PC")
     } else {
         Entry::item("keep-offline", "Make available offline")

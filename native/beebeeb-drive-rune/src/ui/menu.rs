@@ -36,6 +36,8 @@ pub enum Entry {
         checked: bool,
         /// Destructive (Move to Trash): the label is red.
         danger: bool,
+        /// Dimmed (`.wn-mi.is-off`): it is in the menu and cannot be picked now.
+        off: bool,
     },
     /// A heading over a group ("Sort by").
     Head(&'static str),
@@ -50,6 +52,7 @@ impl Entry {
             shortcut: None,
             checked: false,
             danger: false,
+            off: false,
         }
     }
 
@@ -60,6 +63,7 @@ impl Entry {
             shortcut: Some(shortcut),
             checked: false,
             danger: false,
+            off: false,
         }
     }
 
@@ -70,6 +74,7 @@ impl Entry {
             shortcut: None,
             checked,
             danger: false,
+            off: false,
         }
     }
 
@@ -80,7 +85,34 @@ impl Entry {
             shortcut: Some(shortcut),
             checked: false,
             danger: true,
+            off: false,
         }
+    }
+
+    /// This entry, dimmed when `off`: drawn, read as unavailable, skipped by the arrows, not picked.
+    pub const fn dimmed(self, off: bool) -> Entry {
+        match self {
+            Entry::Item {
+                id,
+                label,
+                shortcut,
+                checked,
+                danger,
+                ..
+            } => Entry::Item {
+                id,
+                label,
+                shortcut,
+                checked,
+                danger,
+                off,
+            },
+            other => other,
+        }
+    }
+
+    pub fn is_off(&self) -> bool {
+        matches!(self, Entry::Item { off: true, .. })
     }
 
     pub fn id(&self) -> Option<&'static str> {
@@ -104,12 +136,23 @@ pub fn height(entries: &[Entry]) -> f32 {
             .sum::<f32>()
 }
 
-/// The next item from `hot` in direction `delta` (headings and separators are skipped; the ends wrap).
+/// The key of the entry `index` of the menu keyed `key` (`<key>-item-<n>`: separators are not
+/// counted), so its owner can put keyboard focus on the highlighted item.
+pub fn item_key(key: &str, entries: &[Entry], index: usize) -> Option<String> {
+    if !matches!(entries.get(index), Some(Entry::Item { .. })) {
+        return None;
+    }
+    let n = entries[..index].iter().filter(|e| !matches!(e, Entry::Sep)).count();
+    Some(format!("{key}-item-{n}"))
+}
+
+/// The next item from `hot` in direction `delta` (headings, separators and dimmed items are
+/// skipped; the ends wrap).
 pub fn step(entries: &[Entry], hot: Option<usize>, delta: isize) -> Option<usize> {
     let items: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(e, Entry::Item { .. }))
+        .filter(|(_, e)| matches!(e, Entry::Item { off: false, .. }))
         .map(|(i, _)| i)
         .collect();
     if items.is_empty() {
@@ -190,10 +233,11 @@ pub fn menu(
                 shortcut,
                 checked,
                 danger,
+                off,
                 ..
             } => {
                 let k = format!("{key}-item-{n_item}");
-                let is_hot = hot == Some(i);
+                let is_hot = hot == Some(i) && !off;
                 let mut tick = el().key(format!("{k}-tick")).w(14.0).center();
                 if checked {
                     tick = tick.child(kit::glyph(format!("{k}-check"), &glyphs::CHECK, 12.0, t.text));
@@ -210,23 +254,34 @@ pub fn menu(
                     .center_y()
                     .radius(radius::SM)
                     .fill(if is_hot { t.press } else { Color::TRANSPARENT })
-                    .focusable(true)
-                    .focus_selected(is_hot || (hot.is_none() && n_item == 0))
-                    .no_focus_ring()
-                    .on_hover(move |s: &mut State| hover(s, i))
-                    .on_press_tx(move |s: &mut State, tx: &mut Tx| pick(s, i, tx))
                     .child(tick)
                     .child(
                         kit::label(
                             format!("{k}-label"),
                             label,
                             ITEM,
-                            if danger { danger_ink(t) } else { t.text },
+                            if off {
+                                t.text_quaternary
+                            } else if danger {
+                                danger_ink(t)
+                            } else {
+                                t.text
+                            },
                         )
                         .grow(1.0)
                         .min_w(0.0)
                         .truncate(),
                     );
+                // A dimmed item is read as unavailable; it takes no focus, no pointer and no pick.
+                item = if off {
+                    item.disabled(true)
+                } else {
+                    item.focusable(true)
+                        .focus_selected(is_hot || (hot.is_none() && n_item == 0))
+                        .no_focus_ring()
+                        .on_hover(move |s: &mut State| hover(s, i))
+                        .on_press_tx(move |s: &mut State, tx: &mut Tx| pick(s, i, tx))
+                };
                 if checked {
                     item = item.checked(true);
                 }
@@ -236,7 +291,13 @@ pub fn menu(
                             format!("{k}-shortcut"),
                             keys,
                             SHORTCUT,
-                            if is_hot { t.text_secondary } else { t.text_tertiary },
+                            if off {
+                                t.text_quaternary
+                            } else if is_hot {
+                                t.text_secondary
+                            } else {
+                                t.text_tertiary
+                            },
                         )
                         .ml(24.0),
                     );

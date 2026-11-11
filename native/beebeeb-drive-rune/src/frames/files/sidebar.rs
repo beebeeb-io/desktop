@@ -15,13 +15,18 @@ const SIDEBAR_W: f32 = 220.0;
 pub fn sidebar(s: &State, t: &Theme) -> El {
     let storage = s.storage;
     let active = s.sidebar_section;
+    // What the source does not know is left out: no count, no split, no account. Never a sample.
     let counts = s.actions.source.counts();
+    let waiting = counts.map(|c| c.shared_waiting).filter(|&n| n > 0);
+    let trash = counts.map(|c| c.trash).filter(|&n| n > 0);
+    let kept = counts.map(|c| c.available_offline).filter(|&n| n > 0);
+    let split = s.actions.source.storage_split().filter(|_| s.storage_known);
 
     let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
         let count = match section {
-            SidebarSection::Shared => Some(counts.shared_waiting).filter(|&n| n > 0).map(Count::Pill),
-            SidebarSection::Trash => Some(counts.trash).filter(|&n| n > 0).map(Count::Plain),
+            SidebarSection::Shared => waiting.map(Count::Pill),
+            SidebarSection::Trash => trash.map(Count::Plain),
             _ => None,
         };
         sections = sections.child(
@@ -54,12 +59,12 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
             side_item(
                 "Available offline",
                 &icons::AVAILABLE_OFFLINE,
-                Some(counts.available_offline).filter(|&n| n > 0).map(Count::Plain),
+                kept.map(Count::Plain),
                 false,
                 "Ctrl+7",
                 t,
             )
-            .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1304"))),
+            .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0715"))),
         );
 
     let nav = col()
@@ -72,11 +77,15 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         .child(sections)
         .child(this_pc);
 
-    // Storage meter (`.mk-store`). The split is the board's sample: Files 24 GB, Photos 216 GB.
-    const FILES_BYTES: i64 = 24_000_000_000;
+    // Storage meter (`.mk-store`): what is in use, in the source's two parts (Files, Photos). A
+    // source that knows the total and not the split fills the meter in one part.
     let quota = storage.quota_bytes.max(1) as f64;
-    let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
-    let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
+    let (files_bytes, photos_bytes) = match split {
+        Some(split) => (split.files_bytes, split.photos_bytes),
+        None => (storage.used_bytes, 0),
+    };
+    let files_frac = (files_bytes.max(0) as f64 / quota).min(1.0) as f32;
+    let photos_frac = (photos_bytes.max(0) as f64 / quota).min(1.0) as f32;
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
     let storage_value = if s.storage_known {
         format!(
@@ -124,71 +133,63 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 ),
         );
     // The split, like the total, is the server's: nothing is shown in its place.
-    if s.storage_known {
+    if split.is_some() {
         meter = meter.child(
             row()
                 .key("storage-breakdown")
                 .justify_between()
                 .child(kit::label(
                     "storage-files",
-                    format!("Files {}", format_storage(FILES_BYTES)),
+                    format!("Files {}", format_storage(files_bytes)),
                     type_::KBD,
                     t.text_tertiary,
                 ))
                 .child(kit::label(
                     "storage-photos",
-                    format!("Photos {}", format_storage((storage.used_bytes - FILES_BYTES).max(0))),
+                    format!("Photos {}", format_storage(photos_bytes)),
                     type_::KBD,
                     t.text_tertiary,
                 )),
         );
     }
 
-    let account = row()
-        .key("account-row")
-        .center_y()
-        .gap(8.0)
-        .pt(2.0)
-        .px(2.0)
-        .child(kit::avatar(
-            "avatar",
-            "AV",
-            26.0,
-            rune::oklch(0.88, 0.05, 250.0),
-            t.card,
-            t,
-        ))
-        .child(
-            col()
-                .key("account-info")
-                .grow(1.0)
-                .min_w(0.0)
-                .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(
-                    kit::label(
-                        "account-email",
-                        "anna@northwind.studio",
-                        type_::BODY_SM,
-                        t.text_tertiary,
-                    )
-                    .truncate(),
-                ),
-        )
-        .child(
-            el().key("settings-btn")
-                .role("button")
-                .label("Settings")
-                .shortcut_hint("Ctrl+,")
-                .help("Settings  Ctrl+,")
-                .size(26.0, 26.0)
-                .radius(radius::CONTROL)
-                .center()
-                .hover(t.selection)
-                .press(t.press)
-                .focusable(true)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0901")))
-                .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
-        );
+    // Whose account: the source's. With none known the row holds the settings gear only.
+    let mut account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
+    account = match s.actions.source.account() {
+        Some(who) => account
+            .child(kit::avatar(
+                "avatar",
+                &who.initials,
+                26.0,
+                rune::oklch(0.88, 0.05, 250.0),
+                t.card,
+                t,
+            ))
+            .child(
+                col()
+                    .key("account-info")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(kit::label("account-name", who.name, type_::BODY_SEMI, t.text).truncate())
+                    .child(kit::label("account-email", who.email, type_::BODY_SM, t.text_tertiary).truncate()),
+            ),
+        None => account.child(el().key("account-info").grow(1.0)),
+    };
+    let account = account.child(
+        el().key("settings-btn")
+            .role("button")
+            .label("Settings")
+            .shortcut_hint("Ctrl+,")
+            .help("Settings  Ctrl+,")
+            .size(26.0, 26.0)
+            .radius(radius::CONTROL)
+            .center()
+            .hover(t.selection)
+            .press(t.press)
+            .focusable(true)
+            .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0701")))
+            .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
+    );
 
     let foot = col()
         .key("sidebar-foot")

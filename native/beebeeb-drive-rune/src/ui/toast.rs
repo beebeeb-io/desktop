@@ -14,11 +14,23 @@ pub const TEXT: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
 /// `.mk-toast .kit-toast b`
 pub const ACTION: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
 
-/// What the glyph says (`.tone-neutral`, `.tone-green`).
+/// What the glyph says (`.tone-neutral`, `.tone-green`, `.tone-red`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
     Done,
+    /// Something failed (DW-0109).
+    Failed,
+}
+
+/// A toast's button: the words drawn on it ("Undo Ctrl+Z"), the name assistive technology reads
+/// ("Undo"), its shortcut if it has one ("Ctrl+Z"), and what it does.
+#[derive(Clone, Copy)]
+pub struct ToastAction {
+    pub text: &'static str,
+    pub name: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub run: fn(&mut State, &mut Tx),
 }
 
 /// The layer a toast sits in: as wide as the content area, 34 pt tall, `bottom` points above
@@ -35,14 +47,8 @@ pub fn layer(toast: El) -> El {
         .child(toast)
 }
 
-/// The toast. `action`: its label ("Undo  Ctrl+Z") and what it does.
-pub fn toast(
-    ic: &'static Icon,
-    tone: Tone,
-    message: &str,
-    action: Option<(&str, fn(&mut State, &mut Tx))>,
-    t: &Theme,
-) -> El {
+/// The toast. A failure is read at once (`alert`); the others when there is a pause (`status`).
+pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastAction>, t: &Theme) -> El {
     // `.glass`: the board's paper at 72 % (68 % in dark, where its paper is the theme's paper-2) over a blur.
     let glass = if t.dark {
         t.paper2.alpha(0.68)
@@ -51,7 +57,7 @@ pub fn toast(
     };
     let mut toast = row()
         .key("toast")
-        .role("status")
+        .role(if tone == Tone::Failed { "alert" } else { "status" })
         .label(message)
         .h(34.0)
         .pl(14.0)
@@ -79,14 +85,18 @@ pub fn toast(
             match tone {
                 Tone::Neutral => t.text_secondary,
                 Tone::Done => t.green,
+                Tone::Failed => t.red,
             },
         ))
         .child(kit::label("toast-text", message, TEXT, t.text));
-    if let Some((label, run)) = action {
+    if let Some(action) = action {
+        let (label, run) = (action.text, action.run);
+        let mut button = el().key("toast-action").role("button").label(action.name);
+        if let Some(keys) = action.shortcut {
+            button = button.shortcut_hint(keys);
+        }
         toast = toast.child(
-            el().key("toast-action")
-                .role("button")
-                .label(label)
+            button
                 .h(24.0)
                 .px(8.0)
                 .ml(3.25 - 10.0)

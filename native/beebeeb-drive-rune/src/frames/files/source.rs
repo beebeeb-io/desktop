@@ -1,8 +1,18 @@
 //! `FilesSource`: what the Files frames ask beyond a folder's listing (`crate::source::DriveSource`):
 //! one item's facts for the details panel, and the actions of the file menu.
 //!
+//! Everything the window says that is not in the listing comes through this trait: the sidebar's
+//! counts, the account, the storage split, the sync state. A source that does not know says `None`
+//! and the window leaves the place empty; it never shows a sample in its place.
+//!
+//! An action is ASKED here and answered at once with "accepted" or why not. What it then changes
+//! in the folder arrives later through [`FilesSource::changes`] (a copy that now exists, an action
+//! that failed after all), so an engine never has to finish the work inside the call.
+//!
 //! `FilesFixture` holds exactly what the board draws (DW-0401, DW-0406, DW-1104) and records every
-//! call, so a test can say which engine call an action made. The engine's implementation is another lane's.
+//! call, so a test can say which engine call an action made. `NoEngine` is the source of a window
+//! with nothing behind it (`--db`): it knows nothing and refuses every action.
+//! The engine's implementation is another lane's.
 
 use crate::source::{DriveItem, format_size};
 use crate::ui::file_list::format_date;
@@ -27,11 +37,51 @@ pub struct Details {
     pub picture: bool,
 }
 
-/// Why an action did not happen.
+/// Why an action did not happen. The window says it in words (DW-0109), never as a code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionError {
     /// Backups and service folders cannot change (DW-0425).
     Protected,
+    /// It needs a connection, and there is none.
+    Offline,
+    /// Nothing is connected that could do it (a window that only reads a database).
+    Unavailable,
+    /// It was tried and did not work.
+    Failed,
+}
+
+/// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Trash,
+    Restore,
+    Duplicate,
+    KeepOffline,
+    RemoveOffline,
+    CopyLink,
+    Open,
+    ShowInFileExplorer,
+    Upload,
+    /// Asked in its own frame (DW-0410); here for the message's words and Try again.
+    Rename,
+}
+
+impl Action {
+    /// "Couldn't <this>."
+    pub fn words(self) -> &'static str {
+        match self {
+            Action::Trash => "move to Trash",
+            Action::Restore => "put it back",
+            Action::Duplicate => "duplicate",
+            Action::KeepOffline => "keep on this PC",
+            Action::RemoveOffline => "remove from this PC",
+            Action::CopyLink => "copy the link",
+            Action::Open => "open",
+            Action::ShowInFileExplorer => "show in File Explorer",
+            Action::Upload => "upload",
+            Action::Rename => "rename",
+        }
+    }
 }
 
 /// One call an action made on the source, in the engine's words.
@@ -39,9 +89,24 @@ pub enum ActionError {
 pub enum Call {
     Trash(Vec<String>),
     Restore(Vec<String>),
-    Duplicate(String),
-    KeepOffline(String, bool),
-    Sort(super::Sort),
+    Duplicate(Vec<String>),
+    KeepOffline(Vec<String>, bool),
+    CopyLink(Vec<String>),
+    Open(Vec<String>),
+    ShowInFileExplorer(Vec<String>),
+    /// Into the folder with this id (`None`: the root).
+    Upload(Option<String>, Vec<std::path::PathBuf>),
+    /// The folder with this id (`None`: the root) is now sorted like this.
+    Sort(Option<String>, super::Sort),
+}
+
+/// What an accepted action changed since the window last asked.
+#[derive(Clone, Debug)]
+pub enum Change {
+    /// A copy now stands next to the item with the id `after` (DW-0406).
+    Copied { after: String, item: Box<DriveItem> },
+    /// An accepted action did not work after all.
+    Failed(Action, ActionError),
 }
 
 /// The counts beside the sidebar's sections.
@@ -53,26 +118,102 @@ pub struct Counts {
     pub available_offline: u32,
 }
 
+/// Whose account this is: the sidebar's last row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub name: String,
+    pub email: String,
+    /// The avatar's letters.
+    pub initials: String,
+}
+
+/// What the storage in use is made of: the meter's two parts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageSplit {
+    pub files_bytes: i64,
+    pub photos_bytes: i64,
+}
+
 pub trait FilesSource: Send + 'static {
-    fn counts(&self) -> Counts;
+    /// `None`: not known (nothing is connected that counts them).
+    fn counts(&self) -> Option<Counts>;
+    fn account(&self) -> Option<Account>;
+    fn storage_split(&self) -> Option<StorageSplit>;
+    /// The status line's word for sync ("Up to date"). `None`: nothing syncs here.
+    fn sync_state(&self) -> Option<String>;
     fn details(&self, item: &DriveItem, folder: &str) -> Details;
     /// A date the list shows in other words than its own ("Just now" for a copy made a moment ago).
     fn changed_label(&self, item: &DriveItem) -> Option<String>;
+    /// May things be added to the folder with this id (`None`: the root)? Not to Backups, a service
+    /// folder, Trash or Shared with me (DW-0414, DW-0481).
+    fn can_add(&self, folder: Option<&str>) -> bool;
+    /// The sort this folder was left with (DW-0404: "Each folder remembers its own sort").
+    fn sort_of(&self, folder: Option<&str>) -> Option<super::Sort>;
+    fn set_sort(&mut self, folder: Option<&str>, sort: super::Sort);
     fn trash(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
-    /// The copy, as it now stands next to the original (`names`: the folder's names, to find a free one).
-    fn duplicate(&mut self, item: &DriveItem, names: &[&str]) -> Result<DriveItem, ActionError>;
-    fn keep_offline(&mut self, item: &DriveItem, keep: bool) -> Result<(), ActionError>;
-    fn sort(&mut self, sort: super::Sort);
+    /// Copies of these, each next to its original; they arrive through [`FilesSource::changes`].
+    /// `taken`: the folder's names as the window shows them.
+    fn duplicate(&mut self, items: &[DriveItem], taken: &[&str]) -> Result<(), ActionError>;
+    fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError>;
+    /// Put the share link of these on the clipboard. `Ok`: it is there.
+    fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
+    /// Open these files in their apps (downloaded and decrypted on this PC first).
+    fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
+    fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
+    /// Upload these files of this PC into the folder with this id (`None`: the root).
+    fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError>;
+    /// What accepted actions changed since the last call, oldest first.
+    fn changes(&mut self) -> Vec<Change>;
 }
 
-#[derive(Default)]
-pub struct FilesFixture {
-    pub calls: Vec<Call>,
-    /// How many items this session moved to Trash and did not take back.
-    pub trashed: u32,
-    /// Ids of the copies made in this session: the board shows them as changed "Just now" on "This PC".
-    copies: Vec<String>,
+fn ids(items: &[DriveItem]) -> Vec<String> {
+    items.iter().map(|i| i.id.clone()).collect()
+}
+
+/// What a row itself says about the item, for a source that knows no more.
+pub fn details_of_row(item: &DriveItem, folder: &str) -> Details {
+    let size = if item.is_folder {
+        item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
+    } else {
+        item.size.map(format_size).unwrap_or_default()
+    };
+    let kept = item.pc_status.as_deref() == Some("available_offline");
+    let place = match item.pc_status.as_deref() {
+        Some("online_only") => "Online only now",
+        Some("on_this_pc") => "Downloaded",
+        Some("available_offline") => "Kept on this PC",
+        _ => "",
+    };
+    let offline_note = match (place.is_empty(), size.is_empty()) {
+        (false, false) => format!("{place} \u{00B7} {size}"),
+        (false, true) => place.to_string(),
+        (true, _) => size.clone(),
+    };
+    let shared = if item.shared_type.is_some() {
+        "Anyone with the link".to_string()
+    } else if item.shared_badges.is_empty() {
+        "Only you".to_string()
+    } else {
+        item.shared_badges
+            .iter()
+            .map(|b| b.initials.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Details {
+        kind: kind_of(item).to_string(),
+        size,
+        changed: format_date(&item.modified_at),
+        changed_on: None,
+        added: None,
+        where_: folder.to_string(),
+        versions: None,
+        shared,
+        offline_note,
+        kept_offline: kept,
+        picture: item.has_thumbnail,
+    }
 }
 
 pub fn kind_of(item: &DriveItem) -> &'static str {
@@ -108,89 +249,161 @@ pub fn copy_name(name: &str, taken: &[&str]) -> String {
         .unwrap_or(first)
 }
 
+/// The source of a window with nothing behind it but a listing (`--db`): it knows no counts, no
+/// account and no sync state, and refuses every action with [`ActionError::Unavailable`], so
+/// nothing in the window claims a change that no engine made.
+#[derive(Default)]
+pub struct NoEngine;
+
+impl FilesSource for NoEngine {
+    fn counts(&self) -> Option<Counts> {
+        None
+    }
+    fn account(&self) -> Option<Account> {
+        None
+    }
+    fn storage_split(&self) -> Option<StorageSplit> {
+        None
+    }
+    fn sync_state(&self) -> Option<String> {
+        None
+    }
+    fn details(&self, item: &DriveItem, folder: &str) -> Details {
+        details_of_row(item, folder)
+    }
+    fn changed_label(&self, _: &DriveItem) -> Option<String> {
+        None
+    }
+    fn can_add(&self, _: Option<&str>) -> bool {
+        false
+    }
+    fn sort_of(&self, _: Option<&str>) -> Option<super::Sort> {
+        None
+    }
+    fn set_sort(&mut self, _: Option<&str>, _: super::Sort) {}
+    fn trash(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn restore(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn duplicate(&mut self, _: &[DriveItem], _: &[&str]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn open(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn show_in_file_explorer(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn upload(&mut self, _: Option<&str>, _: &[std::path::PathBuf]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn changes(&mut self) -> Vec<Change> {
+        Vec::new()
+    }
+}
+
+/// The board's sample account and every action answered in memory. `fail` makes the next calls
+/// of an action fail, so a test (and a board frame of a failure) can show what the window says.
+#[derive(Default)]
+pub struct FilesFixture {
+    /// Every call, in order. Shared, so a test keeps a handle after the window owns the fixture.
+    pub calls: std::sync::Arc<std::sync::Mutex<Vec<Call>>>,
+    /// How many items this session moved to Trash and did not take back.
+    pub trashed: u32,
+    /// Ids of the copies made in this session: the board shows them as changed "Just now" on "This PC".
+    copies: Vec<String>,
+    /// Actions that fail when asked, and why. Shared like `calls`.
+    pub fail: std::sync::Arc<std::sync::Mutex<Vec<(Action, ActionError)>>>,
+    /// Actions that are accepted and fail afterwards (the failure arrives through `changes`).
+    pub fail_later: Vec<(Action, ActionError)>,
+    sorts: std::collections::HashMap<Option<String>, super::Sort>,
+    changes: Vec<Change>,
+}
+
+/// The fixture's protected folder: the board's Backups row.
+pub const BACKUPS_ID: &str = "f-backups";
+
+impl FilesFixture {
+    fn record(&self, call: Call) {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call);
+    }
+
+    fn refuse(&self, action: Action, items: &[DriveItem]) -> Result<(), ActionError> {
+        let fail = self.fail.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&(_, why)) = fail.iter().find(|(a, _)| *a == action) {
+            return Err(why);
+        }
+        let changes = matches!(
+            action,
+            Action::Trash | Action::Duplicate | Action::KeepOffline | Action::RemoveOffline | Action::CopyLink
+        );
+        if changes && items.iter().any(|i| i.is_protected) {
+            return Err(ActionError::Protected);
+        }
+        Ok(())
+    }
+}
+
 impl FilesSource for FilesFixture {
-    fn counts(&self) -> Counts {
+    fn counts(&self) -> Option<Counts> {
         // The board's sample: 1 share waiting, 12 in Trash, 3 kept offline.
-        Counts {
+        Some(Counts {
             shared_waiting: 1,
             trash: 12 + self.trashed,
             available_offline: 3,
-        }
+        })
+    }
+
+    fn account(&self) -> Option<Account> {
+        Some(Account {
+            name: "Anna Visser".into(),
+            email: "anna@northwind.studio".into(),
+            initials: "AV".into(),
+        })
+    }
+
+    fn storage_split(&self) -> Option<StorageSplit> {
+        // DW-0401: 240 GB of 1 TB: Files 24 GB, Photos 216 GB.
+        Some(StorageSplit {
+            files_bytes: 24_000_000_000,
+            photos_bytes: 216_000_000_000,
+        })
+    }
+
+    fn sync_state(&self) -> Option<String> {
+        Some("Up to date".into())
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
-        let size = if item.is_folder {
-            item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
-        } else {
-            item.size.map(format_size).unwrap_or_default()
-        };
-        let kept = item.pc_status.as_deref() == Some("available_offline");
-        let place = match item.pc_status.as_deref() {
-            Some("online_only") => "Online only now",
-            Some("on_this_pc") => "Downloaded",
-            Some("available_offline") => "Kept on this PC",
-            _ => "",
-        };
-        let offline_note = match (place.is_empty(), size.is_empty()) {
-            (false, false) => format!("{place} \u{00B7} {size}"),
-            (false, true) => place.to_string(),
-            (true, _) => size.clone(),
-        };
-        let copy = self.copies.contains(&item.id);
+        let row = details_of_row(item, folder);
         // The facts the board draws for the rows it selects; for any other row only what the row itself says.
-        let (changed_on, added, versions, shared) = if copy {
-            (
-                Some("This PC"),
-                Some("28 Oct 2026"),
-                Some("1 version"),
-                "Only you".to_string(),
-            )
+        let (changed_on, added, versions, shared) = if self.copies.contains(&item.id) {
+            ("This PC", "28 Oct 2026", "1 version", "Only you")
         } else {
             match item.id.as_str() {
-                "contract" => (
-                    Some("Anna's iPhone"),
-                    Some("28 Oct 2026"),
-                    Some("3 versions"),
-                    "Sam Okafor, pending".to_string(),
-                ),
-                "harbour" => (
-                    Some("Anna's iPhone"),
-                    Some("28 Oct 2026"),
-                    Some("1 version"),
-                    "Anyone with the link".to_string(),
-                ),
-                _ => (
-                    None,
-                    None,
-                    None,
-                    if item.shared_type.is_some() {
-                        "Anyone with the link".to_string()
-                    } else if item.shared_badges.is_empty() {
-                        "Only you".to_string()
-                    } else {
-                        item.shared_badges
-                            .iter()
-                            .map(|b| b.initials.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    },
-                ),
+                "contract" => ("Anna's iPhone", "28 Oct 2026", "3 versions", "Sam Okafor, pending"),
+                "harbour" => ("Anna's iPhone", "28 Oct 2026", "1 version", "Anyone with the link"),
+                _ => return row,
             }
         };
         Details {
-            kind: kind_of(item).to_string(),
-            size,
-            changed: self
-                .changed_label(item)
-                .unwrap_or_else(|| format_date(&item.modified_at)),
-            changed_on: changed_on.map(str::to_string),
-            added: added.map(str::to_string),
-            where_: folder.to_string(),
-            versions: versions.map(str::to_string),
-            shared,
-            offline_note,
-            kept_offline: kept,
-            picture: item.has_thumbnail,
+            changed: self.changed_label(item).unwrap_or(row.changed.clone()),
+            changed_on: Some(changed_on.to_string()),
+            added: Some(added.to_string()),
+            versions: Some(versions.to_string()),
+            shared: shared.to_string(),
+            ..row
         }
     }
 
@@ -198,54 +411,114 @@ impl FilesSource for FilesFixture {
         self.copies.contains(&item.id).then(|| "Just now".to_string())
     }
 
+    fn can_add(&self, folder: Option<&str>) -> bool {
+        folder != Some(BACKUPS_ID)
+    }
+
+    fn sort_of(&self, folder: Option<&str>) -> Option<super::Sort> {
+        self.sorts.get(&folder.map(str::to_string)).copied()
+    }
+
+    fn set_sort(&mut self, folder: Option<&str>, sort: super::Sort) {
+        let folder = folder.map(str::to_string);
+        self.record(Call::Sort(folder.clone(), sort));
+        self.sorts.insert(folder, sort);
+    }
+
     fn trash(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        if items.iter().any(|i| i.is_protected) {
-            return Err(ActionError::Protected);
-        }
-        self.calls
-            .push(Call::Trash(items.iter().map(|i| i.id.clone()).collect()));
+        self.refuse(Action::Trash, items)?;
+        self.record(Call::Trash(ids(items)));
         self.trashed += items.len() as u32;
         Ok(())
     }
 
     fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        self.calls
-            .push(Call::Restore(items.iter().map(|i| i.id.clone()).collect()));
+        self.refuse(Action::Restore, items)?;
+        self.record(Call::Restore(ids(items)));
         self.trashed = self.trashed.saturating_sub(items.len() as u32);
         Ok(())
     }
 
-    fn duplicate(&mut self, item: &DriveItem, names: &[&str]) -> Result<DriveItem, ActionError> {
-        if item.is_protected {
-            return Err(ActionError::Protected);
+    fn duplicate(&mut self, items: &[DriveItem], taken: &[&str]) -> Result<(), ActionError> {
+        self.refuse(Action::Duplicate, items)?;
+        self.record(Call::Duplicate(ids(items)));
+        if let Some(&(action, why)) = self.fail_later.iter().find(|(a, _)| *a == Action::Duplicate) {
+            self.changes.push(Change::Failed(action, why));
+            return Ok(());
         }
-        self.calls.push(Call::Duplicate(item.id.clone()));
-        let id = format!("{}-copy-{}", item.id, self.copies.len() + 1);
-        self.copies.push(id.clone());
-        Ok(DriveItem {
-            id,
-            name: copy_name(&item.name, names),
-            // A new file: on this PC, its own versions start now, and it is not shared (DW-0406).
-            shared_type: None,
-            shared_badges: Vec::new(),
-            pc_status: Some("on_this_pc".into()),
-            ..item.clone()
-        })
-    }
-
-    fn keep_offline(&mut self, item: &DriveItem, keep: bool) -> Result<(), ActionError> {
-        self.calls.push(Call::KeepOffline(item.id.clone(), keep));
+        let mut taken: Vec<String> = taken.iter().map(|n| n.to_string()).collect();
+        for item in items {
+            let id = format!("{}-copy-{}", item.id, self.copies.len() + 1);
+            self.copies.push(id.clone());
+            let names: Vec<&str> = taken.iter().map(String::as_str).collect();
+            let name = copy_name(&item.name, &names);
+            taken.push(name.clone());
+            self.changes.push(Change::Copied {
+                after: item.id.clone(),
+                item: Box::new(DriveItem {
+                    id,
+                    name,
+                    // A new file: on this PC, its own versions start now, and it is not shared (DW-0406).
+                    shared_type: None,
+                    shared_badges: Vec::new(),
+                    pc_status: Some("on_this_pc".into()),
+                    ..item.clone()
+                }),
+            });
+        }
         Ok(())
     }
 
-    fn sort(&mut self, sort: super::Sort) {
-        self.calls.push(Call::Sort(sort));
+    fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError> {
+        self.refuse(
+            if keep {
+                Action::KeepOffline
+            } else {
+                Action::RemoveOffline
+            },
+            items,
+        )?;
+        self.record(Call::KeepOffline(ids(items), keep));
+        Ok(())
+    }
+
+    fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.refuse(Action::CopyLink, items)?;
+        self.record(Call::CopyLink(ids(items)));
+        Ok(())
+    }
+
+    fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.refuse(Action::Open, items)?;
+        self.record(Call::Open(ids(items)));
+        Ok(())
+    }
+
+    fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.refuse(Action::ShowInFileExplorer, items)?;
+        self.record(Call::ShowInFileExplorer(ids(items)));
+        Ok(())
+    }
+
+    fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
+        self.refuse(Action::Upload, &[])?;
+        if !self.can_add(folder) {
+            return Err(ActionError::Protected);
+        }
+        self.record(Call::Upload(folder.map(str::to_string), files.to_vec()));
+        Ok(())
+    }
+
+    fn changes(&mut self) -> Vec<Change> {
+        std::mem::take(&mut self.changes)
     }
 }
 
 /// The board's folders: `BoardFixtureSource` holds the root (DW-0401); this honours the folder id.
-/// Lisbon trip holds the seven rows of DW-0420, "New folder" nothing (DW-1106); a folder the board
-/// never opens lists nothing rather than invented rows. An id that is no folder: `NotFound`.
+/// Lisbon trip holds the seven rows of DW-0420, "New folder" nothing (DW-1106). A folder the board
+/// never opens (Backups: "4 devices", Documents: "48 items") cannot be read here: it has things in
+/// it that the board does not draw, so it shows neither invented rows nor "Nothing here yet".
+/// An id that is no folder: `NotFound`.
 pub struct BoardDrive {
     root: crate::source::BoardFixtureSource,
 }
@@ -340,10 +613,15 @@ impl crate::source::DriveSource for BoardDrive {
             id: Some(id.to_string()),
             name,
         };
+        let items = match id {
+            "f-lisbon" => lisbon_trip(id),
+            NEW_FOLDER_ID => Vec::new(),
+            _ => return Err(SourceError::Unreadable),
+        };
         Ok(Listing {
             path: vec![root.folder.clone(), folder.clone()],
             folder,
-            items: if id == "f-lisbon" { lisbon_trip(id) } else { Vec::new() },
+            items,
         })
     }
 

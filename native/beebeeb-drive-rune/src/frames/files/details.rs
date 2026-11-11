@@ -1,12 +1,47 @@
 //! The details panel of the selected item (`.mk-det`), its facts from `FilesSource::details`.
+//! Its three controls act on the selection: the Available offline switch, Share… (DW-0407) and
+//! Version history (DW-0413).
 
+use super::Intent;
 use super::source::Details;
+use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview, switch_card};
+use crate::theme::tokens::{Theme, radius, type_};
+use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview, switch};
 use crate::ui::{file_list, kit};
-use rune::{El, Span, col, el, row};
+use rune::{El, Span, Tx, col, el, row};
+
+/// `ui::detail_pane::switch_card`, with a switch that switches: a card with a title, a second line
+/// and the switch. Keys: `<key>-card`, `<key>-label`, `<key>-detail`, `<key>-switch`, `<key>-knob`.
+fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
+    row()
+        .key(format!("{key}-card"))
+        .w_full()
+        .min_h(40.0)
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
+        .radius(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .child(
+            col()
+                .key(format!("{key}-text"))
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(kit::label(format!("{key}-label"), title, type_::ITEM_TITLE, t.text).truncate())
+                .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
+        )
+        .child(
+            switch(key, title, on, t)
+                .description(sub)
+                .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    s.toggle_keep_offline(tx);
+                }),
+        )
+}
 
 pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     let Some((item, d)) = item else {
@@ -64,7 +99,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
         )
         .child(encrypted_badge(t))
         .child(facts)
-        .child(switch_card(
+        .child(offline_card(
             "offline",
             "Available offline",
             &d.offline_note,
@@ -75,7 +110,13 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
             row()
                 .key("detail-actions")
                 .gap(8.0)
-                .child(action_button("share", "Share\u{2026}", &icons::SHARE, t))
-                .child(action_button("versions", "Version history", &icons::VERSION_HISTORY, t)),
+                .child(
+                    action_button("share", "Share\u{2026}", &icons::SHARE, t)
+                        .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0407"))),
+                )
+                .child(
+                    action_button("versions", "Version history", &icons::VERSION_HISTORY, t)
+                        .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0413"))),
+                ),
         )
 }

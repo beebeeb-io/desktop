@@ -18,3 +18,9 @@ macro_rules! line24 {
 
 /// A menu's tick, and the "done" toast's.
 pub static CHECK: Icon = line24!("check", r#"<path d="M20 6L9 17l-5-5"></path>"#);
+
+/// The failed message's mark (DW-0109): the board's `alert`.
+pub static ALERT: Icon = line24!(
+    "alert",
+    r#"<path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z"></path><path d="M12 8v4.6"></path><path d="M12 15.9v.1"></path>"#
+);

@@ -1,10 +1,12 @@
 //! Tests of the Files frames: keyboard and pointer (scripted input), roles and names, and what each
 //! action asks of the source.
 
+use super::source::{Action, ActionError, Call, FilesFixture};
 use super::{Intent, MenuKind, Toast};
 use crate::source::{DriveSource, LargeFixtureSource};
 use crate::{State, init, load, view};
 use rune::{Env, Key, KeyEvent, Mods, PhysicalInput, Runtime};
+use std::sync::{Arc, Mutex};
 
 thread_local! {
     static CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
@@ -12,7 +14,7 @@ thread_local! {
 
 /// Draw frames while time moves on, so that what an input just mounted (a menu, a toast) has
 /// arrived and can be pointed at: a `frame(0.0)` alone never ends its entrance.
-fn settle(rt: &mut Runtime<State>) {
+pub(super) fn settle(rt: &mut Runtime<State>) {
     for _ in 0..3 {
         let now = CLOCK.with(|c| {
             c.set(c.get() + 0.4);
@@ -22,7 +24,7 @@ fn settle(rt: &mut Runtime<State>) {
     }
 }
 
-fn runtime_of(state: State) -> Runtime<State> {
+pub(super) fn runtime_of(state: State) -> Runtime<State> {
     let env = Env {
         system_dark: false,
         scale: 2.0,
@@ -34,52 +36,88 @@ fn runtime_of(state: State) -> Runtime<State> {
 }
 
 /// The board's window, with focus in the list (on the selected row), as after a click there.
-fn runtime() -> Runtime<State> {
+pub(super) fn runtime() -> Runtime<State> {
     let mut rt = runtime_of(init());
     click(&mut rt, "row-6-date");
     rt
 }
 
-fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
+pub(super) type Calls = Arc<Mutex<Vec<Call>>>;
+pub(super) type Fails = Arc<Mutex<Vec<(Action, ActionError)>>>;
+
+/// The board's window over a fixture the test keeps its handles on: what was asked of the source,
+/// and what it is told to refuse.
+pub(super) fn spied() -> (Runtime<State>, Calls, Fails) {
+    spied_on(init())
+}
+
+pub(super) fn spied_on(mut state: State) -> (Runtime<State>, Calls, Fails) {
+    let fixture = FilesFixture::default();
+    let (calls, fails) = (fixture.calls.clone(), fixture.fail.clone());
+    state.actions.source = Box::new(fixture);
+    let mut rt = runtime_of(state);
+    if find(&rt, "row-6-date").is_some() {
+        click(&mut rt, "row-6-date");
+    }
+    (rt, calls, fails)
+}
+
+pub(super) fn asked(calls: &Calls) -> Vec<Call> {
+    calls.lock().unwrap().clone()
+}
+
+/// The key of the element that has keyboard focus.
+pub(super) fn focused(rt: &Runtime<State>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
+}
+
+pub(super) fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+pub(super) fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
     find(rt, key).unwrap_or_else(|| panic!("no element keyed {key}"))
 }
 
-fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
+pub(super) fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
     rt.elements()
         .into_iter()
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-const NONE: Mods = Mods {
+pub(super) const NONE: Mods = Mods {
     shift: false,
     cmd: false,
     alt: false,
     ctrl: false,
     logo: false,
 };
-const CTRL: Mods = Mods {
+pub(super) const CTRL: Mods = Mods {
     cmd: true,
     ctrl: true,
     ..NONE
 };
-const SHIFT: Mods = Mods { shift: true, ..NONE };
-const ALT: Mods = Mods { alt: true, ..NONE };
+pub(super) const SHIFT: Mods = Mods { shift: true, ..NONE };
+pub(super) const ALT: Mods = Mods { alt: true, ..NONE };
 
-fn press(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+pub(super) fn press(rt: &mut Runtime<State>, key: Key, mods: Mods) {
     rt.key(KeyEvent { key, mods });
     settle(rt);
 }
 
-fn centre(rt: &Runtime<State>, key: &str) -> (f32, f32) {
+pub(super) fn centre(rt: &Runtime<State>, key: &str) -> (f32, f32) {
     let r = info(rt, key).rect;
     (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
 }
 
-fn click(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
     click_with(rt, key, NONE);
 }
 
-fn click_with(rt: &mut Runtime<State>, key: &str, mods: Mods) {
+pub(super) fn click_with(rt: &mut Runtime<State>, key: &str, mods: Mods) {
     let (x, y) = centre(rt, key);
     rt.physical_input(PhysicalInput::Modifiers(mods));
     rt.pointer_down(x, y);
@@ -88,19 +126,19 @@ fn click_with(rt: &mut Runtime<State>, key: &str, mods: Mods) {
     rt.physical_input(PhysicalInput::Modifiers(NONE));
 }
 
-fn right_click(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn right_click(rt: &mut Runtime<State>, key: &str) {
     let (x, y) = centre(rt, key);
     rt.secondary_down(x, y);
     rt.secondary_up(x, y);
     settle(rt);
 }
 
-fn names(rt: &Runtime<State>) -> Vec<String> {
+pub(super) fn names(rt: &Runtime<State>) -> Vec<String> {
     rt.state.listing.items.iter().map(|i| i.name.clone()).collect()
 }
 
 /// The labels of the open menu's items, in order (headings and separators left out).
-fn menu_labels(rt: &Runtime<State>) -> Vec<String> {
+pub(super) fn menu_labels(rt: &Runtime<State>) -> Vec<String> {
     rt.elements()
         .into_iter()
         .filter(|e| !e.exiting && matches!(e.role, "menuitem" | "menuitemcheckbox"))
@@ -179,11 +217,11 @@ fn enter_on_a_folder_shows_that_folders_contents_and_back_and_forward_return() {
         [
             "Day 1",
             "Day 2",
-            "Tickets.pdf",
             "Alfama.heic",
             "Belem.heic",
-            "Tram 28.mov",
-            "Sunset.heic"
+            "Sunset.heic",
+            "Tickets.pdf",
+            "Tram 28.mov"
         ]
     );
     assert_eq!(info(&rt, "crumb-0").text.as_deref(), Some("Files"));
@@ -225,7 +263,7 @@ fn the_board_fixture_honours_the_folder_id() {
 
 #[test]
 fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
-    let mut rt = runtime();
+    let (mut rt, calls, _) = spied();
     press(&mut rt, Key::Enter, NONE);
     press(&mut rt, Key::Text(" ".into()), NONE);
     press(&mut rt, Key::Function(2), NONE);
@@ -233,12 +271,12 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
     assert_eq!(
         rt.state.actions.intents,
         [
-            Intent::Open("contract".into()),
             Intent::Frame("DW-0408"),
             Intent::Frame("DW-0410"),
             Intent::Frame("DW-0411")
         ]
     );
+    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
 }
 
 // ---- Selection ----
@@ -394,7 +432,7 @@ fn a_protected_folder_and_several_items_get_the_menus_the_board_gives_them() {
 
 #[test]
 fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
-    let mut rt = runtime();
+    let (mut rt, calls, _) = spied();
     for (label, intent) in [
         ("Share\u{2026}", Intent::Frame("DW-0407")),
         ("Preview", Intent::Frame("DW-0408")),
@@ -402,8 +440,9 @@ fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
         ("Rename", Intent::Frame("DW-0410")),
         ("Details", Intent::Frame("DW-0411")),
         ("Version history\u{2026}", Intent::Frame("DW-0413")),
-        ("Show in File Explorer", Intent::ShowInFileExplorer("contract".into())),
-        ("Copy link", Intent::CopyLink("contract".into())),
+        // These two are calls on the source, not frames: the last frame asked for stays.
+        ("Show in File Explorer", Intent::Frame("DW-0413")),
+        ("Copy link", Intent::Frame("DW-0413")),
     ] {
         right_click(&mut rt, "row-6-date");
         let item = rt
@@ -416,6 +455,13 @@ fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
         assert!(rt.state.actions.menu.is_none(), "{label} closes the menu");
         assert_eq!(rt.state.actions.intents.last(), Some(&intent), "{label}");
     }
+    assert_eq!(
+        asked(&calls),
+        [
+            Call::ShowInFileExplorer(ids(&["contract"])),
+            Call::CopyLink(ids(&["contract"]))
+        ]
+    );
     assert_eq!(rt.state.live_toast(), Some(Toast::LinkCopied), "Copy link says so");
     assert_eq!(info(&rt, "toast").role, "status");
     assert_eq!(info(&rt, "toast").label.as_deref(), Some("Link copied"));
@@ -450,7 +496,8 @@ fn delete_moves_to_trash_without_a_question_and_undo_puts_it_back() {
         (names(&rt)[5].as_str(), names(&rt)[8].as_str()),
         ("Budget 2026.xlsx", "Northwind brand guide.pdf")
     );
-    assert!(!rt.state.undo(), "nothing is left to undo");
+    press(&mut rt, Key::Command('z'), CTRL);
+    assert_eq!(names(&rt).len(), 11, "nothing is left to undo");
 }
 
 #[test]
@@ -626,17 +673,6 @@ fn every_shortcut_a_tooltip_names_does_something() {
     assert!(find(&rt, "detail-pane").is_some());
     press(&mut rt, Key::Text("P".into()), Mods { shift: true, ..ALT });
     assert!(find(&rt, "detail-pane").is_none());
-    // Sync history Ctrl+6, Available offline Ctrl+7, Settings Ctrl+, : the sidebar's buttons and their keys agree.
-    click(&mut rt, "Sync history-row");
-    press(&mut rt, Key::Command('6'), CTRL);
-    click(&mut rt, "Available offline-row");
-    press(&mut rt, Key::Command('7'), CTRL);
-    click(&mut rt, "settings-btn");
-    press(&mut rt, Key::Command(','), CTRL);
-    assert_eq!(
-        rt.state.actions.intents,
-        ["DW-1301", "DW-1301", "DW-1304", "DW-1304", "DW-0901", "DW-0901"].map(Intent::Frame)
-    );
     // Ctrl+1..5: the sections.
     press(&mut rt, Key::Command('5'), CTRL);
     assert!(rt.state.sidebar_section == crate::ui::sidebar::SidebarSection::Trash);
@@ -652,7 +688,7 @@ fn every_shortcut_a_tooltip_names_does_something() {
 
 #[test]
 fn an_empty_folder_says_so_and_add_files_opens_new() {
-    let mut rt = runtime();
+    let (mut rt, calls, _) = spied();
     rt.update(|s, _| s.open_folder(Some(super::source::NEW_FOLDER_ID.to_string())));
     settle(&mut rt);
     assert_eq!(info(&rt, "empty-title").text.as_deref(), Some("Nothing here yet"));
@@ -676,19 +712,19 @@ fn an_empty_folder_says_so_and_add_files_opens_new() {
     rt.drop_files(files.clone(), Some((x, y)));
     settle(&mut rt);
     assert_eq!(
-        rt.state.actions.intents,
-        [Intent::Upload(Some(super::source::NEW_FOLDER_ID.to_string()), files)]
+        asked(&calls),
+        [Call::Upload(Some(super::source::NEW_FOLDER_ID.to_string()), files)]
     );
 }
 
 #[test]
 fn files_dropped_on_the_list_upload_into_the_folder_shown() {
-    let mut rt = runtime();
+    let (mut rt, calls, _) = spied();
     let (x, y) = centre(&rt, "row-9-date");
     let files = vec![std::path::PathBuf::from("photo.heic")];
     rt.drop_files(files.clone(), Some((x, y)));
     settle(&mut rt);
-    assert_eq!(rt.state.actions.intents, [Intent::Upload(None, files)]);
+    assert_eq!(asked(&calls), [Call::Upload(None, files)]);
 }
 
 // ---- Roles and names ----
