@@ -96,8 +96,9 @@ impl AppIdentity {
         }
     }
 
-    /// The control channel's name (`control.rs`); the platform adds the user to it. It is also
-    /// the single-instance lock: one server per identity and user.
+    /// The control channel's name (`control.rs`); the platform adds the user and the Windows
+    /// session to it. It is also the single-instance lock: one server per identity, user AND
+    /// session; exclusivity across sessions comes from the engine/profile lock (not linked yet).
     pub const fn control_channel(self) -> &'static str {
         match self {
             Self::Real => "io.beebeeb.app.control",
