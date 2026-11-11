@@ -203,6 +203,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
+        // The one banner of the whole window, or the loading strip (`frames::global`).
+        .children(crate::frames::global::under_toolbar(s, &t))
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
@@ -243,7 +245,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .gradient(fade, fade.alpha(0.0)),
             )
     } else {
-        body.grow(1.0).min_h(0.0)
+        crate::frames::global::fit(s, body, &t)
     };
     let window = col()
         .key("window")

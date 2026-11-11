@@ -1,14 +1,17 @@
 //! UI components for the Beebeeb Drive window: the design system every frame builds on.
 
 pub mod au;
+pub mod banner;
 pub mod button;
 pub mod caption;
 pub mod detail_pane;
 pub mod empty;
 pub mod file_list;
 pub mod gate;
+pub mod global_icons;
 pub mod keys;
 pub mod kit;
+pub mod load_strip;
 pub mod menu;
 pub mod settings_card;
 pub mod settings_controls;

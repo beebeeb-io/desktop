@@ -168,7 +168,7 @@
    "kind": "text",
    "x": 48.46,
    "y": 46,
-   "w": 81.22,
+   "w": 81.24,
    "h": 15.7,
    "text": "beebeeb.io",
    "family": "sans",
@@ -187,7 +187,7 @@
    "kind": "text",
    "x": 48.46,
    "y": 63.54,
-   "w": 81.22,
+   "w": 81.24,
    "h": 11.5,
    "text": "DRIVE",
    "family": "mono",
@@ -1276,9 +1276,9 @@
   },
   "col-size": {
    "kind": "text",
-   "x": 801.43,
+   "x": 801.44,
    "y": 134.25,
-   "w": 22.57,
+   "w": 22.56,
    "h": 13,
    "text": "Size",
    "family": "sans",
@@ -1297,7 +1297,7 @@
    "kind": "text",
    "x": 836,
    "y": 134.25,
-   "w": 37.7,
+   "w": 37.71,
    "h": 13,
    "text": "Shared",
    "family": "sans",
@@ -2088,7 +2088,7 @@
    "kind": "text",
    "x": 270,
    "y": 315.5,
-   "w": 108.86,
+   "w": 108.87,
    "h": 17,
    "text": "Budget 2026.xlsx",
    "family": "sans",
@@ -3051,7 +3051,7 @@
    "kind": "box",
    "x": 1010.5,
    "y": 348.5,
-   "w": 164.27,
+   "w": 164.3,
    "h": 24,
    "bg": [
     249,
@@ -3081,7 +3081,7 @@
    "kind": "text",
    "x": 1036.5,
    "y": 353,
-   "w": 129.27,
+   "w": 129.3,
    "h": 14.5,
    "text": "End-to-end encrypted",
    "family": "sans",
@@ -3642,131 +3642,6 @@
    ],
    "tracking": 0
   },
-  "empty": {
-   "kind": "box",
-   "x": 420,
-   "y": 226,
-   "w": 480,
-   "h": 212,
-   "css": {
-    "pad": "28px 24px",
-    "gap": "8px"
-   }
-  },
-  "empty-tile": {
-   "kind": "box",
-   "x": 634,
-   "y": 254,
-   "w": 52,
-   "h": 52,
-   "bg": [
-    14,
-    14,
-    14,
-    18
-   ],
-   "css": {
-    "radius": "15px"
-   }
-  },
-  "empty-icon": {
-   "kind": "icon",
-   "x": 647,
-   "y": 267,
-   "w": 26,
-   "h": 26,
-   "icon": [
-    "M3 3l18 18",
-    "M9 6.4A6 6 0 0 1 18 9.5a4 4 0 0 1 2.3 7.3",
-    "M16.5 18H7a4.5 4.5 0 0 1-1.7-8.66"
-   ],
-   "filled": false,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ]
-  },
-  "empty-title": {
-   "kind": "text",
-   "x": 580.96,
-   "y": 314,
-   "w": 158.07,
-   "h": 22,
-   "text": "Needs a connection",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 17,
-   "weight": 600,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.2,
-   "lh": "22px"
-  },
-  "empty-sub": {
-   "kind": "text",
-   "x": 546.45,
-   "y": 344,
-   "w": 227.11,
-   "h": 30,
-   "text": "Contract draft.pdf isn't on this PC yet. Connect to open it.",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0,
-   "lh": "15px",
-   "align": "center"
-  },
-  "empty-action": {
-   "kind": "box",
-   "x": 618.37,
-   "y": 382,
-   "w": 83.26,
-   "h": 28,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ],
-   "css": {
-    "radius": "6px",
-    "border": "1px oklch(0.9 0.008 82)",
-    "pad": "0px 12px",
-    "gap": "7px"
-   }
-  },
-  "empty-action-label": {
-   "kind": "text",
-   "x": 631.37,
-   "y": 386.71,
-   "w": 57.26,
-   "h": 18.57,
-   "text": "Try again",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
   "scrim": {
    "kind": "box",
    "x": 0,
@@ -3855,6 +3730,130 @@
     255
    ],
    "tracking": -0.14
+  },
+  "blocked": {
+   "kind": "box",
+   "x": 420,
+   "y": 226,
+   "w": 480,
+   "h": 212,
+   "css": {
+    "pad": "28px 24px",
+    "gap": "8px"
+   }
+  },
+  "blocked-tile": {
+   "kind": "box",
+   "x": 634,
+   "y": 254,
+   "w": 52,
+   "h": 52,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "15px"
+   }
+  },
+  "blocked-icon": {
+   "kind": "icon",
+   "x": 647,
+   "y": 267,
+   "w": 26,
+   "h": 26,
+   "icon": [
+    "M3 3l18 18",
+    "M9 6.4A6 6 0 0 1 18 9.5a4 4 0 0 1 2.3 7.3",
+    "M16.5 18H7a4.5 4.5 0 0 1-1.7-8.66"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "blocked-title": {
+   "kind": "text",
+   "x": 580.97,
+   "y": 314,
+   "w": 158.06,
+   "h": 22,
+   "text": "Needs a connection",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 17,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.2
+  },
+  "blocked-text": {
+   "kind": "text",
+   "x": 546.45,
+   "y": 344,
+   "w": 227.11,
+   "h": 30,
+   "text": "Contract draft.pdf isn't on this PC yet. Connect to open it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "center"
+  },
+  "blocked-retry": {
+   "kind": "box",
+   "x": 618.37,
+   "y": 382,
+   "w": 83.26,
+   "h": 28,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "border": "1px oklch(0.9 0.008 82)",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "blocked-retry-label": {
+   "kind": "text",
+   "x": 631.37,
+   "y": 386.71,
+   "w": 57.26,
+   "h": 18.57,
+   "text": "Try again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
   }
  },
  "theme": "light"
