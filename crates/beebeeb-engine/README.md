@@ -8,6 +8,61 @@ names Tauri (`scripts/check-engine-boundary.sh`).
 Tests: `cargo test --locked` in this directory. The `test-support` feature is for the tests of other crates only;
 a release build with it does not compile.
 
+## For a host: one engine handle (`app::Engine`)
+
+```rust
+use beebeeb_engine::app::{Engine, EngineConfig, PlatformCredentials, SyncStart};
+use beebeeb_engine::host::ChannelHost;
+
+let (host, messages) = ChannelHost::new(|| { /* post a wake-up to the UI loop; nothing else */ });
+let engine = std::sync::Arc::new(Engine::open(
+    EngineConfig { account_id, state_dir, api_base: beebeeb_engine::runner::api_base_url() },
+    host,
+    PlatformCredentials,
+)?);
+match engine.restore() { /* GateState: SignedOut, NeedsRecoveryPhrase, Locked, Ready, KeyStoreUnavailable */ }
+engine.sign_in_password(email, password)?;   // -> NextAfterSignIn::{TwoFactor, RecoveryPhrase, Drive}
+engine.two_factor(code)?;                    // after TwoFactor
+engine.unlock_with_phrase(phrase)?;          // after RecoveryPhrase
+engine.start_sync(sync_root)?;               // SyncStart::{Started, AlreadyRunning, NoSession}
+engine.listing(None, Sort::default(), 0, 200)?; // the Files rows: Backups root first, each row marked
+engine.pause(); engine.resume(); engine.stop(); engine.lock(); engine.sign_out_keeping_local_data()?;
+```
+
+**Threading.**
+
+| call | blocks? | runs on |
+| --- | --- | --- |
+| `open` | no network; starts the handle's own tokio runtime (threads named `beebeeb-engine`) | the caller |
+| `restore`, `gate` | credential store only (DPAPI or the Keychain can take a moment) | the caller |
+| `sign_in_password`, `two_factor`, `unlock_with_phrase`, `sign_out_keeping_local_data` | yes: the network (30 s per request at most) and the password's key derivation | the caller, waiting on the runtime |
+| `start_sync`, `stop`, `lock` | until the engine exists, or its task has ended | the caller, waiting on the runtime |
+| `pause`, `resume`, `is_paused` | no | the caller |
+| `listing`, `state_db` | a local database read | the caller |
+| the sync engine itself | never returns to you | the runtime's threads |
+
+Every method is synchronous and takes `&self`: call them from a worker thread, never from the UI thread. One
+session step runs at a time (a second call waits for the first). The UI thread learns about the engine through
+the `EngineHost` given to `open`: a `ChannelHost` queues each `HostMessage` (typed `EngineEvent`s, notices, "open
+the conflict window") and calls the wake hook on the ENGINE's thread; the UI thread drains the receiver when
+woken. `{:?}` of a message prints its kind and never a name or a path.
+
+**Rules the handle keeps** (from `signin/`, the same ones the Tauri shell uses): a stored vault key is loaded
+only when it is provably this account's (`signin::store::load_session_from_vault`, task 2447); a sign-in removes
+a key that is not this account's before it stores its token; the phrase's key is stored only after the server
+confirmed it; an engine starts only with the keys of the session in memory, after the local data is bound to
+that account. A start onto another account's local data is refused on every OS and deletes nothing.
+
+**Not in the handle yet:** the plan check (`GateState::NoPlan` is never answered), device approval, passkeys,
+Windows Hello, the legacy flat credential layout (read by the Tauri shell only), a sign-out that sends or deletes
+local data (only "keep"), a startup probe of the stored token against the server, storage numbers. The API base,
+the config dir and the state dir are process-wide in the engine (`BB_API_BASE`, `state_paths`), and the
+credential store's service name and the config folder name are constants: a second app identity on the same
+user account needs the app-identity port (PR 288) before it may open a handle with `PlatformCredentials`.
+
+Contract test: `tests/host_contract.rs` (the local fake API with a real OPAQUE server side, the in-memory
+credential store).
+
 ## For frame lanes: the Backups folder (LD-0113)
 
 The window is an app surface, so it follows the web app's rule, not Explorer's.

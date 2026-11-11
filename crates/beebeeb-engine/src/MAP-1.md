@@ -10,6 +10,7 @@ Modules 1–34, sorted by path.
 | `account_binding.rs` | Ruling R10 (spec 2026-10-06 §5.6): the local data on this computer belongs to the account that created it, and a different account never reu | — |
 | `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountAccess (1), AccountProfile (9), BillingUsage (3), Subscription (19), SetPreferredRegionResponse (2), UserRegionResponse (4), AccountActivity (2), SecurityScore (4), AccountSessionList (1), ClientDeviceList (1), ClientSyncSessionList (1), RevokeAllResult (1), … (+16 more) |
 | `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | BodyBytes (2), ChunkApiError (3), GrantReply (3), OnBody, fetch_from_storage, now_ms, provenance_headers, ApiResult, ErrorChain (1), DesktopApiError (7), Listing (2), FileId, … (+30 more) |
+| `app.rs` | One engine handle for a host without a UI toolkit (the native shell, a test): restore the stored session, say which screen the window shows, | — |
 | `auth_attempts.rs` | Authentication starts before there is an unlocked command session. | — |
 | `auth_transport.rs` | Sends one core `auth_flow` request over reqwest and hands the answer back. | — |
 | `backup_actions.rs` | LD-0113 for the app's own window: what the person may do to a row at or under the Backups root, and the words of a refusal. | — |
@@ -39,4 +40,3 @@ Modules 1–34, sorted by path.
 | `found_while_paused/tests.rs` | `found_while_paused` unit tests, split out of `found_while_paused.rs`. | — |
 | `free_up_space.rs` | Free up space: make unpinned local files online-only again. | — |
 | `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Counts (21), NEEDS_REVIEW, Op (8), Options (2), Row (6), Unit (3), is_parent_404, same_leaf, PresendBlock (2), plan, presend_block |
-| `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |

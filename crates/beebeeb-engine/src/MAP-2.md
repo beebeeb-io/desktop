@@ -6,6 +6,7 @@ Modules 35–68, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
+| `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
 | `host.rs` | The seam between the engine and the shell that shows it: what the engine tells the UI ([`EngineEvent`]) and what it asks of the program arou | — |
 | `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
 | `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | CAP_WRITE, FP_TRASH_APPLE, FileProviderChangePayload (5), FileProviderItemPayload (22), IpcRequest (11), IpcResponse (10), file_entry_payload_for_db, persist_thumbnail_plaintext, thumbnail_variant, StagedContents, StagingDir, StagingDirRefusal (3), … (+10 more) |
@@ -39,4 +40,3 @@ Modules 35–68, sorted by path.
 | `source_pin.rs` | Test-only helper for the tests that read this crate's own source text. | — |
 | `staged_payload.rs` | Durable ownership of plaintext copies, including work cancelled before an upload session exists. | — |
 | `state_db.rs` | SQLite-backed per-file sync state. | RecordedIdentity (3), MarkKind (3), is_unreadable_mark, normalized_email, RetryOutcome (7), UnsentChange (11), UnsentPage (2), AcceptOutcome (6), BackupEnqueue (4), BackupLayout (3), BackupPassMark (3), BackupPassRecord (3), … (+72 more) |
-| `state_paths.rs` | Where `state.db`, the lock and the device identity live, and the one-way move out of the legacy `.beebeeb` dir. | — |

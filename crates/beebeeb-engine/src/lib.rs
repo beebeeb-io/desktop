@@ -17,6 +17,7 @@ pub mod account;
 pub mod account_binding;
 pub mod account_dto;
 pub mod api_client;
+pub mod app;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod auth_attempts;
 pub mod auth_transport;
@@ -78,6 +79,7 @@ pub mod session;
 pub mod session_commands;
 pub mod shared_folder_index;
 pub mod sign_out;
+pub mod signin;
 #[cfg(any(test, feature = "test-support"))]
 pub mod source_pin;
 pub mod staged_payload;

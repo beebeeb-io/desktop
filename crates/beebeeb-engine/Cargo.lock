@@ -240,6 +240,7 @@ dependencies = [
  "base64 0.22.1",
  "beebeeb-backup",
  "beebeeb-core",
+ "beebeeb-engine",
  "beebeeb-sync",
  "beebeeb-transfer",
  "beebeeb-types",
