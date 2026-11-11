@@ -68,28 +68,40 @@ impl StateDb {
         Ok(())
     }
     pub fn mark_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
+        let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("INSERT INTO sync_state (key,value) VALUES (?1,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", [format!("shared_folder_index_dirty:{folder_id}")])?;
         Ok(())
     }
     pub fn dirty_shared_index_roots(&self) -> Result<Vec<String>> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt=conn.prepare("SELECT substr(key,27) FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'")?;
-        stmt.query_map([],|r|r.get(0))?.collect()
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt =
+            conn.prepare("SELECT substr(key,27) FROM sync_state WHERE key LIKE 'shared_folder_index_dirty:%'")?;
+        stmt.query_map([], |r| r.get(0))?.collect()
     }
     #[cfg(test)]
     pub fn clear_shared_index_dirty(&self, folder_id: &str) -> Result<()> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
-        conn.execute("DELETE FROM sync_state WHERE key=?1", [format!("shared_folder_index_dirty:{folder_id}")])?;
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM sync_state WHERE key=?1",
+            [format!("shared_folder_index_dirty:{folder_id}")],
+        )?;
         Ok(())
     }
-    pub fn shared_index_dirty_revision(&self,id:&str)->Result<Option<String>> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row("SELECT value FROM sync_state WHERE key=?1",[format!("shared_folder_index_dirty:{id}")],|r|r.get(0)).optional()
+    pub fn shared_index_dirty_revision(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT value FROM sync_state WHERE key=?1",
+            [format!("shared_folder_index_dirty:{id}")],
+            |r| r.get(0),
+        )
+        .optional()
     }
-    pub fn clear_shared_index_dirty_at_revision(&self,id:&str,revision:Option<&str>)->Result<()> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
-        conn.execute("DELETE FROM sync_state WHERE key=?1 AND value=?2",params![format!("shared_folder_index_dirty:{id}"),revision])?;
+    pub fn clear_shared_index_dirty_at_revision(&self, id: &str, revision: Option<&str>) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "DELETE FROM sync_state WHERE key=?1 AND value=?2",
+            params![format!("shared_folder_index_dirty:{id}"), revision],
+        )?;
         Ok(())
     }
     /// Task 2279 item 1: index work that cannot run before the root has
@@ -134,11 +146,19 @@ impl StateDb {
         )?;
         Ok(())
     }
-    pub fn list_owned_key_records(&self)->Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
-        let conn=self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt=conn.prepare("SELECT record FROM owned_key_records")?;
-        let records=stmt.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>>>()?;
-        records.into_iter().map(|s|serde_json::from_str(&s).map_err(|e|rusqlite::Error::FromSqlConversionFailure(0,rusqlite::types::Type::Text,Box::new(e)))).collect()
+    pub fn list_owned_key_records(&self) -> Result<Vec<crate::owner_keys::OwnedKeyRecord>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT record FROM owned_key_records")?;
+        let records = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        records
+            .into_iter()
+            .map(|s| {
+                serde_json::from_str(&s)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+            })
+            .collect()
     }
     /// Generation of this account-bound DB handle. The runner also stops its
     /// old bridge before reset, so old requests cannot join a fresh engine.
@@ -148,15 +168,28 @@ impl StateDb {
     }
     pub fn get_owned_key_record(&self, id: &str) -> Result<Option<crate::owner_keys::OwnedKeyRecord>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let record: Option<String> = conn.query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r|r.get(0)).optional()?;
-        record.map(|s| serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))).transpose()
+        let record: Option<String> = conn
+            .query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        record
+            .map(|s| {
+                serde_json::from_str(&s)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+            })
+            .transpose()
     }
     #[cfg(test)]
     pub fn put_owned_key_record(&self, row: &crate::owner_keys::OwnedKeyRecord) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Self::put_owned_key_record_conn(&conn, row)
     }
-    pub fn put_owned_key_record_at_revision(&self, row: &crate::owner_keys::OwnedKeyRecord, revision: u64) -> Result<()> {
+    pub fn put_owned_key_record_at_revision(
+        &self,
+        row: &crate::owner_keys::OwnedKeyRecord,
+        revision: u64,
+    ) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         if self.1.load(std::sync::atomic::Ordering::Acquire) != revision {
             return Err(rusqlite::Error::InvalidQuery);

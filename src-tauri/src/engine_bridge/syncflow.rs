@@ -73,7 +73,10 @@ pub(super) fn guard_init_base(base_version: Option<i64>, kind: InitKind) -> Resu
 /// op is updating. Anything else means the server handed back a different item
 /// than the client chose, so the op must abort.
 ///
-pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: LocalFileId<'_>) -> Result<(), EngineError> {
+pub(super) fn ensure_session_item_id(
+    session: &crate::state_db::UploadResume,
+    local_file_id: LocalFileId<'_>,
+) -> Result<(), EngineError> {
     let ours = if session.is_create {
         session.self_minted
     } else {
@@ -82,9 +85,10 @@ pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, lo
     if ours {
         return Ok(());
     }
-    Err(anyhow::anyhow!(
-        "server_changed_item_id: the upload init answered with an id this device did not choose"
-    ).into())
+    Err(
+        anyhow::anyhow!("server_changed_item_id: the upload init answered with an id this device did not choose")
+            .into(),
+    )
 }
 
 /// The server no longer accepts writes to this upload session: 404 (session
@@ -133,11 +137,17 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     // Task 2413: and every segment one name this host can hold, the rule a server row is stored under (on Windows no
     // `:`, reserved device name, or trailing dot or space, which would reach another entry than the row's own).
-    crate::stored_path::check_path(rel_path).map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
+    crate::stored_path::check_path(rel_path)
+        .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
-pub(super) fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> Result<(), EngineError> {
+pub(super) fn record_moved_to_trash_activity(
+    db: &StateDb,
+    file_id: &str,
+    rel_path: &str,
+    occurred_at: i64,
+) -> Result<(), EngineError> {
     db.record_local_activity(LocalActivityEventInput {
         event_type: LocalActivityKind::MovedToTrash,
         file_id: Some(file_id.to_string()),
@@ -160,7 +170,11 @@ pub(super) const FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS: u32 = 3;
 /// endpoint that times out on a large tree) stopped every upload on the Mac. A successful
 /// snapshot resets the count. Elsewhere the request was taken before the snapshot, so a failure
 /// ends only this tick.
-pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: anyhow::Error) -> Result<i64, EngineError> {
+pub(super) fn after_failed_snapshot(
+    bridge: &EngineBridge,
+    cursor: i64,
+    error: anyhow::Error,
+) -> Result<i64, EngineError> {
     #[cfg(target_os = "macos")]
     {
         let failures = bridge.failed_snapshots.fetch_add(1, Ordering::SeqCst).saturating_add(1);
@@ -336,7 +350,12 @@ pub async fn sync_tick_outcome(
         let fetched_at = now_secs;
         match bridge.api().sync_snapshot().await {
             Ok(mut snap) if snap.seq_id < cursor => {
-                snap.nodes=bridge.prepare_owned_rows(&snap.nodes).await?.into_iter().map(|p|p.row).collect();
+                snap.nodes = bridge
+                    .prepare_owned_rows(&snap.nodes)
+                    .await?
+                    .into_iter()
+                    .map(|p| p.row)
+                    .collect();
                 tracing::warn!(
                     cursor,
                     server_seq = snap.seq_id,
@@ -363,7 +382,9 @@ pub async fn sync_tick_outcome(
         let prepared = prepare_owned_sync_op(bridge, original).await?;
         bridge.owner_key_scope().check()?;
         max_seq = max_seq.max(original.seq_id);
-        let Some(op) = prepared else { continue; };
+        let Some(op) = prepared else {
+            continue;
+        };
         match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
             Ok(applied) => applied_item_ids.extend(applied),
             Err(e) => {
@@ -383,19 +404,45 @@ pub async fn sync_tick_outcome(
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
-pub(super) async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->Result<Option<crate::api_client::SyncOp>, EngineError> {
-    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
-    let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
+pub(super) async fn prepare_owned_sync_op(
+    bridge: &EngineBridge,
+    op: &crate::api_client::SyncOp,
+) -> Result<Option<crate::api_client::SyncOp>, EngineError> {
+    if !matches!(
+        op.op_type.as_str(),
+        "file_create" | "folder_create" | "file_update" | "file_rename" | "folder_rename" | "file_move" | "folder_move"
+    ) {
+        return Ok(Some(op.clone()));
+    }
+    let Some(id) = op.payload["id"].as_str() else {
+        return Ok(Some(op.clone()));
+    };
     // L12: the id class decides. A foreign row needs the canonical listing so
     // `prepare_owned_rows` can see its envelope; an owner row never does.
     let known_foreign = beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false);
-    let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
-    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
-    let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
-    let Some(prepared)=prepared.pop() else{return Ok(None)};
-    let mut result=op.clone();result.payload=prepared.row;
-    if matches!(op.op_type.as_str(),"file_move"|"folder_move") {result.payload["new_parent_id"]=result.payload["parent_id"].clone();}
-    if matches!(op.op_type.as_str(),"file_rename"|"folder_rename") {result.payload["new_name_encrypted"]=result.payload["name_encrypted"].clone();}
+    let mut row = synthesize_op_row(
+        bridge,
+        id,
+        op,
+        op.payload["new_name_encrypted"]
+            .as_str()
+            .or_else(|| op.payload["name_encrypted"].as_str()),
+    );
+    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {
+        row = serde_json::json!({"id":id});
+    }
+    let mut prepared = bridge.prepare_owned_rows(&[row]).await?;
+    let Some(prepared) = prepared.pop() else {
+        return Ok(None);
+    };
+    let mut result = op.clone();
+    result.payload = prepared.row;
+    if matches!(op.op_type.as_str(), "file_move" | "folder_move") {
+        result.payload["new_parent_id"] = result.payload["parent_id"].clone();
+    }
+    if matches!(op.op_type.as_str(), "file_rename" | "folder_rename") {
+        result.payload["new_name_encrypted"] = result.payload["name_encrypted"].clone();
+    }
     Ok(Some(result))
 }
 
@@ -413,7 +460,12 @@ pub(super) async fn bootstrap_from_snapshot(
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let mut snapshot = bridge.api().sync_snapshot().await?;
-    snapshot.nodes=bridge.prepare_owned_rows(&snapshot.nodes).await?.into_iter().map(|p|p.row).collect();
+    snapshot.nodes = bridge
+        .prepare_owned_rows(&snapshot.nodes)
+        .await?
+        .into_iter()
+        .map(|p| p.row)
+        .collect();
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
@@ -872,8 +924,10 @@ pub(super) fn apply_sync_op(
     // A sparse folder rename/move has no descendant events. Reuse the same
     // metadata write for their new parent paths, then signal those identities
     // with the folder. This preserves content baselines and queued rename holds.
-    if matches!(op.op_type.as_str(), "folder_rename" | "folder_move" | "file_rename" | "file_move")
-        && applied.iter().any(|changed| changed == id)
+    if matches!(
+        op.op_type.as_str(),
+        "folder_rename" | "folder_move" | "file_rename" | "file_move"
+    ) && applied.iter().any(|changed| changed == id)
         && bridge.db().get_file(id)?.is_some_and(|row| row.is_dir())
     {
         rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
@@ -911,9 +965,13 @@ pub(super) fn rebase_folder_descendants(
         if !visited.insert(parent_id.clone()) {
             continue;
         }
-        let Some(parent) = bridge.db().get_file(&parent_id)? else { continue };
+        let Some(parent) = bridge.db().get_file(&parent_id)? else {
+            continue;
+        };
         for child in rows.iter().filter(|row| row.parent_id.as_deref() == Some(&parent_id)) {
-            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else { continue };
+            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else {
+                continue;
+            };
             let row = serde_json::json!({
                 "id": child.file_id,
                 "name": child.path.rsplit('/').next().unwrap_or_default(),
@@ -926,8 +984,15 @@ pub(super) fn rebase_folder_descendants(
                 "content_type": contract.content_type,
             });
             if let Some(updated) = apply_metadata_file_row(
-                bridge.db(), &row, contract.namespace, contract.shared_root_id,
-                contract.share_id, contract.permission_bits, now, bridge.api().master_key(), &parent.path,
+                bridge.db(),
+                &row,
+                contract.namespace,
+                contract.shared_root_id,
+                contract.share_id,
+                contract.permission_bits,
+                now,
+                bridge.api().master_key(),
+                &parent.path,
             )? {
                 if updated.path != child.path {
                     applied.push(child.file_id.clone());

@@ -137,7 +137,11 @@ pub(super) fn derive_recipient_share_key(
     ))
 }
 
-pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> Result<Zeroizing<[u8; 32]>, EngineError> {
+pub(super) fn unwrap_key_frame(
+    wrap_key: &[u8; 32],
+    encrypted_key_b64: &str,
+    label: &str,
+) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let raw = decode_standard_b64(label, encrypted_key_b64)?;
     let frame_key = beebeeb_core::kdf::FileKey::from_bytes(*wrap_key);
     let plaintext = Zeroizing::new(
@@ -210,12 +214,26 @@ impl KeyCustody {
     }
 }
 
-pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: KeyCustody) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+pub(super) fn unwrap_folder_child_for_format(
+    folder: &[u8; 32],
+    root: &str,
+    id: &str,
+    kind: u8,
+    wrap: &str,
+    custody: KeyCustody,
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     if custody.is_custody() {
         let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
         Ok(beebeeb_sync::key_resolution::unwrap_child_key(
-            &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)
-    } else { unwrap_child_file_key(folder, wrap) }
+            &beebeeb_core::kdf::FileKey::from_bytes(*folder),
+            root,
+            id,
+            kind,
+            &frame,
+        )?)
+    } else {
+        unwrap_child_file_key(folder, wrap)
+    }
 }
 
 pub(super) fn unwrap_child_file_key(
@@ -223,7 +241,7 @@ pub(super) fn unwrap_child_file_key(
     encrypted_file_key_b64: &str,
 ) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     #[cfg(test)]
-    LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
+    LEGACY_CHILD_READS.with(|n| n.set(n.get() + 1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
@@ -301,8 +319,13 @@ fn refused_server_row(file_id: &str, rule: &beebeeb_core::path_safety::UnsafeNam
     None
 }
 
-pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
-    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
+pub(crate) fn decrypt_shared_name_with_key(
+    file_key: &beebeeb_core::kdf::FileKey,
+    name_encrypted: &str,
+) -> Option<String> {
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted)
+        .ok()
+        .map(|m| m.name)
 }
 
 /// A shared row's own name: its decrypted name, or the placeholder name when it does not decrypt (or is blank).
@@ -456,7 +479,9 @@ pub(super) fn apply_metadata_file_row(
     // path and parent are where the file is on disk; the server's are still the old ones.
     let held = match existing.as_ref() {
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
-        Some(entry) if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? => {
+        Some(entry)
+            if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? =>
+        {
             Some(entry.clone())
         }
         _ => None,
