@@ -679,7 +679,9 @@ fn a_staged_file_that_cannot_be_read_is_kept_not_deleted() {
     };
 
     // Unreadable for a moment (here: moved away, as a scanner's lock would make it): nothing is deleted or started.
-    let aside = world.dir.path().join("held-by-a-scanner");
+    // Moved out of the staging folder: whatever else is IN that folder is removed before an installer starts.
+    let elsewhere = tempfile::tempdir().expect("temp dir");
+    let aside = elsewhere.path().join("held-by-a-scanner");
     fs::rename(&installer, &aside).expect("move aside");
     assert!(matches!(
         updater.step(Event::Apply),

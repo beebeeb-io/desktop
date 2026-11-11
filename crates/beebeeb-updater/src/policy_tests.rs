@@ -154,10 +154,11 @@ fn refuses_another_channels_manifest() {
         Err(Refusal::WrongChannel)
     );
     let mut publish = honest("0.9.5");
+    // The 0.8.x shape (neither field) is not a signed manifest at all: the strict reader refuses it.
     (publish.product, publish.claimed_channel) = (None, None);
     assert_eq!(
         run(&key, "0.9.0", None, &publish).map(|c| c.verdict),
-        Err(Refusal::WrongChannel)
+        Err(Refusal::ManifestUnreadable)
     );
 }
 
@@ -447,7 +448,7 @@ fn refuses_an_artefact_signature_by_another_key_before_downloading() {
 #[test]
 fn refuses_an_artefact_without_a_sane_length() {
     let key = TestKey::generate();
-    for size in [None, Some(0), Some(MAX_ARTIFACT_BYTES + 1)] {
+    for size in [Some(0), Some(MAX_ARTIFACT_BYTES + 1)] {
         let mut publish = honest("0.9.1");
         publish.size = size;
         assert_eq!(
@@ -456,6 +457,13 @@ fn refuses_an_artefact_without_a_sane_length() {
             "{size:?}"
         );
     }
+    // No length at all is not a signed manifest's shape (the strict reader): refused before the size rule.
+    let mut publish = honest("0.9.1");
+    publish.size = None;
+    assert_eq!(
+        run(&key, "0.9.0", None, &publish).map(|c| c.verdict),
+        Err(Refusal::ManifestUnreadable)
+    );
 }
 
 #[test]
