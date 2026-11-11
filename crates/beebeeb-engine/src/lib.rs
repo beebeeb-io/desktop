@@ -5,6 +5,14 @@
 //! unchanged; the Rune shell (`native/beebeeb-drive-rune`) calls them directly.
 //! Boundary, measurements and the extraction plan: `docs/superpowers/specs/2026-11-11-native-engine-boundary.md`.
 
+// The test helpers behind `test-support` (in-memory databases, injected failures, `*_for_test` writers) never ship:
+// a release build with the feature on does not compile. Tests build with debug assertions; a release does not.
+// CI also checks the feature graph (`scripts/check-engine-boundary.sh`).
+#[cfg(all(feature = "test-support", not(debug_assertions)))]
+compile_error!(
+    "beebeeb-engine: test-support is for tests only; it is on in a release build (enable it under [dev-dependencies] only)"
+);
+
 pub mod account_binding;
 pub mod diagnostic_redaction;
 pub mod drive_v2;

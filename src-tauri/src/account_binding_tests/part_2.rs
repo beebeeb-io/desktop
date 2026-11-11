@@ -682,7 +682,7 @@ pub(super) fn signed_in_via(profile: Option<&account_dto::AccountProfile>) -> Au
 }
 
 /// An HTTP server on localhost that answers every request with `status_line` and `body`; the base URL.
-fn answering(status_line: &'static str, body: String) -> String {
+pub(super) fn answering(status_line: &'static str, body: String) -> String {
     answering_after(status_line, body, || {})
 }
 

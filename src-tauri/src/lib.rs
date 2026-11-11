@@ -331,6 +331,9 @@ mod selective_sync_wave2_tests;
 mod state_db_purge_tests;
 #[cfg(test)]
 mod state_db_shell_tests;
+// The walker the source censuses share: the shell's tree and the engine crate's.
+#[cfg(test)]
+mod source_census;
 #[cfg(test)]
 mod tests;
 

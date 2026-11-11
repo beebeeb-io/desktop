@@ -401,3 +401,175 @@ jobs:
         with:
           name: release-branch-point-test
           path: ${{ runner.temp }}/release-branch-point-test.log
+
+  # ── The engine crate and the native Rune app (PR #280) ────────────────────────────────────────────────────────
+  # Self-contained jobs, kept at the end of the file on purpose: `ci/fast-rust-jobs` is restructuring the jobs
+  # above, and these three share no step with them. `crates/beebeeb-engine` holds tests that left `src-tauri`
+  # (331 on Linux when it moved), so without these jobs they would run nowhere.
+
+  engine-crate:
+    name: Engine crate test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: crates/beebeeb-engine
+
+      - name: Test count guard self-test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" scripts/assert-cargo-test-counts.py --self-test
+
+      # The engine's OS-gated code (Windows Cloud Files rows, the macOS release journal) compiles and runs here on
+      # its own OS; the shell's tests reach it only with the `test-support` feature on.
+      - name: Run the engine crate's tests
+        working-directory: crates/beebeeb-engine
+        shell: bash
+        env:
+          TEMP: ${{ runner.temp }}/beebeeb-tmp
+          TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/engine-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/engine-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/engine-test.exit"
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          # The library binary must be in the log and at or above its floor (scripts/cargo-test-floors.txt).
+          "$py" ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine-
+
+      - name: Upload engine test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-test-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/engine-test.log
+            ${{ runner.temp }}/engine-test.exit
+
+  engine-boundary:
+    name: Engine boundary (no tauri, test-support dev-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # 1.99.1: the native crate's lock and manifests need it; it reads the other two as well.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.99.1
+
+      # From cargo's dependency graph only (no build): `cargo tree -p beebeeb-engine | grep -c tauri` is 0, and the
+      # engine's test-support feature is on no normal or build edge of the desktop app or the native app.
+      - name: Engine boundary check
+        run: sh scripts/check-engine-boundary.sh
+
+      # A release build with the test helpers on does not compile (`compile_error!` in the engine's lib.rs).
+      - name: test-support refuses a release build
+        working-directory: crates/beebeeb-engine
+        run: |
+          if cargo check --locked --release --features test-support > "$RUNNER_TEMP/release-test-support.log" 2>&1; then
+            echo "a release build with test-support compiled"; exit 1
+          fi
+          grep -q "test-support is for tests only" "$RUNNER_TEMP/release-test-support.log" || { cat "$RUNNER_TEMP/release-test-support.log"; echo "it failed for another reason"; exit 1; }
+          echo "refused: $(grep -c 'test-support is for tests only' "$RUNNER_TEMP/release-test-support.log") compile_error line(s)"
+
+  native-rune:
+    name: Native Rune app (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux test
+            os: ubuntu-latest
+          - name: Windows build
+            os: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # Headless rendering needs a Vulkan driver: Mesa's software one (lavapipe). There is no GPU on the runner, so
+      # a test that renders and finds no adapter fails; none is skipped for it.
+      - name: Install Linux dependencies (software Vulkan, window system headers)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev pkg-config
+
+      # Rune needs 1.99.1 (native/beebeeb-drive-rune/Cargo.toml).
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.99.1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: native/beebeeb-drive-rune
+
+      - name: Run the native app's tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: native/beebeeb-drive-rune
+        env:
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/native-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/native-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/native-test.exit"
+          # The crate has no library: its one test binary is named, must be in the log, and has a floor.
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/native-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_drive-
+
+      - name: Build the native app (Windows)
+        if: runner.os == 'Windows'
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        run: |
+          build_exit=0
+          CARGO_TERM_COLOR=never cargo build --locked > "$RUNNER_TEMP/native-build.log" 2>&1 || build_exit=$?
+          cat "$RUNNER_TEMP/native-build.log"
+          [ "$build_exit" -eq 0 ] || exit "$build_exit"
+          ls -l "${CARGO_TARGET_DIR:-target}/debug/beebeeb-drive.exe"
+
+      - name: Upload native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-rune-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/native-test.log
+            ${{ runner.temp }}/native-test.exit
+            ${{ runner.temp }}/native-build.log
+          if-no-files-found: ignore

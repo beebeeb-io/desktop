@@ -11,10 +11,12 @@ use beebeeb_engine::drive_v2::dto;
 use beebeeb_engine::drive_v2::model::{self, Sort};
 use beebeeb_engine::state_db::StateDb;
 
+pub use beebeeb_engine::state_db::ReadOnlyOpenError;
+
 pub use beebeeb_engine::drive_v2::DriveError;
 pub use beebeeb_engine::drive_v2::model::{SortDir, SortKey};
 
-use crate::source::{Crumb, DriveItem, DriveSource, Listing, StorageSummary};
+use crate::source::{Crumb, DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 /// One page of a folder: the rows `offset..offset + limit` of the sorted listing, how many rows the folder
 /// has in all, and the crumbs from the root to the folder (both included).
@@ -40,16 +42,12 @@ pub struct EngineSource {
 }
 
 impl EngineSource {
-    /// Open `path` read-only. The error is a fixed word (`"not found"`, `"not a state database"`), never
-    /// SQLite's text.
-    pub fn open(path: &Path) -> Result<Self, &'static str> {
-        if !path.is_file() {
-            return Err("not found");
-        }
-        let db = StateDb::open_read_only(path).map_err(|_| "not a state database")?;
-        // Prove the file is a state database before the window opens on it.
-        db.children_paged(None, 0, 1).map_err(|_| "not a state database")?;
-        Ok(Self { db })
+    /// Open `path` read-only. A file that is missing, not a database, not a state database, from an older build or
+    /// held by another program is refused with that reason (`ReadOnlyOpenError`), before any window opens on it.
+    pub fn open(path: &Path) -> Result<Self, ReadOnlyOpenError> {
+        Ok(Self {
+            db: StateDb::open_read_only(path)?,
+        })
     }
 
     /// A page of `folder_id` (`None`: the root), sorted folders-first by `sort`.
@@ -97,25 +95,21 @@ fn item(item: dto::DriveItem) -> DriveItem {
 }
 
 impl DriveSource for EngineSource {
-    /// The whole folder, name ascending. A folder that is gone (or an id that is not a folder) shows as the
-    /// empty root rather than panicking the window; `page` is the call that reports the error.
-    fn list(&self, folder_id: Option<&str>) -> Listing {
-        let root = || Crumb {
-            id: None,
-            name: model::ROOT_NAME.to_string(),
-        };
-        match self.page(folder_id, Sort::default(), 0, usize::MAX) {
-            Ok(page) => Listing {
-                folder: page.path.last().cloned().unwrap_or_else(root),
-                path: page.path,
-                items: page.items,
-            },
-            Err(_) => Listing {
-                folder: root(),
-                path: vec![root()],
-                items: Vec::new(),
-            },
-        }
+    /// The whole folder, name ascending. A folder that is gone and a database that cannot be read are errors:
+    /// neither is ever shown as an empty folder.
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let page = self
+            .page(folder_id, Sort::default(), 0, usize::MAX)
+            .map_err(|error| match error {
+                DriveError::NotFound => SourceError::NotFound,
+                _ => SourceError::Unreadable,
+            })?;
+        let folder = page.path.last().cloned().ok_or(SourceError::Unreadable)?;
+        Ok(Listing {
+            folder,
+            path: page.path,
+            items: page.items,
+        })
     }
 
     /// Used and total bytes are the account's, from the server. A state.db does not hold them.

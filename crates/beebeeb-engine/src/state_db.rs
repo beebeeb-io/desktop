@@ -645,6 +645,9 @@ pub use sql::{is_file_provider_trash, page_cache_limit_kib, tree_holds_a_file};
 mod conn;
 use conn::*;
 
+mod read_only;
+pub use read_only::ReadOnlyOpenError;
+
 mod error;
 pub use error::StateDbError;
 use error::*;

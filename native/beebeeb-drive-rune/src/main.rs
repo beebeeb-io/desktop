@@ -40,6 +40,8 @@ const ROW_HEIGHT: f32 = 32.0;
 struct State {
     source: Box<dyn DriveSource>,
     listing: Listing,
+    /// Why `listing` could not be read, when it could not: the window shows this instead of rows.
+    list_error: Option<source::SourceError>,
     storage: Option<source::StorageSummary>,
     selected: Option<usize>,
     search: TextEdit,
@@ -79,18 +81,47 @@ impl SidebarSection {
 }
 
 /// `--db <path>`: show the files of that `state.db` (opened read-only) instead of the fixture.
-fn db_arg() -> Option<std::path::PathBuf> {
-    let mut args = std::env::args_os().skip(1);
+/// `Err`: `--db` was given with no path after it (the end of the line, or another `--option`).
+fn db_arg(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Option<std::path::PathBuf>, &'static str> {
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--db" {
-            return args.next().map(std::path::PathBuf::from);
+            return match args.next() {
+                Some(path) if !path.is_empty() && !path.to_string_lossy().starts_with("--") => {
+                    Ok(Some(std::path::PathBuf::from(path)))
+                }
+                _ => Err("--db needs the path of a state.db"),
+            };
         }
     }
-    None
+    Ok(None)
+}
+
+/// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
+fn load(source: &dyn DriveSource, folder_id: Option<&str>) -> (Listing, Option<source::SourceError>) {
+    match source.list(folder_id) {
+        Ok(listing) => (listing, None),
+        Err(error) => {
+            let root = source::Crumb {
+                id: None,
+                name: "Files".into(),
+            };
+            let unread = Listing {
+                folder: root.clone(),
+                path: vec![root],
+                items: Vec::new(),
+            };
+            (unread, Some(error))
+        }
+    }
 }
 
 fn init() -> State {
-    let source: Box<dyn DriveSource> = match db_arg() {
+    let db = db_arg(std::env::args_os().skip(1)).unwrap_or_else(|error| {
+        eprintln!("beebeeb-drive: {error}");
+        std::process::exit(2);
+    });
+    let source: Box<dyn DriveSource> = match db {
         Some(path) => match source_engine::EngineSource::open(&path) {
             Ok(source) => Box::new(source),
             Err(error) => {
@@ -101,11 +132,12 @@ fn init() -> State {
         },
         None => Box::new(FixtureSource::new(5000)),
     };
-    let listing = source.list(None);
+    let (listing, list_error) = load(source.as_ref(), None);
     let storage = source.storage();
     State {
         source,
         listing,
+        list_error,
         storage,
         selected: None,
         search: TextEdit::new(""),
@@ -507,6 +539,15 @@ fn column_headers(t: &tokens::Theme) -> El {
 // ---------------------------------------------------------------------------
 
 fn file_list(s: &State, cx: &mut Cx<State>, t: &tokens::Theme) -> El {
+    // A folder that could not be read says so. It never draws as an empty folder.
+    if let Some(error) = s.list_error {
+        return col().key("file-list-error").grow(1.0).w_full().px(space::S4).child(
+            text(error.message())
+                .key("file-list-error-text")
+                .font(type_::BODY)
+                .color(t.text_secondary),
+        );
+    }
     let count = s.listing.items.len();
     let _hair = 1.0 / cx.env().scale;
     let selection_color = t.selection;
@@ -660,7 +701,8 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             if let Some(idx) = s.selected {
                 if s.listing.items[idx].is_folder {
                     // Navigate into folder (in the spike, reload root).
-                    s.listing = s.source.list(Some(&s.listing.items[idx].id));
+                    let folder_id = s.listing.items[idx].id.clone();
+                    (s.listing, s.list_error) = load(s.source.as_ref(), Some(&folder_id));
                     s.selected = None;
                 }
             }
@@ -737,7 +779,7 @@ fn main() {
             ("dark", |_| {}),
             ("large-folder", |s| {
                 let source = Box::new(FixtureSource::new(5000));
-                s.listing = source.list(None);
+                (s.listing, s.list_error) = load(source.as_ref(), None);
                 s.source = source;
             }),
         ],
@@ -752,6 +794,49 @@ fn main() {
 mod tests {
     use super::*;
     use rune::{Env, Runtime};
+
+    #[test]
+    fn db_option_takes_one_path_and_refuses_to_be_given_none() {
+        let args = |list: &[&str]| list.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(db_arg(args(&[])), Ok(None));
+        assert_eq!(db_arg(args(&["--snap", "x.png"])), Ok(None));
+        assert_eq!(
+            db_arg(args(&["--snap", "x.png", "--db", "a/state.db"])),
+            Ok(Some(std::path::PathBuf::from("a/state.db")))
+        );
+        assert!(db_arg(args(&["--db"])).is_err(), "--db at the end of the line");
+        assert!(
+            db_arg(args(&["--db", "--snap", "x.png"])).is_err(),
+            "--db followed by another option"
+        );
+        assert!(db_arg(args(&["--db", ""])).is_err(), "--db with an empty path");
+    }
+
+    /// A folder that cannot be read draws the reason, and no rows: it never looks like an empty folder.
+    #[test]
+    fn an_unreadable_folder_draws_its_reason_instead_of_rows() {
+        struct Broken;
+        impl DriveSource for Broken {
+            fn list(&self, _: Option<&str>) -> Result<Listing, source::SourceError> {
+                Err(source::SourceError::Unreadable)
+            }
+            fn storage(&self) -> Option<source::StorageSummary> {
+                None
+            }
+        }
+        let env = Env {
+            system_dark: false,
+            scale: 1.0,
+        };
+        let mut state = init();
+        (state.listing, state.list_error) = load(&Broken, None);
+        state.source = Box::new(Broken);
+        assert_eq!(state.list_error, Some(source::SourceError::Unreadable));
+        let mut rt = Runtime::new(state, view, (1280.0, 800.0), env);
+        rt.frame(0.0);
+        assert!(rt.find("file-list-error-text").is_some(), "the reason is drawn");
+        assert!(rt.find("file-list").is_none(), "and no (empty) list is");
+    }
 
     #[test]
     fn file_list_renders_5000_rows_with_virtual_rows() {
@@ -800,7 +885,7 @@ mod tests {
 
         // Simulate Enter: navigate into folder.
         let folder_id = state.listing.items[0].id.clone();
-        state.listing = state.source.list(Some(&folder_id));
+        (state.listing, state.list_error) = load(state.source.as_ref(), Some(&folder_id));
         state.selected = None;
 
         // Selection is cleared after navigation.

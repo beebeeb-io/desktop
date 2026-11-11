@@ -81,7 +81,7 @@ fn lists_the_root_opens_folders_and_pages_through_5000_children() {
     let source = EngineSource::open(&path).expect("open read-only");
 
     // The root: 2 folders first (name order), then the 120 files in name order.
-    let root = source.list(None);
+    let root = source.list(None).unwrap();
     assert_eq!(root.items.len(), 122);
     assert_eq!(names(&root.items[..3]), ["Archive", "Projects", "note-000.txt"]);
     assert_eq!(root.items[121].name, "note-119.txt");
@@ -93,11 +93,11 @@ fn lists_the_root_opens_folders_and_pages_through_5000_children() {
     assert!(root.items[0].is_folder && root.items[0].size.is_none());
 
     // Open a folder, then the one inside it, then the one inside that: counts and crumbs.
-    let projects = source.list(Some("d-projects"));
+    let projects = source.list(Some("d-projects")).unwrap();
     assert_eq!(projects.items.len(), 51);
     assert_eq!(projects.items[0].name, "Alpha");
     assert_eq!(crumb_names(&projects.path), ["Files", "Projects"]);
-    let drafts = source.list(Some("d-drafts"));
+    let drafts = source.list(Some("d-drafts")).unwrap();
     assert_eq!(drafts.items.len(), 10);
     assert_eq!(crumb_names(&drafts.path), ["Files", "Projects", "Alpha", "Drafts"]);
     assert_eq!(drafts.folder.id.as_deref(), Some("d-drafts"));
@@ -138,7 +138,7 @@ fn lists_the_root_opens_folders_and_pages_through_5000_children() {
     assert_eq!(crumb_names(&details.path), ["Files", "Projects", "Alpha", "Drafts"]);
     assert_eq!(details.version_count, 1);
 
-    // An id that is not there, and a file opened as a folder: the error, and an empty root from `list`.
+    // An id that is not there, and a file opened as a folder: an error from both calls, never an empty folder.
     assert_eq!(
         source.page(Some("nope"), Sort::default(), 0, 10).unwrap_err(),
         DriveError::NotFound
@@ -147,7 +147,8 @@ fn lists_the_root_opens_folders_and_pages_through_5000_children() {
         source.page(Some("f-0001"), Sort::default(), 0, 10).unwrap_err(),
         DriveError::NotFound
     );
-    assert_eq!(source.list(Some("nope")).items.len(), 0);
+    assert_eq!(source.list(Some("nope")).err(), Some(SourceError::NotFound));
+    assert_eq!(source.list(Some("f-0001")).err(), Some(SourceError::NotFound));
 
     // No figure without the server.
     assert!(source.storage().is_none());
@@ -160,7 +161,7 @@ fn the_source_never_writes_and_refuses_what_is_not_a_state_db() {
     build(&path);
     let before = std::fs::read(&path).unwrap();
     let source = EngineSource::open(&path).unwrap();
-    source.list(None);
+    source.list(None).unwrap();
     source.page(Some("d-archive"), Sort::default(), 0, 100).unwrap();
     drop(source);
     assert_eq!(
@@ -169,32 +170,51 @@ fn the_source_never_writes_and_refuses_what_is_not_a_state_db() {
         "the database file is byte-identical after reading"
     );
 
+    // Each refusal keeps its own reason (the engine's tests cover the older-schema and locked cases).
     assert_eq!(
         EngineSource::open(&dir.path().join("missing.db")).err(),
-        Some("not found")
+        Some(ReadOnlyOpenError::NotFound)
     );
     let text = dir.path().join("notes.txt");
-    std::fs::write(&text, b"not a database").unwrap();
-    assert_eq!(EngineSource::open(&text).err(), Some("not a state database"));
-    // An empty SQLite file has no `files` table: refused, and not turned into a state database.
-    let empty = dir.path().join("empty.db");
-    rusqlite::Connection::open(&empty)
+    std::fs::write(
+        &text,
+        b"this is a text file, long enough to be read as a database header",
+    )
+    .unwrap();
+    assert_eq!(EngineSource::open(&text).err(), Some(ReadOnlyOpenError::NotADatabase));
+    let other = dir.path().join("other.db");
+    rusqlite::Connection::open(&other)
         .unwrap()
         .execute_batch("CREATE TABLE t(x);")
         .unwrap();
-    assert_eq!(EngineSource::open(&empty).err(), Some("not a state database"));
-    let tables: i64 = rusqlite::Connection::open(&empty)
+    assert_eq!(
+        EngineSource::open(&other).err(),
+        Some(ReadOnlyOpenError::NotAStateDatabase)
+    );
+}
+
+/// A database that stops being readable after the window opened on it shows as an error, never as an empty folder.
+#[test]
+fn a_read_error_after_opening_is_an_error_state_not_an_empty_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    build(&path);
+    let source = EngineSource::open(&path).unwrap();
+    assert_eq!(source.list(None).unwrap().items.len(), 122, "control: readable first");
+    // Another connection takes the table away under the open source.
+    rusqlite::Connection::open(&path)
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'", [], |r| {
-            r.get(0)
-        })
+        .execute_batch("ALTER TABLE files RENAME TO files_gone;")
         .unwrap();
-    assert_eq!(tables, 1, "opening read-only created nothing");
+    assert_eq!(source.list(None).err(), Some(SourceError::Unreadable));
+    assert_eq!(source.list(Some("d-archive")).err(), Some(SourceError::Unreadable));
+    assert!(source.page(None, Sort::default(), 0, 10).is_err());
 }
 
 /// The measurement the PR quotes (`cargo test -- --nocapture timings`): a 500-row page and the whole
 /// 5,000-child folder, on the 5,204-row database and on one with 70,000 rows; and SQLite's plan for the
-/// listing query. The bounds are loose (a loaded machine must not flake this); the printed numbers are the record.
+/// listing query. Nothing is asserted about the time (a loaded machine must not fail this); the printed numbers are
+/// the record, and the plan is the assertion.
 #[test]
 fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
     let dir = tempfile::tempdir().unwrap();
@@ -250,15 +270,11 @@ fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
                 .unwrap()
                 .total
         });
-        let whole = best(&|| source.list(Some("d-archive")).items.len());
+        let whole = best(&|| source.list(Some("d-archive")).unwrap().items.len());
         println!(
             "TIMING {label}: 500-row page of the 5,000-child folder {:.1} ms; whole folder {:.1} ms (best of 5)",
             page.as_secs_f64() * 1e3,
             whole.as_secs_f64() * 1e3
-        );
-        assert!(
-            whole.as_millis() < 2_000,
-            "{label}: listing 5,000 children took {whole:?}"
         );
 
         // The statement `StateDb::children_paged` runs (its WHERE, ORDER BY and LIMIT; `state_db/files.rs`).
@@ -281,13 +297,17 @@ fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
     }
 }
 
-/// Writes the same invented database to `BB_NATIVE_FIXTURE_DB` for a headless render of the window
-/// (`beebeeb-drive --db <path> --snap <png>`). Does nothing when the variable is not set.
+/// Writes the same invented database to the NEW file `BB_NATIVE_FIXTURE_DB` names, for a headless render of the
+/// window (`beebeeb-drive --db <path> --snap <png>`). Does nothing when the variable is not set, and refuses a
+/// path where something already is: this never deletes or overwrites a file.
 #[test]
 fn writes_the_fixture_db_for_a_render() {
     if let Some(path) = std::env::var_os("BB_NATIVE_FIXTURE_DB") {
         let path = std::path::PathBuf::from(path);
-        let _ = std::fs::remove_file(&path);
+        assert!(
+            !path.exists(),
+            "BB_NATIVE_FIXTURE_DB names a file that exists; give a new path"
+        );
         build(&path);
     }
 }

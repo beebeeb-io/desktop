@@ -25,15 +25,45 @@ impl StateDb {
     }
     /// Open an existing state database for reading only: no table is created or migrated, no row is written and
     /// the journal mode is left as it is, so a viewer can look at a database the engine owns. (SQLite itself may
-    /// create the `-shm` side file of a WAL database; the database file is not written.) A database from an older
-    /// build that lacks a column a query names fails that query; it is never altered here.
-    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+    /// create the `-shm` side file of a WAL database; the database file is not written.)
+    ///
+    /// Two locks keep the handle read-only: the connection is opened `SQLITE_OPEN_READ_ONLY`, and `query_only` is
+    /// set on it, so every writer of the returned `StateDb` fails in SQLite before it changes anything
+    /// (`state_db::read_only_tests`). Before it returns, the listing's own columns are read once, so a file that
+    /// is not a state database, or one from a build too old to list, is refused here with its own reason and
+    /// never shows as an empty folder.
+    pub fn open_read_only(path: impl AsRef<Path>) -> std::result::Result<Self, ReadOnlyOpenError> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(ReadOnlyOpenError::NotFound);
+        }
         let conn = Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+        )
+        .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        // A short wait for the proof read, so a database another process holds answers "locked" at once.
+        conn.busy_timeout(std::time::Duration::from_millis(250))
+            .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        conn.pragma_update(None, "query_only", true)
+            .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        let has_files: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'files')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        if !has_files {
+            return Err(ReadOnlyOpenError::NotAStateDatabase);
+        }
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        let db = Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0));
+        // The listing statement itself, for no rows: it names every column a listing reads.
+        db.children_paged(None, 0, 0)
+            .map_err(|e| ReadOnlyOpenError::classify(&e))?;
+        Ok(db)
     }
     /// The schema of a state database, created if missing and brought up to today's columns. Runs inside
     /// [`StateDb::open`]'s `BEGIN IMMEDIATE`, so one opener applies it and any other opener waits and then finds it

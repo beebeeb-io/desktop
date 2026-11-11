@@ -1,0 +1,7 @@
+# Floors for scripts/assert-cargo-test-counts.py: `<os> <floor> <part of the test binary's "Running ..." header>`.
+# A binary that executes fewer tests than its floor fails the run, so a suite cannot shrink unseen (a test module
+# that stops compiling in, a filter left on, a crate that lost its tests in a move).
+# A floor is the count measured on that OS minus a margin of about 5%, rounded down to a ten. Raise it when the
+# suite grows by more than the margin; lowering one needs a reason in the commit. An OS without a line has no floor.
+linux 310 deps/beebeeb_engine-
+linux 8 deps/beebeeb_drive-
