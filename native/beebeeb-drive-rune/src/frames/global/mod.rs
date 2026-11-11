@@ -152,7 +152,7 @@ struct Dismissed {
 /// What the global elements keep.
 pub struct Ui {
     pub source: Box<dyn GlobalSource>,
-    dismissed: Dismissed,
+    dismissed: std::cell::Cell<Dismissed>,
     /// The file a preview could not open without a connection (DW-0121): its id and its name.
     pub blocked_preview: Option<(String, String)>,
     /// The last things asked for, oldest first (at most [`INTENTS_KEPT`]).
@@ -172,7 +172,7 @@ impl Ui {
     pub fn new(source: Box<dyn GlobalSource>) -> Self {
         Ui {
             source,
-            dismissed: Dismissed::default(),
+            dismissed: std::cell::Cell::new(Dismissed::default()),
             blocked_preview: None,
             intents: Vec::new(),
             board_crop_bottom: false,
@@ -193,22 +193,41 @@ impl Ui {
     }
 
     fn is_dismissed(&self, kind: BannerKind, status: &GlobalStatus) -> bool {
+        let dismissed = self.dismissed.get();
         match kind {
-            BannerKind::SyncProblem => status.sync_problems <= self.dismissed.sync_at,
-            BannerKind::BackupProblem => status.backup_problems <= self.dismissed.backup_at,
+            BannerKind::SyncProblem => status.sync_problems <= dismissed.sync_at,
+            BannerKind::BackupProblem => status.backup_problems <= dismissed.backup_at,
             BannerKind::StorageAlmostFull => match status.storage.map(source::Storage::level) {
-                Some(StorageLevel::AlmostFull(step)) => step <= self.dismissed.storage_at,
+                Some(StorageLevel::AlmostFull(step)) => step <= dismissed.storage_at,
                 _ => false,
             },
             _ => false,
         }
     }
 
+    /// Forget a dismissal whose cause is gone, so the next time it happens it shows again.
+    fn settle(&self, status: &GlobalStatus) {
+        let mut dismissed = self.dismissed.get();
+        if status.sync_problems == 0 {
+            dismissed.sync_at = 0;
+        }
+        if status.backup_problems == 0 {
+            dismissed.backup_at = 0;
+        }
+        if !matches!(
+            status.storage.map(source::Storage::level),
+            Some(StorageLevel::AlmostFull(_))
+        ) {
+            dismissed.storage_at = 0;
+        }
+        self.dismissed.set(dismissed);
+    }
+
     /// The one banner to show: the first in the board's order that holds and was not dismissed.
-    /// None while the app is locked, and none under "signed out" ("Other banners wait until this
-    /// is solved").
+    /// None while the app is locked (the lock screen is another frame).
     pub fn banner(&self) -> Option<(BannerKind, GlobalStatus)> {
         let status = self.source.status();
+        self.settle(&status);
         if status.locked {
             return None;
         }
@@ -223,34 +242,19 @@ impl Ui {
         let Some((kind, status)) = self.banner() else {
             return false;
         };
+        let mut dismissed = self.dismissed.get();
         match kind {
-            BannerKind::SyncProblem => self.dismissed.sync_at = status.sync_problems,
-            BannerKind::BackupProblem => self.dismissed.backup_at = status.backup_problems,
+            BannerKind::SyncProblem => dismissed.sync_at = status.sync_problems,
+            BannerKind::BackupProblem => dismissed.backup_at = status.backup_problems,
             BannerKind::StorageAlmostFull => {
                 if let Some(StorageLevel::AlmostFull(step)) = status.storage.map(source::Storage::level) {
-                    self.dismissed.storage_at = step;
+                    dismissed.storage_at = step;
                 }
             }
             _ => return false,
         }
+        self.dismissed.set(dismissed);
         true
-    }
-
-    /// Forget a dismissal whose cause is gone, so the next time it happens it shows again.
-    pub fn settle(&mut self) {
-        let status = self.source.status();
-        if status.sync_problems == 0 {
-            self.dismissed.sync_at = 0;
-        }
-        if status.backup_problems == 0 {
-            self.dismissed.backup_at = 0;
-        }
-        if !matches!(
-            status.storage.map(source::Storage::level),
-            Some(StorageLevel::AlmostFull(_))
-        ) {
-            self.dismissed.storage_at = 0;
-        }
     }
 
     fn ask(&mut self, intent: Intent) {
@@ -260,6 +264,8 @@ impl Ui {
         self.intents.push(intent);
     }
 
+    /// The shell takes what was asked for (a lane that draws DW-1109 or DW-0428 routes them).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }

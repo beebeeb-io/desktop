@@ -10,7 +10,7 @@
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use rune::tok::Family;
-use rune::{Color, El, Icon, LiveRegion, TextStyle, Tx, el, oklch, row};
+use rune::{Color, El, Icon, Key, KeyEvent, LiveRegion, TextStyle, Tx, el, oklch, row};
 
 use super::{global_icons, kit};
 
@@ -65,6 +65,22 @@ pub fn sentence(runs: &[Run]) -> String {
 }
 
 pub type Handler = fn(&mut State, &mut Tx);
+
+/// A button that Enter presses too, as Windows users expect. Rune presses a focused control on
+/// Space, and on Return only a row, a link or the window's default button (rune README, "Key
+/// routing", step 5), so the button hears Return itself.
+pub fn pressable(button: El, run: Handler) -> El {
+    button.on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx)).on_key(
+        move |s: &mut State, ev: &KeyEvent, tx: &mut Tx| {
+            let plain = !(ev.mods.shift || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl);
+            if ev.key == Key::Enter && plain {
+                run(s, tx);
+                return true;
+            }
+            false
+        },
+    )
+}
 
 /// One banner. `action`: the button's word and what it does. `dismiss`: what the cross does
 /// (`None`: this banner cannot be dismissed, and no cross is drawn).
@@ -124,7 +140,7 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
         );
     if let Some((word, run)) = b.action {
         // `.kit-btn.kit-btn-sm`, outlined.
-        out = out.child(
+        out = out.child(pressable(
             row()
                 .key("banner-action")
                 .role("button")
@@ -141,12 +157,12 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .cursor(rune::Cursor::Pointer)
-                .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx))
                 .child(kit::label("banner-action-label", word, type_::BUTTON_SM, t.text)),
-        );
+            run,
+        ));
     }
     if let Some(run) = b.dismiss {
-        out = out.child(
+        out = out.child(pressable(
             el().key("banner-dismiss")
                 .role("button")
                 .label("Dismiss")
@@ -155,14 +171,14 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .cursor(rune::Cursor::Pointer)
-                .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx))
                 .child(kit::glyph(
                     "banner-dismiss-icon",
                     &global_icons::CLOSE,
                     13.0,
                     t.text_tertiary,
                 )),
-        );
+            run,
+        ));
     }
     out
 }

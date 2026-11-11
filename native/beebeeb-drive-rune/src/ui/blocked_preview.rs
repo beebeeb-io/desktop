@@ -48,11 +48,11 @@ pub fn blocked_preview(
                 .gap(8.0)
                 .items_center()
                 .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-                .child(
+                .child(super::banner::pressable(
                     tool_button("preview-close", "Close", &global_icons::CLOSE, 14.0, ToolState::Idle, t)
-                        .shortcut_hint("Esc")
-                        .on_press_tx(move |s: &mut State, tx: &mut Tx| close(s, tx)),
-                )
+                        .shortcut_hint("Esc"),
+                    close,
+                ))
                 .child(
                     el().key("preview-title-box").grow(1.0).min_w(0.0).px(4.0).child(
                         kit::label("preview-title", name, type_::TITLE, t.text)
@@ -62,11 +62,13 @@ pub fn blocked_preview(
                 ),
         )
         .child(
-            empty::empty_state("blocked", ic, title, sentence, t).w_full().child(
-                button::outline_button("blocked-retry", retry_word, None, t)
-                    .autofocus()
-                    .focus_ring(2.0, 2.0, t.accent_deep)
-                    .on_press_tx(move |s: &mut State, tx: &mut Tx| retry_run(s, tx)),
-            ),
+            empty::empty_state("blocked", ic, title, sentence, t)
+                .w_full()
+                .child(super::banner::pressable(
+                    button::outline_button("blocked-retry", retry_word, None, t)
+                        .autofocus()
+                        .focus_ring(2.0, 2.0, t.accent_deep),
+                    retry_run,
+                )),
         )
 }

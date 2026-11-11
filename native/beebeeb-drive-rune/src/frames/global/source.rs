@@ -74,6 +74,8 @@ pub fn size_words(bytes: u64) -> String {
 pub enum Step {
     InProgress,
     WaitingForFileList,
+    /// The engine's to report; the board draws the two states above.
+    #[cfg_attr(not(test), allow(dead_code))]
     Done,
 }
 
