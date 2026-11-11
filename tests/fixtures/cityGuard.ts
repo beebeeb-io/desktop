@@ -3,7 +3,8 @@
  * identify the hosting provider (docs/canon/data-residency.md), so no user-facing string and no code
  * path of the desktop may name one or read one off the wire.
  *
- * What the guard scans: every `.ts` / `.tsx` under `src/` and every `.rs` under `src-tauri/src/`,
+ * What the guard scans: every `.ts` / `.tsx` under `src/` and every `.rs` under `src-tauri/src/` and
+ * `crates/beebeeb-engine/src/` (`RUST_ROOTS`: the engine crate holds most of the modules the shell had),
  * with comments removed, and for Rust with every `#[cfg(test)]` item removed (test code may name a
  * city to prove it is absent). A split moves a `#[cfg(test)] mod tests` into its own
  * `<module>/tests/*.rs` children, so those files are skipped whole: the attribute that makes them
@@ -13,7 +14,8 @@
  *      the payload (the server sends `city` for one more release and it must stay unread).
  * Fixtures under `tests/` and `src-tauri/tests/` are outside the scan: they prove absence.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { RUST_ROOTS } from './rustConstants'
 import { rustTestFiles } from './rustTestFiles'
 import { join, relative } from 'node:path'
 
@@ -137,15 +139,18 @@ function walk(dir: string, ext: RegExp, out: string[] = []): string[] {
 }
 
 /** A Rust file that only a `#[cfg(test)]` module includes: a split's `<module>/tests/*.rs` child. */
-function isRustTestModule(file: string, root: string): boolean {
-  return relative(join(root, 'src-tauri/src'), file).split(/[\\/]/).includes('tests')
+function isRustTestModule(file: string, rustRoot: string): boolean {
+  return relative(rustRoot, file).split(/[\\/]/).includes('tests')
 }
 
 /** Every scanned file under `root` with its hits (files with none are left out). */
 export function scan(root: string): { files: number; offenders: Record<string, string[]> } {
   const ts = walk(join(root, 'src'), /\.(ts|tsx)$/)
   const testModules = rustTestFiles(root)
-  const rs = walk(join(root, 'src-tauri/src'), /\.rs$/).filter((file) => !isRustTestModule(file, root) && !testModules.has(file))
+  // A scratch tree may hold one of the two Rust trees only; the real tree holds both (the callers' file floors).
+  const rs = RUST_ROOTS.map((rustRoot) => join(root, rustRoot))
+    .filter((rustRoot) => existsSync(rustRoot))
+    .flatMap((rustRoot) => walk(rustRoot, /\.rs$/).filter((file) => !isRustTestModule(file, rustRoot) && !testModules.has(file)))
   const offenders: Record<string, string[]> = {}
   for (const file of [...ts, ...rs]) {
     const found = hits(readFileSync(file, 'utf8'), file.endsWith('.rs') ? 'rs' : 'ts')

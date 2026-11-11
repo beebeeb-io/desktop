@@ -126,25 +126,6 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
     ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
     ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
-    ("DW-1202", |s| crate::frames::tray::set_scene(s, "DW-1202")),
-    ("DW-1203", |s| crate::frames::tray::set_scene(s, "DW-1203")),
-    ("DW-1204", |s| crate::frames::tray::set_scene(s, "DW-1204")),
-    ("DW-1205", |s| crate::frames::tray::set_scene(s, "DW-1205")),
-    ("DW-1206", |s| crate::frames::tray::set_scene(s, "DW-1206")),
-    ("DW-1207", |s| crate::frames::tray::set_scene(s, "DW-1207")),
-    ("DW-1208", |s| crate::frames::tray::set_scene(s, "DW-1208")),
-    ("DW-1209", |s| crate::frames::tray::set_scene(s, "DW-1209")),
-    ("DW-1210", |s| crate::frames::tray::set_scene(s, "DW-1210")),
-    ("DW-1211", |s| crate::frames::tray::set_scene(s, "DW-1211")),
-    ("DW-1212", |s| crate::frames::tray::set_scene(s, "DW-1212")),
-    ("DW-1213", |s| crate::frames::tray::set_scene(s, "DW-1213")),
-    ("DW-1214", |s| crate::frames::tray::set_scene(s, "DW-1214")),
-    ("DW-1215", |s| crate::frames::tray::set_scene(s, "DW-1215")),
-    ("DW-1216", |s| crate::frames::tray::set_scene(s, "DW-1216")),
-    ("DW-1219", |s| crate::frames::tray::set_scene(s, "DW-1219")),
-    ("DW-1220", |s| crate::frames::tray::set_scene(s, "DW-1220")),
-    ("DW-1221", |s| crate::frames::tray::set_scene(s, "DW-1221")),
-    ("DW-1222", |s| crate::frames::tray::set_scene(s, "DW-1222")),
 ];
 
 fn scene(s: &mut State, event: Event) {
@@ -192,7 +173,13 @@ pub fn run() {
     // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
     if launch.tooling
         && launch.rune_args.iter().any(|arg| arg == instance::GATE_EXPORT_FLAG)
-        && let Some(code) = crate::ui::gate::run_from_args(SCENES, state::init, registry::view, FONTS, FAMILIES)
+        && let Some(code) = crate::ui::gate::run_from_args(
+            crate::frames::scenes(SCENES),
+            state::init,
+            registry::view,
+            FONTS,
+            FAMILIES,
+        )
     {
         std::process::exit(code);
     }
@@ -289,7 +276,7 @@ pub fn run() {
     let main_spec = AppSpec::<State> {
         fonts: FONTS,
         families: FAMILIES,
-        scenes: SCENES,
+        scenes: crate::frames::scenes(SCENES),
         min_size: Some(WindowKind::Main.min_size()),
         poll: Some(host::poll),
         on_key: Some(host::on_key),

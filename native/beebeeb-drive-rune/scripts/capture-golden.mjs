@@ -94,15 +94,18 @@ try {
     // A window of its own inside the screen (the b's flyout, over Windows' wallpaper and taskbar) is the client area.
     const root = screen.querySelector(ownWindow) || screen;
     const r = root.getBoundingClientRect();
-    // Viewport coordinates, for a viewport screenshot: a full-page one re-lays the page out and a frame
-    // further along its row (a horizontal scroller) is no longer where this box says.
-    return { x: r.x + root.clientLeft, y: r.y + root.clientTop, width: root.clientWidth, height: root.clientHeight };
+    // Viewport coordinates, for a viewport screenshot: a full-page one resizes the viewport first, and a
+    // frame that is not the first of its row (the board's rows scroll sideways) then moves from under the clip.
+    return { x: r.x + root.clientLeft, y: r.y + root.clientTop, width: root.clientWidth, height: root.clientHeight, vw: window.innerWidth, vh: window.innerHeight };
   }, { frameId, dark, ownWindow: OWN_WINDOW });
   await page.waitForTimeout(400);
 
   const stem = dark ? `${frameId}-dark` : frameId;
   const png = join(outDir, `${stem}-board.png`);
-  await page.screenshot({ path: png, clip });
+  if (clip.x < 0 || clip.y < 0 || clip.x + clip.width > clip.vw || clip.y + clip.height > clip.vh) {
+    console.error(`capture-golden: the frame (${clip.width}x${clip.height} at ${clip.x},${clip.y}) does not fit the ${clip.vw}x${clip.vh} viewport`); process.exit(2);
+  }
+  await page.screenshot({ path: png, clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height } });
 
   const geo = await page.evaluate(({ frameId, keymapSrc, ownWindow }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);

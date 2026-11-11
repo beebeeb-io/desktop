@@ -321,6 +321,29 @@ const SCENE: Host<State> = Host {
     after: |_, _| {},
 };
 
+/// The group's board frames, each as a scene of the window (`frames::scenes`).
+pub const FRAMES: &[(&str, fn(&mut State))] = &[
+    ("DW-1202", |s| set_scene(s, "DW-1202")),
+    ("DW-1203", |s| set_scene(s, "DW-1203")),
+    ("DW-1204", |s| set_scene(s, "DW-1204")),
+    ("DW-1205", |s| set_scene(s, "DW-1205")),
+    ("DW-1206", |s| set_scene(s, "DW-1206")),
+    ("DW-1207", |s| set_scene(s, "DW-1207")),
+    ("DW-1208", |s| set_scene(s, "DW-1208")),
+    ("DW-1209", |s| set_scene(s, "DW-1209")),
+    ("DW-1210", |s| set_scene(s, "DW-1210")),
+    ("DW-1211", |s| set_scene(s, "DW-1211")),
+    ("DW-1212", |s| set_scene(s, "DW-1212")),
+    ("DW-1213", |s| set_scene(s, "DW-1213")),
+    ("DW-1214", |s| set_scene(s, "DW-1214")),
+    ("DW-1215", |s| set_scene(s, "DW-1215")),
+    ("DW-1216", |s| set_scene(s, "DW-1216")),
+    ("DW-1219", |s| set_scene(s, "DW-1219")),
+    ("DW-1220", |s| set_scene(s, "DW-1220")),
+    ("DW-1221", |s| set_scene(s, "DW-1221")),
+    ("DW-1222", |s| set_scene(s, "DW-1222")),
+];
+
 /// Puts one board frame's flyout in the window (`--scene DW-1203 --size 340x520`).
 pub fn set_scene(s: &mut State, frame: &str) {
     s.tray = Ui::board(frame);
