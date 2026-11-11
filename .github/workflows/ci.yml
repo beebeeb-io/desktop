@@ -86,7 +86,8 @@ jobs:
           # Only a pull request's merge commit (two parents) gives a trustworthy list; anything else leaves the
           # list empty, and an empty list runs every area.
           if [ "$EVENT_NAME" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
-            git diff --name-only HEAD^1 HEAD > "$list" || : > "$list"
+            # --no-renames: a file moved out of src-tauri into docs/ must be listed under its old path too.
+            git diff --name-only --no-renames HEAD^1 HEAD > "$list" || : > "$list"
           fi
           echo "changed paths: $(wc -l < "$list")"
           python3 scripts/ci-changed-areas.py "$list" | tee -a "$GITHUB_OUTPUT"

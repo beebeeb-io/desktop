@@ -66,7 +66,7 @@ runs:
       with:
         workspaces: ${{ inputs.crate-dir }}
         shared-key: ${{ inputs.cache-key }}
-        save-if: true # MEASUREMENT COMMIT ONLY (warm-cache run): the next commit restores pushes-only
+        save-if: ${{ github.event_name == 'push' }}
         cache-on-failure: true
 
     - name: Test count guard self-test

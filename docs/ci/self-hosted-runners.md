@@ -158,14 +158,17 @@ The Rust job only. "File Provider Swift (macOS)" stays on GitHub-hosted runners:
 Measured on the Legion (WSL2, 16 logical CPUs) with this pull request's configuration; a self-hosted Linux
 runner on comparable hardware does the same work. "Warm" = `CARGO_TARGET_DIR` kept from the previous job.
 
-| Step | Warm self-hosted (measured on the Legion) | GitHub-hosted, this PR |
-|---|---|---|
-| Queue + set up job + checkout | ~5 s (no VM to boot) | see the PR's table |
-| apt-get, cache restore | 0 s (skipped) | see the PR's table |
-| Compile, PR touching `src-tauri/src` | 11.7 s incremental (one-line change); 49 s if a dependency changed | see the PR's table |
-| Compile, clean (after a cleanup) | 58.5 s | – |
-| Tests | 66–68 s: one test needs 65 s of real time (§7 of the speed doc); 22 s without that test | see the PR's table |
-| **Total, typical PR** | **about 85 s; about 40 s if the 65 s test moves out of the per-PR suite** | |
+| Step | Warm self-hosted Linux (measured on the Legion) |
+|---|---|
+| Queue + set up job + checkout | ~5 s (no VM to boot; not measured, GitHub's part) |
+| `apt-get`, cache restore | 0 s (both skipped on a self-hosted runner) |
+| Compile, pull request touching `src-tauri/src` | 11.7 s (one-line change, incremental); 49 s when a dependency changed |
+| Compile, after a cleanup (clean target directory) | 58.5 s |
+| Tests | 69.2 s (3 runs: 69.18, 69.22, 69.26): one test needs 65 s of real time; at most 36.9 s without it (measured on 4 cores) |
+| **Total, typical pull request** | **about 85 s** (5 + 12 + 69); **about 55 s** if the 65 s test leaves the per-PR suite |
+
+GitHub-hosted today, for comparison (this pull request, `2026-11-11-rust-ci-speed.md` §6): Linux 318 s with a cold
+dependency cache; the warm number is in that table.
 
 Windows and macOS runners: not measured (no runner exists). The same reasoning gives "incremental compile +
 the 65 s floor"; the first real job on each replaces this sentence with a number.
