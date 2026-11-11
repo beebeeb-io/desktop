@@ -2929,15 +2929,7 @@
     249,
     247,
     184
-   ],
-   "css": {
-    "radius": "999px",
-    "shadow": "oklch(0 0 none / 0.1) 0px 6px 22px 0px, oklch(0.999994 0.0000497986 none / 0.7) 0px 0.5px 0px 0px inset",
-    "border": "0.5px oklch(0.18 0.01 70 / 0.09)",
-    "pad": "0px 8px 0px 14px",
-    "gap": "10px"
-   },
-   "tone": "green"
+   ]
   },
   "toast-icon": {
    "kind": "icon",
@@ -2959,9 +2951,9 @@
   "toast-text": {
    "kind": "text",
    "x": 729.95,
-   "y": 493.5,
+   "y": 492.5,
    "w": 69.09,
-   "h": 15,
+   "h": 17,
    "text": "Link copied",
    "family": "sans",
    "fontFamily": "Inter",
@@ -2973,18 +2965,7 @@
     13,
     255
    ],
-   "tracking": 0,
-   "lh": "17px"
-  },
-  "crop-fade": {
-   "kind": "box",
-   "x": 0,
-   "y": 32,
-   "w": 1278,
-   "h": 44,
-   "css": {
-    "image": "linear-gradient(to top, rgba(0, 0, 0, 0), oklch(0.968 0.006 85))"
-   }
+   "tracking": 0
   }
  },
  "theme": "light"

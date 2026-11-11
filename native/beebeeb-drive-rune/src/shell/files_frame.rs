@@ -1,19 +1,18 @@
-//! The Files frame group (DW-0401): the Files window of `ui/` (PR 286), as the registry's line
-//! for `FrameGroup::Section(Section::Files)`. Its tests are `ui/tests.rs`.
+//! The Files frame group (DW-0401 and the frames of `frames/files/FRAMES.md`): the registry's line
+//! for `FrameGroup::Section(Section::Files)`. Its tests are `ui/tests.rs` and `frames/files/tests.rs`.
 
 use rune::{Cx, El, KeyEvent, Tx};
 
 use crate::State;
-use crate::ui;
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    ui::window::files_window(s, cx)
+    crate::frames::files::view(s, cx)
 }
 
 /// The Files window's keys (arrows, Enter, back, Ctrl+F). The shell's own shortcuts ran first
 /// (`host::on_key`).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    ui::keys::on_key(s, ev, tx)
+    crate::frames::files::keys::on_key(s, ev, tx)
 }
 
 /// The tests `main.rs` held on `v2-native` (PRs 280 and 286), re-homed with the entry point.

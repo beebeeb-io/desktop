@@ -2929,15 +2929,7 @@
     21,
     16,
     173
-   ],
-   "css": {
-    "radius": "999px",
-    "shadow": "oklch(0 0 none / 0.1) 0px 6px 22px 0px, oklch(0.999994 0.0000497986 none / 0.08) 0px 0.5px 0px 0px inset",
-    "border": "0.5px oklch(0.92 0.006 85 / 0.12)",
-    "pad": "0px 8px 0px 14px",
-    "gap": "10px"
-   },
-   "tone": "red"
+   ]
   },
   "toast-icon": {
    "kind": "icon",
@@ -2975,8 +2967,7 @@
     224,
     255
    ],
-   "tracking": 0,
-   "lh": "17px"
+   "tracking": 0
   },
   "toast-action": {
    "kind": "box",
@@ -2989,13 +2980,9 @@
     233,
     222,
     23
-   ],
-   "css": {
-    "radius": "999px",
-    "pad": "0px 8px"
-   }
+   ]
   },
-  "toast-action-label": {
+  "toast-action-text": {
    "kind": "text",
    "x": 862.77,
    "y": 493.5,
@@ -3013,16 +3000,6 @@
     255
    ],
    "tracking": 0
-  },
-  "crop-fade": {
-   "kind": "box",
-   "x": 0,
-   "y": 32,
-   "w": 1278,
-   "h": 44,
-   "css": {
-    "image": "linear-gradient(to top, rgba(0, 0, 0, 0), oklch(0.16 0.01 70))"
-   }
   }
  },
  "theme": "dark"

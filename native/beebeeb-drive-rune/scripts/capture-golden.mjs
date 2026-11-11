@@ -160,7 +160,7 @@ try {
     // eslint-disable-next-line no-new-func
     new Function('win', 'api', keymapSrc)(screen, api);
     return { frame: frameId, width: screen.clientWidth, height: screen.clientHeight, elements: out, problems };
-  }, { frameId, keymapSrc: ['keymap.js', ...readdirSync(HERE).filter((f) => /^keymap-.+\.js$/.test(f)).sort()].map((f) => readFileSync(join(HERE, f), 'utf-8')).join('\n') });
+  }, { frameId, keymapSrc: [join(HERE, 'keymap.js'), ...readdirSync(HERE).filter((f) => /^keymap-.+\.js$/.test(f)).sort().map((f) => join(HERE, f)), ...(existsSync(join(HERE, 'keymap.d')) ? readdirSync(join(HERE, 'keymap.d')).filter((f) => f.endsWith('.js')).sort().map((f) => join(HERE, 'keymap.d', f)) : [])].map((f) => readFileSync(f, 'utf-8')).join('\n') });
 
   const flat = JSON.stringify(geo);
   if (/â€|Â·/.test(flat)) { console.error('capture-golden: mojibake in the exported text (the board must be served as utf-8)'); code = 1; }

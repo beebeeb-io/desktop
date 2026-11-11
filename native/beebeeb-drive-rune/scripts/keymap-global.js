@@ -1,6 +1,6 @@
 // keymap-global.js: the gate keys of the global elements (the board's "Global elements on
 // Windows": the banner under the toolbar, the loading strip, the crop's fade). Runs after
-// keymap.js, in the same scope (`win`, `api`, `q`, `qa`). Keys are class names; boxes carry
+// keymap.js and before keymap.d/, in the same scope (`win`, `api`, `q`, `qa`). Keys are class names; boxes carry
 // `css` (radius, padding, gap: the gate ignores it, the builder reads it).
 {
   const gcss = (el) => {
@@ -42,34 +42,6 @@
       api.text('strip-detail', q(':scope > div.t-cap', banner));
     }
   }
-  // The toast (DW-0107 to DW-0109): a pill at the bottom of the content area.
-  const toast = q('.mk-toast > .kit-toast');
-  if (toast) {
-    api.box('toast', toast, { ...gcss(toast), tone: (toast.className.match(/tone-(\w+)/) || [])[1] || '' });
-    api.icon('toast-icon', q(':scope > svg', toast));
-    const span = q(':scope > span', toast);
-    api.textNode('toast-text', span, { lh: getComputedStyle(span).lineHeight });
-    const act = q('b', span);
-    if (act) { api.box('toast-action', act, gcss(act)); api.textNode('toast-action-label', act); }
-  }
-  // The empty state (DW-0114) and the same block inside a preview that cannot open (DW-0121).
-  const empty = q('.kit-empty');
-  if (empty) {
-    api.box('empty', empty, gcss(empty));
-    const tile = q(':scope > .kit-tile', empty);
-    api.box('empty-tile', tile, gcss(tile));
-    api.icon('empty-icon', q('svg', tile));
-    api.text('empty-title', q(':scope > .t-title', empty), { lh: getComputedStyle(q(':scope > .t-title', empty)).lineHeight });
-    const sub = q(':scope > .t-sub', empty);
-    api.text('empty-sub', sub, { lh: getComputedStyle(sub).lineHeight, align: getComputedStyle(sub).textAlign });
-    const btn = q('button', empty);
-    if (btn) {
-      api.box('empty-action', btn, gcss(btn));
-      api.icon('empty-action-icon', q('svg', btn));
-      api.text('empty-action-label', q('span', btn));
-    }
-    api.text('empty-hint', q('.t-cap', empty));
-  }
   // The preview panel in front of the window (DW-0121): the scrim, the card, its title bar.
   const scrim = q('.mk-scrim');
   if (scrim) {
@@ -82,6 +54,20 @@
     api.box('preview-close', close, gcss(close));
     api.icon('preview-close-icon', q('svg', close));
     api.text('preview-title', q('.mk-title b', bar));
+    // What the panel says instead of the file (`.kit-empty` inside the card).
+    const blocked = q('.kit-empty', card);
+    if (blocked) {
+      api.box('blocked', blocked, gcss(blocked));
+      const tile = q(':scope > .kit-tile', blocked);
+      api.box('blocked-tile', tile, gcss(tile));
+      api.icon('blocked-icon', q('svg', tile));
+      api.text('blocked-title', q(':scope > .t-title', blocked));
+      const sub = q(':scope > .t-sub', blocked);
+      api.text('blocked-text', sub, { lh: getComputedStyle(sub).lineHeight, align: getComputedStyle(sub).textAlign });
+      const btn = q('button', blocked);
+      api.box('blocked-retry', btn, gcss(btn));
+      api.text('blocked-retry-label', q('span', btn));
+    }
   }
   // The grid (DW-0119): a tile, a name and a line under it per item; a plain tile until its thumbnail arrives.
   const grid = q('.mk-gridview');
@@ -98,13 +84,6 @@
       api.text(`${k}-name`, q('.mk-gname', cell));
       api.text(`${k}-sub`, q('.mk-gsub', cell));
     });
-    const crumbs = q('.mk-title .mk-crumbs');
-    if (crumbs) {
-      api.text('crumb-parent', q(':scope > i', crumbs));
-      api.icon('crumb-sep', q(':scope > svg', crumbs));
-      api.text('crumb-current', q(':scope > span', crumbs));
-      api.text('crumb-count', q('.mk-title > span:not(.mk-crumbs)'));
-    }
   }
   const fade = q(':scope > .mk-cropfade, .mk-cropfade');
   if (fade) api.box('crop-fade', fade, gcss(fade));
