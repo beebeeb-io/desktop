@@ -18,7 +18,14 @@ const CHILDREN: usize = 19;
 fn spliced() -> &'static (String, Vec<String>) {
     static SPLICED: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
     SPLICED.get_or_init(|| {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/src");
+        // Compiled into the engine crate, and by `#[path]` into a `src-tauri` integration test: the manifest
+        // directory is the crate that compiles this file.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = if manifest.join("tauri.conf.json").exists() {
+            manifest.join("src")
+        } else {
+            manifest.join("../../src-tauri/src")
+        };
         let hub = std::fs::read_to_string(src.join("lib.rs")).expect("read src/lib.rs");
         let mut out = String::with_capacity(hub.len() * 40);
         let mut children = Vec::new();
