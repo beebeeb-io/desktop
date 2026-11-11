@@ -6,45 +6,46 @@ Repo: `github.com/anomalyco/rune` — pre-release, "we don't take pull requests"
 
 ## 1. Verdict: GO-WITH-CONDITIONS
 
-Rune can replace the Tauri WebView2 layer for Beebeeb Drive on Windows. The spike proves it compiles, the API covers every surface the app needs, and the engine layer separates cleanly. Conditions below.
+Rune can replace the Tauri WebView2 layer for Beebeeb Drive on Windows. The spike builds, renders headlessly, and its tests pass. The engine layer separates cleanly. Conditions below.
+
+**Correction (2026-11-11, after lead's native Windows run):** Rune's `rust-toolchain.toml` pins to 1.99.1, but the crate builds with the desktop repo's stable pin (rustc 1.98.0 MSVC on Windows, 1.98.1 on Linux). The spike's `rust-toolchain.toml` now pins to `stable`. Rust 1.99.1 is NOT a hard condition.
 
 ### Evidence the verdict rests on
 
-| Capability | Status | Source |
-|---|---|---|
-| Custom titlebar + Windows caption buttons + snap layouts | Works today | `crates/rune/README.md` "Window chrome" section; `crates/rune/examples/custom_titlebar.rs`; verified in the spike |
-| Virtual rows (5,000+ items) | Works today | `crates/rune/src/el/virtual_rows.rs`; spike uses it; README measured perf section |
-| Accessibility (UIA via AccessKit) | Works today | `crates/rune/src/a11y/windows.rs`; uses `accesskit_windows::Adapter` + `WM_GETOBJECT` subclassing |
-| Text fields + IME + password fields | Works today | README "Text fields" section; `TextEdit::secure()` hides text, blocks undo/copy/IME; macOS Secure Event Input; model buffers wipe on drop |
-| Issue 586 (secure fields + accessibility) | NOT a blocker | Secure fields expose no text to the accessibility tree (`secure text (never exposed)` in README Accessibility section); the field reports only its role, label, and selection/caret positions |
-| Dark mode + system theme | Works today | `crates/rune/src/platform/win32/dark_mode.rs`; uses uxtheme ordinals 135/136 (Windows 10 1903+); menus follow; `cx.system_dark()` in views |
-| DPI + multi-monitor | Works today | `crates/rune/src/platform/win32/dpi_drag.rs`; handles `WM_DPICHANGED` during move/size loops |
-| Context menus (native) | Works today | `tx.popup_menu()` uses `TrackPopupMenuEx` on Windows; keeps drawing while menu tracks |
-| File drop IN | Works today | `on_drop_files()` works on macOS, Windows, X11; pointer sampling on Windows via `GetCursorPos` |
-| File drag OUT | macOS only; Windows NOT implemented | README: "macOS only for now. Elsewhere `drag_out` is ignored" — file as Rune issue |
-| File dialogs (open/save/folder) | Works today | `native-file-dialog` feature; rfd on macOS/Windows, XDG portal on Linux |
-| Notifications (Windows toast) | Works today | `rune-notify`: `register` + `post` + `on_click` + activation scheme for click-after-quit |
-| Multiple windows | Works today | `run_windows()`, `App::window()`, mixed state types; `--window KEY` for headless |
-| Single-instance + deep links | Works today | `rune::single_instance("com.example.app")` uses named pipe on Windows; `App::on_open_url` |
-| Tray/system tray | App-owned, not Rune-built | Rune provides `keep_running()`, `windowless()`, `AppHandle` hide/show/position; the tray icon itself is the app's (D-Bus `StatusNotifierItem` on Linux; Windows: app handles the tray) |
-| Pop-up/overlay windows | Works today | `App::overlay()` with `OverlaySpec`; `always_on_top`, `borderless`, positioning |
-| Headless PNG + element tree | Works today | `--snap`, `--tree`, `--script`, `--video`; `Runtime::new()` for tests |
-| Clipboard (text, rich, secret) | Works today | `tx.copy_secret()` with 30s expiry + platform history-exclusion; rich clipboard (HTML/RTF/image) |
-| Smooth scrolling | Works today | Scroll costs no commit; `virtual_rows` mounts only visible rows |
-| Springs/animation | Works today | `rune-motion`; `motion::SNAPPY`, `motion::SNAP`; reduced-motion support; motion-audit |
-| Fonts bundled (Inter) | Works today | Rune bundles 3 Inter faces (Regular, Medium, SemiBold) by default; `AppSpec::fonts` for custom |
-| Issue 430 (memory ~180 MB for hello on DX12) | Monitor; NOT a blocker now | README Measured section shows 10.9 MB binary, 70 MB idle (settings example); hello on DX12 memory depends on GPU backend; wgpu is the Windows path |
-| Installer/updater | NOT in Rune; we build our own | Tauri provides NSIS + updater today; Rune doesn't bundle apps or update them; need a separate solution |
-| Autostart | NOT in Rune; app's responsibility | Registry key `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; trivial |
-| Stability (3-week-old pre-release) | Risk; mitigated by pinning | Pin a rev of `dev`; `dev` is never rewritten; we can file issues |
+| Capability | Status | Verified | Source |
+|---|---|---|---|
+| Custom titlebar + Windows caption buttons + snap layouts | Works today | RAN: spike uses `App::titlebar(Titlebar::new(32.0))`; lead confirmed on Windows (1m48s build, caption buttons visible) | `crates/rune/README.md` "Window chrome" :1027; `crates/rune/examples/custom_titlebar.rs` |
+| Virtual rows (5,000+ items) | Works today | RAN: spike mounts 32 of 5,000 rows (from `--tree` JSON count); `cargo test` passes | `crates/rune/src/el/virtual_rows.rs`:80 |
+| Accessibility (UIA via AccessKit) | Works today | READ: `crates/rune/src/a11y/windows.rs`:1-65 | `accesskit_windows::Adapter` + `WM_GETOBJECT` subclassing |
+| Text fields + IME + password fields | Works today | RAN: search field renders and is findable in `--tree`; `cargo test search_field_takes_text` passes | README "Text fields" :1280; `TextEdit::secure()` |
+| Issue 586 (secure fields + accessibility) | NOT a blocker | READ: issue 586 is NOT referenced in Rune's code or CHANGELOG at rev c92e462e. The protections are already in place: README :2368 says "secure text (never exposed)"; CHANGELOG has extensive secure field entries; `src/edit/secure.rs` and `runtime/types.rs`:230 confirm `a11y.secure` flag suppresses text. Recovery phrase and password screens CAN be native. | `crates/rune/src/edit/secure.rs`; README Accessibility :2368 |
+| Dark mode + system theme | Works today | RAN: spike renders both `--theme dark` and `--theme light`; `cx.system_dark()` used | `crates/rune/src/platform/win32/dark_mode.rs`:1-40 |
+| DPI + multi-monitor | Works today | READ: `crates/rune/src/platform/win32/dpi_drag.rs`:1-40 | Handles `WM_DPICHANGED` during move/size loops |
+| Context menus (native) | Works today | READ: `crates/rune/README.md` "Pop-up and context menus" :1714 | `tx.popup_menu()` uses `TrackPopupMenuEx` on Windows |
+| File drop IN | Works today | READ: `crates/rune/README.md` "Dropping files in" :1657 | `on_drop_files()` on macOS, Windows, X11 |
+| File drag OUT | macOS only; Windows NOT implemented | READ: `crates/rune/README.md` :1631 "macOS only for now" | File as Rune issue; workaround: OLE `DoDragDrop` |
+| File dialogs (open/save/folder) | Works today | READ: `crates/rune/README.md` "File dialogs" :1586 | `native-file-dialog` feature; rfd on macOS/Windows |
+| Notifications (Windows toast) | Works today | READ: `crates/rune-notify/README.md` | `register` + `post` + `on_click` + activation scheme |
+| Multiple windows | Works today | READ: `crates/rune/README.md` "Multiple windows" :1766 | `run_windows()`, `App::window()`, mixed state types |
+| Single-instance + deep links | Works today | READ: `crates/rune/README.md` :676 | `rune::single_instance()` uses named pipe on Windows |
+| Tray/system tray | App-owned, not Rune-built | READ: `crates/rune/README.md` "Compact tray" :947 | `keep_running()`, `windowless()`, `AppHandle` show/hide |
+| Pop-up/overlay windows | Works today | READ: `crates/rune/README.md` "Multiple windows" :1766 | `App::overlay()` with `OverlaySpec` |
+| Headless PNG + element tree | Works today | RAN: `--snap` writes PNG, `--tree` writes JSON (both exit 0 on lavapipe) | `--snap`, `--tree`, `--script` |
+| Clipboard (text, rich, secret) | Works today | READ: `crates/rune/README.md` "Rich clipboard" :1342 | `tx.copy_secret()` with 30s expiry |
+| Smooth scrolling | Works today | READ: `crates/rune/README.md` "Smooth scrolling" :764 | Scroll costs no commit; `virtual_rows` mounts only visible |
+| Springs/animation | Works today | READ: `crates/rune/README.md` :846 | `rune-motion`; `motion::SNAPPY` |
+| Fonts bundled (Inter) | Works today | RAN: headless PNG renders text with Inter (Rune bundles 3 faces by default) | `crates/rune/Cargo.toml` features; README "Launching fast" :688 |
+| Memory (issue 430, ~180 MB hello on DX12) | Monitor | RAN: spike RSS = 137 MB on lavapipe (software Vulkan, Linux); lead measures Windows | README Measured :2895 |
+| Installer/updater | NOT in Rune; we build our own | READ | Tauri provides NSIS + updater; Rune doesn't |
+| Autostart | NOT in Rune; app's responsibility | READ | Registry key `HKCU\...\Run` |
+| Stability (3-week-old pre-release) | Risk; mitigated by pinning | READ | Pin rev of `dev`; `dev` never rewritten |
 
 ### Conditions
 
-1. **Rust 1.99.1**: Rune's workspace needs edition 2024. The spike crate pins `rust-toolchain.toml` to 1.99.1. The Tauri crate pins to "stable" (1.98.1). Both build side by side.
+1. ~~**Rust 1.99.1**~~: **Corrected.** Rune's own repo pins to 1.99.1, but our crate builds with `stable` (1.98.0 MSVC on Windows confirmed by the lead; 1.98.1 on Linux). NOT a condition. The spike's `rust-toolchain.toml` now says `stable`.
 2. **Drag-out on Windows**: File drag-out is macOS-only today. Must file a Rune issue. Workaround: use the Windows `DoDragDrop` API ourselves (OLE, straightforward) or defer until Rune ships it.
 3. **Installer + updater**: Tauri ships NSIS + auto-updater. The native shell needs its own. Options: (a) keep the NSIS installer (it's an exe, not Tauri-specific), (b) use `windows-installer` crate, (c) WiX. The updater: a simple HTTP check + download + restart, or Squirrel-style.
 4. **Tray icon on Windows**: Rune doesn't draw the system tray icon. The app must create the `NOTIFYICONDATA` + `Shell_NotifyIcon` window message loop itself (or use `tray-icon` crate, same underlying API Tauri uses).
-5. **Disk space**: The build machine has 28 GB free (below the 40 GB threshold). A full Rune debug build may need 10-15 GB. Use release/incremental builds.
 
 ## 2. What cannot be native and what we do instead
 
@@ -230,7 +231,7 @@ At that point, `v2-next` switches its default binary from Tauri to Rune. The Tau
 | Memory too high on Windows (DX12 + wgpu overhead) | User complaints, > 200 MB idle | Profile with `procwatch`; switch GPU backend; use `release_gpu_when_closed` for closed windows |
 | `drag_out` never ships for Windows | Upload-only workflow | Implement ourselves with OLE `DoDragDrop`; or use `clipboard_win` + manual drag detection |
 | Installer complexity (no Tauri NSIS) | Slower release cycle | Reuse the existing NSIS script (it runs cargo build output through NSIS, not Tauri-specific); or WiX |
-| Edition 2024 / Rust 1.99.1 conflict with core/server | Build complexity | The native crate has its own `rust-toolchain.toml`; core and server keep their own pins |
+| ~~Edition 2024 / Rust 1.99.1 conflict~~ | ~~Not a risk~~ | Builds with stable (1.98.x); no conflict |
 | Disk space on build machines | Can't build | Use release+incremental; separate `CARGO_TARGET_DIR`; clean old targets |
 
 ## 6. Cost honesty

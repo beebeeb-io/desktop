@@ -6,8 +6,23 @@ Filed: 2026-11-11 by the Rune spike lane (task 2445).
 ## Prerequisites
 
 - [ ] Guus approves go-with-conditions verdict
-- [ ] Rust 1.99.1 installed on Legion and testrig (`rustup install 1.99.1`)
-- [ ] Disk space freed to >= 40 GB on Legion
+- [x] Rust stable (1.98.x) builds the spike (confirmed on Windows + Linux)
+- [x] Disk space is fine (58 GB free after cleanup)
+
+## The render-look-fix method (every slice uses this)
+
+```sh
+# 1. Render headless (uses lavapipe software Vulkan on Linux):
+native/beebeeb-drive-rune/scripts/snap.sh DW-0401
+
+# 2. Look at the PNGs (Read tool, or image viewer).
+# 3. Compare with the board's drawing (DW-0401-board.png).
+# 4. Fix code; re-run snap.sh; repeat.
+# 5. Write remaining differences to diff.md.
+```
+
+The script sources `~/code/bb-legion-native/lavapipe/env.sh` and writes PNGs + tree to
+`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/2445/rune/`.
 
 ## Phase 0: Foundation (slices 1-5, sequential then parallel)
 
