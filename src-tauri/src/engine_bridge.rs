@@ -169,38 +169,9 @@ mod tests {
         production_tree_parts(module).join("\n")
     }
 
+    /// Both trees (`source_census`): a module the engine crate took over is read there.
     fn production_tree_parts(module: &str) -> Vec<String> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = vec![src.join(format!("{module}.rs"))];
-        walk(&src.join(module), &mut files);
-        files.retain(|path| {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-            name != "tests.rs"
-                && !name.ends_with("_tests.rs")
-                && !path.components().any(|part| part.as_os_str() == "tests")
-        });
-        files.sort();
-        files
-            .into_iter()
-            .map(|path| {
-                std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-                    .replace("\r\n", "\n")
-            })
-            .collect()
+        crate::source_census::production_tree_parts(module)
     }
 
     fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> Result<Vec<u8>, EngineError> {

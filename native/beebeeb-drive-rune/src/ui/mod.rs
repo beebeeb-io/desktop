@@ -54,7 +54,7 @@ impl State {
         }
         let id = item.id.clone();
         self.files.back.push(self.listing.folder.id.clone());
-        self.listing = self.source.list(Some(&id));
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), Some(&id));
         self.selected = None;
         true
     }
@@ -68,7 +68,7 @@ impl State {
         let Some(parent) = self.files.back.pop() else {
             return false;
         };
-        self.listing = self.source.list(parent.as_deref());
+        (self.listing, self.list_error) = crate::load(self.source.as_ref(), parent.as_deref());
         self.selected = None;
         true
     }

@@ -441,16 +441,16 @@ mod tests {
     fn test_1885_no_macos_code_path_spawns_open() {
         use crate::finder_setup_command_tests::{macos_compiled, test_module_files};
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rust_files(&src, &mut files);
-        assert!(files.len() > 20, "the scan sees the source tree: {} files", files.len());
+        // Both trees (`source_census`, which asserts each was read): the shell's and the engine crate's.
+        let files = crate::source_census::rust_files();
 
         let needles = spawn_needles();
         let (mut lines_on_a_mac, mut spawns_elsewhere) = (0, 0);
         let test_modules = test_module_files(&src);
-        for file in &files {
-            let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
-            if test_modules.contains(&name) {
+        for (name, file) in &files {
+            if test_modules.contains(name)
+                || (crate::source_census::is_engine_file(name) && crate::source_census::is_test_file(name))
+            {
                 continue;
             }
             let text = std::fs::read_to_string(file)
@@ -485,7 +485,7 @@ mod tests {
     }
 
     fn without_tests(text: &str) -> String {
-        crate::finder_setup_command_tests::without_items(text, &["#[cfg(test)]", "#[cfg(all(test"])
+        crate::finder_setup_command_tests::without_items(text, &crate::source_census::TEST_ITEM_GATES)
     }
 
     /// The Objective-C side has no way to start `open` either: the bridge opens through `NSWorkspace`

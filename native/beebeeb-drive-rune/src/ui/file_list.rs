@@ -212,6 +212,24 @@ pub fn column_headers(t: &Theme) -> El {
         )
 }
 
+/// In place of the rows when the folder could not be read: the reason, in words.
+pub fn list_error(error: crate::source::SourceError, t: &Theme) -> El {
+    col()
+        .key("file-list-error")
+        .role("alert")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .py(12.0)
+        .px(20.0)
+        .child(kit::label(
+            "file-list-error-text",
+            error.message(),
+            type_::LIST_ITEM,
+            t.text_secondary,
+        ))
+}
+
 /// The rows, virtualised (`.mk-rows`).
 pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
     let count = s.listing.items.len();

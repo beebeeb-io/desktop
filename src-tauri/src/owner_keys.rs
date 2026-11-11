@@ -2,9 +2,7 @@
 
 use crate::{api_client::ApiClient, state_db::StateDb};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -230,16 +228,6 @@ pub(crate) use requests::{
     RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope,
     request_upload_fields,
 };
-
-/// A failed row remains visible and deletable; this label is never ciphertext
-/// or a path supplied by the server.
-pub fn blocked_name(id: &str) -> String {
-    let suffix = Sha256::digest(id.as_bytes())[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    format!("Unavailable file {suffix}")
-}
 
 /// The item's real kind as this device last stored it. A key record does not
 /// carry one, and assuming a file would ask the resolver for the wrong L7 kind.
@@ -1040,35 +1028,7 @@ impl crate::engine_bridge::EngineBridge {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OwnedKeyRecord {
-    pub file_id: String,
-    pub name_encrypted: String,
-    pub owner_wrap: Option<Vec<u8>>,
-    pub pending_owner_wrap: Option<Vec<u8>>,
-    pub shared_root_id: Option<String>,
-    pub folder_wrap: Option<Vec<u8>>,
-    pub folder_key_version: Option<i32>,
-    pub foreign_added: bool,
-    #[serde(default)]
-    pub member_added: bool,
-    /// Durable L12 fact: this row carries a 2236 request envelope. Persisted so
-    /// a download in a later process still takes the request content key.
-    #[serde(default)]
-    pub request_row: bool,
-    /// Core's resolution of a request row's name (P2-2), for a later rename.
-    #[serde(default)]
-    pub request_name: Option<requests::RequestName>,
-    pub blocked_fingerprint: Option<String>,
-}
-
-impl OwnedKeyRecord {
-    pub fn fingerprint(&self) -> String {
-        let mut opaque = self.clone();
-        opaque.blocked_fingerprint = None;
-        STANDARD.encode(Sha256::digest(serde_json::to_vec(&opaque).expect("opaque record")))
-    }
-}
+pub use beebeeb_engine::owner_keys::{OwnedKeyRecord, blocked_name};
 
 // normalize_wrap and AccountScope moved to owner_keys/scope.rs for the size ratchet.
 

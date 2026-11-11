@@ -253,14 +253,20 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
     let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
-    let meter = col()
-        .key("storage-meter")
-        .role("group")
-        .label(format!(
-            "Storage: {} of {}",
+    let storage_value = if s.storage_known {
+        format!(
+            "{} of {}",
             format_storage(storage.used_bytes),
             format_storage(storage.quota_bytes)
-        ))
+        )
+    } else {
+        // No figure without the server (a `--db` source never asks it).
+        "Unavailable".to_string()
+    };
+    let mut meter = col()
+        .key("storage-meter")
+        .role("group")
+        .label(format!("Storage: {storage_value}"))
         .gap(5.0)
         .px(4.0)
         .child(
@@ -270,11 +276,7 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .child(kit::label("storage-label", "Storage", type_::CAPTION, t.text_secondary))
                 .child(kit::label(
                     "storage-value",
-                    format!(
-                        "{} of {}",
-                        format_storage(storage.used_bytes),
-                        format_storage(storage.quota_bytes)
-                    ),
+                    storage_value.clone(),
                     type_::KBD,
                     t.text_tertiary,
                 )),
@@ -295,8 +297,10 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                         .w(track_w * photos_frac)
                         .fill(t.text_quaternary),
                 ),
-        )
-        .child(
+        );
+    // The split, like the total, is the server's: nothing is shown in its place.
+    if s.storage_known {
+        meter = meter.child(
             row()
                 .key("storage-breakdown")
                 .justify_between()
@@ -313,6 +317,7 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                     t.text_tertiary,
                 )),
         );
+    }
 
     let account = row()
         .key("account-row")

@@ -394,25 +394,14 @@ fn no_file_provider_bridge_call_is_made_outside_the_bridge_gate() {
             }
         }
     }
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&src, &mut files);
-    assert!(
-        files.len() > 20,
-        "the census sees the source tree: {} files",
-        files.len()
-    );
+    // Both trees (`source_census`, which asserts each was read): the shell's and the engine crate's.
+    let files = crate::source_census::rust_files();
     let (mut gated, mut checked_lines) = (0, 0);
-    for file in files {
-        let name = file.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+    for (name, file) in files {
         if name == "macos_file_provider.rs" {
             continue; // the bridge itself
         }
-        if name == "tests.rs"
-            || name.ends_with("/tests.rs")
-            || name.ends_with("_tests.rs")
-            || name.split('/').any(|part| part == "tests")
-        {
+        if crate::source_census::is_test_file(&name) {
             continue;
         }
         let text = std::fs::read_to_string(&file)

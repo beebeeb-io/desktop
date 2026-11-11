@@ -17,7 +17,11 @@ pub fn files_window(s: &State, cx: &mut Cx<State>) -> El {
             .min_w(0.0)
             .h_full()
             .child(file_list::column_headers(&t))
-            .child(file_list::file_list(s, cx, &t)),
+            // A folder that could not be read says so. It never draws as an empty folder.
+            .child(match s.list_error {
+                Some(error) => file_list::list_error(error, &t),
+                None => file_list::file_list(s, cx, &t),
+            }),
     );
     if s.show_detail_pane {
         let selected = s.selected.and_then(|i| s.listing.items.get(i));

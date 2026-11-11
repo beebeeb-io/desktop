@@ -15,7 +15,9 @@ const RUST_SRC = fileURLToPath(new URL('../../src-tauri/src/', import.meta.url))
 
 export function rustSource(file: string): string {
   if (file === 'lib.rs') return libRsSource()
-  return readFileSync(new URL(`../../src-tauri/src/${file}`, import.meta.url), 'utf8')
+  // A module the engine crate took over (`account_binding.rs`, `state_db/...`) is read there.
+  const shell = new URL(`../../src-tauri/src/${file}`, import.meta.url)
+  return readFileSync(existsSync(shell) ? shell : new URL(`../../crates/beebeeb-engine/src/${file}`, import.meta.url), 'utf8')
 }
 
 /**

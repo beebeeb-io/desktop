@@ -60,10 +60,31 @@ pub struct StorageSummary {
     pub quota_bytes: i64,
 }
 
+/// Why a folder could not be listed. A source that cannot read says so; it never answers with an empty folder,
+/// because "no files" and "your files cannot be read" must not look the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceError {
+    /// The folder is not there any more (deleted or moved elsewhere), or the id is not a folder.
+    NotFound,
+    /// The data behind the source could not be read.
+    Unreadable,
+}
+
+impl SourceError {
+    /// What the window says in place of the rows.
+    pub fn message(self) -> &'static str {
+        match self {
+            SourceError::NotFound => "This folder is not here any more.",
+            SourceError::Unreadable => "Your files cannot be read right now.",
+        }
+    }
+}
+
 /// The data contract the UI consumes.
 pub trait DriveSource: Send + 'static {
-    fn list(&self, folder_id: Option<&str>) -> Listing;
-    fn storage(&self) -> StorageSummary;
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError>;
+    /// `None`: this source cannot know the account's used and total bytes (they are the server's).
+    fn storage(&self) -> Option<StorageSummary>;
 }
 
 /// Format bytes as "84 KB", "1.2 MB", "3.1 GB" etc. Shared by file_list and detail_pane.
@@ -96,7 +117,7 @@ impl BoardFixtureSource {
 }
 
 impl DriveSource for BoardFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
         use rune::oklch;
 
         // The board's avatar hues (`.kit-avatar.hue-a…d`). Only the hue is data: the design
@@ -244,7 +265,7 @@ impl DriveSource for BoardFixtureSource {
             ),
         ];
 
-        Listing {
+        Ok(Listing {
             folder: Crumb {
                 id: None,
                 name: "Files".into(),
@@ -254,14 +275,14 @@ impl DriveSource for BoardFixtureSource {
                 name: "Files".into(),
             }],
             items,
-        }
+        })
     }
 
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
+    fn storage(&self) -> Option<StorageSummary> {
+        Some(StorageSummary {
             used_bytes: 240_000_000_000,    // 240 GB
             quota_bytes: 1_000_000_000_000, // 1 TB
-        }
+        })
     }
 }
 
@@ -364,8 +385,8 @@ impl LargeFixtureSource {
 }
 
 impl DriveSource for LargeFixtureSource {
-    fn list(&self, _folder_id: Option<&str>) -> Listing {
-        Listing {
+    fn list(&self, _folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        Ok(Listing {
             folder: Crumb {
                 id: None,
                 name: "Files".into(),
@@ -375,12 +396,12 @@ impl DriveSource for LargeFixtureSource {
                 name: "Files".into(),
             }],
             items: self.items.clone(),
-        }
+        })
     }
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
+    fn storage(&self) -> Option<StorageSummary> {
+        Some(StorageSummary {
             used_bytes: 240_000_000_000,
             quota_bytes: 1_000_000_000_000,
-        }
+        })
     }
 }
