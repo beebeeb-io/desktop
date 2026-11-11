@@ -91,6 +91,18 @@ fn item(item: dto::DriveItem) -> DriveItem {
         modified_at: item.modified_at,
         mime: item.mime,
         has_thumbnail: item.has_thumbnail,
+        // The state database holds no share links or people for a row of the person's own: none shown.
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: item.local.as_ref().and_then(|local| match local {
+            dto::LocalState::Downloaded => Some("on_this_pc".to_string()),
+            dto::LocalState::OnlineOnly => Some("online_only".to_string()),
+            dto::LocalState::AvailableOffline => Some("available_offline".to_string()),
+            // Syncing and failed have no mark in this column yet.
+            dto::LocalState::Syncing | dto::LocalState::Failed => None,
+        }),
+        // Not read yet: the Backups root's flag (`system_role`) is not in the listing's row.
+        is_protected: false,
     }
 }
 

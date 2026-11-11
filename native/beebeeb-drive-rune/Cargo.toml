@@ -17,6 +17,8 @@ rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
+serde_json = "1"
+
 [dev-dependencies]
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"

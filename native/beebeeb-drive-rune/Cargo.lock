@@ -518,6 +518,7 @@ dependencies = [
  "rune-kit",
  "rune-notify",
  "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 
