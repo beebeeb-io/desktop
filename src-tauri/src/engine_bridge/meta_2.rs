@@ -437,15 +437,15 @@ pub(super) fn apply_metadata_file_row(
 
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
-    let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+    let remote_updated = json_timestamp_secs(f, &["updated_at"]).unwrap_or(0);
     let stored = crate::owner_keys::stored_name(db, file_id, master_key)?;
-    // The unavailable label is a display name only. Stored as the path, the
-    // watcher would upload it as a new file; keep the path empty so the row
-    // retries its name on the next sync with the right key (task 2445).
+    // P3-2 (task 2445): the typed return distinguishes blocked from named.
+    // A blocked record keeps the path empty so the row retries its name on
+    // the next sync with the right key; it is never stored as the path.
     let leaf = match stored {
-        Some(name) if name == crate::owner_keys::blocked_name(file_id) => String::new(),
-        Some(name) => name,
-        None => resolve_relative_path(f, file_id, master_key),
+        crate::owner_keys::StoredName::Blocked => String::new(),
+        crate::owner_keys::StoredName::Name(name) => name,
+        crate::owner_keys::StoredName::None => resolve_relative_path(f, file_id, master_key),
     };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
@@ -472,13 +472,30 @@ pub(super) fn apply_metadata_file_row(
         _ => None,
     };
     let path = held.as_ref().map_or(path, |entry| entry.path.clone());
+    // P1-2 (task 2445): never overwrite a non-empty stored path with an empty one.
+    // A blocked record must not blank a name the previous sync already resolved.
+    let path = if path.is_empty() {
+        existing.as_ref().map_or(path, |entry| {
+            if entry.path.is_empty() {
+                String::new()
+            } else {
+                entry.path.clone()
+            }
+        })
+    } else {
+        path
+    };
     let status = existing
         .as_ref()
         .map(|entry| entry.status.clone())
         .unwrap_or(FileStatus::CloudOnly);
     // Task 1640 (review N1, condition 1): a remote move or rename gives the row another place;
     // the fetch candidate described the entry at the old one.
-    let moved = existing.as_ref().is_some_and(|entry| entry.path != path);
+    // P2-3 (task 2445): an empty previous path is "placed for the first time", not moved.
+    // Without this guard, healing ~44k empty-path rows would create ~44k poison + ~88k orphan records.
+    let moved = existing
+        .as_ref()
+        .is_some_and(|entry| entry.path != path && !entry.path.is_empty());
 
     let item_kind = if f["is_folder"].as_bool().unwrap_or(false)
         || f["kind"].as_str() == Some("folder")
@@ -634,7 +651,7 @@ pub(super) fn process_metadata_row(
         return Ok(None);
     }
     let size = f["size_bytes"].as_i64().unwrap_or(0);
-    let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
+    let remote_updated = json_timestamp_secs(f, &["updated_at"]).unwrap_or(0);
 
     // §6.3.2: a snapshot node fills a row at version 0, or raises an older one, in any
     // status but Trashing and Conflict. Only the version (and the size) changes here; the
@@ -742,9 +759,11 @@ pub(super) fn process_metadata_row(
             // (3) Pending download/upload/conflict/error — let the dedicated
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
-            // Task 2445: an empty path means the name never decrypted (vault was
-            // locked); re-apply now that the key may be correct.
-            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || entry.path.is_empty() {
+            // Task 2445 / P3-3: an empty path without a pending op (not Uploading,
+            // not Conflict) is re-applied so the heal can name it.
+            let heal_empty =
+                entry.path.is_empty() && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict);
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || heal_empty {
                 return apply(bridge);
             }
             Ok(Some((entry.path, entry.item_kind)))

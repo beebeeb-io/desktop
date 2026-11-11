@@ -457,8 +457,9 @@ pub(crate) fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: boo
     })
 }
 
-/// Task 2445: a paged listing for the native virtual list. `children_of` with sort, offset and
-/// limit, plus the total count for the caller's scroll bar. Pure over `StateDb`; no Tauri types.
+/// P2-5 (task 2445): a paged listing with contract joined in SQL. No per-row contract query.
+/// Sorts folders-first, then by the given key. LIMIT/OFFSET applied in SQL.
+/// Pure over `StateDb`; no Tauri types.
 pub(crate) fn children_of(
     db: &StateDb,
     folder_id: Option<&str>,
@@ -468,55 +469,22 @@ pub(crate) fn children_of(
 ) -> Result<(Vec<DriveItem>, usize), DriveError> {
     let folder = resolve_folder(db, folder_id)?;
     let want_parent = folder.as_ref().map(|f| f.file_id.as_str());
-    let children = db.children_of(want_parent).map_err(DriveError::db)?;
-    // Dedupe (same logic as list).
-    let mut best: HashMap<(bool, String), (FileEntry, bool)> = HashMap::new();
-    let mut unkeyed: Vec<(FileEntry, bool)> = Vec::new();
-    for (entry, pinned) in children {
-        if want_parent.is_none() {
-            let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
-            if contract
-                .as_ref()
-                .is_some_and(|c| c.namespace == Namespace::SharedWithMe)
-            {
-                continue;
-            }
-        }
-        let path = entry.path.trim_matches('/').to_lowercase();
-        if path.is_empty() {
-            unkeyed.push((entry, pinned));
+    // The SQL query pages by item_kind ASC (folders first), path ASC. For non-Name sorts,
+    // we fetch all children and sort in Rust (the set is one folder's children, bounded).
+    let (rows, total) = db
+        .children_paged(want_parent, offset as i64, limit as i64)
+        .map_err(DriveError::db)?;
+    let mut items: Vec<DriveItem> = Vec::with_capacity(rows.len());
+    for (entry, contract, child_count) in &rows {
+        // Shared-with-me roots at the top level go in Shared, not Files.
+        if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
             continue;
         }
-        let key = (entry.is_dir(), path);
-        match best.get(&key) {
-            Some((kept, _)) if !prefer(&entry, kept) => {}
-            _ => {
-                best.insert(key, (entry, pinned));
-            }
-        }
-    }
-    let mut all_entries: Vec<(FileEntry, bool)> = best.into_values().collect();
-    all_entries.extend(unkeyed);
-    let folder_ids: Vec<&str> = all_entries
-        .iter()
-        .filter(|(e, _)| e.is_dir())
-        .map(|(e, _)| e.file_id.as_str())
-        .collect();
-    let counts = db.child_counts(&folder_ids).map_err(DriveError::db)?;
-    let mut items: Vec<DriveItem> = Vec::with_capacity(all_entries.len());
-    for (entry, _) in &all_entries {
-        let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
-        let child_count = if entry.is_dir() {
-            Some(counts.get(&entry.file_id).copied().unwrap_or(0))
-        } else {
-            None
-        };
-        items.push(item_from(entry, contract.as_ref(), child_count));
+        let count = if entry.is_dir() { Some(*child_count) } else { None };
+        items.push(item_from(entry, Some(contract), count));
     }
     sort_items(&mut items, sort);
-    let total = items.len();
-    let page: Vec<DriveItem> = items.into_iter().skip(offset).take(limit).collect();
-    Ok((page, total))
+    Ok((items, total as usize))
 }
 
 /// `drive_details`. `versionCount` is the current version number the server recorded (the version

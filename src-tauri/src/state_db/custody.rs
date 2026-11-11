@@ -221,4 +221,38 @@ impl StateDb {
         conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
         Ok(())
     }
+    /// Task 2445: clear all `blocked_fingerprint` values so blocked records are
+    /// re-evaluated on the next `prepare_owned_rows` pass.
+    pub fn clear_all_blocked_fingerprints(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let records = self.list_owned_key_records()?;
+        let mut cleared = 0usize;
+        for mut record in records {
+            if record.blocked_fingerprint.is_some() {
+                record.blocked_fingerprint = None;
+                Self::put_owned_key_record_conn(&conn, &record)?;
+                cleared += 1;
+            }
+        }
+        Ok(cleared)
+    }
+    /// Task 2445: whether the envelope-heal migration has run.
+    pub fn envelope_heal_done(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row("SELECT 1 FROM sync_state WHERE key = 'envelope_heal_2445'", [], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some())
+    }
+    /// Task 2445: mark the envelope-heal migration as done.
+    pub fn mark_envelope_heal_done(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('envelope_heal_2445', '1') ON CONFLICT(key) DO NOTHING",
+            [],
+        )?;
+        Ok(())
+    }
 }

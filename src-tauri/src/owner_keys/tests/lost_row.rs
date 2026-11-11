@@ -1,22 +1,241 @@
-//! Task 2445 / night slice 65: a file row whose name cannot be decrypted with
-//! the loaded master key survives `prepare_owned_rows` when the canonical fetch
-//! answers 404, and appears in `model::list` (blocked, not gone).
+//! Task 2445: prod-shaped tests for the files data path.
+//!
+//! The server snapshot emits `"file_request_id": null, "sender_ephemeral_pubkey": null,
+//! "wrapped_content_key": null` for ordinary rows. The old `request_envelope` treated JSON null
+//! as "carries an envelope" (`row.get(field).is_some()` is true for null), blocking every row.
+//! `updated_at` is an RFC 3339 string, not an integer.
 
 use super::*;
 
-/// The fixture serves 404 for every request (the canonical file fetch is gone).
+/// A fixture that serves 404 for every canonical file fetch.
 fn lost_fixture() -> Fixture {
     Fixture::wire(|_req| Some((404, serde_json::to_vec(&serde_json::json!({})).unwrap())))
+}
+
+/// Build a prod-shaped snapshot row: null envelope fields, RFC 3339 updated_at.
+fn prod_row(id: &str, parent_id: Option<&str>, name_encrypted: &str, is_folder: bool, size: i64) -> Value {
+    json!({
+        "id": id,
+        "parent_id": parent_id,
+        "name_encrypted": name_encrypted,
+        "file_request_id": null,
+        "sender_ephemeral_pubkey": null,
+        "wrapped_content_key": null,
+        "acted_via_share_id": null,
+        "uploaded_by": null,
+        "owner_wrapped_file_key": null,
+        "chunk_count": 1,
+        "size_bytes": size,
+        "is_folder": is_folder,
+        "is_uploading": false,
+        "content_hash": null,
+        "has_thumbnail": false,
+        "version_number": 1,
+        "storage_pool_id": null,
+        "is_trashed": false,
+        "updated_at": "2026-11-10T12:00:00Z"
+    })
+}
+
+#[test]
+fn prod_shaped_row_is_readable_and_nested() {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
+    let folder_id = "f0000000-0000-4000-8000-000000000001";
+    let file_id = "a0000000-0000-4000-8000-000000000001";
+
+    let folder_name = beebeeb_core::encrypt::encrypt_name(&master, folder_id, "Docs", None).unwrap();
+    let file_name = beebeeb_core::encrypt::encrypt_name(&master, file_id, "Report.pdf", None).unwrap();
+
+    let folder = prod_row(folder_id, None, &folder_name, true, 0);
+    let file = prod_row(file_id, Some(folder_id), &file_name, false, 2000);
+
+    let fixture = lost_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+
+    let prepared = run(bridge.prepare_owned_rows(&[folder, file])).unwrap();
+    assert_eq!(prepared.len(), 2, "both rows must survive prepare");
+    let file_prep = prepared.iter().find(|p| p.row["id"] == file_id).unwrap();
+    assert!(file_prep.readable, "the file must be readable with the correct key");
+    assert!(
+        file_prep.record.blocked_fingerprint.is_none(),
+        "the file must not be blocked"
+    );
+
+    let snapshot = crate::api_client::SyncSnapshot {
+        seq_id: 1,
+        nodes: prepared.into_iter().map(|p| p.row).collect(),
+    };
+    crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot, 1, 1, &mut Vec::new()).unwrap();
+
+    // The file must be listed in the folder with its real name and nested path.
+    let listing = crate::drive_v2::model::list(
+        bridge.db(),
+        Some(folder_id),
+        crate::drive_v2::model::Sort::default(),
+        false,
+    )
+    .unwrap();
+    let file_item = listing.items.iter().find(|i| i.id == file_id);
+    assert!(file_item.is_some(), "the file must be listed in the folder");
+    assert_eq!(file_item.unwrap().name, "Report.pdf");
+
+    // The file's stored path must be nested.
+    let entry = bridge.db().get_file(file_id).unwrap().expect("file must exist in DB");
+    assert_eq!(entry.path, "Docs/Report.pdf", "path must be nested under the folder");
+
+    // updated_at from RFC 3339 must parse (not 0).
+    assert!(
+        entry.remote_updated_at > 0,
+        "RFC 3339 updated_at must parse to a real timestamp, got {}",
+        entry.remote_updated_at
+    );
+}
+
+#[test]
+fn request_envelope_null_fields_are_not_carried() {
+    // All three fields null → no envelope, Ok(None).
+    let row = json!({"file_request_id": null, "sender_ephemeral_pubkey": null, "wrapped_content_key": null});
+    assert!(
+        crate::owner_keys::requests::request_envelope(&row).unwrap().is_none(),
+        "all-null fields must not be treated as carrying an envelope"
+    );
+    // All three absent → no envelope, Ok(None).
+    let row = json!({});
+    assert!(crate::owner_keys::requests::request_envelope(&row).unwrap().is_none());
+    // A mix of null and non-null → malformed, Err.
+    let row = json!({"file_request_id": "some-uuid", "sender_ephemeral_pubkey": null, "wrapped_content_key": null});
+    assert!(
+        crate::owner_keys::requests::request_envelope(&row).is_err(),
+        "a mix of null and non-null is malformed"
+    );
+}
+
+#[test]
+fn never_overwrite_nonempty_path_with_empty() {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
+    let folder_id = "f0000000-0000-4000-8000-000000000002";
+    let file_id = "a0000000-0000-4000-8000-000000000002";
+
+    let folder_name = beebeeb_core::encrypt::encrypt_name(&master, folder_id, "Docs", None).unwrap();
+    let file_name = beebeeb_core::encrypt::encrypt_name(&master, file_id, "Report.pdf", None).unwrap();
+
+    let fixture = lost_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let bridge = crate::engine_bridge::EngineBridge::new(
+        Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
+        Arc::new(fixture.api()),
+    );
+
+    // First sync: correct name.
+    let folder = prod_row(folder_id, None, &folder_name, true, 0);
+    let file = prod_row(file_id, Some(folder_id), &file_name, false, 2000);
+    let prepared = run(bridge.prepare_owned_rows(&[folder.clone(), file])).unwrap();
+    let snapshot = crate::api_client::SyncSnapshot {
+        seq_id: 1,
+        nodes: prepared.into_iter().map(|p| p.row).collect(),
+    };
+    crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot, 1, 1, &mut Vec::new()).unwrap();
+    let entry = bridge.db().get_file(file_id).unwrap().unwrap();
+    assert_eq!(entry.path, "Docs/Report.pdf");
+
+    // Second sync: the file's name is now sealed under a WRONG key (simulating vault lock).
+    let wrong_master = beebeeb_core::kdf::MasterKey::from_bytes([9; 32]);
+    let bad_name = beebeeb_core::encrypt::encrypt_name(&wrong_master, file_id, "Report.pdf", None).unwrap();
+    let file_bad = prod_row(file_id, Some(folder_id), &bad_name, false, 2000);
+    let prepared2 = run(bridge.prepare_owned_rows(&[folder, file_bad])).unwrap();
+    let snapshot2 = crate::api_client::SyncSnapshot {
+        seq_id: 2,
+        nodes: prepared2.into_iter().map(|p| p.row).collect(),
+    };
+    crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot2, 2, 2, &mut Vec::new()).unwrap();
+
+    // The path must NOT have been overwritten with an empty string.
+    let entry = bridge.db().get_file(file_id).unwrap().unwrap();
+    assert_eq!(
+        entry.path, "Docs/Report.pdf",
+        "a non-empty path must never be overwritten with an empty one"
+    );
+}
+
+#[test]
+fn heal_clears_blocked_and_resnapshots() {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
+    let file_id = "a0000000-0000-4000-8000-000000000003";
+    let file_name = beebeeb_core::encrypt::encrypt_name(&master, file_id, "notes.txt", None).unwrap();
+
+    let fixture = lost_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let db = StateDb::open(temp.path().join("db")).unwrap();
+
+    // Simulate a DB left by the old bug: a blocked record + empty path + a set cursor.
+    let mut record = crate::owner_keys::OwnedKeyRecord {
+        file_id: file_id.into(),
+        name_encrypted: file_name.clone(),
+        ..Default::default()
+    };
+    record.blocked_fingerprint = Some(record.fingerprint());
+    db.put_owned_key_record(&record).unwrap();
+    let entry = FileEntry {
+        file_id: file_id.into(),
+        path: String::new(),
+        status: FileStatus::CloudOnly,
+        size_bytes: 100,
+        modified_at: 0,
+        content_hash: None,
+        remote_updated_at: 0,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    db.upsert_file(&entry).unwrap();
+    db.set_sync_cursor(42).unwrap();
+
+    // The heal migration must clear blocked fingerprints and request a resnapshot.
+    assert!(!db.envelope_heal_done().unwrap());
+    let cleared = db.clear_all_blocked_fingerprints().unwrap();
+    assert_eq!(cleared, 1);
+    db.request_resnapshot().unwrap();
+    db.mark_envelope_heal_done().unwrap();
+    assert!(db.envelope_heal_done().unwrap());
+
+    // After clearing, the record's blocked_fingerprint is gone.
+    let record = db.get_owned_key_record(file_id).unwrap().unwrap();
+    assert!(
+        record.blocked_fingerprint.is_none(),
+        "the heal must clear blocked_fingerprint"
+    );
+
+    // A resnapshot was requested.
+    assert!(
+        db.take_needs_resnapshot().unwrap(),
+        "the heal must request a resnapshot"
+    );
+
+    // Now a snapshot with the correct key should name the file.
+    let bridge = crate::engine_bridge::EngineBridge::new(Arc::new(db), Arc::new(fixture.api()));
+    let row = prod_row(file_id, None, &file_name, false, 100);
+    let prepared = run(bridge.prepare_owned_rows(&[row])).unwrap();
+    assert!(prepared[0].readable, "after clearing blocked, the row must be readable");
+
+    let snapshot = crate::api_client::SyncSnapshot {
+        seq_id: 43,
+        nodes: prepared.into_iter().map(|p| p.row).collect(),
+    };
+    crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot, 43, 43, &mut Vec::new()).unwrap();
+
+    let entry = bridge.db().get_file(file_id).unwrap().unwrap();
+    assert_eq!(entry.path, "notes.txt", "the healed row must have its real name");
 }
 
 #[test]
 fn a_file_row_with_an_unreadable_name_survives_the_key_walk() {
     let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
-    // Owner-class ids (version 4): the loaded master key derives the file key.
     let folder_id = "f0000000-0000-4000-8000-0000000000f1";
     let file_id = "a0000000-0000-4000-8000-0000000000a1";
 
-    // The folder's name encrypts under the loaded key [7;32] so it resolves.
     let folder_name = beebeeb_core::encrypt::encrypt_name(&master, folder_id, "Docs", None).unwrap();
     let folder_row = json!({
         "id": folder_id,
@@ -28,7 +247,6 @@ fn a_file_row_with_an_unreadable_name_survives_the_key_walk() {
         "version_number": 1
     });
 
-    // The file's name is sealed under a DIFFERENT key, so the loaded key cannot open it.
     let wrong_master = beebeeb_core::kdf::MasterKey::from_bytes([9; 32]);
     let file_name = beebeeb_core::encrypt::encrypt_name(&wrong_master, file_id, "Report.pdf", None).unwrap();
     let file_row = json!({
@@ -48,7 +266,6 @@ fn a_file_row_with_an_unreadable_name_survives_the_key_walk() {
         Arc::new(fixture.api()),
     );
 
-    // Drive the real path: prepare → snapshot → list.
     let prepared = run(bridge.prepare_owned_rows(&[folder_row, file_row])).unwrap();
     let snapshot = crate::api_client::SyncSnapshot {
         seq_id: 1,
@@ -68,7 +285,6 @@ fn a_file_row_with_an_unreadable_name_survives_the_key_walk() {
         "the file row must survive the key walk, not vanish: {:?}",
         listing.items.iter().map(|i| &i.id).collect::<Vec<_>>()
     );
-    // The file should show with the blocked name label, not an empty name.
     let file_item = listing.items.iter().find(|i| i.id == file_id).unwrap();
     assert!(
         file_item.name.starts_with("Unavailable file "),
@@ -94,7 +310,6 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
         "version_number": 1
     });
 
-    // First pass: the file's name is sealed under the WRONG key.
     let wrong_master = beebeeb_core::kdf::MasterKey::from_bytes([9; 32]);
     let bad_name = beebeeb_core::encrypt::encrypt_name(&wrong_master, file_id, "Report.pdf", None).unwrap();
     let file_row_bad = json!({
@@ -114,7 +329,6 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
         Arc::new(fixture.api()),
     );
 
-    // First sync: wrong key, row blocked.
     let prepared = run(bridge.prepare_owned_rows(&[folder_row.clone(), file_row_bad])).unwrap();
     let snapshot = crate::api_client::SyncSnapshot {
         seq_id: 1,
@@ -122,14 +336,12 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
     };
     crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot, 1, 1, &mut Vec::new()).unwrap();
 
-    // Verify the row exists but has an empty path (blocked).
     let entry = bridge.db().get_file(file_id).unwrap().expect("row must exist");
     assert!(
         entry.path.is_empty(),
         "the row's path is empty when the name cannot decrypt"
     );
 
-    // Second sync: the same file with a name sealed under the CORRECT key.
     let good_name = beebeeb_core::encrypt::encrypt_name(&master, file_id, "Report.pdf", None).unwrap();
     let file_row_good = json!({
         "id": file_id,
@@ -148,7 +360,6 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
     };
     crate::engine_bridge::syncflow::apply_snapshot(&bridge, temp.path(), &snapshot2, 2, 2, &mut Vec::new()).unwrap();
 
-    // Now the row must have a real name.
     let listing = crate::drive_v2::model::list(
         bridge.db(),
         Some(folder_id),
@@ -157,8 +368,5 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
     )
     .unwrap();
     let file_item = listing.items.iter().find(|i| i.id == file_id).unwrap();
-    assert_eq!(
-        file_item.name, "Report.pdf",
-        "the healed row shows its real name, not the blocked label"
-    );
+    assert_eq!(file_item.name, "Report.pdf", "the healed row shows its real name");
 }

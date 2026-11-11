@@ -222,7 +222,6 @@ mod activity;
 mod moves;
 mod requests;
 mod scope;
-mod snapshot_keep;
 
 pub use scope::{AccountScope, normalize_wrap};
 
@@ -251,21 +250,43 @@ pub(crate) fn kind_in_db(db: &StateDb, id: &str) -> ItemKind {
     }
 }
 
-pub fn stored_name(db: &StateDb, id: &str, master: &[u8; 32]) -> anyhow::Result<Option<String>> {
+/// P3-2 (task 2445): a typed return so callers distinguish a real name from a blocked label
+/// without comparing the label string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredName {
+    /// The decrypted display name.
+    Name(String),
+    /// The row is blocked; the label is `blocked_name(id)`.
+    Blocked,
+    /// No record or no name could be resolved.
+    None,
+}
+
+impl StoredName {
+    /// For test compatibility: returns `Some(&str)` for Name, None otherwise.
+    pub fn as_deref(&self) -> Option<&str> {
+        match self {
+            StoredName::Name(name) => Some(name.as_str()),
+            _ => Option::None,
+        }
+    }
+}
+
+pub fn stored_name(db: &StateDb, id: &str, master: &[u8; 32]) -> anyhow::Result<StoredName> {
     let Some(record) = db.get_owned_key_record(id)? else {
-        return Ok(None);
+        return Ok(StoredName::None);
     };
     if record.blocked_fingerprint.is_some() {
-        return Ok(Some(blocked_name(id)));
+        return Ok(StoredName::Blocked);
     }
     Ok(
         match record_key(&MasterKey::from_bytes(*master), &record, kind_in_db(db, id)) {
-            Ok((_, metadata)) => Some(metadata.name),
+            Ok((_, metadata)) => StoredName::Name(metadata.name),
             // P2-9: a foreign id has no derived key, so the listing's fallback
             // reader would seal/open a key the attacker chose and then show the
             // server's plaintext name. The row is unavailable, by its class.
-            Err(_) if class_of(id).ok() == Some(ItemClass::Foreign) => Some(blocked_name(id)),
-            Err(_) => None,
+            Err(_) if class_of(id).ok() == Some(ItemClass::Foreign) => StoredName::Blocked,
+            Err(_) => StoredName::None,
         },
     )
 }

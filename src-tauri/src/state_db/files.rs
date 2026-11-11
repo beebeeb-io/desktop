@@ -665,25 +665,102 @@ impl StateDb {
         let rows = stmt.query_map(params![parent_id], file_overview_row)?;
         rows.collect()
     }
+    /// P2-5 (task 2445): a paged listing with contract joined in SQL. Returns
+    /// `(entry, contract, child_count)` for the children of `parent_id`, with
+    /// LIMIT/OFFSET paging, plus the total count. Child counts for folders are
+    /// joined with a correlated subquery so no per-row query is needed.
+    pub fn children_paged(
+        &self,
+        parent_id: Option<&str>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<(FileEntry, FileContractState, i64)>, i64)> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE parent_id IS ?1 AND status != 'trashing'",
+            params![parent_id],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
+                    parent_id, item_kind, pin_state, inherited_pin_state,
+                    namespace, shared_root_id, share_id, permission_bits,
+                    content_type, current_version, current_object_version_id,
+                    local_base_version, local_hash, cache_path, cache_bytes,
+                    last_sync_at, owner_email,
+                    (SELECT COUNT(*) FROM files AS c WHERE c.parent_id = files.file_id AND c.status != 'trashing')
+             FROM files
+             WHERE parent_id IS ?1 AND status != 'trashing'
+             ORDER BY item_kind ASC, path ASC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![parent_id, limit, offset], |row| {
+            let entry = FileEntry {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                status: FileStatus::from_str(&row.get::<_, String>(2)?),
+                size_bytes: row.get(3)?,
+                modified_at: row.get(4)?,
+                content_hash: row.get(5)?,
+                remote_updated_at: row.get(6)?,
+                parent_id: row.get(7)?,
+                item_kind: ItemKind::from_str(&row.get::<_, String>(8)?),
+            };
+            let pin_state = PinState::from_str(&row.get::<_, String>(9)?);
+            let inherited_pin_state = PinState::from_str(&row.get::<_, String>(10)?);
+            let contract = FileContractState {
+                file_id: entry.file_id.clone(),
+                namespace: Namespace::from_str(&row.get::<_, String>(11)?),
+                parent_id: entry.parent_id.clone(),
+                shared_root_id: row.get(12)?,
+                share_id: row.get(13)?,
+                owner_email: row.get(23)?,
+                permission_bits: row.get(14)?,
+                item_kind: entry.item_kind.clone(),
+                content_type: row.get(15)?,
+                current_version: row.get(16)?,
+                current_object_version_id: row.get(17)?,
+                local_base_version: row.get(18)?,
+                local_hash: row.get(19)?,
+                cache_path: row.get(20)?,
+                cache_bytes: row.get(21)?,
+                pin_state,
+                inherited_pin_state,
+                last_sync_at: row.get(22)?,
+            };
+            let child_count: i64 = row.get(24)?;
+            Ok((entry, contract, child_count))
+        })?;
+        Ok((rows.collect::<Result<Vec<_>>>()?, total))
+    }
     /// Task 2445: count of children for each folder id in `folder_ids`, in one query.
+    /// P3-5: chunks the id list to avoid SQLite's variable limit.
     pub fn child_counts(&self, folder_ids: &[&str]) -> Result<std::collections::HashMap<String, i64>> {
         if folder_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let placeholders: String = folder_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT parent_id, COUNT(*) FROM files
-             WHERE parent_id IN ({placeholders}) AND status != 'trashing'
-             GROUP BY parent_id"
-        );
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            folder_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        rows.collect::<Result<std::collections::HashMap<_, _>>>()
+        let mut result = std::collections::HashMap::new();
+        // SQLite's SQLITE_MAX_VARIABLE_NUMBER is 999 by default; chunk to stay under.
+        for chunk in folder_ids.chunks(500) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT parent_id, COUNT(*) FROM files
+                 WHERE parent_id IN ({placeholders}) AND status != 'trashing'
+                 GROUP BY parent_id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::types::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for pair in rows {
+                let (k, v) = pair?;
+                result.insert(k, v);
+            }
+        }
+        Ok(result)
     }
     pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
