@@ -5,8 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CREATE_ACCOUNT_URL, openUrl } from '../../desktopApi'
 import {
   deviceRequestCancel, deviceRequestPoll, deviceRequestStart, lastSignedInEmail, type LoginOutcome, nextAfterSignIn,
-  passkeySignIn, phraseError, restoreWithPhrase, signIn, signInProblem, twoFactorError, unknownPhraseWords,
-  verifySecondFactor,
+  passkeySignIn, restoreWithPhrase, signIn, signInProblem, twoFactorError, unknownPhraseWords, verifySecondFactor,
 } from './api'
 import { AnotherDeviceView } from './AnotherDevice'
 import { type DeviceStatus, type SignInProblem } from './model'
@@ -125,34 +124,27 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   const leaveDevice = useCallback((to: Screen) => { void deviceRequestCancel(); setScreen(to) }, [])
 
   // ── Two-factor ──
-  const [twoFactorMessage, setTwoFactorMessage] = useState<string | null>(null)
   const verify = useCallback(async (code: string) => {
     setTwoFactor((t) => ({ ...t, code, state: 'verifying' }))
-    setTwoFactorMessage(null)
     const r = await verifySecondFactor(code)
-    if (r.ok) { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setTwoFactorMessage(null); void settle(r.value); return }
-    // The error text comes from Rust (auth_v2::gate::two_factor_error).
+    if (r.ok) { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); void settle(r.value); return }
+    // An expired partial token sends back to the sign-in screen. The decision is in Rust
+    // (auth_v2::gate::two_factor_error returns the board's words; here we branch on it).
     const msg = await twoFactorError(r.reason)
-    setTwoFactorMessage(msg.ok ? msg.value : r.reason)
-    // An expired partial token sends back to the sign-in screen.
-    if (r.reason.includes('expired') || r.reason.includes('No pending')) {
+    if (msg.ok && msg.value.includes('expired')) {
       setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('sign-in'); return
     }
     setTwoFactor((t) => ({ ...t, code: '', state: 'wrong' }))
   }, [settle])
 
   // ── The 12 words ──
-  const [phraseMessage, setPhraseMessage] = useState<string | null>(null)
   const restore = useCallback(async () => {
     setPhraseState('restoring')
-    setPhraseMessage(null)
     setUnknown([])
     const phrase = words.join(' ')
     const r = await restoreWithPhrase(phrase)
-    if (r.ok) { setWords(EMPTY_WORDS); setPhraseState('idle'); setPhraseMessage(null); onSignedIn(); return }
-    // The error text comes from Rust (auth_v2::gate::phrase_error).
-    const msg = await phraseError(r.reason)
-    setPhraseMessage(msg.ok ? msg.value : r.reason)
+    if (r.ok) { setWords(EMPTY_WORDS); setPhraseState('idle'); onSignedIn(); return }
+    // The error text lives in Rust (auth_v2::gate::phrase_error); the TSX branches on the code.
     if (/too many/i.test(r.reason)) { setPhraseState('too-many'); return }
     const marks = await unknownPhraseWords(words)
     setUnknown(marks.ok ? marks.value : [])
