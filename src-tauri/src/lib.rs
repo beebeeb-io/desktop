@@ -16,29 +16,44 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
-mod account;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::account;
 pub(crate) use beebeeb_engine::account_binding;
-mod account_dto;
-mod api_client;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::account_dto;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::api_client;
 mod auth_v2; // v2 b10
 mod v2_snap; // v2 b03
 // LD-0113: what this device refuses to delete, rename or move (the Backups root, its own backups).
-mod backup_protect;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::backup_protect;
 mod browser_login;
 #[cfg(any(target_os = "windows", test))]
-mod callback_gate;
-mod config;
-mod conflict;
-mod desktop_capabilities;
-mod desktop_search;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::callback_gate;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::config;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::conflict;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::desktop_capabilities;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::desktop_search;
 pub(crate) use beebeeb_engine::diagnostic_redaction;
-mod direct_download;
-mod download_pin;
-mod engine_bridge;
-mod engine_status;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::direct_download;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::download_pin;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::engine_bridge;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::engine_status;
 mod finder_removal;
-mod owner_keys;
-mod shared_folder_index;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::owner_keys;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::shared_folder_index;
 // Task 1885: how the bridge's answer to "open this in Finder" becomes a command's result, and the pins that keep
 // the macOS code from spawning `open` again. Only macOS calls it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -58,28 +73,33 @@ mod native_parity_tests;
 // sockets don't exist on Windows; the Windows Cloud Files callback runs
 // in-process (see `windows_cf`), so this module is `unix`-only.
 #[cfg(unix)]
-mod ipc_frame;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::ipc_frame;
 #[cfg(unix)]
-mod ipc_socket;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::ipc_socket;
 // Idempotency table for Finder write-queue requests (task 1684).
 #[cfg(unix)]
-mod ipc_write_dedup;
-mod keychain;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::ipc_write_dedup;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::keychain;
 // LD-0113: backups from source (`backup`: the host for core's pass, the scheduler, sources, device identity) and
 // the known-folder catalog with the old mirror's legacy paths (`known_folder`; the mirror itself is gone).
 mod backup;
-mod known_folder;
+
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::known_folder;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::link_health;
 #[cfg(target_os = "linux")]
-mod linux_fuse;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::linux_fuse;
 #[cfg(target_os = "linux")]
-mod linux_thumbnail;
-#[cfg(all(test, not(target_os = "linux")))]
-mod linux_fuse {
-    #[path = "inode_map.rs"]
-    pub mod inode_map;
-}
-mod link_health;
-mod lockfile;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::linux_thumbnail;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::lockfile;
 #[cfg(target_os = "macos")]
 mod macos_file_provider;
 // Task 1885: NSWorkspace for the URLs that are not Finder items (System Settings), with no child `open`.
@@ -88,13 +108,16 @@ mod macos_workspace;
 // Task 2267: a Windows start refused over unowned local data proves the data is the signed-in account's own before it
 // is adopted (Windows never resets; macOS and Linux reset instead, so they never need it).
 #[cfg(any(target_os = "windows", test))]
-mod own_data_proof;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::own_data_proof;
 // Task 2267 (fix round 2): what the person decides about the changes the proof held for review.
 #[cfg(any(target_os = "windows", test))]
-mod found_while_paused;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::found_while_paused;
 // Task 2407 (core 2404): a sync-folder write, rename or delete by name never touches a different entry the name reaches
 // (a Windows 8.3 short name), through core's `path_safety::short_name_alias`.
-mod name_alias;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::name_alias;
 // Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
 // memory. Windows and Linux run it; macOS keeps its own resume.
 pub(crate) use beebeeb_engine::held_queue;
@@ -104,16 +127,21 @@ mod macos_popover;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
-mod reauth;
-mod runner;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::reauth;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::runner;
 mod sign_out;
-mod staged_payload;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::staged_payload;
 pub(crate) use beebeeb_engine::state_db;
-mod state_paths;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::state_paths;
 // 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
-mod sync_activity;
-mod transfer_progress;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::sync_activity;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::transfer_progress;
 // 0.8.15: WebView2's browser shortcuts (print, reload, find, ...) are off in every window; no-op off Windows.
 mod webview_browser_keys;
 pub(crate) use beebeeb_engine::write_token;
@@ -124,10 +152,12 @@ pub(crate) use beebeeb_engine::write_token;
 mod surfaces;
 // Per-process scratch dirs so unit tests never touch the person's real config or cache.
 #[cfg(test)]
-mod test_sandbox;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::test_sandbox;
 // Layout-independent comparison of source text, for the tests that pin the code by reading it.
 #[cfg(test)]
-mod source_pin;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::source_pin;
 // The File Provider extension logs through its one logger and makes only closed values public.
 #[cfg(test)]
 mod extension_log_pin;
@@ -137,50 +167,54 @@ mod extension_log_pin;
 // Unix socket instead, and the Linux FUSE prototype does not use the socket at
 // all (it calls the in-process `EngineBridge` directly). Compiled everywhere (cheap, cross-platform via
 // `notify`) but the runner only spawns it on Windows (see `runner::run`).
-mod watcher;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::watcher;
 // Task 2191: the guard for Windows files of unknown content (synced before task 1640). Its
 // decisions are cross-platform (tested everywhere); the runner calls it on Windows only.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod unknown_check;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::unknown_check;
 // Task 2240 slice 2: the placeholder reconcile decided from folder listings. Cross-platform so it is
 // tested everywhere; only the Windows tick calls it.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod os_state_reconcile;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::os_state_reconcile;
 // Tasks 2270 / 2280: what to do with an upload finalization journal row. Decided on every platform (tested
 // everywhere); applied on Windows only (`windows_cf::upload_finalization`).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod upload_finalization_plan;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::upload_finalization_plan;
 // Task 2284: the no-fetch scope a finalization, stamp or promote holds around its data open.
-mod no_fetch_scope;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::no_fetch_scope;
 // LD-0105 S0: when a Cloud Files fetch reports its byte progress to Windows. Decided on every platform
 // (tested everywhere); applied on Windows only (`windows_cf::callbacks::keep_fetch_alive`).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod cf_keepalive;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::cf_keepalive;
 // LD-0105 W2: the streaming fetch's rules (demands, the sink, a session's end, the poison key). Pure and tested
 // everywhere; the Windows glue is `windows_cf::streaming`.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod cf_range;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::cf_range;
 // LD-0105 D2 (W3): the ONE player allowlist and media types. It lives under `windows_cf/` (the contract's
 // path) but is pure and compiled everywhere, so its rules are tested on every platform. Switched on with
 // the streaming callback (W2); `windows_cf::streaming` calls it.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-#[path = "windows_cf/stream_players.rs"]
-mod stream_players;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::stream_players;
 // Windows Cloud Files API — Phase 2 Task 6. Gated to Windows only;
 // the module's own files start with `#![cfg(target_os = "windows")]`
 // so this `mod` declaration plus the conditional are belt-and-braces.
 #[cfg(target_os = "windows")]
-mod windows_cf;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::windows_cf;
 #[cfg(target_os = "windows")]
 static SESSION_TRANSITION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(any(target_os = "windows", test))]
-mod session_commands;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::session_commands;
 #[cfg(target_os = "windows")]
 static SESSION_COMMANDS: LazyLock<session_commands::SessionCommands> =
     LazyLock::new(session_commands::SessionCommands::new);
 
 #[cfg(any(target_os = "windows", test))]
-mod auth_attempts;
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::auth_attempts;
 #[cfg(target_os = "windows")]
 static AUTH_ATTEMPTS: LazyLock<auth_attempts::AuthAttempts> = LazyLock::new(auth_attempts::AuthAttempts::new);
 
@@ -228,7 +262,8 @@ use file_open_commands::*;
 pub(crate) use file_open_commands::{FreeUpSpaceResult, free_up_space_blocking, is_contained, reject_unsafe_rel_path};
 mod passkey_commands; // v2 b15
 #[cfg(target_os = "windows")]
-mod passkey_windows; // v2 b15
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::passkey_windows; // v2 b15
 mod settings_commands;
 mod share_v2; // v2 b05
 use settings_commands::*;
@@ -238,6 +273,7 @@ use unsent_changes_commands::*;
 mod vault_tree;
 use vault_tree::*;
 mod account_commands;
+mod engine_host;
 // Desktop v2 (B02): the `drive_*` commands behind the window's DriveSource.
 mod drive_v2;
 use account_commands::*;
@@ -333,7 +369,7 @@ mod state_db_purge_tests;
 mod state_db_shell_tests;
 // The walker the source censuses share: the shell's tree and the engine crate's.
 #[cfg(test)]
-mod source_census;
+pub(crate) use beebeeb_engine::source_census;
 #[cfg(test)]
 mod tests;
 
@@ -537,4 +573,4 @@ mod task_2243_poll_cost_tests;
 mod task_2190_kept_copies_tests;
 
 #[cfg(test)]
-mod root_source;
+pub(crate) use beebeeb_engine::root_source;

@@ -1,6 +1,7 @@
 //! `local_state_purge` items split out of `lib.rs`.
 
 use super::*;
+pub(crate) use beebeeb_engine::local_state::{purge_macos_hydrate_cache, state_db_for_config};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct FinderInstallState {
@@ -151,7 +152,11 @@ pub(super) fn finish_repair_after_removal(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn persist_finder_install_result(cfg: &mut HeldConfig, installed: bool, error: Option<String>) -> Result<(), String> {
+pub(super) fn persist_finder_install_result(
+    cfg: &mut HeldConfig,
+    installed: bool,
+    error: Option<String>,
+) -> Result<(), String> {
     // Task 1889: the result is written onto the file as it is now (`update_held`), not by saving the copy this
     // flow loaded before its slow work, which would put back what another writer saved since.
     cfg.update_held(|held| {
@@ -225,19 +230,6 @@ pub(super) fn begin_finder_install_attempt(cfg: &mut HeldConfig) -> Result<(), S
 pub(super) fn finder_install_failed(cfg: &mut HeldConfig, error: String) -> Result<FinderInstallState, String> {
     // Task 1889: recorded and saved onto the file as it is now; the state is built from what was saved.
     cfg.update_held(|held| (true, finder_install_failure_state(held, error)))
-}
-
-pub(super) fn state_db_for_config(cfg: &DesktopConfig) -> Result<Option<state_db::StateDb>, String> {
-    let Some(_) = &cfg.sync_root else {
-        return Ok(None);
-    };
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(None);
-    }
-    state_db::StateDb::open(&db_path)
-        .map(Some)
-        .map_err(|e| format!("open state.db: {e}"))
 }
 
 /// Resolve the local `state.db` from the app-local data dir alone — task
@@ -990,7 +982,9 @@ pub(super) fn remove_file_provider_domain() -> Result<finder_removal::DomainRemo
 /// Windows and Linux only in the app: on macOS every File Provider call goes through the reconciler's bridge
 /// gate, which runs it on the blocking pool itself (`finder_setup::macos_ports::BridgeGate`).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub(super) async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+pub(super) async fn on_blocking_pool<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| format!("A File Provider call did not finish: {error}"))
@@ -998,8 +992,8 @@ pub(super) async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T
 
 /// The removal, off the runtime (round 4).
 #[cfg(not(target_os = "macos"))]
-pub(super) async fn remove_file_provider_domain_blocking() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure>
-{
+pub(super) async fn remove_file_provider_domain_blocking()
+-> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     match on_blocking_pool(remove_file_provider_domain).await {
         Ok(result) => result,
         Err(message) => Err(message.into()),
@@ -1008,41 +1002,13 @@ pub(super) async fn remove_file_provider_domain_blocking() -> Result<finder_remo
 
 /// The install, off the runtime (round 4): its cleanup is a removal.
 #[cfg(not(target_os = "macos"))]
-pub(super) async fn install_file_provider_domain_blocking() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+pub(super) async fn install_file_provider_domain_blocking()
+-> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     match on_blocking_pool(install_file_provider_domain).await {
         Ok(result) => result,
         Err(message) => Err(message.into()),
     }
 }
-
-/// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
-/// account-security boundary (sign-out, lock, daemon startup) so a decrypted
-/// plaintext copy staged for a Finder open can never outlive the boundary
-/// that's supposed to end its access — independent of, and in addition to,
-/// the per-request cleanup `fetchContents` itself does. Distinct from the
-/// general local-file/smart-cache purge `purge_local_state_files` runs on
-/// sign-out: THAT purge intentionally does NOT run on lock (lock keeps the
-/// regular local file cache so re-unlocking stays fast), but the hydrate
-/// cache holds nothing but ephemeral per-open staging copies, so it is always
-/// safe — and always right — to empty here too. Best-effort and non-fatal:
-/// logout/lock must always appear to succeed, and daemon startup must never
-/// block on this.
-#[cfg(target_os = "macos")]
-pub(crate) fn purge_macos_hydrate_cache(context: &str) {
-    let dir = crate::ipc_socket::macos_hydrate_cache_dir();
-    match crate::ipc_socket::macos_purge_hydrate_cache_dir(&dir) {
-        Ok(removed) if removed > 0 => {
-            tracing::info!(removed, context, "purged macOS hydrate-cache staged plaintext");
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(error = %error, context, "failed to purge macOS hydrate-cache dir (best-effort)");
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn purge_macos_hydrate_cache(_context: &str) {}
 
 /// "Open in Finder" on a Mac (task 1885): the bridge opens the Beebeeb folder through `NSWorkspace` and answers
 /// when LaunchServices has. `Ok` only if it opened; an `Err` is what the frontend turns into the toast.

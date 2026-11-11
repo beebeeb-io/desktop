@@ -1,0 +1,852 @@
+//! The local search index and its server sync: build it from `state.db`, rank results for a
+//! query, and push/pull the encrypted shards. Must not touch the UI or decide Finder revealability.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::hash::{Hash, Hasher};
+use std::pin::Pin;
+
+use beebeeb_core::kdf::MasterKey;
+use beebeeb_core::search_index::{DEFAULT_NUM_SHARDS, EncryptedShard, SearchIndex, tokenize};
+use beebeeb_core::search_sync::{self, ShardCoord, ShardRef};
+use serde::Serialize;
+
+use crate::api_client::{ApiClient, SearchShardRef};
+use crate::state_db::{Namespace, StateDb};
+
+type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+pub trait SearchShardStore: Sync {
+    fn master_key_bytes(&self) -> [u8; 32];
+    fn fetch_manifest<'a>(&'a self) -> StoreFuture<'a, Vec<SearchShardRef>>;
+    fn get_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, Option<Vec<u8>>>;
+    fn put_shard<'a>(&'a self, shard: EncryptedShard) -> StoreFuture<'a, SearchShardRef>;
+    fn delete_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, ()>;
+}
+
+impl SearchShardStore for ApiClient {
+    fn master_key_bytes(&self) -> [u8; 32] {
+        *self.master_key()
+    }
+
+    fn fetch_manifest<'a>(&'a self) -> StoreFuture<'a, Vec<SearchShardRef>> {
+        Box::pin(async move { self.fetch_search_shard_manifest().await })
+    }
+
+    fn get_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move { self.get_search_shard(bucket, page).await })
+    }
+
+    fn put_shard<'a>(&'a self, shard: EncryptedShard) -> StoreFuture<'a, SearchShardRef> {
+        Box::pin(async move { self.put_search_shard(&shard).await })
+    }
+
+    fn delete_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, ()> {
+        Box::pin(async move { self.delete_search_shard(bucket, page).await })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSearchRecord {
+    pub file_id: String,
+    pub name: String,
+    pub rel_path: String,
+    pub status: String,
+    pub size_bytes: i64,
+    pub modified_at: i64,
+    /// A row of the `SharedWithMe` namespace. Shared content is webapp-only by ruling 1701: it is not in Finder, so
+    /// quick search must not offer to show it there (task 1885, I3).
+    pub shared_with_me: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSearchIndex {
+    pub index: SearchIndex,
+    pub records: BTreeMap<String, LocalSearchRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSearchIndexState {
+    Ready,
+    Syncing,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DesktopSearchResult {
+    pub file_id: String,
+    pub name: String,
+    pub rel_path: String,
+    pub status: String,
+    pub size_bytes: i64,
+    pub modified_at: i64,
+    pub shared_with_me: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DesktopSearchResponse {
+    pub query: String,
+    pub index_state: DesktopSearchIndexState,
+    pub indexed_file_count: usize,
+    pub results: Vec<DesktopSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SearchIndexSyncSummary {
+    pub indexed_file_count: usize,
+    pub remote_manifest_count: usize,
+    pub put_count: usize,
+    pub get_count: usize,
+    pub delete_count: usize,
+    pub num_shards: u32,
+}
+
+pub fn syncing_response(query: String) -> DesktopSearchResponse {
+    DesktopSearchResponse {
+        query,
+        index_state: DesktopSearchIndexState::Syncing,
+        indexed_file_count: 0,
+        results: Vec::new(),
+    }
+}
+
+pub fn build_local_index(db: &StateDb) -> anyhow::Result<LocalSearchIndex> {
+    let mut records = BTreeMap::new();
+    let mut pairs = Vec::new();
+    // One read for every shared row (roots and their children): quick search must not offer them for Finder.
+    let shared: HashSet<String> = db
+        .list_contract_states_by_namespace(Namespace::SharedWithMe)?
+        .into_iter()
+        .map(|contract| contract.file_id)
+        .collect();
+    // LD-0113 (core's `is_hidden_backup_item`): a device folder's manifest in Backups is never offered.
+    let backups = crate::backup_protect::BackupsTree::read(db);
+    for entry in db.list_files()? {
+        if entry.is_dir()
+            || backups.is_hidden(&entry.path)
+            || db
+                .get_owned_key_record(&entry.file_id)?
+                .is_some_and(|record| record.blocked_fingerprint.is_some())
+        {
+            continue;
+        }
+        let name = leaf_name(&entry.path);
+        if name.trim().is_empty() {
+            continue;
+        }
+        pairs.push((entry.file_id.clone(), name.clone()));
+        let shared_with_me = shared.contains(&entry.file_id);
+        records.insert(
+            entry.file_id.clone(),
+            LocalSearchRecord {
+                file_id: entry.file_id,
+                name,
+                rel_path: entry.path,
+                status: entry.status.as_str().to_string(),
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at,
+                shared_with_me,
+            },
+        );
+    }
+    Ok(LocalSearchIndex {
+        index: SearchIndex::build(&pairs, DEFAULT_NUM_SHARDS),
+        records,
+    })
+}
+
+/// `exclude_shared` drops shared-with-me rows BEFORE the result limit (task 1885 fix round 2, n1): a Mac's quick search
+/// offers only what Finder has, and a filter applied after `truncate(limit)` would let twelve shared matches ranked above
+/// the person's own files turn into "No matching files.".
+pub fn query_local_index(
+    local: &LocalSearchIndex,
+    query: &str,
+    limit: usize,
+    exclude_shared: bool,
+) -> DesktopSearchResponse {
+    let trimmed = query.trim();
+    let mut results: Vec<_> = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        local
+            .index
+            .query(trimmed)
+            .into_iter()
+            .filter_map(|file_id| local.records.get(&file_id))
+            .filter(|record| !(exclude_shared && record.shared_with_me))
+            .cloned()
+            .collect()
+    };
+
+    results.sort_by(|a, b| compare_records_for_query(a, b, trimmed));
+    results.truncate(limit);
+
+    DesktopSearchResponse {
+        query: query.to_string(),
+        index_state: DesktopSearchIndexState::Ready,
+        indexed_file_count: local.index.file_count(),
+        results: results
+            .into_iter()
+            .map(|r| DesktopSearchResult {
+                file_id: r.file_id,
+                name: r.name,
+                rel_path: r.rel_path,
+                status: r.status,
+                size_bytes: r.size_bytes,
+                modified_at: r.modified_at,
+                shared_with_me: r.shared_with_me,
+            })
+            .collect(),
+    }
+}
+
+pub fn local_index_signature(db: &StateDb) -> anyhow::Result<u64> {
+    let local = build_local_index(db)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    local.index.file_count().hash(&mut hasher);
+    for (file_id, record) in &local.records {
+        file_id.hash(&mut hasher);
+        record.name.hash(&mut hasher);
+        record.rel_path.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::Result<Option<SearchIndex>> {
+    let manifest = store.fetch_manifest().await?;
+    if manifest.is_empty() {
+        return Ok(None);
+    }
+    let mut shards = Vec::new();
+    for coord in &manifest {
+        if let Some(blob) = store.get_shard(coord.bucket, coord.page).await? {
+            shards.push(EncryptedShard {
+                bucket: coord.bucket,
+                page: coord.page,
+                blob,
+            });
+        }
+    }
+    let master_key = MasterKey::from_bytes(store.master_key_bytes());
+    Ok(Some(SearchIndex::from_encrypted_shards(
+        &master_key,
+        &shards,
+        DEFAULT_NUM_SHARDS,
+    )?))
+}
+
+pub async fn sync_local_index_to_remote(db: &StateDb, api: &ApiClient) -> anyhow::Result<SearchIndexSyncSummary> {
+    sync_local_index_to_store(db, api).await
+}
+
+async fn sync_local_index_to_store(
+    db: &StateDb,
+    store: &impl SearchShardStore,
+) -> anyhow::Result<SearchIndexSyncSummary> {
+    let local = build_local_index(db)?;
+    let master_key = MasterKey::from_bytes(store.master_key_bytes());
+    let remote_manifest = store.fetch_manifest().await?;
+    let partial = db
+        .list_owned_key_records()?
+        .iter()
+        .any(|r| r.blocked_fingerprint.is_some());
+    let mut remote_shards = Vec::new();
+    for coord in &remote_manifest {
+        if let Some(blob) = store.get_shard(coord.bucket, coord.page).await? {
+            let shard = EncryptedShard {
+                bucket: coord.bucket,
+                page: coord.page,
+                blob,
+            };
+            if SearchIndex::from_encrypted_shards(&master_key, std::slice::from_ref(&shard), DEFAULT_NUM_SHARDS).is_ok()
+            {
+                remote_shards.push(shard);
+            } else if partial {
+                anyhow::bail!("owner index rebuild deferred until listing is complete");
+            }
+        } else if partial {
+            anyhow::bail!("owner index rebuild deferred until listing is complete");
+        }
+    }
+    let mut index = SearchIndex::from_encrypted_shards(&master_key, &remote_shards, DEFAULT_NUM_SHARDS)?;
+    // Preserve readable entries from concurrent devices, and replay only known
+    // local names/removals. Unavailable rows are not deletion instructions.
+    for entry in db.list_owned_key_records()? {
+        if !partial && db.get_file(&entry.file_id)?.is_none() {
+            index.remove(&entry.file_id);
+        }
+    }
+    for (id, entry) in &local.records {
+        index.upsert(id, &entry.name);
+    }
+    let encrypted = index.encrypt_shards(&master_key)?;
+
+    let remote_versions: BTreeMap<(u32, u32), i64> = remote_manifest
+        .iter()
+        .map(|r| ((r.bucket, r.page), r.version))
+        .collect();
+    let local_refs: Vec<ShardRef> = encrypted
+        .iter()
+        .map(|s| ShardRef {
+            bucket: s.bucket,
+            page: s.page,
+            version: remote_versions
+                .get(&(s.bucket, s.page))
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1),
+        })
+        .collect();
+    let remote_refs: Vec<ShardRef> = remote_manifest.iter().map(to_core_shard_ref).collect();
+    let plan = search_sync::diff_manifest(&local_refs, &remote_refs, true);
+
+    let shard_map: BTreeMap<ShardCoord, EncryptedShard> = encrypted
+        .into_iter()
+        .map(|s| {
+            (
+                ShardCoord {
+                    bucket: s.bucket,
+                    page: s.page,
+                },
+                s,
+            )
+        })
+        .collect();
+
+    let mut put_count = 0usize;
+    for coord in &plan.to_put {
+        if let Some(shard) = shard_map.get(coord) {
+            store.put_shard(shard.clone()).await?;
+            put_count += 1;
+        }
+    }
+    let mut delete_count = 0usize;
+    for coord in &plan.to_delete {
+        store.delete_shard(coord.bucket, coord.page).await?;
+        delete_count += 1;
+    }
+
+    Ok(SearchIndexSyncSummary {
+        indexed_file_count: local.index.file_count(),
+        remote_manifest_count: remote_manifest.len(),
+        put_count,
+        get_count: remote_manifest.len(),
+        delete_count,
+        num_shards: DEFAULT_NUM_SHARDS,
+    })
+}
+
+fn to_core_shard_ref(r: &SearchShardRef) -> ShardRef {
+    ShardRef {
+        bucket: r.bucket,
+        page: r.page,
+        version: r.version,
+    }
+}
+
+fn compare_records_for_query(a: &LocalSearchRecord, b: &LocalSearchRecord, query: &str) -> Ordering {
+    let ar = rank_name(&a.name, query);
+    let br = rank_name(&b.name, query);
+    ar.cmp(&br)
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        .then_with(|| a.rel_path.to_lowercase().cmp(&b.rel_path.to_lowercase()))
+        .then_with(|| a.file_id.cmp(&b.file_id))
+}
+
+fn rank_name(name: &str, query: &str) -> u8 {
+    let n = tokenize(name);
+    let q = tokenize(query);
+    let needle = q.normalized.trim();
+    if needle.is_empty() {
+        return 9;
+    }
+    if n.normalized.trim() == needle {
+        return 0;
+    }
+    if n.normalized.starts_with(needle) {
+        return 1;
+    }
+    if q.tokens
+        .iter()
+        .any(|qt| n.tokens.iter().any(|nt| nt.as_str() == qt.as_str()))
+    {
+        return 2;
+    }
+    if q.tokens.iter().any(|qt| n.tokens.iter().any(|nt| nt.starts_with(qt))) {
+        return 3;
+    }
+    if n.normalized.contains(needle) {
+        return 4;
+    }
+    5
+}
+
+fn leaf_name(path: &str) -> String {
+    let trimmed = path.trim_matches(|c| c == '/' || c == '\\');
+    trimmed
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex};
+
+    use beebeeb_core::kdf::MasterKey;
+    use beebeeb_core::search_index::DEFAULT_NUM_SHARDS;
+
+    use crate::api_client::ApiClient;
+    use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, StateDb};
+
+    fn seed_file(db: &StateDb, file_id: &str, path: &str, kind: ItemKind) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.to_string(),
+            path: path.to_string(),
+            status: FileStatus::Local,
+            size_bytes: 123,
+            modified_at: 1_775_000_000,
+            content_hash: None,
+            remote_updated_at: 1_775_000_000,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .expect("seed file");
+
+        if kind == ItemKind::Folder {
+            let mut contract: FileContractState = db
+                .get_file_contract_state(file_id)
+                .expect("contract lookup")
+                .expect("default contract row");
+            contract.item_kind = ItemKind::Folder;
+            db.set_file_contract_state(&contract).expect("mark folder");
+        }
+    }
+
+    #[test]
+    fn local_index_builds_from_state_db_leaf_file_names_and_skips_folders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "cafe-notes", "Archive/CaféNotes.txt", ItemKind::File);
+        seed_file(&db, "photo", "Design/myVacationPhoto.png", ItemKind::File);
+        seed_file(&db, "folder", "Archive/CaféFolder", ItemKind::Folder);
+
+        let local = super::build_local_index(&db).expect("local index");
+
+        assert_eq!(local.index.num_shards(), DEFAULT_NUM_SHARDS);
+        assert_eq!(local.index.file_count(), 2);
+        assert_eq!(local.records.get("cafe-notes").unwrap().name, "CaféNotes.txt");
+        assert_eq!(local.records.get("photo").unwrap().name, "myVacationPhoto.png");
+        assert_eq!(local.index.query("cafe"), BTreeSet::from(["cafe-notes".to_string()]));
+        assert_eq!(local.index.query("photo"), BTreeSet::from(["photo".to_string()]));
+        assert!(
+            local.index.query("archive").is_empty(),
+            "parent folder segments must not be indexed as file-name tokens"
+        );
+        assert!(
+            local.index.query("folder").is_empty(),
+            "folder rows are not file results"
+        );
+    }
+
+    /// Task 1885 fix round 1 (I3): the results say which rows are shared with the person. A shared file is in the index
+    /// (the search finds it), but it is not in Finder, so the flag is what lets the quick-search overlay stop offering to
+    /// show it there. A shared root's CHILD is flagged too: its contract carries the namespace, not only the root's.
+    #[test]
+    fn test_1885_results_say_which_rows_are_shared_with_me() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "mine", "Reports/report-mine.pdf", ItemKind::File);
+        seed_file(&db, "shared-root-file", "Shared/report-theirs.pdf", ItemKind::File);
+        seed_file(&db, "shared-child", "Shared/Deep/report-deeper.pdf", ItemKind::File);
+        for id in ["shared-root-file", "shared-child"] {
+            let mut contract = db.get_file_contract_state(id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+
+        let local = super::build_local_index(&db).expect("local index");
+        let found = super::query_local_index(&local, "report", 10, false);
+        let flags: std::collections::BTreeMap<_, _> = found
+            .results
+            .iter()
+            .map(|r| (r.file_id.as_str(), r.shared_with_me))
+            .collect();
+        assert_eq!(
+            flags,
+            std::collections::BTreeMap::from([("mine", false), ("shared-root-file", true), ("shared-child", true)]),
+            "all three are found; the two shared rows say so"
+        );
+        let json = serde_json::to_value(&found.results[0]).expect("serialize");
+        assert!(
+            json.get("shared_with_me").is_some(),
+            "the flag reaches the frontend: {json}"
+        );
+    }
+
+    /// Task 1885 fix round 2 (n1): a Mac's quick search drops the shared rows BEFORE it cuts to the limit. With more
+    /// shared matches than the limit, ranked above the person's own file, the own file is still returned. (Without the
+    /// flag the same query returns twelve shared rows and no own file: that is what the old filter-after-the-limit did.)
+    #[test]
+    fn test_1885_shared_rows_are_dropped_before_the_limit_not_after() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        for n in 0..13 {
+            // The names START with the query, so they rank ahead of the own file's later token match.
+            let id = format!("shared-{n:02}");
+            seed_file(&db, &id, &format!("Shared/report-{n:02}.pdf"), ItemKind::File);
+            let mut contract = db.get_file_contract_state(&id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+        seed_file(&db, "mine", "Archive/My old report.pdf", ItemKind::File);
+        let local = super::build_local_index(&db).expect("local index");
+
+        let ids = |response: &super::DesktopSearchResponse| {
+            response.results.iter().map(|r| r.file_id.clone()).collect::<Vec<_>>()
+        };
+        let everything = super::query_local_index(&local, "report", 12, false);
+        assert_eq!(everything.results.len(), 12);
+        assert!(
+            everything.results.iter().all(|r| r.shared_with_me),
+            "setup: twelve shared rows outrank the own file, so a filter after the limit would leave nothing: {:?}",
+            ids(&everything)
+        );
+
+        let for_a_mac = super::query_local_index(&local, "report", 12, true);
+        assert_eq!(ids(&for_a_mac), vec!["mine".to_string()], "the own match is returned");
+        assert!(for_a_mac.results.iter().all(|r| !r.shared_with_me));
+        assert_eq!(
+            for_a_mac.indexed_file_count, everything.indexed_file_count,
+            "the count of indexed files is the index's, not the filtered list's"
+        );
+    }
+
+    /// Fix round 2 (n1): with enough of the person's own matches, a Mac gets a full page of them, none shared.
+    #[test]
+    fn test_1885_a_mac_gets_a_full_page_of_the_persons_own_matches() {
+        use crate::state_db::Namespace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        for n in 0..6 {
+            let id = format!("shared-{n}");
+            seed_file(&db, &id, &format!("Shared/note-{n}.txt"), ItemKind::File);
+            let mut contract = db.get_file_contract_state(&id).expect("lookup").expect("row");
+            contract.namespace = Namespace::SharedWithMe;
+            db.set_file_contract_state(&contract).expect("mark shared");
+        }
+        for n in 0..5 {
+            seed_file(&db, &format!("mine-{n}"), &format!("Docs/note-{n}.txt"), ItemKind::File);
+        }
+        let local = super::build_local_index(&db).expect("local index");
+        let page = super::query_local_index(&local, "note", 4, true);
+        assert_eq!(page.results.len(), 4, "a full page");
+        assert!(
+            page.results
+                .iter()
+                .all(|r| r.file_id.starts_with("mine-") && !r.shared_with_me)
+        );
+        let windows = super::query_local_index(&local, "note", 4, false);
+        assert_eq!(windows.results.len(), 4, "without the flag every row is a candidate");
+    }
+
+    #[test]
+    fn local_query_uses_core_tokenization_and_returns_ranked_results() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "start", "CaféNotes.txt", ItemKind::File);
+        seed_file(&db, "middle", "Projects/Project_Cafe_Archive.txt", ItemKind::File);
+        seed_file(&db, "camel", "Design/myVacationPhoto.png", ItemKind::File);
+        seed_file(&db, "miss", "Budget.xlsx", ItemKind::File);
+        let local = super::build_local_index(&db).expect("local index");
+
+        let cafe = super::query_local_index(&local, "cafe", 10, false);
+        assert_eq!(
+            cafe.results.iter().map(|r| r.file_id.as_str()).collect::<Vec<_>>(),
+            vec!["start", "middle"],
+            "a file name starting with the folded query ranks before a later token match"
+        );
+
+        let camel = super::query_local_index(&local, "vacation photo", 10, false);
+        assert_eq!(
+            camel.results.iter().map(|r| r.file_id.as_str()).collect::<Vec<_>>(),
+            vec!["camel"],
+            "camelCase names must be searchable through core tokenization"
+        );
+
+        let empty = super::query_local_index(&local, "nonexistent", 10, false);
+        assert!(empty.results.is_empty());
+        assert_eq!(empty.index_state, super::DesktopSearchIndexState::Ready);
+        assert_eq!(empty.indexed_file_count, 4);
+    }
+
+    #[test]
+    fn shard_sync_round_trips_with_web_compatible_wire_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = StateDb::open(dir.path().join("state.db")).expect("state db");
+        seed_file(&db, "cafe-notes", "Archive/CaféNotes.txt", ItemKind::File);
+        seed_file(&db, "photo", "Design/myVacationPhoto.png", ItemKind::File);
+
+        let local = super::build_local_index(&db).expect("local index");
+        let master_key = [9u8; 32];
+        let mk = MasterKey::from_bytes(master_key);
+        let encrypted = local.index.encrypt_shards(&mk).expect("encrypted shards");
+        let used: BTreeSet<(u32, u32)> = encrypted.iter().map(|s| (s.bucket, s.page)).collect();
+        let stale_bucket = (0..DEFAULT_NUM_SHARDS)
+            .find(|b| !used.contains(&(*b, 0)))
+            .expect("unused stale bucket");
+
+        let api = ApiClient::new("https://api.beebeeb.io/".into(), "fixture-token".into(), master_key);
+        assert_eq!(
+            api.search_shard_manifest_url(),
+            "https://api.beebeeb.io/api/v1/search-index/shards"
+        );
+        assert_eq!(
+            api.search_shard_url(7, 2),
+            "https://api.beebeeb.io/api/v1/search-index/shards/7/2"
+        );
+
+        let store = FixtureSearchStore::new(master_key, "fixture-token");
+        store.insert_shard(stale_bucket, 0, 9, vec![1, 2, 3, 4]);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let summary = rt
+            .block_on(super::sync_local_index_to_store(&db, &store))
+            .expect("sync local index");
+
+        assert_eq!(summary.indexed_file_count, 2);
+        assert_eq!(summary.remote_manifest_count, 1);
+        assert_eq!(summary.put_count, encrypted.len());
+        assert_eq!(summary.delete_count, 1);
+        assert_eq!(summary.get_count, 1);
+
+        let restored = rt
+            .block_on(super::load_remote_index_from_store(&store))
+            .expect("load remote index")
+            .expect("remote index present");
+        assert_eq!(restored.file_count(), 2);
+        assert_eq!(restored.query("cafe"), BTreeSet::from(["cafe-notes".to_string()]));
+        assert_eq!(restored.query("photo"), BTreeSet::from(["photo".to_string()]));
+
+        let requests = store.requests();
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/api/v1/search-index/shards");
+        assert!(
+            requests.iter().any(|r| r.method == "PUT"
+                && r.path.starts_with("/api/v1/search-index/shards/")
+                && r.authorization.as_deref() == Some("Bearer fixture-token")
+                && r.content_type.as_deref() == Some("application/octet-stream")
+                && !r.body.is_empty()),
+            "shard PUT must use web's raw octet-stream contract with bearer auth"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.method == "DELETE" && r.path == format!("/api/v1/search-index/shards/{stale_bucket}/0")),
+            "authoritative full rebuild deletes remote-only stale shards"
+        );
+        assert!(
+            requests.iter().any(|r| r.method == "GET"
+                && r.path.starts_with("/api/v1/search-index/shards/")
+                && r.path != "/api/v1/search-index/shards"),
+            "remote round-trip must fetch raw shard bytes by bucket/page"
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    struct FixtureState {
+        shards: BTreeMap<(u32, u32), (i64, Vec<u8>)>,
+        next_version: i64,
+        requests: Vec<RecordedRequest>,
+    }
+
+    struct FixtureSearchStore {
+        master_key: [u8; 32],
+        token: String,
+        state: Arc<Mutex<FixtureState>>,
+    }
+
+    impl FixtureSearchStore {
+        fn new(master_key: [u8; 32], token: &str) -> Self {
+            Self {
+                master_key,
+                token: token.to_string(),
+                state: Arc::new(Mutex::new(FixtureState {
+                    next_version: 10,
+                    ..FixtureState::default()
+                })),
+            }
+        }
+
+        fn insert_shard(&self, bucket: u32, page: u32, version: i64, blob: Vec<u8>) {
+            self.state
+                .lock()
+                .expect("fixture mutex")
+                .shards
+                .insert((bucket, page), (version, blob));
+        }
+
+        fn requests(&self) -> Vec<RecordedRequest> {
+            self.state.lock().expect("fixture mutex").requests.clone()
+        }
+
+        fn record(
+            &self,
+            method: &str,
+            path: String,
+            authorization: Option<String>,
+            content_type: Option<String>,
+            body: Vec<u8>,
+        ) {
+            self.state
+                .lock()
+                .expect("fixture mutex")
+                .requests
+                .push(RecordedRequest {
+                    method: method.to_string(),
+                    path,
+                    authorization,
+                    content_type,
+                    body,
+                });
+        }
+
+        fn auth(&self) -> Option<String> {
+            Some(format!("Bearer {}", self.token))
+        }
+    }
+
+    impl super::SearchShardStore for FixtureSearchStore {
+        fn master_key_bytes(&self) -> [u8; 32] {
+            self.master_key
+        }
+
+        fn fetch_manifest<'a>(&'a self) -> super::StoreFuture<'a, Vec<crate::api_client::SearchShardRef>> {
+            Box::pin(async move {
+                self.record(
+                    "GET",
+                    "/api/v1/search-index/shards".to_string(),
+                    self.auth(),
+                    None,
+                    Vec::new(),
+                );
+                let shards = self
+                    .state
+                    .lock()
+                    .expect("fixture mutex")
+                    .shards
+                    .iter()
+                    .map(|(&(bucket, page), (version, _))| crate::api_client::SearchShardRef {
+                        bucket,
+                        page,
+                        version: *version,
+                    })
+                    .collect();
+                Ok(shards)
+            })
+        }
+
+        fn get_shard<'a>(&'a self, bucket: u32, page: u32) -> super::StoreFuture<'a, Option<Vec<u8>>> {
+            Box::pin(async move {
+                self.record(
+                    "GET",
+                    format!("/api/v1/search-index/shards/{bucket}/{page}"),
+                    self.auth(),
+                    None,
+                    Vec::new(),
+                );
+                Ok(self
+                    .state
+                    .lock()
+                    .expect("fixture mutex")
+                    .shards
+                    .get(&(bucket, page))
+                    .map(|(_, blob)| blob.clone()))
+            })
+        }
+
+        fn put_shard<'a>(
+            &'a self,
+            shard: beebeeb_core::search_index::EncryptedShard,
+        ) -> super::StoreFuture<'a, crate::api_client::SearchShardRef> {
+            Box::pin(async move {
+                self.record(
+                    "PUT",
+                    format!("/api/v1/search-index/shards/{}/{}", shard.bucket, shard.page),
+                    self.auth(),
+                    Some("application/octet-stream".to_string()),
+                    shard.blob.clone(),
+                );
+                let version = {
+                    let mut guard = self.state.lock().expect("fixture mutex");
+                    let version = guard.next_version;
+                    guard.next_version += 1;
+                    guard.shards.insert((shard.bucket, shard.page), (version, shard.blob));
+                    version
+                };
+                Ok(crate::api_client::SearchShardRef {
+                    bucket: shard.bucket,
+                    page: shard.page,
+                    version,
+                })
+            })
+        }
+
+        fn delete_shard<'a>(&'a self, bucket: u32, page: u32) -> super::StoreFuture<'a, ()> {
+            Box::pin(async move {
+                self.record(
+                    "DELETE",
+                    format!("/api/v1/search-index/shards/{bucket}/{page}"),
+                    self.auth(),
+                    None,
+                    Vec::new(),
+                );
+                self.state.lock().expect("fixture mutex").shards.remove(&(bucket, page));
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn api_client_search_shard_urls_match_web_paths() {
+        let api = ApiClient::new("https://api.beebeeb.io/".into(), "tok".into(), [0u8; 32]);
+        assert_eq!(
+            api.search_shard_manifest_url(),
+            "https://api.beebeeb.io/api/v1/search-index/shards"
+        );
+        assert_eq!(
+            api.search_shard_url(12, 3),
+            "https://api.beebeeb.io/api/v1/search-index/shards/12/3"
+        );
+    }
+
+    fn shard_path_coord(path: &str) -> Option<(u32, u32)> {
+        let suffix = path.strip_prefix("/api/v1/search-index/shards/")?;
+        let (bucket, page) = suffix.split_once('/')?;
+        Some((bucket.parse().ok()?, page.parse().ok()?))
+    }
+
+    #[test]
+    fn fixture_contract_paths_parse_like_server_routes() {
+        assert_eq!(shard_path_coord("/api/v1/search-index/shards/63/0"), Some((63, 0)));
+        assert_eq!(shard_path_coord("/api/v1/search-index/shards"), None);
+    }
+}

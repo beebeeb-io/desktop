@@ -433,15 +433,15 @@ mod wiring_tests {
     /// The runner module's text, from the facade and every file the split moved its code into.
     fn runner_rs() -> String {
         source(concat!(
-            include_str!("../runner.rs"),
+            include_str!("../../../crates/beebeeb-engine/src/runner.rs"),
             "\n",
-            include_str!("../runner/lifecycle.rs"),
+            include_str!("../../../crates/beebeeb-engine/src/runner/lifecycle.rs"),
             "\n",
-            include_str!("../runner/telemetry.rs"),
+            include_str!("../../../crates/beebeeb-engine/src/runner/telemetry.rs"),
             "\n",
-            include_str!("../runner/tick_loop.rs"),
+            include_str!("../../../crates/beebeeb-engine/src/runner/tick_loop.rs"),
             "\n",
-            include_str!("../runner/working_set_signal.rs"),
+            include_str!("../../../crates/beebeeb-engine/src/runner/working_set_signal.rs"),
             "\n",
         ))
     }
@@ -709,7 +709,9 @@ mod wiring_tests {
     #[test]
     fn startup_and_the_conflict_handler_still_go_through_policy() {
         assert!(lib_rs().contains("surfaces::policy::startup_surface("));
-        assert!(runner_rs().contains("surfaces::policy::conflict_auto_opens_window("));
+        // The engine asks its host (`runner`), and the Tauri host answers from the policy (`engine_host.rs`).
+        assert!(runner_rs().contains("if app.conflict_opens_window() {"));
+        assert!(include_str!("../engine_host.rs").contains("surfaces::policy::conflict_auto_opens_window("));
     }
 
     #[test]
