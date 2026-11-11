@@ -98,6 +98,15 @@ impl BoardTrash {
         }
     }
 
+    /// DW-0749b: emptying, five of the twelve deleted for good; three of the seven left are listed.
+    pub fn emptying() -> Self {
+        let mut trash = BoardTrash::new();
+        trash.rows.drain(..3);
+        trash.unlisted = 4;
+        trash.emptying = Some(Emptying { done: 5, of: 12 });
+        trash
+    }
+
     /// DW-0117: nothing in Trash.
     pub fn empty() -> Self {
         BoardTrash {

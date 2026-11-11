@@ -1,5 +1,6 @@
-//! Shared (`DW-0501` With me, `DW-0502` By me, `DW-0503` Requests, and their empty states
-//! `DW-0508`, `DW-0509`, `DW-0510`). Its menus and dialogs are listed in `FRAMES.md`.
+//! Shared (`DW-0501` With me, `DW-0502` By me, `DW-0503` Requests, their empty states
+//! `DW-0508`, `DW-0509`, `DW-0510`, and an item's menu `DW-0505`, `DW-0506`, `DW-0507`). Its
+//! dialogs are listed in `FRAMES.md`.
 
 pub mod parts;
 pub mod scenes;
@@ -13,6 +14,7 @@ use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
+use parts::menu::{Entry, Open};
 use parts::table::{Columns, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
@@ -45,6 +47,8 @@ pub struct SharedUi {
     pub tab: Tab,
     /// The selected item of the tab that shows.
     pub selected: Option<usize>,
+    /// The selected item's menu, while it is open (DW-0505, DW-0506, DW-0507).
+    pub menu: Option<Open>,
 }
 
 impl Default for SharedUi {
@@ -53,6 +57,7 @@ impl Default for SharedUi {
             source: Box::new(BoardShared::new()),
             tab: Tab::WithMe,
             selected: None,
+            menu: None,
         }
     }
 }
@@ -62,6 +67,7 @@ impl SharedUi {
         if self.tab != tab {
             self.tab = tab;
             self.selected = None;
+            self.menu = None;
         }
     }
 
@@ -90,14 +96,113 @@ impl SharedUi {
         }
     }
 
-    /// The menu of the selected item: DW-0505, DW-0506 or DW-0507.
-    pub fn menu_intent(&self) -> Intent {
-        Intent::Frame(match self.tab {
-            Tab::WithMe => "DW-0505",
-            Tab::ByMe => "DW-0506",
-            Tab::Requests => "DW-0507",
-        })
+    /// The id of the selected item.
+    fn selected_id(&self) -> Option<String> {
+        let i = self.selected?;
+        let people = self.source.people_shares();
+        match self.tab {
+            Tab::WithMe => self.source.with_me().get(i).map(|r| r.id.clone()),
+            Tab::ByMe if i < people.len() => Some(people[i].id.clone()),
+            Tab::ByMe => self.source.links().get(i - people.len()).map(|l| l.id.clone()),
+            Tab::Requests => self.source.requests().get(i).map(|r| r.id.clone()),
+        }
     }
+
+    /// The selected item's menu (DW-0505, DW-0506, DW-0507) and its name.
+    pub fn menu_entries(&self) -> (&'static str, &'static [Entry], f32) {
+        let Some(i) = self.selected else {
+            return ("", &[], 0.0);
+        };
+        match self.tab {
+            Tab::WithMe => ("Shared with you", MENU_WITH_ME, 220.0),
+            // A share with people offers People and Stop sharing instead of the link items.
+            Tab::ByMe if i < self.source.people_shares().len() => ("Shared with people", MENU_PEOPLE, 210.0),
+            Tab::ByMe => ("Link", MENU_LINK, 210.0),
+            Tab::Requests => match self.source.requests().get(i).map(|r| r.state) {
+                Some(RequestState::Open) => ("File request", MENU_REQUEST, 200.0),
+                // A closed or expired request only offers View files and Remove.
+                _ => ("File request", MENU_REQUEST_OVER, 200.0),
+            },
+        }
+    }
+
+    /// Do what the menu's item `n` says, and close the menu.
+    pub fn pick(&mut self, n: usize) -> Option<Intent> {
+        let (_, entries, _) = self.menu_entries();
+        self.menu = None;
+        let words = entries.get(n)?.words;
+        let id = self.selected_id()?;
+        let mut gone = false;
+        let intent = match words {
+            "Open" | "View files" => self.open_intent(),
+            "Preview" => Some(Intent::Do("preview", id)),
+            "Make available offline" => {
+                self.source.keep_offline(&id);
+                None
+            }
+            "Show in File Explorer" => Some(Intent::Frame("DW-1180")),
+            "Details" => Some(Intent::Frame("DW-0411")),
+            // The confirmation is the shell's (the board draws none); the engine call follows it.
+            "Leave\u{2026}" => Some(Intent::Do("leave", id)),
+            "Copy link" => Some(Intent::Do("copy-link", id)),
+            "Change expiry" => Some(Intent::Do("change-expiry", id)),
+            "Password\u{2026}" => Some(Intent::Do("link-password", id)),
+            "People" => Some(Intent::Frame("DW-0511")),
+            "Stop sharing" => {
+                gone = self.source.stop_sharing(&id);
+                None
+            }
+            "Close request" => {
+                self.source.close_request(&id);
+                None
+            }
+            "Remove" => {
+                gone = self.source.remove_request(&id);
+                None
+            }
+            _ => None,
+        };
+        if gone {
+            let left = self.count();
+            self.selected = self.selected.filter(|_| left > 0).map(|i| i.min(left - 1));
+        }
+        intent
+    }
+}
+
+const MENU_WITH_ME: &[Entry] = &[
+    Entry::new("Open").keys("Enter"),
+    Entry::new("Preview").keys("Space"),
+    Entry::new("Make available offline").rule(),
+    Entry::new("Show in File Explorer"),
+    Entry::new("Details").keys("Alt+Enter"),
+    Entry::new("Leave\u{2026}").danger().rule(),
+];
+const MENU_LINK: &[Entry] = &[
+    Entry::new("Copy link"),
+    Entry::new("Change expiry").more(),
+    Entry::new("Password\u{2026}"),
+    Entry::new("Open").keys("Enter"),
+    Entry::new("People").rule(),
+    Entry::new("Stop sharing").danger(),
+];
+const MENU_PEOPLE: &[Entry] = &[Entry::new("People"), Entry::new("Stop sharing").danger()];
+const MENU_REQUEST: &[Entry] = &[
+    Entry::new("Copy link"),
+    Entry::new("View files"),
+    Entry::new("Change expiry").more(),
+    Entry::new("Close request").danger().rule(),
+];
+const MENU_REQUEST_OVER: &[Entry] = &[Entry::new("View files"), Entry::new("Remove").danger().rule()];
+
+fn pick(s: &mut State, n: usize) {
+    if let Some(intent) = s.frames.shared.pick(n) {
+        s.frames.intents.push(intent);
+    }
+}
+
+fn close_menu(s: &mut State) {
+    s.frames.shared.menu = None;
 }
 
 fn select(i: usize) -> impl Fn(&mut State) + 'static {
@@ -114,10 +219,9 @@ fn open(i: usize) -> impl Fn(&mut State) + 'static {
 }
 
 fn menu(i: usize) -> impl Fn(&mut State, rune::PointerPress, &mut Tx) + 'static {
-    move |s: &mut State, _, _| {
+    move |s: &mut State, press, _| {
         s.frames.shared.selected = Some(i);
-        let intent = s.frames.shared.menu_intent();
-        s.frames.intents.push(intent);
+        s.frames.shared.menu = Some(Open::at(press.x, press.y));
     }
 }
 
@@ -441,12 +545,30 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     } else {
         status
     };
-    chrome::window(s, cx, &t, bar, body, &status, None)
+    let layer = ui.menu.as_ref().map(|open| {
+        let (name, entries, min_w) = ui.menu_entries();
+        parts::menu::menu(name, entries, open, min_w, &t, pick, close_menu)
+    });
+    chrome::window(s, cx, &t, bar, body, &status, layer)
 }
 
 /// Shared's keys: the arrows select, Enter opens. The menu key is Rune's (it calls the row's
 /// `on_secondary_press`).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if let Some(open) = s.frames.shared.menu.as_mut() {
+        let (hot, count) = (open.hot, s.frames.shared.menu_entries().1.len());
+        return match ev.key {
+            Key::Enter => {
+                pick(s, hot);
+                true
+            }
+            Key::Escape => {
+                close_menu(s);
+                true
+            }
+            _ => s.frames.shared.menu.as_mut().is_some_and(|open| open.on_key(ev, count)),
+        };
+    }
     if ev.is_command('f') {
         tx.focus(crate::ui::keys::SEARCH_KEY, true);
         return true;

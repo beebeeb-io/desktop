@@ -18,6 +18,9 @@ pub enum Intent {
     Frame(&'static str),
     /// Open the item with this id as Files would.
     OpenItem(String),
+    /// Something the engine or the shell does with the item of this id, named by the board's
+    /// words ("copy-link", "preview", "leave"): a clipboard write, a confirmation, a further menu.
+    Do(&'static str, String),
 }
 
 /// What the lane's groups keep on `State` (ONE field: `State::frames`).

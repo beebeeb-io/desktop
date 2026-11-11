@@ -73,6 +73,14 @@ pub trait SharedSource {
     fn accept(&mut self, id: &str) -> bool;
     /// Decline an invitation: it goes; the sender is not told why.
     fn decline(&mut self, id: &str) -> bool;
+    /// Keep something shared with the person on this PC.
+    fn keep_offline(&mut self, id: &str) -> bool;
+    /// End a share with people or a link, straight away.
+    fn stop_sharing(&mut self, id: &str) -> bool;
+    /// Close a file request: no new uploads, what arrived stays.
+    fn close_request(&mut self, id: &str) -> bool;
+    /// Take a closed or expired request out of the list.
+    fn remove_request(&mut self, id: &str) -> bool;
 }
 
 /// The board's sample (DW-0501, DW-0502, DW-0503), or nothing at all (DW-0508, DW-0509, DW-0510).
@@ -288,5 +296,38 @@ impl SharedSource for BoardShared {
         let before = self.invitations.len();
         self.invitations.retain(|i| i.id != id);
         self.invitations.len() != before
+    }
+    fn keep_offline(&mut self, id: &str) -> bool {
+        match self.with_me.iter_mut().find(|r| r.id == id) {
+            Some(row) => {
+                row.pc = Some(PcState::AvailableOffline);
+                true
+            }
+            None => false,
+        }
+    }
+    fn stop_sharing(&mut self, id: &str) -> bool {
+        let before = self.people.len() + self.links.len();
+        self.people.retain(|p| p.id != id);
+        self.links.retain(|l| l.id != id);
+        self.people.len() + self.links.len() != before
+    }
+    fn close_request(&mut self, id: &str) -> bool {
+        match self
+            .requests
+            .iter_mut()
+            .find(|r| r.id == id && r.state == RequestState::Open)
+        {
+            Some(request) => {
+                request.state = RequestState::Closed;
+                true
+            }
+            None => false,
+        }
+    }
+    fn remove_request(&mut self, id: &str) -> bool {
+        let before = self.requests.len();
+        self.requests.retain(|r| r.id != id || r.state == RequestState::Open);
+        self.requests.len() != before
     }
 }

@@ -57,7 +57,11 @@ pub fn item(
         .px(10.0)
         .gap(8.0)
         .center_y()
-        .fill(if selected { t.selection } else { Color::TRANSPARENT })
+        .fill(if selected {
+            super::item_selected(t)
+        } else {
+            Color::TRANSPARENT
+        })
         .hover(t.hover)
         .press(t.press)
         .focusable(true)

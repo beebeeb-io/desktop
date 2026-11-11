@@ -23,6 +23,8 @@ pub enum ButtonKind {
     Outline,
     /// Words only, in red: a destructive action that still asks.
     GhostDanger,
+    /// Words only, unavailable for now: drawn at 40 %, not a Tab stop.
+    GhostOff,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub fn button_keyed(
     let ink = match kind {
         ButtonKind::Outline => t.text,
         ButtonKind::GhostDanger => red_text(t),
+        ButtonKind::GhostOff => t.text_secondary,
     };
     let (h, glyph, type_style) = match size {
         ButtonSize::Small => (22.0, 14.0, type_::BUTTON_SM),
@@ -63,10 +66,12 @@ pub fn button_keyed(
         .px(12.0)
         .gap(7.0)
         .center()
-        .radius(radius::MD)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true);
+        .radius(radius::MD);
+    b = if kind == ButtonKind::GhostOff {
+        b.disabled(true).opacity(0.4)
+    } else {
+        b.hover(t.hover).press(t.press).focusable(true)
+    };
     if kind == ButtonKind::Outline {
         b = b.fill(t.paper).border(1.0, t.card_border).border_layout();
     }
@@ -150,5 +155,6 @@ pub fn pill(key: &str, words: &str, tone: Tone, dot: bool, t: &Theme) -> El {
                 .fill(dot_ink),
         );
     }
-    p.child(kit::label(format!("{key}-pill-label"), words, style::PILL, ink))
+    // The words at their own width (Rune lays a text out half a point wider at most).
+    p.child(kit::label(format!("{key}-pill-label"), words, style::PILL, ink).w(rune::text::advance(words, style::PILL)))
 }

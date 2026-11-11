@@ -8,6 +8,7 @@ pub mod controls;
 pub mod empty;
 pub mod icons;
 pub mod list;
+pub mod menu;
 pub mod sidebar;
 pub mod table;
 pub mod toolbar;
@@ -50,6 +51,11 @@ pub fn green_text(t: &Theme) -> Color {
     } else {
         oklch(0.46, 0.13, 155.0)
     }
+}
+
+/// `.kit-item.is-selected`: a selected item of a grouped list.
+pub fn item_selected(t: &Theme) -> Color {
+    t.text.alpha(if t.dark { 0.09 } else { 0.06 })
 }
 
 /// A board avatar hue by its letter (`.kit-avatar.hue-a` … `hue-e`): only the hue is data.

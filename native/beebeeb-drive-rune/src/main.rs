@@ -182,10 +182,15 @@ const SCENES: &[ui::gate::Scene<State>] = &[
     ("DW-0501", frames::shared::scenes::dw_0501),
     ("DW-0502", frames::shared::scenes::dw_0502),
     ("DW-0503", frames::shared::scenes::dw_0503),
+    ("DW-0505", frames::shared::scenes::dw_0505),
+    ("DW-0506", frames::shared::scenes::dw_0506),
+    ("DW-0507", frames::shared::scenes::dw_0507),
     ("DW-0508", frames::shared::scenes::dw_0508),
     ("DW-0509", frames::shared::scenes::dw_0509),
     ("DW-0510", frames::shared::scenes::dw_0510),
     ("DW-0747", frames::trash::scenes::dw_0747),
+    ("DW-0748", frames::trash::scenes::dw_0748),
+    ("DW-0749b", frames::trash::scenes::dw_0749b),
     ("DW-0117", frames::trash::scenes::dw_0117),
 ];
 
