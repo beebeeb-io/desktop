@@ -7,8 +7,10 @@ pub mod shared;
 pub mod trash;
 
 use crate::State;
+use crate::shell::app::{Event, Route, Section};
+use crate::shell::registry::{Frame, FrameGroup};
 use crate::ui::sidebar::SidebarSection;
-use rune::{Cx, El, KeyEvent, Tx};
+use rune::{KeyEvent, Tx};
 
 /// Somewhere a control wants to go that this lane does not draw: the shell's route machine
 /// (or the lane that owns the target frame) picks it up. A control never does nothing.
@@ -32,16 +34,24 @@ pub struct Ui {
     pub intents: Vec<Intent>,
 }
 
-/// The view of the section the sidebar shows, when one of this lane's groups draws it.
-pub fn view(s: &State, cx: &mut Cx<State>) -> Option<El> {
-    match s.sidebar_section {
-        SidebarSection::Shared => Some(shared::view(s, cx)),
-        SidebarSection::Trash => Some(trash::view(s, cx)),
-        _ => None,
-    }
+/// The registry's lines (`shell::registry::FRAMES`): Shared and Trash.
+pub const SHARED: Frame = Frame {
+    group: FrameGroup::Section(Section::Shared),
+    view: shared::view,
+    on_key: Some(shared::on_key),
+};
+pub const TRASH: Frame = Frame {
+    group: FrameGroup::Section(Section::Trash),
+    view: trash::view,
+    on_key: Some(trash::on_key),
+};
+
+/// Put the window on a section, as a click in the sidebar does (the scenes and the tests).
+pub fn go(s: &mut State, section: Section) {
+    crate::shell::host::dispatch(s, Event::Navigate(Route::section(section)));
 }
 
-/// The keys of the section the sidebar shows. `None`: not one of this lane's sections.
+/// The keys of the section the window shows. `None`: not one of this lane's sections.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     match s.sidebar_section {
         SidebarSection::Shared => Some(shared::on_key(s, ev, tx)),

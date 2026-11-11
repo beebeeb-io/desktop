@@ -15,7 +15,7 @@ pub(crate) fn runtime(scene: fn(&mut State)) -> Runtime<State> {
         scale: 2.0,
     };
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
-    rt.on_key = Some(crate::on_key);
+    rt.on_key = Some(crate::shell::host::on_key);
     settle(&mut rt);
     rt
 }

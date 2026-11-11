@@ -4,10 +4,10 @@ use super::parts::menu::Open;
 use super::source::BoardShared;
 use super::{SharedUi, Tab};
 use crate::State;
-use crate::ui::sidebar::SidebarSection;
+use crate::shell::app::Section;
 
 fn scene(s: &mut State, tab: Tab, source: BoardShared) {
-    s.sidebar_section = SidebarSection::Shared;
+    crate::frames::go(s, Section::Shared);
     s.frames.shared = SharedUi {
         source: Box::new(source),
         tab,

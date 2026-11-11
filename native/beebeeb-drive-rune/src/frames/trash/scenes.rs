@@ -3,15 +3,15 @@
 use super::TrashUi;
 use super::source::BoardTrash;
 use crate::State;
-use crate::ui::sidebar::SidebarSection;
+use crate::shell::app::Section;
 
 pub fn dw_0747(s: &mut State) {
-    s.sidebar_section = SidebarSection::Trash;
+    crate::frames::go(s, Section::Trash);
     s.frames.trash = TrashUi::default();
 }
 
 pub fn dw_0117(s: &mut State) {
-    s.sidebar_section = SidebarSection::Trash;
+    crate::frames::go(s, Section::Trash);
     s.frames.trash = TrashUi {
         source: Box::new(BoardTrash::empty()),
         selected: None,
@@ -31,7 +31,7 @@ pub fn dw_0748(s: &mut State) {
 
 /// Emptying: 5 of 12 deleted for good.
 pub fn dw_0749b(s: &mut State) {
-    s.sidebar_section = SidebarSection::Trash;
+    crate::frames::go(s, Section::Trash);
     s.frames.trash = TrashUi {
         source: Box::new(BoardTrash::emptying()),
         selected: None,
