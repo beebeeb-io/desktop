@@ -41,7 +41,8 @@ impl StateDb {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
-        let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test)) {
+        let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test, feature = "test-support"))
+        {
             tx.query_row(
                 "SELECT path, parent_id FROM files
                  WHERE file_id = ?1 AND item_kind = 'file'

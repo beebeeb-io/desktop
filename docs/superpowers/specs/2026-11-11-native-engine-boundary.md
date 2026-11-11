@@ -164,13 +164,13 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `main` | 8 | 0 | 0 | 0 | - | SHELL |
 ## 4. Events the engine pushes to the UI today (each becomes a typed Rust event)
 
-41 `emit` call sites, 19 event names. The native shell needs one `enum EngineEvent` in the engine crate and an `EventSink` trait
+41 `emit` call sites, 21 event names. The native shell needs one `enum EngineEvent` in the engine crate and an `EventSink` trait
 (`fn send(&self, EngineEvent)`) that the Tauri shell implements with `app.emit` and the Rune shell with `AppHandle::update`.
 
 | event name | emitted in | payload today | native event |
 |---|---|---|---|
 | `engine-status` | `runner/tick_loop.rs` (2), `unknown_check.rs`, `settings_commands.rs` | `serde_json::Value` (`engine_status` payload + startup guard) | `Status(EngineStatus)`: type the JSON first |
-| `engine-conflict` | `runner/tick_loop.rs` | `json!{file id, name}` | `Conflict { file_id }` |
+| `engine-conflict` | `runner/tick_loop.rs` | a `json!` object (untyped) | `Conflict { file_id }` |
 | `drive://event` | `drive_v2/events.rs`, `share_v2/mod.rs` (2) | `DriveEvent` enum (typed) | `Drive(DriveEvent)` as is |
 | `drive://transfers` | `drive_v2/status_cmds.rs` | transfer rows (typed DTO) | `Transfers(Vec<TransferRow>)` |
 | `office://progress` | `office_v2/mod.rs` (2) | progress struct | none (DEAD) |
@@ -219,8 +219,8 @@ Stays desktop: `state_db` (the desktop's own SQLite schema), `windows_cf` (CFAPI
 
 | # | step | files | the seam | the test that proves it | parallel with UI frames? |
 |---|---|---|---|---|---|
-| 1 | leaf engine modules | `name_alias`, `download_pin`, `conflict`, `cf_range`, `ipc_frame`, `ipc_write_dedup`, `lockfile`, `os_state_reconcile`, `shared_folder_index`, `transfer_progress`, `account_dto`, `desktop_capabilities`, `link_health` (~6,600 lines, 0 refs) | plain `pub use`, as this PR | both crates' suites; counts unchanged | yes |
-| 2 | config + paths | `config`, `state_paths`, `test_sandbox` | `config` names `finder_setup`/`surfaces` in 3 places: cut with a `ConfigObserver` trait | `config_write_pin_tests` re-rooted at the crate | yes |
+| 1 | leaf engine modules | `name_alias`, `download_pin`, `conflict`, `cf_range`, `ipc_frame`, `ipc_write_dedup`, `lockfile`, `os_state_reconcile`, `shared_folder_index`, `transfer_progress`, `account_dto`, `desktop_capabilities`, `link_health` (7,243 lines, 0 refs) | plain `pub use`, as this PR | both crates' suites; counts unchanged | yes |
+| 2 | config + paths | `config`, `state_paths`, `test_sandbox` | `config` names `finder_setup`/`surfaces` on 4 lines: cut with a `ConfigObserver` trait | `config_write_pin_tests` re-rooted at the crate | yes |
 | 3 | API client | `api_client`, `direct_download`, `no_fetch_scope` | none (0 refs); needs step 1's `account_dto` | loopback tests move with it | yes |
 | 4 | SESSION, after PR #277 merges | `keychain/**`, `session_state`, `session_apply`, `session_reauth`, `auth_v2/**`, `login_commands`, `browser_login`, `reauth`, `account`, `vault_unlock`, `passkey_windows` | commands stay in the shell; `SessionStore` owns what `tauri::State<AppState>` holds today; sign-in steps go out as `EngineEvent::SignIn` | `keychain_isolation_tests`, `startup_session_tests`, the auth gate's table tests, run from the engine crate | no: the sign-in frames wait for it |
 | 5 | the sync engine: start/stop + typed events | `engine_bridge`, `owner_keys`, `watcher`, `ipc_socket`, `staged_payload`, `found_while_paused`, `backup`, `backup_protect`, `own_data_proof`, `engine_status`, `unknown_check`, `runner`, `bound_engine` | `EventSink` + `EngineEvent` (§4) replace the `AppHandle` in `runner` (28 refs) and `bound_engine` (23); `Notifier` trait for toasts | a headless test: start the engine on a temp root against the loopback API, upload one file, assert the `Status` sequence received through a channel sink | partly: Files/Details frames yes, status-line and activity frames need it |

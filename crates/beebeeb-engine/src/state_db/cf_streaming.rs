@@ -77,7 +77,7 @@ impl StateDb {
 
     /// Test only: the listing's version and the recorded identity of `file_id`, as a 0.8.21 database
     /// holds them (a version, no identity). Its callers are Windows-native tests.
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "test-support"), windows))]
     pub fn set_versions_for_test(&self, file_id: &str, current: Option<&str>, minted: Option<&str>) {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -257,7 +257,7 @@ impl StateDb {
 
     /// Test only: every read of a `files` row fails from now on (the table is renamed away), while
     /// `cf_poison` stays readable. Its one caller is a Windows-native test.
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "test-support"), windows))]
     pub fn make_file_rows_unreadable_for_test(&self) {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute_batch("ALTER TABLE files RENAME TO files_unreadable_for_test")

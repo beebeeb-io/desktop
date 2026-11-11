@@ -23,9 +23,10 @@ impl StateDb {
         }
         Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
-    /// Open an existing state database for reading only: nothing is created, migrated or written (not even the
-    /// journal mode), so a viewer can look at a database the engine owns. A database from an older build that lacks
-    /// a column a query names fails that query; it is never altered here.
+    /// Open an existing state database for reading only: no table is created or migrated, no row is written and
+    /// the journal mode is left as it is, so a viewer can look at a database the engine owns. (SQLite itself may
+    /// create the `-shm` side file of a WAL database; the database file is not written.) A database from an older
+    /// build that lacks a column a query names fails that query; it is never altered here.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,
@@ -411,7 +412,7 @@ impl StateDb {
         // agreed content) gets its "not in sync" mark at the next tick, not at the next start.
         // The tick's retry reads its place once and clears the flag.
         // Only the Windows guard reads these flags, so other builds carry no triggers (self-review).
-        if !cfg!(any(target_os = "windows", test)) {
+        if !cfg!(any(target_os = "windows", test, feature = "test-support")) {
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;

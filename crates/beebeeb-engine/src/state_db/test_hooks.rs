@@ -26,7 +26,7 @@ impl StateDb {
     pub fn hold_lock_for_test(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0.lock().expect("state_db mutex poisoned")
     }
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
     pub fn set_created_at_for_test(&self, op_id: &str, created_at: i64) {
         let conn = self.0.lock().unwrap();
         conn.execute(

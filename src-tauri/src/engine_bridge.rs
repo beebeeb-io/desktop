@@ -183,7 +183,13 @@ mod tests {
                 }
             }
         }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // A module the engine crate took over (`state_db`, ...) is read there; the rule a caller checks is unchanged.
+        let own = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let src = if own.join(format!("{module}.rs")).exists() {
+            own
+        } else {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/beebeeb-engine/src")
+        };
         let mut files = vec![src.join(format!("{module}.rs"))];
         walk(&src.join(module), &mut files);
         files.retain(|path| {
