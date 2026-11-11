@@ -476,9 +476,13 @@ fn becoming_active_and_updates_reach_the_reconciler_and_the_log() {
     assert!(run.contains("tauri::WindowEvent::Focused(true) = event") && run.contains("handle.app_activated()"));
     for signature in ["async fn install_update(", "async fn install_channel_downgrade("] {
         let body = body_between(&production, signature, "\n}\n");
-        assert!(body.contains("LifecycleEvent::UpdateDownloaded"), "{signature}");
-        assert!(body.contains("LifecycleEvent::UpdateInstalled"), "{signature}");
+        // Tasks 2449/2451: both commands install through the one record-first path, which writes both events.
+        assert!(body.contains("flow::download_record_install("), "{signature}");
     }
+    let flow = include_str!("update_window/flow.rs");
+    let install = body_between(flow, "async fn download_record_install(", "\n}\n");
+    assert!(install.contains("LifecycleEvent::UpdateDownloaded"));
+    assert!(install.contains("LifecycleEvent::UpdateInstalled"));
 }
 
 /// F7 follow-up 2 (f7b concern 4): in `Ready` the user-enabled poll sets no timer while no window is visible, and
