@@ -50,3 +50,34 @@ export const unlockWithWindowsHello = (): Promise<CommandResult<void>> => comman
 export const unknownPhraseWords = (words: string[]): Promise<CommandResult<number[]>> => command('auth_phrase_unknown_words', { words })
 export const restoreWithPhrase = (recoveryPhrase: string): Promise<CommandResult<void>> =>
   command('desktop_unlock_with_recovery_phrase', { recoveryPhrase })
+
+// ── Task 2445: auth rules in Rust (auth_v2::gate) ──────────────────────────
+
+export interface SignInProblemDto {
+  problem: import('./model').SignInProblem
+  text: string
+  lock_note?: string
+  wait_seconds?: number
+}
+
+/** Map a sign-in error code to the board's problem and text. The decision lives in Rust. */
+export const signInProblem = (code: string, consecutiveFailures: number): Promise<CommandResult<SignInProblemDto>> =>
+  command('auth_sign_in_problem', { code, consecutiveFailures })
+
+/** What screen follows a sign-in. The decision lives in Rust (auth_v2::gate::next_after_sign_in).
+ *  Keys are camelCase (Tauri's invoke convention for snake_case Rust params). */
+export const nextAfterSignIn = (outcome: LoginOutcome): Promise<CommandResult<string>> =>
+  command('auth_next_after_sign_in', {
+    requires2fa: outcome.requires_2fa,
+    vaultUnlocked: outcome.vault_unlocked,
+    reauthenticated: outcome.reauthenticated,
+    accountMismatch: outcome.account_mismatch !== null,
+  })
+
+/** The board's words for a 2FA verify error. */
+export const twoFactorError = (code: string): Promise<CommandResult<string>> =>
+  command('auth_two_factor_error', { code })
+
+/** The board's words for a recovery-phrase error. */
+export const phraseError = (code: string): Promise<CommandResult<string>> =>
+  command('auth_phrase_error', { code })

@@ -14,7 +14,7 @@ Modules 46–92, sorted by path.
 | `ipc_socket_framing_tests.rs` | End-to-end framing tests for the daemon IPC socket (task 1670 issue 3). | — |
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
 | `ipc_write_dedup_tests.rs` | Unit tests for the write-queue idempotency table (task 1684). | — |
-| `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthStoreError (4), AuthResult, VaultLockState (2), SessionToken, AuthSecretStore (12), AuthVault (3), holds_session_token, holds_account_email, holds_vault_key, platform_keychain_store_for, legacy_platform_keychain_store, migrate_legacy_keychain_to_account, … (+1 more) |
+| `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthResult, AuthStoreError (4), VaultLockState (2), SessionToken, AuthSecretStore (18), AuthVault (3), holds_account_email, holds_session_token, holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for, migrate_legacy_keychain_between, … (+1 more) |
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `known_folder.rs` | The known folders a backup can be turned on for (Windows' Desktop, Documents, Pictures, Music, Videos and Downloads), and what is left of th | resolve_known_folder, resolve_known_folder_current |
 | `launch_wiring_tests.rs` | (no //! header) | — |
