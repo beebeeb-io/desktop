@@ -166,13 +166,13 @@ fn refuses_another_channels_manifest() {
 fn refuses_a_manifest_older_than_one_already_accepted() {
     let key = TestKey::generate();
     let mut replayed = honest("0.9.1");
-    replayed.manifest_time = 1_700_000_000;
+    replayed.manifest_time = 1_799_000_000;
     assert_eq!(
         run(&key, "0.9.0", Some(1_800_000_000), &replayed).map(|c| c.verdict),
         Err(Refusal::StaleManifest)
     );
     assert!(
-        run(&key, "0.9.0", Some(1_700_000_000), &replayed).is_ok(),
+        run(&key, "0.9.0", Some(1_799_000_000), &replayed).is_ok(),
         "the same manifest again is not a replay"
     );
 }
@@ -503,5 +503,37 @@ fn policy_strict_a_signed_manifest_with_an_unknown_field_is_refused() {
     assert_eq!(
         resigned(&|manifest| manifest["install_args"] = "/S".into()),
         Err(Refusal::ManifestUnreadable)
+    );
+}
+
+/// A build with no build time (or a value that cannot be one) does not run with the not-before rule off: it takes
+/// no update at all, and says why.
+#[test]
+fn a_build_without_a_build_time_takes_no_update() {
+    use crate::policy::V2_KEY_CREATED;
+    let key = TestKey::generate();
+    let (manifest, signature) = honest("0.9.1").manifest(&key);
+    let built_at = |not_before: u64| {
+        let mut trust = trust(&key);
+        trust.not_before = not_before;
+        run_with(&trust, "0.9.0", None, NOW, &manifest, &signature)
+    };
+    assert!(
+        matches!(built_at(V2_KEY_CREATED), Ok(Verdict::Upgrade(_))),
+        "the control"
+    );
+    for not_a_build_time in [0, 1, V2_KEY_CREATED - 1] {
+        assert_eq!(
+            built_at(not_a_build_time),
+            Err(Refusal::NoBuildTime),
+            "{not_a_build_time}"
+        );
+    }
+    // Also for a manifest that is not even signed: the state the person sees is the build's, not the server's.
+    let mut unbuilt = trust(&key);
+    unbuilt.not_before = 0;
+    assert_eq!(
+        run_with(&unbuilt, "0.9.0", None, NOW, &manifest, ""),
+        Err(Refusal::NoBuildTime)
     );
 }

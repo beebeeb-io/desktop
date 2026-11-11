@@ -92,15 +92,40 @@ impl EngineStopped {
     }
 }
 
+/// The staged installer, verified, and held so that nothing can write, replace, rename or delete it while this
+/// value lives. Only the machine makes one, at `Event::Apply`, after the file passed its length and signature
+/// through this very handle: there is no way to start an installer the machine has not just verified.
+pub struct VerifiedInstaller {
+    path: PathBuf,
+    _held: fs::File,
+}
+
+impl VerifiedInstaller {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Starts the installer the way Tauri's updater does for 0.8.x (`/P` passive: progress only; `/R` start the
+    /// app afterwards; `/UPDATE` keep shortcuts and the autostart entry). A per-user install: no elevation. The
+    /// installer waits for this process to exit; it never ends it.
+    #[cfg(windows)]
+    pub fn start_nsis(&self, _stopped: EngineStopped) -> bool {
+        std::process::Command::new(&self.path)
+            .args(["/P", "/R", "/UPDATE"])
+            .spawn()
+            .is_ok()
+    }
+}
+
 /// The two things only the shell can do at "Restart to update", in the order the machine calls them.
 pub trait Apply {
     /// Stops the sync engine and parks uploads in progress, then returns the proof. `None` when the engine did not
     /// stop in time: nothing is started, the staged update is kept, and the person can try again.
     fn stop_engine(&mut self) -> Option<EngineStopped>;
 
-    /// Starts the verified installer (Windows: [`crate::host::launch_nsis`]). On `true` the shell exits the
+    /// Starts the verified installer (Windows: `installer.start_nsis(stopped)`). On `true` the shell exits the
     /// process; the installer waits for that, replaces the files and starts the new version.
-    fn launch(&mut self, installer: &Path, offer: &Offer, stopped: EngineStopped) -> bool;
+    fn launch(&mut self, installer: &VerifiedInstaller, offer: &Offer, stopped: EngineStopped) -> bool;
 
     /// The installer did not start after the engine was stopped: start the engine again.
     fn resume_engine(&mut self);
@@ -412,14 +437,18 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             Err(refusal) => return refused(refusal),
         };
 
-        // Recorded on disk first: a check that could not be recorded did not happen, in memory either.
+        // Recorded on disk first: a check that could not be recorded did not happen, in memory either. The mark
+        // only ever moves forward: the larger of this manifest's time and the mark it was checked against (a mark
+        // the policy did not believe, beyond the clock tolerance, is the one thing that is replaced).
+        let believable = self.clock.now().saturating_add(policy::MAX_CLOCK_SKEW_SECS);
+        let kept = seen.map_or(0, |seen| seen.manifest_time);
+        let mark = if kept <= believable {
+            checked.manifest_time.max(kept)
+        } else {
+            checked.manifest_time
+        };
         let mut recorded = self.persisted.clone();
-        recorded.seen.insert(
-            channel,
-            HighWater {
-                manifest_time: checked.manifest_time,
-            },
-        );
+        recorded.seen.insert(channel, HighWater { manifest_time: mark });
         recorded.last_check = Some(self.clock.now());
         if !self.store.save(&recorded) {
             return State::Failed {
@@ -709,8 +738,12 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         let Some(stopped) = self.apply.stop_engine() else {
             return kept(Failure::EngineStillRunning, offer);
         };
-        let started = self.apply.launch(&installer, &offer, stopped);
-        drop(held);
+        let verified = VerifiedInstaller {
+            path: installer,
+            _held: held,
+        };
+        let started = self.apply.launch(&verified, &offer, stopped);
+        drop(verified);
         if started {
             State::Restarting { offer }
         } else {

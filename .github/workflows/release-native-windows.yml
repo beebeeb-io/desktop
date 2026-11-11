@@ -71,19 +71,31 @@ jobs:
             *) echo "::error::Desktop release channel '$RELEASE_CHANNEL' must be alpha, beta, or stable."; exit 1 ;;
           esac
 
+      - name: Checkout the ref rules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
       # Building and promoting both sign. Neither runs from a branch that is not a release ref: main is protected
       # by pull requests, and a release/* branch is held to its reviewed branch point by the next job. The
-      # `desktop-release` environment enforces the same list in the repository settings.
+      # `desktop-release` environment enforces the same list in the repository settings. The rule is a script with
+      # its own self-test (also run on every pull request, ci.yml).
       - name: Refuse a ref that is not a release ref
         shell: bash
         env:
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          case "$REF" in
-            refs/heads/main|refs/heads/release/*) echo "release ref: $REF" ;;
-            *) echo "::error::$REF is not a release ref. A native release is built and promoted from main or release/* only."; exit 1 ;;
-          esac
+          bash scripts/native-release-ref-check.sh --self-test
+          bash scripts/native-release-ref-check.sh ref "$REF"
+
+      # The public key the native line trusts is pinned in a second place: a change to the committed file that
+      # does not also change this line (and the same line in tests/nativeChannelManifest.test.ts) stops here.
+      - name: Refuse another updater public key than the pinned one
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8e8ab5cb63a9e1e467135a79dabb9dd9f58895f547a078fd7d61a24244ad3284  crates/beebeeb-updater/keys/updater-v2.pub' | sha256sum --check --strict
 
   validate-release-notes:
     name: Validate release notes
@@ -233,9 +245,10 @@ jobs:
       # The compile runs BEFORE the Azure login (release.yml's measured timing constraint: the OIDC assertion is
       # valid about 5 minutes, so nothing slow may sit between the login and the first signature).
       #
-      # BEEBEEB_BUILD_NOT_BEFORE is this build's own time, baked into the updater (crates/beebeeb-updater
-      # host::BUILD_NOT_BEFORE): the build refuses to install from any manifest signed before it. Its own manifest
-      # is signed later in this run, so it passes.
+      # BEEBEEB_BUILD_NOT_BEFORE is the time of the commit this build is made from (reproducible: the same commit
+      # gives the same binary rule), baked into the updater (crates/beebeeb-updater host::BUILD_NOT_BEFORE): the
+      # build refuses to install from any manifest signed before it. Its own manifest is signed later in this run,
+      # so it passes. The crate's build script stops the build on a value that is not a plausible time.
       - name: Build the native app
         working-directory: native/beebeeb-drive-rune
         shell: bash
@@ -243,10 +256,31 @@ jobs:
           BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          BEEBEEB_BUILD_NOT_BEFORE="$(date -u +%s)"
+          BEEBEEB_BUILD_NOT_BEFORE="$(git log -1 --format=%ct HEAD)"
           export BEEBEEB_BUILD_NOT_BEFORE
-          echo "build time (not-before): $BEEBEEB_BUILD_NOT_BEFORE"
+          echo "commit time (not-before): $BEEBEEB_BUILD_NOT_BEFORE"
+          echo "BUILD_NOT_BEFORE=$BEEBEEB_BUILD_NOT_BEFORE" >> "$GITHUB_ENV"
           cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      # What is checked is the binary that ships, not the environment it was meant to be built in: it must carry
+      # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
+      # 2026-11-11, the day the v2 key was made). A binary without the mark has no updater in it, or was built
+      # without the time and would refuse every update: neither is released.
+      - name: Refuse a binary that does not report the commit's time as its build time
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe
+          marks="$(grep -a -o 'beebeeb-updater-not-before=[0-9a-z]*;' "$exe" | sort -u || true)"
+          echo "marks in the binary: ${marks:-none}"
+          if [[ "$marks" != "beebeeb-updater-not-before=${BUILD_NOT_BEFORE};" ]]; then
+            echo "::error::the built binary does not report build time $BUILD_NOT_BEFORE (found: ${marks:-no mark})."
+            exit 1
+          fi
+          if (( BUILD_NOT_BEFORE < 1794355200 )); then
+            echo "::error::build time $BUILD_NOT_BEFORE is before 2026-11-11: not a plausible commit time."
+            exit 1
+          fi
 
       # NSIS is pinned, not taken from the runner image: NSIS 3.11 as released (the archive Tauri's bundler pins
       # too), checked by SHA-256 before it is unpacked; build-installer.ps1 checks the compiler and the stub it packs
@@ -411,17 +445,22 @@ jobs:
       # variable is set (decision 2450). The files are signed before this step and the host never holds a key.
       PUBLISH_TARGET: ${{ vars.DESKTOP_RELEASE_PUBLISH_TARGET || 'dir:releases-repo' }}
     steps:
-      - name: Checkout the scripts at the release tag
+      # Scripts, the signer (bun.lock) and the public key come from the commit this run was dispatched on: the
+      # reviewed head of main or of a release/* branch. The release tag is NEVER checked out: `ref: desktop-v0.9.0`
+      # resolves a branch of that name before the tag, and any writer can push such a branch, whose code would
+      # then run in the step that holds the v2 key. The tag only names the build whose assets are published, and
+      # is read by its full name (refs/tags/…) in scripts/native-release-ref-check.sh.
+      - name: Checkout the dispatched commit (scripts, signer, public key)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
-          ref: desktop-v${{ inputs.version }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
           path: desktop-src
 
-      # What gets a signed manifest is a build this repository released from reviewed history: the tag's commit is
-      # in the history of the ref this run was started from (main, or a release/* branch that passed the branch
-      # point check), and the tag has a published, non-draft GitHub release.
+      # What gets a signed manifest is a build this repository released from reviewed history: refs/tags/<tag>
+      # exists, no branch carries its name, its commit is in the history of the dispatched commit, and it has a
+      # published, non-draft GitHub release.
       - name: Refuse a tag that is not on this release ref or has no published release
         shell: bash
         env:
@@ -430,18 +469,18 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tag_sha="$(git -C desktop-src rev-parse "refs/tags/$TAG^{commit}")"
-          if ! git -C desktop-src merge-base --is-ancestor "$tag_sha" "$HEAD_SHA"; then
-            echo "::error::$TAG ($tag_sha) is not in the history of $GITHUB_REF ($HEAD_SHA): refusing to sign a manifest for it."
+          if [[ "$(git -C desktop-src rev-parse HEAD)" != "$HEAD_SHA" ]]; then
+            echo "::error::the checkout is not the dispatched commit $HEAD_SHA."
             exit 1
           fi
+          tag_sha="$(bash desktop-src/scripts/native-release-ref-check.sh tag desktop-src "$TAG" "$HEAD_SHA")"
           mkdir -p work
           gh api "repos/$REPO/releases/tags/$TAG" > work/release.json
-          if [[ "$(jq -r '.draft' work/release.json)" != "false" ]]; then
+          if [[ "$(jq -r '.draft' work/release.json)" != "false" || "$(jq -r '.tag_name' work/release.json)" != "$TAG" ]]; then
             echo "::error::$TAG has no published GitHub release."
             exit 1
           fi
-          echo "$TAG is $tag_sha, in the history of $GITHUB_REF, with a published release"
+          echo "$TAG is $tag_sha, in the history of $HEAD_SHA, with a published release"
 
       - name: Checkout releases repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4

@@ -997,3 +997,40 @@ fn a_fresh_install_refuses_a_manifest_older_than_its_own_build() {
         "a refused manifest leaves no mark"
     );
 }
+
+/// The replay mark only moves forward. The one mark that is replaced is one the clock rule cannot believe.
+#[test]
+fn the_replay_mark_keeps_the_larger_time() {
+    use crate::policy::{HighWater, MAX_CLOCK_SKEW_SECS};
+    let seeded = |mark: u64| {
+        let world = World::new();
+        let mut http = FakeHttp::default();
+        Publish::new(Channel::Stable, "0.9.1", artifact_bytes(SIZE)).serve(&mut http, &world.key);
+        let mut store = MemStore::default();
+        store
+            .persisted
+            .seen
+            .insert(Channel::Stable, HighWater { manifest_time: mark });
+        let mut updater = updater(&world.key, "0.9.0", world.dir.path(), http, store);
+        let state = settle(&mut updater, CHECK);
+        (state, updater.store.persisted.seen[&Channel::Stable].manifest_time)
+    };
+    // An older mark moves up to the manifest's time (1_800_000_000).
+    let (state, mark) = seeded(1_799_000_000);
+    assert!(matches!(state, State::Available { .. }));
+    assert_eq!(mark, 1_800_000_000);
+    // A newer, believable mark refuses the manifest and stays where it is.
+    let (state, mark) = seeded(NOW + MAX_CLOCK_SKEW_SECS);
+    assert!(matches!(
+        state,
+        State::Failed {
+            failure: Failure::Refused(Refusal::StaleManifest),
+            ..
+        }
+    ));
+    assert_eq!(mark, NOW + MAX_CLOCK_SKEW_SECS);
+    // A mark from the year 2096 is not believed and is replaced by the manifest that was accepted.
+    let (state, mark) = seeded(4_000_000_000);
+    assert!(matches!(state, State::Available { .. }));
+    assert_eq!(mark, 1_800_000_000);
+}

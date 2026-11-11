@@ -7,7 +7,6 @@
 1641 src-tauri/src/account_dto.rs
 2427 src-tauri/src/api_client.rs
 1808 src-tauri/src/config.rs
-1377 src-tauri/src/diagnostic_redaction.rs
 1634 src-tauri/src/direct_download.rs
 33174 src-tauri/src/engine_bridge.rs
 1318 src-tauri/src/engine_status.rs
@@ -16,7 +15,6 @@
 2323 src-tauri/src/finder_setup/driver.rs
 1773 src-tauri/src/finder_setup/macos_ports.rs
 1408 src-tauri/src/found_while_paused.rs
-1586 src-tauri/src/held_queue.rs
 6052 src-tauri/src/ipc_socket.rs
 1910 src-tauri/src/ipc_socket_framing_tests.rs
 2330 src-tauri/src/keychain.rs
@@ -25,7 +23,6 @@
 1776 src-tauri/src/owner_keys/tests.rs
 1758 src-tauri/src/popover_data.rs
 3915 src-tauri/src/runner.rs
-17015 src-tauri/src/state_db.rs
 1358 src-tauri/src/watcher.rs
 1243 src-tauri/src/windows_cf/callbacks.rs
 1593 src-tauri/src/windows_cf/mod.rs

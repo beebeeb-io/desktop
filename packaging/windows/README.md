@@ -78,12 +78,14 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
    `BEEBEEB_APP_IDENTIFIER`, every test build is refused: that is the intended state, not a bug in the script.
 2. With the test app running, run the installer without `/S`: after about 20 seconds it must show "Beebeeb Test is
    still running" with Retry and Cancel, and `Get-Process beebeeb-desktop-test` must still list the same id.
-3. The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v
+3. (Also with `/S`, and also over an MSI install: the scan runs in `.onInit` since Delta 3.) The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v
    DisplayVersion /d 0.8.24 /f`, run the installer: the message, exit code 3, no file changed. Then with `/d
    0.8.25`: it installs. Then with `/d banana`: refused (a version that does not parse is not "at least 0.8.25").
 4. `cargo test --locked --features net` in `crates\beebeeb-updater` on Windows: the two `#[cfg(windows)]` tests
    (`a_held_installer_cannot_be_written_replaced_renamed_or_deleted`,
-   `the_staged_file_cannot_be_replaced_between_the_check_and_the_start`) run only there.
+   `the_staged_file_cannot_be_replaced_between_the_check_and_the_start`) run only there. CI runs them too
+   (`ci.yml`, job `updater-windows`, hosted `windows-latest`, each test named in the gate); the first run of that
+   job on this PR is the first time they execute anywhere.
 
 Prove the checker can fail before trusting it: run step 4 with `-Version 9.9.9` (must print `FAIL  uninstall entry:
 DisplayVersion` and exit 1), and step 7 while the app is still installed (must fail 5 of 6).

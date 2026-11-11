@@ -34,9 +34,9 @@ mod testkit;
 
 pub use machine::{
     Apply, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, Intent, Persisted, Response, State, Store,
-    Unreachable, Updater,
+    Unreachable, Updater, VerifiedInstaller,
 };
 pub use manifest::{Channel, Manifest, ManifestError, Platform};
-pub use policy::{HighWater, KeyScope, NATIVE_FLOOR, Offer, Refusal, Trust, TrustedKey, Verdict};
+pub use policy::{HighWater, KeyScope, NATIVE_FLOOR, Offer, Refusal, Trust, TrustedKey, V2_KEY_CREATED, Verdict};
 pub use signature::{LEGACY_0_8_PUBKEY, PublicKey, Signature, SignatureError, UPDATER_V2_PUBKEY};
 pub use version::Version;

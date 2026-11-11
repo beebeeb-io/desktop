@@ -9,10 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::machine::{Clock, Persisted, Store};
 
 /// When this build was made, unix seconds: `BEEBEEB_BUILD_NOT_BEFORE` in the environment of the release build
-/// (`release-native-windows.yml` sets it before `cargo build`). `None` in any other build.
+/// (`release-native-windows.yml` sets it to the commit's time before `cargo build`; `build.rs` stops the build on a
+/// value that is set and is not a plausible time). `None` in any other build.
 pub const BUILD_NOT_BEFORE: Option<u64> = parse_build_time(option_env!("BEEBEEB_BUILD_NOT_BEFORE"));
 
-/// Plain digits only; anything else is "not a release build".
+/// `beebeeb-updater-not-before=<unix seconds>;` (or `…=unset;`), written by `build.rs`. The release workflow reads
+/// it out of the built binary and refuses to publish unless it is the commit's time: what is checked is the
+/// binary that ships, not the environment it was meant to be built in.
+pub static BUILD_MARK: &str = env!("BEEBEEB_UPDATER_BUILD_MARK");
+
+/// Plain digits, at least [`crate::policy::V2_KEY_CREATED`]; anything else is "not a release build".
 pub(crate) const fn parse_build_time(text: Option<&str>) -> Option<u64> {
     let Some(text) = text else { return None };
     let digits = text.as_bytes();
@@ -27,26 +33,33 @@ pub(crate) const fn parse_build_time(text: Option<&str>) -> Option<u64> {
         value = value * 10 + (digits[i] - b'0') as u64;
         i += 1;
     }
+    if value < crate::policy::V2_KEY_CREATED {
+        return None;
+    }
     Some(value)
 }
 
-/// Why no release trust could be built. Both mean: this is not a release build, and it must not update itself.
+/// Why no trust could be built at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotAReleaseBuild {
     /// `keys/updater-v2.pub` is not a minisign public key.
     NoUpdaterKey,
-    /// The build was made without `BEEBEEB_BUILD_NOT_BEFORE`.
-    NoBuildTime,
 }
 
 /// The trust a released native Windows build ships with: the v2 key only, for 0.9.0 and later; our host; the NSIS
 /// target first; nothing signed before the build itself.
+///
+/// A build without a build time (a development build) still gets a trust, with `not_before` 0, and with it every
+/// check ends in `Failed { Refused(NoBuildTime) }`: the shell shows that state. It fails closed and in sight; the
+/// rule is never off.
 pub fn windows_release_trust() -> Result<crate::policy::Trust, NotAReleaseBuild> {
-    windows_trust_built_at(BUILD_NOT_BEFORE.ok_or(NotAReleaseBuild::NoBuildTime)?)
+    // Keeps the mark in every binary that can update itself (the release workflow looks for it there).
+    std::hint::black_box(BUILD_MARK);
+    windows_trust_built_at(BUILD_NOT_BEFORE.unwrap_or(0))
 }
 
-/// The same trust for a build made at `not_before`. The bridge release 0.8.25 uses this to check a v2 manifest
-/// before it installs a native build: it passes its own build time.
+/// The same trust with a given not-before. The bridge release 0.8.25 uses this to check a v2 manifest before it
+/// installs a native build, with the fixed [`crate::policy::V2_KEY_CREATED`] (it bakes in no time of its own).
 pub fn windows_trust_built_at(not_before: u64) -> Result<crate::policy::Trust, NotAReleaseBuild> {
     let key = crate::signature::PublicKey::updater_v2().map_err(|_| NotAReleaseBuild::NoUpdaterKey)?;
     Ok(crate::policy::Trust {
@@ -131,18 +144,6 @@ pub fn open_denying_writes(path: &Path) -> std::io::Result<fs::File> {
     options.open(path)
 }
 
-/// Starts the staged NSIS installer the way Tauri's updater does for 0.8.x (`/P` passive: progress only; `/R`
-/// start the app afterwards; `/UPDATE` keep shortcuts and the autostart entry). A per-user install: no elevation.
-/// It takes the proof that the engine is stopped: the shell's [`crate::machine::Apply::launch`] passes on the one
-/// the machine handed it. The installer waits for this process to exit; it never ends it.
-#[cfg(windows)]
-pub fn launch_nsis(installer: &Path, _stopped: crate::machine::EngineStopped) -> bool {
-    std::process::Command::new(installer)
-        .args(["/P", "/R", "/UPDATE"])
-        .spawn()
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,9 +181,13 @@ mod tests {
     #[test]
     fn a_release_build_trusts_one_key_one_host_and_never_goes_below_0_9_0() {
         assert!(RELEASE_BASE_URL.ends_with(RELEASE_HOST));
-        // The tests are not a release build: no build time is baked in, so no release trust exists.
+        // The tests are not a release build: no build time is baked in, and the trust that comes out of that
+        // refuses every manifest by name (policy_tests: `a_build_without_a_build_time_takes_no_update`).
         assert_eq!(BUILD_NOT_BEFORE, None);
-        assert_eq!(windows_release_trust().err(), Some(NotAReleaseBuild::NoBuildTime));
+        assert_eq!(BUILD_MARK, "beebeeb-updater-not-before=unset;");
+        assert_eq!(windows_release_trust().expect("the v2 key is committed").not_before, 0);
+        assert!(include_str!("../build.rs").contains("const EARLIEST: u64 = 1_794_355_200;"));
+        assert_eq!(crate::policy::V2_KEY_CREATED, 1_794_355_200);
         let trust = windows_trust_built_at(1_800_000_000).expect("the v2 key is committed");
         assert_eq!(trust.keys.len(), 1, "the native line trusts the v2 key only");
         assert!(trust.keys[0].valid_for.covers(crate::policy::NATIVE_FLOOR));

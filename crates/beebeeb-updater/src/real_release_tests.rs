@@ -78,7 +78,7 @@ fn the_native_rules_refuse_the_unsigned_0_8_manifest() {
         allowed_hosts: vec![crate::host::RELEASE_HOST.to_string()],
         targets: vec!["windows-x86_64-nsis".to_string()],
         floor: crate::policy::NATIVE_FLOOR,
-        not_before: 0,
+        not_before: crate::policy::V2_KEY_CREATED,
     };
     let nsis = &Manifest::parse(PUBLISHED).expect("parses").platforms["windows-x86_64-nsis"].signature;
     for signature in ["", nsis.as_str()] {

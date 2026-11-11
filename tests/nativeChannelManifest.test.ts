@@ -116,6 +116,8 @@ describe('the native line is signed by the v2 key only', () => {
     const old = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', 'src-tauri', 'tauri.conf.json'), 'utf8')).plugins.updater.pubkey
     expect(v2).not.toBe(old)
     expect(Buffer.from(v2, 'base64').toString('utf8')).toStartWith('untrusted comment: minisign public key: FED25848C41F2348\n')
+    // Pinned in a second place (and a third: release-native-windows.yml): replacing the committed key alone fails.
+    expect(createHash('sha256').update(fs.readFileSync(V2_PUB)).digest('hex')).toBe('8e8ab5cb63a9e1e467135a79dabb9dd9f58895f547a078fd7d61a24244ad3284')
   })
 
   test('--verify accepts the right key, bytes and name, and refuses each single lie', () => {

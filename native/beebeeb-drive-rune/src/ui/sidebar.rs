@@ -191,10 +191,15 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                         .ml(8.0), // board: storage-label x=21=1+12(px)+8(ml) ✓
                 )
                 .child(
-                    text(format!("{used_label} of {quota_label}"))
-                        .key("storage-value")
-                        .font(type_::BODY_SM)
-                        .color(t.text_tertiary),
+                    text(if s.storage_known {
+                        format!("{used_label} of {quota_label}")
+                    } else {
+                        // No figure without the server (a `--db` source never asks it).
+                        "Unavailable".to_string()
+                    })
+                    .key("storage-value")
+                    .font(type_::BODY_SM)
+                    .color(t.text_tertiary),
                 ),
         )
         .child(

@@ -20,6 +20,12 @@ pub const NATIVE_FLOOR: Version = Version::new(0, 9, 0);
 /// The largest artefact accepted. Today's NSIS installer is about 13 MiB.
 pub const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The day the v2 key was made, 2026-11-11T00:00:00Z. Nothing the v2 key signed is older, so no build time is
+/// earlier: a `Trust::not_before` below it is not a build time, and the policy refuses to work with it
+/// ([`Refusal::NoBuildTime`]) instead of running with the rule off. It is also the fixed not-before of the bridge
+/// release 0.8.25, which is not part of the native line and bakes in no time of its own.
+pub const V2_KEY_CREATED: u64 = 1_794_355_200;
+
 /// A signed time may be this far ahead of this PC's clock. Beyond it the manifest is refused and never becomes a
 /// replay mark: one signature made with a wrong clock must not block a channel for good.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
@@ -64,8 +70,9 @@ pub struct Trust {
     pub targets: Vec<String>,
     /// Nothing older than this is ever installed.
     pub floor: Version,
-    /// When this build was made (unix seconds, baked in by the release build). A manifest signed before it was
-    /// published before this build existed: it can say nothing new to this build and never installs anything.
+    /// When this build was made (unix seconds: the time of the commit it was built from, baked in by the release
+    /// build). A manifest signed before it was published before this build existed: it can say nothing new to this
+    /// build and never installs anything. Below [`V2_KEY_CREATED`] it is not a build time and every check is refused.
     pub not_before: u64,
 }
 
@@ -149,6 +156,9 @@ pub enum Refusal {
     SignedInTheFuture,
     /// The manifest offers a newer version but was signed before this build was made: a replayed old manifest.
     OlderThanThisBuild,
+    /// This build carries no build time (it is not a release build): it takes no update at all. The UI says so;
+    /// the not-before rule is never simply off.
+    NoBuildTime,
 }
 
 /// Checks a channel manifest and its detached signature against what is installed.
@@ -161,6 +171,9 @@ pub fn check(
     manifest_bytes: &[u8],
     manifest_signature: &str,
 ) -> Result<Checked, Refusal> {
+    if trust.not_before < V2_KEY_CREATED {
+        return Err(Refusal::NoBuildTime);
+    }
     let signature = Signature::from_base64(manifest_signature).map_err(|_| Refusal::ManifestSignature)?;
     let signer = trust.signer(&signature).ok_or(Refusal::ManifestSignature)?;
     signature

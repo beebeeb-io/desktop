@@ -11,6 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::machine::{
     Apply, Clock, Config, EngineStopped, Event, Http, Persisted, Response, State, Store, Unreachable, Updater,
+    VerifiedInstaller,
 };
 use crate::manifest::Channel;
 use crate::policy::{KeyScope, NATIVE_FLOOR, Offer, Trust, TrustedKey};
@@ -66,7 +67,8 @@ pub fn trust(key: &TestKey) -> Trust {
         allowed_hosts: vec![HOST.to_string()],
         targets: vec![TARGET.to_string(), "windows-x86_64".to_string()],
         floor: NATIVE_FLOOR,
-        not_before: 0,
+        // The earliest build time there is; an honest test manifest is signed well after it.
+        not_before: crate::policy::V2_KEY_CREATED,
     }
 }
 
@@ -324,7 +326,8 @@ impl Apply for FakeApply {
         Some(EngineStopped::engine_stopped_and_uploads_parked())
     }
 
-    fn launch(&mut self, installer: &Path, offer: &Offer, _stopped: EngineStopped) -> bool {
+    fn launch(&mut self, installer: &VerifiedInstaller, offer: &Offer, _stopped: EngineStopped) -> bool {
+        let installer = installer.path();
         if let Some(hook) = self.during_launch.as_mut() {
             hook(installer);
         }

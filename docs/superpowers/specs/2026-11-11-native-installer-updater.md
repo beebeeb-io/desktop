@@ -198,8 +198,7 @@ killed mutant each; "the same key" is the v2 key since Delta 2):
    - not older than the newest manifest this install accepted on the channel (`StaleManifest`; persisted per
      channel, so a replayed older manifest is refused after a restart too);
    - **not older than this build** when it offers anything newer (`OlderThanThisBuild`). Every release build has
-     its own time baked in (`BEEBEEB_BUILD_NOT_BEFORE`, `host::BUILD_NOT_BEFORE`; no release trust exists without
-     it). A fresh install, a deleted `updater.json` and the bridge have no mark, and without this rule they took
+     its own time baked in (`BEEBEEB_BUILD_NOT_BEFORE`, `host::BUILD_NOT_BEFORE`; see "The build time" below). A fresh install, a deleted `updater.json` and the bridge have no mark, and without this rule they took
      any old signed manifest above their own version, a withdrawn one included. **Decision (lane, 2026-11-11): a
      manifest signed before the build offers nothing: a newer version in it is refused, an equal or older one
      reads as "up to date", because** refusing it outright would turn every switch to a slower channel into an
@@ -218,6 +217,22 @@ killed mutant each; "the same key" is the v2 key since Delta 2):
 9. Older than installed: a downgrade. A background check holds the installed build; a manual check reports it, and
    only `DownloadDowngrade(<that version>)` starts it (today's rules, `update_window.rs:151-160`, `:553-559`).
 
+**The build time (Delta 3). Release rule: a native build can only take manifests signed after its own commit
+time.** The time baked in is the time of the commit the build is made from (`git log -1 --format=%ct`), so it is
+reproducible and never later than the manifest the same run signs. It is held three times: the crate's `build.rs`
+stops a build whose `BEEBEEB_BUILD_NOT_BEFORE` is set and is not plain digits of at least 2026-11-11 (the day the
+v2 key was made, `policy::V2_KEY_CREATED`); the release workflow reads the mark `beebeeb-updater-not-before=<n>;`
+out of the BUILT BINARY and refuses to go on unless it is exactly the commit's time; and at run time a build
+without a plausible time takes no update at all: every check ends in `Failed { Refused(NoBuildTime) }`, a state
+the UI shows. The rule is never silently off. (The mark is in the binary only once the shell links the updater:
+until then the workflow refuses every native release, which is right.)
+**Consequence for hotfix ordering:** a build made from a commit that is LATER than a channel's current manifest
+does not accept that manifest when it names a newer version. Example: 0.9.3 is on stable, signed Monday; a hotfix
+0.9.2 for an older line is committed Tuesday: its installs refuse the 0.9.3 manifest (`OlderThanThisBuild`) until
+stable is signed again. So: **after every native release, re-publish (`publish_existing`) each channel manifest
+that the new build should still be able to follow**, or release in commit order. The bridge 0.8.25 is not on the
+native line and uses the fixed `V2_KEY_CREATED` instead of a time of its own (lead ruling, 2026-11-11).
+
 **Freshness and withdrawal (replaced in Delta 2).** A host that keeps serving the last signed manifest (a freeze)
 cannot be told from a quiet channel, and there is still no expiry field (**Decision (lane, 2026-11-11), kept:**
 an expiring manifest needs the signing key on a schedule, a larger exposure than the freeze). What is done instead:
@@ -229,7 +244,11 @@ an expiring manifest needs the signing key on a schedule, a larger exposure than
 - **The UI can say when nothing has been verified.** `Updater::freshness()` is `Unverified { days }` when no
   check has passed every rule for 14 days (`UNVERIFIED_WARNING_SECS`), counted from the last one that did, or
   from the build's own time if none ever did (so a deleted record cannot hide it). "Up to date" beside it would
-  be a guess; the shell shows the warning with the last verified check's date.
+  be a guess; the shell shows the warning with the last verified check's date. **What this state detects, and
+  what it does not:** it detects blocking (no answer, or answers the rules refuse). It does NOT detect a replay
+  freeze: a host that keeps serving the last manifest this install accepted passes every rule, the check counts
+  as verified, and the install reads "up to date". Only an expiring manifest would show that, and that is the
+  decision above.
 - **An offer does not outlive the channel.** A background check while an offer, a resumable download or a staged
   update is on screen is `State::Rechecking { kept }` for one `Tick`: the UI keeps drawing `kept`; if the channel
   still offers exactly that, nothing changes; if it offers something else or nothing, the old offer and its staged
@@ -243,8 +262,11 @@ it is the same mechanism every 0.8.x update has used. Staging is `%LOCALAPPDATA%
 in a folder the person's other programs can write, and (Delta 2) the check and the start are one hold: at Apply
 everything else in the folder is removed (an installer loads from its own folder first), the file is opened so
 that nothing can write, replace, rename or delete it (`host::open_denying_writes`: Windows share mode read only),
-verified through that handle, and the handle is kept until the installer process exists. Windows-only code,
-never run by a lane: two `#[cfg(windows)]` tests are on the lead's native list (`packaging/windows/README.md`).
+verified through that handle, and the handle is kept until the installer process exists. The path and the handle
+travel as one `VerifiedInstaller`, which only the machine can make (Delta 3): `Apply::launch` receives it, and its
+`start_nsis(EngineStopped)` is the only way to start an installer, so no public function starts a path that was
+not just verified. Windows-only code: two `#[cfg(windows)]` tests, run by CI on a hosted Windows runner (`ci.yml`,
+job `updater-windows`, each test named in the gate) and on the lead's native list.
 
 **State machine** (`machine.rs`): one `State` and one `step(Event)`. States: `Idle`, `Checking`, `UpToDate`,
 `Available { offer }`, `Downloading { received, total }`, `Verifying`, `ReadyToRestart`, `Restarting`,
@@ -306,8 +328,8 @@ plugin packed into the installer, not Tauri in the app.
   already stopped and the process is exiting. Only this product's own binary name is looked at.
 - **It refuses an install below 0.8.25** (`RefuseBelowBridge`, §2): message, exit code 3, nothing changed; when an
   old updater started it, the app that was installed is started again. NSIS installs are checked in `.onInit`
-  (every mode); an MSI install in the reinstall page (interactive and passive; **not** in a silent `/S` run over
-  an MSI install, where NSIS runs no page: stated, not closed).
+  (every mode), and so are MSI installs (Delta 3: the MSI scan is a function, `FindWixInstall`, that `.onInit`
+  calls too, so a silent `/S` run refuses as well).
 - **Code signing:** unchanged in substance. Today Tauri calls `scripts/windows/sign-artifact.ps1` for the app
   binary, the uninstaller and the installers (`release.yml:365-383`), and `verify-authenticode.ps1` gates
   publication (`:488-510`). Now `build-installer.ps1 -Mode release` calls the same script for the same three files
@@ -351,6 +373,13 @@ not designed or built here and is open (§9 Q4).
 - Before signing, in the workflow: the run's ref is `main` or `release/*`; a `release/*` ref passes the reviewed
   branch-point check, also for a promotion; the tag being published is in the history of that ref and has a
   published release; publishing runs one at a time (`concurrency: desktop-native-publish-manifest`).
+- **The release tag is never checked out (Delta 3; review P1-A).** A promotion's scripts, signer and public key
+  come from the dispatched commit (`github.sha`), not from `desktop-v<V>`: a bare `ref: desktop-v0.9.0` resolves
+  a branch of that name before the tag, and any writer can push one. The tag is read only by its full name
+  (`refs/tags/…`), for the ancestry check and to name the release whose assets are published; a branch carrying a
+  release tag's name is refused outright (`scripts/native-release-ref-check.sh`, 21 self-tests, also in `ci.yml`).
+  The public key file's SHA-256 is pinned in the workflow and in `tests/nativeChannelManifest.test.ts`, and the
+  crate, the key, the packaging and the release scripts have `CODEOWNERS` entries.
 - **These in-file checks are the second line.** A branch can carry its own copy of a workflow, so what holds is the
   environment's own rules, which only Guus can set:
 
@@ -365,11 +394,16 @@ not designed or built here and is open (§9 Q4).
 3. Environments → `desktop-release` → Required reviewers: Guus (and Bram once provisioned); "Prevent self-review"
    off while there is one operator.
 4. Environments → `desktop-release` → Deployment branches and tags → Selected: `main` and `release/*`. No tag rule.
-5. Check (task 2451): `gh secret list` shows the four names only under the environment; a dispatch of a signing
+5. Rules → Rulesets (Delta 3): a **tag** ruleset on `desktop-v*` (restrict creation, update and deletion to the
+   release workflow's actor and Guus), and a **branch** ruleset that forbids creating any branch named
+   `desktop-v*` (target `desktop-v*`, "Restrict creations", no bypass). The workflow refuses such a branch when it
+   sees one; the ruleset stops it from existing.
+6. Branch protection on `main`: "Require review from Code Owners" on, so the `CODEOWNERS` entries bind.
+7. Check (task 2451): `gh secret list` shows the four names only under the environment; a dispatch of a signing
    workflow from a throwaway branch stops at the environment and never starts a step.
 
 Order: merge the workflow changes first (steps 1 and 2 break any signing job that does not name the environment,
-which after this PR and lane H1's is none), then 1, then 2 to 4, then 5.
+which after this PR and lane H1's is none), then 1, then 2 to 6, then 7.
 
 **Layout under `https://releases.beebeeb.io/`** (the same on any host):
 
@@ -435,7 +469,7 @@ Rehearsal and the lead's commands: `packaging/windows/README.md`.
   and §2 are therefore promises the shell lane must keep, with nothing in this PR that can test them:
   `BEEBEEB_APP_IDENTIFIER`, `--quit-for-update`, and calling `handoff::arrival()` before `state.db` is opened.
 - Delta 2 does not build a native MSI, does not remove credentials or the sync root on uninstall (the box says
-  so), does not gate a silent `/S` install over an MSI install below 0.8.25, does not give the upgrade rehearsal a
+  so), does not give the upgrade rehearsal a
   release-identity mode (README section B), and does not split `release.yml`'s build step, which compiles and
   signs in one step with the 0.8.x key present (changing it changes the 0.8.x release path).
 - `release-native-windows.yml` passes `actionlint` and has never run; the `s3` and `rsync` publish targets have
