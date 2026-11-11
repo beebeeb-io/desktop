@@ -5,6 +5,11 @@ Lane P1, 2026-11-11. Ruling (Guus, 2026-11-11): 0.9.0 is the native Rust app (`n
 account, settings, `state.db`, sync folder and credentials. Amended the same day: a Tauri **0.8.25 bridge** is
 allowed and wanted. Line numbers are at `v2-native` `b9e73441`.
 
+**Amended 2026-11-11 after the independent security review of PR #283 ("Delta 2").** Where a paragraph below was
+changed it says so; the rulings behind the changes: Guus, 2026-11-11 11:40: the updater key moves into the
+`desktop-release` environment AND the native line gets its own, password-protected key; keep the Windows MSI;
+GitHub "Latest" shows 0.9.0 only when it is stable; the update host stays GitHub Pages for now.
+
 ## 1. Today, exactly (0.8.x on Windows)
 
 **Check.** 5 s after start, every 4 h (`activity_conflict_commands.rs:825-827`, `native_menu.rs:6-14`) and on "Check
@@ -48,7 +53,7 @@ Cloud Files sync root: the app registers it and only sign-out unregisters it (`w
 ```mermaid
 flowchart LR
     OLD["0.8.24 and older<br/>reads desktop/latest.json"] -- "Tauri updater, as today" --> B["0.8.25 bridge (Tauri)<br/>reads desktop/v2/stable.json first,<br/>then desktop/latest.json"]
-    B -- "Tauri updater + pre-flight<br/>same key, same NSIS flags" --> N["0.9.0 native<br/>same folder, same identity"]
+    B -- "Tauri updater + pre-flight<br/>v2 key, signed v2 manifest, same NSIS flags" --> N["0.9.0 native<br/>same folder, same identity"]
     N -- "beebeeb-updater<br/>signed manifest, one host" --> N2["0.9.x native"]
     L[("desktop/latest.json, beta.json, alpha.json<br/>never newer than 0.8.x")] -.-> OLD
     L -.-> B
@@ -71,11 +76,22 @@ only, and native builds are published only to `desktop/v2/{stable,beta,alpha}.js
   in the legacy manifest (0.8.25 or a later 0.8.x); after that restart the 5-second check offers 0.9.0. Two
   restarts, each asked for, no manual download. An install older than 0.3.0 could never update in place (key
   rotation, `docs/RELEASING.md`) and still needs one manual reinstall. An unmodified ≤ 0.8.24 updater *could*
-  install 0.9.0 directly (same key, and §5's installer is a drop-in), but then every old layout since 0.3.0 would be
-  an upgrade source for the native engine. **Decision (lane, 2026-11-11): 0.9.0 is offered to 0.8.25+ only,
+  install 0.9.0 directly if it were signed by the 0.8.x key, and then every old layout since 0.3.0 would be an
+  upgrade source for the native engine. **Decision (lane, 2026-11-11): 0.9.0 is offered to 0.8.25+ only,
   because** the native engine then has one tested predecessor (data layout, credential names, sync-root state), a
-  bad 0.9.0 is withdrawn by deleting one v2 manifest without touching the 0.8.x line, and macOS/Linux keep
-  updating from the legacy manifests unchanged.
+  bad 0.9.0 is withdrawn without touching the 0.8.x line (§7 R7), and macOS/Linux keep updating from the legacy
+  manifests unchanged.
+- **How "0.8.25+ only" is enforced (Delta 2; the review found it enforced nowhere).** Three independent locks:
+  1. **The key.** Native installers and v2 manifests are signed by the v2 key only (§4). A client on 0.8.24 or
+     older trusts only the 0.8.x key, so a native installer served to it at a legacy address fails Tauri's
+     signature check and is never started. (With one shared key this lock would not exist and lock 2 alone would
+     hold: that was the design before Guus's ruling.)
+  2. **The installer.** It refuses to run over an installed version below 0.8.25, in every mode, before a file is
+     touched; a version that is empty or does not parse counts as below (§5). This is what stops a person who
+     downloads 0.9.0 from the site and runs it over an old install.
+  3. **The app.** On its first start the native app reads the hand-off note 0.8.25 wrote
+     (`crates/beebeeb-updater/src/handoff.rs`, `arrival()`): earlier state without a note from 0.8.25 or later,
+     for this very version, is `WithoutHandoff`, and the shell must not assume the pre-flight ran.
 - **MSI installs:** v2 has no MSI entry, so they fall back to `windows-x86_64` (the NSIS file); the installer's WiX
   branch removes the MSI first (one UAC prompt) and installs per user. Rehearsal variant B.
 
@@ -88,11 +104,15 @@ changes for the `main` lane (not applied on this branch, not compiled). All in `
    (`from`, `to`, `channel`, `at`), stop the engine, `CfDisconnectSyncRoot` (`windows_cf/mod.rs:258-301`), and
    checkpoint `state.db`'s WAL.
 3. Tasks 2446 + 2447 (already in 0.8.25): the Tauri app writes the credential owner tags.
-4. Recommended (lead ruling 2026-11-11, task 2449): after the download, the verified signature must sign the file
-   the URL ends in, and that name must carry the manifest's version. This closes §8.1 for the **old-format**
-   manifests too, on 0.8.25 and later (Windows and Linux; the Mac bundle's name has no version).
-5. Recommended: a version of 0.9.0 or later is installed only if the signed v2 manifest names the same version,
-   URL and signature.
+4. **Required** (Delta 2): after the download, the verified signature must sign the file the URL ends in, and that
+   name must carry the manifest's version; a version that does not parse is refused. This closes §8.1 for the
+   **old-format** manifests too, on 0.8.25 and later (Windows and Linux; the Mac bundle's name has no version: the
+   plan states macOS's exposure and what closes it).
+5. **Required** (Delta 2): a version of 0.9.0 or later is installed only if the v2 manifest, signed by the v2 key,
+   names the same version, URL and signature; and only such a version may come from the v2 address at all.
+6. **Required** (Delta 2): 0.8.25 trusts two keys, each for its own line: the 0.8.x key for versions below 0.9.0
+   and the v2 key (`src-tauri/updater-v2.pub`, the same file as `crates/beebeeb-updater/keys/updater-v2.pub`)
+   for 0.9.0 and later. 0.8.25 itself is signed by the 0.8.x key, so every older client can install it.
 
 No pipeline change is needed for 0.8.25: `release.yml` publishes it as any 0.8.x.
 
@@ -104,11 +124,11 @@ No pipeline change is needed for 0.8.25: `release.yml` publishes it as any 0.8.x
 | Identifier | `io.beebeeb.app` | `tauri.conf.json:5`; NSIS `BUNDLEID` | same |
 | Publisher in the uninstall entry | `beebeeb` | NSIS `MANUFACTURER` (derived by Tauri from the identifier) | same |
 | Install folder | `%LOCALAPPDATA%\Beebeeb` | NSIS `.onInit`, and `HKCU\Software\beebeeb\Beebeeb` (default) | same |
-| Main binary | `beebeeb-desktop.exe` | NSIS `MAINBINARYNAME`; `HKCU\…\Uninstall\Beebeeb\MainBinaryName` | **same file name** |
+| Main binary | `beebeeb-desktop.exe` | NSIS `MAINBINARYNAME`; `HKCU\…\Uninstall\Beebeeb\MainBinaryName` | **same file name** (a test build: `beebeeb-desktop-test.exe`, §5) |
 | Uninstall entry | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb` | NSIS `UNINSTKEY` | same key |
 | Shortcuts | `Start Menu\Programs\Beebeeb.lnk`, `Desktop\Beebeeb.lnk`, AppUserModelID `io.beebeeb.app` | NSIS | same |
 | Autostart | `HKCU\…\CurrentVersion\Run` value `Beebeeb` = `"<exe path> "`, + `…\Explorer\StartupApproved\Run` | `app_run.rs:46`; `auto-launch` 0.5.0 `windows.rs:6-8` | same value name and exe path |
-| Updater key | minisign `C6FADFD59D732197` | `tauri.conf.json:76` | same (`signature.rs` `BEEBEEB_DESKTOP_PUBKEY`, test-pinned) |
+| Updater key | minisign `C6FADFD59D732197` | `tauri.conf.json:76` | **new: the v2 key**, minisign `FED25848C41F2348` (`crates/beebeeb-updater/keys/updater-v2.pub`, test-pinned); the old key stays the 0.8.x line's (§4) |
 | Artefact name | `Beebeeb_<V>_x64-setup.exe` | `release.yml:766` | same |
 
 **Decision (lane, 2026-11-11): the native binary is installed as `beebeeb-desktop.exe`, because** five things hold
@@ -127,7 +147,9 @@ time, but two were *resolved by* Tauri and must now be spelled out):
 - Window frame: `%APPDATA%\io.beebeeb.app\main-window-frame.json` (ours; the plugin's `.window-state.json` is ignored).
 - Credentials: Windows Credential Manager, generic, target `io.beebeeb.app/<account id>/<leaf>` with leaves
   `session-token`, `wrapped-master-key`, `account-email`; legacy flat `io.beebeeb.app/<leaf>` (`keychain.rs:11`,
-  `:629`; `keychain/accounts.rs:66-93`). A hard-coded constant, so a test build shares them with the real app.
+  `:629`; `keychain/accounts.rs:66-93`). In 0.8.x a hard-coded constant, so a Tauri test build shares them with
+  the real app. **The native app must not (Delta 2, §5):** it derives the target prefix from its build-time
+  identifier, so a test build reads and writes `io.beebeeb.app.test/…` only.
 - Sync root: id `Beebeeb!<fnv1a64 of the folder path>`, provider id `Beebeeb`, provider GUID
   `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90` (`windows_cf/mod.rs:90`, `:165`; `registration.rs:117-157`). The native
   engine re-registers with `CF_REGISTER_FLAG_UPDATE` on start, as today.
@@ -138,40 +160,91 @@ time, but two were *resolved by* Tauri and must now be spelled out):
 
 A library: no Tauri, no UI, no network or clock of its own (`cargo tree -e normal | grep -c tauri` prints 0).
 
-**Signatures. Decision (lane, 2026-11-11): keep the existing key and the exact minisign form, because** one key then
-verifies what 0.8.25 installs and what 0.9.x installs, `scripts/check-updater-signature-key.mjs` and the rotation
-procedure stay valid, and the format already signs a time and a file name that Tauri ignores and we can use. The
-verifier is `minisign-verify` 0.2.5, the crate Tauri's updater uses (no dependencies). Legacy signatures are refused.
+**Signatures and keys (replaced in Delta 2; Guus, 2026-11-11 11:40).** The format stays the exact minisign form
+Tauri's signer writes (it already signs a time and a file name, which Tauri ignores and we use); the verifier is
+`minisign-verify` 0.2.5, the crate Tauri's updater uses (no dependencies); legacy (not pre-hashed) signatures are
+refused, also when our own key made them (`signature.rs`, `refuses_a_legacy_signature_by_our_own_key`).
+
+There are **two keys, one per release line**:
+
+| Key | Signs | Trusted by | Private half |
+|---|---|---|---|
+| 0.8.x key, `C6FADFD59D732197`, no password | 0.8.x artefacts, 0.8.25 included | every 0.8.x build; 0.8.25 for versions below 0.9.0 only | environment secret `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) |
+| v2 key, `FED25848C41F2348`, password-protected | native installers and v2 manifests | 0.8.25 for 0.9.0 and later only; every native build, for 0.9.0 and later, and nothing else | environment secret `UPDATER_V2_PRIVATE_KEY` (+ `_PASSWORD`) |
+
+In the crate a build's trust is a **list of keys, each with a version scope** (`policy.rs`: `Trust.keys`,
+`TrustedKey { key, valid_for: KeyScope { from, before } }`). A signature by a trusted key for a version outside its
+scope is refused (`Refusal::KeyNotValidForVersion` for a manifest, `ArtifactSignature` for an artefact). A native
+build's list has one entry (`host::windows_trust_built_at`: the v2 key from 0.9.0 on); a later rotation is one
+release whose list has two. The public key is one committed file, `crates/beebeeb-updater/keys/updater-v2.pub`
+(`include_str!` in the crate, `--pubkey` / `--pubkey-file` in the release scripts, `src-tauri/updater-v2.pub` in
+0.8.25); `a_release_build_has_the_v2_key` holds it to: a minisign key, not a placeholder, not the 0.8.x key, and
+the release workflow names that test in its gate.
 
 **Signed manifest.** New: `desktop/v2/<channel>.json.sig`, a detached signature of the manifest bytes by the same
 key, whose signed file name is the channel's manifest file. The rules, in order (`policy.rs`, one test and one
-killed mutant each):
+killed mutant each; "the same key" is the v2 key since Delta 2):
 
-1. The manifest's signature verifies and signs this channel's file name (`stable.json` is not `beta.json`).
-2. The manifest says `product: desktop` and this channel.
-3. Its signed time is not older than the newest manifest this install accepted on the channel (persisted per
-   channel: a replayed older manifest is refused after a restart too).
+1. The manifest's signature verifies under a trusted key and signs this channel's file name (`stable.json` is not
+   `beta.json`).
+2. The manifest parses **strictly** (Delta 2): every field is one this build knows, none is given twice, no
+   platform is named twice, and `product`, `channel` and each `size` are present. What is signed is exactly what
+   is understood. Consequence, accepted: the v2 field set is frozen; a new field needs a new manifest address.
+   It says `product: desktop` and this channel, and its key may sign its version.
+3. Its signed time (Delta 2: three bounds, `now` is this PC's clock):
+   - not more than 24 hours ahead of `now` (`SignedInTheFuture`): a signature made with a wrong clock is refused
+     and never becomes the mark, so it cannot block a channel; a mark that is already further ahead than that is
+     not believed (the clock was set back since) and is replaced by the next manifest;
+   - not older than the newest manifest this install accepted on the channel (`StaleManifest`; persisted per
+     channel, so a replayed older manifest is refused after a restart too);
+   - **not older than this build** when it offers anything newer (`OlderThanThisBuild`). Every release build has
+     its own time baked in (`BEEBEEB_BUILD_NOT_BEFORE`, `host::BUILD_NOT_BEFORE`; no release trust exists without
+     it). A fresh install, a deleted `updater.json` and the bridge have no mark, and without this rule they took
+     any old signed manifest above their own version, a withdrawn one included. **Decision (lane, 2026-11-11): a
+     manifest signed before the build offers nothing: a newer version in it is refused, an equal or older one
+     reads as "up to date", because** refusing it outright would turn every switch to a slower channel into an
+     error and a false "not verified" warning, while offering its older build would let a withdrawn build come
+     back as a downgrade on a fresh install. Cost, accepted: a person who moves to a slower channel is offered
+     that channel's older build only after the channel's next manifest (a promotion re-signs it: one dispatch).
 4. Equal version: up to date.
 5. The artefact for `windows-x86_64-nsis` (then `windows-x86_64`) is at `https://releases.beebeeb.io/<plain path>`:
    https, that exact host, no port, user, query, fragment or dot segment.
 6. It has a `size` in `1..=512 MiB`.
-7. Its signature is by our key (checked before a byte is downloaded), and signs the file name the URL ends in,
-   which must carry the manifest's version (`Beebeeb_0.9.1_x64-setup.exe`). An old release's installer with its
-   honest signature therefore cannot be offered as a newer version.
+7. Its signature is by a trusted key that may sign this version (checked before a byte is downloaded), and signs
+   the file name the URL ends in, which must be exactly `Beebeeb_<version>_<rest>.exe`. An old release's installer
+   with its honest signature therefore cannot be offered as a newer version, and a manifest's signature (it signs
+   `<channel>.json`) can never pass as an artefact's, nor the reverse.
 8. Nothing below 0.9.0 is ever installed (a native build is never replaced by the Tauri app).
 9. Older than installed: a downgrade. A background check holds the installed build; a manual check reports it, and
    only `DownloadDowngrade(<that version>)` starts it (today's rules, `update_window.rs:151-160`, `:553-559`).
 
-**Freshness.** Rule 3 stops replay; it cannot stop a host that keeps serving the last manifest (a freeze).
-**Decision (lane, 2026-11-11): no expiry field, because** an expiring manifest needs the signing key on a schedule,
-a larger exposure than the freeze it prevents; the UI shows the last successful check (`Persisted.last_check`).
+**Freshness and withdrawal (replaced in Delta 2).** A host that keeps serving the last signed manifest (a freeze)
+cannot be told from a quiet channel, and there is still no expiry field (**Decision (lane, 2026-11-11), kept:**
+an expiring manifest needs the signing key on a schedule, a larger exposure than the freeze). What is done instead:
+
+- **Withdrawing a build is publishing, never deleting.** A newer signed manifest that points at the build to go
+  back to (`publish_existing` with that version) moves every client's mark past the withdrawn manifest, so it can
+  never be served again to a client that saw the new one; a fresh install is covered by rule 3's build time for
+  every manifest older than its own build. Removing a manifest revokes nothing: the host can serve it again.
+- **The UI can say when nothing has been verified.** `Updater::freshness()` is `Unverified { days }` when no
+  check has passed every rule for 14 days (`UNVERIFIED_WARNING_SECS`), counted from the last one that did, or
+  from the build's own time if none ever did (so a deleted record cannot hide it). "Up to date" beside it would
+  be a guess; the shell shows the warning with the last verified check's date.
+- **An offer does not outlive the channel.** A background check while an offer, a resumable download or a staged
+  update is on screen is `State::Rechecking { kept }` for one `Tick`: the UI keeps drawing `kept`; if the channel
+  still offers exactly that, nothing changes; if it offers something else or nothing, the old offer and its staged
+  file are dropped. No answer, or a refused one, is not news: `kept` stays.
 
 **Apply. Decision (lane, 2026-11-11): download to a staging folder, verify, run the NSIS installer passively, let it
 restart the app; not swap-in-place, because** a running exe cannot be replaced on Windows without a helper process,
 the installer already closes the app, replaces the file, updates the uninstall entry's version and restarts it, and
 it is the same mechanism every 0.8.x update has used. Staging is `%LOCALAPPDATA%\io.beebeeb.app\updates\`:
 `<name>.part` while downloading, `<name>` once verified. The file is verified **again** at Apply, because it sits
-in a folder the person's other programs can write.
+in a folder the person's other programs can write, and (Delta 2) the check and the start are one hold: at Apply
+everything else in the folder is removed (an installer loads from its own folder first), the file is opened so
+that nothing can write, replace, rename or delete it (`host::open_denying_writes`: Windows share mode read only),
+verified through that handle, and the handle is kept until the installer process exists. Windows-only code,
+never run by a lane: two `#[cfg(windows)]` tests are on the lead's native list (`packaging/windows/README.md`).
 
 **State machine** (`machine.rs`): one `State` and one `step(Event)`. States: `Idle`, `Checking`, `UpToDate`,
 `Available { offer }`, `Downloading { received, total }`, `Verifying`, `ReadyToRestart`, `Restarting`,
@@ -184,10 +257,17 @@ thread). `Http`, `Clock`, `Store` and `Apply` are traits; tests never start an i
   offset is refused; three attempts in a row without a new byte stop with `DownloadInterrupted`, keeping the part
   for the next `Download`. Never more than `size` bytes are read; a stated total that differs is `WrongSize`.
 - **Never automatic:** nothing is installed without `Event::Apply`, which only "Restart to update" sends (today's
-  rule: no auto-install; and today's gap: no unsynced-changes rule, §1). **Decision (lane, 2026-11-11): the shell
-  stops the engine before `Apply` (the same pre-flight as §2 item 2) and does not block on unsynced changes,
-  because** uploads are resumable and local changes are in `state.db`, which the installer does not touch; blocking
-  would leave a person with a large queue unable to take a fix for it.
+  rule: no auto-install; and today's gap: no unsynced-changes rule, §1).
+- **The engine is stopped before the installer starts: a precondition in the types (Delta 2; the review found
+  `machine.rs` and this section contradicting each other).** `Apply::launch(installer, offer, EngineStopped)`
+  cannot be called without an `EngineStopped`, and the machine gets one only from `Apply::stop_engine()`, which the
+  shell implements as: stop the sync engine, park every upload in progress (resumable after the restart), then
+  mint the proof. The order inside `Event::Apply` is fixed: verify the file, stop the engine, start the installer.
+  If the engine does not stop: `Failed { EngineStillRunning }`, nothing is started, the staged update is kept. If
+  the installer does not start: `Apply::resume_engine()`. A bad file never costs a running engine (it is refused
+  first). **Decision (lane, 2026-11-11), kept:** an update does not wait for unsynced changes to drain, **because**
+  parked uploads resume and local changes are in `state.db`, which the installer does not touch; blocking would
+  leave a person with a large queue unable to take a fix for it.
 - **Proxy and TLS** (`net.rs`, feature `net`): reqwest's defaults, as the engine's client (`HTTPS_PROXY`,
   `NO_PROXY`, the Windows system proxy; no prompt for a proxy password). TLS is the OS stack, so a company root is
   honoured; https only, no redirect followed, no header but a fixed user agent and `Range`.
@@ -209,9 +289,25 @@ by the build script, the WebView2 section removed, the file-association include 
 (process lookup, semver compare, start-as-user; MIT/Apache-2.0; SHA-256 pinned in `build-installer.ps1`): an NSIS
 plugin packed into the installer, not Tauri in the app.
 
-- **Test mode:** `Beebeeb Test`, `io.beebeeb.app.test`, unsigned, beside the real app, as
-  `tools/agent-team/testbuild.ps1` does today. The native binary must take its identifier at build time (contract
-  for the shell lane: `BEEBEEB_APP_IDENTIFIER`); credentials and `desktop.toml` are shared with the real app (§3).
+- **Test mode shares nothing with the real app (replaced in Delta 2; data-loss class).** `Beebeeb Test`,
+  `io.beebeeb.app.test`, binary `beebeeb-desktop-test.exe`, unsigned. **Contract for the shell lane:** the native
+  binary takes its identifier at build time (`BEEBEEB_APP_IDENTIFIER`, default `io.beebeeb.app`) and derives from
+  it the state folder (`%LOCALAPPDATA%\<id>`), the config file (`%APPDATA%\beebeeb-test\desktop.toml` for the test
+  identifier), the credential target prefix (`<id>/…`), the single-instance lock and the sync-root provider id, so
+  a test build can never read or write the real account. `build-installer.ps1 -Mode test` refuses a binary that
+  does not carry the test identifier (and release mode one that does): until the shell honours the variable, no
+  test installer can be built, which is the safe state.
+- **The installer never ends a process (replaced in Delta 2).** The template killed every process of the binary's
+  name, without asking in passive mode. Now (`utils.nsh`, `CheckIfAppIsRunning`): a running native app is asked to
+  quit through its single-instance channel (the installed binary is started with `--quit-for-update`; **contract
+  for the shell lane:** the running instance stops the engine, parks uploads and exits; without a running instance
+  the flag exits at once); the installer waits 20 seconds; then it says the app is still running and offers Retry
+  or Cancel. A hung app is ended by the person. An update the app started itself needs no asking: the engine is
+  already stopped and the process is exiting. Only this product's own binary name is looked at.
+- **It refuses an install below 0.8.25** (`RefuseBelowBridge`, §2): message, exit code 3, nothing changed; when an
+  old updater started it, the app that was installed is started again. NSIS installs are checked in `.onInit`
+  (every mode); an MSI install in the reinstall page (interactive and passive; **not** in a silent `/S` run over
+  an MSI install, where NSIS runs no page: stated, not closed).
 - **Code signing:** unchanged in substance. Today Tauri calls `scripts/windows/sign-artifact.ps1` for the app
   binary, the uninstaller and the installers (`release.yml:365-383`), and `verify-authenticode.ps1` gates
   publication (`:488-510`). Now `build-installer.ps1 -Mode release` calls the same script for the same three files
@@ -221,19 +317,59 @@ plugin packed into the installer, not Tauri in the app.
   release mode refuses a binary whose version resource is not `Beebeeb <V>`. Shell lane.
 - **Size:** the Tauri installer of 0.8.22 is 8,854,808 bytes (measured). The native one is not measured: there is
   no native Windows release binary yet (§10).
-- **Uninstall:** as today; the sync root stays registered after an uninstall (today's behaviour). Follow-up, not
-  0.9.0: an `--unregister` entry point the uninstaller calls.
+- **Uninstall:** as today; the sync root stays registered and the Credential Manager entries stay after an
+  uninstall, also with "delete app data" ticked. Delta 2 makes the box say so ("This does not sign you out and
+  does not remove the Beebeeb folder from Explorer: sign out in Beebeeb before uninstalling") instead of removing
+  them from NSIS script that no lane can run. Follow-up, not 0.9.0: an `--uninstall-cleanup` entry point of the
+  native app (credentials + sync root) that the uninstaller calls before it deletes the binary.
+- **Toolchain pin (Delta 2):** NSIS 3.11 as released, by SHA-256: the archive in the workflow, and
+  `Bin\makensis.exe` and the stub `Stubs\lzma_solid-x86-unicode` again in `build-installer.ps1` (release mode
+  refuses anything else); the plugin DLL was already pinned.
 
 ## 6. Release pipeline and hosting
 
 `release.yml` is not changed. New: `.github/workflows/release-native-windows.yml` (same inputs; refuses a version
 below 0.9.0), `scripts/native-channel-manifest.mjs` and `scripts/publish-release-files.sh`. Same gates: authored
 `RELEASE_NOTES.md` (validator with `--no-macos`), `RELEASE_BLOCKERS.md`, the branch-point check, the Authenticode
-gate, the key guard; only `build` names the `desktop-release` environment. It builds the native crate, packages and
-signs, signs the installer and then the manifest with the same secret (`tauri signer sign`, used as a signing
-tool; the key reaches it by environment only), creates `desktop-v<V>` with the authored notes (`make_latest:
-false`), stages the files and publishes them. It never writes `desktop/latest.json`, `beta.json` or `alpha.json`
-(the publish script refuses any path but the two below).
+gate, the key guard. It builds the native crate (baking in the build's time), packages and Authenticode-signs,
+signs the installer and then the manifest with the v2 key (`tauri signer sign`, used as a signing tool; the key
+reaches it by environment only) and verifies both against the committed public key, creates `desktop-v<V>` with
+the authored notes (`make_latest: false`; a release becomes GitHub's "Latest" only when its stable manifest is
+published: job `mark-latest`, Guus 2026-11-11), stages the files and publishes them. It never writes
+`desktop/latest.json`, `beta.json` or `alpha.json` (the publish script refuses any path but the two below).
+**MSI (Guus, 2026-11-11: keep the Windows MSI):** this pipeline builds the NSIS installer only; a native MSI is
+not designed or built here and is open (§9 Q4).
+
+**The signing boundary (Delta 2; review P1-1; details in task 2451, not repeated here).**
+
+- Every job that signs names `environment: desktop-release`: `build` and `publish-manifest` here,
+  `sign-macos-updater-artifact.yml`'s `sign`, and `release.yml`'s `build` (it already did; its `publish-manifest`
+  holds no key). A promotion (`publish_existing`) is the same `publish-manifest` job, so the same gate.
+- No step that holds a key installs dependencies: `bun install` and the signer's own install are separate steps
+  without the key; the signing steps run the installed signer and nothing else, and read the key from the
+  environment, never a command line.
+- Before signing, in the workflow: the run's ref is `main` or `release/*`; a `release/*` ref passes the reviewed
+  branch-point check, also for a promotion; the tag being published is in the history of that ref and has a
+  published release; publishing runs one at a time (`concurrency: desktop-native-publish-manifest`).
+- **These in-file checks are the second line.** A branch can carry its own copy of a workflow, so what holds is the
+  environment's own rules, which only Guus can set:
+
+**Settings Guus must make (a lane cannot change repository settings).** In `beebeeb-io/desktop` → Settings:
+
+1. Environments → `desktop-release` → Environment secrets: add `UPDATER_V2_PRIVATE_KEY` and
+   `UPDATER_V2_PRIVATE_KEY_PASSWORD` (the new key), and add `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` with their current values.
+2. Secrets and variables → Actions → Repository secrets: **delete** `TAURI_SIGNING_PRIVATE_KEY` and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (an environment secret wins while both exist, but the repository copy stays
+   readable outside the environment until it is deleted). The v2 key is never a repository secret.
+3. Environments → `desktop-release` → Required reviewers: Guus (and Bram once provisioned); "Prevent self-review"
+   off while there is one operator.
+4. Environments → `desktop-release` → Deployment branches and tags → Selected: `main` and `release/*`. No tag rule.
+5. Check (task 2451): `gh secret list` shows the four names only under the environment; a dispatch of a signing
+   workflow from a throwaway branch stops at the environment and never starts a step.
+
+Order: merge the workflow changes first (steps 1 and 2 break any signing job that does not name the environment,
+which after this PR and lane H1's is none), then 1, then 2 to 4, then 5.
 
 **Layout under `https://releases.beebeeb.io/`** (the same on any host):
 
@@ -259,8 +395,8 @@ S3-compatible bucket; `rsync:…`: our own web server), chosen by the repository
 | R3 | NSIS replaces the binary while the app runs with the Cloud Files provider connected | 0.8.25 pre-flight disconnects first (§2 item 2); without it the installer kills the process, as in every 0.8.x update; `state.db` is WAL and not in the install folder | rehearsal steps 7-9, with the app running and syncing |
 | R4 | Explorer holds placeholders or a file is open in the sync folder | the installer touches only `%LOCALAPPDATA%\Beebeeb`; the sync root registration is untouched and the native engine reconnects with the same id | rehearsal step 10 (a placeholder open in Explorer during the update) |
 | R5 | Two uninstall entries (NSIS + MSI, or old + new) | same `UNINSTKEY`; the WiX branch removes an MSI install | `verify-install.ps1` "exactly one uninstall entry"; rehearsal variant B |
-| R6 | The native engine cannot open a state written by an old Tauri build | only 0.8.25+ is an upgrade source (§2 b) | engine lane; rehearsal's `state.db` fingerprint before/after |
-| R7 | A bad 0.9.0 reaches everyone | alpha, then beta, then stable (build once, promote by manifest); withdraw by removing the v2 manifest | `publish_existing` |
+| R6 | The native engine cannot open a state written by an old Tauri build | only 0.8.25+ is an upgrade source, enforced three times: the v2 key, the installer's refusal, the hand-off note (§2 b) | `handoff.rs` tests; native check 3 in `packaging/windows/README.md`; engine lane |
+| R7 | A bad 0.9.0 reaches everyone | alpha, then beta, then stable (build once, promote by manifest). **Withdraw by publishing a newer signed manifest that points back** (`publish_existing` with the good version): removing a manifest withdraws nothing, the host can serve it again (§4, "Freshness and withdrawal") | `a_background_check_drops_an_offer_the_channel_has_withdrawn_or_replaced`, `a_manifest_older_than_this_build_never_installs_anything_even_with_no_mark` |
 | R8 | Rollback to an old signed build through the update server | §4 rules 1, 3, 7 | `policy_tests.rs`, `machine_tests.rs` (34 of 34 mutants killed) |
 | R9 | A partial or swapped file is run; `EBWebView` stays locked | `.part` until verified, verified again at Apply; best-effort removal, repeated by the next install | `machine_tests.rs`; `verify-install.ps1` |
 
@@ -279,14 +415,15 @@ Rehearsal and the lead's commands: `packaging/windows/README.md`.
 
 ## 9. Open questions that are Guus's
 
-- **Q1 (decision 2450). Where is `releases.beebeeb.io` served from for 0.9.0?** It must be our own hosting in the EU
-  for "one host, ours" to be true (`AGENTS.md`). Until then the name points at GitHub Pages and each release
-  commits its installer to that repo. The lead recommends EU hosting behind the same name (§6).
-- **Q2. The updater key** was generated without a password (`CLAUDE.md`: "rotate before public release") and now
-  also signs manifests, in one more CI job. Rotate before 0.9.0 (0.8.25 is a natural release N), or keep?
-- **Q3. GitHub "Latest" and beebeeb.io/download** when 0.9.0 is stable: the native installer becomes the fresh
-  Windows download while macOS and Linux stay on 0.8.x. Who decides the day and the wording?
-- **Q4. Dropping the MSI** for Windows from 0.9.0 (§2, §5): confirm.
+- **Q1 (decision 2450). Where is `releases.beebeeb.io` served from for 0.9.0?** Guus, 2026-11-11: it stays GitHub
+  Pages for now. A US system in the update path, existing and not extended; the client still allows one host
+  name, so moving is a DNS change plus one repository variable (§6).
+- **Q2. The updater key.** Answered (Guus, 2026-11-11 11:40): both. The old key moves into the environment; the
+  native line has its own password-protected key (§4, §6).
+- **Q3. GitHub "Latest" and beebeeb.io/download.** Answered: "Latest" shows 0.9.0 only when it is stable
+  (`mark-latest`). The download page's wording and day are still open.
+- **Q4. The MSI.** Answered: keep the Windows MSI. Open consequence: the native pipeline builds no MSI (§6); an
+  existing MSI install still moves to the NSIS installer through the WiX branch (§2).
 - **Q5. Certificates:** none new; Azure Artifact Signing is unchanged.
 
 ## 10. What this PR does not do
@@ -294,6 +431,12 @@ Rehearsal and the lead's commands: `packaging/windows/README.md`.
 - It runs nothing on Windows: `makensis`, the PowerShell scripts and the rehearsal are written, not executed (a
   lane cannot run Windows binaries). The lead's commands: `packaging/windows/README.md`.
 - It does not wire the updater into the native shell or the engine crate (PR #280), add the icon/version resource,
-  implement the 0.8.25 changes, or touch autostart, tray, single instance, macOS or Linux.
+  implement the 0.8.25 changes, or touch autostart, tray, single instance, macOS or Linux. Three contracts in §5
+  and §2 are therefore promises the shell lane must keep, with nothing in this PR that can test them:
+  `BEEBEEB_APP_IDENTIFIER`, `--quit-for-update`, and calling `handoff::arrival()` before `state.db` is opened.
+- Delta 2 does not build a native MSI, does not remove credentials or the sync root on uninstall (the box says
+  so), does not gate a silent `/S` install over an MSI install below 0.8.25, does not give the upgrade rehearsal a
+  release-identity mode (README section B), and does not split `release.yml`'s build step, which compiles and
+  signs in one step with the 0.8.x key present (changing it changes the 0.8.x release path).
 - `release-native-windows.yml` passes `actionlint` and has never run; the `s3` and `rsync` publish targets have
   never run; `net::HttpsClient` compiles for Linux and `x86_64-pc-windows-msvc` and was never run against a server.

@@ -483,14 +483,24 @@ The native Windows app has its own workflow, `.github/workflows/release-native-w
   `RELEASE_NOTES.md` (validated with `--no-macos`: a native release is Windows only), `RELEASE_BLOCKERS.md`, the
   branch-point check, the Authenticode gate (1 installer, no MSI), the updater-signature key guard.
 - The installer is built by `packaging/windows/build-installer.ps1 -Mode release` (plain `makensis`), not by the
-  Tauri bundler. It is signed for the updater with the same key and tool as 0.8.x (`tauri signer sign`).
+  Tauri bundler. It is signed for the updater with the same tool as 0.8.x (`tauri signer sign`) and **another
+  key**: the native line's own, password-protected v2 key (minisign `FED25848C41F2348`; public half committed as
+  `crates/beebeeb-updater/keys/updater-v2.pub`; private half only as the `desktop-release` environment's secrets
+  `UPDATER_V2_PRIVATE_KEY` / `UPDATER_V2_PRIVATE_KEY_PASSWORD`). The 0.8.x key signs 0.8.x only. A native build
+  trusts the v2 key alone; 0.8.25 trusts both, each for its own line.
+- Every job that signs (here `build` and `publish-manifest`; `release.yml`'s `build`; the macOS signing workflow)
+  names the `desktop-release` environment, and no step that holds a key installs dependencies. The settings that
+  make this a boundary are in the spec, section 6 ("Settings Guus must make").
+- Promoting a build to another channel and **withdrawing** one are both `publish_existing=true`: a withdrawal
+  publishes a newer signed manifest that points at the version to go back to. Never delete a manifest to withdraw
+  a build: the host can serve it again.
 - A native release is published to the **v2** manifests only: `desktop/v2/{stable,beta,alpha}.json`, each with a
   detached signature `….json.sig` (the native updater refuses an unsigned manifest), and the installer under
   `desktop/artifacts/<version>/`. `scripts/publish-release-files.sh` puts the staged files where
   `releases.beebeeb.io` is served from (repository variable `DESKTOP_RELEASE_PUBLISH_TARGET`; default: the
   `beebeeb-io/releases` checkout). Installs on 0.8.24 or older never see a native release: they first update to
   0.8.25, the bridge (`docs/superpowers/plans/2026-11-11-bridge-0.8.25.md`).
-- GitHub "Latest" is not moved by this workflow.
+- GitHub "Latest" moves to a native release only when its **stable** manifest is published (job `mark-latest`).
 
 ## Style Notes
 

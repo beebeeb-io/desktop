@@ -16,7 +16,7 @@ cd src-tauri && cargo check --locked --all-targets           # Rust side without
 cd src-tauri && cargo test --locked 2>&1 | tee /tmp/bb-desktop-test.log
 python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard CI uses (proves it rejects empty runs)
 scripts/release-macos-local.sh <VERSION> <CHANNEL>           # macOS release: local only, fail-closed (docs/RELEASING.md)
-cd crates/beebeeb-updater && cargo test --locked             # the native updater's rules (truth line: test result: ok. N passed; 0 failed)
+cd crates/beebeeb-updater && cargo test --locked --features net   # the native updater's rules (truth line: test result: ok. N passed; 0 failed)
 ```
 
 Truth lines: `cargo test` → per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the

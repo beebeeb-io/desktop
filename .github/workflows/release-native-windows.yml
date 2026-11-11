@@ -359,9 +359,8 @@ jobs:
         with:
           path: artifacts
 
-      # make_latest stays false: GitHub's "Latest" is what beebeeb.io/download offers and what release.yml's
-      # delivery check compares with desktop/latest.json. Moving it to a native release is its own decision
-      # (spec, open questions).
+      # make_latest is false here: GitHub's "Latest" is what beebeeb.io/download offers. A native release becomes
+      # "Latest" only when its stable manifest is published (job mark-latest; Guus, 2026-11-11).
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -564,3 +563,25 @@ jobs:
             git commit -m "desktop: publish native $CHANNEL manifest $TAG"
             git push
           fi
+
+  # Guus, 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
+  # make_latest false; this job marks it when its STABLE manifest has been published. Its own job: the job that
+  # holds the signing key keeps `contents: read`.
+  mark-latest:
+    name: Mark the stable release as Latest
+    if: ${{ always() && inputs.channel == 'stable' && needs.publish-manifest.result == 'success' }}
+    needs: publish-manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark desktop-v<version> as the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: desktop-v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          id="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')"
+          gh api -X PATCH "repos/$REPO/releases/$id" -f make_latest=true --jq '.tag_name'
