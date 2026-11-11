@@ -6,12 +6,12 @@ use crate::State;
 use crate::shell::app::Section;
 
 pub fn dw_0747(s: &mut State) {
-    crate::frames::go(s, Section::Trash);
+    crate::frames::scene(s, Section::Trash);
     s.frames.trash = TrashUi::default();
 }
 
 pub fn dw_0117(s: &mut State) {
-    crate::frames::go(s, Section::Trash);
+    crate::frames::scene(s, Section::Trash);
     s.frames.trash = TrashUi {
         source: Box::new(BoardTrash::empty()),
         selected: None,
@@ -23,15 +23,12 @@ pub fn dw_0117(s: &mut State) {
 pub fn dw_0748(s: &mut State) {
     dw_0747(s);
     s.frames.trash.selected = Some(1);
-    s.frames.trash.menu = Some(super::Open {
-        at: (420.0, 166.0),
-        hot: 0,
-    });
+    s.frames.trash.menu = Some(super::Open::at(420.0, 166.0));
 }
 
 /// Emptying: 5 of 12 deleted for good.
 pub fn dw_0749b(s: &mut State) {
-    crate::frames::go(s, Section::Trash);
+    crate::frames::scene(s, Section::Trash);
     s.frames.trash = TrashUi {
         source: Box::new(BoardTrash::emptying()),
         selected: None,

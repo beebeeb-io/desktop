@@ -3,6 +3,7 @@
 //! draws them.
 
 use crate::State;
+use crate::shell::app::Event;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
@@ -52,7 +53,9 @@ fn new_button(off: bool, t: &Theme) -> El {
     }
 }
 
-/// The search field (`.mk-search`), the same field as in Files: it edits `State::search`.
+/// The search field (`.mk-search`), drawn as in Files. It edits these sections' own text
+/// (`frames::Ui::search`), never Files' field; Enter asks for the search (the section's
+/// `on_key`: `Intent::Do("search", ..)`), which is the Search group's to show (DW-0802).
 fn search_field(s: &State, t: &Theme) -> El {
     kit::note_text(
         "search-placeholder",
@@ -75,27 +78,53 @@ fn search_field(s: &State, t: &Theme) -> El {
         .center_y()
         .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
         .child(
-            text_input(&s.search, type_::SEARCH)
+            text_input(&s.frames.search, type_::SEARCH)
                 .key(crate::ui::keys::SEARCH_KEY)
                 .label("Search names")
                 .shortcut_hint("Ctrl+F")
                 .single_line()
                 .color(t.text)
                 .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
-                .on_edit(|s: &mut State| &mut s.search)
+                .on_edit(|s: &mut State| &mut s.frames.search)
+                .on_input_key(|s: &mut State, ev: &rune::KeyEvent, _: &mut rune::Tx| search_key(s, ev))
                 .grow(1.0),
         )
         .child(kbd("kbd-hint", "Ctrl+F", t))
 }
 
+/// The search field's keys while it has focus: Enter asks for what is typed (the Search
+/// group shows the results, DW-0802). Every other key is the field's.
+pub fn search_key(s: &mut State, ev: &rune::KeyEvent) -> bool {
+    if ev.key != rune::Key::Enter || !crate::frames::plain(ev) {
+        return false;
+    }
+    let typed = s.frames.search.text.trim().to_string();
+    if typed.is_empty() {
+        return false;
+    }
+    s.frames.intents.push(crate::frames::Intent::Do("search", typed));
+    true
+}
+
 pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
-    let nav = row()
-        .key("nav")
-        .child(tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Off, t).shortcut_hint("Alt+Left"))
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
-        );
+    // Back and Forward are the shell's history: live when there is somewhere to go.
+    let (back, forward) = crate::frames::history(s);
+    let live = |on: bool| if on { ToolState::Idle } else { ToolState::Off };
+    let mut back_button =
+        tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, live(back), t).shortcut_hint("Alt+Left");
+    if back {
+        back_button = back_button.on_press(|s: &mut State| {
+            crate::shell::host::dispatch(s, Event::Back);
+        });
+    }
+    let mut forward_button =
+        tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, live(forward), t).shortcut_hint("Alt+Right");
+    if forward {
+        forward_button = forward_button.on_press(|s: &mut State| {
+            crate::shell::host::dispatch(s, Event::Forward);
+        });
+    }
+    let nav = row().key("nav").child(back_button).child(forward_button);
     let title = col()
         .key("folder-info")
         .px(4.0)

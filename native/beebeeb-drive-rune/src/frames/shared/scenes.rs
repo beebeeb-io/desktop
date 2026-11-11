@@ -7,7 +7,7 @@ use crate::State;
 use crate::shell::app::Section;
 
 fn scene(s: &mut State, tab: Tab, source: BoardShared) {
-    crate::frames::go(s, Section::Shared);
+    crate::frames::scene(s, Section::Shared);
     s.frames.shared = SharedUi {
         source: Box::new(source),
         tab,
@@ -37,7 +37,7 @@ pub fn dw_0510(s: &mut State) {
 
 fn menu(s: &mut State, selected: usize, at: (f32, f32), hot: usize) {
     s.frames.shared.selected = Some(selected);
-    s.frames.shared.menu = Some(Open { at, hot });
+    s.frames.shared.menu = Some(Open::at(at.0, at.1).lit(hot));
 }
 
 /// The menu on Brand review.pdf, Leave… lit.

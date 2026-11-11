@@ -81,6 +81,11 @@ pub fn button_keyed(
     b.child(kit::label(format!("{k}-label"), words, type_style, ink))
 }
 
+/// The key of the tab worded `words` in the switch `n`.
+pub fn segment_key(n: usize, words: &str) -> String {
+    format!("seg-{n}-{}", slug(words))
+}
+
 /// A worded segmented control (`.kit-seg.kit-seg-sm`): `tabs` are (words, chosen). Keys:
 /// `seg-<n>`, each tab `seg-<n>-<words>` and `-label`. The caller adds each tab's `on_press`
 /// through `each`.
@@ -94,7 +99,7 @@ pub fn segments(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, 
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     for (i, (words, on)) in tabs.iter().enumerate() {
-        let k = format!("seg-{n}-{}", slug(words));
+        let k = segment_key(n, words);
         let mut tab = el()
             .key(k.clone())
             .role("tab")
@@ -108,6 +113,8 @@ pub fn segments(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, 
             .center()
             .radius(8.0)
             .focusable(true)
+            // One Tab stop for the switch: the chosen tab. Left and Right move between tabs.
+            .tab_index(if *on { 0 } else { -1 })
             .child(kit::label(
                 format!("{k}-label"),
                 *words,

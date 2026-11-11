@@ -7,12 +7,12 @@ pub mod source;
 mod tests;
 
 use crate::State;
-use crate::frames::Intent;
 use crate::frames::shared::parts::controls::{ButtonKind, button};
-use crate::frames::shared::parts::menu::{Entry, Open, menu};
+use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
 use crate::frames::shared::parts::table::{Columns, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
 use crate::frames::shared::parts::{chrome, empty};
+use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
@@ -37,20 +37,39 @@ const MENU: &[Entry] = &[
     Entry::new("Delete permanently\u{2026}").danger().rule(),
 ];
 
-fn pick(s: &mut State, n: usize) {
+/// Do what the menu's item `n` says, for the selected item; focus goes back to it (or to the
+/// row that took its place).
+fn pick(s: &mut State, n: usize, tx: &mut Tx) {
     s.frames.trash.menu = None;
-    match n {
-        0 => {
+    let id = s.frames.trash.selected_id();
+    match (n, id) {
+        (0, _) => {
             s.frames.trash.restore_selected();
         }
-        1 => s.frames.intents.push(Intent::Frame("DW-0411")),
-        2 => s.frames.intents.push(Intent::Frame("DW-0749")),
+        (1, Some(id)) => s.frames.intents.push(Intent::About("DW-0411", id)),
+        // The warning for THIS item (DW-0748: "the same big warning as Empty Trash, for this item").
+        (2, Some(id)) => s.frames.intents.push(Intent::Do("delete-permanently", id)),
         _ => {}
+    }
+    return_focus(s, tx);
+}
+
+fn close_menu(s: &mut State, tx: &mut Tx) {
+    s.frames.trash.menu = None;
+    return_focus(s, tx);
+}
+
+fn return_focus(s: &State, tx: &mut Tx) {
+    if let Some(i) = s.frames.trash.selected {
+        tx.return_focus(format!("row-{i}"), tx.focus_visible());
     }
 }
 
-fn close_menu(s: &mut State) {
-    s.frames.trash.menu = None;
+/// The pointer is on the menu's item `n`.
+fn light(s: &mut State, n: usize) {
+    if let Some(open) = s.frames.trash.menu.as_mut() {
+        open.hot = n;
+    }
 }
 
 impl Default for TrashUi {
@@ -64,6 +83,17 @@ impl Default for TrashUi {
 }
 
 impl TrashUi {
+    /// The id of the selected item.
+    pub fn selected_id(&self) -> Option<String> {
+        self.source.items().get(self.selected?).map(|item| item.id.clone())
+    }
+
+    /// Move the selection to row `i`; focus goes with it.
+    fn select(&mut self, i: usize, tx: &mut Tx) {
+        self.selected = Some(i);
+        tx.focus(format!("row-{i}"), true);
+    }
+
     /// Restore the selected item; the selection stays on the row that takes its place.
     pub fn restore_selected(&mut self) -> bool {
         let items = self.source.items();
@@ -197,6 +227,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             .enumerate()
             .map(|(i, r)| {
                 table_row(i, r, ui.selected == Some(i), &COLUMNS, &t)
+                    // The list is one Tab stop: the selected row, or the first.
+                    .tab_index(if ui.selected.unwrap_or(0) == i { 0 } else { -1 })
                     .on_press(move |s: &mut State| s.frames.trash.selected = Some(i))
                     .on_secondary_press(move |s: &mut State, press, _| {
                         s.frames.trash.selected = Some(i);
@@ -210,6 +242,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         }
         body.child(header(&COLUMNS, &t)).child(rows("Trash", list))
     };
+    let window = cx.layout_size("window");
     chrome::window(
         s,
         cx,
@@ -217,54 +250,87 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         bar,
         body,
         "Items in Trash are deleted for good after 30 days",
-        ui.menu
-            .as_ref()
-            .map(|open| menu("Trash item", MENU, open, 220.0, &t, pick, close_menu)),
+        ui.menu.as_ref().map(|open| {
+            menu(
+                "Trash item",
+                MENU,
+                open,
+                220.0,
+                window,
+                &t,
+                pick,
+                close_menu,
+                light,
+                on_key,
+            )
+        }),
     )
 }
 
-/// Trash's keys: the arrows select, Delete asks for the permanent delete (DW-0748's last
-/// item), Ctrl+Z is not here (restore is the menu's). Nothing opens with Enter.
+/// Trash's keys. A menu takes every key while it is open. Otherwise, in the list (or with
+/// focus nowhere): the arrows, Home and End move the selection AND focus; Delete asks for the
+/// permanent delete of the selected item; Alt+Enter asks for its details; Space previews it
+/// ("nothing here opens (Preview works)", DW-0747); the Menu key or Shift+F10 opens the menu
+/// of the SELECTED item under it. Nothing opens with Enter. In the search field, Enter asks
+/// for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if let Some(open) = s.frames.trash.menu.as_mut() {
-        let hot = open.hot;
-        return match ev.key {
-            Key::Enter => {
-                pick(s, hot);
-                true
-            }
-            Key::Escape => {
-                close_menu(s);
-                true
-            }
-            _ => open.on_key(ev, MENU.len()),
-        };
+        match open.on_key(ev, MENU, tx) {
+            Took::Pick(n) => pick(s, n, tx),
+            Took::Close => close_menu(s, tx),
+            Took::Key => {}
+        }
+        return true;
     }
     if ev.is_command('f') {
         tx.focus(crate::ui::keys::SEARCH_KEY, true);
         return true;
     }
-    if tx.focused().is_some_and(|key| !key.starts_with("row-")) {
-        return false;
+    match tx.focused() {
+        Some(key) if key == crate::ui::keys::SEARCH_KEY => {
+            return crate::frames::shared::parts::toolbar::search_key(s, ev);
+        }
+        Some(key) if !key.starts_with("row-") => return false,
+        _ => {}
     }
     let count = s.frames.trash.source.items().len();
     if count == 0 {
         return false;
     }
     let ui = &mut s.frames.trash;
-    match ev.key {
-        Key::Down => {
-            ui.selected = Some(ui.selected.map_or(0, |i| (i + 1).min(count - 1)));
-            true
-        }
-        Key::Up => {
-            ui.selected = Some(ui.selected.map_or(0, |i| i.saturating_sub(1)));
-            true
-        }
-        Key::Delete if ui.selected.is_some() => {
-            s.frames.intents.push(Intent::Frame("DW-0749"));
-            true
-        }
-        _ => false,
+    if frames::is_menu_key(ev) {
+        return match ui.selected {
+            Some(i) => {
+                ui.menu = Some(Open::under(format!("row-{i}")));
+                true
+            }
+            None => false,
+        };
     }
+    if frames::is_alt_enter(ev) || frames::is_space(ev) {
+        let Some(id) = ui.selected_id() else {
+            return false;
+        };
+        s.frames.intents.push(if frames::is_space(ev) {
+            Intent::Do("preview", id)
+        } else {
+            Intent::About("DW-0411", id)
+        });
+        return true;
+    }
+    if !frames::plain(ev) {
+        return false;
+    }
+    match ev.key {
+        Key::Down => ui.select(ui.selected.map_or(0, |i| (i + 1).min(count - 1)), tx),
+        Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
+        Key::Home => ui.select(0, tx),
+        Key::End => ui.select(count - 1, tx),
+        Key::Delete => match ui.selected_id() {
+            Some(id) => s.frames.intents.push(Intent::Do("delete-permanently", id)),
+            None => return false,
+        },
+        _ => return false,
+    }
+    true
 }

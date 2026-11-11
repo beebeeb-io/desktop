@@ -18,10 +18,19 @@ pub enum Kind {
     Folder,
     Document,
     Sheet,
-    /// A photo: its thumbnail (the board's sample gradient until the engine hands over pixels).
-    Photo,
-    /// A photo with the board's other sample (`.mk-ph5`, a harbour at dusk).
-    PhotoDusk,
+    /// A photo, with its thumbnail when the source has one. Without: the plain tile and glyph
+    /// of a document, never a picture that is not the photo's.
+    Photo(Option<Thumb>),
+}
+
+/// A thumbnail a source hands over. Today these are the board's two sample pictures (the
+/// fixtures' data); the engine's pixels become a third variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Thumb {
+    /// `.mk-ph4`: leaves.
+    BoardLeaves,
+    /// `.mk-ph5`: a harbour at dusk.
+    BoardDusk,
 }
 
 impl Kind {
@@ -29,7 +38,7 @@ impl Kind {
         match self {
             Kind::Folder => &icons::FILES,
             Kind::Sheet => &icons::DOC_SPREADSHEET,
-            Kind::Document | Kind::Photo | Kind::PhotoDusk => &icons::DOC_GENERIC,
+            Kind::Document | Kind::Photo(_) => &icons::DOC_GENERIC,
         }
     }
 }
@@ -83,8 +92,8 @@ pub fn tile(key: &str, icon_key: String, kind: Kind, d: f32, r: f32, glyph: f32,
         .clip_rounded(r)
         .center();
     match kind {
-        Kind::Photo => return photo(tile),
-        Kind::PhotoDusk => return crate::ui::file_list::thumbnail(tile),
+        Kind::Photo(Some(Thumb::BoardLeaves)) => return photo(tile),
+        Kind::Photo(Some(Thumb::BoardDusk)) => return crate::ui::file_list::thumbnail(tile),
         _ => {}
     }
     tile.fill(t.tile)

@@ -1,6 +1,6 @@
 //! What Shared shows and what it can do: a small trait with the board's samples as its fixture.
 
-use super::parts::table::{Extra, Kind, Row};
+use super::parts::table::{Extra, Kind, Row, Thumb};
 use crate::ui::file_list::PcState;
 
 /// Someone wants to share something with the person (DW-0501's card).
@@ -227,7 +227,7 @@ impl BoardShared {
                 link(
                     "l-harbour",
                     "Harbour.heic",
-                    Kind::PhotoDusk,
+                    Kind::Photo(Some(Thumb::BoardDusk)),
                     "Expires in 27 days, with password",
                     false,
                 ),

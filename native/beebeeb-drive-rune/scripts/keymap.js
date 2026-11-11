@@ -171,10 +171,13 @@ if (foot) {
 }
 
 // ==== Lane f-shared-search-trash: Shared, Search and Trash (src/frames/{shared,search,trash}) ====
-// Everything below is keyed by class, per occurrence in document order.
+// Everything below is keyed by class, per occurrence in document order, and only outside the
+// details pane (`.mk-det`): what the pane draws is keyed above, by the Files lane, under its own
+// names. `scripts/check-keymap-scope.sh` proves a Files capture exports the same keys as before.
+const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};
-qa('.kit-btn').forEach((b) => {
+qa('.kit-btn').filter((b) => !inDet(b)).forEach((b) => {
   // The same words twice in one frame (New request in the toolbar and in the empty state): `-2` for the second.
   const base = `btn-${slug(b.textContent)}`;
   btnSeen[base] = (btnSeen[base] || 0) + 1;
@@ -184,7 +187,7 @@ qa('.kit-btn').forEach((b) => {
   api.text(`${k}-label`, q('span', b));
 });
 // A worded segmented control (`.kit-seg`): `seg-<n>`, each tab `seg-<n>-<its words>` and `-label`.
-qa('.kit-seg').forEach((seg, n) => {
+qa('.kit-seg').filter((seg) => !inDet(seg)).forEach((seg, n) => {
   api.box(`seg-${n}`, seg);
   qa(':scope > span', seg).forEach((tab) => {
     const k = `seg-${n}-${slug(tab.textContent)}`;
@@ -217,7 +220,7 @@ qa('.mk-rows > .mk-row').forEach((row, i) => {
   api.text(`row-${i}-from`, q('.mk-cell', from));
 });
 // A grouped list (`.kit-list`): `list-<n>`, its items `item-<n>-<m>` and their parts.
-qa('.kit-list').forEach((list, n) => {
+qa('.kit-list').filter((list) => !inDet(list)).forEach((list, n) => {
   api.text(`list-${n}-title`, q(':scope > .kit-list-title', list));
   api.text(`list-${n}-foot`, q(':scope > .kit-list-foot', list));
   api.box(`list-${n}`, q(':scope > .kit-list-body', list));

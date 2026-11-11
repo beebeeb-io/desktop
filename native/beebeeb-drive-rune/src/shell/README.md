@@ -39,8 +39,13 @@ kinds (`surfaces::WindowKind::{Main, Flyout}`) and the rest is `app::Screen` / `
 In `registry.rs`, add your group to `FRAMES`:
 
 ```rust
-Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None },
+Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ```
+
+`feedback` is whether the live feedback mode of test builds (`src/feedback/README.md`) may run on
+your frames: `Denied("reason")` until you have met its three duties ("For frame lanes": mark every
+secret, prove it with a test, keep secrets still), then `Allowed`. A build without the `feedback`
+feature does not read it.
 
 `view` is `fn(&State, &mut Cx<State>) -> El` and draws the WHOLE window for that state (caption
 included, as `files_frame::view` does). `on_key` is optional: it gets the keys the shell does not take.
@@ -67,7 +72,9 @@ Read where the window is from `s.shell.app` (`screen()`, `route()`, `dialog()`, 
   session gate is closed and brings the window forward. From the flyout:
   `main.update(|s, _| { host::request(s, Intent::Settings(SettingsPane::General)); })`.
 
-The shell already handles Alt+Left / Alt+Right, Ctrl+, , Ctrl+/ and Esc (`host::on_key`).
+The shell already handles Alt+Left / Alt+Right, Ctrl+, , Ctrl+/ and Esc (`host::on_key`). In a
+build with the `feedback` feature, F8 and Shift+F8 are the feedback mode's and it sees every key
+first (`feedback::on_key`).
 `ui::sidebar` selects by writing `State::sidebar_section`; `host::poll` turns that into a navigation,
 so the sidebar routes today. It can only see a CHANGE of that value: a click on the row that is
 already highlighted (to leave a folder, or from Sync history, which has no highlight of its own) does
@@ -109,7 +116,7 @@ behind is inert and gets no keys. A dialog lane writes ONE function and ONE line
 
 ```rust
 pub fn card(dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El   // registry::DialogFn
-// DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None },
+// DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ```
 
 It returns its card and nothing else: no scrim, no window chrome, no copy of what is behind it.

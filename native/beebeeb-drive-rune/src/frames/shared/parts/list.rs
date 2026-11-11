@@ -8,8 +8,33 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use rune::{Color, El, Icon, col, el, row};
 
-/// One item. Keys: `item-<n>-<m>` and `-tile`, `-tile-icon`, `-title`, `-sub`, `-more`; `trailing`
-/// elements (avatars, a pill, "Link") sit between the words and the menu glyph.
+/// The key of the More button of item `m` in list `n`: an item's menu opens under it.
+pub fn more_key(n: usize, m: usize) -> String {
+    format!("item-{n}-{m}-more-btn")
+}
+
+/// The More button at an item's end (the board's three dots, `.mk-mac`): a button named for
+/// its item; the caller adds what a press does. Its box is the glyph's (the padding is taken
+/// back by the margin), so the item's layout is the board's. Not a Tab stop: the Menu key on
+/// the item does the same. Keys: `item-<n>-<m>-more-btn`, and the glyph `item-<n>-<m>-more`.
+pub fn more(n: usize, m: usize, title: &str, t: &Theme) -> El {
+    el().key(more_key(n, m))
+        .role("button")
+        .label(format!("More actions for {title}"))
+        .padding(4.0)
+        .mx(-4.0)
+        .my(-4.0)
+        .radius(6.0)
+        .center()
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .tab_index(-1)
+        .child(kit::glyph(format!("item-{n}-{m}-more"), &MORE, 16.0, t.text_tertiary))
+}
+
+/// One item. Keys: `item-<n>-<m>` and `-tile`, `-tile-icon`, `-title`, `-sub`; `trailing`
+/// elements (avatars, a pill, "Link") sit between the words and `more` (`list::more`).
 #[allow(clippy::too_many_arguments)]
 pub fn item(
     n: usize,
@@ -19,6 +44,7 @@ pub fn item(
     title: &str,
     sub: &str,
     trailing: Vec<El>,
+    more: El,
     selected: bool,
     t: &Theme,
 ) -> El {
@@ -69,7 +95,7 @@ pub fn item(
         .child(lead)
         .child(words)
         .children(trailing)
-        .child(kit::glyph(format!("{k}-more"), &MORE, 16.0, t.text_tertiary))
+        .child(more)
 }
 
 /// The card around the items (`.kit-list-body`), inset 16 pt (`.mx-4`). Key: `list-<n>`.

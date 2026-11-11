@@ -7,11 +7,9 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::{caption, kit};
 use rune::{Cx, El, col, el, row};
 
-/// The PC's own summary, the words `crate::ui::status_bar` shows in Files (the board's sample).
-pub const PC_SUMMARY: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
-
-/// The status line (`.mk-foot`) with this section's words at the right.
-pub fn status_line(details: &str, t: &Theme) -> El {
+/// The status line (`.mk-foot`): the PC's sync state in words at the left (`sync`, from
+/// `frames::PcStatus`), this section's words at the right.
+pub fn status_line(sync: &str, details: &str, t: &Theme) -> El {
     row()
         .key("status-bar")
         .role("status")
@@ -24,12 +22,7 @@ pub fn status_line(details: &str, t: &Theme) -> El {
         .gap(7.0)
         .center_y()
         .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.green))
-        .child(kit::label(
-            "status-text",
-            "Up to date",
-            type_::STATUS_STRONG,
-            t.text_secondary,
-        ))
+        .child(kit::label("status-text", sync, type_::STATUS_STRONG, t.text_secondary))
         .child(el().key("status-spacer").grow(1.0))
         .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
 }
@@ -45,7 +38,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         .fill(t.bg)
         .child(toolbar)
         .child(body.grow(1.0).min_h(0.0).w_full())
-        .child(status_line(status, t));
+        .child(status_line(&s.frames.pc.sync_words(), status, t));
     let mut window = col()
         .key("window")
         .role("window")

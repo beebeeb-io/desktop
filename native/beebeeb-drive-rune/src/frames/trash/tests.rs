@@ -1,7 +1,7 @@
 //! Trash: the list, the empty state, selection and the intents.
 
 use crate::frames::Intent;
-use crate::frames::shared::tests::{click, info, press, runtime};
+use crate::frames::shared::tests::{alt, click, focused, info, press, press_with, runtime, space};
 use rune::Key;
 
 #[test]
@@ -42,7 +42,11 @@ fn empty_trash_asks_for_the_warning_and_delete_does_too() {
     press(&mut rt, Key::Enter);
     assert_eq!(rt.state.frames.intents.len(), 1, "nothing in Trash opens");
     press(&mut rt, Key::Delete);
-    assert_eq!(rt.state.frames.intents.len(), 2);
+    assert_eq!(
+        rt.state.frames.intents.last(),
+        Some(&Intent::Do("delete-permanently", "t-contract-old".into())),
+        "Delete names the ONE item; Empty Trash names none"
+    );
 }
 
 #[test]
@@ -86,10 +90,18 @@ fn the_trash_menu_restores_asks_for_details_and_for_the_warning() {
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
-    assert_eq!(rt.state.frames.intents, vec![Intent::Frame("DW-0749")]);
+    // P1-2: one item's permanent delete is not Empty Trash's intent, and names the item.
+    assert_eq!(
+        rt.state.frames.intents,
+        vec![Intent::Do("delete-permanently", "t-contract-old".into())]
+    );
+    assert!(!rt.state.frames.intents.contains(&Intent::Frame("DW-0749")));
     let mut rt = runtime(super::scenes::dw_0748);
     click(&mut rt, "mi-details");
-    assert_eq!(rt.state.frames.intents, vec![Intent::Frame("DW-0411")]);
+    assert_eq!(
+        rt.state.frames.intents,
+        vec![Intent::About("DW-0411", "t-contract-old".into())]
+    );
     let mut rt = runtime(super::scenes::dw_0748);
     press(&mut rt, Key::Escape);
     assert!(rt.find("menu").is_none() && rt.state.frames.intents.is_empty());
@@ -116,4 +128,52 @@ fn emptying_shows_how_far_it_is_and_empty_trash_waits() {
     assert!(!button.focusable, "Empty Trash… waits while Trash empties");
     click(&mut rt, "btn-empty-trash");
     assert!(rt.state.frames.intents.is_empty());
+}
+
+/// P1-1 in Trash: the Menu key restores the highlighted item, not the one that was clicked.
+#[test]
+fn the_menu_key_restores_the_highlighted_item() {
+    let mut rt = runtime(super::scenes::dw_0747);
+    click(&mut rt, "row-0");
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.frames.trash.selected, Some(2));
+    assert_eq!(focused(&rt).as_deref(), Some("row-2"), "focus goes with the selection");
+    press(&mut rt, Key::ContextMenu);
+    assert!(rt.find("menu").is_some());
+    press(&mut rt, Key::Enter);
+    let left: Vec<String> = rt
+        .state
+        .frames
+        .trash
+        .source
+        .items()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert!(
+        left.contains(&"Old invoices".to_string()) && !left.contains(&"Budget 2025.xlsx".to_string()),
+        "Budget 2025.xlsx was restored, Old invoices stays: {left:?}"
+    );
+    // Arrows only: the Menu key still has a menu.
+    let mut rt = runtime(super::scenes::dw_0747);
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::ContextMenu);
+    assert!(rt.find("menu").is_some());
+}
+
+/// P2-3 in Trash: Alt+Enter is Details, Space previews ("nothing here opens (Preview works)").
+#[test]
+fn alt_enter_asks_for_details_and_space_previews() {
+    let mut rt = runtime(super::scenes::dw_0747);
+    press(&mut rt, Key::Down);
+    press_with(&mut rt, Key::Enter, alt());
+    press(&mut rt, space());
+    assert_eq!(
+        rt.state.frames.intents,
+        vec![
+            Intent::About("DW-0411", "t-old-invoices".into()),
+            Intent::Do("preview", "t-old-invoices".into())
+        ]
+    );
 }

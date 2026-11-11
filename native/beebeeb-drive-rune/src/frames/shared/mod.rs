@@ -9,12 +9,12 @@ pub mod source;
 pub(crate) mod tests;
 
 use crate::State;
-use crate::frames::Intent;
+use crate::frames::{self, Intent};
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
-use parts::menu::{Entry, Open};
+use parts::menu::{Entry, Open, Took, Trail};
 use parts::table::{Columns, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
@@ -86,7 +86,9 @@ impl SharedUi {
         match self.tab {
             Tab::WithMe => self.source.with_me().get(i).map(|r| Intent::OpenItem(r.id.clone())),
             // A share with people opens People with access; a link or a request opens what it points at.
-            Tab::ByMe if i < self.source.people_shares().len() => Some(Intent::Frame("DW-0511")),
+            Tab::ByMe if i < self.source.people_shares().len() => {
+                self.selected_id().map(|id| Intent::About("DW-0511", id))
+            }
             Tab::ByMe => self
                 .source
                 .links()
@@ -106,6 +108,37 @@ impl SharedUi {
             Tab::ByMe => self.source.links().get(i - people.len()).map(|l| l.id.clone()),
             Tab::Requests => self.source.requests().get(i).map(|r| r.id.clone()),
         }
+    }
+
+    /// The key of item `i` of the tab that shows: focus goes where the selection goes.
+    pub fn item_key(&self, i: usize) -> String {
+        let people = self.source.people_shares().len();
+        match self.tab {
+            Tab::WithMe => format!("row-{i}"),
+            Tab::ByMe if i < people => format!("item-0-{i}"),
+            Tab::ByMe => format!("item-1-{}", i - people),
+            Tab::Requests => format!("item-0-{i}"),
+        }
+    }
+
+    /// The key of the selected item.
+    pub fn selected_key(&self) -> Option<String> {
+        self.selected.map(|i| self.item_key(i))
+    }
+
+    /// The item of the selected item's menu that shows these keys ("Space", "Alt+Enter"): a
+    /// key the menu shows does what that item does, also while the menu is closed.
+    pub fn hinted(&self, keys: &str) -> Option<usize> {
+        let (_, entries, _) = self.menu_entries();
+        entries
+            .iter()
+            .position(|e| matches!(e.trail, Trail::Keys(k) if k == keys))
+    }
+
+    /// Move the selection to item `i`.
+    fn select(&mut self, i: usize, tx: &mut Tx) {
+        self.selected = Some(i);
+        tx.focus(self.item_key(i), true);
     }
 
     /// The selected item's menu (DW-0505, DW-0506, DW-0507) and its name.
@@ -140,14 +173,14 @@ impl SharedUi {
                 self.source.keep_offline(&id);
                 None
             }
-            "Show in File Explorer" => Some(Intent::Frame("DW-1180")),
-            "Details" => Some(Intent::Frame("DW-0411")),
+            "Show in File Explorer" => Some(Intent::About("DW-1180", id)),
+            "Details" => Some(Intent::About("DW-0411", id)),
             // The confirmation is the shell's (the board draws none); the engine call follows it.
             "Leave\u{2026}" => Some(Intent::Do("leave", id)),
             "Copy link" => Some(Intent::Do("copy-link", id)),
             "Change expiry" => Some(Intent::Do("change-expiry", id)),
             "Password\u{2026}" => Some(Intent::Do("link-password", id)),
-            "People" => Some(Intent::Frame("DW-0511")),
+            "People" => Some(Intent::About("DW-0511", id)),
             "Stop sharing" => {
                 gone = self.source.stop_sharing(&id);
                 None
@@ -195,14 +228,31 @@ const MENU_REQUEST: &[Entry] = &[
 ];
 const MENU_REQUEST_OVER: &[Entry] = &[Entry::new("View files"), Entry::new("Remove").danger().rule()];
 
-fn pick(s: &mut State, n: usize) {
+/// Do what the menu's item `n` says; focus goes back to the item the menu was about (or to
+/// the one that took its place).
+fn pick(s: &mut State, n: usize, tx: &mut Tx) {
     if let Some(intent) = s.frames.shared.pick(n) {
         s.frames.intents.push(intent);
     }
+    return_focus(s, tx);
 }
 
-fn close_menu(s: &mut State) {
+fn close_menu(s: &mut State, tx: &mut Tx) {
     s.frames.shared.menu = None;
+    return_focus(s, tx);
+}
+
+fn return_focus(s: &State, tx: &mut Tx) {
+    if let Some(key) = s.frames.shared.selected_key() {
+        tx.return_focus(key, tx.focus_visible());
+    }
+}
+
+/// The pointer is on the menu's item `n`.
+fn light(s: &mut State, n: usize) {
+    if let Some(open) = s.frames.shared.menu.as_mut() {
+        open.hot = n;
+    }
 }
 
 fn select(i: usize) -> impl Fn(&mut State) + 'static {
@@ -218,11 +268,37 @@ fn open(i: usize) -> impl Fn(&mut State) + 'static {
     }
 }
 
+/// A secondary press on item `i`: its menu at the pointer (or, from the keyboard through
+/// Rune, at the item's corner).
 fn menu(i: usize) -> impl Fn(&mut State, rune::PointerPress, &mut Tx) + 'static {
     move |s: &mut State, press, _| {
         s.frames.shared.selected = Some(i);
         s.frames.shared.menu = Some(Open::at(press.x, press.y));
     }
+}
+
+/// The menu of item `i`, opened under the element keyed `under` (the Menu key, the More button).
+fn menu_under(i: usize, under: String) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        s.frames.shared.selected = Some(i);
+        s.frames.shared.menu = Some(Open::under(under.clone()));
+    }
+}
+
+/// A click on the people of share `i`: People with access (DW-0502's action).
+fn open_people(i: usize) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        s.frames.shared.selected = Some(i);
+        if let Some(id) = s.frames.shared.selected_id() {
+            s.frames.intents.push(Intent::About("DW-0511", id));
+        }
+    }
+}
+
+/// An item of a list is a Tab stop only when it is the selected one (the first, when none is):
+/// the list is one stop, and the arrows move inside it.
+fn stop(ui: &SharedUi, i: usize) -> i32 {
+    if ui.selected.unwrap_or(0) == i { 0 } else { -1 }
 }
 
 fn new_request(t: &Theme) -> El {
@@ -306,6 +382,7 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
         .enumerate()
         .map(|(i, r)| {
             table_row(i, r, ui.selected == Some(i), &COLUMNS, t)
+                .tab_index(stop(ui, i))
                 .on_press(select(i))
                 .on_double_press(open(i))
                 .on_secondary_press(menu(i))
@@ -342,7 +419,14 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
         .enumerate()
         .map(|(m, p)| {
             let k = format!("item-0-{m}");
-            let mut avatars = row().key("avatars").role("group").label("Shared with");
+            // "Click the people": People with access. Not a Tab stop: Enter on the item does the same.
+            let mut avatars = row()
+                .key(format!("{k}-people"))
+                .role("button")
+                .label(format!("People with access to {}", p.name))
+                .focusable(true)
+                .tab_index(-1)
+                .on_press(open_people(m));
             for (j, person) in p.people.iter().enumerate() {
                 let a = kit::avatar(
                     format!("{k}-avatar-{j}"),
@@ -366,9 +450,11 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 &p.name,
                 &p.names,
                 trailing,
+                list::more(0, m, &p.name, t).on_press(menu_under(m, list::more_key(0, m))),
                 ui.selected == Some(m),
                 t,
             )
+            .tab_index(stop(ui, m))
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -409,9 +495,11 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 &l.name,
                 &l.line,
                 trailing,
+                list::more(1, m, &l.name, t).on_press(menu_under(i, list::more_key(1, m))),
                 ui.selected == Some(i),
                 t,
             )
+            .tab_index(stop(ui, i))
             .on_press(select(i))
             .on_double_press(open(i))
             .on_secondary_press(menu(i))
@@ -484,9 +572,11 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 &r.title,
                 &r.line,
                 vec![state],
+                list::more(0, m, &r.title, t).on_press(menu_under(m, list::more_key(0, m))),
                 ui.selected == Some(m),
                 t,
             )
+            .tab_index(stop(ui, m))
             .on_press(select(m))
             .on_double_press(open(m))
             .on_secondary_press(menu(m))
@@ -539,67 +629,105 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         },
         &t,
     );
-    // With nothing to count, the board's status line is the PC's summary, as in Files (DW-0508, DW-0509, DW-0510).
-    let status = if count == 0 {
-        chrome::PC_SUMMARY.to_string()
-    } else {
-        status
-    };
+    // With nothing to count, the status line is the PC's summary, as in Files (DW-0508, DW-0509, DW-0510).
+    let status = if count == 0 { s.frames.pc.summary() } else { status };
+    let window = cx.layout_size("window");
     let layer = ui.menu.as_ref().map(|open| {
         let (name, entries, min_w) = ui.menu_entries();
-        parts::menu::menu(name, entries, open, min_w, &t, pick, close_menu)
+        parts::menu::menu(name, entries, open, min_w, window, &t, pick, close_menu, light, on_key)
     });
     chrome::window(s, cx, &t, bar, body, &status, layer)
 }
 
-/// Shared's keys: the arrows select, Enter opens. The menu key is Rune's (it calls the row's
-/// `on_secondary_press`).
+/// Shared's keys. A menu takes every key while it is open. Otherwise: on the switch, Left and
+/// Right change the tab and Down goes into the list; in the list (or with focus nowhere) the
+/// arrows, Home and End move the selection AND focus, Enter opens, the keys an item's menu
+/// shows (Space, Alt+Enter) do what that item does, and the Menu key or Shift+F10 opens the
+/// menu of the SELECTED item under it. In the search field, Enter asks for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if let Some(open) = s.frames.shared.menu.as_mut() {
-        let (hot, count) = (open.hot, s.frames.shared.menu_entries().1.len());
-        return match ev.key {
-            Key::Enter => {
-                pick(s, hot);
-                true
-            }
-            Key::Escape => {
-                close_menu(s);
-                true
-            }
-            _ => s.frames.shared.menu.as_mut().is_some_and(|open| open.on_key(ev, count)),
-        };
+    if let Some(mut open) = s.frames.shared.menu.take() {
+        let entries = s.frames.shared.menu_entries().1;
+        let took = open.on_key(ev, entries, tx);
+        s.frames.shared.menu = Some(open);
+        match took {
+            Took::Pick(n) => pick(s, n, tx),
+            Took::Close => close_menu(s, tx),
+            Took::Key => {}
+        }
+        return true;
     }
     if ev.is_command('f') {
         tx.focus(crate::ui::keys::SEARCH_KEY, true);
         return true;
     }
-    if tx
-        .focused()
-        .is_some_and(|key| !key.starts_with("row-") && !key.starts_with("item-"))
-    {
-        return false;
+    let focused = tx.focused().map(str::to_owned);
+    match focused.as_deref() {
+        Some(key) if key == crate::ui::keys::SEARCH_KEY => return parts::toolbar::search_key(s, ev),
+        Some(key) if key.starts_with("seg-0-") => return tab_key(s, ev, tx),
+        Some(key) if !key.starts_with("row-") && !key.starts_with("item-") => return false,
+        _ => {}
     }
     let count = s.frames.shared.count();
     if count == 0 {
         return false;
     }
     let ui = &mut s.frames.shared;
-    match ev.key {
-        Key::Down => {
-            ui.selected = Some(ui.selected.map_or(0, |i| (i + 1).min(count - 1)));
-            true
-        }
-        Key::Up => {
-            ui.selected = Some(ui.selected.map_or(0, |i| i.saturating_sub(1)));
-            true
-        }
-        Key::Enter => match ui.open_intent() {
-            Some(intent) => {
-                s.frames.intents.push(intent);
+    if frames::is_menu_key(ev) {
+        return match ui.selected_key() {
+            Some(key) => {
+                ui.menu = Some(Open::under(key));
                 true
             }
             None => false,
-        },
-        _ => false,
+        };
     }
+    if frames::is_alt_enter(ev) || frames::is_space(ev) {
+        let keys = if frames::is_space(ev) { "Space" } else { "Alt+Enter" };
+        return match ui.hinted(keys) {
+            Some(n) => {
+                pick(s, n, tx);
+                true
+            }
+            None => false,
+        };
+    }
+    if !frames::plain(ev) {
+        return false;
+    }
+    match ev.key {
+        Key::Down => ui.select(ui.selected.map_or(0, |i| (i + 1).min(count - 1)), tx),
+        Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
+        Key::Home => ui.select(0, tx),
+        Key::End => ui.select(count - 1, tx),
+        Key::Enter => match ui.open_intent() {
+            Some(intent) => s.frames.intents.push(intent),
+            None => return false,
+        },
+        _ => return false,
+    }
+    true
+}
+
+/// The keys of the switch while one of its tabs has focus.
+fn tab_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if !frames::plain(ev) {
+        return false;
+    }
+    let ui = &mut s.frames.shared;
+    let at = TABS.iter().position(|(tab, _)| *tab == ui.tab).unwrap_or(0);
+    let to = match ev.key {
+        Key::Left => at.saturating_sub(1),
+        Key::Right => (at + 1).min(TABS.len() - 1),
+        Key::Home => 0,
+        Key::End => TABS.len() - 1,
+        // Into the list: the selected item, or the first.
+        Key::Down if ui.count() > 0 => {
+            ui.select(ui.selected.unwrap_or(0), tx);
+            return true;
+        }
+        _ => return false,
+    };
+    ui.show(TABS[to].0);
+    tx.focus(parts::controls::segment_key(0, TABS[to].1), true);
+    true
 }

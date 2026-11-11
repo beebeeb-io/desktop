@@ -12,6 +12,8 @@
 //!
 //! Lanes: add ONE `mod` line for your module below, in alphabetical order, and nothing else.
 
+#[cfg(feature = "feedback")]
+mod feedback;
 mod frames;
 mod shell;
 mod source;

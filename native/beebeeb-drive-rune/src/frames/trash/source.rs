@@ -1,6 +1,6 @@
 //! What Trash shows, and what it can do: a small trait with the board's sample as its fixture.
 
-use crate::frames::shared::parts::table::{Extra, Kind, Row};
+use crate::frames::shared::parts::table::{Extra, Kind, Row, Thumb};
 
 /// The totals in the toolbar and the confirmation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +78,7 @@ impl BoardTrash {
                 row(
                     "t-img-2044",
                     "IMG_2044.HEIC",
-                    Kind::Photo,
+                    Kind::Photo(Some(Thumb::BoardLeaves)),
                     "24 Oct 2026",
                     "3.8 MB",
                     "Backups",
@@ -105,6 +105,16 @@ impl BoardTrash {
         trash.unlisted = 4;
         trash.emptying = Some(Emptying { done: 5, of: 12 });
         trash
+    }
+
+    /// These rows and nothing else (a test's own Trash).
+    #[cfg(test)]
+    pub fn of(rows: Vec<Row>) -> Self {
+        BoardTrash {
+            rows,
+            unlisted: 0,
+            emptying: None,
+        }
     }
 
     /// DW-0117: nothing in Trash.
