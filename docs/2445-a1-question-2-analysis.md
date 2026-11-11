@@ -12,10 +12,13 @@ a real, verified 32-byte key:
 
 | Path | Where the key comes from | Verification |
 |---|---|---|
-| Recovery phrase unlock (`install_recovered_session`) | `recover_from_phrase` → HKDF from the BIP-39 words | `recovered_key_matches_account` (server confirms) |
-| Device approval (`apply_session` via `device.rs:install`) | The approving device relays the key over ECDH | The approver holds the real key |
-| Startup restore (`restore_stored_session` → `load_session_from_keychain`) | Windows Credential Manager | Was verified on the sign-in that stored it |
-| Browser handoff (`apply_session`) | Handshake from the signed-in browser | The browser holds the real key |
+| Recovery phrase unlock (`install_recovered_session`) | `recover_from_phrase` → HKDF from the BIP-39 words | `recovered_key_matches_account` (server confirms) — the ONLY path that VERIFIES the key against the account |
+| Device approval (`apply_session` via `device.rs:install`) | The approving device relays the key over ECDH | TRUSTED, not verified: the approver is assumed to hold the real key |
+| Startup restore (`restore_stored_session` → `load_session_from_keychain`) | Windows Credential Manager | TRUSTED: was verified on the sign-in that stored it; the loader does not re-verify |
+| Browser handoff (`apply_session`) | Handshake from the signed-in browser | TRUSTED: the browser is assumed to hold the real key |
+
+~~The engine in the test build could only have started after a verified recovery-phrase unlock or device approval, both of which deliver the correct key.~~
+Correction (P2-5): only the recovery-phrase path VERIFIES the key against the account. Device approval, browser handoff and keychain restore install a TRUSTED key — trusted because the source had the real key, not because this PC re-verified it. Task 2447 addresses a stale-key scenario where the trusted key was left behind by a previous account.
 
 A password-only `desktop_login` calls `store_first_sign_in`, which writes the
 session TOKEN to the credential store but **never sets `acct.session`** (no
