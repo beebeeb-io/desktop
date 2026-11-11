@@ -1,12 +1,14 @@
 //! How this build reads an update feed and hands an accepted update to the Tauri updater (tasks 2449 and 2451).
 //!
-//! Owns: reading `desktop/v2/<channel>.json` and its `.sig` first on Windows; the one check every offer and install
-//! goes through ([`checked_update`]); recording the channel and the hand-off note before the installer runs.
+//! Owns: reading `desktop/v2/<channel>.json` and its `.sig` first on Windows; the channel's replay mark (the newest
+//! signed time accepted, kept beside the config); the one check every offer and install goes through
+//! ([`checked_update`]), which gives each feed the one key of its line; quieting the engine before a native
+//! installer runs (`preflight`), then recording the channel and the hand-off note.
 //! Must not: decide a rule itself (those are `trust`'s), or fall back to the unsigned feed for anything but "the v2
 //! manifest does not exist" (404). A v2 manifest that exists and fails any check is a hard error.
 //! Tests: `flow_tests`.
 
-use super::trust::{self, Direction, Feed, Host, SignedManifest, TrustedKeys};
+use super::trust::{self, Direction, Feed, Host, Line, SignedManifest, TrustedKeys};
 use super::*;
 
 /// The code an error leads with when the signed feed could not be read (anything but "not there").
@@ -15,6 +17,49 @@ pub(crate) const UPDATE_MANIFEST_UNAVAILABLE_CODE: &str = "update_manifest_unava
 const MAX_FEED_BYTES: usize = 1024 * 1024;
 /// The note a native build reads once to learn it replaced this app in place.
 pub(crate) const UPDATE_HANDOFF_FILE: &str = "update-handoff.json";
+/// Where the replay marks live, beside the config: `{"<channel>": <signed time of the newest accepted manifest>}`.
+pub(crate) const UPDATE_SEEN_FILE: &str = "update-v2-seen.json";
+
+/// This PC's clock in unix seconds.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn read_marks(dir: &Path) -> std::collections::BTreeMap<String, u64> {
+    std::fs::read(dir.join(UPDATE_SEEN_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// The channel's replay mark, or `None` when none was written (or the file cannot be read).
+pub(crate) fn replay_mark(dir: &Path, channel: ReleaseChannel) -> Option<u64> {
+    read_marks(dir).get(channel.as_str()).copied()
+}
+
+/// Stores `accepted` as the channel's replay mark unless the stored one is larger (a clock set back never lowers
+/// it). Written through a temp file and a rename.
+pub(crate) fn record_replay_mark(dir: &Path, channel: ReleaseChannel, accepted: u64) -> std::io::Result<()> {
+    let mut marks = read_marks(dir);
+    let stored = marks.get(channel.as_str()).copied();
+    let next = trust::next_replay_mark(stored, accepted);
+    if stored == Some(next) {
+        return Ok(());
+    }
+    marks.insert(channel.as_str().to_string(), next);
+    let temp = dir.join(format!("{UPDATE_SEEN_FILE}.tmp"));
+    std::fs::write(&temp, serde_json::to_vec(&marks)?)?;
+    std::fs::rename(&temp, dir.join(UPDATE_SEEN_FILE))
+}
+
+/// The folder the config lives in: where the replay marks and the hand-off note go.
+pub(crate) fn state_dir() -> Option<PathBuf> {
+    DesktopConfig::path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
 
 pub(crate) fn v2_manifest_url(base: &str, channel: ReleaseChannel) -> String {
     let file = trust::v2_manifest_file(channel.as_str()).expect("every release channel has a v2 manifest file");
@@ -77,12 +122,15 @@ pub(crate) async fn fetch_v2_feed(base: &str, channel: ReleaseChannel) -> Result
 }
 
 /// The feed this install reads: the signed manifest when it exists (Windows only), else today's unsigned one.
-/// `None` is the unsigned feed.
+/// `None` is the unsigned feed. A manifest that passed becomes the channel's replay mark in `marks_dir`; a refused
+/// one (signed in the future included) is never recorded.
 pub(crate) async fn signed_manifest_for(
     windows: bool,
     base: &str,
     keys: &TrustedKeys,
     channel: ReleaseChannel,
+    now: u64,
+    marks_dir: Option<&Path>,
 ) -> Result<Option<SignedManifest>, String> {
     if !windows {
         return Ok(None);
@@ -90,17 +138,24 @@ pub(crate) async fn signed_manifest_for(
     match fetch_v2_feed(base, channel).await? {
         V2Feed::Absent => Ok(None),
         V2Feed::Present { manifest, signature } => {
-            trust::verify_v2_manifest(keys, channel.as_str(), &manifest, &signature)
-                .map(Some)
-                .map_err(|refusal| {
+            let seen = marks_dir.and_then(|dir| replay_mark(dir, channel));
+            let signed = trust::verify_v2_manifest(keys, channel.as_str(), &manifest, &signature, now, seen).map_err(
+                |refusal| {
                     tracing::warn!(code = refusal.code(), channel = %channel.as_str(), "the signed update manifest was refused");
                     refusal.message()
-                })
+                },
+            )?;
+            if let Some(dir) = marks_dir
+                && let Err(error) = record_replay_mark(dir, channel, signed.signed_at)
+            {
+                tracing::warn!(kind = ?error.kind(), "could not store the update replay mark");
+            }
+            Ok(Some(signed))
         }
     }
 }
 
-/// The keys this build trusts: the one in `tauri.conf.json` and the next one (`updater-v2.pub`).
+/// The keys this build trusts: the one in `tauri.conf.json` (legacy line) and `updater-v2.pub` (native line).
 pub(crate) fn trusted_keys(app: &tauri::AppHandle) -> Result<TrustedKeys, String> {
     let baked = app
         .config()
@@ -119,8 +174,8 @@ pub(crate) fn strictly_newer(installed: &str, offered: &str) -> Option<bool> {
 }
 
 /// The update the selected channel offers this install, accepted by `trust::accept`, on an updater that verifies
-/// its bytes with the trusted key that signed it. `Ok(None)`: nothing to offer. Every offer and every install
-/// goes through here.
+/// its bytes with the one key of the feed's line: the v2 key for the signed manifest, the baked key for the legacy
+/// feed. `Ok(None)`: nothing to offer. Every offer and every install goes through here.
 pub(crate) async fn checked_update(
     app: &tauri::AppHandle,
     channel: ReleaseChannel,
@@ -129,27 +184,37 @@ pub(crate) async fn checked_update(
     use tauri_plugin_updater::UpdaterExt;
 
     let keys = trusted_keys(app)?;
-    let signed = signed_manifest_for(cfg!(target_os = "windows"), UPDATE_MANIFEST_BASE_URL, &keys, channel).await?;
-    let endpoint = match &signed {
-        Some(_) => v2_manifest_url(UPDATE_MANIFEST_BASE_URL, channel),
-        None => update_manifest_url_for_channel(channel),
+    let marks_dir = state_dir();
+    let signed = signed_manifest_for(
+        cfg!(target_os = "windows"),
+        UPDATE_MANIFEST_BASE_URL,
+        &keys,
+        channel,
+        unix_now(),
+        marks_dir.as_deref(),
+    )
+    .await?;
+    let (line, endpoint) = match &signed {
+        Some(_) => (Line::Native, v2_manifest_url(UPDATE_MANIFEST_BASE_URL, channel)),
+        None => (Line::Legacy, update_manifest_url_for_channel(channel)),
     };
-    let updater_with = |pubkey: Option<&str>| -> Result<tauri_plugin_updater::Updater, String> {
-        let url = endpoint
-            .parse()
-            .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?;
-        let mut builder = app
-            .updater_builder()
-            .endpoints(vec![url])
-            .map_err(|e| e.to_string())?
-            // The decision is `trust::accept`'s, against `real_app_version()`, not Tauri's own comparison.
-            .version_comparator(|_current, _release| true);
-        if let Some(pubkey) = pubkey {
-            builder = builder.pubkey(pubkey);
-        }
-        builder.build().map_err(|e| e.to_string())
-    };
-    let Some(update) = updater_with(None)?.check().await.map_err(|e| e.to_string())? else {
+    // The key the Tauri updater verifies the downloaded bytes with is fixed by the line, before anything is read.
+    let line_key = keys
+        .for_line(line)
+        .ok_or_else(|| trust::Refusal::ManifestSignature.message())?;
+    let url = endpoint
+        .parse()
+        .map_err(|e| format!("parse update manifest URL {endpoint}: {e}"))?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        // The decision is `trust::accept`'s, against `real_app_version()`, not Tauri's own comparison.
+        .version_comparator(|_current, _release| true)
+        .pubkey(line_key.tauri_pubkey.clone())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
         return Ok(None);
     };
     if direction == Direction::NewerOnly && strictly_newer(real_app_version(), &update.version) != Some(true) {
@@ -157,7 +222,6 @@ pub(crate) async fn checked_update(
     }
     let host = Host {
         macos: cfg!(target_os = "macos"),
-        windows: cfg!(target_os = "windows"),
     };
     let feed = signed.as_ref().map_or(Feed::Unsigned, Feed::Signed);
     let key = trust::accept(
@@ -175,22 +239,11 @@ pub(crate) async fn checked_update(
         tracing::warn!(code = refusal.code(), version = %update.version, channel = %channel.as_str(), "an update was refused");
         refusal.message()
     })?;
-    if key.tauri_pubkey == keys.baked().tauri_pubkey {
-        return Ok(Some(update));
+    // `accept` names the key of the feed's line or refuses; anything else is a bug, and nothing is installed.
+    if key.tauri_pubkey != line_key.tauri_pubkey {
+        return Err(trust::Refusal::KeyScope.message());
     }
-    // Signed with the next key: the same update again, on an updater that verifies with that key.
-    let again = updater_with(Some(&key.tauri_pubkey))?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?;
-    match again {
-        Some(again) if same_update(&update, &again) => Ok(Some(again)),
-        _ => Err(trust::Refusal::NotInManifest.message()),
-    }
-}
-
-fn same_update(a: &tauri_plugin_updater::Update, b: &tauri_plugin_updater::Update) -> bool {
-    a.version == b.version && a.download_url == b.download_url && a.signature == b.signature
+    Ok(Some(update))
 }
 
 /// Runs `install` with the record written first. On Windows a successful install exits the process inside
@@ -225,10 +278,16 @@ pub(crate) fn write_update_handoff(
     std::fs::rename(&temp, dir.join(UPDATE_HANDOFF_FILE))
 }
 
-/// Downloads the accepted update (the updater verifies the bytes with the key `checked_update` chose), records
-/// the channel that served it and the hand-off note, then installs. Returns only when the install did not replace
-/// this process (Linux), or failed.
+/// The code an error leads with when the installer did not take over after sync was stopped for it.
+pub(crate) const UPDATE_INSTALL_FAILED_SYNC_STOPPED_CODE: &str = "update_install_failed_sync_stopped";
+
+/// Downloads the accepted update (the updater verifies the bytes with the key `checked_update` chose). For a
+/// native release (0.9.0 or later) it then makes sync quiet (`preflight::quiet_engine`: uploads in flight finish,
+/// the engine stops, the Cloud Files provider disconnects) and keeps the engine slot until the installer has taken
+/// over. Then, for every update: the channel that served it and the hand-off note are recorded, and the install
+/// runs. Returns only when the install did not replace this process (Linux), or failed.
 pub(crate) async fn download_record_install(
+    app: &tauri::AppHandle,
     update: tauri_plugin_updater::Update,
     channel: ReleaseChannel,
 ) -> Result<(), String> {
@@ -239,14 +298,21 @@ pub(crate) async fn download_record_install(
         from: from.clone(),
         to: to.clone(),
     });
+    // Signed out: no account, no engine, nothing to make quiet.
+    let acct = app.state::<AppState>().active_account().ok();
+    let board = app
+        .try_state::<crate::popover_data::PopoverRuntime>()
+        .map(|runtime| runtime.transfers.clone());
+    let quiet = match acct.as_deref() {
+        Some(acct) if trust::is_native_line(&to) => {
+            Some(preflight::quiet_engine(acct, board.as_deref(), preflight::UPLOAD_WAIT).await?)
+        }
+        _ => None,
+    };
     let previous = DesktopConfig::load().ok().and_then(|cfg| cfg.installed_release_channel);
-    let handoff_dir = DesktopConfig::path()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf));
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    record_then_install(
+    let handoff_dir = state_dir();
+    let at = unix_now();
+    let installed = record_then_install(
         || {
             record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
             if let Some(dir) = handoff_dir.as_deref()
@@ -270,5 +336,21 @@ pub(crate) async fn download_record_install(
             }
         },
         || update.install(bytes),
-    )
+    );
+    match (installed, quiet) {
+        (Ok(()), _) => Ok(()),
+        (Err(error), None) => Err(error),
+        (Err(error), Some(quiet)) => {
+            let stopped = quiet.stopped_an_engine;
+            quiet.resume();
+            tracing::error!(%error, stopped, "the native installer did not take over after the pre-flight");
+            Err(if stopped {
+                format!(
+                    "{UPDATE_INSTALL_FAILED_SYNC_STOPPED_CODE}: the update could not be installed and sync is stopped. Restart Beebeeb to sync again."
+                )
+            } else {
+                error
+            })
+        }
+    }
 }

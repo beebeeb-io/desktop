@@ -4,7 +4,7 @@
 
 use super::flow::*;
 use super::trust::TrustedKeys;
-use super::trust_tests::kit::{TestKey, URL_090, manifest};
+use super::trust_tests::kit::{SIGNED_AT, TestKey, URL_090, manifest};
 use super::*;
 use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,7 @@ fn feed_server(routes: Vec<(&'static str, u16, Vec<u8>)>) -> (String, Arc<Mutex<
 }
 
 struct World {
+    old: TestKey,
     next: TestKey,
     keys: TrustedKeys,
     good: Vec<u8>,
@@ -51,7 +52,7 @@ fn world() -> World {
     let keys = TrustedKeys::new(&old.tauri_pubkey(), &next.tauri_pubkey()).unwrap();
     let artifact = next.sign(b"installer", "Beebeeb_0.9.0_x64-setup.exe");
     let good = manifest("0.9.0", "desktop", "stable", URL_090, &artifact, Some(9_000_001));
-    World { next, keys, good }
+    World { old, next, keys, good }
 }
 
 async fn read(
@@ -60,7 +61,7 @@ async fn read(
     routes: Vec<(&'static str, u16, Vec<u8>)>,
 ) -> (Result<Option<String>, String>, usize) {
     let (base, asked) = feed_server(routes);
-    let result = signed_manifest_for(windows, &base, &world.keys, ReleaseChannel::Stable)
+    let result = signed_manifest_for(windows, &base, &world.keys, ReleaseChannel::Stable, SIGNED_AT, None)
         .await
         .map(|signed| signed.map(|manifest| manifest.version));
     let count = asked.lock().unwrap().len();
@@ -99,6 +100,14 @@ async fn only_a_missing_v2_manifest_falls_back_to_the_unsigned_feed() {
                 (SIGNATURE, 200, stranger.sign(&w.good, "stable.json").into_bytes()),
             ],
             "update_manifest_not_signed",
+        ),
+        (
+            "a signature by the legacy key",
+            vec![
+                (MANIFEST, 200, w.good.clone()),
+                (SIGNATURE, 200, w.old.sign(&w.good, "stable.json").into_bytes()),
+            ],
+            "update_key_not_for_this_line",
         ),
         (
             "a signature of other bytes",
@@ -156,7 +165,15 @@ async fn only_a_missing_v2_manifest_falls_back_to_the_unsigned_feed() {
         assert!(error.starts_with(&format!("{code}: ")), "{what}: {error}");
     }
     // A host that does not answer at all.
-    let refused = signed_manifest_for(true, "http://127.0.0.1:1", &w.keys, ReleaseChannel::Stable).await;
+    let refused = signed_manifest_for(
+        true,
+        "http://127.0.0.1:1",
+        &w.keys,
+        ReleaseChannel::Stable,
+        SIGNED_AT,
+        None,
+    )
+    .await;
     assert!(refused.is_err_and(|error| error.starts_with("update_manifest_unavailable: ")));
 }
 
@@ -227,4 +244,79 @@ fn the_hand_off_note_round_trips_and_leaves_no_temp_file() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(names, [std::ffi::OsString::from(UPDATE_HANDOFF_FILE)]);
+}
+
+#[tokio::test]
+async fn an_accepted_manifest_becomes_the_replay_mark_and_a_refused_one_never_does() {
+    let w = world();
+    let dir = tempfile::tempdir().unwrap();
+    let channel = ReleaseChannel::Stable;
+    let now = SIGNED_AT;
+    let serve = |signed_at: u64| {
+        let signature = w.next.sign_at(&w.good, "stable.json", &signed_at.to_string());
+        vec![
+            (MANIFEST, 200, w.good.clone()),
+            (SIGNATURE, 200, signature.into_bytes()),
+        ]
+    };
+    let read_at = async |signed_at: u64, now: u64| {
+        let (base, _) = feed_server(serve(signed_at));
+        signed_manifest_for(true, &base, &w.keys, channel, now, Some(dir.path()))
+            .await
+            .map(|signed| signed.map(|manifest| manifest.signed_at))
+    };
+    assert_eq!(replay_mark(dir.path(), channel), None);
+    // More than 24 h ahead of this PC's clock: refused, and NOT recorded.
+    let ahead = read_at(now + 86_401, now).await.unwrap_err();
+    assert!(ahead.starts_with("update_manifest_signed_in_future: "), "{ahead}");
+    assert_eq!(
+        replay_mark(dir.path(), channel),
+        None,
+        "a refused manifest leaves no mark"
+    );
+    // Accepted: recorded.
+    assert_eq!(read_at(now, now).await, Ok(Some(now)));
+    assert_eq!(replay_mark(dir.path(), channel), Some(now));
+    // An older manifest, honestly signed, replayed: refused; the mark stays.
+    let stale = read_at(now - 60, now).await.unwrap_err();
+    assert!(stale.starts_with("update_manifest_stale: "), "{stale}");
+    assert_eq!(replay_mark(dir.path(), channel), Some(now));
+    // A newer one moves it forward; the other channels have their own mark.
+    assert_eq!(read_at(now + 60, now).await, Ok(Some(now + 60)));
+    assert_eq!(replay_mark(dir.path(), channel), Some(now + 60));
+    assert_eq!(replay_mark(dir.path(), ReleaseChannel::Beta), None);
+    // Stored: the larger of the two, whatever the clock says now.
+    record_replay_mark(dir.path(), channel, now - 500).unwrap();
+    assert_eq!(replay_mark(dir.path(), channel), Some(now + 60));
+    record_replay_mark(dir.path(), ReleaseChannel::Beta, 5).unwrap();
+    assert_eq!(
+        (
+            replay_mark(dir.path(), channel),
+            replay_mark(dir.path(), ReleaseChannel::Beta)
+        ),
+        (Some(now + 60), Some(5))
+    );
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from(UPDATE_SEEN_FILE)], "no temp file left");
+}
+
+/// The order a native install needs: sync quiet first, then the record and the hand-off note, then the installer.
+#[test]
+fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
+    let source = include_str!("flow.rs");
+    let body = &source[source.find("pub(crate) async fn download_record_install(").unwrap()..];
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is gone"));
+    let order = [
+        at("update.download("),
+        at("trust::is_native_line(&to)"),
+        at("preflight::quiet_engine("),
+        at("record_then_install("),
+        at("write_update_handoff("),
+        at("update.install(bytes)"),
+    ];
+    assert!(order.is_sorted(), "{order:?}");
+    assert!(body.contains("quiet.resume()"), "a failed install gives the pause back");
 }

@@ -5,6 +5,9 @@ use super::*;
 pub(crate) mod flow;
 #[cfg(test)]
 mod flow_tests;
+pub(crate) mod preflight;
+#[cfg(test)]
+mod preflight_tests;
 pub(crate) mod trust;
 #[cfg(test)]
 mod trust_tests;
@@ -427,7 +430,7 @@ pub(super) async fn install_update(app: tauri::AppHandle) -> Result<(), String> 
     match flow::checked_update(&app, channel, trust::Direction::NewerOnly).await? {
         Some(update) => {
             tracing::info!(version = %update.version, channel = %channel.as_str(), "downloading update");
-            flow::download_record_install(update, channel).await?;
+            flow::download_record_install(&app, update, channel).await?;
             #[cfg(target_os = "macos")]
             note_updater_relaunch(&app);
             app.restart();
@@ -478,7 +481,7 @@ pub(super) async fn install_channel_downgrade(app: tauri::AppHandle, version: St
         channel = %channel.as_str(),
         "downloading downgrade"
     );
-    flow::download_record_install(u, channel).await?;
+    flow::download_record_install(&app, u, channel).await?;
     #[cfg(target_os = "macos")]
     note_updater_relaunch(&app);
     app.restart()
