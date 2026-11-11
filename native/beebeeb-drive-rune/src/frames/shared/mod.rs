@@ -5,7 +5,7 @@ pub mod parts;
 pub mod scenes;
 pub mod source;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::State;
 use crate::frames::Intent;
