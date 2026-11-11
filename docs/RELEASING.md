@@ -243,7 +243,7 @@ it accepts (`src-tauri/src/update_window/trust.rs` holds the rules, `flow.rs` th
   the sync engine through the one stop helper (on Windows this disconnects the Cloud Files provider; the sync root
   stays registered) and keeps the engine slot until the installer has taken over. An upload still running after the
   wait puts the update off (`update_sync_not_quiet`); nothing is interrupted.
-- **Before the installer runs** the app records `installed_release_channel` and writes `update-handoff.json`
+- **Before the installer runs** the app records `installed_release_channel` and, for a native release only, writes `update-handoff.json`
   (`{"from","to","channel","at"}`) beside its config file; the native app reads that note once and deletes it. On
   Windows Tauri's install exits the process, so nothing after it runs.
 
