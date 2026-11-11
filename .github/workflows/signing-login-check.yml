@@ -6,7 +6,7 @@ name: Signing login check
 # branch the environment refuses the job before it starts, and the run must fail.
 #
 # The second job proves the updater key the same way: it signs one fixed throwaway file with the environment's
-# `TAURI_SIGNING_PRIVATE_KEY` (and its `_PASSWORD`, whatever that holds) and checks that the signature was made by
+# `TAURI_SIGNING_PRIVATE_KEY` and its `_PASSWORD` and checks that the signature was made by
 # the key baked into `tauri.conf.json`. Nothing is published; the signature is never printed or uploaded.
 
 on:

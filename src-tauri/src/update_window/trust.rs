@@ -27,7 +27,7 @@ pub(crate) const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 /// line, on purpose (lead ruling 2026-11-11 12:10 CET, after the security review): a per-build time would strand
 /// installs (0.9.0 published first and 0.8.25 built after it would make 0.8.25 refuse 0.9.0; a later 0.8.26 hotfix
 /// would refuse an already published 0.9.1).
-pub(crate) const V2_KEY_NOT_BEFORE: u64 = 1_794_355_200;
+pub(crate) const V2_KEY_CREATED: u64 = 1_794_355_200;
 /// A signed time may be this far ahead of this PC's clock. Beyond it the manifest is refused and never becomes a
 /// replay mark: one signature made with a wrong clock must not block a channel for good.
 pub(crate) const MAX_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
@@ -65,7 +65,7 @@ pub(crate) enum Refusal {
     /// Signed by a key this build trusts, but not for this release line: the legacy key on the v2 line, or the v2
     /// key on the legacy line.
     KeyScope,
-    /// The manifest's signed time is earlier than the v2 key itself ([`V2_KEY_NOT_BEFORE`]).
+    /// The manifest's signed time is earlier than the v2 key itself ([`V2_KEY_CREATED`]).
     OlderThanKey,
     /// The manifest's signed time is more than [`MAX_CLOCK_SKEW_SECS`] ahead of this PC's clock.
     SignedInTheFuture,
@@ -149,8 +149,8 @@ pub(crate) enum Line {
 }
 
 /// The two keys this build trusts, each for its own line. A signature by one of them on the other's line is
-/// refused: the legacy key has no password and was a repository secret (see task 2451), so it must never be able
-/// to sign a native release; and nothing signed by the v2 key belongs on the legacy feed.
+/// refused: the legacy key must never be able to sign a native release (see task 2451), and nothing signed by the
+/// v2 key belongs on the legacy feed.
 pub(crate) struct TrustedKeys {
     legacy: TrustedKey,
     native: Option<TrustedKey>,
@@ -239,7 +239,7 @@ pub(crate) fn signed_time(signature: &str) -> Option<u64> {
 /// A mark further ahead than the future bound lets in was written under a clock that has since been set back: it
 /// would refuse every honest manifest, so it is not believed here (and never lowered where it is stored).
 pub(crate) fn check_signed_time(signed_at: u64, now: u64, seen: Option<u64>) -> Result<(), Refusal> {
-    if signed_at < V2_KEY_NOT_BEFORE {
+    if signed_at < V2_KEY_CREATED {
         return Err(Refusal::OlderThanKey);
     }
     let latest_believable = now.saturating_add(MAX_CLOCK_SKEW_SECS);
@@ -332,7 +332,7 @@ pub(crate) struct SignedManifest {
     pub(crate) version: String,
     /// The signed time of the manifest's signature: the channel's next replay mark.
     pub(crate) signed_at: u64,
-    platforms: Vec<RawPlatform>,
+    platforms: std::collections::BTreeMap<String, RawPlatform>,
 }
 
 /// Checks a `desktop/v2/<channel>.json` manifest and its detached signature. In order: signed by the v2 key (the
@@ -373,18 +373,20 @@ pub(crate) fn verify_v2_manifest(
     Ok(SignedManifest {
         version: raw.version,
         signed_at,
-        platforms: raw.platforms.into_values().collect(),
+        platforms: raw.platforms,
     })
 }
 
 impl SignedManifest {
     /// Whether the update the Tauri updater read (its version, address and signature) is one this signed manifest
-    /// offers, at an address we trust, with a length, signed by the v2 key (the same line as the manifest; the
+    /// offers for this PC (`target` is the updater's own, `windows-x86_64`: the entry's key is that target or
+    /// `<target>-<installer kind>`, so another architecture's entry cannot stand in), at an address we trust, with a length, signed by the v2 key (the same line as the manifest; the
     /// legacy key is [`Refusal::KeyScope`]) for that file and this version. Returns the key the artefact's bytes
     /// must verify with.
     pub(crate) fn artifact<'k>(
         &self,
         keys: &'k TrustedKeys,
+        target: &str,
         version: &str,
         download_url: &str,
         signature: &str,
@@ -395,6 +397,16 @@ impl SignedManifest {
         let platform = self
             .platforms
             .iter()
+            .filter(|(key, _)| {
+                !target.is_empty()
+                    && key.strip_prefix(target).is_some_and(|rest| {
+                        rest.is_empty()
+                            || rest
+                                .strip_prefix('-')
+                                .is_some_and(|kind| !kind.is_empty() && !kind.contains('-'))
+                    })
+            })
+            .map(|(_, platform)| platform)
             .find(|platform| platform.url == download_url && platform.signature == signature)
             .ok_or(Refusal::NotInManifest)?;
         trusted_file_name(&platform.url).ok_or(Refusal::UntrustedAddress)?;
@@ -432,9 +444,11 @@ pub(crate) enum Direction {
 
 /// The host facts the rules depend on.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Host {
+pub(crate) struct Host<'a> {
     /// A Mac's artefact (`Beebeeb.app.tar.gz`) carries no version, and a Mac never installs in place (task 2176).
     pub(crate) macos: bool,
+    /// The updater's target for this PC (`windows-x86_64`): which entries of a signed manifest are this PC's.
+    pub(crate) target: &'a str,
 }
 
 /// The one decision before an update is offered or installed. Returns the key its bytes must verify with: the v2
@@ -443,7 +457,7 @@ pub(crate) struct Host {
 pub(crate) fn accept<'k>(
     keys: &'k TrustedKeys,
     feed: &Feed<'_>,
-    host: Host,
+    host: Host<'_>,
     direction: Direction,
     installed: &str,
     version: &str,
@@ -461,7 +475,7 @@ pub(crate) fn accept<'k>(
             if newer(installed, version) != Some(true) {
                 return Err(Refusal::NotNewer);
             }
-            manifest.artifact(keys, version, download_url, signature)
+            manifest.artifact(keys, host.target, version, download_url, signature)
         }
         Feed::Unsigned => {
             if is_native_line(version) {

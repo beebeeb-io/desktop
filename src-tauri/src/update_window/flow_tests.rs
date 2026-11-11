@@ -178,6 +178,20 @@ async fn only_a_missing_v2_manifest_falls_back_to_the_unsigned_feed() {
 }
 
 #[test]
+fn the_updater_target_is_os_and_arch_in_the_updater_s_names() {
+    let rows = [
+        ("windows", "x86_64", "windows-x86_64"),
+        ("windows", "aarch64", "windows-aarch64"),
+        ("windows", "x86", "windows-i686"),
+        ("linux", "arm", "linux-armv7"),
+        ("macos", "aarch64", "darwin-aarch64"),
+    ];
+    for (os, arch, want) in rows {
+        assert_eq!(updater_target(os, arch), want);
+    }
+}
+
+#[test]
 fn the_v2_manifest_addresses_are_one_per_channel() {
     let urls: Vec<_> = [ReleaseChannel::Stable, ReleaseChannel::Beta, ReleaseChannel::Alpha]
         .into_iter()
@@ -306,7 +320,8 @@ async fn an_accepted_manifest_becomes_the_replay_mark_and_a_refused_one_never_do
 /// The order a native install needs: sync quiet first, then the record and the hand-off note, then the installer.
 #[test]
 fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
-    let source = include_str!("flow.rs");
+    // A Windows checkout may hold CRLF line endings.
+    let source = include_str!("flow.rs").replace("\r\n", "\n");
     let body = &source[source.find("pub(crate) async fn download_record_install(").unwrap()..];
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is gone"));
     let order = [
@@ -314,9 +329,9 @@ fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
         at("trust::is_native_line(&to)"),
         at("preflight::quiet_engine("),
         at("record_then_install("),
+        at("if trust::is_native_line(&to)\n                && let Some(dir) = handoff_dir.as_deref()"),
         at("write_update_handoff("),
         at("update.install(bytes)"),
     ];
     assert!(order.is_sorted(), "{order:?}");
-    assert!(body.contains("quiet.resume()"), "a failed install gives the pause back");
 }

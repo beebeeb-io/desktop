@@ -236,7 +236,7 @@ fn an_artifact_of_a_signed_manifest_is_on_our_host_sized_and_signed_for_its_own_
         let bytes = manifest(version, "desktop", "stable", url, signature, size);
         let signed = verify(&keys, "stable", &bytes, &next.sign(&bytes, "stable.json")).unwrap();
         signed
-            .artifact(&keys, version, url, signature)
+            .artifact(&keys, TARGET, version, url, signature)
             .map(|key| key.tauri_pubkey.clone())
     };
     let name = "Beebeeb_0.9.0_x64-setup.exe";
@@ -291,23 +291,52 @@ fn an_artifact_of_a_signed_manifest_is_on_our_host_sized_and_signed_for_its_own_
         Err(Refusal::SignatureForOtherFile)
     );
     // Not the entry the manifest holds.
-    let bytes = manifest("0.9.0", "desktop", "stable", URL_090, &next.sign(b"i", name), Some(5));
+    let good = next.sign(b"i", name);
+    let bytes = manifest("0.9.0", "desktop", "stable", URL_090, &good, Some(5));
     let signed = verify(&keys, "stable", &bytes, &next.sign(&bytes, "stable.json")).unwrap();
     let other = next.sign(b"other", name);
     assert_eq!(
-        signed.artifact(&keys, "0.9.0", URL_090, &other).err(),
+        signed.artifact(&keys, TARGET, "0.9.0", URL_090, &other).err(),
         Some(Refusal::NotInManifest)
     );
     assert_eq!(
-        signed.artifact(&keys, "0.9.1", URL_090, &next.sign(b"i", name)).err(),
+        signed
+            .artifact(&keys, TARGET, "0.9.1", URL_090, &next.sign(b"i", name))
+            .err(),
         Some(Refusal::NotInManifest)
     );
+    // The entry must be this PC's: the kit's manifest holds `windows-x86_64-nsis` only.
+    for (target, ours) in [
+        ("windows-x86_64", true),
+        ("windows-x86_64-nsis", true),
+        ("windows-aarch64", false),
+        ("windows-x86", false),
+        ("windows", false),
+        ("linux-x86_64", false),
+        ("", false),
+    ] {
+        assert_eq!(
+            signed.artifact(&keys, target, "0.9.0", URL_090, &good).is_ok(),
+            ours,
+            "{target:?}"
+        );
+    }
 }
 
 /// Windows and Linux follow the same rules on the legacy feed.
-const WINDOWS: Host = Host { macos: false };
-const LINUX: Host = Host { macos: false };
-const MAC: Host = Host { macos: true };
+const TARGET: &str = "windows-x86_64";
+const WINDOWS: Host = Host {
+    macos: false,
+    target: TARGET,
+};
+const LINUX: Host = Host {
+    macos: false,
+    target: "linux-x86_64",
+};
+const MAC: Host = Host {
+    macos: true,
+    target: "darwin-aarch64",
+};
 
 #[test]
 fn the_legacy_feed_offers_only_a_newer_0_8_version_signed_by_the_legacy_key_for_its_own_file() {
@@ -548,7 +577,7 @@ fn the_published_0_8_24_feed_passes_the_rules_and_cannot_pose_as_another_version
             platform["url"].as_str().unwrap(),
             platform["signature"].as_str().unwrap(),
         );
-        let host = Host { macos: false };
+        let host = Host { macos: false, target };
         let run = |installed: &str, version: &str| {
             accept(
                 &keys,
@@ -580,8 +609,8 @@ fn the_published_0_8_24_feed_passes_the_rules_and_cannot_pose_as_another_version
 #[test]
 fn the_v2_key_not_before_is_the_day_the_key_was_made() {
     // 2026-11-11T00:00:00Z. 20_768 days after 1970-01-01 (56 years with 14 leap days, then 314 days into 2026).
-    assert_eq!(V2_KEY_NOT_BEFORE, 1_794_355_200);
-    assert_eq!(V2_KEY_NOT_BEFORE, (56 * 365 + 14 + 314) * 86_400);
+    assert_eq!(V2_KEY_CREATED, 1_794_355_200);
+    assert_eq!(V2_KEY_CREATED, (56 * 365 + 14 + 314) * 86_400);
     assert_eq!(MAX_CLOCK_SKEW_SECS, 86_400);
 }
 
@@ -607,7 +636,7 @@ fn a_signed_time_is_read_from_the_trusted_comment_or_not_at_all() {
 
 #[test]
 fn a_manifest_signed_before_the_key_or_a_day_ahead_of_the_clock_or_before_the_mark_is_refused() {
-    const K: u64 = V2_KEY_NOT_BEFORE;
+    const K: u64 = V2_KEY_CREATED;
     const DAY: u64 = MAX_CLOCK_SKEW_SECS;
     let now = K + 10 * DAY;
     use Refusal::{OlderThanKey, SignedInTheFuture, StaleManifest};

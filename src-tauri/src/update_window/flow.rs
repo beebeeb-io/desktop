@@ -27,6 +27,9 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// One writer of the marks file at a time in this process (the background check and a manual one may overlap).
+static MARKS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn read_marks(dir: &Path) -> std::collections::BTreeMap<String, u64> {
     std::fs::read(dir.join(UPDATE_SEEN_FILE))
         .ok()
@@ -34,7 +37,9 @@ fn read_marks(dir: &Path) -> std::collections::BTreeMap<String, u64> {
         .unwrap_or_default()
 }
 
-/// The channel's replay mark, or `None` when none was written (or the file cannot be read).
+/// The channel's replay mark, or `None` when none was written. A file that cannot be read counts as no mark: the
+/// fixed not-before bound and the future bound still hold, and a mark that blocked every update for good after one
+/// damaged write would be worse.
 pub(crate) fn replay_mark(dir: &Path, channel: ReleaseChannel) -> Option<u64> {
     read_marks(dir).get(channel.as_str()).copied()
 }
@@ -42,6 +47,7 @@ pub(crate) fn replay_mark(dir: &Path, channel: ReleaseChannel) -> Option<u64> {
 /// Stores `accepted` as the channel's replay mark unless the stored one is larger (a clock set back never lowers
 /// it). Written through a temp file and a rename.
 pub(crate) fn record_replay_mark(dir: &Path, channel: ReleaseChannel, accepted: u64) -> std::io::Result<()> {
+    let _one_writer = MARKS_WRITE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut marks = read_marks(dir);
     let stored = marks.get(channel.as_str()).copied();
     let next = trust::next_replay_mark(stored, accepted);
@@ -168,6 +174,18 @@ pub(crate) fn trusted_keys(app: &tauri::AppHandle) -> Result<TrustedKeys, String
     TrustedKeys::new(baked, trust::NEXT_PUBKEY_FILE)
 }
 
+/// This PC's `<os>-<arch>` in the names the Tauri updater gives a manifest's platform keys (`windows-x86_64`). The
+/// updater's own `Update::target` holds the OS alone, so it cannot tell one architecture's entry from another's.
+pub(crate) fn updater_target(os: &str, arch: &str) -> String {
+    let os = if os == "macos" { "darwin" } else { os };
+    let arch = match arch {
+        "x86" => "i686",
+        "arm" => "armv7",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
 /// Strictly newer, by this app's own version order; `None` when either version cannot be read.
 pub(crate) fn strictly_newer(installed: &str, offered: &str) -> Option<bool> {
     compare_channel_release_to_current(installed, offered).map(|ordering| ordering == std::cmp::Ordering::Greater)
@@ -220,8 +238,10 @@ pub(crate) async fn checked_update(
     if direction == Direction::NewerOnly && strictly_newer(real_app_version(), &update.version) != Some(true) {
         return Ok(None);
     }
+    let target = updater_target(std::env::consts::OS, std::env::consts::ARCH);
     let host = Host {
         macos: cfg!(target_os = "macos"),
+        target: &target,
     };
     let feed = signed.as_ref().map_or(Feed::Unsigned, Feed::Signed);
     let key = trust::accept(
@@ -284,8 +304,9 @@ pub(crate) const UPDATE_INSTALL_FAILED_SYNC_STOPPED_CODE: &str = "update_install
 /// Downloads the accepted update (the updater verifies the bytes with the key `checked_update` chose). For a
 /// native release (0.9.0 or later) it then makes sync quiet (`preflight::quiet_engine`: uploads in flight finish,
 /// the engine stops, the Cloud Files provider disconnects) and keeps the engine slot until the installer has taken
-/// over. Then, for every update: the channel that served it and the hand-off note are recorded, and the install
-/// runs. Returns only when the install did not replace this process (Linux), or failed.
+/// over. Then, for every update: the channel that served it is recorded (and, for a native release, the hand-off
+/// note is written), and the install runs. On Windows a started installer ends this process: what it does after
+/// that (a cancel, a failure) can no longer take the record back here. Returns only when the install did not replace this process (Linux), or failed.
 pub(crate) async fn download_record_install(
     app: &tauri::AppHandle,
     update: tauri_plugin_updater::Update,
@@ -315,7 +336,9 @@ pub(crate) async fn download_record_install(
     let installed = record_then_install(
         || {
             record_installed_release_channel(channel).map_err(|e| format!("record installed release channel: {e}"))?;
-            if let Some(dir) = handoff_dir.as_deref()
+            // Only a native build reads (and deletes) the note; a 0.8.x update would leave a stale one behind.
+            if trust::is_native_line(&to)
+                && let Some(dir) = handoff_dir.as_deref()
                 && let Err(error) = write_update_handoff(dir, &from, &to, channel, at)
             {
                 tracing::warn!(kind = ?error.kind(), "could not write the update hand-off note");
@@ -342,7 +365,7 @@ pub(crate) async fn download_record_install(
         (Err(error), None) => Err(error),
         (Err(error), Some(quiet)) => {
             let stopped = quiet.stopped_an_engine;
-            quiet.resume();
+            drop(quiet);
             tracing::error!(%error, stopped, "the native installer did not take over after the pre-flight");
             Err(if stopped {
                 format!(
