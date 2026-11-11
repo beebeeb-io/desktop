@@ -629,10 +629,22 @@ pub(super) fn test_module_files(src: &std::path::Path) -> std::collections::Hash
         if !test_only {
             continue;
         }
-        let candidates = match path {
+        let mut candidates = match path {
             Some(path) => vec![path],
             None => vec![format!("{name}.rs"), format!("{name}/mod.rs")],
         };
+        // A test module split by line count keeps its text in `<name>/part_N.rs`, `include!`d by `<name>.rs`:
+        // those files are the module too.
+        if let Ok(parts) = std::fs::read_dir(src.join(name)) {
+            let mut parts: Vec<String> = parts
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|file| file.starts_with("part_") && file.ends_with(".rs"))
+                .map(|file| format!("{name}/{file}"))
+                .collect();
+            parts.sort();
+            candidates.extend(parts);
+        }
         files.extend(candidates.into_iter().filter(|candidate| {
             src.join(candidate).is_file() && !DECLARED_AS_FILES_BEFORE_THE_SPLIT.contains(&candidate.as_str())
         }));
