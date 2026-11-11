@@ -85,6 +85,26 @@ pub(super) async fn restore_stored_session(state: &AppState, acct: &AccountRunti
         }
     };
 
+    // Task 2447 defense-in-depth: when the probe returned a profile, check
+    // whether the vault key's owner matches the session's user_id. A mismatch
+    // means a foreign key survived a failed sign-out; refuse it and remove it
+    // so the person is asked for the recovery phrase.
+    if let Some(ref profile) = probed {
+        use crate::auth_v2::gate::vault_key_owner_matches;
+        let vault = AuthVault::new(platform_keychain_store_for(acct.id.as_str()));
+        if let Ok(Some(owner)) = vault.vault_key_owner() {
+            if !vault_key_owner_matches(Some(&owner), &profile.user_id) {
+                tracing::warn!(
+                    "startup restore: vault key owner mismatch (task 2447); \
+                     removing foreign key and requiring recovery phrase"
+                );
+                let mut vault = AuthVault::new(platform_keychain_store_for(acct.id.as_str()));
+                let _ = vault.delete_vault_key_and_owner();
+                return false;
+            }
+        }
+    }
+
     let token = zeroize::Zeroizing::new(session.token.clone());
     let email = session.email.clone();
     {
@@ -671,6 +691,10 @@ pub(super) fn store_first_sign_in(
     email: &str,
     profile: account_dto::AccountProfile,
 ) -> Result<(), String> {
+    // Task 2447: before storing the new session's token, remove any vault key
+    // that belongs to a different account. This prevents a stale key from
+    // being paired with the new session's token.
+    remove_foreign_vault_key_if_needed(acct.id.as_str(), &profile.user_id, email)?;
     let write = claim_session_write(acct, turn)?;
     persist_session_token_to_keychain(&write, acct.id.as_str(), token, Some(email))?;
     if let Ok(mut guard) = acct.cached_profile.lock() {

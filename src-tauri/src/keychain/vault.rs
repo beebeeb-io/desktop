@@ -128,6 +128,12 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.store.save_wrapped_master_key(wrapped)
     }
 
+    /// Is a vault key present? Delegates to the store's `holds_wrapped_master_key`
+    /// (the macOS store uses a cheaper attribute-only probe).
+    pub fn has_vault_key(&self) -> AuthResult<bool> {
+        self.store.holds_wrapped_master_key()
+    }
+
     /// Persist the server user id that owns the vault key (task 2447).
     pub fn store_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
         if user_id.trim().is_empty() {

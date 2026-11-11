@@ -550,6 +550,60 @@ pub(super) fn persist_session_token_to_keychain(
     persist_account_email_to_keychain(&vault, email)
 }
 
+/// Task 2447: on a token-only sign-in, check whether the credential store
+/// holds a vault key that belongs to a DIFFERENT account. If so, remove it
+/// (and its owner tag) before storing the new session's token, so the person
+/// cannot unlock with a foreign key. Uses the pure decision function
+/// `should_remove_stored_vault_key` (gate.rs) for the logic; the credential
+/// reads and deletes happen here.
+///
+/// Returns `Ok(true)` when a foreign key was removed, `Ok(false)` when the
+/// key was kept or absent. A removal failure refuses the sign-in (the
+/// person must not sign in while a foreign key cannot be removed).
+pub(super) fn remove_foreign_vault_key_if_needed(
+    account_id: &str,
+    signing_in_user_id: &str,
+    signing_in_email: &str,
+) -> Result<bool, String> {
+    use crate::auth_v2::gate::should_remove_stored_vault_key;
+
+    let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
+    // Check if there is a vault key at all (via the trait's default that
+    // reads and drops; the macOS store has a cheaper attribute-only probe).
+    let has_key = vault
+        .has_vault_key()
+        .map_err(|e| keychain_error("check for vault key in credential store", e))?;
+    if !has_key {
+        return Ok(false);
+    }
+    // Read the owner tag (None = unknown/legacy).
+    let key_owner = vault
+        .vault_key_owner()
+        .map_err(|e| keychain_error("read vault key owner from credential store", e))?;
+    // Read the stored email (may differ from the signing-in email).
+    let stored_email = vault
+        .account_email()
+        .map_err(|e| keychain_error("read stored email from credential store", e))?;
+
+    if should_remove_stored_vault_key(
+        key_owner.as_deref(),
+        signing_in_user_id,
+        signing_in_email,
+        stored_email.as_deref(),
+    ) {
+        tracing::info!(
+            "removing foreign vault key before sign-in (task 2447): stored key owner \
+             does not match the signing-in account"
+        );
+        vault
+            .delete_vault_key_and_owner()
+            .map_err(|e| keychain_error("remove foreign vault key from credential store", e))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Remove the account email the Keychain kept for the session stored before. Every write of a new session token
 /// calls this BEFORE it stores the token, and writes the new session's own email (if it has one) after: the restore
 /// knows a stored session by that email, so the Keychain must never hold one account's token or key next to another
