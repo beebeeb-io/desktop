@@ -32,6 +32,7 @@ pub struct State {
     #[cfg(feature = "feedback")]
     pub(crate) feedback: crate::feedback::Feedback,
     pub settings: crate::frames::settings::SettingsUi,
+    pub(crate) signin: Option<crate::frames::signin::Ui>,
 }
 
 /// The state headless renders and tests start from: the fixture engine, nothing wired.
@@ -85,5 +86,6 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         #[cfg(feature = "feedback")]
         feedback: crate::feedback::Feedback::new(),
         settings: Default::default(),
+        signin: crate::frames::signin::start(),
     }
 }

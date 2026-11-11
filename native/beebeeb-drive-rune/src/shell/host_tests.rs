@@ -119,7 +119,9 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
             s.shell.refresh();
         });
         rt.frame(0.016);
-        assert!(rt.find("not-built").is_some(), "{gate:?}");
+        // As for the sections above: the placeholder, unless the group's lane registered its frame.
+        let built = registry::frame(registry::group_for(&rt.state.shell.app)).is_some();
+        assert_eq!(rt.find("not-built").is_none(), built, "{gate:?}");
         // Behind the gate there is no sidebar and no list: nothing of the account.
         assert!(rt.find("sidebar").is_none(), "{gate:?}");
         assert!(rt.find("file-list").is_none(), "{gate:?}");

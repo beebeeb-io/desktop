@@ -159,6 +159,12 @@ pub const FRAMES: &[Frame] = &[
         feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
     },
     // Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
+    Frame {
+        group: FrameGroup::SignIn,
+        view: crate::frames::signin::frame,
+        on_key: Some(crate::frames::signin::on_key),
+        feedback: FeedbackPolicy::Denied("sign-in shows your email and takes your password"),
+    },
 ];
 
 /// The flyout's content, once the tray lane builds it: `Some(crate::frames::tray::view)`.

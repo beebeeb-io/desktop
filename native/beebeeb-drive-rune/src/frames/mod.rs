@@ -5,6 +5,7 @@
 //! names its own scenes once (`shell::SCENES`) and never changes for a new group.
 
 pub mod settings;
+pub mod signin;
 
 use std::sync::OnceLock;
 
