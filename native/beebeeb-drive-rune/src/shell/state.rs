@@ -33,6 +33,7 @@ pub struct State {
     /// The live feedback mode (test builds only).
     #[cfg(feature = "feedback")]
     pub(crate) feedback: crate::feedback::Feedback,
+    pub frames: crate::frames::Ui,
     pub settings: crate::frames::settings::SettingsUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
 }
@@ -88,6 +89,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         actions: crate::frames::files::Actions::default(),
         #[cfg(feature = "feedback")]
         feedback: crate::feedback::Feedback::new(),
+        frames: crate::frames::Ui::default(),
         settings: Default::default(),
         signin: crate::frames::signin::start(),
     }
