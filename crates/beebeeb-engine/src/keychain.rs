@@ -819,7 +819,7 @@ mod windows_credentials {
 #[path = "../src/keychain/tests.rs"]
 mod tests;
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 mod macos_keychain {
     use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
     use std::ffi::c_void;

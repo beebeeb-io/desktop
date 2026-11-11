@@ -23,11 +23,15 @@ pub enum StateDirMigration {
 
 /// Resolve the process-wide state dir from the app-local data dir the shell names (Tauri: `app_local_data_dir()`).
 pub fn init_from_app_local_data_dir(app_local_data_dir: &Path) -> Result<(), String> {
+    // A relative path would resolve against whatever the working directory is when each file is opened.
+    if !app_local_data_dir.is_absolute() {
+        return Err("the app-local data dir must be an absolute path".to_string());
+    }
     let state_dir = beebeeb_state_dir_from_app_local_data(app_local_data_dir);
 
     match BEEBEEB_STATE_DIR.set(state_dir.clone()) {
         Ok(()) => {
-            tracing::info!(state_dir = %state_dir.display(), "Beebeeb state dir resolved from Tauri app-local-data dir");
+            tracing::info!(state_dir = %state_dir.display(), "Beebeeb state dir resolved from the app-local data dir");
         }
         Err(_) => {
             if BEEBEEB_STATE_DIR.get() != Some(&state_dir) {

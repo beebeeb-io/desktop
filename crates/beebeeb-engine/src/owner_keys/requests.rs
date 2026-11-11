@@ -61,14 +61,14 @@ pub fn request_upload_fields(row: &Value) -> Option<RequestUploadFields> {
 
 /// The owner's upload requests, loaded once per pass.
 #[derive(Default)]
-pub struct RequestKeys {
+pub(crate) struct RequestKeys {
     wrapped: HashMap<String, (Vec<u8>, Vec<u8>)>,
 }
 
 impl RequestKeys {
     /// Build from `GET /api/v1/file-requests`; a failure is an empty set, so a
     /// request row stays unavailable rather than failing the pass.
-    pub async fn load(api: &ApiClient) -> Self {
+    pub(crate) async fn load(api: &ApiClient) -> Self {
         let mut keys = Self::default();
         let Ok(body) = api.list_file_requests().await else {
             return keys;
@@ -132,7 +132,7 @@ impl crate::engine_bridge::EngineBridge {
     /// Apply a carried 2236 envelope to `record` (P1-1/P2-1/P2-2). A malformed
     /// envelope is `Err` for that row only; a well-formed one core cannot
     /// resolve is [`EnvelopeOutcome::Unresolved`], never an owner row.
-    pub async fn resolve_envelope(
+    pub(crate) async fn resolve_envelope(
         &self,
         master: &MasterKey,
         row: &Value,
@@ -211,7 +211,7 @@ pub fn request_envelope(row: &Value) -> anyhow::Result<Option<RequestUploadField
 /// string-derived key from the row id and the pin core read from its current
 /// name — whatever key authenticated that name, `C` included. Never `C` itself;
 /// an upper-repair name is read-only.
-pub fn rename_material(
+pub(crate) fn rename_material(
     master: &MasterKey,
     id: &str,
     record: &crate::owner_keys::OwnedKeyRecord,

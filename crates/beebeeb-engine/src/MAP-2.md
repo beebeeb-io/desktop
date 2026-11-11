@@ -20,7 +20,7 @@ Modules 35–69, sorted by path.
 | `operation_failure.rs` | How a failed operation's error text is classed (auth, quota, permission, locked, or retryable). | — |
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
 | `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, Listing (2), Outcome (2), Probe (5), REQUIRED_PROOFS, Tally (10), Verdict (2), listing_from_status, eligible, listing_of, probe, verdict, … (+3 more) |
-| `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | AccountScope (4), normalize_wrap, RequestKeys (2), RequestName (2), RequestNameKey (4), block_malformed_row, rename_material, request_envelope, request_upload_fields, OwnedKeyRecord (12), blocked_name |
+| `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | AccountScope (4), normalize_wrap, RequestName (2), RequestNameKey (4), block_malformed_row, request_envelope, request_upload_fields, OwnedKeyRecord (12), blocked_name |
 | `passkey_windows.rs` | v2 B15: the Windows platform call for core's passkey flows: webauthn.dll `WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAs | — |
 | `path_safety.rs` | Path guards for a relative path that arrives from outside (an IPC call, a server row): no traversal, and containment under a root. | — |
 | `reauth.rs` | Ruling R8 (spec 2026-10-06 §3): a sign-in on a Mac that already holds an account is either the same account signing in again (only the sessi | — |
