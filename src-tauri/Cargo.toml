@@ -360,3 +360,78 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "test"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Fast tests and a usable dev app (docs/ci/2026-11-11-rust-ci-speed.md): the crypto, KDF, hash and SQLite crates are
+# compiled optimised in the dev and test profiles. At opt-level 0 the Argon2id derivations (core's production
+# parameters) and OPAQUE logins made 6 tests cost 170 s; optimised they cost 16 s (measured, Legion). Only these
+# third-party crates change: no KDF parameter, no crypto code, no release setting. A name that matches no package is a
+# cargo warning, so a renamed dependency shows up in the build log. The cost is 54 CPU-seconds on a clean build
+# (measured), paid once per dependency cache; an unchanged dependency is never rebuilt.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.password-hash]
+opt-level = 3
+[profile.dev.package.opaque-ke]
+opt-level = 3
+[profile.dev.package.voprf]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.fiat-crypto]
+opt-level = 3
+[profile.dev.package.subtle]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.hkdf]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3
+[profile.dev.package.polyval]
+opt-level = 3
+[profile.dev.package.cipher]
+opt-level = 3
+[profile.dev.package.universal-hash]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.ff]
+opt-level = 3
+[profile.dev.package.group]
+opt-level = 3
+[profile.dev.package.bip39]
+opt-level = 3
+[profile.dev.package.generic-array]
+opt-level = 3
+[profile.dev.package.hybrid-array]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3
+[profile.dev.package.crypto-common]
+opt-level = 3
+[profile.dev.package.zeroize]
+opt-level = 3
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
