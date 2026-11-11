@@ -207,4 +207,32 @@ impl StateDb {
         conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
         Ok(())
     }
+    /// Task 2446: whether any key record is blocked or any stored row has no path: what a snapshot with null
+    /// request fields left behind in a build up to 0.8.24. Decides whether the one healing snapshot is asked for.
+    pub fn has_blocked_or_nameless_rows(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM owned_key_records WHERE json_extract(record, '$.blocked_fingerprint') IS NOT NULL)
+                 OR EXISTS(SELECT 1 FROM files WHERE path = '' AND status != 'trashing')",
+            [],
+            |row| row.get(0),
+        )
+    }
+    /// Task 2446: whether this database's one healing snapshot succeeded (or was never needed).
+    pub fn name_heal_done(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row("SELECT 1 FROM sync_state WHERE key = 'name_heal_2446'", [], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+    /// Task 2446: record that the healing snapshot succeeded (or was never needed).
+    pub fn mark_name_heal_done(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('name_heal_2446', '1') ON CONFLICT(key) DO NOTHING",
+            [],
+        )?;
+        Ok(())
+    }
 }

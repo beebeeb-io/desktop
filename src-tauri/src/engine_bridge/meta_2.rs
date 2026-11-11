@@ -632,6 +632,14 @@ pub(super) fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, dep
     true
 }
 
+/// Task 2446: whether a stored row has no name of its own yet: no path at all, or the label a blocked key record gives
+/// it (`owner_keys::blocked_name`). A snapshot applies such a row again, so a row an earlier build blocked by mistake
+/// gets its name; one that is rightly blocked gets the same label again and nothing changes.
+pub(super) fn awaits_its_name(entry: &FileEntry) -> bool {
+    entry.path.is_empty()
+        || entry.path.rsplit('/').next() == Some(crate::owner_keys::blocked_name(&entry.file_id).as_str())
+}
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -737,7 +745,8 @@ pub(super) fn process_metadata_row(
             // path/kind so a folder we already have locally is still descended.
             // Snapshot rows only: an op row's `updated_at` is a local
             // same-second stamp, not a freshness token (see `RowSource::Op`).
-            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at {
+            // Task 2446: a row still waiting for its name is applied again, whatever its time says.
+            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at && !awaits_its_name(&entry) {
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
@@ -756,7 +765,11 @@ pub(super) fn process_metadata_row(
             // (3) Pending download/upload/conflict/error — let the dedicated
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
-            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+            // Task 2446: so is a row still waiting for its name, unless a pending upload or a conflict owns it.
+            let names_it = source == RowSource::Snapshot
+                && awaits_its_name(&entry)
+                && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict);
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || names_it {
                 return apply(bridge);
             }
             Ok(Some((entry.path, entry.item_kind)))
