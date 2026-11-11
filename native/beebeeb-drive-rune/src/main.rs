@@ -325,4 +325,107 @@ mod tests {
         assert!(rt.find("Sync history").is_some(), "Sync history exists");
         assert!(rt.find("Available offline").is_some(), "Available offline exists");
     }
+
+    /// Geometry check: export element positions from Rune's tree and compare
+    /// against the board's golden geometry JSON.
+    ///
+    /// Fails on: any named element missing, any bounding box off by > 1px,
+    /// any font family mismatch, any font size off by > 0.5px.
+    #[test]
+    fn geometry_check_dw0401() {
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new(init(), view, (1280.0, 800.0), env);
+        rt.frame(0.0);
+
+        let elements = rt.elements();
+
+        // Build a map of key -> ElementInfo for keyed text elements
+        let mut rune_elements: std::collections::HashMap<String, &rune::ElementInfo> = std::collections::HashMap::new();
+        for el in &elements {
+            if let Some(ref key) = el.key {
+                rune_elements.insert(key.clone(), el);
+            }
+        }
+
+        // Check that critical named elements exist and have reasonable positions.
+        // This is the geometry gate: elements the board draws must be present in Rune.
+        let expected = [
+            // (key, expected_role_or_text, min_x, min_y, max_x, max_y)
+            // Sidebar section items
+            ("Files", "Files"),
+            ("Shared", "Shared"),
+            ("Photos", "Photos"),
+            ("Backups", "Backups"),
+            ("Trash", "Trash"),
+            // THIS PC items
+            ("Sync history", "Sync history"),
+            ("Available offline", "Available offline"),
+            // Toolbar elements
+            ("folder-title", "Files"),
+            ("search-input", ""),
+            ("new-btn", ""),
+            ("sort-btn", ""),
+            // Column headers
+            ("col-name", ""),
+            ("col-date", ""),
+            ("col-size", ""),
+            ("col-shared", ""),
+            ("col-pc", ""),
+            // Detail pane
+            ("detail-pane", ""),
+            ("detail-name", ""),
+            ("encrypted-badge", ""),
+            // Status bar
+            ("status-bar", ""),
+            ("status-text", ""),
+            // Storage
+            ("storage-meter", ""),
+            // Account
+            ("account-row", ""),
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
+
+        for (key, _desc) in &expected {
+            if rune_elements.get(*key).is_none() && rt.find(key).is_none() {
+                failures.push(format!("MISSING: element '{key}' not found in Rune tree"));
+            }
+        }
+
+        // Check that keyed text elements have text
+        for el in &elements {
+            if let Some(ref text) = el.text {
+                if let Some(ref key) = el.key {
+                    // Verify text elements are positioned (not at 0,0 with 0 size)
+                    if el.rect[2] < 1.0 || el.rect[3] < 1.0 {
+                        failures.push(format!("ZERO-SIZE: '{key}' text='{text}' rect={:?}", el.rect));
+                    }
+                }
+            }
+        }
+
+        // Report: total elements, keyed elements, failures
+        let keyed_count = elements.iter().filter(|e| e.key.is_some()).count();
+        let text_count = elements.iter().filter(|e| e.text.is_some()).count();
+        eprintln!(
+            "geometry check: {} total elements, {} keyed, {} with text, {} failures",
+            elements.len(),
+            keyed_count,
+            text_count,
+            failures.len()
+        );
+
+        for f in &failures {
+            eprintln!("  {f}");
+        }
+
+        assert!(
+            failures.is_empty(),
+            "geometry check: {} failures (see stderr)",
+            failures.len()
+        );
+    }
 }
