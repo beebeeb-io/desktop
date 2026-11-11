@@ -9,7 +9,9 @@
 use rune::{Color, TextStyle, oklch};
 
 /// The Beebeeb Amber accent: `oklch(0.82, 0.17, 84)`.
-pub const AMBER: Color = oklch(0.82, 0.17, 84.0);
+pub fn amber() -> Color {
+    oklch(0.82, 0.17, 84.0)
+}
 
 /// Spacing scale (points).
 pub mod space {
@@ -83,7 +85,7 @@ pub fn theme(dark: bool) -> Theme {
             hover: oklch(0.95, 0.0, 0.0).alpha(0.06),
             press: oklch(0.95, 0.0, 0.0).alpha(0.10),
             selection: oklch(0.50, 0.0, 0.0).alpha(0.25),
-            accent: AMBER,
+            accent: amber(),
             shadow: oklch(0.0, 0.0, 0.0).alpha(0.40),
             icon: oklch(0.75, 0.0, 0.0),
             icon_secondary: oklch(0.55, 0.0, 0.0),
@@ -105,7 +107,7 @@ pub fn theme(dark: bool) -> Theme {
             hover: oklch(0.0, 0.0, 0.0).alpha(0.04),
             press: oklch(0.0, 0.0, 0.0).alpha(0.08),
             selection: oklch(0.50, 0.0, 0.0).alpha(0.15),
-            accent: AMBER,
+            accent: amber(),
             shadow: oklch(0.0, 0.0, 0.0).alpha(0.10),
             icon: oklch(0.35, 0.0, 0.0),
             icon_secondary: oklch(0.55, 0.0, 0.0),
@@ -120,15 +122,37 @@ pub fn theme(dark: bool) -> Theme {
 pub mod file_icon {
     use rune::{Color, oklch};
 
-    pub const FOLDER: Color = oklch(0.82, 0.17, 84.0); // Amber for folders
-    pub const IMAGE: Color = oklch(0.65, 0.18, 150.0); // Green
-    pub const VIDEO: Color = oklch(0.60, 0.20, 320.0); // Purple
-    pub const AUDIO: Color = oklch(0.65, 0.18, 30.0); // Orange
-    pub const DOCUMENT: Color = oklch(0.55, 0.18, 250.0); // Blue
-    pub const SPREADSHEET: Color = oklch(0.65, 0.18, 150.0); // Green
-    pub const PRESENTATION: Color = oklch(0.60, 0.20, 30.0); // Orange
-    pub const CODE: Color = oklch(0.55, 0.15, 200.0); // Teal
-    pub const ARCHIVE: Color = oklch(0.55, 0.10, 60.0); // Brown
-    pub const PDF: Color = oklch(0.55, 0.22, 25.0); // Red
-    pub const GENERIC: Color = oklch(0.60, 0.0, 0.0); // Grey
+    pub fn folder() -> Color {
+        oklch(0.82, 0.17, 84.0)
+    }
+    pub fn image() -> Color {
+        oklch(0.65, 0.18, 150.0)
+    }
+    pub fn video() -> Color {
+        oklch(0.60, 0.20, 320.0)
+    }
+    pub fn audio() -> Color {
+        oklch(0.65, 0.18, 30.0)
+    }
+    pub fn document() -> Color {
+        oklch(0.55, 0.18, 250.0)
+    }
+    pub fn spreadsheet() -> Color {
+        oklch(0.65, 0.18, 150.0)
+    }
+    pub fn presentation() -> Color {
+        oklch(0.60, 0.20, 30.0)
+    }
+    pub fn code() -> Color {
+        oklch(0.55, 0.15, 200.0)
+    }
+    pub fn archive() -> Color {
+        oklch(0.55, 0.10, 60.0)
+    }
+    pub fn pdf() -> Color {
+        oklch(0.55, 0.22, 25.0)
+    }
+    pub fn generic() -> Color {
+        oklch(0.60, 0.0, 0.0)
+    }
 }
