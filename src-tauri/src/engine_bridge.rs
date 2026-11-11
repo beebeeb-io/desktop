@@ -291,6 +291,7 @@ mod tests {
     // Task 2409: Try again on a change that failed.
     mod unsent_retry;
     // Task 2413: a server row is stored only at a path of plain names; the one map onto the sync root.
+    mod snapshot_names_2446;
     mod stored_path_2413;
     #[cfg(windows)]
     mod stored_path_2413_windows;

@@ -185,15 +185,20 @@ pub(crate) fn block_malformed_row(
 /// ([`RequestKeys::row_keys`]), never field presence: the server can plant a
 /// well-formed-shaped envelope on a normal owner row.
 pub(crate) fn request_envelope(row: &Value) -> anyhow::Result<Option<RequestUploadFields>> {
-    let carries = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
+    // Task 2446: a field is carried only when it is present AND not JSON null. The server's snapshot sends the three
+    // as null on every ordinary row, and `get(..).is_some()` is true for null: every row was blocked before its own
+    // key was tried. None carried: no envelope. All three: it must be well formed. A mix: malformed, refused.
+    let carried = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
         .iter()
-        .all(|field| row.get(field).is_some());
-    if !carries {
-        return Ok(None);
+        .filter(|field| row.get(**field).is_some_and(|value| !value.is_null()))
+        .count();
+    match carried {
+        0 => Ok(None),
+        3 => request_upload_fields(row)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope")),
+        _ => Err(anyhow::anyhow!("a row carries a malformed 2236 request envelope")),
     }
-    request_upload_fields(row)
-        .map(Some)
-        .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope"))
 }
 
 /// The key and pin a rename of a request row must seal under (§15, P2-2): the
