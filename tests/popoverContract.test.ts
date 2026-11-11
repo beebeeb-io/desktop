@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { rustSource } from './fixtures/rustConstants'
 import {
   POPOVER_PHASES,
   nextReviewTarget,
@@ -13,7 +14,7 @@ const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`./fi
 
 /** The phase names in the Rust enum, in declaration order, as snake_case. */
 function rustPhases(): string[] {
-  const source = readFileSync(new URL('../src-tauri/src/surfaces/phase.rs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const source = rustSource('surfaces/phase.rs').replace(/\r\n/g, '\n')
   const start = source.indexOf('pub enum PopoverPhase {')
   expect(start).toBeGreaterThan(-1)
   const body = source.slice(start, source.indexOf('\n}', start))

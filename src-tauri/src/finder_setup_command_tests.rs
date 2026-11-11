@@ -1,4 +1,5 @@
 use super::*;
+pub(super) use crate::source_pin::{body_between, macos_compiled, without_items};
 use finder_setup::core::Trigger;
 use finder_setup::driver::{Event, FinderSetupHandle, FinderSetupView};
 use finder_setup::launch_location::LaunchLocation;
@@ -585,16 +586,6 @@ async fn a_blocking_call_runs_on_the_blocking_pool_and_a_panic_answers_a_fixed_s
 
 // ---- helpers ----
 
-/// The text from `start` to the first `end` after it.
-pub(super) fn body_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-    let from = source.find(start).unwrap_or_else(|| panic!("{start} exists"));
-    let to = from
-        + source[from..]
-            .find(end)
-            .unwrap_or_else(|| panic!("{start} ends with {end:?}"));
-    &source[from..to]
-}
-
 /// The three files `lib.rs` already declared as `#[cfg(test)] mod x;` before the split
 /// (5e6a888): the scanners read them then, so `test_module_files` leaves them in.
 const DECLARED_AS_FILES_BEFORE_THE_SPLIT: [&str; 3] = ["test_sandbox.rs", "source_pin.rs", "extension_log_pin.rs"];
@@ -638,10 +629,22 @@ pub(super) fn test_module_files(src: &std::path::Path) -> std::collections::Hash
         if !test_only {
             continue;
         }
-        let candidates = match path {
+        let mut candidates = match path {
             Some(path) => vec![path],
             None => vec![format!("{name}.rs"), format!("{name}/mod.rs")],
         };
+        // A test module split by line count keeps its text in `<name>/part_N.rs`, `include!`d by `<name>.rs`:
+        // those files are the module too.
+        if let Ok(parts) = std::fs::read_dir(src.join(name)) {
+            let mut parts: Vec<String> = parts
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|file| file.starts_with("part_") && file.ends_with(".rs"))
+                .map(|file| format!("{name}/{file}"))
+                .collect();
+            parts.sort();
+            candidates.extend(parts);
+        }
         files.extend(candidates.into_iter().filter(|candidate| {
             src.join(candidate).is_file() && !DECLARED_AS_FILES_BEFORE_THE_SPLIT.contains(&candidate.as_str())
         }));
@@ -661,63 +664,6 @@ pub(super) fn with_test_modules(lib: &str) -> String {
                 .expect("read a test module")
                 .replace("\r\n", "\n")
     })
-}
-
-/// `source` without the items, blocks and statements whose `cfg` attribute stands alone on its
-/// line and starts with one of `attrs` (at any indentation). What an attribute covers ends at
-/// the first line that ends with `;`, or that opens and closes its braces on one line (`fn f() {}`), or, when a
-/// line ending with `{` comes first, at the `}`
-/// that closes it at the attribute's own indentation (`} else {` continues it). An attribute
-/// on an argument or field (the next line ends with `,`) covers that one line.
-pub(super) fn without_items(source: &str, attrs: &[&str]) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut kept = String::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if attrs
-            .iter()
-            .any(|attr| trimmed.starts_with(attr) && trimmed.trim_end().ends_with(']'))
-        {
-            let indent = &lines[i][..lines[i].len() - trimmed.len()];
-            let mut j = i + 1;
-            while j < lines.len()
-                && (lines[j].trim_start().starts_with("#[") || lines[j].trim_start().starts_with("///"))
-            {
-                j += 1;
-            }
-            if lines.get(j).is_some_and(|line| line.trim_end().ends_with(',')) {
-                i = j + 1;
-                continue;
-            }
-            let mut k = j;
-            while k < lines.len() {
-                let line = lines[k].trim_end();
-                if line.ends_with(';') {
-                    break;
-                }
-                // A one-line item (`fn f() {}`): its braces close on the line it starts on (fix round 1, m1).
-                if line.ends_with('}') && line.contains('{') && line.matches('{').count() == line.matches('}').count() {
-                    break;
-                }
-                if line.ends_with('{') {
-                    let close = format!("{indent}}}");
-                    while k < lines.len() && lines[k].trim_end() != close && lines[k].trim_end() != format!("{close};")
-                    {
-                        k += 1;
-                    }
-                    break;
-                }
-                k += 1;
-            }
-            i = k + 1;
-            continue;
-        }
-        kept.push_str(lines[i]);
-        kept.push('\n');
-        i += 1;
-    }
-    kept
 }
 
 /// Fix round 1 (m1): an item covered by one of the attributes can be ONE line (`fn f() {}`). It used to be read as
@@ -769,23 +715,6 @@ pub(super) fn production_source() -> String {
     without_items(
         &crate::root_source::lib_rs().replace("\r\n", "\n"),
         &["#[cfg(test)]", "#[cfg(all(test"],
-    )
-}
-
-/// `source` as the macOS build compiles it: without the test modules and without what is
-/// Windows, Linux or "not macOS" only, so a census of call sites sees only code a Mac can run.
-pub(super) fn macos_compiled(source: &str) -> String {
-    without_items(
-        source,
-        &[
-            "#[cfg(test)]",
-            "#[cfg(all(test",
-            "#[cfg(any(target_os = \"windows\", test))]",
-            "#[cfg(not(target_os = \"macos\"))]",
-            "#[cfg(target_os = \"windows\")]",
-            "#[cfg(target_os = \"linux\")]",
-            "#[cfg(not(unix))]",
-        ],
     )
 }
 

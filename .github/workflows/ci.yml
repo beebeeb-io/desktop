@@ -472,6 +472,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # The running engine moved in (step 2): its Linux mount links libfuse.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 libfuse-dev pkg-config
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -569,7 +576,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev pkg-config
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev pkg-config libfuse2 libfuse-dev
 
       # Rune needs 1.99.1 (native/beebeeb-drive-rune/Cargo.toml).
       - name: Setup Rust

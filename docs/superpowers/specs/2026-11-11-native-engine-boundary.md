@@ -248,3 +248,99 @@ Stays desktop: `state_db` (the desktop's own SQLite schema), `windows_cf` (CFAPI
 - `capabilities/`, `tauri.conf.json`'s Windows parts, `webview2-com` and `windows-core-webview2` in `Cargo.toml`, the 7 plugins, `src/` (React), `index.html`, `vite.config.ts`.
 - Not dead: the MAC bucket and the Tauri shell itself, until the Mac app moves.
 - Not covered by this PR: the move stops at `state_db`'s own closure (`engine_bridge`, `runner`, `windows_cf`, `api_client`, `config` and SESSION are untouched). The Rust source censuses read both trees (`src-tauri/src/source_census.rs`); the bun copy guards (`copyGuard.ts`, `cityGuard.ts`) still walk `src-tauri/src` only.
+
+## 9. Plan check for step 2 (lane E2, 2026-11-11, measured on `v2-native` at `84b8f552`)
+
+Method: the same script as §1 plus a per-kind count (`#[tauri::command`, `AppHandle`, `State<`/`tauri::State`, `.emit*(`,
+`tauri_plugin_*`, window/`Manager` names). "Edges" are `crate::<module>` names in a module's files that point at a module
+which keeps a Tauri reference. Everything below is the tree BEFORE this PR's moves.
+
+### 9.1 §4 corrected: emit sites and event names
+
+§4 said "41 emit call sites, 21 event names". Re-counted: **41 matches of `.emit*(`, of which 35 are product call sites and 6
+are in test files** (3 real emits in `popover_snapshot_command_tests.rs`, 3 string literals in pins). The 35 product sites emit
+**26 names**, not 21. §4 missed `sign-out-send-progress`, `sign-out-send-ended`, `version-center-review`, `menu:folder-created`
+and `conflict-auto-resolved`.
+
+| name | product sites | bucket for the native shell |
+|---|---|---|
+| `engine-status` | `runner/tick_loop.rs` (1, through `emit_payload`), `settings_commands.rs` (1) | engine event |
+| `engine-conflict`, `conflict-auto-resolved` | `runner/tick_loop.rs` (1 + 1) | engine event |
+| `conflict-resolved` | `activity_conflict_commands.rs` (2) | engine event |
+| `drive://event` | `drive_v2/events.rs` (1), `share_v2/mod.rs` (2) | engine event |
+| `drive://transfers` | `drive_v2/status_cmds.rs` (1) | engine event |
+| `browser-login` | `browser_login.rs` (1) | engine event |
+| `kept-folder-changed` | `vault_lock_commands.rs` (1) | engine event |
+| `sign-out-flow-closed`, `sign-out-send-progress`, `sign-out-send-ended` | `vault_lock_commands.rs` (1), `sign_out_commands.rs` (2) | engine event |
+| `update-available` | `native_menu.rs` (1), `update_window.rs` (1) | engine event (the updater lane owns the producer) |
+| `version-center-review` | `settings_commands.rs` (1) | engine event |
+| `menu:files-added`, `menu:folder-created` | `settings_commands.rs` (1 + 1) | engine event (result of an engine action) |
+| `menu:sign-out-flow`, `menu:check-for-updates`, `main:navigate`, `compact-app:navigate`, `windows-app:navigate`, `tray-menu-notice` | `vault_lock_commands.rs`, `native_menu.rs`, `update_window.rs` (2), `tray_window.rs` (5) | shell-internal: a direct call in the native shell |
+| `finder-setup-changed`, `popover-shown`, `popover-hidden`, `review:open` | `finder_setup/macos_ports.rs`, `macos_popover.rs` (2), `popover_data/review.rs` | macOS only |
+| `office://progress` | `office_v2/mod.rs` (2) | dead in the native build |
+
+### 9.2 The four groups
+
+| group | modules | lines | commands | `AppHandle` | `State` | emits | plugins | window names |
+|---|---|---|---|---|---|---|---|---|
+| SESSION | 22 | 20,643 | 89 | 54 | 57 | 6 | 8 | 27 |
+| CONFIG (`config`, `state_paths`, `lockfile`, `test_sandbox`) | 4 | 3,156 | 0 | 2 | 0 | 0 | 0 | 1 |
+| API (`api_client`, `account_dto`, `link_health`, `direct_download`, `no_fetch_scope`, `download_pin`, `transfer_progress`) | 7 | 10,030 | 0 | 0 | 0 | 0 | 0 | 0 |
+| RUNNING ENGINE (34 modules, `engine_bridge` 43,831 and `windows_cf` 13,930 the largest) | 34 | 102,506 | 67 | 58 | 74 | 8 | 6 | 3 |
+
+SESSION by module (lines / commands / `AppHandle` / `State`): `session_state` 1,072/2/2/3; `session_apply` 924/0/1/1;
+`session_reauth` 842/0/2/2; `session_owner` 150/0/0/0; `auth_v2` 2,620/16/5/4; `keychain` 2,689/0/0/0; `login_commands`
+1,095/6/12/4; `vault_lock_commands` 814/15/14/7 (3 emits); `sign_out_commands` 1,123/6/3/6 (2 emits); `sign_out` 3,232/0/0/0;
+`account` 368/0/0/0; `account_v2` 1,036/18/3/18; `reauth` 770/0/0/0; `browser_login` 1,040/1/5/2 (1 emit); `vault_unlock`
+430/1/0/1; `passkey_commands` 562/4/1/4; `passkey_windows` 334/0/0/0; `signup_v2` 524/17/6/0; `session_commands`,
+`callback_gate`, `auth_attempts` 631/0/0/0 together; `unsent_changes_commands` 387/3/0/5.
+
+RUNNING ENGINE, the modules that hold a Tauri reference (the other 27 have none): `runner` 4,149 lines, 18 `AppHandle`,
+3 emits, 1 `try_state`; `backup` 2,706, 1 command; `backup_protect` 560, 4 `AppHandle`, 1 plugin (the notification);
+`bound_engine` 996, 8 commands; `local_state_purge` 1,190, 3 + 3; `vault_tree` 776, 5 commands; `drive_v2` 3,711, 36
+commands, 2 emits; `share_v2` 3,076, 17 commands, 2 emits.
+
+### 9.3 What each group needs from the shell
+
+- **CONFIG:** `state_paths` takes an `AppHandle` in 2 places only to ask Tauri for the app data dir; `config/types.rs:336`
+  names `finder_setup` (1 product line). Needs: nothing but the per-app literals (config dir, credential namespace), kept in one place.
+- **API:** `link_health` names `surfaces` on 4 lines (the copy of two sentences). Needs: nothing.
+- **RUNNING ENGINE:** 76 product lines in the zero-reference modules name a module that keeps Tauri (`backup_protect` 53,
+  `backup` 9, `surfaces` 8, `finder_setup` 4, `popover_data` 1, `drive_v2` 1) plus 12 `lib.rs`-level functions
+  (`notify_conflict_impl`, `notify_quota_warning_impl`, `notify_sync_complete_impl`, `open_conflict_window_impl`,
+  `purge_macos_hydrate_cache`, `free_up_space_blocking`, `stream_players`, ...). From the shell the engine needs exactly:
+  an event sink (status, conflict), three notifications (sync complete, quota warning, conflict), "open the conflict
+  window", the shared transfer board, and the Windows "ask before delete" notifier of `backup_protect`.
+- **SESSION:** the keychain, `reauth`, `account`, `session_owner`, the gate rules (`auth_v2/gate.rs`, `key_owner.rs`) need
+  nothing. `AppState` is plain data behind mutexes (no Tauri type in it); the loader and `keys_for_engine_start` are plain
+  functions. The sign-in steps (`auth_v2/{password,phrase,device,approve,hello}.rs`, `login_commands`) are command
+  functions that take `State<AppState>` and an `AppHandle` to start the engine and to open windows.
+
+### 9.4 The cut, in commit order (every commit compiles on Linux; Windows on the build VM; macOS in CI)
+
+1. This section.
+2. Leaves that already close over themselves (0 references, 0 edges out): `account_dto`, `keychain`, `transfer_progress`,
+   `name_alias`, `download_pin`, `conflict`, `cf_range`, `cf_keepalive`, `ipc_frame`, `ipc_write_dedup`, `os_state_reconcile`,
+   `desktop_capabilities`, `no_fetch_scope`, `callback_gate`, `auth_attempts`, `session_commands`, `reauth`,
+   `passkey_windows`, `linux_thumbnail`, and the test helpers they use. Whole, `git mv`.
+3. CONFIG + API: `config`, `state_paths`, `lockfile`, `link_health`, `api_client`, `direct_download`. Whole; the `surfaces`
+   and `finder_setup` lines are cut (the sentences move with their users; the `AppHandle` path lookup stays a shell wrapper).
+4. The running engine, one strongly connected group, in one commit because no smaller one compiles: `engine_bridge`,
+   `windows_cf`, `ipc_socket`, `owner_keys`, `watcher`, `backup`, `backup_protect`, `engine_status`, `unknown_check`,
+   `found_while_paused`, `staged_payload`, `own_data_proof`, `desktop_search`, `upload_finalization_plan`, `known_folder`,
+   `shared_folder_index`, `sync_activity`, `linux_fuse`, `runner`. Whole, except: `backup`'s 1 command and
+   `backup_protect`'s Tauri notifier stay as wrappers; `runner` takes `Arc<dyn EngineHost>` where it took `AppHandle`.
+5. `EngineEvent` + `EngineHost` (typed payloads; `src-tauri` implements the host with the same event names and JSON).
+   After 4, because typing `engine-status` needs `engine_status` in the engine crate.
+6. SESSION: `session_owner`, `account`, the gate rules, `AppState` + the loader with its key-owner guard,
+   `keys_for_engine_start`, engine start/stop/pause/resume as plain functions.
+7. The Tauri-free host and its headless contract tests; `source_engine` through the host's handle.
+
+### 9.5 Not in this PR (stated before the work, corrected at the end in the PR body)
+
+- macOS-bucket modules stay in `src-tauri`: `finder_setup`, `finder_removal`, `macos_file_provider`, `macos_workspace`,
+  `finder_open`, `popover_data`, `macos_popover`, `lifecycle_log`, and `sign_out`'s removal half (it names `finder_removal`).
+- The command halves of `drive_v2`, `share_v2`, `vault_tree`, `settings_commands`, `account_v2`, `signup_v2`,
+  `browser_login`, `passkey_commands`, `local_state_purge`, `unsent_changes_commands` (plan step 7 and the shell lanes).
+- The sign-in steps as UI-callable functions are attempted last; if they do not finish, the stop is after 6 with the
+  gate, the loader and engine start behind plain functions, and the steps still behind their Tauri commands.

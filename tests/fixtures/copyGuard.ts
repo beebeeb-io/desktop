@@ -23,7 +23,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import ts from 'typescript'
 import { stripComments, stripRustTestItems } from './cityGuard'
-import { libRsChildren, libRsSource } from './rustConstants'
+import { RUST_ROOTS, libRsChildren, libRsSource } from './rustConstants'
 import { rustTestFiles } from './rustTestFiles'
 
 /**
@@ -363,7 +363,6 @@ export interface RustSentence {
 const RUST_EXEMPT_RULES = new Set(['engine'])
 
 function rustFiles(repo: string): string[] {
-  const root = join(repo, 'src-tauri/src')
   const out: string[] = []
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
@@ -375,7 +374,8 @@ function rustFiles(repo: string): string[] {
       }
     }
   }
-  if (existsSync(root)) walk(root)
+  // Both Rust trees (`RUST_ROOTS`): a command's refusal sentence is as often written in the engine crate.
+  for (const root of RUST_ROOTS.map((rustRoot) => join(repo, rustRoot))) if (existsSync(root)) walk(root)
   return out.sort()
 }
 
