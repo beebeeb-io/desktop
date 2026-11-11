@@ -1,19 +1,33 @@
 //! Windows: the control channel's transport, a named pipe (`shell/control.rs` is the protocol).
 //!
-//! - **The name** is this identity's channel plus the user's SID
-//!   (`\\.\pipe\io.beebeeb.app.control.S-1-5-21-…`): one per identity and user, so a test build
-//!   and the real app, and two people on one PC, never meet.
-//! - **The ACL** admits that user only (`D:P(A;;GA;;;<SID>)`: a protected DACL with one entry),
-//!   and remote clients are rejected (`PIPE_REJECT_REMOTE_CLIENTS`).
+//! - **The name** is this identity's channel plus the user's SID and the Windows session
+//!   (`\\.\pipe\io.beebeeb.app.control.S-1-5-21-….<session id>`): one per identity, user and
+//!   session, so a test build and the real app, two people on one PC, and one account signed
+//!   in twice (the console and a remote desktop) never meet.
+//! - **The security descriptor** names that user as the owner and admits that user only
+//!   (`O:<SID>D:P(A;;GA;;;<SID>)`: a protected DACL with one entry), and remote clients are
+//!   rejected (`PIPE_REJECT_REMOTE_CLIENTS`).
 //! - **Serving it is being the instance**: the pipe is created with
 //!   `FILE_FLAG_FIRST_PIPE_INSTANCE`, which fails when the name exists.
 //! - **Every wait is bounded.** Reads poll `PeekNamedPipe` against a deadline, so a client that
 //!   connects and says nothing costs the server two seconds, and a server that never answers
 //!   costs the caller its timeout: neither side can hang the other.
 //!
+//! - **A launch checks the server before it writes** (task 2455). The pipe namespace is shared
+//!   by everybody on the PC and the name is no secret, so ANY local user can create this name
+//!   first, with an access list that lets the victim in. [`send`] therefore asks the OS three
+//!   things about the pipe it has opened ([`server_facts`]) and hands them to
+//!   `control::check_server`: the server process runs as this user, the pipe object is owned
+//!   by this user, and its access list admits this user only. On any mismatch, and whenever
+//!   one of them cannot be read, it writes NOTHING (no verb, no link) and reports the channel
+//!   unreachable: the launch says that it could not check and exits 1; it never starts a
+//!   second instance and never talks to a stranger. Starting up beside such a pipe fails the
+//!   same way: `FILE_FLAG_FIRST_PIPE_INSTANCE` refuses to create ours.
+//!
 //! What this does not defend against: another process of the SAME user that creates the name
-//! first (it would be taken for the running instance, and a launch would hand it one of the
-//! three verbs and exit). Such a process can already do anything this app can.
+//! first with the same owner and access list (it would be taken for the running instance, and
+//! a launch would hand it one of the three verbs and exit). Such a process can already do
+//! anything this app can. And an administrator, who can set any owner on any object.
 
 use std::ptr;
 use std::sync::Arc;
@@ -22,14 +36,17 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
-    HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, GENERIC_READ,
+    GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetTokenInformation, IsValidSid,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenSessionId, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION,
@@ -39,12 +56,14 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 use super::windows::wide;
 use super::{ControlHandler, ControlServer, ServeError};
-use crate::shell::control::{self, MAX_REPLY, MAX_REQUEST, Reply, Request};
+use crate::shell::control::{self, AccessEntry, MAX_REPLY, MAX_REQUEST, Reply, Request, ServerFacts};
 use crate::shell::identity::AppIdentity;
 use crate::shell::instance::Delivery;
 
@@ -75,23 +94,74 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a handle this value owns (CreateNamedPipeW, CreateFileW or
-        // OpenProcessToken returned it, checked valid) and it is closed exactly once, here.
+        // SAFETY: `self.0` is a handle this value owns (CreateNamedPipeW, CreateFileW,
+        // OpenProcess or OpenProcessToken returned it, checked valid) and it is closed exactly
+        // once, here.
         unsafe { CloseHandle(self.raw()) };
     }
 }
 
-/// The current user's SID as text (`S-1-5-21-…`).
-fn current_user_sid() -> Result<String, String> {
+/// Memory the OS allocated with `LocalAlloc` and handed over, freed on drop (on every path).
+struct LocalMem(*mut core::ffi::c_void);
+
+impl Drop for LocalMem {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null block a Win32 call allocated with LocalAlloc for this
+        // value alone (checked where the value is made); it is freed exactly once, here.
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+/// The ACE type of "this SID is granted these rights" (`ACCESS_ALLOWED_ACE_TYPE` in winnt.h;
+/// its module in `windows-sys` is not one this crate builds).
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+/// A SID as text (`S-1-5-21-…`).
+///
+/// # Safety
+/// `sid` must be null or point at memory that holds a SID and stays alive for the call.
+unsafe fn sid_text(sid: PSID) -> Result<String, String> {
+    // SAFETY: the caller's contract; IsValidSid reads only the SID's own header and
+    // sub-authorities, and a null pointer is refused before it.
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err("not a valid SID".into());
+    }
+    let mut text: *mut u16 = ptr::null_mut();
+    // SAFETY: `sid` is a valid SID (checked above) and alive by the caller's contract; `text`
+    // is a live local that receives a LocalAlloc'd, NUL-terminated string on success.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return Err(format!("ConvertSidToStringSidW failed: Win32 error {}", last_error()));
+    }
+    let text = LocalMem(text.cast());
+    // SAFETY: `text.0` is the NUL-terminated UTF-16 string the call above allocated; it is
+    // read up to its terminator and stays alive until `text` drops at the end of this function.
+    let sid = unsafe {
+        let start = text.0.cast::<u16>();
+        let mut len = 0;
+        while *start.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(start, len))
+    };
+    Ok(sid)
+}
+
+/// This process's token, for queries.
+fn own_token() -> Result<Handle, String> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: the pseudo-handle of this process needs no closing; `token` is a live local the
     // call fills on success.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 || token.is_null() {
         return Err(format!("OpenProcessToken failed: Win32 error {}", last_error()));
     }
-    let token = Handle(token as isize);
+    Ok(Handle(token as isize))
+}
+
+/// The SID of a token's user, as text.
+fn token_user_sid(token: &Handle) -> Result<String, String> {
     let mut needed: u32 = 0;
-    // SAFETY: a null buffer of length 0 asks for the size, written to the live local `needed`.
+    // SAFETY: `token` is a live token handle; a null buffer of length 0 asks for the size,
+    // written to the live local `needed`.
     unsafe { GetTokenInformation(token.raw(), TokenUser, ptr::null_mut(), 0, &mut needed) };
     if needed == 0 {
         return Err(format!("GetTokenInformation failed: Win32 error {}", last_error()));
@@ -107,39 +177,174 @@ fn current_user_sid() -> Result<String, String> {
     // SAFETY: on success the buffer starts with a TOKEN_USER whose SID pointer points into the
     // same buffer, which is alive until the end of this function.
     let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let mut text: *mut u16 = ptr::null_mut();
-    // SAFETY: `sid` is the valid SID read above; `text` is a live local that receives a
-    // LocalAlloc'd, NUL-terminated string on success.
-    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
-        return Err(format!("ConvertSidToStringSidW failed: Win32 error {}", last_error()));
-    }
-    // SAFETY: `text` is the NUL-terminated string the call above allocated: read up to its
-    // terminator, then freed exactly once with LocalFree, as its contract says.
-    let sid = unsafe {
-        let mut len = 0;
-        while *text.add(len) != 0 {
-            len += 1;
-        }
-        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
-        LocalFree(text.cast());
-        sid
+    // SAFETY: `sid` points into `buffer`, alive for the call.
+    unsafe { sid_text(sid) }
+}
+
+/// The current user's SID as text (`S-1-5-21-…`).
+fn current_user_sid() -> Result<String, String> {
+    token_user_sid(&own_token()?)
+}
+
+/// The Windows session this process runs in (the console, or one remote desktop session).
+fn current_session_id() -> Result<u32, String> {
+    let token = own_token()?;
+    let (mut session, mut written): (u32, u32) = (0, 0);
+    // SAFETY: `token` is a live token handle; `session` is a live u32, which is exactly what
+    // TokenSessionId writes (its size is passed); `written` is a live local.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.raw(),
+            TokenSessionId,
+            ptr::from_mut(&mut session).cast(),
+            size_of::<u32>() as u32,
+            &mut written,
+        )
     };
-    Ok(sid)
+    if ok == 0 || written as usize != size_of::<u32>() {
+        return Err(format!(
+            "GetTokenInformation(session) failed: Win32 error {}",
+            last_error()
+        ));
+    }
+    Ok(session)
 }
 
-/// The pipe's security descriptor in SDDL: a protected DACL whose one entry gives the user
-/// everything. Nobody else, not even an administrator's other session, is granted access.
+/// The user a running process belongs to: the SID of its token's user.
+fn process_user_sid(pid: u32) -> Result<String, String> {
+    // SAFETY: takes its arguments by value; the returned handle (if any) is owned by the
+    // `Handle` below and closed on every path.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(format!("OpenProcess failed: Win32 error {}", last_error()));
+    }
+    let process = Handle(process as isize);
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: `process` is a live process handle with the right to query; `token` is a live
+    // local the call fills on success.
+    if unsafe { OpenProcessToken(process.raw(), TOKEN_QUERY, &mut token) } == 0 || token.is_null() {
+        return Err(format!("OpenProcessToken(server) failed: Win32 error {}", last_error()));
+    }
+    token_user_sid(&Handle(token as isize))
+}
+
+/// The owner and the access list of the pipe object behind `pipe` (either end's handle).
+fn pipe_security(pipe: &Handle) -> Result<(String, Option<Vec<AccessEntry>>), String> {
+    let mut owner: PSID = ptr::null_mut();
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `pipe` is a live handle; the three out-pointers are live locals. On success
+    // `descriptor` receives a LocalAlloc'd security descriptor and `owner` and `dacl` point
+    // INTO it (or stay null), so they are valid exactly as long as `descriptor` is.
+    let status = unsafe {
+        GetSecurityInfo(
+            pipe.raw(),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS || descriptor.is_null() {
+        return Err(format!("GetSecurityInfo failed: Win32 error {status}"));
+    }
+    // Freed when this function returns, on every path; `owner` and `dacl` are not used after.
+    let _descriptor = LocalMem(descriptor);
+    // SAFETY: `owner` is null or points into the descriptor, alive until the function returns.
+    let owner = unsafe { sid_text(owner) }.map_err(|e| format!("the pipe's owner: {e}"))?;
+    if dacl.is_null() {
+        return Ok((owner, None));
+    }
+    // SAFETY: `dacl` is non-null and points at the ACL inside the live descriptor.
+    let count = unsafe { (*dacl).AceCount };
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for index in 0..u32::from(count) {
+        let mut ace: *mut core::ffi::c_void = ptr::null_mut();
+        // SAFETY: `dacl` is the live ACL; `index` is below its entry count; `ace` is a live
+        // local that receives a pointer into the ACL.
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+            return Err(format!("GetAce failed: Win32 error {}", last_error()));
+        }
+        // SAFETY: GetAce returned a pointer to an entry inside the live ACL; every entry
+        // starts with an ACE_HEADER (read unaligned: the ACL is a byte layout).
+        let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+        let grants =
+            header.AceType == ACCESS_ALLOWED_ACE_TYPE && usize::from(header.AceSize) >= size_of::<ACCESS_ALLOWED_ACE>();
+        if grants {
+            // SAFETY: an entry of this type and at least this size is an ACCESS_ALLOWED_ACE
+            // whose SID starts at its `SidStart` field; only that field's address is taken.
+            let sid: PSID = unsafe { ptr::addr_of_mut!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }.cast();
+            // SAFETY: `sid` points into the live descriptor; `sid_text` validates it first.
+            let sid = unsafe { sid_text(sid) }.map_err(|e| format!("an access list entry: {e}"))?;
+            entries.push(AccessEntry { allows: true, sid });
+        } else {
+            entries.push(AccessEntry {
+                allows: false,
+                sid: String::new(),
+            });
+        }
+    }
+    Ok((owner, Some(entries)))
+}
+
+/// What the OS says about who serves the pipe behind the client handle `pipe`, and the
+/// server's process id. `Err`: one of the facts could not be read (the caller refuses).
+///
+/// The process id is read first and its process opened afterwards; if the server exits in
+/// between and the id is reused, the token read is another process's. The pipe object's own
+/// owner and access list do not have that gap: they are read from the handle itself.
+fn server_facts(pipe: &Handle) -> Result<(ServerFacts, u32), String> {
+    let mut server: u32 = 0;
+    // SAFETY: `pipe` is a live client handle; `server` is a live local.
+    if unsafe { GetNamedPipeServerProcessId(pipe.raw(), &mut server) } == 0 || server == 0 {
+        return Err(format!(
+            "GetNamedPipeServerProcessId failed: Win32 error {}",
+            last_error()
+        ));
+    }
+    let process_user = process_user_sid(server)?;
+    let (owner, access) = pipe_security(pipe)?;
+    Ok((
+        ServerFacts {
+            process_user,
+            owner,
+            access,
+        },
+        server,
+    ))
+}
+
+/// Whether the pipe behind `pipe` is served by this user's own Beebeeb (`control::check_server`).
+/// `Ok`: the server's process id. `Err`: why not, in fixed words and error numbers (no SID).
+fn verify_server(pipe: &Handle) -> Result<u32, String> {
+    let own = current_user_sid()?;
+    let (facts, server) = server_facts(pipe)?;
+    control::check_server(&own, &facts).map_err(|not_ours| not_ours.words().to_owned())?;
+    Ok(server)
+}
+
+/// The pipe's security descriptor in SDDL: the user is the owner (stated, not left to the
+/// token's default, which is the Administrators group in an elevated process), and a protected
+/// DACL whose one entry gives the user everything. Nobody else, not even an administrator's
+/// other session, is granted access. A launch checks exactly this (`control::check_server`).
 fn sddl_for(sid: &str) -> String {
-    format!("D:P(A;;GA;;;{sid})")
+    format!("O:{sid}D:P(A;;GA;;;{sid})")
 }
 
-fn name_for(channel: &str, sid: &str) -> String {
-    format!("\\\\.\\pipe\\{channel}.{sid}")
+fn name_for(channel: &str, sid: &str, session: u32) -> String {
+    format!("\\\\.\\pipe\\{channel}.{sid}.{session}")
 }
 
-/// This identity's pipe for the current user.
+/// This identity's pipe for the current user in the current Windows session.
 pub(super) fn pipe_name(identity: AppIdentity) -> Result<String, String> {
-    Ok(name_for(identity.control_channel(), &current_user_sid()?))
+    Ok(name_for(
+        identity.control_channel(),
+        &current_user_sid()?,
+        current_session_id()?,
+    ))
 }
 
 /// Creates the pipe, first instance only, open to the current user only.
@@ -190,7 +395,9 @@ fn create_pipe(name: &str) -> Result<Handle, ServeError> {
     if pipe == INVALID_HANDLE_VALUE || pipe.is_null() {
         return Err(match error {
             // FILE_FLAG_FIRST_PIPE_INSTANCE: the name exists (access denied), or all of the
-            // existing server's instances are in use.
+            // existing server's instances are in use. Whose pipe it is, nobody knows yet: the
+            // launch that follows finds out before it writes (`send`), and refuses to start
+            // when it is not this user's Beebeeb.
             ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY => ServeError::AlreadyRunning,
             error => ServeError::Os(format!("CreateNamedPipeW failed: Win32 error {error}")),
         });
@@ -377,7 +584,8 @@ fn open_client(name: &str) -> Result<Handle, u32> {
     }
 }
 
-/// Hands one request to whoever serves `name` and waits at most `timeout` in all.
+/// Hands one request to this user's Beebeeb serving `name` and waits at most `timeout` in all.
+/// A server that is not this user's Beebeeb is handed nothing: `Delivery::Unreachable`.
 pub(super) fn send(name: &str, request: &Request, timeout: Duration) -> Delivery {
     let deadline = Instant::now() + timeout;
     let pipe = loop {
@@ -397,13 +605,20 @@ pub(super) fn send(name: &str, request: &Request, timeout: Duration) -> Delivery
             Err(_) => return Delivery::Unreachable,
         }
     };
+    // Before a byte is written: is this this user's own Beebeeb (task 2455)? Anything else,
+    // and anything that cannot be checked, gets no verb and no link.
+    let server = match verify_server(&pipe) {
+        Ok(server) => server,
+        Err(why) => {
+            crate::shell::host::log(format!(
+                "the control channel is not served by this user's Beebeeb ({why}); nothing was sent"
+            ));
+            return Delivery::Unreachable;
+        }
+    };
     // The running instance may bring its window to the front for this request.
-    let mut server: u32 = 0;
-    // SAFETY: `pipe` is a live client handle; `server` is a live local.
-    if unsafe { GetNamedPipeServerProcessId(pipe.raw(), &mut server) } != 0 && server != 0 {
-        // SAFETY: takes a process id by value; failing changes nothing.
-        unsafe { AllowSetForegroundWindow(server) };
-    }
+    // SAFETY: takes a process id by value; failing changes nothing.
+    unsafe { AllowSetForegroundWindow(server) };
     if !write_all(&pipe, &request.encode()) {
         return Delivery::Unreachable;
     }
@@ -415,310 +630,6 @@ pub(super) fn send(name: &str, request: &Request, timeout: Duration) -> Delivery
     }
 }
 
-/// Real pipes, real ACL, on this machine. Each test uses a name of its own, so a running app
-/// (or another test) is never touched.
 #[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
-
-    use super::*;
-
-    const REAL: AppIdentity = AppIdentity::Real;
-
-    fn test_name(what: &str) -> String {
-        let sid = current_user_sid().unwrap();
-        name_for(
-            &format!("io.beebeeb.app.test.harness.{what}.{}", std::process::id()),
-            &sid,
-        )
-    }
-
-    fn recording(reply: Reply) -> (ControlHandler, Arc<Mutex<Vec<Request>>>) {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink = seen.clone();
-        let handler: ControlHandler = Arc::new(move |request| {
-            sink.lock().unwrap().push(request);
-            reply
-        });
-        (handler, seen)
-    }
-
-    fn raw_exchange(name: &str, bytes: &[u8], wait: Duration) -> Option<Vec<u8>> {
-        let pipe = open_client(name).expect("the pipe opens for its own user");
-        assert!(write_all(&pipe, bytes));
-        read_until(&pipe, MAX_REPLY, Instant::now() + wait, |b| b.contains(&b'\n'))
-    }
-
-    #[test]
-    fn the_name_and_the_access_list_are_per_identity_and_per_user() {
-        let sid = current_user_sid().unwrap();
-        assert!(sid.starts_with("S-1-"), "a SID");
-        assert_eq!(sddl_for("S-1-5-21-1-2-3-1001"), "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
-        let (real, test) = (
-            pipe_name(AppIdentity::Real).unwrap(),
-            pipe_name(AppIdentity::Test).unwrap(),
-        );
-        assert_eq!(real, format!("\\\\.\\pipe\\io.beebeeb.app.control.{sid}"));
-        assert_eq!(test, format!("\\\\.\\pipe\\io.beebeeb.app.test.control.{sid}"));
-        assert_ne!(real, test);
-    }
-
-    /// P2-4: a real round trip of every verb, with the acknowledgement.
-    #[test]
-    fn a_request_crosses_a_real_pipe_and_is_acknowledged() {
-        let name = test_name("roundtrip");
-        let (handler, seen) = recording(Reply::Ok);
-        let _server = serve(&name, REAL, handler).unwrap();
-        let wait = Duration::from_secs(5);
-        assert_eq!(send(&name, &Request::Show, wait), Delivery::Acknowledged);
-        assert_eq!(send(&name, &Request::QuitForUpdate, wait), Delivery::Acknowledged);
-        let link = Request::Open("beebeeb://settings/security".into());
-        assert_eq!(send(&name, &link, wait), Delivery::Acknowledged);
-        assert_eq!(*seen.lock().unwrap(), vec![Request::Show, Request::QuitForUpdate, link]);
-    }
-
-    /// Serving the name is being the instance: a second server is refused, and the name is
-    /// free again once the first is dropped.
-    #[test]
-    fn only_one_process_serves_a_name() {
-        let name = test_name("single");
-        let (handler, _) = recording(Reply::Ok);
-        let first = serve(&name, REAL, handler.clone()).unwrap();
-        assert!(matches!(
-            serve(&name, REAL, handler.clone()),
-            Err(ServeError::AlreadyRunning)
-        ));
-        drop(first);
-        assert_eq!(
-            send(&name, &Request::Show, Duration::from_millis(300)),
-            Delivery::Unreachable
-        );
-        let again = serve(&name, REAL, handler);
-        assert!(again.is_ok(), "the name is free after the server is gone");
-    }
-
-    /// P2-9: an instance that is there and does not take the request is "no answer", within
-    /// the caller's timeout; no instance at all is "unreachable".
-    #[test]
-    fn a_busy_or_silent_instance_is_no_answer_and_none_is_unreachable() {
-        let name = test_name("busy");
-        assert_eq!(
-            send(&name, &Request::Show, Duration::from_millis(300)),
-            Delivery::Unreachable
-        );
-        let (handler, seen) = recording(Reply::Busy);
-        let server = serve(&name, REAL, handler).unwrap();
-        assert_eq!(send(&name, &Request::Show, Duration::from_secs(5)), Delivery::NoAnswer);
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        drop(server);
-
-        // A handler that takes longer than the caller waits.
-        let slow_name = test_name("slow");
-        let slow: ControlHandler = Arc::new(|_| {
-            std::thread::sleep(Duration::from_millis(1500));
-            Reply::Ok
-        });
-        let _server = serve(&slow_name, REAL, slow).unwrap();
-        let started = Instant::now();
-        assert_eq!(
-            send(&slow_name, &Request::Show, Duration::from_millis(300)),
-            Delivery::NoAnswer
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(1400),
-            "the caller's timeout holds"
-        );
-    }
-
-    /// Untrusted input: garbage, an unknown verb, an oversized line and a silent client get no
-    /// answer and reach no handler, and the channel still works afterwards.
-    #[test]
-    fn anything_that_is_not_a_request_is_ignored_and_the_channel_survives() {
-        let name = test_name("garbage");
-        let (handler, seen) = recording(Reply::Ok);
-        let _server = serve(&name, REAL, handler).unwrap();
-        let short = Duration::from_millis(400);
-        for bytes in [
-            &b"hello\n"[..],
-            b"BBCTL1 sign-out\n",
-            b"BBCTL1 open https://example.com/\n",
-            b"BBCTL1 quit-for-update now\n",
-            b"\0\0\0\0\n",
-        ] {
-            assert_eq!(
-                raw_exchange(&name, bytes, short),
-                None,
-                "{:?}",
-                String::from_utf8_lossy(bytes)
-            );
-        }
-        let long = vec![b'a'; MAX_REQUEST + 200];
-        assert_eq!(raw_exchange(&name, &long, short), None, "too long");
-        // Connects and says nothing: the server gives up on it after its own wait.
-        let silent = open_client(&name).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        drop(silent);
-        assert!(seen.lock().unwrap().is_empty(), "no handler ran");
-        assert_eq!(
-            send(&name, &Request::Show, Duration::from_secs(5)),
-            Delivery::Acknowledged
-        );
-        assert_eq!(*seen.lock().unwrap(), vec![Request::Show]);
-    }
-
-    /// A pipe somebody made before the app: `sddl` is its security descriptor. It takes one
-    /// client, keeps what that client wrote, and answers a forged `ok`.
-    struct Squatter {
-        name: String,
-        received: Arc<Mutex<Vec<u8>>>,
-        stop: Arc<AtomicBool>,
-        worker: Option<JoinHandle<()>>,
-    }
-
-    impl Squatter {
-        fn received(&self) -> Vec<u8> {
-            self.received.lock().unwrap().clone()
-        }
-    }
-
-    impl Drop for Squatter {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            let Some(worker) = self.worker.take() else { return };
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !worker.is_finished() && Instant::now() < deadline {
-                drop(open_client(&self.name));
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if worker.is_finished() {
-                let _ = worker.join();
-            }
-        }
-    }
-
-    /// `Err`: the Win32 error of creating the pipe (a descriptor this user may not set).
-    fn squat(name: &str, sddl: &str) -> Result<Squatter, u32> {
-        let sddl_w = wide(sddl);
-        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-        // SAFETY: `sddl_w` is NUL-terminated and outlives the call; `descriptor` is a live local
-        // that receives a LocalAlloc'd descriptor on success, freed below.
-        let ok = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl_w.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        };
-        assert!(ok != 0 && !descriptor.is_null(), "{sddl} is SDDL");
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor,
-            bInheritHandle: 0,
-        };
-        let name_w = wide(name);
-        // SAFETY: `name_w` is NUL-terminated; `attributes` and its descriptor are alive for the
-        // call, which copies the descriptor onto the new pipe object.
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                name_w.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                1024,
-                1024,
-                0,
-                &attributes,
-            )
-        };
-        let error = last_error();
-        // SAFETY: allocated by the conversion above, freed exactly once.
-        unsafe { LocalFree(descriptor) };
-        if pipe == INVALID_HANDLE_VALUE || pipe.is_null() {
-            return Err(error);
-        }
-        let pipe = Handle(pipe as isize);
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (sink, thread_stop) = (received.clone(), stop.clone());
-        let worker = std::thread::spawn(move || {
-            while !thread_stop.load(Ordering::SeqCst) {
-                // SAFETY: `pipe` is this thread's live pipe handle; no OVERLAPPED.
-                let connected = unsafe { ConnectNamedPipe(pipe.raw(), ptr::null_mut()) } != 0
-                    || last_error() == ERROR_PIPE_CONNECTED;
-                if connected && !thread_stop.load(Ordering::SeqCst) {
-                    let line = read_until(&pipe, MAX_REQUEST, Instant::now() + Duration::from_millis(600), |b| {
-                        b.contains(&b'\n')
-                    });
-                    if let Some(line) = line {
-                        sink.lock().unwrap().extend_from_slice(&line);
-                        write_all(&pipe, b"ok\n");
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                }
-                // SAFETY: `pipe` is this thread's live pipe handle.
-                unsafe { DisconnectNamedPipe(pipe.raw()) };
-            }
-        });
-        Ok(Squatter {
-            name: name.to_owned(),
-            received,
-            stop,
-            worker: Some(worker),
-        })
-    }
-
-    /// Task 2455, the review's scenario as far as one account can stage it: somebody created
-    /// the app's pipe name FIRST, with an access list that lets everyone in, and answers `ok`
-    /// to anything. A launch must not take that for the running Beebeeb: it writes nothing (no
-    /// verb, no link) and reports the channel unreachable, and the app cannot serve the name.
-    #[test]
-    fn a_pipe_that_admits_everyone_is_not_the_running_app_and_gets_no_request() {
-        let name = test_name("squat-open");
-        let sid = current_user_sid().unwrap();
-        // Everyone (WD) and this user: the squatter lets its victim connect.
-        let squatter = squat(&name, &format!("D:(A;;GA;;;WD)(A;;GA;;;{sid})")).unwrap();
-        let (handler, _) = recording(Reply::Ok);
-        assert!(
-            matches!(serve(&name, REAL, handler), Err(ServeError::AlreadyRunning)),
-            "the name is taken: the app is not the instance"
-        );
-        let link = Request::Open("beebeeb://open/files?folder=Secret_1".into());
-        for request in [link, Request::QuitForUpdate, Request::Show] {
-            assert_eq!(
-                send(&name, &request, Duration::from_secs(2)),
-                Delivery::Unreachable,
-                "{request:?}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(
-            String::from_utf8_lossy(&squatter.received()),
-            "",
-            "the squatter was handed a request"
-        );
-    }
-
-    /// A panic in the handler is a "busy" answer, not the end of the channel.
-    #[test]
-    fn a_panicking_handler_does_not_end_the_channel() {
-        let name = test_name("panic");
-        let calls = Arc::new(Mutex::new(0));
-        let counter = calls.clone();
-        let handler: ControlHandler = Arc::new(move |_| {
-            let mut calls = counter.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            *calls += 1;
-            if *calls == 1 {
-                drop(calls);
-                panic!("the handler");
-            }
-            Reply::Ok
-        });
-        let _server = serve(&name, REAL, handler).unwrap();
-        assert_eq!(send(&name, &Request::Show, Duration::from_secs(5)), Delivery::NoAnswer);
-        assert_eq!(
-            send(&name, &Request::Show, Duration::from_secs(5)),
-            Delivery::Acknowledged
-        );
-    }
-}
+#[path = "windows_control_tests.rs"]
+mod tests;
