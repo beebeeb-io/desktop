@@ -163,6 +163,7 @@ fn file_row(
     let shared_text = item.shared_type.as_deref().unwrap_or("\u{2014}");
     let pc_icon = pc_status_icon(item.pc_status.as_deref());
 
+    // Selected row: neutral rounded fill with 4px inset margins (board: rounded corners, no Amber).
     let mut r = row()
         .key(format!("row-{i}"))
         .role("listitem")
@@ -171,6 +172,7 @@ fn file_row(
         .w_full()
         .px(space::LG)
         .center_y()
+        .radius(if selected { 6.0 } else { 0.0 })
         .fill(if selected { selection_color } else { Color::TRANSPARENT })
         .hover(hover_color)
         .press(press_color)
@@ -222,7 +224,9 @@ fn shared_cell(label: &str, item: &DriveItem, text_secondary: Color) -> El {
 
     if let Some(ref st) = item.shared_type {
         if st == "Link" {
-            cell = cell.child(icon(&icons::LINK, 12.0).key("link-icon").color(text_secondary));
+            cell = cell
+                .child(icon(&icons::LINK, 12.0).key("link-icon").color(text_secondary))
+                .child(text("Link").key("link-text").font(type_::BODY_SM).color(text_secondary));
         }
     }
 

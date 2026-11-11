@@ -123,14 +123,13 @@ pub fn detail_pane(item: Option<&DriveItem>, t: &Theme) -> El {
                         ),
                 ),
         )
-        .child(el().key("detail-spacer").grow(1.0))
-        // Action buttons
+        // Action buttons directly under the offline block (not pinned to bottom)
         .child(
             row()
                 .key("detail-actions")
                 .w_full()
                 .gap(space::SM)
-                .pb(space::LG)
+                .mt(space::SM)
                 .child(action_button("share-btn", "Share\u{2026}", &icons::SHARE, t))
                 .child(action_button(
                     "versions-btn",
