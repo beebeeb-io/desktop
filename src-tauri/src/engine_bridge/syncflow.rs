@@ -253,6 +253,22 @@ pub async fn sync_tick_outcome(
     // place), we re-bootstrap from a fresh snapshot — the snapshot is always
     // authoritative, so a re-bootstrap can never lose data.
 
+    // Task 2446: builds up to 0.8.24 blocked every row of a snapshot the server sent with null request fields, so
+    // a state database may hold rows with no name. Once per database: when such rows exist, ask for one snapshot,
+    // which prepares every row again (`prepare_owned_rows` lifts a block the row no longer earns; nothing here
+    // lifts one). It is marked done only after that snapshot succeeded, so a failed one is asked for again on the
+    // next pass; a database with no such row is marked done at once and takes no extra snapshot.
+    let heals_names = if bridge.db().name_heal_done()? {
+        false
+    } else if bridge.db().has_blocked_or_nameless_rows()? {
+        tracing::info!("sync_tick: rows without a name; asking for one snapshot to read them again");
+        bridge.db().request_resnapshot()?;
+        true
+    } else {
+        bridge.db().mark_name_heal_done()?;
+        false
+    };
+
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
     // tick regardless of the cursor. On macOS the request is read here and cleared
@@ -284,6 +300,9 @@ pub async fn sync_tick_outcome(
                     bridge.db().clear_resnapshot_request(seen)?;
                 }
             }
+            if heals_names {
+                bridge.db().mark_name_heal_done()?;
+            }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome {
                 conflicts,
@@ -301,6 +320,9 @@ pub async fn sync_tick_outcome(
                         if let Some(seen) = resnapshot_request {
                             bridge.db().clear_resnapshot_request(seen)?;
                         }
+                    }
+                    if heals_names {
+                        bridge.db().mark_name_heal_done()?;
                     }
                     applied_item_ids.extend(applied);
                     return Ok(SyncTickOutcome {

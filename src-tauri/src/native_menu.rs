@@ -15,15 +15,7 @@ pub(super) async fn run_update_loop(app: tauri::AppHandle) {
 
 pub(super) async fn check_for_update(app: &tauri::AppHandle) {
     let channel = configured_release_channel();
-    let updater = match updater_for_release_channel(app, channel) {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::debug!(channel = %channel.as_str(), "updater not available: {e}");
-            return;
-        }
-    };
-
-    match updater.check().await {
+    match update_window::flow::checked_update(app, channel, update_window::trust::Direction::NewerOnly).await {
         Ok(Some(update)) => {
             tracing::info!(
                 version = %update.version,
@@ -417,7 +409,11 @@ pub(super) const MENU_RESUME_SYNC_LABEL: &str = "Resume Sync";
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub(super) fn pause_menu_label(paused: bool) -> &'static str {
-    if paused { MENU_RESUME_SYNC_LABEL } else { MENU_PAUSE_SYNC_LABEL }
+    if paused {
+        MENU_RESUME_SYNC_LABEL
+    } else {
+        MENU_PAUSE_SYNC_LABEL
+    }
 }
 
 /// F3: the label for what the file says now (an unreadable file reads as not paused, as the menu toggle does).
@@ -522,7 +518,11 @@ pub(super) fn desktop_menu_specs() -> &'static [DesktopMenuSpec] {
 
 /// The menu table this build installs: a Mac's own, else the shared one (Windows, Linux).
 pub(super) fn installed_menu_specs() -> &'static [DesktopMenuSpec] {
-    if cfg!(target_os = "macos") { MACOS_MENU_SPECS } else { DESKTOP_MENU_SPECS }
+    if cfg!(target_os = "macos") {
+        MACOS_MENU_SPECS
+    } else {
+        DESKTOP_MENU_SPECS
+    }
 }
 
 pub(super) fn desktop_menu_spec(id: &str) -> Option<&'static DesktopMenuSpec> {
@@ -675,9 +675,11 @@ pub(super) fn setup_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
                     Some(item) => Box::new(item.clone()),
                     None => Box::new(build_desktop_menu_item(app, desktop_menu_spec_required(id))?),
                 },
-                MacosMenuEntry::About => {
-                    Box::new(PredefinedMenuItem::about(app, Some("About Beebeeb"), Some(about_metadata()))?)
-                }
+                MacosMenuEntry::About => Box::new(PredefinedMenuItem::about(
+                    app,
+                    Some("About Beebeeb"),
+                    Some(about_metadata()),
+                )?),
                 MacosMenuEntry::Hide => Box::new(PredefinedMenuItem::hide(app, Some("Hide Beebeeb"))?),
                 MacosMenuEntry::HideOthers => Box::new(PredefinedMenuItem::hide_others(app, Some("Hide Others"))?),
                 MacosMenuEntry::ShowAll => Box::new(PredefinedMenuItem::show_all(app, Some("Show All"))?),

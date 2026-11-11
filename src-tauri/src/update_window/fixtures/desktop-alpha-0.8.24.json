@@ -1,0 +1,23 @@
+{
+  "version": "0.8.24",
+  "notes": "",
+  "pub_date": "2026-11-08T19:20:31Z",
+  "platforms": {
+    "linux-x86_64": {
+      "url": "https://github.com/beebeeb-io/desktop/releases/download/desktop-v0.8.24/Beebeeb_0.8.24_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWElYT2QxZC82eGhGRnRoMU9iRWlac3RrM0pLdDdCRi9GWE90RlkrNUVIRVMwQlZKOGM0L2tPeUxqWW5CWW5UYS9ncWYwcERic0J6b1JTTzZsekZVbGRBVDZ0b3FjWndFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTY1MTc4CWZpbGU6QmVlYmVlYl8wLjguMjRfYW1kNjQuQXBwSW1hZ2UKUnVhOHZ5QmtaWWFLR0poSzhIdURCTzREeUdYWnJyNmJPc2xWWkFUa3BLTlpWUnd1dnAvWTNLS3BKc0NOZ1hUT3htTHJFWTVHcVU4dmlsT2xyTG1YQUE9PQo="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/beebeeb-io/desktop/releases/download/desktop-v0.8.24/Beebeeb_0.8.24_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWElYT2QxZC82eG12UlRHRGkvbFh5Uk5uWDN5NGNzLy9FZ2JIWHRGaU9NYkdFakxTT1I0cHprY0FBSHdLdG9MOVI3THRzYjZhS2h6bGFZbUV0bkxVQlhKbTNVejFmZGdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTY1NTg4CWZpbGU6QmVlYmVlYl8wLjguMjRfeDY0LXNldHVwLmV4ZQpOejZoQlJiR3V4TWQxMTNQTVpXT3U2SG5GVGd5ZXhyZzdBaHZmcnBCVUNwWXIyUC9BTWVoL0R1YU5wM1ZDZTBjUUxSODBoVnF5Z1Fqd3h6UktVeXdDZz09Cg=="
+    },
+    "windows-x86_64-nsis": {
+      "url": "https://github.com/beebeeb-io/desktop/releases/download/desktop-v0.8.24/Beebeeb_0.8.24_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWElYT2QxZC82eG12UlRHRGkvbFh5Uk5uWDN5NGNzLy9FZ2JIWHRGaU9NYkdFakxTT1I0cHprY0FBSHdLdG9MOVI3THRzYjZhS2h6bGFZbUV0bkxVQlhKbTNVejFmZGdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTY1NTg4CWZpbGU6QmVlYmVlYl8wLjguMjRfeDY0LXNldHVwLmV4ZQpOejZoQlJiR3V4TWQxMTNQTVpXT3U2SG5GVGd5ZXhyZzdBaHZmcnBCVUNwWXIyUC9BTWVoL0R1YU5wM1ZDZTBjUUxSODBoVnF5Z1Fqd3h6UktVeXdDZz09Cg=="
+    },
+    "windows-x86_64-msi": {
+      "url": "https://github.com/beebeeb-io/desktop/releases/download/desktop-v0.8.24/Beebeeb_0.8.24_x64_en-US.msi",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWElYT2QxZC82eGt1T1BRTjBPQm9Db0d2alo5aG1XMmlTU20zMFN1RHdZTkc1bGc5R1VtMzhSVDZ1WEhIejhobXI2b2xxOE5XUVgzT3gzUFNlVTZnOThpWWtrSGhlSWdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTY1NTg4CWZpbGU6QmVlYmVlYl8wLjguMjRfeDY0X2VuLVVTLm1zaQpKQjlJR1hsOE5WOUh6Um5RVlNONEpla0JBblFZQ0lhY0dZMUw2K2pUTUZNWFFiRDhqbjlIeTF5KzhtaVdQUWJ4RHdDQ0kzaGdmU2kwNjlaWE5ualNBZz09Cg=="
+    }
+  }
+}

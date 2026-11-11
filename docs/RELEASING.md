@@ -202,6 +202,35 @@ worktree without `node_modules`, set `TAURI_CLI` to the installed `@tauri-apps/c
 node scripts/verify-updater-key-rotation.mjs
 ```
 
+## Two updater keys and the signed v2 manifest (from 0.8.25)
+
+From 0.8.25 the app trusts two updater public keys and decides itself which update it accepts
+(`src-tauri/src/update_window/trust.rs` holds the rules, `flow.rs` the fetch and the install; tasks 2449 and 2451):
+
+- **The keys.** `plugins.updater.pubkey` in `tauri.conf.json` is the key every 0.8.x release is signed with
+  (`C6FADFD59D732197`). `src-tauri/updater-v2.pub` is the next key, in the form `tauri signer generate` writes its
+  `.pub` file; the native line (0.9.0 and later) signs with it. 0.8.25 itself is signed with the first key, so 0.8.24
+  and older accept it. A build with `BEEBEEB_RELEASE_VERSION` set fails in `build.rs` while that file holds a
+  placeholder, and a test fails when the file does not hold a key distinct from the baked one. Tauri's updater takes
+  one key, so the app reads the key id of the artefact's signature and builds the updater with the trusted key that
+  made it; a signature by any other key is refused before the download.
+- **Where the keys live in CI.** Both private keys are secrets of the GitHub environment `desktop-release`, never of
+  the repository: every job that signs names `environment: desktop-release` (`build` in `release.yml`, `sign` in
+  `sign-macos-updater-artifact.yml`), and no step that holds a key installs or downloads anything.
+- **Every update, both feeds.** Offered or installed only when its version is strictly newer than the installed one
+  (the named channel downgrade in Settings excepted), and, off macOS, when its signature signs the file the address
+  ends in and that file name carries the version as one `_`-separated part (`Beebeeb_0.8.26_x64-setup.exe`). Keep
+  that naming: an artefact whose name lacks its version is refused by 0.8.25 and later.
+- **Windows reads `desktop/v2/<stable|beta|alpha>.json` first.** With it comes `<file>.sig`, a detached signature by
+  a trusted key whose signed file name is that manifest's (`stable.json`, …). The manifest must name
+  `"product": "desktop"` and its own channel, a plain version at or above 0.9.0, and artefacts under
+  `https://releases.beebeeb.io/` with a `size`. Only a **404 for the manifest** falls back to
+  `desktop/<latest|beta|alpha>.json`; a missing or wrong signature, another channel or product, or any other answer
+  is an error and nothing is installed. On Windows a version at or above 0.9.0 is never taken from the unsigned feed.
+- **Before the installer runs** the app records `installed_release_channel` and writes `update-handoff.json`
+  (`{"from","to","channel","at"}`) beside its config file; the native app reads that note once and deletes it. On
+  Windows Tauri's install exits the process, so nothing after it runs.
+
 ## Windows Authenticode signing (Azure Artifact Signing)
 
 Since 0.8.8, Windows release artifacts are Authenticode-signed with **Azure Artifact Signing**
