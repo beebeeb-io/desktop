@@ -68,19 +68,68 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
     line
 }
 
-/// The text of a file, read-only.
-pub fn body(doc: &TextDoc, t: &Theme) -> El {
+/// One line that wraps at the window's width (Wrap): one text in which each run keeps its ink.
+fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
+    let mut content = String::new();
+    let mut spans = Vec::new();
+    for run in runs {
+        let mut span = Span::new(content.len(), content.len() + run.text.len()).color(ink(run.ink, t));
+        if run.bold {
+            span = span.weight(650.0);
+        }
+        if run.italic {
+            span = span.italic();
+        }
+        if run.underline {
+            span = span.underline(t.separator_strong);
+        }
+        spans.push(span);
+        content.push_str(&run.text);
+    }
+    // KNOWN DEFECT (PR body, "Not done"): the text wraps at the room's width (measured 986 x 63
+    // for a 400-character line), but this row keeps one row's height, so the lines after a
+    // wrapped line draw over its second row. Five constructions were tried (the group's wrap
+    // test names what each measured); the row's height must follow the text before Wrap is done.
+    row()
+        .key(format!("line-{i}"))
+        .w_full()
+        .min_h(LINE_H)
+        .items_start()
+        .child(
+            kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
+                .w(GUTTER_W)
+                .px(16.0)
+                .align(Align::End),
+        )
+        .child(
+            col().key(format!("line-{i}-room")).grow(1.0).shrink().pr(16.0).child(
+                rune::rich(content, spans)
+                    .key(format!("line-{i}-text"))
+                    .font(style::CODE)
+                    .color(t.text_secondary)
+                    .wrap()
+                    .w_full(),
+            ),
+        )
+}
+
+/// The text of a file, read-only. `wrap`: long lines wrap instead of running past the edge.
+pub fn body(doc: &TextDoc, wrap: bool, t: &Theme) -> El {
     let mut lines = col()
         .key("viewer-body")
         .role("document")
         .grow(1.0)
-        .min_w(0.0)
+        .shrink()
         .h_full()
         .py(12.0)
         .fill(t.bg)
         .clip_rounded(0.0);
     for (i, runs) in doc.lines.iter().enumerate() {
-        lines = lines.child(line(i, runs, false, t));
+        lines = lines.child(if wrap {
+            wrapped_line(i, runs, t)
+        } else {
+            line(i, runs, false, t)
+        });
     }
     lines
 }

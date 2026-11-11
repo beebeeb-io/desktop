@@ -13,7 +13,7 @@ The gate state per frame is in the PR body.
 | DW-1516 | A large file: "Decrypting on this PC", the size done, a bar, Cancel | built |
 | DW-1517 | Too large to preview with the space this PC has: the numbers, Free up space…, Download to… | built |
 | DW-1518 | Decrypting failed: nothing changed; Try again, Report a problem | built |
-| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | built; gate not green (4 pixel checks light, 2 dark: see the PR body) |
+| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | built, NOT done: gate 4 pixel checks red in light, 2 in dark; Wrap's rows overlap (PR body) |
 | DW-1527 | A text file over 2 MB: read-only, the first 500 lines, Open in another app… | built |
 | DW-1513 | Markdown rendered, Rendered / Source, Edit Ctrl+E, the details panel | not built |
 | DW-1519 | A newer version arrived while reading: a banner with Show it | not built |

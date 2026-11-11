@@ -22,15 +22,9 @@ pub const BUTTON_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).trackin
 pub const BUTTON_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
 
 /// The text of a file: JetBrains Mono 12.5px on 21px.
-pub const CODE: TextStyle = TextStyle::new(12.5, 400.0)
-    .family(Family::Mono)
-    .lh(21.0)
-    .features("'calt' 1, 'liga' 1");
+pub const CODE: TextStyle = TextStyle::new(12.5, 400.0).family(Family::Mono).lh(21.0);
 /// A keyword: 650.
-pub const CODE_BOLD: TextStyle = TextStyle::new(12.5, 650.0)
-    .family(Family::Mono)
-    .lh(21.0)
-    .features("'calt' 1, 'liga' 1");
+pub const CODE_BOLD: TextStyle = TextStyle::new(12.5, 650.0).family(Family::Mono).lh(21.0);
 /// `.kit-seg-sm [role=tab]`: 12px/550.
 pub const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(17.0);
 /// A shortcut after a button's word: mono 10px/500.

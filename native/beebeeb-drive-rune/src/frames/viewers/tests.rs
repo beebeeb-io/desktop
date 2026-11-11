@@ -451,3 +451,45 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
     );
     assert!(!rt.state.viewer.as_mut().unwrap().pump(), "nothing new");
 }
+
+#[test]
+fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_one() {
+    /// The Python file with its first line made 400 characters long.
+    struct LongLine;
+    impl ViewerSource for LongLine {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            let mut file = FixtureViewerSource::new().open(id)?;
+            if let Body::Text(doc) = &mut file.body {
+                doc.lines[0] = plain_lines(&"word ".repeat(80)).remove(0);
+            }
+            Ok(file)
+        }
+        fn poll(&mut self, _: &str) -> Option<Body> {
+            None
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.open(id)
+        }
+    }
+    let mut state = init();
+    assert!(open_from(&mut state, Box::new(LongLine), board::CODE));
+    let mut rt = runtime_of(state, false);
+    let window_right = 1278.0;
+    let text = info(&rt, "run-0-0").rect;
+    assert!(text[0] + text[2] > window_right, "No wrap: the line runs past the edge");
+    assert_eq!(text[3], 21.0, "No wrap: one row");
+    operate(&mut rt, "seg-0");
+    let text = info(&rt, "line-0-text").rect;
+    assert!(
+        text[0] + text[2] <= window_right,
+        "Wrap: the text stays inside the window ({text:?})"
+    );
+    assert!(text[3] >= 42.0, "Wrap: the text takes more rows ({text:?})");
+    assert_eq!(info(&rt, "line-1-text").rect[3], 21.0, "a short line stays one row");
+    assert_eq!(info(&rt, "line-1-text").text.as_deref(), Some("import csv"));
+    // NOT asserted, because it is not true yet (the PR body's "Not done"): the ROW of a wrapped
+    // line is as high as its text. It measures 21 against a text of 63, so the next line overlaps.
+    operate(&mut rt, "seg-1");
+    assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
+}

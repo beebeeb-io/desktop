@@ -230,7 +230,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             ui,
             text::tools(doc, ui.wrap, &t),
             text::banner(doc, &t),
-            text::body(doc, &t),
+            text::body(doc, ui.wrap, &t),
             &text::status(doc),
             &t,
         );
