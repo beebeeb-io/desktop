@@ -447,6 +447,7 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
     let what = row().key("ph-dlg-what").gap(12.0).center_y().child(thumb).child(
         col()
             .key("ph-dlg-what-text")
+            .items_start()
             .child(kit::label("ph-dlg-name", name, type_::HEAD, t.text))
             .child(kit::label(
                 "ph-dlg-size",
