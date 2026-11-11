@@ -19,8 +19,10 @@ pub mod account_dto;
 pub mod api_client;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod auth_attempts;
+pub mod auth_transport;
 pub mod backup;
 pub mod backup_actions;
+pub mod backup_delete;
 pub mod backup_protect;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod callback_gate;
@@ -83,6 +85,8 @@ pub mod state_db;
 pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
 pub mod transfer_progress;

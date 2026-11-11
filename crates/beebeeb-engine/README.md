@@ -54,6 +54,12 @@ let menu = backup_actions::allowed_actions(&db, &own, &item.id)?; // every actio
 A row that is this device's own backup of a folder it backs up now answers "This is a backup of `<path>`. Change
 the original instead." for every change (core's `own_backup_refusal`); the path is shown, never logged.
 
-Not built yet: the delete-backup call itself (password, confirmation token, then the delete), and the engine
-entry points for "Free up space", "Keep on this PC", "Open/Show in File Explorer" and opening a file for the
-in-app viewers.
+**Delete a backup** (`backup_delete::delete_backup`, async): for a row whose `DeleteBackup` verdict is
+`NeedsPassword`, pass the password the person typed. It asks the rule again, proves the password to the server
+(core's OPAQUE step-up), and spends the single-use confirmation token on the delete of that one folder
+(`DELETE /api/v1/files/{id}`, a move to Trash, as the web app does). `DeleteBackupError` says why nothing was
+deleted: `WrongPassword`, `Refused(words)` (the root, this device's own active backup), `NotABackup`, `NotFound`,
+`SignedOut`, `RateLimited(seconds)`, `Offline`, `Failed(code)`. The rows leave the listing on the engine's next pull.
+
+Not built yet: the engine entry points for "Free up space", "Keep on this PC", "Open/Show in File Explorer" and
+opening a file for the in-app viewers.
