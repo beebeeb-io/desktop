@@ -221,9 +221,10 @@ mod tests {
     /// other row differs from it in ONE fact and is refused for that fact.
     #[test]
     fn only_this_users_own_server_on_a_this_user_only_channel_is_ours() {
+        // Not a grant, even though it names this user: the app never creates one.
         let denial = AccessEntry {
             allows: false,
-            sid: String::new(),
+            sid: ME.into(),
         };
         let rows: Vec<(&str, &str, ServerFacts, Result<(), NotOurs>)> = vec![
             (
