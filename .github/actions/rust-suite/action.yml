@@ -1,6 +1,6 @@
 name: Rust suite
 description: >
-  Compile every target of one Rust crate once and run its tests, with the counted truth line
+  Compile every target of one Rust crate once and run its tests in the same cargo invocation, with the counted truth line
   (scripts/assert-cargo-test-counts.py) and the evidence upload. One job per crate and OS calls this;
   a new crate is one more job of a few lines (docs/ci/2026-11-11-rust-ci-speed.md, "Adding a crate").
 
@@ -16,7 +16,7 @@ inputs:
     required: true
   test-threads:
     description: libtest threads. The suite waits (sockets, SQLite, timers) far more than it computes, so more threads than cores is faster.
-    default: "8"
+    default: "16"
 
 runs:
   using: composite
@@ -33,7 +33,7 @@ runs:
       with:
         workspaces: ${{ inputs.crate-dir }}
         shared-key: ${{ inputs.cache-key }}
-        save-if: ${{ github.event_name == 'push' }}
+        save-if: true # MEASUREMENT COMMIT ONLY: reverted to pushes-only in this pull request's last commit
         cache-on-failure: true
 
     - name: Build settings and test directories
@@ -66,9 +66,9 @@ runs:
         "$BB_PY" scripts/assert-cargo-test-counts.py --self-test
         "$BB_PY" scripts/assert-test-build-covers-all-targets.py --self-test
 
-    # The old `cargo check --all-targets` step compiled the crate a second time in another profile. The test build
-    # compiles the library, the binaries, the examples and every test target; only a bench target would be left out,
-    # so the guard fails the job the day the crate gets one.
+    # There is no separate `cargo check --all-targets` step: it compiled the crate a second time. The test build
+    # compiles the library, the binaries, the examples and every test target (measured: the same 8 units); only a
+    # bench target would be left out, so this guard fails the job the day the crate gets one.
     - name: The test build covers every target
       shell: bash
       working-directory: ${{ inputs.crate-dir }}
@@ -76,24 +76,29 @@ runs:
         cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
         "$BB_PY" "$GITHUB_WORKSPACE/scripts/assert-test-build-covers-all-targets.py" "$RUNNER_TEMP/cargo-metadata.json"
 
-    - name: Compile every target
-      shell: bash
-      working-directory: ${{ inputs.crate-dir }}
-      run: |
-        build_exit=0
-        CARGO_TERM_COLOR=never cargo test --locked --no-run > "$RUNNER_TEMP/cargo-build.log" 2>&1 || build_exit=$?
-        cat "$RUNNER_TEMP/cargo-build.log"
-        echo "$build_exit" > "$RUNNER_TEMP/cargo-build.exit"
-        exit "$build_exit"
-
-    - name: Run Rust tests
+    # ONE cargo invocation compiles every target and runs the tests. Two invocations (a `--no-run` build, or the old
+    # `cargo check`, and then `cargo test`) compile the crate a second time on every fresh build: Tauri's
+    # `generate_context!` rewrites an embedded asset in OUT_DIR while the library's two units compile, so the next
+    # cargo invocation finds one of them dirty (measured: 55 s Linux, 47 s macOS, 88 s Windows of pure repeat).
+    # A compile error leaves no test result, which the count guard reports as red.
+    - name: Compile every target and run the tests
       shell: bash
       working-directory: ${{ inputs.crate-dir }}
       run: |
         cargo_exit=0
+        started=$(date +%s)
         CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+        total=$(( $(date +%s) - started ))
         cat "$RUNNER_TEMP/cargo-test.log"
         echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+        # A composite action is ONE step in the job's timing, so the phases are reported here (and in the evidence).
+        {
+          echo "rust-suite timing: compile + tests $total s (cargo exit $cargo_exit)"
+          grep -E '^ *Finished .* in ' "$RUNNER_TEMP/cargo-test.log" | sed 's/^ */rust-suite compile line: /' || true
+          grep '^test result:' "$RUNNER_TEMP/cargo-test.log" | sed 's/^/rust-suite truth line: /' || true
+        } > "$RUNNER_TEMP/rust-suite-timing.txt"
+        cat "$RUNNER_TEMP/rust-suite-timing.txt"
+        cat "$RUNNER_TEMP/rust-suite-timing.txt" >> "$GITHUB_STEP_SUMMARY"
         "$BB_PY" "$GITHUB_WORKSPACE/scripts/assert-cargo-test-counts.py" "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
 
     - name: Remove temporary test files
@@ -108,7 +113,6 @@ runs:
       with:
         name: ${{ inputs.evidence-name }}
         path: |
-          ${{ runner.temp }}/cargo-build.log
-          ${{ runner.temp }}/cargo-build.exit
           ${{ runner.temp }}/cargo-test.log
           ${{ runner.temp }}/cargo-test.exit
+          ${{ runner.temp }}/rust-suite-timing.txt
