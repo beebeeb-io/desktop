@@ -200,7 +200,7 @@ pub(super) fn updater_builder_for_release_channel(
     channel: ReleaseChannel,
 ) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
     use tauri_plugin_updater::UpdaterExt;
-
+    crate::app_identity::AppIdentity::CURRENT.updater_refusal()?; // a test build stops before any network call
     let endpoint = update_manifest_url_for_channel(channel);
     app.updater_builder()
         .endpoints(vec![

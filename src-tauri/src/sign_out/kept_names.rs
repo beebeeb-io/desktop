@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 /// The folder's name under the container's `Documents` (§7.1).
 pub const KEPT_FOLDER_NAME: &str = "Changes not sent";
 /// `tauri.conf.json`'s `identifier`; a test pins the two equal.
-pub const APP_BUNDLE_ID: &str = "io.beebeeb.app";
+pub const APP_BUNDLE_ID: &str = crate::app_identity::AppIdentity::CURRENT.bundle_identifier();
+/// The app's directory under the OS data dir.
+const APP_DIR: &str = crate::app_identity::AppIdentity::CURRENT.data_dir_name();
 /// The longest file name APFS takes, in UTF-8 bytes.
 pub const MAX_NAME_BYTES: usize = 255;
 
@@ -30,7 +32,7 @@ pub fn kept_root(document_dir: Option<&Path>, data_dir: Option<&Path>, bundle_id
         .join("Documents");
     match document_dir {
         Some(dir) if dir.is_absolute() && dir.ends_with(&container_documents) => Some(dir.join(KEPT_FOLDER_NAME)),
-        _ => data_dir.map(|data| data.join("beebeeb").join(KEPT_FOLDER_NAME)),
+        _ => data_dir.map(|data| data.join(APP_DIR).join(KEPT_FOLDER_NAME)),
     }
 }
 

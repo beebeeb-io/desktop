@@ -113,7 +113,7 @@ export function Sidebar({
               <div className="h-full bg-ink-3" style={{ width: `${pct}%` }} />
             </div>
             <div className="mt-1.5 font-mono text-[11px] text-ink-3">
-              {storageLine(storage.usedBytes, storage.quotaBytes)}
+              {(storage as { line?: string }).line ?? storageLine(storage.usedBytes, storage.quotaBytes)}
             </div>
           </div>
         )}

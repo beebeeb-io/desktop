@@ -503,6 +503,7 @@ use meta_2::*;
 pub(crate) use meta_2::{decrypt_shared_name_with_key, parse_base_version_number};
 
 mod landing;
+mod staging_bases;
 #[cfg(windows)]
 pub(crate) use landing::retry_kept_originals;
 use landing::*;

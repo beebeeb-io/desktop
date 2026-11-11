@@ -206,7 +206,8 @@ pub fn init(dir: PathBuf, names: fn() -> KnownNames) {
 
 /// `<home>/Library/Logs/Beebeeb`.
 pub fn default_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join("Library").join("Logs").join("Beebeeb"))
+    let logs_dir = crate::app_identity::AppIdentity::CURRENT.logs_dir_name();
+    dirs::home_dir().map(|home| home.join("Library").join("Logs").join(logs_dir))
 }
 
 pub fn event(event: LifecycleEvent) {

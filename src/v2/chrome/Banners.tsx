@@ -55,8 +55,9 @@ interface BannerCopy { text: string; detail: string; action?: string }
 
 export function bannerCopy(kind: BannerKind, o: { syncProblems?: number; backupProblems?: number; storage?: StorageSummary | null; asOf?: string } = {}): BannerCopy {
   const n = (v: number | undefined) => v ?? 3
-  const used = o.storage ? Math.round(o.storage.usedBytes / 1024 ** 3) : 950
-  const quota = o.storage ? o.storage.quotaBytes / 1024 ** 4 : 1
+  // Decimal units, as the meter and the web app: 1 GB = 1000³ bytes (a binary value is never labelled GB).
+  const used = o.storage ? Math.floor(o.storage.usedBytes / 1000 ** 3) : 950
+  const quota = o.storage ? Math.round(o.storage.quotaBytes / 1000 ** 3) / 1000 : 1
   switch (kind) {
     // DW-1108 Shows the sentence in full: "Changes you make will upload when you’re back." Typographic apostrophes, as
     // the rest of the window's copy (DW-0109's "Couldn’t", DW-0410b's "There’s").
