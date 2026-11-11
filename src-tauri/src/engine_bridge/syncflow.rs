@@ -256,11 +256,17 @@ pub async fn sync_tick_outcome(
     // already resets blocked_fingerprint on every pass.
     // P1-B: mark done only AFTER the snapshot succeeds (see below); requesting
     // here and marking after bootstrap prevents a lost heal on network failure.
-    let needs_envelope_heal = !bridge.db().envelope_heal_done()? && bridge.db().has_blocked_or_nameless_rows()?;
-    if needs_envelope_heal {
+    let needs_envelope_heal = if bridge.db().envelope_heal_done()? {
+        false
+    } else if bridge.db().has_blocked_or_nameless_rows()? {
         tracing::info!("task 2445: requesting re-snapshot for the null-envelope heal");
         bridge.db().request_resnapshot()?;
-    }
+        true
+    } else {
+        // (b) Healthy DB: mark done so the json_extract scan does not run every tick.
+        bridge.db().mark_envelope_heal_done()?;
+        false
+    };
 
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this

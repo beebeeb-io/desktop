@@ -203,7 +203,7 @@ fn heal_detects_blocked_rows_and_prepareownedrows_resets_them() {
     // Requesting a resnapshot is the heal action.
     db.request_resnapshot().unwrap();
     assert!(
-        db.take_needs_resnapshot().unwrap(),
+        db.peek_resnapshot_request().unwrap().is_some(),
         "the heal must request a resnapshot"
     );
 
