@@ -52,6 +52,10 @@ pub struct DriveItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     pub has_thumbnail: bool,
+    /// The row's place in the Backups tree (LD-0113), for the native window. Not part of the JSON the web view
+    /// reads. Filled by `model::children_of`; `Outside` from every other constructor.
+    #[serde(skip)]
+    pub backup: crate::backup_actions::BackupMark,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
