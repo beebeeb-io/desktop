@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::api_client::ApiClient;
 use beebeeb_core::encrypt::NameMetadata;
 use beebeeb_core::kdf::{FileKey, MasterKey};
-use crate::api_client::ApiClient;
 
 /// A 2236 request upload row's envelope fields (L12). The row is an owner-class
 /// item whose content key is the request key `C`, not a derived key.
@@ -93,7 +93,11 @@ impl RequestKeys {
     /// checks, the row-bound seal, then the shipped empty-id seal. Content is
     /// `C`; the rename target is the string-derived key and the recorded pin,
     /// never `C`, and `None` for an upper-repair (read-only) name.
-    pub(crate) fn row_keys(&mut self, master: &MasterKey, row: &Value) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
+    pub(crate) fn row_keys(
+        &mut self,
+        master: &MasterKey,
+        row: &Value,
+    ) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
         let fields = request_upload_fields(row)?;
         let id = row.get("id")?.as_str()?;
         let encrypted = row.get("name_encrypted")?.as_str()?;
@@ -200,7 +204,10 @@ pub(crate) fn rename_material(
     master: &MasterKey,
     id: &str,
     record: &crate::owner_keys::OwnedKeyRecord,
-) -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+) -> anyhow::Result<(
+    beebeeb_core::kdf::FileKey,
+    beebeeb_core::chunk_stream::ExpectedChunkFormat,
+)> {
     use beebeeb_core::chunk_stream::ExpectedChunkFormat;
 
     let name = record

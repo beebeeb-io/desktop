@@ -24,9 +24,9 @@ mod index_repair;
 mod ingestion;
 mod invites;
 mod migration;
+mod move_adopt;
 mod owner_copy;
 mod prepare;
-mod move_adopt;
 mod request;
 mod review;
 

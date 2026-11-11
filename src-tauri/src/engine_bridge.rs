@@ -37,8 +37,8 @@ use crate::conflict::is_text_file;
 use crate::state_db::{
     ClaimOutcome, ClaimedOp, FileContractState, FileEntry, FileStatus, ItemKind, KeptReason, LocalActivityEventInput,
     LocalActivityKind, LocalFileId, Namespace, OperationKind, OperationPauseReason, PERMISSION_OWNER, PERMISSION_READ,
-    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, ServerFileId, StateDb, TookOver,
-    UploadResume, VersionId,
+    PERMISSION_SHARE, PERMISSION_WRITE, ParkReason, PendingOperation, ServerFileId, StateDb, TookOver, UploadResume,
+    VersionId,
 };
 
 pub struct EngineBridge {
@@ -97,24 +97,23 @@ pub struct EngineBridge {
 mod lifecycle;
 mod upload;
 // LD-0113: the backup uploader (a file read in place from a backed-up folder).
-mod backup_upload;
 mod backup_tree;
+mod backup_upload;
 // LD-0113: the Backups root, the merge's moves and the device manifest.
 mod backup_root;
-mod shared_roots;
 mod finder_create;
 mod finder_edit;
+mod hydrate;
 mod local_classify;
 mod local_layout;
 mod operations;
-mod hydrate;
+mod shared_roots;
 // LD-0105 W2: a Windows range session's preparation and its "whole" record.
 mod range_fetch;
+pub(crate) use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub(crate) use range_fetch::{PrepEnd, RangePrep};
-pub(crate) use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
 mod conflicts;
-
 
 // ── Wire-byte counters (P1 — live throughput) ────────────────────────────────
 //
@@ -130,124 +129,9 @@ mod conflicts;
 // both counters simultaneously is NOT required (the heartbeat is a telemetry
 // estimate, not an accounting figure).
 
-
-
-
-
-
-
-
 // ── Per-file state machine ────────────────────────────────────────────────────
 
-
-
-
 // ── EngineBridge ──────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Files `cached_sha256_file_hex` read on this thread (tests count them).
 #[cfg(test)]
@@ -255,183 +139,16 @@ thread_local! {
     static HASH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 thread_local! {
     /// Task 2190: the op whose decision check fails, for the feed's per-item test.
     static FAIL_DECIDABLE_READ: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 thread_local! { static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ── Periodic sync tick ────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -441,12 +158,7 @@ mod tests {
     fn production_tree(module: &str) -> String {
         production_tree_parts(module)
             .into_iter()
-            .map(|text| {
-                crate::finder_setup_command_tests::without_items(
-                    &text,
-                    &["#[cfg(test)]", "#[cfg(all(test"],
-                )
-            })
+            .map(|text| crate::finder_setup_command_tests::without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -493,7 +205,10 @@ mod tests {
 
     fn test_open_content_frame(key: &beebeeb_core::kdf::FileKey, bytes: &[u8]) -> Result<Vec<u8>, EngineError> {
         let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
-            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), "legacy", beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
+            "legacy",
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        );
         let data = reader.push_frame(&content_frame(bytes)?)?.data;
         reader.finish()?;
         Ok(data)
@@ -510,107 +225,121 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
 
-mod basics;
-mod uploads;
-mod hydration;
-mod trash_ops;
-mod shared;
-mod metadata;
-mod finder_queue;
-mod uploads_2;
-mod conflicts;
-mod uploads_3;
-mod uploads_4;
-// LD-0113 Task D3: the backup uploader leaves the source untouched.
-mod backup_uploads;
-mod backup_host;
-// LD-0113 PR 2: the Backups root, the merge and the device manifest.
-mod backup_layout;
-mod shared_2;
-mod sync;
-mod sync_2;
-mod ipc;
-mod hydrate_files;
-mod trash_markers;
-mod versions;
-mod uploads_5;
-mod finder_queue_2;
-mod uploads_6;
-mod refusals;
-mod sync_3;
-mod uploads_7;
-mod versions_2;
-mod finder_queue_3;
-mod trash_ops_2;
-mod metadata_2;
-mod finder_queue_4;
-mod versions_3;
-mod sync_4;
-mod uploads_8;
-mod finder_queue_5;
-mod refusals_2;
-mod finder_queue_6;
-mod thumbnails;
-mod sync_5;
-mod conflicts_2;
-mod thumbnails_2;
-mod uploads_9;
-mod refusals_3;
-mod logging;
-mod downloads;
-mod reg_1640;
-mod reg_1640_2;
-mod scan;
-mod review_t3;
-mod review_2190;
-mod review_2190_2;
-mod errors_types;
-mod typed_ids;
-mod remote_move;
-mod ld0105_u1_rows;
-mod ld0113_protect;
-// Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
-mod name_alias_2407;
-#[cfg(windows)]
-mod name_alias_2407_windows;
-// Task 2409: Try again on a change that failed.
-mod unsent_retry;
-// Task 2413: a server row is stored only at a path of plain names; the one map onto the sync root.
-mod stored_path_2413;
-#[cfg(windows)]
-mod stored_path_2413_windows;
+    mod basics;
+    mod conflicts;
+    mod finder_queue;
+    mod hydration;
+    mod metadata;
+    mod shared;
+    mod trash_ops;
+    mod uploads;
+    mod uploads_2;
+    mod uploads_3;
+    mod uploads_4;
+    // LD-0113 Task D3: the backup uploader leaves the source untouched.
+    mod backup_host;
+    mod backup_uploads;
+    // LD-0113 PR 2: the Backups root, the merge and the device manifest.
+    mod backup_layout;
+    mod conflicts_2;
+    mod downloads;
+    mod errors_types;
+    mod finder_queue_2;
+    mod finder_queue_3;
+    mod finder_queue_4;
+    mod finder_queue_5;
+    mod finder_queue_6;
+    mod hydrate_files;
+    mod ipc;
+    mod ld0105_u1_rows;
+    mod ld0113_protect;
+    mod logging;
+    mod metadata_2;
+    mod refusals;
+    mod refusals_2;
+    mod refusals_3;
+    mod reg_1640;
+    mod reg_1640_2;
+    mod remote_move;
+    mod review_2190;
+    mod review_2190_2;
+    mod review_t3;
+    mod scan;
+    mod shared_2;
+    mod sync;
+    mod sync_2;
+    mod sync_3;
+    mod sync_4;
+    mod sync_5;
+    mod thumbnails;
+    mod thumbnails_2;
+    mod trash_markers;
+    mod trash_ops_2;
+    mod typed_ids;
+    mod uploads_5;
+    mod uploads_6;
+    mod uploads_7;
+    mod uploads_8;
+    mod uploads_9;
+    mod versions;
+    mod versions_2;
+    mod versions_3;
+    // Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
+    mod name_alias_2407;
+    #[cfg(windows)]
+    mod name_alias_2407_windows;
+    // Task 2409: Try again on a change that failed.
+    mod unsent_retry;
+    // Task 2413: a server row is stored only at a path of plain names; the one map onto the sync root.
+    mod stored_path_2413;
+    #[cfg(windows)]
+    mod stored_path_2413_windows;
 
-use basics::{RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api, write_test_png};
-use finder_queue_2::{capture_logs_async, fp_create};
-use finder_queue_5::{Refused, refuse, stop_refusing};
-#[cfg(unix)]
-use ipc::IpcHydrationMock;
-use metadata_2::{patched_parents};
-use refusals_2::{reqwest_status_error, transient};
-use refusals_3::{PLANTED, assert_clean_line};
-use reg_1640::{regression_1640_edited_file_in_a_folder, regression_1640_edited_file_in_a_folder_in, regression_1640_synced_file};
-#[cfg(target_os = "windows")]
-use reg_1640::{regression_1640_chunk, regression_1640_web_saves};
-use reg_1640_2::{regression_1640_new_placeholder, regression_1640_uploads_queued_for};
-use scan::{regression_2229_set_modified, task_2190_files_holding, task_2190_fu1_tick_after, task_2190_server_chunk, task_2190_web_saves};
-use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
-use sync::{SyncMockServer, enc_name, snap_node};
-use sync_5::{landed_create, rule3_setup, thumbnail_blob};
-use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
-use uploads::{HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, http_json_dated, hydration_test_key, read_http_request, upload_mock_response};
-#[cfg(unix)]
-use uploads::{MockResponse, hydration_mock_response};
-use uploads_3::{ResumableUploadMock, ResumeMockMode, count_requests, init_item_id, resumable_create_op};
-use uploads_5::{fp_save, queue_save, seed_uploaded_db_row, seed_uploaded_row};
-#[cfg(unix)]
-use uploads_7::{land_one_save, remote_update};
-use uploads_8::{assert_kept_uploading, failing_passes};
-use versions::{drain_upload_queue, finder_file_target, held_content_version, run_competing, versioned_server_answer};
-use versions_2::{fp_save_moved, name_parent_status, seed_folder_row, seed_row_in_folder};
-#[cfg(unix)]
-use versions_2::{FP_ROOT, fp_create_in, listed_under, reparented_changes};
-#[cfg(target_os = "macos")]
-use versions_3::*;
+    use basics::{
+        RecordedRequest, UploadMockServer, read_http_request_or_hangup, test_bridge, test_bridge_with_api,
+        write_test_png,
+    };
+    use finder_queue_2::{capture_logs_async, fp_create};
+    use finder_queue_5::{Refused, refuse, stop_refusing};
+    #[cfg(unix)]
+    use ipc::IpcHydrationMock;
+    use metadata_2::patched_parents;
+    use refusals_2::{reqwest_status_error, transient};
+    use refusals_3::{PLANTED, assert_clean_line};
+    #[cfg(target_os = "windows")]
+    use reg_1640::{regression_1640_chunk, regression_1640_web_saves};
+    use reg_1640::{
+        regression_1640_edited_file_in_a_folder, regression_1640_edited_file_in_a_folder_in,
+        regression_1640_synced_file,
+    };
+    use reg_1640_2::{regression_1640_new_placeholder, regression_1640_uploads_queued_for};
+    use scan::{
+        regression_2229_set_modified, task_2190_files_holding, task_2190_fu1_tick_after, task_2190_server_chunk,
+        task_2190_web_saves,
+    };
+    use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
+    use sync::{SyncMockServer, enc_name, snap_node};
+    use sync_5::{landed_create, rule3_setup, thumbnail_blob};
+    use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
+    use uploads::{
+        HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
+        hydration_test_key, read_http_request, upload_mock_response,
+    };
+    #[cfg(unix)]
+    use uploads::{MockResponse, hydration_mock_response};
+    use uploads_3::{ResumableUploadMock, ResumeMockMode, count_requests, init_item_id, resumable_create_op};
+    use uploads_5::{fp_save, queue_save, seed_uploaded_db_row, seed_uploaded_row};
+    #[cfg(unix)]
+    use uploads_7::{land_one_save, remote_update};
+    use uploads_8::{assert_kept_uploading, failing_passes};
+    use versions::{
+        drain_upload_queue, finder_file_target, held_content_version, run_competing, versioned_server_answer,
+    };
+    #[cfg(unix)]
+    use versions_2::{FP_ROOT, fp_create_in, listed_under, reparented_changes};
+    use versions_2::{fp_save_moved, name_parent_status, seed_folder_row, seed_row_in_folder};
+    #[cfg(target_os = "macos")]
+    use versions_3::*;
 }
 
 /// The attempt resumed its persisted upload session, found it reaped (the server answered 404 or
@@ -729,52 +458,67 @@ impl Seams {
 }
 
 mod types;
-use types::*;
-pub use types::{WireCounters, FpWrite, CachePolicy, PinUpdateOutcome, CacheCleanupOutcome, TransferLoopOutcome, ConflictContentSide, ParkedChoice, ParkedResolution, ConflictContentPreview, FetchedVersion, FetchTicket, name_opens, ConflictDetected, SyncTickOutcome};
 #[cfg(windows)]
 pub use types::FetchedBytes;
-pub(crate) use types::{NON_UUID, log_alias_resolved, SyncFolderContent, RENAME_SETTLE_SECS, OpDone, LocalEntry, PrunedEntry};
+use types::*;
+pub use types::{
+    CacheCleanupOutcome, CachePolicy, ConflictContentPreview, ConflictContentSide, ConflictDetected, FetchTicket,
+    FetchedVersion, FpWrite, ParkedChoice, ParkedResolution, PinUpdateOutcome, SyncTickOutcome, TransferLoopOutcome,
+    WireCounters, name_opens,
+};
+pub(crate) use types::{
+    LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, SyncFolderContent, log_alias_resolved,
+};
 // LD-0113 Amendment 7: the Windows-native rung removes a read-only Backups file the way the engine does.
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use types::{RemovedKind, engine_remove};
 
 mod errors;
 use errors::*;
+pub(crate) use errors::{
+    AcceptsClosed, EngineError, ItemInTrash, ParkNow, QueueStateMoved, QueuedCopyMissing, StagedCopyGone,
+    ThumbnailNotYet, UnknownItem, UnsentLocalChange, engine_cause, error_category, error_http_status, loggable_id,
+};
 pub use errors::{OperationFailureClass, classify_operation_error, retry_delay_seconds};
-pub(crate) use errors::{EngineError, engine_cause, UnknownItem, QueuedCopyMissing, UnsentLocalChange, ThumbnailNotYet, loggable_id, error_category, StagedCopyGone, AcceptsClosed, ItemInTrash, error_http_status, QueueStateMoved, ParkNow};
 
 mod content;
 use content::*;
-pub(crate) use content::{sha256_hex, ContentFingerprint, cached_sha256_file_hex, sha256_file_hex, content_frame};
+pub(crate) use content::{ContentFingerprint, cached_sha256_file_hex, content_frame, sha256_file_hex, sha256_hex};
 
 mod media;
 use media::*;
 
 mod fs;
 use fs::*;
-pub(crate) use fs::{path_is_engine_internal, relative_db_path, LocalPathVerdict, move_no_replace};
+pub(crate) use fs::{LocalPathVerdict, move_no_replace, path_is_engine_internal, relative_db_path};
 
 mod meta;
-use meta::*;
-pub use meta::{HydrateSource, SharedRootRefreshOutcome};
-pub(crate) use meta::{wire_id_fields, HydrateProgressFn, hydrate_final_status, hydrate_dest_is_allowed, write_hydrated_plaintext, write_hydrated_from_reader, item_content_version, item_version_identifier};
 #[cfg(windows)]
 pub(crate) use meta::promote_fetched_content;
+use meta::*;
+pub(crate) use meta::{
+    HydrateProgressFn, hydrate_dest_is_allowed, hydrate_final_status, item_content_version, item_version_identifier,
+    wire_id_fields, write_hydrated_from_reader, write_hydrated_plaintext,
+};
+pub use meta::{HydrateSource, SharedRootRefreshOutcome};
 
 mod meta_2;
 use meta_2::*;
-pub(crate) use meta_2::{parse_base_version_number, decrypt_shared_name_with_key};
+pub(crate) use meta_2::{decrypt_shared_name_with_key, parse_base_version_number};
 
 mod landing;
-use landing::*;
-pub use landing::{FinderWriteItemKind, FinderWriteTarget, FinderWriteOutcome, VersionConflictEntry, is_ignored_finder_name, version_conflict_feed_from_db};
-pub(crate) use landing::{keep_both_name, FinderStagingBases, finder_staging_candidates};
 #[cfg(windows)]
 pub(crate) use landing::retry_kept_originals;
+use landing::*;
+pub(crate) use landing::{FinderStagingBases, finder_staging_candidates, keep_both_name};
+pub use landing::{
+    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name,
+    version_conflict_feed_from_db,
+};
 
 mod syncflow;
-use syncflow::*;
-pub use syncflow::sync_tick_outcome;
 #[cfg(test)]
 pub use syncflow::sync_tick;
-pub(crate) use syncflow::{sync_folder_content, init_conflict_class, local_file_path_under_sync_root};
+pub use syncflow::sync_tick_outcome;
+use syncflow::*;
+pub(crate) use syncflow::{init_conflict_class, local_file_path_under_sync_root, sync_folder_content};
