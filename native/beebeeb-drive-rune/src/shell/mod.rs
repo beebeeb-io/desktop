@@ -126,6 +126,20 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
     ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
     ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
+    // Lane f-shared-search-trash: Shared and Trash, by board frame id.
+    ("DW-0501", crate::frames::shared::scenes::dw_0501),
+    ("DW-0502", crate::frames::shared::scenes::dw_0502),
+    ("DW-0503", crate::frames::shared::scenes::dw_0503),
+    ("DW-0505", crate::frames::shared::scenes::dw_0505),
+    ("DW-0506", crate::frames::shared::scenes::dw_0506),
+    ("DW-0507", crate::frames::shared::scenes::dw_0507),
+    ("DW-0508", crate::frames::shared::scenes::dw_0508),
+    ("DW-0509", crate::frames::shared::scenes::dw_0509),
+    ("DW-0510", crate::frames::shared::scenes::dw_0510),
+    ("DW-0747", crate::frames::trash::scenes::dw_0747),
+    ("DW-0748", crate::frames::trash::scenes::dw_0748),
+    ("DW-0749b", crate::frames::trash::scenes::dw_0749b),
+    ("DW-0117", crate::frames::trash::scenes::dw_0117),
 ];
 
 fn scene(s: &mut State, event: Event) {
