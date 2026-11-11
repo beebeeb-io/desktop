@@ -114,10 +114,6 @@ pub struct Engine<C: CredentialStores> {
     failures: AtomicU32,
 }
 
-fn poisoned<T>(_: T) -> String {
-    "session state is unusable; restart Beebeeb".to_string()
-}
-
 impl<C: CredentialStores> Engine<C> {
     /// Build the handle. Reads nothing yet: call [`Engine::restore`] next.
     pub fn open(config: EngineConfig, host: Arc<dyn EngineHost>, stores: C) -> Result<Self, String> {
