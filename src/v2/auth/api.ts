@@ -72,3 +72,11 @@ export const nextAfterSignIn = (outcome: LoginOutcome): Promise<CommandResult<st
     reauthenticated: outcome.reauthenticated,
     account_mismatch: outcome.account_mismatch !== null,
   })
+
+/** The board's words for a 2FA verify error. */
+export const twoFactorError = (code: string): Promise<CommandResult<string>> =>
+  command('auth_two_factor_error', { code })
+
+/** The board's words for a recovery-phrase error. */
+export const phraseError = (code: string): Promise<CommandResult<string>> =>
+  command('auth_phrase_error', { code })

@@ -10,11 +10,12 @@ import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
+import { SignInFlow } from './index'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 import { usePrivateScreen } from './privateScreen'
 
-type GateState = 'checking' | 'signed_out' | 'locked' | 'no_plan' | 'ready'
+type GateState = 'checking' | 'signed_out' | 'locked' | 'needs_recovery_phrase' | 'no_plan' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
@@ -48,6 +49,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
   if (state === 'signed_out') return <AccountEntry onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
+  if (state === 'needs_recovery_phrase') return <SignInFlow onSignedIn={check} startAt="phrase" />
   if (state === 'no_plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
 }

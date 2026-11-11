@@ -17,9 +17,11 @@ pub enum GateState {
     Ready,
     /// No session token at all: show sign-in (DW-A02/A03).
     SignedOut,
-    /// Signed in but the vault key is not in memory: show the lock screen (DW-0009, Windows Hello)
-    /// or the recovery phrase (DW-A23) if this is a first sign-in with no keychain key.
+    /// Signed in, vault key IS in the keychain: show the lock screen (DW-0009, Windows Hello).
     Locked,
+    /// Signed in, but no vault key in keychain at all: show the recovery phrase (DW-A23).
+    /// A first sign-in by password ends here; the 12 words (or another device) provision the key.
+    NeedsRecoveryPhrase,
     /// Signed in and unlocked, but the account has no plan: show the choose-a-plan screen (DW-0014).
     NoPlan,
 }
@@ -126,8 +128,36 @@ pub fn problem_text(p: &SignInProblem) -> &'static str {
 }
 
 /// DW-A22's note (a hint, not a diagnosis).
-pub const LOCK_NOTE: &str = "After five wrong tries in a row, your account locks for a short while. It unlocks by itself, \
-     and we\u{2019}ve emailed the account owner a link to unlock it now.";
+pub const LOCK_NOTE: &str = "After five wrong tries in a row, your account locks for a short \
+     while. It unlocks by itself, and we\u{2019}ve emailed the account owner a link to unlock it now.";
+
+// ── Two-factor step (DW-A26 to DW-A28) ─────────────────────────────────────
+
+/// Two-factor: wrong code (DW-A27).
+pub const WRONG_2FA_CODE: &str = "That code didn\u{2019}t work. Check the app and try again.";
+
+/// Two-factor: the partial token expired (~5 min) before the code was sent.
+pub const TWO_FACTOR_EXPIRED: &str = "Your sign-in expired. Start again from the password.";
+
+/// Map a 2FA verify error to the board's words. A wrong code stays retryable;
+/// an expired partial token starts over; anything else is honest.
+pub fn two_factor_error(code: &str) -> &'static str {
+    if code == "invalid_credentials" || code.contains("Invalid authentication code") {
+        return WRONG_2FA_CODE;
+    }
+    if code.contains("expired") || code.contains("No pending") {
+        return TWO_FACTOR_EXPIRED;
+    }
+    if code == "offline" || code.contains("network error") || code.contains("could not reach") {
+        return "You\u{2019}re offline. Nothing was sent.";
+    }
+    if code.starts_with("rate_limited") {
+        return "Too many tries from this network. Wait and try again.";
+    }
+    "The code check didn\u{2019}t finish. Try again."
+}
+
+// ── Recovery-phrase step (DW-A23 to DW-A25) ─────────────────────────────────
 
 /// The recovery-phrase step's error text (DW-A24).
 pub const WRONG_PHRASE: &str = "That phrase doesn\u{2019}t open this account. Nothing was restored.";
@@ -135,8 +165,61 @@ pub const WRONG_PHRASE: &str = "That phrase doesn\u{2019}t open this account. No
 /// DW-A24: after the server's attempt limit.
 pub const TOO_MANY_PHRASE_TRIES: &str = "Too many tries. Wait an hour.";
 
-/// Two-factor: wrong code (DW-A27).
-pub const WRONG_2FA_CODE: &str = "That code didn\u{2019}t work. Check the app and try again.";
+/// Map a recovery-phrase error to the board's words.
+pub fn phrase_error(code: &str) -> &'static str {
+    if code.contains("Incorrect recovery phrase") {
+        return WRONG_PHRASE;
+    }
+    if code.contains("too many") || code.contains("Too many") {
+        return TOO_MANY_PHRASE_TRIES;
+    }
+    if code == "offline" || code.contains("network error") || code.contains("could not reach") {
+        return "You\u{2019}re offline. Nothing was sent.";
+    }
+    if code.contains("Sign in before") {
+        return "Sign in before entering the recovery phrase.";
+    }
+    "The phrase check didn\u{2019}t finish. Try again."
+}
+
+// ── Another-device step (DW-A07 to DW-A10) ─────────────────────────────────
+
+/// Map a device-request status to the board's text (DW-A08 to DW-A10).
+pub fn device_status_text(status: &str) -> &'static str {
+    match status {
+        "denied" => "The request was denied on the other device.",
+        "expired" => "Nobody approved within 5 minutes. Ask again.",
+        "keys_did_not_arrive" => "The other device approved, but the keys didn\u{2019}t arrive. Ask again.",
+        "failed" => "Something went wrong. Ask again.",
+        "signed_in" => "Signed in.",
+        "approved" => "Approved. Setting up\u{2026}",
+        "reconnecting" => "Reconnecting\u{2026}",
+        _ => "",
+    }
+}
+
+// ── Approve step (DW-A11 to DW-A17) ────────────────────────────────────────
+
+/// Map an approve error to the board's words.
+pub fn approve_error(code: &str) -> &'static str {
+    if code == "request_not_found" {
+        return "We could not find a waiting request with that code. Check it on the other device.";
+    }
+    if code == "invalid_credentials" {
+        return "That password isn\u{2019}t right. Nothing was shared.";
+    }
+    if code == "hello_unavailable" {
+        return "Windows Hello isn\u{2019}t set up on this PC. Set it up in Windows Settings to \
+                approve sign-ins.";
+    }
+    if code == "hello_failed" {
+        return "Windows Hello didn\u{2019}t recognise you. Nothing was shared.";
+    }
+    if code == "offline" || code.contains("network error") {
+        return "You\u{2019}re offline. Nothing was shared.";
+    }
+    "The approval didn\u{2019}t finish. Nothing was shared."
+}
 
 // ── Engine gate ─────────────────────────────────────────────────────────────
 
@@ -151,17 +234,38 @@ pub fn engine_allowed(vault_unlocked: bool, has_plan: bool) -> bool {
     vault_unlocked && has_plan
 }
 
+// ── Vault key probe ─────────────────────────────────────────────────────────
+
+/// Does the credential store hold a vault key for this account? The gate uses this
+/// to choose between the lock screen (key present, Windows Hello unlocks) and the
+/// recovery phrase (no key, the 12 words or another device provisions it).
+///
+/// Fails closed: if the store cannot answer (DPAPI error, locked Keychain), it
+/// says "present" so the window shows the lock, not the phrase. Only a definitive
+/// "not found" shows the phrase.
+fn vault_key_probe(account_id: &str) -> bool {
+    use crate::keychain::{holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for};
+    // Check the id-keyed store first, then the legacy store (the same read fallback
+    // `load_session_from_keychain` uses). `holds_vault_key` never unlocks or reads
+    // the key; a store that cannot answer counts as holding one (fail closed).
+    holds_vault_key(&platform_keychain_store_for(account_id)) || holds_vault_key(&legacy_platform_keychain_store())
+}
+
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
-/// Decide the gate state from the values the window already has (from `sync_status`
-/// and `account_subscription`). The TSX calls this once after reading both; the
-/// decision is in Rust.
-pub fn decide_gate(logged_in: bool, vault_unlocked: bool, has_no_plan: bool) -> GateState {
+/// Decide the gate state. `vault_key_in_keychain` distinguishes the lock screen
+/// (key present, Windows Hello can unlock) from the recovery-phrase step (no key,
+/// the 12 words or another device must provision it).
+pub fn decide_gate(logged_in: bool, vault_unlocked: bool, vault_key_in_keychain: bool, has_no_plan: bool) -> GateState {
     if !logged_in {
         return GateState::SignedOut;
     }
     if !vault_unlocked {
-        return GateState::Locked;
+        return if vault_key_in_keychain {
+            GateState::Locked
+        } else {
+            GateState::NeedsRecoveryPhrase
+        };
     }
     if has_no_plan {
         return GateState::NoPlan;
@@ -213,13 +317,22 @@ pub(crate) fn auth_gate_state(
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
+    // When signed in but not unlocked, check if the credential store holds the vault key.
+    // If yes: the lock screen (Windows Hello can unlock). If no: recovery phrase needed.
+    // On macOS: `keychain_vault_key_present` (fails closed). On Windows: try to load the
+    // session from the credential store; success means both token AND key are present.
+    let vault_key_in_keychain = if logged_in && !vault_unlocked {
+        vault_key_probe(acct.id.as_str())
+    } else {
+        false
+    };
     let no_plan = has_no_plan(
         plan_state.as_deref(),
         plan.as_deref(),
         plan_status.as_deref(),
         quota_bytes,
     );
-    Ok(decide_gate(logged_in, vault_unlocked, no_plan))
+    Ok(decide_gate(logged_in, vault_unlocked, vault_key_in_keychain, no_plan))
 }
 
 /// Map a sign-in error code and the failure count to the board's problem and text.
@@ -262,6 +375,30 @@ pub(crate) fn auth_next_after_sign_in(
     account_mismatch: bool,
 ) -> NextAfterSignIn {
     next_after_sign_in(requires_2fa, vault_unlocked, reauthenticated, account_mismatch)
+}
+
+/// The board's words for a 2FA verify error. The TSX shows this verbatim.
+#[tauri::command]
+pub(crate) fn auth_two_factor_error(code: String) -> String {
+    two_factor_error(&code).to_string()
+}
+
+/// The board's words for a recovery-phrase error. The TSX shows this verbatim.
+#[tauri::command]
+pub(crate) fn auth_phrase_error(code: String) -> String {
+    phrase_error(&code).to_string()
+}
+
+/// The board's words for an approve error. The TSX shows this verbatim.
+#[tauri::command]
+pub(crate) fn auth_approve_error_text(code: String) -> String {
+    approve_error(&code).to_string()
+}
+
+/// The board's words for a device-request status. The TSX shows this verbatim.
+#[tauri::command]
+pub(crate) fn auth_device_status_text(status: String) -> String {
+    device_status_text(&status).to_string()
 }
 
 #[cfg(test)]
@@ -362,22 +499,27 @@ mod tests {
 
     #[test]
     fn decide_gate_signed_out() {
-        assert_eq!(decide_gate(false, false, false), GateState::SignedOut);
+        assert_eq!(decide_gate(false, false, false, false), GateState::SignedOut);
     }
 
     #[test]
-    fn decide_gate_locked() {
-        assert_eq!(decide_gate(true, false, false), GateState::Locked);
+    fn decide_gate_locked_with_key() {
+        assert_eq!(decide_gate(true, false, true, false), GateState::Locked);
+    }
+
+    #[test]
+    fn decide_gate_needs_recovery_phrase() {
+        assert_eq!(decide_gate(true, false, false, false), GateState::NeedsRecoveryPhrase);
     }
 
     #[test]
     fn decide_gate_no_plan() {
-        assert_eq!(decide_gate(true, true, true), GateState::NoPlan);
+        assert_eq!(decide_gate(true, true, false, true), GateState::NoPlan);
     }
 
     #[test]
     fn decide_gate_ready() {
-        assert_eq!(decide_gate(true, true, false), GateState::Ready);
+        assert_eq!(decide_gate(true, true, false, false), GateState::Ready);
     }
 
     #[test]
@@ -404,5 +546,102 @@ mod tests {
     fn has_no_plan_with_status_none() {
         assert!(has_no_plan(None, None, Some("none"), None));
         assert!(!has_no_plan(None, None, Some("active"), None));
+    }
+
+    // ── Two-factor error mapping ────────────────────────────────────────
+
+    #[test]
+    fn two_factor_wrong_code() {
+        assert!(two_factor_error("invalid_credentials").contains("didn\u{2019}t work"));
+        assert!(two_factor_error("Invalid authentication code").contains("didn\u{2019}t work"));
+    }
+
+    #[test]
+    fn two_factor_expired() {
+        assert!(two_factor_error("No pending two-factor sign-in").contains("expired"));
+        assert!(two_factor_error("partial token expired").contains("expired"));
+    }
+
+    #[test]
+    fn two_factor_offline() {
+        assert!(two_factor_error("offline").contains("offline"));
+        assert!(two_factor_error("network error: timeout").contains("offline"));
+    }
+
+    #[test]
+    fn two_factor_rate_limited() {
+        assert!(two_factor_error("rate_limited:30").contains("Too many"));
+    }
+
+    #[test]
+    fn two_factor_other() {
+        assert!(two_factor_error("unknown_server_error").contains("didn\u{2019}t finish"));
+    }
+
+    // ── Phrase error mapping ────────────────────────────────────────────
+
+    #[test]
+    fn phrase_wrong() {
+        assert!(phrase_error("Incorrect recovery phrase").contains("doesn\u{2019}t open"));
+    }
+
+    #[test]
+    fn phrase_too_many() {
+        assert!(phrase_error("Too many tries").contains("Wait an hour"));
+        assert!(phrase_error("too many requests").contains("Wait an hour"));
+    }
+
+    #[test]
+    fn phrase_offline() {
+        assert!(phrase_error("offline").contains("offline"));
+    }
+
+    #[test]
+    fn phrase_no_session() {
+        assert!(phrase_error("Sign in before unlocking the vault.").contains("Sign in before"));
+    }
+
+    #[test]
+    fn phrase_other() {
+        assert!(phrase_error("reqwest build: something").contains("didn\u{2019}t finish"));
+    }
+
+    // ── Device status text ──────────────────────────────────────────────
+
+    #[test]
+    fn device_status_denied() {
+        assert!(device_status_text("denied").contains("denied"));
+    }
+
+    #[test]
+    fn device_status_expired() {
+        assert!(device_status_text("expired").contains("5 minutes"));
+    }
+
+    #[test]
+    fn device_status_keys_did_not_arrive() {
+        assert!(device_status_text("keys_did_not_arrive").contains("didn\u{2019}t arrive"));
+    }
+
+    // ── Approve error ───────────────────────────────────────────────────
+
+    #[test]
+    fn approve_not_found() {
+        assert!(approve_error("request_not_found").contains("could not find"));
+    }
+
+    #[test]
+    fn approve_wrong_password() {
+        assert!(approve_error("invalid_credentials").contains("isn\u{2019}t right"));
+    }
+
+    #[test]
+    fn approve_hello_unavailable() {
+        assert!(approve_error("hello_unavailable").contains("isn\u{2019}t set up"));
+    }
+
+    #[test]
+    fn approve_offline() {
+        assert!(approve_error("offline").contains("offline"));
     }
 }
