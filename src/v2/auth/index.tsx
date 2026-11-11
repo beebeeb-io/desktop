@@ -71,7 +71,13 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   /** Decide the next screen from a sign-in outcome. The decision lives in Rust (auth_v2::gate). */
   const settle = useCallback(async (outcome: LoginOutcome) => {
     const r = await nextAfterSignIn(outcome)
-    const next = r.ok ? r.value : 'recovery_phrase'
+    if (!r.ok) {
+      // An invoke failure is an error, not the phrase screen (P1-1 review: no silent fallback).
+      setProblem({ kind: 'other' })
+      setProblemMessage('Sign-in didn’t finish. Nothing was unlocked. Try again.')
+      return
+    }
+    const next = r.value
     if (next === 'two_factor') { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('two-factor'); return }
     if (next === 'recovery_phrase') { setScreen('phrase'); return }
     // drive, reauthenticated
@@ -213,7 +219,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
       return (
         <SignInView
           continueAs={continueAs} email={email} password={password} busy={busy} problem={problem} waitSeconds={wait} passkeyPrompt={passkeyPrompt}
-          onEmail={(v) => { setEmail(v); if (problem?.kind !== 'rate-limited') setProblem(null) }}
+          onEmail={(v) => { setEmail(v); if (problem?.kind !== 'rate_limited') setProblem(null) }}
           onPassword={setPassword}
           onSubmit={() => void submit()}
           onContinueAs={() => setScreen('continue-as')}

@@ -64,13 +64,14 @@ export interface SignInProblemDto {
 export const signInProblem = (code: string, consecutiveFailures: number): Promise<CommandResult<SignInProblemDto>> =>
   command('auth_sign_in_problem', { code, consecutiveFailures })
 
-/** What screen follows a sign-in. The decision lives in Rust (auth_v2::gate::next_after_sign_in). */
+/** What screen follows a sign-in. The decision lives in Rust (auth_v2::gate::next_after_sign_in).
+ *  Keys are camelCase (Tauri's invoke convention for snake_case Rust params). */
 export const nextAfterSignIn = (outcome: LoginOutcome): Promise<CommandResult<string>> =>
   command('auth_next_after_sign_in', {
-    requires_2fa: outcome.requires_2fa,
-    vault_unlocked: outcome.vault_unlocked,
+    requires2fa: outcome.requires_2fa,
+    vaultUnlocked: outcome.vault_unlocked,
     reauthenticated: outcome.reauthenticated,
-    account_mismatch: outcome.account_mismatch !== null,
+    accountMismatch: outcome.account_mismatch !== null,
   })
 
 /** The board's words for a 2FA verify error. */
