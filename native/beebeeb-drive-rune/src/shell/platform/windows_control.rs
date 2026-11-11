@@ -248,11 +248,12 @@ fn pipe_security(pipe: &Handle) -> Result<(String, Option<Vec<AccessEntry>>), St
             &mut descriptor,
         )
     };
+    // Whatever the call allocated is freed when this function returns, on every path (a
+    // failure too); `owner` and `dacl` are not used after that.
+    let _descriptor = (!descriptor.is_null()).then(|| LocalMem(descriptor));
     if status != ERROR_SUCCESS || descriptor.is_null() {
         return Err(format!("GetSecurityInfo failed: Win32 error {status}"));
     }
-    // Freed when this function returns, on every path; `owner` and `dacl` are not used after.
-    let _descriptor = LocalMem(descriptor);
     // SAFETY: `owner` is null or points into the descriptor, alive until the function returns.
     let owner = unsafe { sid_text(owner) }.map_err(|e| format!("the pipe's owner: {e}"))?;
     if dacl.is_null() {
