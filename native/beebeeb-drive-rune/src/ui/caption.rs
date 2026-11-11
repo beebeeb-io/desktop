@@ -31,7 +31,7 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
             // Sidebar-coloured left portion
             row()
                 .key("caption-left")
-                .w(210.0) // sidebar width minus some padding
+                .w(220.0) // sidebar width (board: 220px)
                 .h(TITLEBAR_H)
                 .fill(t.sidebar_bg)
                 .pl(insets.leading + space::MD)

@@ -376,6 +376,7 @@ dependencies = [
  "rune",
  "rune-kit",
  "rune-notify",
+ "serde_json",
 ]
 
 [[package]]

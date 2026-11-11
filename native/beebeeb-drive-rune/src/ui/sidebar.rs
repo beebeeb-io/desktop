@@ -13,7 +13,8 @@ use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, space, type_};
 use rune::{Color, El, col, el, icon, row, text};
 
-const SIDEBAR_W: f32 = 210.0;
+/// Board: sidebar element is 220px wide (from golden/DW-0401.json: sidebar w=220).
+const SIDEBAR_W: f32 = 220.0;
 
 /// Which sidebar section is active.
 #[derive(Clone, Copy, PartialEq, Eq)]

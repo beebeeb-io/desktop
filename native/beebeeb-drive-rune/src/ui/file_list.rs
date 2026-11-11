@@ -18,11 +18,13 @@ use chrono::Timelike;
 use rune::{Color, Cx, El, col, el, icon, row, text};
 use std::borrow::Cow;
 
-const ROW_H: f32 = 32.0;
+/// Board: rows are 30px tall (y=119,149,179... spacing 30).
+const ROW_H: f32 = 30.0;
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
 const COL_SHARED_W: f32 = 92.0;
-const COL_PC_W: f32 = 48.0;
+/// Board: PC column is 34px wide (x=941, 34px).
+const COL_PC_W: f32 = 34.0;
 
 /// Column headers row.
 pub fn column_headers(t: &Theme) -> El {

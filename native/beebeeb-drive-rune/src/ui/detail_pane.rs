@@ -16,7 +16,8 @@ use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, space, type_};
 use rune::{El, col, el, icon, row, text};
 
-const PANE_W: f32 = 268.0;
+/// Board: detail pane is 284px wide (from golden/DW-0401.json: detail-pane w=284).
+const PANE_W: f32 = 284.0;
 const PREVIEW_H: f32 = 170.0;
 
 pub fn detail_pane(item: Option<&DriveItem>, t: &Theme) -> El {

@@ -137,7 +137,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     // Assemble toolbar
     row()
         .key("toolbar")
-        .h(40.0)
+        .h(46.0) // Board: toolbar h=46 (y=33 to y=79)
         .w_full()
         .fill(t.bg)
         .pl(space::LG)
