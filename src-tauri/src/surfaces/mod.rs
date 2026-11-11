@@ -36,7 +36,7 @@ pub mod anchor;
 pub mod blur_guard;
 pub mod failure;
 pub mod launch;
-pub mod phase;
+pub use beebeeb_engine::surfaces::phase;
 pub mod policy;
 pub mod registry;
 pub mod window_state;

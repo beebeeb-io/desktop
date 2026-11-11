@@ -5,7 +5,7 @@
 // The include also re-exports the production migration entry point, which only the lib calls.
 #![allow(unused_imports)]
 
-#[path = "../src/keychain.rs"]
+#[path = "../../crates/beebeeb-engine/src/keychain.rs"]
 mod keychain;
 
 use keychain::{AuthSecretStore, AuthStoreError, AuthVault, SecretBytes, SessionToken, VaultLockState};
