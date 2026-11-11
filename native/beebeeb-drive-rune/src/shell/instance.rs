@@ -28,6 +28,8 @@ pub const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 pub const OPEN_LINK_FLAG: &str = "--open-link";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
+/// Development only: the frame gate's element export (`ui::gate::run_from_args`).
+pub const GATE_EXPORT_FLAG: &str = "--gate-export";
 
 /// Whether this build honours development and diagnostic flags (Rune's `--snap`, `--out`,
 /// `--html`, `--script`, …, and `--db`): debug builds, and release builds made with the
@@ -56,7 +58,8 @@ pub struct Launch {
 /// Rune's headless tooling flags (`crates/rune/src/tooling/args.rs`). Only these make a run a
 /// renderer, and only in a dev build: an unknown flag must never switch off the single
 /// instance or the profile check.
-const TOOLING_FLAGS: [&str; 24] = [
+const TOOLING_FLAGS: [&str; 25] = [
+    GATE_EXPORT_FLAG,
     "--snap",
     "--tree",
     "--script",
@@ -331,6 +334,7 @@ mod tests {
             &["--script", "C:\\s.json"],
             &["--db", "C:\\state.db"],
             &["--feedback-dir", "C:\\f"],
+            &["--gate-export", "C:\\g.json", "--scene", "DW-0401"],
             &["--video", "v.mp4"],
             &["--tree", "t.json"],
             &["--list-windows"],

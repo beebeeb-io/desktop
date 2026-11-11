@@ -23,6 +23,8 @@ pub struct State {
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
     pub(crate) show_detail_pane: bool,
+    /// What the Files window keeps beside the listing (`ui::FilesUi`).
+    pub(crate) files: crate::ui::FilesUi,
     /// The shell: the route machine, the gate, the b, the actions (`shell/host.rs`).
     pub shell: Shell,
     // --- one line per frame group below ---
@@ -38,7 +40,7 @@ pub fn init_with(shell: Shell) -> State {
 }
 
 /// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
-pub(crate) fn load(source: &dyn DriveSource, folder_id: Option<&str>) -> (Listing, Option<source::SourceError>) {
+pub fn load(source: &dyn DriveSource, folder_id: Option<&str>) -> (Listing, Option<source::SourceError>) {
     match source.list(folder_id) {
         Ok(listing) => (listing, None),
         Err(error) => {
@@ -74,6 +76,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,
+        files: crate::ui::FilesUi::default(),
         shell,
     }
 }

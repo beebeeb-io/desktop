@@ -10,7 +10,9 @@ name: Desktop CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # The long-lived base branches: their pushes are the only runs that SAVE the Rust dependency cache, which
+    # every pull request against them restores (.github/actions/rust-suite).
+    branches: [main, v2-next, v2-native]
 
 permissions:
   contents: read
@@ -54,9 +56,53 @@ jobs:
       - name: Lint
         run: bun run lint
 
+  # Which areas the change touches (scripts/ci-changed-areas.py; it fails open). A pull request that changes only
+  # docs, design files or the native UI crates does not run the Tauri engine suite: the three Rust jobs are then
+  # SKIPPED, and a skipped job satisfies a required check, so the job names below still report. A push runs everything.
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.areas.outputs.rust }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+          # A pull request is checked out as its merge commit: parent 1 is the base, so two commits hold the diff.
+          fetch-depth: 2
+
+      - name: Classifier self-test
+        run: python3 scripts/ci-changed-areas.py --self-test
+
+      - name: Classify the changed paths
+        id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          list="$RUNNER_TEMP/changed-paths.txt"
+          : > "$list"
+          # Only a pull request's merge commit (two parents) gives a trustworthy list; anything else leaves the
+          # list empty, and an empty list runs every area.
+          if [ "$EVENT_NAME" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
+            # --no-renames: a file moved out of src-tauri into docs/ must be listed under its old path too.
+            git diff --name-only --no-renames HEAD^1 HEAD > "$list" || : > "$list"
+          fi
+          echo "changed paths: $(wc -l < "$list")"
+          python3 scripts/ci-changed-areas.py "$list" | tee -a "$GITHUB_OUTPUT"
+
+  # The three Rust jobs share .github/actions/rust-suite: compile every target ONCE, run the tests, assert the
+  # counted truth line, upload the evidence. `runs-on` reads a repository variable, so a job moves to a self-hosted
+  # runner without a code change; a pull request from a fork always stays on a GitHub-hosted runner
+  # (docs/ci/self-hosted-runners.md: that expression is a convenience, the security is the repository setting).
+  # `needs.changes.outputs.rust != 'false'`: the suite is skipped only when the classifier positively said so; a
+  # failed or cancelled classifier runs it.
   rust-linux:
     name: Rust test (Linux)
-    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'ubuntu-latest') || vars.RUST_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -64,7 +110,9 @@ jobs:
         with:
           persist-credentials: false
 
+      # A self-hosted runner has these installed once (docs/ci/self-hosted-runners.md) and has no sudo.
       - name: Install Linux dependencies
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -75,53 +123,54 @@ jobs:
             libfuse2 \
             libfuse-dev
 
+      - name: Rust suite
+        uses: ./.github/actions/rust-suite
+        with:
+          evidence-name: rust-test-linux
+          cache-key: desktop-linux
+
+  # The native updater (crates/beebeeb-updater): its rules decide what an install will run, so a pull request that
+  # weakens one fails here, not at the next release. The count line is asserted: a run without tests is a failure.
+  updater:
+    name: Updater crate (tests, Windows check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          workspaces: src-tauri
+          targets: x86_64-pc-windows-msvc
+          components: clippy
 
-      - name: Test count guard self-test
-        run: python scripts/assert-cargo-test-counts.py --self-test
-
-      - name: Run Rust tests
-        working-directory: src-tauri
-        env:
-          # Keep the app's config/lock files out of the runner's real home.
-          XDG_CONFIG_HOME: ${{ runner.temp }}/beebeeb-xdg-config
-          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+      - name: Test, lint and cross-check
+        working-directory: crates/beebeeb-updater
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
-          cargo_exit=0
-          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
-          cat "$RUNNER_TEMP/cargo-test.log"
-          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
+          cargo clippy --locked --all-targets --features net -- -D warnings
+          cargo check --locked --features net --target x86_64-pc-windows-msvc
+          test "$(cargo tree --locked -e normal --features net | grep -c tauri)" -eq 0
 
-      - name: Upload Rust test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-test-linux
-          path: |
-            ${{ runner.temp }}/cargo-test.log
-            ${{ runner.temp }}/cargo-test.exit
+      - name: Release script self-tests
+        run: |
+          set -euo pipefail
+          bash scripts/publish-release-files.sh --self-test
+          bash scripts/native-release-ref-check.sh --self-test
 
-  rust-check:
-    name: Rust check (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-          - name: macOS
-            os: macos-latest
+  # The updater's Windows-only rules (the staged installer is held so that nothing can replace it between the check
+  # and the start) exist only under cfg(windows): they are tested where they exist. Each test is named, so a run in
+  # which they were filtered out or compiled away is a failure. A hosted runner, no secret, no environment.
+  updater-windows:
+    name: Updater crate (Windows-only tests)
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -131,66 +180,62 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - name: Test on Windows
+        working-directory: crates/beebeeb-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test-windows.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test-windows.log"
+          for name in \
+            'host::tests::a_held_installer_cannot_be_written_replaced_renamed_or_deleted' \
+            'machine_tests::the_staged_file_cannot_be_replaced_between_the_check_and_the_start'; do
+            grep -Fxq "test $name ... ok" "$RUNNER_TEMP/updater-test-windows.log" || { echo "::error::$name did not run"; exit 1; }
+          done
+
+  # Windows and macOS are two jobs, not a matrix: a skipped matrix job reports under its unexpanded name and would
+  # leave the required "Rust check (Windows)" / "Rust check (macOS)" checks waiting for ever.
+  # Task 2272 / 2271: macOS runs the tests too. The 0.8.18 release found a macOS-only test failure on the
+  # maintainer's Mac that this job would have caught.
+  rust-windows:
+    name: Rust check (Windows)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'windows-latest') || vars.RUST_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
-          workspaces: src-tauri
+          persist-credentials: false
 
-      - name: Test count guard self-test
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        shell: bash
-        run: |
-          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          "$py" scripts/assert-cargo-test-counts.py --self-test
-
-      - name: Cargo check
-        working-directory: src-tauri
-        shell: bash
-        run: |
-          check_exit=0
-          CARGO_TERM_COLOR=never cargo check --locked --all-targets > "$RUNNER_TEMP/cargo-check.log" 2>&1 || check_exit=$?
-          cat "$RUNNER_TEMP/cargo-check.log"
-          echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
-          exit "$check_exit"
-
-      # Task 2272 / 2271: macOS runs the tests too, not only `cargo check`. The 0.8.18 release found a macOS-only test
-      # failure on the maintainer's Mac that this job would have caught.
-      - name: Run Rust tests
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        working-directory: src-tauri
-        shell: bash
-        env:
-          # Config/cache live in the disposable runner's profile (Windows Known Folders, macOS
-          # ~/Library); keep temporary test files in their own directory. TEMP/TMP are Windows',
-          # TMPDIR is macOS'.
-          TEMP: ${{ runner.temp }}/beebeeb-tmp
-          TMP: ${{ runner.temp }}/beebeeb-tmp
-          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
-        run: |
-          mkdir -p "$TEMP"
-          cargo_exit=0
-          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
-          cat "$RUNNER_TEMP/cargo-test.log"
-          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
-
-      - name: Upload Rust evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Rust suite
+        uses: ./.github/actions/rust-suite
         with:
-          name: rust-${{ matrix.name }}
-          path: |
-            ${{ runner.temp }}/cargo-check.log
-            ${{ runner.temp }}/cargo-check.exit
-            ${{ runner.temp }}/cargo-test.log
-            ${{ runner.temp }}/cargo-test.exit
+          evidence-name: rust-Windows
+          cache-key: desktop-windows
+
+  rust-macos:
+    name: Rust check (macOS)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-latest') || vars.RUST_MACOS_RUNNER || 'macos-latest' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Rust suite
+        uses: ./.github/actions/rust-suite
+        with:
+          evidence-name: rust-macOS
+          cache-key: desktop-macos
 
   fileprovider-swift:
     # Task 1670 issue 3: until this job existed, NO CI step compiled the File
-    # Provider extension's Swift (rust-check only runs `cargo check`; the
+    # Provider extension's Swift (the Rust jobs compile no Swift; the
     # extension was first built at release time, on a developer's Mac). It now
     # compiles on every PR, unsigned and without secrets, and runs the pure
     # Foundation framing tests with a COUNTED truth line.

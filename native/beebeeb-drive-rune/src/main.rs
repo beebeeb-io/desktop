@@ -2,11 +2,12 @@
 //!
 //! This file is the entry point and nothing else: it names the crate's modules and hands over
 //! to the shell. Everything about lifetime, windows, the tray and routing is in `shell/`
-//! (`src/shell/README.md`); the root state is `shell::state::State`.
+//! (`src/shell/README.md`); the root state is `shell::state::State`; the Files window
+//! (DW-0401) is `ui/` (`ui::window::files_window`), registered in `shell/registry.rs`.
 //!
 //! ```sh
 //! cargo run -p beebeeb-drive-rune
-//! cargo run -p beebeeb-drive-rune -- --snap DW-0401.png --size 1280x800 --scale 2 --theme light
+//! cargo run -p beebeeb-drive-rune -- --snap DW-0401.png --scene DW-0401 --size 1280x800 --scale 2
 //! ```
 //!
 //! Lanes: add ONE `mod` line for your module below, in alphabetical order, and nothing else.
@@ -21,8 +22,9 @@ mod theme;
 mod ui;
 
 // `ui/**` names these at the crate root.
-pub use shell::TITLEBAR_H;
-pub use shell::state::State;
+pub use shell::registry::view;
+pub use shell::state::{State, init, load};
+pub use shell::{FAMILIES, FONTS, TITLEBAR_H};
 
 fn main() {
     shell::run();

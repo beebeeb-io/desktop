@@ -64,26 +64,25 @@ use state::State;
 
 /// Titlebar height in points — the single source of truth used by both
 /// `App::titlebar` and `ui::caption::caption_bar`.
-/// Board: brand/caption area is 33px (sidebar starts at y=33, toolbar at y=33).
-pub const TITLEBAR_H: f32 = 33.0;
+/// Board: `.kit-wincap { height: 32px }`.
+pub const TITLEBAR_H: f32 = 32.0;
 
+pub const FAMILIES: (&str, &str) = ("Inter", "JetBrains Mono");
 /// Inter (sans) + JetBrains Mono (mono), bundled as TTF.
 pub static FONTS: &[&[u8]] = &[
-    include_bytes!("../../assets/fonts/inter-latin-400-normal.ttf"),
-    include_bytes!("../../assets/fonts/inter-latin-500-normal.ttf"),
-    include_bytes!("../../assets/fonts/inter-latin-600-normal.ttf"),
-    include_bytes!("../../assets/fonts/inter-latin-700-normal.ttf"),
+    // Inter, variable (optical size 14-32, weight 100-900): the build the board draws with, so
+    // the wordmark's optical size and the 650 weights are the board's.
+    include_bytes!("../../assets/fonts/inter-latin-variable-opsz-wght.ttf"),
     include_bytes!("../../assets/fonts/jetbrains-mono-latin-400-normal.ttf"),
     include_bytes!("../../assets/fonts/jetbrains-mono-latin-500-normal.ttf"),
     include_bytes!("../../assets/fonts/jetbrains-mono-latin-600-normal.ttf"),
 ];
-const FAMILIES: (&str, &str) = ("Inter", "JetBrains Mono");
 
-/// Named states for headless renders (`--scene NAME`). The first three are DW-0401's; the
-/// rest put the route machine somewhere, so a frame lane can render its group before any
-/// navigation exists.
-type Scene = (&'static str, fn(&mut State));
-const SCENES: &[Scene] = &[
+/// Named states for headless renders (`--snap out.png --scene NAME`) and the frame gate
+/// (`scripts/compare.sh DW-0401`): one per board frame, by its frame id, and the ones that put
+/// the route machine somewhere, so a frame lane can render its group before any navigation
+/// exists.
+const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("light", |_| {}),
     ("dark", |_| {}),
     ("large-folder", |s| {
@@ -93,6 +92,7 @@ const SCENES: &[Scene] = &[
         s.selected = None;
         s.show_detail_pane = false;
     }),
+    ("DW-0401", |_| {}),
     ("shared", |s| scene(s, Event::Navigate(Route::section(Section::Shared)))),
     ("photos", |s| scene(s, Event::Navigate(Route::section(Section::Photos)))),
     ("backups", |s| {
@@ -154,6 +154,14 @@ fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>) -> platfo
 pub fn run() {
     let identity = AppIdentity::CURRENT;
     let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD);
+    // `--gate-export out.json --scene DW-0401 [--theme dark] [--size 1278x798]`: the frame gate's
+    // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
+    if launch.tooling
+        && launch.rune_args.iter().any(|arg| arg == instance::GATE_EXPORT_FLAG)
+        && let Some(code) = crate::ui::gate::run_from_args(SCENES, state::init, registry::view, FONTS, FAMILIES)
+    {
+        std::process::exit(code);
+    }
     let platform = platform::current();
     // The engine lane replaces this with the real engine; nothing else in `run` changes.
     let engine: Arc<dyn EngineActions> = Arc::new(FixtureEngine::ready());

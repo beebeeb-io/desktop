@@ -32,7 +32,7 @@ Modules 48–97, sorted by path.
 | `no_fetch_scope.rs` | Task 2284 A1.2: the no-fetch scope. | — |
 | `open_folder_tests.rs` | (no //! header) | — |
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
-| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (5), Probe (5), Tally (10), Verdict (2), Outcome (4), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
+| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (5), Probe (5), Tally (10), Verdict (3), Outcome (4), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
 | `owner_backfill_tests.rs` | (no //! header) | — |
 | `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | AccountScope (4), normalize_wrap, OwnedKeyRecord (12), blocked_name |
 | `passkey_commands.rs` | v2 B15: the four passkey commands (crypto review 2026-11-08, rule 6), thin wrappers over core's passkey flows (`beebeeb_core::passkey`). | — |

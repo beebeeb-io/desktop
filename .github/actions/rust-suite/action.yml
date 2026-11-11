@@ -1,0 +1,127 @@
+name: Rust suite
+description: >
+  Compile every target of one Rust crate once and run its tests in the same cargo invocation, with the counted truth line
+  (scripts/assert-cargo-test-counts.py) and the evidence upload. One job per crate and OS calls this;
+  a new crate is one more job of a few lines (docs/ci/2026-11-11-rust-ci-speed.md, "Adding a crate").
+
+inputs:
+  crate-dir:
+    description: Directory holding the crate's Cargo.toml.
+    default: src-tauri
+  evidence-name:
+    description: Name of the uploaded evidence artifact.
+    required: true
+  cache-key:
+    description: Shared key of the dependency cache (one per crate and OS).
+    required: true
+  test-threads:
+    description: >
+      libtest threads; empty = libtest's default (one per core). More threads than cores is faster (the suite waits
+      far more than it computes) but NOT safe on a small runner: with 16 threads on the 3-core macOS runner a
+      real-time test saw a 15 s stall and failed. Set it only for a runner with cores to spare.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+    # Before the cache step: the cache key includes the CARGO_* settings.
+    - name: Build settings and test directories
+      shell: bash
+      run: |
+        # GitHub-hosted: no debuginfo and nothing incremental (every run starts from the cache). CI sets no
+        # RUST_BACKTRACE, so debuginfo was never read there; a failed test still prints its own file:line (that
+        # comes from the panic location, not from debuginfo). Measured on a clean build: 79 s and a 141 MB test
+        # binary without it, 117 s and 781 MB with it. A self-hosted runner keeps cargo's defaults: its target
+        # directory is kept, so incremental compilation is what makes it fast.
+        if [ "${{ runner.environment }}" = github-hosted ]; then
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        fi
+        if [ -n "${{ inputs.test-threads }}" ]; then echo "RUST_TEST_THREADS=${{ inputs.test-threads }}" >> "$GITHUB_ENV"; fi
+        # Temporary test files (hundreds of SQLite databases, one fsync per commit) go to memory on Linux.
+        # Config stays out of the runner's real home there. TEMP/TMP are Windows', TMPDIR is Linux' and macOS'.
+        tmp="$RUNNER_TEMP/beebeeb-tmp"
+        if [ "$RUNNER_OS" = Linux ] && [ -d /dev/shm ] && [ -w /dev/shm ]; then
+          tmp="/dev/shm/beebeeb-tmp-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+        fi
+        mkdir -p "$tmp"
+        if [ "$RUNNER_OS" = Windows ]; then tmp="$(cygpath -w "$tmp")"; fi
+        { echo "TMPDIR=$tmp"; echo "TEMP=$tmp"; echo "TMP=$tmp"; echo "BB_TEST_TMP=$tmp"; } >> "$GITHUB_ENV"
+        if [ "$RUNNER_OS" = Linux ]; then
+          mkdir -p "$RUNNER_TEMP/beebeeb-xdg-config"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/beebeeb-xdg-config" >> "$GITHUB_ENV"
+        fi
+        # Windows: `python` (python3 can be the Store stub there); elsewhere python3.
+        if [ "$RUNNER_OS" = Windows ]; then echo "BB_PY=python" >> "$GITHUB_ENV"; else echo "BB_PY=python3" >> "$GITHUB_ENV"; fi
+
+    # GitHub-hosted only: a self-hosted runner keeps its own warm CARGO_TARGET_DIR (docs/ci/self-hosted-runners.md).
+    # Saved only by pushes to a base branch: a pull request restores its base branch's cache and never writes a
+    # 1 GB copy of its own. `cache-on-failure`: a red test run still leaves the compiled dependencies behind.
+    - name: Cache cargo
+      if: runner.environment == 'github-hosted'
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        workspaces: ${{ inputs.crate-dir }}
+        shared-key: ${{ inputs.cache-key }}
+        save-if: ${{ github.event_name == 'push' }}
+        cache-on-failure: true
+
+    - name: Test count guard self-test
+      shell: bash
+      run: |
+        "$BB_PY" scripts/assert-cargo-test-counts.py --self-test
+        "$BB_PY" scripts/assert-test-build-covers-all-targets.py --self-test
+
+    # There is no separate `cargo check --all-targets` step: it compiled the crate a second time. The test build
+    # compiles the library, the binaries, the examples and every test target (measured: the same 8 units); only a
+    # bench target would be left out, so this guard fails the job the day the crate gets one.
+    - name: The test build covers every target
+      shell: bash
+      working-directory: ${{ inputs.crate-dir }}
+      run: |
+        cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+        "$BB_PY" "$GITHUB_WORKSPACE/scripts/assert-test-build-covers-all-targets.py" "$RUNNER_TEMP/cargo-metadata.json"
+
+    # ONE cargo invocation compiles every target and runs the tests. Two invocations (a `--no-run` build, or the old
+    # `cargo check`, and then `cargo test`) compile the crate a second time on every fresh build: Tauri's
+    # `generate_context!` rewrites an embedded asset in OUT_DIR while the library's two units compile, so the next
+    # cargo invocation finds one of them dirty (measured: 55 s Linux, 47 s macOS, 88 s Windows of pure repeat).
+    # A compile error leaves no test result, which the count guard reports as red.
+    - name: Compile every target and run the tests
+      shell: bash
+      working-directory: ${{ inputs.crate-dir }}
+      run: |
+        cargo_exit=0
+        started=$(date +%s)
+        CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
+        total=$(( $(date +%s) - started ))
+        cat "$RUNNER_TEMP/cargo-test.log"
+        echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
+        # A composite action is ONE step in the job's timing, so the phases are reported here (and in the evidence).
+        {
+          echo "rust-suite timing: compile + tests $total s (cargo exit $cargo_exit)"
+          grep -E '^ *Finished .* in ' "$RUNNER_TEMP/cargo-test.log" | sed 's/^ */rust-suite compile line: /' || true
+          grep '^test result:' "$RUNNER_TEMP/cargo-test.log" | sed 's/^/rust-suite truth line: /' || true
+        } > "$RUNNER_TEMP/rust-suite-timing.txt"
+        cat "$RUNNER_TEMP/rust-suite-timing.txt"
+        cat "$RUNNER_TEMP/rust-suite-timing.txt" >> "$GITHUB_STEP_SUMMARY"
+        "$BB_PY" "$GITHUB_WORKSPACE/scripts/assert-cargo-test-counts.py" "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+    - name: Remove temporary test files
+      if: always()
+      shell: bash
+      run: |
+        case "${BB_TEST_TMP:-}" in /dev/shm/beebeeb-tmp-*) rm -rf "$BB_TEST_TMP" ;; esac
+
+    - name: Upload Rust evidence
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.evidence-name }}
+        path: |
+          ${{ runner.temp }}/cargo-test.log
+          ${{ runner.temp }}/cargo-test.exit
+          ${{ runner.temp }}/rust-suite-timing.txt
