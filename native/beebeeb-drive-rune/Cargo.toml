@@ -1,0 +1,23 @@
+[package]
+name = "beebeeb-drive-rune"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Rune needs Rust 1.99.1 (edition 2024 + language features it uses).
+# The desktop repo's src-tauri/ pins to "stable" (currently 1.98.1 on this machine).
+# This crate is a sibling, not a workspace member of src-tauri/, so it gets its own toolchain.
+# During the migration both shells build side by side.
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-features = false, features = ["accessibility"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
+rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+# For headless golden-PNG tests.
+
+[[bin]]
+name = "beebeeb-drive"
+path = "src/main.rs"
