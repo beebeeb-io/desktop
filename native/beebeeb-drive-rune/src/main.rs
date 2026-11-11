@@ -338,6 +338,27 @@ mod tests {
         assert!(rt.find("detail-pane").is_some(), "detail-pane exists");
     }
 
+    /// Dark-mode render: same as light-mode but with system_dark=true.
+    /// Verifies the dark theme path produces the same structural elements
+    /// without panic. Brief constraint: "render dark too".
+    #[test]
+    fn view_renders_dark_without_panic() {
+        let env = Env {
+            system_dark: true,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new(init(), view, (1280.0, 800.0), env);
+        rt.frame(0.0);
+
+        // Same structural assertions as light mode
+        for section in &["Files", "Shared", "Photos", "Backups", "Trash"] {
+            assert!(rt.find(section).is_some(), "dark sidebar section '{section}' exists");
+        }
+        assert!(rt.find("file-list").is_some(), "dark file-list exists");
+        assert!(rt.find("detail-pane").is_some(), "dark detail-pane exists");
+        assert!(rt.find("b-mark").is_some(), "dark b-mark exists");
+    }
+
     #[test]
     fn arrow_down_moves_selection() {
         let mut state = init();
