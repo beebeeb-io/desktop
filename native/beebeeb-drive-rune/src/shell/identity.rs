@@ -85,8 +85,20 @@ impl AppIdentity {
         self.bundle_identifier()
     }
 
-    /// The control channel's name (`control.rs`); the platform adds the user to it. It is also
-    /// the single-instance lock: one server per identity and user.
+    /// The folder (under the local data dir) that holds the live feedback mode's inbox. The
+    /// feature exists only in test builds, so this is the TEST identity's folder for both: a
+    /// build that has the feature and the real identifier still never writes a note into the
+    /// real app's data folder.
+    #[cfg(feature = "feedback")]
+    pub const fn feedback_dir_id(self) -> &'static str {
+        match self {
+            Self::Real | Self::Test => TEST_BUNDLE_IDENTIFIER,
+        }
+    }
+
+    /// The control channel's name (`control.rs`); the platform adds the user and the Windows
+    /// session to it. It is also the single-instance lock: one server per identity, user AND
+    /// session; exclusivity across sessions comes from the engine/profile lock (not linked yet).
     pub const fn control_channel(self) -> &'static str {
         match self {
             Self::Real => "io.beebeeb.app.control",

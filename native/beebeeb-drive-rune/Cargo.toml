@@ -20,12 +20,17 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 serde_json = "1"
 # Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
 png = "0.18"
+# Only for the `feedback` feature: names the surface format and device types of the capture;
+# the same wgpu rune already builds (no new crate is compiled).
+wgpu = { version = "30", default-features = false, optional = true }
 
 [features]
 # Development and diagnostic flags in a RELEASE build (Rune's `--snap`, `--out`, `--html`,
 # `--script`, …, and `--db`). Debug builds have them without it. A shipped build is built
 # without this feature and ignores every one of them (`shell/instance.rs`: `DEV_BUILD`).
 dev-tools = []
+# Live feedback mode (src/feedback/): on for test builds, OFF for release.
+feedback = ["dep:wgpu"]
 
 [target.'cfg(windows)'.dependencies]
 # The same windows-sys Rune builds with: the notification-area icon, the registry Run value,

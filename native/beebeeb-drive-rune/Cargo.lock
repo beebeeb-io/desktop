@@ -551,6 +551,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "wgpu",
  "windows-sys 0.59.0",
 ]
 
