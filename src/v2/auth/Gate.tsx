@@ -13,19 +13,22 @@ import { AccountEntry } from './create/entry'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 import { usePrivateScreen } from './privateScreen'
-import { hasNoPlan } from './plan'
 
-type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
+type GateState = 'checking' | 'signed_out' | 'locked' | 'no_plan' | 'ready'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
+/** Read the gate state from Rust (auth_v2::gate). The decision lives in Rust; this is thin wiring. */
 async function readGate(): Promise<GateState> {
-  const status = await command<{ logged_in: boolean; vault_unlocked?: boolean }>('sync_status')
-  if (!status.ok) return 'ready'
-  if (!status.value.logged_in) return 'signed-out'
-  if (status.value.vault_unlocked === false) return 'locked'
+  // The subscription is only needed when unlocked; read it and pass the fields to Rust.
   const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
-  return sub.ok && hasNoPlan(sub.value) ? 'no-plan' : 'ready'
+  const result = await command<GateState>('auth_gate_state', {
+    planState: sub.ok ? (sub.value.plan_state ?? null) : null,
+    plan: sub.ok ? (sub.value.plan ?? null) : null,
+    planStatus: sub.ok ? (sub.value.status ?? null) : null,
+    quotaBytes: sub.ok ? (sub.value.quota_bytes ?? null) : null,
+  })
+  return result.ok ? result.value : 'ready'
 }
 
 export function AuthGate({ children }: { children: ReactNode }) {
@@ -43,9 +46,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [check])
   if (signedOutWarning) return <SignedOutWarning sentence={signedOutWarning} onOk={() => { setSignedOutWarning(null); check() }} />
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
-  if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
+  if (state === 'signed_out') return <AccountEntry onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
-  if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
+  if (state === 'no_plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
 }
 

@@ -50,3 +50,25 @@ export const unlockWithWindowsHello = (): Promise<CommandResult<void>> => comman
 export const unknownPhraseWords = (words: string[]): Promise<CommandResult<number[]>> => command('auth_phrase_unknown_words', { words })
 export const restoreWithPhrase = (recoveryPhrase: string): Promise<CommandResult<void>> =>
   command('desktop_unlock_with_recovery_phrase', { recoveryPhrase })
+
+// ── Task 2445: auth rules in Rust (auth_v2::gate) ──────────────────────────
+
+export interface SignInProblemDto {
+  problem: import('./model').SignInProblem
+  text: string
+  lock_note?: string
+  wait_seconds?: number
+}
+
+/** Map a sign-in error code to the board's problem and text. The decision lives in Rust. */
+export const signInProblem = (code: string, consecutiveFailures: number): Promise<CommandResult<SignInProblemDto>> =>
+  command('auth_sign_in_problem', { code, consecutiveFailures })
+
+/** What screen follows a sign-in. The decision lives in Rust (auth_v2::gate::next_after_sign_in). */
+export const nextAfterSignIn = (outcome: LoginOutcome): Promise<CommandResult<string>> =>
+  command('auth_next_after_sign_in', {
+    requires_2fa: outcome.requires_2fa,
+    vault_unlocked: outcome.vault_unlocked,
+    reauthenticated: outcome.reauthenticated,
+    account_mismatch: outcome.account_mismatch !== null,
+  })

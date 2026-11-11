@@ -4,11 +4,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CREATE_ACCOUNT_URL, openUrl } from '../../desktopApi'
 import {
-  deviceRequestCancel, deviceRequestPoll, deviceRequestStart, lastSignedInEmail, type LoginOutcome, passkeySignIn, restoreWithPhrase,
-  signIn, unknownPhraseWords, verifySecondFactor,
+  deviceRequestCancel, deviceRequestPoll, deviceRequestStart, lastSignedInEmail, type LoginOutcome, nextAfterSignIn,
+  passkeySignIn, restoreWithPhrase, signIn, signInProblem, unknownPhraseWords, verifySecondFactor,
 } from './api'
 import { AnotherDeviceView } from './AnotherDevice'
-import { problemFrom, problemText, type DeviceStatus, type SignInProblem } from './model'
+import { type DeviceStatus, type SignInProblem } from './model'
 import { ContinueAsView, PasskeyPasswordView, SignInView, type ContinueAsAccount } from './SignIn'
 import { FirstRunView, LostPhraseView, PhraseView, TwoFactorView } from './Steps'
 
@@ -37,6 +37,8 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<SignInProblem | null>(null)
+  /** The board's words for the current problem, from Rust (auth_v2::gate::problem_text). */
+  const [problemMessage, setProblemMessage] = useState<string | null>(null)
   const [wait, setWait] = useState(0)
   const failures = useRef(0)
   const [passkeyPrompt, setPasskeyPrompt] = useState(false)
@@ -65,10 +67,13 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   // Clear every secret when the flow goes away (rule 9).
   useEffect(() => () => { setPassword(''); setWords(EMPTY_WORDS) }, [])
 
-  const settle = useCallback((outcome: LoginOutcome) => {
-    if (outcome.requires_2fa) { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('two-factor'); return }
-    // A password sign-in on a PC that holds no keys continues with the 12 words (or another device, DW-A23).
-    if (!outcome.vault_unlocked && !outcome.reauthenticated) { setScreen('phrase'); return }
+  /** Decide the next screen from a sign-in outcome. The decision lives in Rust (auth_v2::gate). */
+  const settle = useCallback(async (outcome: LoginOutcome) => {
+    const r = await nextAfterSignIn(outcome)
+    const next = r.ok ? r.value : 'recovery_phrase'
+    if (next === 'two_factor') { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); setScreen('two-factor'); return }
+    if (next === 'recovery_phrase') { setScreen('phrase'); return }
+    // drive, reauthenticated
     onSignedIn()
   }, [onSignedIn])
 
@@ -81,13 +86,20 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
     if (result.ok) {
       failures.current = 0
       setPassword('')
-      settle(result.value)
+      void settle(result.value)
       return
     }
     if (/invalid/i.test(result.reason)) failures.current += 1
-    const p = problemFrom(result.reason, failures.current)
-    setProblem(p)
-    if (p.kind === 'rate-limited') setWait(p.seconds)
+    // The error mapping lives in Rust (auth_v2::gate::problem_from).
+    const r = await signInProblem(result.reason, failures.current)
+    if (r.ok) {
+      setProblem(r.value.problem)
+      setProblemMessage(r.value.text)
+      if (r.value.wait_seconds) setWait(r.value.wait_seconds)
+    } else {
+      setProblem({ kind: 'other' })
+      setProblemMessage(null)
+    }
   }, [email, password, settle])
 
   // ── Another device ──
@@ -114,7 +126,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
   const verify = useCallback(async (code: string) => {
     setTwoFactor((t) => ({ ...t, code, state: 'verifying' }))
     const r = await verifySecondFactor(code)
-    if (r.ok) { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); settle(r.value); return }
+    if (r.ok) { setTwoFactor({ mode: 'totp', code: '', state: 'idle' }); void settle(r.value); return }
     setTwoFactor((t) => ({ ...t, code: '', state: 'wrong' }))
   }, [settle])
 
@@ -141,6 +153,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
     if (r.value.vault_unlocked) { onSignedIn(); return }
     // The password screen starts clean: an earlier try's words belong to that try (DW-A30).
     setProblem(null)
+    setProblemMessage(null)
     setScreen('passkey-password')
   }, [email, onSignedIn])
 
@@ -187,7 +200,7 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
       )
     case 'passkey-password':
       // A failed Unlock is said here, in the sign-in screen's words (the view takes the error; it was never passed).
-      return <PasskeyPasswordView email={email} password={password} busy={busy} error={problem ? problemText(problem) : undefined} waitSeconds={wait} onPassword={setPassword} onUnlock={() => void submit()} />
+      return <PasskeyPasswordView email={email} password={password} busy={busy} error={problemMessage ?? undefined} waitSeconds={wait} onPassword={setPassword} onUnlock={() => void submit()} />
     default:
       return (
         <SignInView
