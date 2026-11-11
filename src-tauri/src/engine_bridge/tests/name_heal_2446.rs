@@ -107,7 +107,7 @@ async fn a_failed_snapshot_leaves_the_heal_pending_and_a_good_one_completes_it()
     store_blocked(&bridge, dir.path()).await;
 
     // Pass 1: the snapshot fails. Nothing is named, and the heal is still owed.
-    let _ = sync_tick(&bridge, dir.path()).await;
+    sync_tick_outcome_at(&bridge, dir.path(), 1_000).await.unwrap();
     assert_eq!(
         server.snapshots_asked.load(AtomicOrdering::SeqCst),
         1,
@@ -122,8 +122,9 @@ async fn a_failed_snapshot_leaves_the_heal_pending_and_a_good_one_completes_it()
         crate::owner_keys::blocked_name(FOLDER)
     );
 
-    // Pass 2: asked for again, it succeeds: both rows have their names, the child under its folder.
-    sync_tick(&bridge, dir.path()).await.unwrap();
+    // Pass 2, after the wait (`name_heal_sync_2446` pins the wait): asked for again, it succeeds: both rows have
+    // their names, the child under its folder.
+    sync_tick_outcome_at(&bridge, dir.path(), 1_060).await.unwrap();
     assert_eq!(
         server.snapshots_asked.load(AtomicOrdering::SeqCst),
         2,

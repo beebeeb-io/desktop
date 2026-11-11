@@ -640,6 +640,24 @@ pub(super) fn awaits_its_name(entry: &FileEntry) -> bool {
         || entry.path.rsplit('/').next() == Some(crate::owner_keys::blocked_name(&entry.file_id).as_str())
 }
 
+/// Task 2446 (review of PR 289): whether a row the snapshot just read is still at its blocked label although its
+/// key record is readable: an upload, a conflict or a queued change of this PC kept it there. (A rightly blocked
+/// row has a blocked record and is not waiting for anything; a row being trashed is not named again.)
+pub(super) fn waits_for_its_change(db: &StateDb, file_id: &str, stored_path: &str) -> Result<bool, EngineError> {
+    if stored_path.rsplit('/').next() != Some(crate::owner_keys::blocked_name(file_id).as_str()) {
+        return Ok(false);
+    }
+    if db
+        .get_owned_key_record(file_id)?
+        .is_some_and(|record| record.blocked_fingerprint.is_some())
+    {
+        return Ok(false);
+    }
+    Ok(db
+        .get_file(file_id)?
+        .is_some_and(|entry| entry.status != FileStatus::Trashing))
+}
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -765,10 +783,15 @@ pub(super) fn process_metadata_row(
             // (3) Pending download/upload/conflict/error — let the dedicated
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
-            // Task 2446: so is a row still waiting for its name, unless a pending upload or a conflict owns it.
+            // Task 2446: so is a row still waiting for its name, unless a pending upload or a conflict owns it, or
+            // (review of PR 289) a change made on this PC is still queued or parked for it. That change was queued
+            // at the row's place and lands there (the landing writes its op's path, `state_db/landing.rs`), so the row stays where its
+            // bytes and its change are, with its size, times and version as they were. The healing snapshot counts
+            // such a row as left (`waits_for_its_change`) and reads it again once the change is gone.
             let names_it = source == RowSource::Snapshot
                 && awaits_its_name(&entry)
-                && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict);
+                && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict)
+                && !bridge.db().has_queued_local_change(file_id)?;
             if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || names_it {
                 return apply(bridge);
             }
