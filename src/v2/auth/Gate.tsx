@@ -10,22 +10,34 @@ import { CaptionBarView } from '../chrome/CaptionBar'
 import { Toolbar } from '../chrome/Toolbar'
 import { Sidebar } from '../chrome/Sidebar'
 import { AccountEntry } from './create/entry'
+import { SignInFlow } from './index'
 import { unlockWithWindowsHello } from './api'
 import { HelloPrompt } from './parts'
 import { usePrivateScreen } from './privateScreen'
-import { hasNoPlan } from './plan'
 
-type GateState = 'checking' | 'signed-out' | 'locked' | 'no-plan' | 'ready'
+type GateState = 'checking' | 'signed_out' | 'locked' | 'needs_recovery_phrase' | 'no_plan' | 'ready' | 'error'
 
 export const PLANS_URL = 'https://beebeeb.io/pricing'
 
+/** Read the gate state from Rust (auth_v2::gate). The decision lives in Rust; this is thin wiring.
+ *  P3: fails closed (error + Try again, never 'ready') and skips the subscription when signed out. */
 async function readGate(): Promise<GateState> {
-  const status = await command<{ logged_in: boolean; vault_unlocked?: boolean }>('sync_status')
-  if (!status.ok) return 'ready'
-  if (!status.value.logged_in) return 'signed-out'
-  if (status.value.vault_unlocked === false) return 'locked'
+  // First call with no plan info: Rust checks signed-in + vault-unlocked. If not unlocked, skip the subscription.
+  const probe = await command<GateState>('auth_gate_state', {})
+  if (!probe.ok) return 'error' as GateState
+  // The credential store could not say whether the vault key is there (task 2447, P2-6): neither locked nor
+  // "needs the phrase". The error screen asks again; the native sign-in slice gives it its own words.
+  if ((probe.value as string) === 'key_store_unavailable') return 'error' as GateState
+  if (probe.value === 'signed_out' || probe.value === 'locked' || probe.value === 'needs_recovery_phrase') return probe.value
+  // Only when unlocked: read the subscription and let Rust check the plan.
   const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')
-  return sub.ok && hasNoPlan(sub.value) ? 'no-plan' : 'ready'
+  const result = await command<GateState>('auth_gate_state', {
+    planState: sub.ok ? (sub.value.plan_state ?? null) : null,
+    plan: sub.ok ? (sub.value.plan ?? null) : null,
+    planStatus: sub.ok ? (sub.value.status ?? null) : null,
+    quotaBytes: sub.ok ? (sub.value.quota_bytes ?? null) : null,
+  })
+  return result.ok ? result.value : 'error' as GateState
 }
 
 export function AuthGate({ children }: { children: ReactNode }) {
@@ -43,9 +55,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [check])
   if (signedOutWarning) return <SignedOutWarning sentence={signedOutWarning} onOk={() => { setSignedOutWarning(null); check() }} />
   if (state === 'checking') return <div className="h-screen bg-paper" aria-busy="true" />
-  if (state === 'signed-out') return <AccountEntry onSignedIn={check} onCreated={check} />
+  if (state === 'error') return (
+    <GateWindow>
+      <section className="flex max-w-[320px] flex-col items-center text-center" data-gate-error>
+        <h1 className="m-0 text-[18px] font-semibold">Something went wrong</h1>
+        <p className="mt-1 mb-5 text-[13px] text-ink-2">Beebeeb couldn't check your session. Try again.</p>
+        <BBButton onClick={check}><span className="text-[13px] font-medium">Try again</span></BBButton>
+      </section>
+    </GateWindow>
+  )
+  if (state === 'signed_out') return <AccountEntry onSignedIn={check} onCreated={check} />
   if (state === 'locked') return <LockedWindow onUnlocked={check} />
-  if (state === 'no-plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
+  if (state === 'needs_recovery_phrase') return <SignInFlow onSignedIn={check} startAt="phrase" />
+  if (state === 'no_plan') return <NoPlanWindow onCheckAgain={check} onSignedOut={(warning) => { setSignedOutWarning(warning); check() }} />
   return <>{children}</>
 }
 
