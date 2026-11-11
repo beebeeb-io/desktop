@@ -9,7 +9,7 @@
 //! | Leaves the app (a web page) | `Trailing::External` | `item-<L>-<I>-ext` |
 //! | The chosen one of several | `Trailing::Check` | `item-<L>-<I>-check` |
 //! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret` |
-//! | Switch | `Trailing::Switch` | `item-<L>-<I>-switch`, `-knob` |
+//! | Switch | `item_with(.., vec![detail_pane::switch("item-<L>-<I>", ..)], ..)` | `item-<L>-<I>-switch`, `-knob` |
 //!
 //! A row is 28 pt, 40 pt with a second line; the board rules a row off from the one
 //! above only where the two are siblings in its markup (`Item::ruled`). What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
@@ -21,8 +21,8 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::tok::Family;
 use rune::{El, Icon, TextStyle, col, el, row};
 
+use super::kit;
 use super::settings_shell::SUB;
-use super::{detail_pane, kit};
 
 /// 10px/600 on a 13px line, tracked .01em: a list's heading (`.kit-list-title`).
 pub const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
@@ -44,6 +44,8 @@ pub enum Role {
     Link,
     /// Does something here.
     Button,
+    /// One of several choices; `true` for the chosen one.
+    Radio(bool),
 }
 
 /// What sits at a row's trailing edge, in order.
@@ -59,7 +61,6 @@ pub enum Trailing {
         choice: String,
         open: bool,
     },
-    Switch(bool),
 }
 
 /// One row of a settings list.
@@ -118,7 +119,7 @@ impl Item {
                 Trailing::Pop { choice, .. } => name = format!("{name}, {choice}"),
                 Trailing::Check => name = format!("{name}, chosen"),
                 Trailing::External => name = format!("{name}, opens in the browser"),
-                Trailing::Chevron | Trailing::Switch(_) => {}
+                Trailing::Chevron => {}
             }
         }
         if let Some(sub) = &self.sub {
@@ -160,6 +161,11 @@ pub fn pop_button(key: &str, name: &str, choice: &str, open: bool, t: &Theme) ->
 /// One row (`.kit-item`). Keys: `item-<L>-<I>` and the pieces named in the module's table.
 /// The row's own press is the caller's (`.on_press`), for `Role::Link` and `Role::Button`.
 pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
+    item_with(list, index, it, Vec::new(), t)
+}
+
+/// A row with controls of the caller's at its trailing edge (a button), after the row's own.
+pub fn item_with(list: usize, index: usize, it: &Item, extra: Vec<El>, t: &Theme) -> El {
     let key = format!("item-{list}-{index}");
     let mut r = row()
         .key(key.clone())
@@ -173,6 +179,13 @@ pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
         Role::Link => r
             .role("link")
             .label(it.name())
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true),
+        Role::Radio(chosen) => r
+            .role("radio")
+            .label(it.name())
+            .checked(chosen)
             .hover(t.hover)
             .press(t.press)
             .focusable(true),
@@ -217,8 +230,10 @@ pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
             Trailing::External => kit::glyph(format!("{key}-ext"), &ic::EXTERNAL, 14.0, t.text),
             Trailing::Check => kit::glyph(format!("{key}-check"), &ic::CHECK, 16.0, t.text),
             Trailing::Pop { choice, open } => pop_button(&key, &it.title, choice, *open, t),
-            Trailing::Switch(on) => detail_pane::switch(&key, &it.title, *on, t),
         });
+    }
+    for child in extra {
+        r = r.child(child);
     }
     r
 }

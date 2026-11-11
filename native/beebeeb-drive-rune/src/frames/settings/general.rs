@@ -8,8 +8,8 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::El;
 
-use super::source::{ThemeChoice, Update};
-use super::{Dialog, Intent, Menu, SettingsUi};
+use super::source::Update;
+use super::{Dialog, Intent, MenuKind, SettingsUi};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 
 /// Where the Theme menu drops, in the window's body: over its pop-up button, the board's place.
@@ -18,7 +18,7 @@ const THEME_MENU_AT: (f32, f32) = (700.0, 86.0);
 /// The pane, and the menu over it when one is open.
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let g = ui.source.general();
-    let menu_open = matches!(ui.menu, Some(Menu::Theme { .. }));
+    let menu_open = ui.menu.is_some_and(|m| m.kind == MenuKind::Theme);
 
     let appearance = lists::list(
         0,
@@ -36,7 +36,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .role(Role::Button),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.toggle_theme_menu()),
+            .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Theme)),
         ],
         None,
         t,
@@ -143,28 +143,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     }
     children.extend([help, privacy, about]);
 
-    let menu = match ui.menu {
-        Some(Menu::Theme { hot }) => {
-            let items = ThemeChoice::ALL
-                .iter()
-                .enumerate()
-                .map(|(i, choice)| {
-                    let choice = *choice;
-                    controls::menu_item(0, i, choice.label(), choice == g.theme, i == hot, t)
-                        .on_press(move |s: &mut State| s.settings.choose_theme(choice))
-                })
-                .collect();
-            Some(
-                controls::menu(0, "Theme", 130.0, items, t)
-                    .absolute(THEME_MENU_AT.0, THEME_MENU_AT.1)
-                    .modal(true, |s: &mut State| s.settings.menu = None),
-            )
-        }
-        None => None,
-    };
+    let menu = super::menu_overlay(ui, MenuKind::Theme, THEME_MENU_AT, t);
     let overlay = match ui.dialog {
         Some(Dialog::ReportProblem) => Some(report_problem(t)),
-        None => menu,
+        _ => menu,
     };
     (shell::pane(children, t), overlay)
 }

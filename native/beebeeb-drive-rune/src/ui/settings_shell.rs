@@ -188,14 +188,15 @@ pub fn crumb(label: &str, t: &Theme) -> El {
 /// A pane's heading (`.mk-set-h`): the title, and a second line where the board has one.
 /// Keys: `set-title`, `set-sub`.
 pub fn heading(title: &str, sub: Option<&str>, t: &Theme) -> El {
-    let mut h = col().key("set-h").gap(3.0).child(
+    let mut h = col().key("set-h").items_start().gap(3.0).child(
         kit::label("set-title", title, PANE_TITLE, t.text)
             .role("heading")
             .level(1)
             .w_full(),
     );
     if let Some(sub) = sub {
-        h = h.child(kit::label("set-sub", sub, SUB, t.text_tertiary).wrap());
+        // `max-width: 60ch`: sixty zeros of Inter at 12 px.
+        h = h.child(kit::label("set-sub", sub, SUB, t.text_tertiary).wrap().w(454.22));
     }
     h
 }

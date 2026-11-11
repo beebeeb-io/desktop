@@ -55,7 +55,111 @@ pub struct General {
     pub update: Update,
 }
 
+/// Which releases this PC is offered (DW-0789).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Channel {
+    #[default]
+    Stable,
+    Beta,
+    Alpha,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 3] = [Channel::Stable, Channel::Beta, Channel::Alpha];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Beta => "Beta",
+            Self::Alpha => "Alpha",
+        }
+    }
+
+    /// What the channel offers, as the Release channel row says it.
+    pub fn says(self) -> &'static str {
+        match self {
+            Self::Stable => "Regular releases after validation.",
+            Self::Beta => "Earlier builds for release testing.",
+            Self::Alpha => "Earliest builds for rapid feedback.",
+        }
+    }
+}
+
+/// A version's release notes (DW-0789b).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ReleaseNotes {
+    pub version: String,
+    pub channel: Channel,
+    /// The day it was released, as the dialog says it ("4 Nov 2026").
+    pub released: String,
+    /// The release's own notes, a line each. Empty: the release came without notes.
+    pub lines: Vec<String>,
+}
+
+/// The About pane's values (DW-0751).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct About {
+    pub product: String,
+    pub tagline: String,
+    /// The running version and its build number: "0.9.1", "311".
+    pub version: String,
+    pub build: String,
+    /// The encryption core's revision, as short as the board shows it.
+    pub core: String,
+    /// What the last check found, in the row's words.
+    pub last_check: String,
+    pub channel: Channel,
+    pub notes: ReleaseNotes,
+    /// The foot line under More: the company.
+    pub company: String,
+}
+
+/// One place new files can be stored (DW-0788): the account's default, or a country.
+/// A country, never a city, never a provider.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Location {
+    pub name: String,
+    /// The default's second line.
+    pub says: Option<String>,
+    /// `false`: not live yet. Shown as "Coming soon", never choosable, never presented as live.
+    pub live: bool,
+    /// `true` for the account's default (Europe: Beebeeb places each file).
+    pub default: bool,
+}
+
+/// Where new files are stored, and what happens when that place cannot take one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Locations {
+    pub choices: Vec<Location>,
+    /// Index into `choices`.
+    pub chosen: usize,
+    /// Only store in the chosen country: an upload it cannot take waits (off: another EU country).
+    pub only_here: bool,
+    /// The chosen country cannot take files right now.
+    pub unavailable: bool,
+}
+
+impl Locations {
+    pub fn chosen(&self) -> &Location {
+        &self.choices[self.chosen.min(self.choices.len() - 1)]
+    }
+}
+
 pub trait SettingsSource {
+    /// Engine: the server's list of storage locations for this account and the stored
+    /// choice. `None`: the list could not load.
+    fn locations(&self) -> Option<Locations>;
+    /// Engine: store the choice (new files only; existing files never move). `false`: not choosable.
+    fn choose_location(&mut self, index: usize) -> bool;
+    /// Engine: store "only store in the chosen country".
+    fn set_only_here(&mut self, on: bool);
+    /// Engine: ask the server for the list again.
+    fn reload_locations(&mut self);
+    /// Engine: the app's own version and build, the pinned core revision, the updater's
+    /// last check and channel, and the newest release's notes.
+    fn about(&self) -> About;
+    /// Engine: store the release channel; the updater forgets its last answer and checks again.
+    fn set_channel(&mut self, channel: Channel);
     /// Engine: the stored theme preference, the account's storage region, the app's own
     /// version, and the updater's last known state.
     fn general(&self) -> General;
@@ -66,6 +170,8 @@ pub trait SettingsSource {
 /// The board's sample content, frame by frame.
 pub struct BoardSettings {
     general: General,
+    about: About,
+    locations: Option<Locations>,
 }
 
 impl BoardSettings {
@@ -78,6 +184,27 @@ impl BoardSettings {
                 version: "0.9.1".into(),
                 update: Update::Current,
             },
+            about: About {
+                product: "Beebeeb Drive".into(),
+                tagline: "End-to-end encrypted storage".into(),
+                version: "0.9.1".into(),
+                build: "311".into(),
+                core: "2084927".into(),
+                last_check: "0.9.1 is the newest version · checked today, 09:12".into(),
+                channel: Channel::Stable,
+                notes: ReleaseNotes {
+                    version: "0.9.2".into(),
+                    channel: Channel::Stable,
+                    released: "4 Nov 2026".into(),
+                    lines: vec![
+                        "Bandwidth limits apply straight away, without pausing sync.".into(),
+                        "Sync history keeps 30 days on every PC.".into(),
+                        "A file badge no longer stays on Uploading after the upload finished.".into(),
+                    ],
+                },
+                company: "Initlabs B.V.".into(),
+            },
+            locations: Some(board_locations()),
         }
     }
 
@@ -90,11 +217,90 @@ impl BoardSettings {
     }
 }
 
+/// DW-0788: the default (Europe) chosen; Germany and Finland live; the Netherlands coming soon.
+fn board_locations() -> Locations {
+    let country = |name: &str, live: bool| Location {
+        name: name.into(),
+        says: None,
+        live,
+        default: false,
+    };
+    Locations {
+        choices: vec![
+            Location {
+                name: "Default".into(),
+                says: Some("Europe: Beebeeb places each new file in the EU".into()),
+                live: true,
+                default: true,
+            },
+            country("Germany", true),
+            country("Finland", true),
+            country("Netherlands", false),
+        ],
+        chosen: 0,
+        only_here: false,
+        unavailable: false,
+    }
+}
+
+impl BoardSettings {
+    /// DW-0788b / DW-0788c: country `index` is the stored choice; `unavailable`: it cannot
+    /// take files right now.
+    pub fn with_location(mut self, index: usize, unavailable: bool) -> Self {
+        if let Some(l) = &mut self.locations {
+            l.chosen = index;
+            l.unavailable = unavailable;
+        }
+        self
+    }
+
+    /// DW-0788d: the list of locations could not load.
+    pub fn with_locations_failed(mut self) -> Self {
+        self.locations = None;
+        self
+    }
+}
+
 impl SettingsSource for BoardSettings {
+    fn locations(&self) -> Option<Locations> {
+        self.locations.clone()
+    }
+    fn choose_location(&mut self, index: usize) -> bool {
+        match &mut self.locations {
+            Some(l) if l.choices.get(index).is_some_and(|c| c.live) => {
+                l.chosen = index;
+                l.unavailable = false;
+                if l.choices[index].default {
+                    l.only_here = false;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    fn set_only_here(&mut self, on: bool) {
+        if let Some(l) = &mut self.locations {
+            l.only_here = on;
+        }
+    }
+    fn reload_locations(&mut self) {
+        self.locations = Some(board_locations());
+    }
     fn general(&self) -> General {
-        self.general.clone()
+        let mut g = self.general.clone();
+        // General names a country only once the account has chosen one.
+        if let Some(l) = self.locations.as_ref().filter(|l| !l.chosen().default) {
+            g.storage_location = l.chosen().name.clone();
+        }
+        g
     }
     fn set_theme(&mut self, theme: ThemeChoice) {
         self.general.theme = theme;
+    }
+    fn about(&self) -> About {
+        self.about.clone()
+    }
+    fn set_channel(&mut self, channel: Channel) {
+        self.about.channel = channel;
     }
 }

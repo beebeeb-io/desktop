@@ -9,30 +9,60 @@
 //! shows it on a fresh `State`); `SettingsUi::intents` is what settings asks the shell to do
 //! (leave settings, show a frame another lane owns, open a web page).
 
+pub mod about;
 pub mod general;
 pub mod source;
+pub mod storage_location;
 #[cfg(test)]
 mod tests;
 
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
-use crate::ui::{caption, settings_shell as shell};
+use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, row};
 
-use source::{BoardSettings, SettingsSource, ThemeChoice};
+use source::{BoardSettings, Channel, SettingsSource, ThemeChoice};
 
 /// A pane of settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
     General,
+    /// General › About Beebeeb (DW-0751).
+    About,
+    /// General › Storage location (DW-0788).
+    StorageLocation,
 }
 
-/// A menu dropped from a pop-up button.
+/// Which menu a pop-up button drops.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Menu {
-    /// General › Appearance › Theme (DW-0787); `hot` is the item under the keyboard.
-    Theme { hot: usize },
+pub enum MenuKind {
+    /// General › Appearance › Theme (DW-0787).
+    Theme,
+    /// About › Updates › Release channel (DW-0789).
+    Channel,
+}
+
+impl MenuKind {
+    pub fn labels(self) -> Vec<&'static str> {
+        match self {
+            Self::Theme => ThemeChoice::ALL.iter().map(|c| c.label()).collect(),
+            Self::Channel => Channel::ALL.iter().map(|c| c.label()).collect(),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Theme => "Theme",
+            Self::Channel => "Release channel",
+        }
+    }
+}
+
+/// An open menu; `hot` is the item under the pointer or the keyboard.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Menu {
+    pub kind: MenuKind,
+    pub hot: usize,
 }
 
 /// A dialog over a pane.
@@ -40,6 +70,8 @@ pub enum Menu {
 pub enum Dialog {
     /// General › Help and report a problem (DW-0782).
     ReportProblem,
+    /// About › Release notes (DW-0789b).
+    ReleaseNotes,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -51,10 +83,14 @@ pub enum Intent {
     Open(&'static str),
     /// Open a web page in the browser: the page's NAME (the shell holds the addresses).
     Web(&'static str),
-    /// Download the new version's installer and show it in File Explorer (DW-0781).
+    /// Download the new version's installer and show it in File Explorer (DW-0781, DW-0789b).
     DownloadUpdate,
     /// Save the support bundle and open an email to support in the person's email app (DW-0782).
     SaveBundleAndWriteEmail,
+    /// Put this text on the clipboard (About › Copy: the version lines).
+    Copy(String),
+    /// Ask the updater whether a newer version exists, now (About › Check now).
+    CheckForUpdates,
 }
 
 /// The settings state of the window.
@@ -64,6 +100,8 @@ pub struct SettingsUi {
     pub pane: Pane,
     pub menu: Option<Menu>,
     pub dialog: Option<Dialog>,
+    /// What a toast over the pane says, until the next thing happens.
+    pub toast: Option<&'static str>,
     pub source: Box<dyn SettingsSource>,
     pub intents: Vec<Intent>,
 }
@@ -75,6 +113,7 @@ impl Default for SettingsUi {
             pane: Pane::General,
             menu: None,
             dialog: None,
+            toast: None,
             source: Box::new(BoardSettings::new()),
             intents: Vec::new(),
         }
@@ -97,17 +136,33 @@ impl SettingsUi {
         self.dialog = None;
     }
 
-    /// Go where a row or a sidebar item points: a pane of this lane, or an intent for the shell.
+    /// Go where a row, a button or a sidebar item points (a board frame id): a state of
+    /// this lane's panes, or an intent for the shell.
     pub fn go(&mut self, frame: &'static str) {
         self.menu = None;
         self.dialog = None;
+        self.toast = None;
         match frame {
-            "DW-0701" => self.pane = Pane::General,
+            "DW-0401" => self.leave(),
+            "DW-0701" | "DW-0781" => self.pane = Pane::General,
             "DW-0782" => {
                 self.pane = Pane::General;
                 self.dialog = Some(Dialog::ReportProblem);
             }
-            "DW-0401" => self.leave(),
+            "DW-0787" => {
+                self.pane = Pane::General;
+                self.toggle_menu(MenuKind::Theme);
+            }
+            "DW-0751" => self.pane = Pane::About,
+            "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => self.pane = Pane::StorageLocation,
+            "DW-0789" => {
+                self.pane = Pane::About;
+                self.toggle_menu(MenuKind::Channel);
+            }
+            "DW-0789b" => {
+                self.pane = Pane::About;
+                self.dialog = Some(Dialog::ReleaseNotes);
+            }
             other => self.intents.push(Intent::Show(other)),
         }
     }
@@ -126,41 +181,107 @@ impl SettingsUi {
         }
     }
 
-    pub fn toggle_theme_menu(&mut self) {
-        self.menu = match self.menu {
-            Some(Menu::Theme { .. }) => None,
-            None => {
+    /// Store new files in location `index`; says so in a toast when it took.
+    pub fn choose_location(&mut self, index: usize) {
+        if self.source.choose_location(index) {
+            self.toast = Some("Storage location updated");
+        }
+    }
+
+    /// The index of the current choice in a menu.
+    pub fn chosen(&self, kind: MenuKind) -> usize {
+        match kind {
+            MenuKind::Theme => {
                 let now = self.source.general().theme;
-                Some(Menu::Theme {
-                    hot: ThemeChoice::ALL.iter().position(|c| *c == now).unwrap_or(0),
-                })
+                ThemeChoice::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
+            MenuKind::Channel => {
+                let now = self.source.about().channel;
+                Channel::ALL.iter().position(|c| *c == now).unwrap_or(0)
+            }
+        }
+    }
+
+    /// Open the menu on its current choice, or close it.
+    pub fn toggle_menu(&mut self, kind: MenuKind) {
+        self.menu = match self.menu {
+            Some(open) if open.kind == kind => None,
+            _ => Some(Menu {
+                kind,
+                hot: self.chosen(kind),
+            }),
         };
     }
 
-    pub fn choose_theme(&mut self, theme: ThemeChoice) {
-        self.source.set_theme(theme);
+    /// Take item `index` of a menu, and close it.
+    pub fn choose(&mut self, kind: MenuKind, index: usize) {
+        match kind {
+            MenuKind::Theme => self.source.set_theme(ThemeChoice::ALL[index.min(2)]),
+            MenuKind::Channel => self.source.set_channel(Channel::ALL[index.min(2)]),
+        }
         self.menu = None;
     }
 }
 
+/// The menu `kind` at `at` in the window's body, when it is the open one.
+pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, at: (f32, f32), t: &Theme) -> Option<El> {
+    let open = ui.menu.filter(|m| m.kind == kind)?;
+    let chosen = ui.chosen(kind);
+    let items = kind
+        .labels()
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| {
+            controls::menu_item(0, i, label, i == chosen, i == open.hot, t)
+                .on_press(move |s: &mut State| s.settings.choose(kind, i))
+        })
+        .collect();
+    Some(
+        controls::menu(0, kind.name(), 130.0, items, t)
+            .absolute(at.0, at.1)
+            .modal(true, |s: &mut State| s.settings.menu = None),
+    )
+}
+
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
-/// (`main.rs` lists the same ids as scenes; the shell lane registers this table.)
+/// (`main.rs` adds this table to its scenes; the shell lane registers it.)
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0701", |s| s.settings.show(Pane::General)),
     ("DW-0781", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_update_available());
         s.settings.show(Pane::General);
     }),
-    ("DW-0782", |s| {
-        s.settings.show(Pane::General);
-        s.settings.go("DW-0782");
+    ("DW-0782", |s| open_on(s, "DW-0782")),
+    ("DW-0787", |s| open_on(s, "DW-0787")),
+    ("DW-0751", |s| open_on(s, "DW-0751")),
+    ("DW-0789", |s| {
+        open_on(s, "DW-0789");
+        // The board draws the pointer over Beta.
+        s.settings.menu = Some(Menu {
+            kind: MenuKind::Channel,
+            hot: 1,
+        });
     }),
-    ("DW-0787", |s| {
-        s.settings.show(Pane::General);
-        s.settings.toggle_theme_menu();
+    ("DW-0789b", |s| open_on(s, "DW-0789b")),
+    ("DW-0788", |s| open_on(s, "DW-0788")),
+    ("DW-0788b", |s| {
+        open_on(s, "DW-0788");
+        s.settings.choose_location(1);
+    }),
+    ("DW-0788c", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_location(2, true));
+        open_on(s, "DW-0788");
+    }),
+    ("DW-0788d", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_locations_failed());
+        open_on(s, "DW-0788");
     }),
 ];
+
+fn open_on(s: &mut State, frame: &'static str) {
+    s.settings.show(Pane::General);
+    s.settings.go(frame);
+}
 
 /// Show the frame `id` on `s` (a scene). `false`: this group has not built it.
 pub fn scene(id: &str, s: &mut State) -> bool {
@@ -170,6 +291,15 @@ pub fn scene(id: &str, s: &mut State) -> bool {
             true
         }
         None => false,
+    }
+}
+
+impl Pane {
+    /// The sidebar section a pane belongs to (a pane opened from General stays under General).
+    pub fn section(self) -> Pane {
+        match self {
+            Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
+        }
     }
 }
 
@@ -254,7 +384,7 @@ fn sidebar(ui: &SettingsUi, t: &Theme) -> El {
             .iter()
             .map(|sec| {
                 let frame = sec.frame;
-                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(ui.pane), t)
+                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(ui.pane.section()), t)
                     .on_press(move |s: &mut State| s.settings.go(frame))
             })
             .collect()
@@ -276,6 +406,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(ui.dark(cx.system_dark()));
     let (pane, overlay) = match ui.pane {
         Pane::General => general::pane(ui, &t),
+        Pane::About => about::pane(ui, &t),
+        Pane::StorageLocation => storage_location::pane(ui, &t),
     };
     let mut body = row()
         .key("body")
@@ -311,15 +443,15 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         }
         return false;
     }
-    if let Some(Menu::Theme { hot }) = ui.menu {
-        let last = ThemeChoice::ALL.len() - 1;
+    if let Some(Menu { kind, hot }) = ui.menu {
+        let last = kind.labels().len() - 1;
         let hot = match ev.key {
             Key::Down => (hot + 1).min(last),
             Key::Up => hot.saturating_sub(1),
             Key::Home => 0,
             Key::End => last,
             Key::Enter => {
-                ui.choose_theme(ThemeChoice::ALL[hot]);
+                ui.choose(kind, hot);
                 return true;
             }
             Key::Escape => {
@@ -332,7 +464,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             }
             _ => return false,
         };
-        ui.menu = Some(Menu::Theme { hot });
+        ui.menu = Some(Menu { kind, hot });
         return true;
     }
     match ev.key {

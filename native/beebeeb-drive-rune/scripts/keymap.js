@@ -224,6 +224,21 @@ if (set) {
     api.text(`card-${i}-head`, q('.t-head', c));
     api.text(`card-${i}-sub`, q('.t-sub', c));
   });
+  // A notice inside a pane (`.mk-banner`), a toast over it, a toned tile (a state's glyph on its tint).
+  qa('.mk-banner', set).forEach((bn, i) => {
+    api.box(`note-${i}`, bn);
+    api.icon(`note-${i}-icon`, q(':scope > svg', bn));
+    api.text(`note-${i}-text`, q('.tx', bn));
+  });
+  qa('.kit-toast', set).forEach((to, i) => {
+    api.box(`toast-${i}`, to);
+    api.icon(`toast-${i}-icon`, q('svg', to));
+    api.text(`toast-${i}-text`, q('span', to));
+  });
+  qa('.kit-tile', set).forEach((ti, i) => {
+    api.box(`tile-${i}`, ti);
+    api.icon(`tile-${i}-icon`, q('svg', ti));
+  });
   qa('.wn-menu', set).forEach((menu, m) => {
     api.box(`menu-${m}`, menu);
     qa('.wn-mi', menu).forEach((mi, i) => {

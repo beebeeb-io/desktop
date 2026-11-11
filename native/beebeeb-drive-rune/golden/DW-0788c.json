@@ -1196,6 +1196,57 @@
     255,
     255
    ]
+  },
+  "note-0": {
+   "kind": "box",
+   "x": 268,
+   "y": 168,
+   "w": 512,
+   "h": 52,
+   "bg": [
+    197,
+    74,
+    0,
+    31
+   ]
+  },
+  "note-0-icon": {
+   "kind": "icon",
+   "x": 280,
+   "y": 186,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 8v4.6",
+    "M12 15.9v.1"
+   ],
+   "filled": false,
+   "color": [
+    201,
+    75,
+    0,
+    255
+   ]
+  },
+  "note-0-text": {
+   "kind": "text",
+   "x": 306,
+   "y": 177,
+   "w": 464,
+   "h": 34,
+   "text": "Your chosen location isn't available right now. New files go wherever Beebeeb places them by default.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

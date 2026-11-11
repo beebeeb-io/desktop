@@ -1196,6 +1196,55 @@
     255,
     255
    ]
+  },
+  "toast-0": {
+   "kind": "box",
+   "x": 491.46,
+   "y": 562,
+   "w": 199.07,
+   "h": 34,
+   "bg": [
+    251,
+    249,
+    247,
+    184
+   ]
+  },
+  "toast-0-icon": {
+   "kind": "icon",
+   "x": 505.96,
+   "y": 571.5,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "filled": false,
+   "color": [
+    53,
+    193,
+    119,
+    255
+   ]
+  },
+  "toast-0-text": {
+   "kind": "text",
+   "x": 530.96,
+   "y": 570.5,
+   "w": 151.07,
+   "h": 17,
+   "text": "Storage location updated",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 550,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

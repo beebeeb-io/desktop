@@ -10,7 +10,7 @@
 //! outside it. It is modal: Tab stays inside, Esc is the caller's `on_dismiss`.
 //! Buttons are numbered with every other `.kit-btn` of the frame, in the board's order.
 
-use crate::theme::tokens::{Theme, radius};
+use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, TextStyle, col, rich, row};
 
 use super::kit;
@@ -67,6 +67,27 @@ pub fn button(index: usize, label: &str, weight: Weight, t: &Theme) -> El {
 /// A paragraph of a dialog's body (`.wn-dlg-body > p.t-sub`). Key: `dlg-text-<I>`.
 pub fn para(index: usize, words: &str, t: &Theme) -> El {
     kit::label(format!("dlg-text-{index}"), words, SUB, t.text_tertiary).wrap()
+}
+
+/// A small print line of a dialog's body (`.wn-dlg-body > p.t-cap`). Key: `dlg-text-<I>`.
+pub fn caption(index: usize, words: &str, t: &Theme) -> El {
+    kit::label(format!("dlg-text-{index}"), words, type_::CAPTION, t.text_tertiary).wrap()
+}
+
+/// A list of lines in a dialog's body (`ul.t-sub` > `li`): indented, and without a marker,
+/// as the board draws it. Keys: `dlg-li-<I>`.
+pub fn bullets(lines: &[String], t: &Theme) -> El {
+    let mut list = col().key("dlg-list").role("list").w_full().pl(18.0).gap(6.0);
+    for (i, line) in lines.iter().enumerate() {
+        list = list.child(
+            row().key(format!("dlg-li-{i}-row")).role("listitem").w_full().child(
+                kit::label(format!("dlg-li-{i}"), line.clone(), SUB, t.text_secondary)
+                    .wrap()
+                    .grow(1.0),
+            ),
+        );
+    }
+    list
 }
 
 /// A paragraph with a machine's value inside it (`spans`: byte ranges in mono).
