@@ -344,6 +344,8 @@ pub trait TraySource {
 /// The board's frames, each with exactly what the board draws in it.
 pub struct BoardFixture {
     frame: &'static str,
+    /// The plans page was opened from DW-1213: the line reads "Waiting for your plan."
+    plan_opened: bool,
     /// What was asked of it, for tests: the engine calls a real source would make.
     pub asked: Vec<String>,
 }
@@ -360,12 +362,9 @@ impl BoardFixture {
         let frame = FRAMES.iter().find(|f| **f == id)?;
         Some(BoardFixture {
             frame,
+            plan_opened: false,
             asked: Vec::new(),
         })
-    }
-
-    pub fn frame_id(&self) -> &'static str {
-        self.frame
     }
 
     /// Shows another frame's content (the shell's tray state changed: `frames::tray::follow`).
@@ -378,7 +377,10 @@ impl BoardFixture {
 
 impl TraySource for BoardFixture {
     fn snapshot(&self) -> Snapshot {
-        let (status, changes) = frame_content(self.frame);
+        let (mut status, changes) = frame_content(self.frame);
+        if let Status::NoPlan { waiting } = &mut status {
+            *waiting = self.plan_opened;
+        }
         Snapshot {
             status,
             changes,
@@ -389,6 +391,7 @@ impl TraySource for BoardFixture {
     /// Each action leads to the frame the board's Actions send it to.
     fn act(&mut self, action: Action) {
         self.asked.push(format!("{action:?}"));
+        self.plan_opened |= action == Action::ChoosePlan;
         self.frame = match (self.frame, action) {
             (_, Action::Pause) => "DW-1204",
             (_, Action::Resume | Action::SyncAnyway) => "DW-1203",

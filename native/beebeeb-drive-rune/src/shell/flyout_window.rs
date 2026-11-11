@@ -72,12 +72,13 @@ pub fn view(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {
 }
 
 /// Esc closes the flyout.
-pub fn on_key(_: &mut FlyoutState, ev: &KeyEvent, tx: &mut Tx) -> bool {
+pub fn on_key(s: &mut FlyoutState, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if ev.key == Key::Escape {
         tx.close_window();
         return true;
     }
-    false
+    // The list's keys, also before anything in the flyout has focus (the tray lane's).
+    crate::frames::tray::on_window_key(s, ev, tx)
 }
 
 /// A click outside it (the flyout lost focus) closes it, and notes when.

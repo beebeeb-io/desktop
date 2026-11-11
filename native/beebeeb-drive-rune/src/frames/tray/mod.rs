@@ -364,6 +364,12 @@ pub fn on_key<S: 'static>(host: Host<S>) -> impl Fn(&mut S, &KeyEvent, &mut Tx) 
     }
 }
 
+/// The flyout window's keys beyond Esc (`flyout_window::on_key`): the arrow keys reach the list
+/// straight after the flyout opens, before anything in it has focus.
+pub fn on_window_key(s: &mut FlyoutState, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    on_key(FLYOUT)(s, ev, tx)
+}
+
 /// Which of the board's frames says what the shell's tray state says, in DW-1201's order (the
 /// order of `shell::tray::tray_model_for`). The fixture follows it, so the flyout and the b
 /// agree before the engine is linked.
