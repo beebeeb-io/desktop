@@ -39,7 +39,7 @@ if (side) {
     if (pill) { api.box(`${label}-pill`, pill); api.textNode(`${label}-badge`, pill); }
     api.text(`${label}-badge`, q('.mk-side-count', item));
   });
-  api.textNode('this-pc-label', q('.mk-side-title', side));
+  if (!q('.mk-set')) api.textNode('this-pc-label', q('.mk-side-title', side)); // settings keys its own titles, below
   const store = q('.mk-store', side);
   if (store) {
     const caps = qa('.t-cap span', store);
@@ -168,4 +168,100 @@ if (foot) {
   api.box('status-dot', q('.mk-sdot', foot));
   api.text('status-text', q('b', foot));
   api.text('status-details', q('.ml-auto', foot));
+}
+
+// ---- Settings, inside the window (`.mk-set`: lane f-settings, src/frames/settings) ----
+// One scheme for every pane: lists and their rows by order (`list-<L>`, `item-<L>-<I>`), every
+// button, banner, card and menu by order. A pane's own drawings (charts, trees) have their own lines.
+const set = q('.mk-set');
+if (set) {
+  qa('.mk-side-title', side).forEach((tt) => api.textNode(`side-title-${slug(tt.textContent)}`, tt));
+  const sfoot = q('.mk-side-foot', side);
+  if (sfoot) { api.box('side-foot-box', sfoot); api.textNode('side-foot', sfoot); }
+  const main = q('.mk-set-main', set);
+  api.box('set-main', main);
+  const crumb = q('.mk-set-col > .t-sub .kit-go > span', main);
+  if (crumb) { api.icon('crumb-icon', q('svg', crumb)); api.textNode('crumb', crumb); }
+  api.text('set-title', q('.mk-set-h .t-large', main));
+  api.text('set-sub', q('.mk-set-h .t-sub', main));
+  qa('.kit-list', set).forEach((list, L) => {
+    const title = q(':scope > .kit-list-title', list);
+    if (title) api.textNode(`list-${L}-title`, title);
+    api.box(`list-${L}-body`, q(':scope > .kit-list-body', list));
+    const foot = q(':scope > .kit-list-foot', list);
+    if (foot) api.textNode(`list-${L}-foot`, foot);
+    qa('.kit-item', list).forEach((item, I) => {
+      const k = `item-${L}-${I}`;
+      api.box(k, item, { selected: item.classList.contains('is-selected') });
+      api.icon(`${k}-icon`, q('.kit-item-icon svg', item));
+      api.text(`${k}-title`, q('.kit-item-title', item));
+      api.text(`${k}-sub`, q('.kit-item-sub', item));
+      api.text(`${k}-value`, q('.kit-item-value', item));
+      api.icon(`${k}-chev`, q('.kit-item-chev svg', item));
+      api.icon(`${k}-check`, q('.kit-item-check svg', item));
+      api.icon(`${k}-ext`, q(':scope > svg', item));
+      api.text(`${k}-time`, q('span.font-mono.t-cap', item));
+      const pop = q('.mk-pop2', item);
+      if (pop) { api.box(`${k}-pop`, pop); api.textNode(`${k}-pop-label`, pop); api.icon(`${k}-pop-caret`, q('svg', pop)); }
+      const sw = q('[role="switch"] > span', item);
+      if (sw) { api.box(`${k}-switch`, sw, { checked: sw.parentElement.getAttribute('aria-checked') === 'true' }); api.box(`${k}-knob`, q('span', sw)); }
+    });
+  });
+  qa('.kit-btn', set).forEach((b, i) => {
+    api.box(`btn-${i}`, b);
+    api.icon(`btn-${i}-icon`, q('svg', b));
+    const lab = q('span', b);
+    if (lab) api.text(`btn-${i}-label`, lab); else api.textNode(`btn-${i}-label`, b);
+  });
+  qa('.kit-banner', set).forEach((bn, i) => {
+    api.box(`banner-${i}`, bn);
+    api.icon(`banner-${i}-icon`, q('.kit-banner-icon svg', bn));
+    api.text(`banner-${i}-title`, q('.kit-banner-text > b', bn));
+    api.text(`banner-${i}-text`, q('.kit-banner-text > span', bn));
+  });
+  qa('.kit-card', set).forEach((c, i) => {
+    api.box(`card-${i}`, c);
+    api.icon(`card-${i}-mark`, q(':scope > svg[viewBox="0 0 512 512"]', c), { mark: true });
+    api.text(`card-${i}-head`, q('.t-head', c));
+    api.text(`card-${i}-sub`, q('.t-sub', c));
+  });
+  // A notice inside a pane (`.mk-banner`), a toast over it, a toned tile (a state's glyph on its tint).
+  qa('.mk-banner', set).forEach((bn, i) => {
+    api.box(`note-${i}`, bn);
+    api.icon(`note-${i}-icon`, q(':scope > svg', bn));
+    api.text(`note-${i}-text`, q('.tx', bn));
+  });
+  qa('.kit-toast', set).forEach((to, i) => {
+    api.box(`toast-${i}`, to);
+    api.icon(`toast-${i}-icon`, q('svg', to));
+    api.text(`toast-${i}-text`, q('span', to));
+  });
+  qa('.kit-pill', set).forEach((pl, i) => {
+    api.box(`pill-${i}`, pl);
+    api.box(`pill-${i}-dot`, q('.kit-dot', pl));
+    api.textNode(`pill-${i}-label`, pl);
+  });
+  qa('.kit-tile', set).forEach((ti, i) => {
+    api.box(`tile-${i}`, ti);
+    api.icon(`tile-${i}-icon`, q('svg', ti));
+  });
+  qa('.wn-menu', set).forEach((menu, m) => {
+    api.box(`menu-${m}`, menu);
+    qa('.wn-mi', menu).forEach((mi, i) => {
+      api.box(`menu-${m}-item-${i}`, mi, { hot: mi.classList.contains('is-hot') });
+      api.icon(`menu-${m}-item-${i}-check`, q('.ck svg', mi));
+      api.text(`menu-${m}-item-${i}-label`, q('.lb', mi));
+    });
+  });
+  // A dialog over the pane (`.wn-dlg` on `.mk-scrim`).
+  api.box('scrim', q('.mk-scrim', set));
+  const dlg = q('.wn-dlg', set);
+  if (dlg) {
+    api.box('dlg', dlg);
+    api.text('dlg-title', q('.wn-dlg-head .t-title', dlg));
+    api.text('dlg-sub', q('.wn-dlg-head .t-sub', dlg));
+    qa('.wn-dlg-body > p', dlg).forEach((p, i) => api.text(`dlg-text-${i}`, p));
+    qa('.wn-dlg-body li', dlg).forEach((li, i) => api.text(`dlg-li-${i}`, li));
+    api.box('dlg-foot', q('.wn-dlg-foot', dlg));
+  }
 }
