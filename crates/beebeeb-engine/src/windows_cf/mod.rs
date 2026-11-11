@@ -1,0 +1,1649 @@
+//! Windows Cloud Files API integration — registers the Beebeeb sync
+//! root with the OS and creates placeholders for cloud-only files. The
+//! companion [`callbacks`] module installs the on-open hydration hook
+//! Windows fires when a user touches a cloud-only entry in Explorer.
+//!
+//! Phase 2 Task 6 of `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`.
+//!
+//! ## Why a separate module
+//!
+//! The macOS counterpart lives in a Swift `BeebeebFileProvider` extension
+//! target that talks to the Rust daemon over a Unix socket
+//! ([`crate::ipc_socket`]). Windows is the opposite: there's no
+//! second process — the desktop binary itself registers as the cloud
+//! sync provider, and Windows calls back into our running tokio
+//! runtime through `extern "system"` callbacks. So everything in this
+//! module is in-process Rust code, not an FFI shim.
+//!
+//! ## Lifecycle
+//!
+//! 1. On first launch, after the user picks a sync root,
+//!    [`register_sync_root`] is called once. Idempotent — re-registering
+//!    the same path is a no-op per Windows docs.
+//! 2. Each time the engine bridge learns of a new remote file, it calls
+//!    [`placeholders::create_placeholder`] to drop a 0-byte placeholder
+//!    in Explorer. The placeholder carries the file_id as its identity
+//!    blob so the fetch callback can recover it later.
+//! 3. When the user opens the file, Windows fires
+//!    [`callbacks::fetch_data_callback`], which invokes
+//!    `EngineBridge::hydrate_file` to download + decrypt and writes the
+//!    plaintext into the placeholder.
+//!
+//! ## Why no IPC client here
+//!
+//! The plan doc sketched an `IpcClient::connect` from inside the
+//! callback. That made sense when the callback was assumed to live in
+//! a separate process. In practice it doesn't — the desktop binary is
+//! both the daemon and the provider — so we take a static handle to
+//! the live `EngineBridge` (set by [`set_bridge`] from
+//! `runner::run`) and call it directly. Removes a serialisation round
+//! trip and removes the need for a Windows-named-pipe IPC variant.
+//!
+//! ## Build gating
+//!
+//! Every file in this module starts with `#![cfg(target_os = "windows")]`
+//! and `windows_cf` itself is only registered in `lib.rs` under the
+//! same gate. macOS and Linux builds skip everything here so the
+//! `windows` crate never resolves on those platforms.
+
+#![cfg(target_os = "windows")]
+
+pub mod callbacks;
+pub mod placeholders;
+// LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
+pub mod poison;
+// LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
+pub mod streaming;
+// LD-0105 S0: a fetch's byte progress reported to Cloud Files.
+pub mod fetch_progress;
+// LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
+mod registration;
+pub use registration::*;
+#[cfg(test)]
+mod reconcile_tests;
+// LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
+#[cfg(test)]
+mod ld0105_native_tests;
+// LD-0113 D1: the pre-operation delete and rename callbacks on a QA sync root.
+#[cfg(test)]
+mod ld0113_kfm_native_tests;
+#[cfg(test)]
+mod ld0113_protect_native_tests; // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
+// LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
+pub mod read_only;
+pub mod signout;
+pub mod status_ui;
+pub mod thumbnail_provider;
+
+use std::os::windows::ffi::OsStrExt;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock;
+
+use windows::Win32::Storage::CloudFilters::*;
+use windows::core::*;
+
+use crate::engine_bridge::EngineBridge;
+
+/// Identifier shown to Windows for our sync provider. Surfaced in the
+/// Sync settings UI ("Files synced by Beebeeb"). Keep stable —
+/// changing this between releases would orphan existing placeholders.
+pub const PROVIDER_ID: &str = "Beebeeb";
+
+/// Provider version reported alongside `PROVIDER_ID`. It is written into the
+/// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`) when a root
+/// is first registered.
+///
+/// LD-0105 S7 (0.8.22): bumping it NO LONGER re-registers anything. Up to 0.8.21 a
+/// version that differed from (or could not be read back as) this constant made
+/// `register_shell_sync_root` run the WinRT `Unregister`, and an unregister deletes
+/// every cloud-only placeholder of the root. An existing registration is now kept as
+/// it is ([`shell_step`]); a policy change reaches existing installs through the Win32
+/// registration, which is re-applied with `CF_REGISTER_FLAG_UPDATE` on every start.
+/// A change that really needs a new Explorer registration needs its own migration.
+///
+/// `1.0.0` → `1.1.0`: dropped `AutoDehydrationAllowed` from the hydration modifier.
+pub const PROVIDER_VERSION: &str = "1.1.0";
+
+// Each connection carries a monotonically increasing context ID. Old OS
+// callbacks cannot borrow credentials from a later account, even if Windows
+// reuses a connection key.
+static BRIDGE: std::sync::LazyLock<crate::callback_gate::CallbackGate<EngineBridge>> =
+    std::sync::LazyLock::new(crate::callback_gate::CallbackGate::new);
+struct Connection {
+    key: CF_CONNECTION_KEY,
+    generation: u64,
+    root: std::path::PathBuf,
+}
+static CONNECTION: std::sync::Mutex<Option<Connection>> = std::sync::Mutex::new(None);
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Live handle to the tokio runtime that owns the daemon.
+///
+/// Cloud Files delivers the fetch callback on an OS-managed
+/// filter-driver worker thread that is *not* attached to any tokio
+/// runtime, so `Handle::try_current()` returns `Err` there and the
+/// callback can't drive `hydrate_file` (an async fn). We stash the
+/// runtime handle here from [`connect_root`] (which runs on a tokio
+/// worker, so `Handle::current()` is valid) and the callback reaches
+/// it through [`runtime`] to `block_on` the hydration.
+static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Absolute path of the connected Cloud Files sync root.
+///
+/// The FETCH_DATA callback only receives a `CF_CALLBACK_INFO`, which carries
+/// the file's volume-relative `NormalizedPath` ONLY when the root was connected
+/// with `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH` — we connect WITHOUT it (task
+/// 0783 finding), so `NormalizedPath` can be empty on a fetch. When the
+/// callback needs an on-disk placeholder path it can't get from the callback
+/// info (e.g. the resolve-or-error resize in [`callbacks::fetch_data_callback`]),
+/// it falls back to `<SYNC_ROOT>/<state_db rel path>` — the same on-disk layout
+/// `populate_placeholders` mints. Stashed here from [`connect_root`] (which
+/// already owns the path); set-once for the process lifetime (a re-login reuses
+/// the same root).
+static SYNC_ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
+
+/// Internal accessor for the callback module: the connected sync-root path, or
+/// `None` if [`connect_root`] hasn't run yet. Used to reconstruct an on-disk
+/// placeholder path from a state-DB relative path when the callback's
+/// `NormalizedPath` is unavailable.
+pub fn sync_root() -> Option<std::path::PathBuf> {
+    SYNC_ROOT.read().ok().and_then(|root| root.clone())
+}
+
+/// Stable provider GUID for the Beebeeb sync root.
+///
+/// Minted once (UUIDv4 `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90`) and
+/// hardcoded so the sync-root identity is stable across releases and
+/// machines. Previously `GUID::zeroed()`, a dev shortcut that let
+/// Windows pick a per-machine default — fine for local testing but it
+/// would orphan placeholders if the default ever changed. A fixed GUID
+/// keeps the provider identity deterministic.
+///
+/// `GUID::from_u128` lays the value out in the canonical
+/// big-endian-string order, so the literal here matches the dashed
+/// form above.
+pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
+
+/// Sender into the upload driver's debounce loop (`crate::watcher`). The
+/// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
+/// live channel through this slot. Overwritten by [`set_notify_sender`] from
+/// `watcher::spawn`; read by [`notify_sender`] in the callback module.
+///
+/// **Must be RE-POINTABLE, not set-once.** On a re-login or sync-root change the
+/// runner DROPS the old runner and re-spawns IN THE SAME PROCESS (see
+/// `runner::run` lifecycle), so `watcher::spawn` runs again and creates a BRAND
+/// NEW channel. The previous debounce loop has ended, so the old channel's
+/// receiver is gone and every `send` into it errors. A set-once `OnceLock` would
+/// keep the dead first sender forever → local uploads would silently stop after
+/// the first logout→login. So we store the sender in a `RwLock<Option<…>>` and
+/// OVERWRITE it on every (re)spawn, always pointing at the live debounce loop.
+///
+static NOTIFY_TX: RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>>> = RwLock::new(None);
+
+/// Register (or RE-register) the upload driver's event sender so the Cloud Files
+/// NOTIFY callbacks ([`callbacks::notify_file_close_completion_callback`] and
+/// friends) push create/modify/delete/rename events into the LIVE debounce loop.
+/// Called from `watcher::spawn` on every (re)spawn — it OVERWRITES any prior
+/// sender so a re-login installs the new channel and uploads keep working.
+pub fn set_notify_sender(tx: tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>) {
+    if let Ok(mut slot) = NOTIFY_TX.write() {
+        *slot = Some(tx);
+    }
+}
+
+/// Internal accessor for the callback module: a clone of the CURRENT NOTIFY-event
+/// sender, or `None` if `watcher::spawn` hasn't registered one yet (e.g. a NOTIFY
+/// callback raced engine startup, or a logout cleared it). The callback drops the
+/// event in that case — a missed startup event is reconciled by the next
+/// `sync_tick`.
+pub fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>> {
+    NOTIFY_TX.read().ok().and_then(|slot| slot.clone())
+}
+
+/// Publish only while the runner is live, serialized with connection teardown.
+pub fn set_bridge(bridge: Arc<EngineBridge>) {
+    let connection = CONNECTION.lock().unwrap();
+    if bridge.is_stopping() || ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    if let Some(connection) = connection.as_ref() {
+        if let Err(error) = BRIDGE.install(connection.generation, bridge) {
+            tracing::error!(%error, "callback reactivation refused");
+        }
+    }
+}
+
+pub fn bridge() -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(None)?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+pub fn callback_bridge(context: *mut std::ffi::c_void) -> Option<crate::callback_gate::CallbackLease<EngineBridge>> {
+    let lease = BRIDGE.acquire(Some(context as usize as u64))?;
+    if lease.is_stopping() {
+        return None;
+    }
+    Some(lease)
+}
+
+/// Cancellation is polled independently of the HTTP request: dropping its
+/// future releases the download/key owner even when the server never replies.
+pub async fn cancelled(lease: &crate::callback_gate::CallbackLease<EngineBridge>) {
+    while !lease.is_revoked() && !lease.is_stopping() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Stop admission, cancel downloads, drain transfers and release credentials.
+/// Preserve a failed disconnect's key so a retry cannot register over it.
+static REVOCATION_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn ensure_reactivation_allowed() -> std::result::Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst)
+        || REVOCATION_PENDING.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(
+            "Vault lock did not finish. Retry locking; if it persists, restart Beebeeb before unlocking.".into(),
+        );
+    }
+    Ok(())
+}
+
+pub async fn revoke_callbacks() -> anyhow::Result<()> {
+    REVOCATION_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Close admission synchronously, even if CONNECTION is held by a stalled
+    // native call. Keep that revoked slot until its actual leases have drained.
+    let revoked = BRIDGE.revoke();
+    let worker = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if let Some(revoked) = revoked {
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
+        }
+        let mut connection = CONNECTION.lock().unwrap();
+        // A stopping runner may have published after the first revoke.
+        if let Some(revoked) = BRIDGE.revoke() {
+            revoked
+                .drain(std::time::Duration::from_secs(3))
+                .map_err(anyhow::Error::msg)?;
+        }
+        *NOTIFY_TX.write().unwrap() = None;
+        if let Some(current) = connection.as_ref() {
+            unsafe { CfDisconnectSyncRoot(current.key) }?;
+        }
+        *connection = None;
+        *SYNC_ROOT.write().unwrap() = None;
+        Ok(())
+    });
+    // CfDisconnect/CfExecute cannot be force-aborted safely. They remain on
+    // isolated native/blocking workers. A deadline is a FAILED lock, and the
+    // process stays fenced if such a worker cannot confirm completion.
+    match tokio::time::timeout(std::time::Duration::from_secs(4), worker).await {
+        Ok(result) => {
+            result??;
+            REVOCATION_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!("Cloud Files callbacks revoked and drained");
+            Ok(())
+        }
+        Err(_) => {
+            refuse_unconfirmed_stop();
+            anyhow::bail!(
+                "Vault lock failed: a Windows Cloud Files operation is not responding. The vault is not locked. Restart Beebeeb before unlocking."
+            )
+        }
+    }
+}
+
+static STOP_UNCONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn refuse_unconfirmed_stop() {
+    STOP_UNCONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+static CREDENTIAL_OWNERS: std::sync::Mutex<Vec<std::sync::Weak<()>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn track_credentials(api: &Arc<crate::api_client::ApiClient>) {
+    CREDENTIAL_OWNERS.lock().unwrap().push(api.credential_lifetime());
+}
+
+/// Includes watcher scans/heartbeat workers that may be outside the runner's
+/// task. An unconfirmed owner is retained as a weak reference for the next retry.
+pub async fn wait_for_credential_release() -> std::result::Result<(), String> {
+    if STOP_UNCONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(
+            "Sync shutdown could not be confirmed. Restart Beebeeb before locking or switching accounts.".into(),
+        );
+    }
+    for _ in 0..1000 {
+        {
+            let mut owners = CREDENTIAL_OWNERS.lock().unwrap();
+            owners.retain(|owner| owner.strong_count() != 0);
+            if owners.is_empty() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err("Sync workers are still stopping. Retry locking/signing out before switching accounts.".into())
+}
+
+pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    if let Err(error) = unsafe { CfUnregisterSyncRoot(PCWSTR(wide.as_ptr())) } {
+        use windows::Win32::Foundation::{ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_NOT_A_CLOUD_FILE};
+        if error.code() != HRESULT::from_win32(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            && error.code() != HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0)
+        {
+            return Err(error.into());
+        }
+    }
+    // Prove the Cloud Files registration itself is gone, independently of the
+    // Explorer/WinRT registration and its per-user registry metadata.
+    let mut buffer = vec![0u64; 1024];
+    let result = unsafe {
+        CfGetSyncRootInfoByPath(
+            PCWSTR(wide.as_ptr()),
+            CF_SYNC_ROOT_INFO_BASIC,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match result {
+        Err(error)
+            if error.code()
+                == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+                || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
+        Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
+    }
+}
+
+/// Internal accessor for the daemon's tokio runtime handle, used by the
+/// fetch callback to bridge sync→async. `None` if [`connect_root`] never ran
+/// (e.g. registration failed before the handle was stashed) — the
+/// callback must then fail the hydration rather than hang Explorer.
+pub fn runtime() -> Option<tokio::runtime::Handle> {
+    RUNTIME.get().cloned()
+}
+
+/// Register `sync_root_path` as a Cloud Files sync root. After this
+/// call returns Ok, Explorer shows the folder with our provider name
+/// and the `placeholders::create_placeholder` calls start having
+/// effect. Failures here are fatal for the Windows hydration story —
+/// log and surface to the engine-status stream so the WebView can
+/// degrade gracefully.
+///
+/// Idempotent at the OS layer: re-registering the same path with the
+/// same provider id returns success.
+pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+    register_sync_root_with(sync_root_path, &BEEBEEB_PROVIDER, HYDRATION_POLICY)
+}
+
+/// [`register_sync_root`] as `provider`, with the Win32 hydration policy `hydration` (a test passes
+/// `PARTIAL` to stand for a 0.8.21 install).
+pub fn register_sync_root_with(
+    sync_root_path: &std::path::Path,
+    provider: &SyncProvider,
+    hydration: CF_HYDRATION_POLICY_PRIMARY,
+) -> anyhow::Result<()> {
+    let path_wide: Vec<u16> = sync_root_path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let provider_version: Vec<u16> = provider.version.encode_utf16().chain(std::iter::once(0)).collect();
+    let display_name: Vec<u16> = provider.name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: `info` and `policies` are stack-allocated structs whose
+    // lifetimes outlive the `CfRegisterSyncRoot` call. The wide-string
+    // buffers are kept alive on the same stack frame for the same
+    // reason. `CfRegisterSyncRoot` does not retain pointers past
+    // return.
+    unsafe {
+        let info = CF_SYNC_REGISTRATION {
+            StructSize: std::mem::size_of::<CF_SYNC_REGISTRATION>() as u32,
+            ProviderName: PCWSTR(display_name.as_ptr()),
+            ProviderVersion: PCWSTR(provider_version.as_ptr()),
+            SyncRootIdentity: std::ptr::null(),
+            SyncRootIdentityLength: 0,
+            FileIdentity: std::ptr::null(),
+            FileIdentityLength: 0,
+            // Stable, hardcoded provider GUID (see BEEBEEB_PROVIDER_GUID)
+            // so the sync-root identity is deterministic across releases
+            // and machines, rather than the previous GUID::zeroed() dev
+            // shortcut that let Windows pick a per-machine default.
+            ProviderId: provider.guid,
+        };
+        // Hydration policy (LD-0105 S7): [`HYDRATION_POLICY`] = `PROGRESSIVE` since 0.8.22 (was
+        // `PARTIAL`, which Microsoft documents as "not currently supported"). The FETCH_DATA callback
+        // serves the bytes on open; `PROGRESSIVE` lets a reader's IO complete as soon as its bytes
+        // are transferred. Modifier NONE: no streaming-only mode (the platform must keep the bytes).
+        //
+        // Population policy `ALWAYS_FULL` (was `FULL`, originally `PARTIAL`):
+        // the provider PRE-POPULATES the whole namespace by eagerly minting a
+        // placeholder for every cloud-only row (`populate_placeholders`,
+        // re-run on every tick via `refresh_placeholders` so newly discovered
+        // rows are added). `ALWAYS_FULL` is the "the namespace is ALWAYS
+        // present locally in full — never forward an enumeration request to
+        // the provider" contract: Windows treats every directory as fully
+        // enumerated by the on-disk placeholders and NEVER asks us for more,
+        // so no `FETCH_PLACEHOLDERS` callback is ever needed.
+        //
+        // Why not `FULL`: `FULL` only marks a directory fully-populated AFTER
+        // the provider explicitly stamps it `CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION`
+        // (or sets pin state); any directory NOT yet marked is still treated
+        // as "not fully populated" and Windows BLOCKS its first Explorer
+        // listing waiting for a `FETCH_PLACEHOLDERS` callback — which this
+        // in-process provider never registered, so enumeration hung/timed out.
+        // `ALWAYS_FULL` removes that per-directory requirement entirely: the
+        // namespace is unconditionally complete, so enumeration is served from
+        // the placeholders with no callback round-trip.
+        //
+        // The vault is small and (today) flat — `sync_tick` lists only the
+        // root, non-recursively — so eager full population is cheap and
+        // correct. If deep recursive listing is added later and the vault
+        // grows large, the alternative is to switch back to `PARTIAL` and
+        // register a real `CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS` that serves a
+        // directory's children from the DB via `CfExecute(TRANSFER_PLACEHOLDERS)`.
+        let policies = CF_SYNC_POLICIES {
+            StructSize: std::mem::size_of::<CF_SYNC_POLICIES>() as u32,
+            Hydration: CF_HYDRATION_POLICY {
+                // In windows 0.58 the policy fields are strongly-typed
+                // newtypes (CF_HYDRATION_POLICY_PRIMARY(u16) etc.), and the
+                // `CF_*_PARTIAL` constants are already those newtypes — assign
+                // them directly rather than unwrapping `.0` into a raw int.
+                Primary: hydration,
+                Modifier: CF_HYDRATION_POLICY_MODIFIER_NONE,
+            },
+            Population: CF_POPULATION_POLICY {
+                // `CF_POPULATION_POLICY_ALWAYS_FULL` (windows 0.58:
+                // `CF_POPULATION_POLICY_PRIMARY(3)`) — verified present in the
+                // vendored bindings. The namespace is ALWAYS fully present
+                // locally; Windows never forwards an enumeration request, so no
+                // FETCH_PLACEHOLDERS callback is required.
+                Primary: CF_POPULATION_POLICY_ALWAYS_FULL,
+                Modifier: CF_POPULATION_POLICY_MODIFIER_NONE,
+            },
+            InSync: CF_INSYNC_POLICY_NONE,
+            HardLink: CF_HARDLINK_POLICY_NONE,
+            PlaceholderManagement: CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
+        };
+
+        // Flags:
+        //  - `UPDATE` so a root previously registered with an older policy
+        //    (`PARTIAL`, or `FULL`) — e.g. an onboarding that ran before this
+        //    fix — is re-registered in place with the new `ALWAYS_FULL` policy
+        //    rather than the call no-opping on the stale registration.
+        //  - `DISABLE_ON_DEMAND_POPULATION_ON_ROOT` is the explicit
+        //    "this provider fully pre-populates the namespace; do NOT
+        //    expect an on-demand FETCH_PLACEHOLDERS callback" contract
+        //    that pairs with `ALWAYS_FULL` — it reinforces, at the root, that
+        //    Explorer must not block on a placeholder fetch that never comes.
+        let register_flags = CF_REGISTER_FLAG_UPDATE | CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT;
+        CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, register_flags)
+            .map_err(|e| anyhow::anyhow!("CfRegisterSyncRoot failed: {e}"))?;
+    }
+
+    tracing::info!(
+        sync_root = %sync_root_path.display(),
+        "Cloud Files sync root registered"
+    );
+    Ok(())
+}
+
+/// Write the Explorer SHELL registration for the Beebeeb sync root via WinRT
+/// `StorageProviderSyncRootManager::Register`.
+///
+/// ## What this adds (and why it's separate from [`register_sync_root`])
+///
+/// [`register_sync_root`] registers the root with the Cloud Files **platform**
+/// (Win32 `CfRegisterSyncRoot`) — that is what drives placeholders + on-demand
+/// hydration, and it is verified working. But it writes **no Explorer shell
+/// metadata**, so Explorer shows no Status column, no cloud/check overlays, no
+/// "Beebeeb" sidebar entry, and no "Free up space" context menu. This function
+/// writes that shell metadata — the `…\Explorer\SyncRootManager\<id>` shell
+/// entry, the `CLSID\{…}` namespace tree, and the nav-pane mount — in one WinRT
+/// call. The per-file in-sync / pin state is already stamped by
+/// `create_placeholder` (MARK_IN_SYNC) and `mark_in_sync`/`mark_not_in_sync`, so
+/// once the provider is shell-registered the overlays, Status column, sidebar
+/// entry, and menu all render from existing state — no per-file rework.
+///
+/// **Purely additive.** It does NOT touch the Win32 registration, the FETCH_DATA
+/// callback, or the ALWAYS_FULL/PARTIAL population/hydration contract. The two
+/// registrations are kept in agreement: the WinRT policies below mirror the
+/// Win32 `CF_SYNC_POLICIES` — `HydrationPolicy = Partial` ↔ `CF_HYDRATION_POLICY_PARTIAL`,
+/// `PopulationPolicy = AlwaysFull` ↔ `CF_POPULATION_POLICY_ALWAYS_FULL`.
+///
+/// Best-effort: every failure is returned as `Err` for the caller to log-and-
+/// continue. A shell-registration failure must never break login / engine /
+/// hydration — those run off the Win32 path, which is independent of this.
+///
+/// Idempotent: if a sync root is already shell-registered for this folder we
+/// skip the re-register (a duplicate `Register` for the same Id throws), and a
+/// "already registered" error is swallowed as success.
+#[cfg(target_os = "windows")]
+pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+    register_shell_sync_root_as(sync_root, &BEEBEEB_PROVIDER)
+}
+
+/// [`register_shell_sync_root`] as `provider` (a test root registers as [`QA_PROVIDER`]).
+pub fn register_shell_sync_root_as(sync_root: &std::path::Path, provider: &SyncProvider) -> anyhow::Result<()> {
+    use windows::Foundation::Collections::IVector;
+    use windows::Security::Cryptography::CryptographicBuffer;
+    use windows::Storage::Provider::{
+        StorageProviderHardlinkPolicy, StorageProviderHydrationPolicy, StorageProviderHydrationPolicyModifier,
+        StorageProviderInSyncPolicy, StorageProviderItemPropertyDefinition, StorageProviderPopulationPolicy,
+        StorageProviderProtectionMode, StorageProviderSyncRootInfo, StorageProviderSyncRootManager,
+    };
+    use windows::Storage::{IStorageFolder, StorageFolder};
+    use windows::core::{HSTRING, Interface};
+
+    let id = shell_sync_root_id_as(sync_root, provider.name);
+    let id_h = HSTRING::from(id.as_str());
+
+    // Resolve the sync-root folder as a WinRT StorageFolder (the `Path` property
+    // is a StorageFolder, not a string). `GetFolderFromPathAsync` is async; we are
+    // on a normal (non-callback) thread here so blocking on `.get()` is fine.
+    let path_h = HSTRING::from(&*sync_root.to_string_lossy());
+    let folder: StorageFolder = StorageFolder::GetFolderFromPathAsync(&path_h)
+        .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync queue failed: {e}"))?
+        .get()
+        .map_err(|e| anyhow::anyhow!("GetFolderFromPathAsync failed for sync root: {e}"))?;
+
+    // Idempotency guard (LD-0105 S7): an existing registration is kept, whatever version it
+    // recorded; see [`shell_step`]. Only a root with no registration is registered below.
+    let registered = StorageProviderSyncRootManager::GetSyncRootInformationForId(&id_h)
+        .ok()
+        .map(|existing| existing.Version().ok().map(|h| h.to_string_lossy()));
+    let step = shell_step(registered.as_ref().map(|v| v.as_deref()));
+    if let ShellStep::Keep(status) = step {
+        tracing::info!(status, "Explorer shell sync root already registered; kept as it is");
+        return Ok(());
+    }
+
+    let info = StorageProviderSyncRootInfo::new()
+        .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootInfo::new failed: {e}"))?;
+
+    info.SetId(&id_h).map_err(|e| anyhow::anyhow!("SetId failed: {e}"))?;
+    // `SetPath` takes `Param<IStorageFolder>` (the interface), and the
+    // `Param<…, InterfaceType> for &U` blanket impl only fires when `U:
+    // CanInto<IStorageFolder>`. `StorageFolder` (the concrete runtime class) does
+    // NOT auto-declare `CanInto<IStorageFolder>` in windows-0.58 — its
+    // `interface_hierarchy!` lists only IUnknown/IInspectable — so `&folder`
+    // fails to satisfy the bound. QueryInterface the class to the interface it
+    // implements, then pass that owned `IStorageFolder` (which trivially
+    // satisfies `Param<IStorageFolder>`).
+    let folder_iface: IStorageFolder = folder
+        .cast::<IStorageFolder>()
+        .map_err(|e| anyhow::anyhow!("cast StorageFolder→IStorageFolder failed: {e}"))?;
+    info.SetPath(&folder_iface)
+        .map_err(|e| anyhow::anyhow!("SetPath failed: {e}"))?;
+    info.SetDisplayNameResource(&HSTRING::from(provider.name))
+        .map_err(|e| anyhow::anyhow!("SetDisplayNameResource failed: {e}"))?;
+
+    // Icon: the running exe's first icon resource, the same pattern OneDrive /
+    // ProtonDrive use (`"<exe>,0"`). Best-effort — if the exe path can't be
+    // resolved we fall back to just the index-0 reference, which Explorer renders
+    // as a generic icon rather than failing the whole registration.
+    let icon_resource = std::env::current_exe()
+        .ok()
+        .map(|exe| format!("{},0", exe.to_string_lossy()))
+        .unwrap_or_else(|| ",0".to_string());
+    info.SetIconResource(&HSTRING::from(icon_resource.as_str()))
+        .map_err(|e| anyhow::anyhow!("SetIconResource failed: {e}"))?;
+
+    // ── Policies — MUST mirror the Win32 CF_SYNC_POLICIES so the platform and
+    //    shell registrations agree (see register_sync_root) ──
+    //
+    // Progressive ↔ CF_HYDRATION_POLICY_PROGRESSIVE ([`HYDRATION_POLICY`], LD-0105 S7). Only a root with
+    // no registration gets here (first install, or sign-in after a sign-out), so these values decide
+    // what a fresh root runs with: they must equal the Win32 ones.
+    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Progressive)
+        .map_err(|e| anyhow::anyhow!("SetHydrationPolicy failed: {e}"))?;
+    // Modifier None (LD-0105 S7, review N-P2-1 (b)): was `StreamingAllowed`, under which the platform may
+    // keep no data on disk at all, which would break the one-version-per-placeholder record and every
+    // on-disk check. `AutoDehydrationAllowed` stays dropped (1.1.0): an opened file stays on disk until
+    // the person, or "Free up space", frees it, and pins are honoured.
+    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::None)
+        .map_err(|e| anyhow::anyhow!("SetHydrationPolicyModifier failed: {e}"))?;
+    // AlwaysFull ↔ CF_POPULATION_POLICY_ALWAYS_FULL: the namespace is always fully
+    // present locally (we eagerly mint a placeholder per cloud-only row), so
+    // Explorer never asks the provider to enumerate.
+    info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)
+        .map_err(|e| anyhow::anyhow!("SetPopulationPolicy failed: {e}"))?;
+    // InSync `Default`: consistent with the per-file in-sync state we stamp
+    // ourselves (create_placeholder MARK_IN_SYNC; mark_in_sync→CfSetInSyncState).
+    // We manage in-sync explicitly, so the shell needs no extra attribute-based
+    // in-sync inference.
+    info.SetInSyncPolicy(StorageProviderInSyncPolicy::Default)
+        .map_err(|e| anyhow::anyhow!("SetInSyncPolicy failed: {e}"))?;
+    info.SetHardlinkPolicy(StorageProviderHardlinkPolicy::None)
+        .map_err(|e| anyhow::anyhow!("SetHardlinkPolicy failed: {e}"))?;
+    info.SetShowSiblingsAsGroup(false)
+        .map_err(|e| anyhow::anyhow!("SetShowSiblingsAsGroup failed: {e}"))?;
+    info.SetProtectionMode(StorageProviderProtectionMode::Unknown)
+        .map_err(|e| anyhow::anyhow!("SetProtectionMode failed: {e}"))?;
+    info.SetVersion(&HSTRING::from(provider.version))
+        .map_err(|e| anyhow::anyhow!("SetVersion failed: {e}"))?;
+
+    // Context is an opaque per-provider blob Windows hands back to us; encode the
+    // Id bytes so it is non-empty and self-describing. Built via CryptographicBuffer
+    // to avoid hand-rolling a DataWriter.
+    let context = CryptographicBuffer::CreateFromByteArray(id.as_bytes())
+        .map_err(|e| anyhow::anyhow!("CryptographicBuffer::CreateFromByteArray failed: {e}"))?;
+    info.SetContext(&context)
+        .map_err(|e| anyhow::anyhow!("SetContext failed: {e}"))?;
+
+    // Declare a Status column so Explorer renders the sync-state column for this
+    // provider. Property id 0 is the canonical per-item sync-status property; the
+    // per-file value is supplied through the in-sync/pin state we already stamp.
+    let props: IVector<StorageProviderItemPropertyDefinition> = info
+        .StorageProviderItemPropertyDefinitions()
+        .map_err(|e| anyhow::anyhow!("StorageProviderItemPropertyDefinitions failed: {e}"))?;
+    let status_def = StorageProviderItemPropertyDefinition::new()
+        .map_err(|e| anyhow::anyhow!("StorageProviderItemPropertyDefinition::new failed: {e}"))?;
+    status_def
+        .SetId(0)
+        .map_err(|e| anyhow::anyhow!("property SetId failed: {e}"))?;
+    status_def
+        .SetDisplayNameResource(&HSTRING::from("Status"))
+        .map_err(|e| anyhow::anyhow!("property SetDisplayNameResource failed: {e}"))?;
+    props
+        .Append(&status_def)
+        .map_err(|e| anyhow::anyhow!("append Status property definition failed: {e}"))?;
+    // LD-0113 Amendment 8a: the "Read-only" custom state the Backups root carries (core's MSG_BADGE).
+    // Only a new registration declares it (an existing one is kept, above); a failure here costs the
+    // badge, never the registration.
+    match read_only::read_only_state_definition(beebeeb_core::backup::MSG_BADGE)
+        .and_then(|definition| props.Append(&definition))
+    {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "the Read-only custom state could not be declared; Backups shows no badge")
+        }
+    }
+
+    // Register. Swallow an "already registered" race as success (idempotent) —
+    // the guard above usually catches it, but a concurrent register could still
+    // collide.
+    match StorageProviderSyncRootManager::Register(&info) {
+        Ok(()) => {
+            tracing::info!(
+                sync_root = %sync_root.display(),
+                shell_id = %id,
+                "Explorer shell sync root registered (Status column + overlays + sidebar)"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) == 0x800700B7. Treat an
+            // already-registered entry as success so a re-login reconverges
+            // without surfacing a spurious error.
+            if e.code().0 as u32 == 0x8007_00B7 {
+                tracing::info!(
+                    sync_root = %sync_root.display(),
+                    "Explorer shell sync root already registered (Register returned ALREADY_EXISTS)"
+                );
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("StorageProviderSyncRootManager::Register failed: {e}"))
+            }
+        }
+    }
+}
+
+/// Remove the Explorer SHELL registration for `sync_root` (the inverse of
+/// [`register_shell_sync_root`]).
+///
+/// Called on sign-out / reset so a logout does not leave a dead "Beebeeb"
+/// nav-pane entry, Status column, or overlays pointing at a folder the user is
+/// no longer signed into. Sign-out propagates failures and verifies absence;
+/// an already-absent registration is an idempotent success.
+///
+/// The Id is reconstructed from the sync-root path via the same stable
+/// [`shell_sync_root_id`] scheme used to register, so the caller only needs the
+/// persisted `DesktopConfig.sync_root` — not the running engine.
+#[cfg(target_os = "windows")]
+pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+    use windows::Storage::Provider::StorageProviderSyncRootManager;
+    use windows::core::HSTRING;
+
+    let id = shell_sync_root_id(sync_root);
+    let id_h = HSTRING::from(id.as_str());
+
+    // Tear down the breadcrumb status-flyout registration FIRST (revoke the COM
+    // class object + remove the registry binding under the sync-root key), while
+    // the sync-root key still exists. Best-effort and self-contained; it logs its
+    // own failures and never returns an error, so it cannot block the shell
+    // unregister below. Inverse of `register_status_ui_for_sync_root`.
+    status_ui::unregister_status_ui_source(&id);
+
+    // Tear down the media thumbnail-provider registration (revoke the COM class
+    // object + remove the `ThumbnailProvider` binding under the sync-root key +
+    // the CLSID subtree), while the sync-root key still exists. Best-effort and
+    // self-contained; logs its own failures, never blocks the shell unregister.
+    // Inverse of `register_thumbnail_provider_for_sync_root`.
+    thumbnail_provider::unregister_thumbnail_provider(&id);
+
+    let roots = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    let mut registered = false;
+    for index in 0..roots.Size()? {
+        if roots.GetAt(index)?.Id()? == id_h {
+            registered = true;
+            break;
+        }
+    }
+    if registered {
+        StorageProviderSyncRootManager::Unregister(&id_h)
+            .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootManager::Unregister failed: {e}"))?;
+    }
+    let remaining = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
+    for index in 0..remaining.Size()? {
+        anyhow::ensure!(
+            remaining.GetAt(index)?.Id()? != id_h,
+            "Explorer registration remains after unregister; sign-out did not finish"
+        );
+    }
+    // WinRT removes the live registration but can leave our per-user handler
+    // key behind. Delete only this root's stable ID, then prove absence.
+    remove_owned_shell_key(&id)?;
+    tracing::info!(sync_root = %sync_root.display(), shell_id = %id, "Explorer shell sync root unregistered");
+    Ok(())
+}
+
+fn remove_owned_shell_key(id: &str) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::*;
+    use windows::core::HSTRING;
+    let key = HSTRING::from(format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
+    ));
+    unsafe {
+        let result = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
+        anyhow::ensure!(
+            result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND,
+            "Could not remove owned Explorer registry key: {result:?}"
+        );
+        let mut handle = HKEY::default();
+        let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
+        if remaining == ERROR_SUCCESS {
+            let _ = RegCloseKey(handle);
+        }
+        anyhow::ensure!(
+            remaining == ERROR_FILE_NOT_FOUND || remaining == ERROR_PATH_NOT_FOUND,
+            "Could not verify owned Explorer registry key removal: {remaining:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Guard so the dedicated status-UI COM thread is spawned at most once per
+/// process. A re-login re-runs [`connect_root`], but the class object + its STA
+/// apartment must persist for the whole process lifetime, so we never respawn.
+static STATUS_UI_THREAD: OnceLock<()> = OnceLock::new();
+
+/// Guard so the dedicated thumbnail-provider COM thread is spawned at most once
+/// per process. Same reasoning as [`STATUS_UI_THREAD`]: `CoRegisterClassObject`
+/// keeps the class object alive only while the registering thread's COM apartment
+/// lives, so we register on one long-lived STA thread that parks for the process
+/// lifetime.
+static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
+
+/// Stand up the Explorer **media thumbnail provider** (task 0823) so cloud-only
+/// image/video placeholders show real tiles instead of generic type icons.
+///
+/// ## The cloud-files binding (what the earlier attempts got wrong)
+///
+/// `IThumbnailProvider` for placeholders is NOT registered via the generic
+/// per-extension `SystemFileAssociations\.ext\ShellEx` path (the Cloud Filter
+/// suppresses that for dehydrated files), nor as an InprocServer32 DLL (same
+/// suppression). The shell honors a **cloud-files thumbnail provider bound to the
+/// sync root** — for an unpackaged app that binding is the registry value
+/// `ThumbnailProvider = {clsid}` under the SyncRootManager key, with the handler
+/// as a normal in-process `LocalServer32` COM server. This is the SAME shape as
+/// the status-UI handler ([`register_status_ui_for_sync_root`]) and lets the
+/// provider reach the in-process [`EngineBridge`] directly. See
+/// `thumbnail_provider` module docs for the OneDrive/Nextcloud confirmation.
+///
+/// Why a dedicated STA thread: `CoRegisterClassObject` ties the class object's
+/// lifetime to the registering thread's COM apartment, so we spawn one long-lived
+/// STA thread that initializes COM, registers the class object + the registry
+/// binding, and parks for the process lifetime.
+///
+/// `shell_id` is the same `Beebeeb!<hash>` id [`shell_sync_root_id`] mints, so the
+/// `ThumbnailProvider` value lands under the exact SyncRootManager key the WinRT
+/// shell registration created. Spawned at most once per process (guarded by
+/// [`THUMBNAIL_PROVIDER_THREAD`]). Best-effort: any failure is logged inside the
+/// thread — missing thumbnails only cost the tiles; overlays, the Status column,
+/// the flyout, and hydration are unaffected.
+pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
+    if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
+        if let Err(error) = thumbnail_provider::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
+        return;
+    }
+    let shell_id = shell_sync_root_id(sync_root);
+    let _ = THUMBNAIL_PROVIDER_THREAD.set(());
+
+    let spawned = std::thread::Builder::new()
+        .name("beebeeb-thumbnail-provider".to_string())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // SAFETY: standard COM init for this dedicated thread. S_FALSE
+            // (already initialized) is non-error. Balanced with CoUninitialize on
+            // the failure early-exit only.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr.is_err() {
+                tracing::warn!(hr = ?hr, "thumbnail-provider thread: CoInitializeEx failed; tiles disabled");
+                return;
+            }
+
+            if let Err(e) = thumbnail_provider::register_thumbnail_provider(&shell_id) {
+                tracing::warn!(error = %e, "thumbnail provider registration failed; media tiles absent (overlays/column/flyout/hydration unaffected)");
+                // SAFETY: balance the CoInitializeEx above before exiting.
+                unsafe { CoUninitialize() };
+                return;
+            }
+
+            tracing::info!("thumbnail provider registered; running STA message pump for process lifetime");
+            // ★ RUN A MESSAGE PUMP — do NOT park(). This thread is an STA
+            // (`COINIT_APARTMENTTHREADED`) that registered the class object via
+            // `CoRegisterClassObject(CLSCTX_LOCAL_SERVER)`. COM delivers every
+            // cross-apartment / cross-PROCESS activation and method call to an STA
+            // as a window message dispatched to the apartment's hidden message
+            // window. A thread blocked in `std::thread::park()` never pumps, so the
+            // class object is registered but UNREACHABLE: the shell's thumbnail
+            // host resolves our binding + CLSID, then its `CoCreateInstance`
+            // (`IThumbnailProvider`) HANGS waiting on a message queue that is never
+            // serviced → no `Initialize`/`GetThumbnail`, silent type-icon fallback.
+            //
+            // Task 0823 diagnosis (ProcMon + a cross-process `CoCreateInstance`
+            // probe, 2026-06-20) proved exactly this: with the HKLM binding fix in
+            // place the shell read the binding + our CLSID, but never activated the
+            // object and never spawned/connected our server — and an external
+            // `CoCreateInstance(CLSCTX_LOCAL_SERVER)` of our CLSID hung indefinitely
+            // against this parked thread. Pumping messages is the missing half.
+            //
+            // `GetMessageW` blocks until a message arrives (no busy-wait) and
+            // returns 0 only on `WM_QUIT` — which we never post — so this loop runs
+            // for the process lifetime, keeping the apartment live and servicing COM
+            // activations. Process exit tears the apartment down;
+            // `unregister_thumbnail_provider` revokes the class-object cookie on
+            // sign-out.
+            //
+            // SAFETY: standard STA message pump. `MSG` is a plain out-param;
+            // `GetMessageW(None, 0, 0)` retrieves messages for any window on THIS
+            // thread (the hidden COM message window). `TranslateMessage`/
+            // `DispatchMessageW` are the documented dispatch pair.
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+            };
+            let mut msg = MSG::default();
+            loop {
+                let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+                // 0 == WM_QUIT (never posted here), -1 == error: stop pumping rather
+                // than spin. The apartment stays alive until process exit either way.
+                if ret.0 <= 0 {
+                    tracing::warn!(ret = ret.0, "thumbnail-provider message pump ended");
+                    break;
+                }
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not spawn thumbnail-provider thread; media tiles disabled");
+    }
+}
+
+/// Stand up the OneDrive-style Explorer breadcrumb **status flyout** for
+/// `sync_root` (clicking "Beebeeb" in the path-bar → synced state + storage bar
+/// + "Free up space"). PURELY ADDITIVE on top of [`register_shell_sync_root`].
+///
+/// Why a dedicated thread: Windows asks our COM `IClassFactory` for the status-UI
+/// source on demand, and `CoRegisterClassObject` keeps the class object alive
+/// only as long as the registering thread's COM apartment lives. The Microsoft
+/// CloudMirror sample does exactly this — registers its status-UI factory on a
+/// dedicated single-threaded-apartment thread that then parks on a wait. A tokio
+/// worker is the wrong home: it is transient and may have its apartment torn
+/// down. So we spawn one long-lived STA thread that initializes COM, registers
+/// the class object + the registry binding, and parks for the process lifetime.
+///
+/// Spawned at most once per process (guarded by [`STATUS_UI_THREAD`]); a re-login
+/// reuses the existing registration. Best-effort: any failure is logged inside
+/// the thread and never propagated — the flyout is a nicety; overlays, the
+/// Status column, the nav-pane entry and hydration are unaffected.
+pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
+    if STATUS_UI_THREAD.get().is_some() {
+        if let Err(error) = status_ui::rebind(&shell_sync_root_id(sync_root)) {
+            tracing::warn!(%error, "shell binding refresh failed");
+        }
+        return;
+    }
+    let shell_id = shell_sync_root_id(sync_root);
+    let _ = STATUS_UI_THREAD.set(());
+
+    let spawned = std::thread::Builder::new()
+        .name("beebeeb-status-ui".to_string())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // SAFETY: standard COM init for this dedicated thread. Returns an
+            // HRESULT; S_FALSE (already initialized) is non-error. We pair it with
+            // a CoUninitialize only on the (failure) early-exit paths.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr.is_err() {
+                tracing::warn!(hr = ?hr, "status-UI thread: CoInitializeEx failed; flyout disabled");
+                return;
+            }
+
+            if let Err(e) = status_ui::register_status_ui_source(&shell_id) {
+                tracing::warn!(error = %e, "status-UI source registration failed; breadcrumb flyout absent (overlays/column/hydration unaffected)");
+                // SAFETY: balance the CoInitializeEx above before exiting — no
+                // point holding an apartment for a failed registration.
+                unsafe { CoUninitialize() };
+                return;
+            }
+
+            tracing::info!("status-UI source registered; parking COM thread for process lifetime");
+            // Park forever: keep the apartment + class object alive. The class
+            // object must live exactly as long as the process; process exit tears
+            // it down. `unregister_status_ui_source` revokes the cookie on
+            // sign-out; this parked thread simply keeps the apartment resident.
+            loop {
+                std::thread::park();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not spawn status-UI thread; breadcrumb flyout disabled");
+    }
+}
+
+/// Connect the Cloud Files callback table for `sync_root_path` so Windows
+/// fires [`callbacks::fetch_data_callback`] when a user opens a cloud-only
+/// placeholder. Must be called after [`register_sync_root`]. Returns the
+/// error from `CfConnectSyncRoot` on failure (e.g. already connected).
+///
+/// The callback table is a static array terminated by a
+/// `CF_CALLBACK_TYPE_NONE` sentinel, per the Cloud Files contract. We register:
+///
+/// - `FETCH_DATA` — the bytes-on-open (download) hook. Directory *enumeration*
+///   is served from the eagerly pre-created on-disk placeholders (the root is
+///   registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
+///   `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
+///   placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
+/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger (task 0780). Fires
+///   AFTER a handle that wrote a new/modified file in the connected root closes.
+///   Unlike a `notify`/ReadDirectoryChanges watcher (which the CF filter starves
+///   on a connected root), this DOES fire, so it is the create/modify hook for
+///   local uploads.
+/// - `NOTIFY_DELETE_COMPLETION` — fires after a local delete; propagates a
+///   server trash for a known file.
+/// - `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move; propagates a
+///   server move/rename. Its params arm carries the OLD path (`SourcePath`); the
+///   NEW path is `CF_CALLBACK_INFO.NormalizedPath`.
+///
+/// No special connect flag is needed for NOTIFY delivery: the
+/// `NOTIFY_*_COMPLETION` callbacks are delivered to any registered handler
+/// post-operation. `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO` (kept) only asks
+/// Windows to populate `CF_CALLBACK_INFO.ProcessInfo`; it does not gate notify
+/// delivery. [LEAD native build: confirm the three NOTIFY callbacks actually
+/// fire on a real CfConnectSyncRoot'd root — the bindings + table shape are
+/// verified against windows-0.58, but only a native run proves delivery.]
+fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyhow::Result<CF_CONNECTION_KEY> {
+    let path_wide: Vec<u16> = sync_root_path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // The table must outlive the call; it lives on this stack frame and
+    // `CfConnectSyncRoot` copies what it needs before returning. The
+    // CF_CALLBACK_TYPE_NONE sentinel MUST stay last.
+    let table = [
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_FETCH_DATA,
+            Callback: Some(callbacks::fetch_data_callback),
+        },
+        // LD-0105 W2: a cancelled fetch ends its demand; an open arms W3's per-app decline.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_CANCEL_FETCH_DATA,
+            Callback: Some(streaming::cancel_fetch_data_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_OPEN_COMPLETION,
+            Callback: Some(streaming::notify_file_open_completion_callback),
+        },
+        // Upload trigger: a handle that wrote a new/modified file has closed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_FILE_CLOSE_COMPLETION,
+            Callback: Some(callbacks::notify_file_close_completion_callback),
+        },
+        // LD-0113 §6.3: BEFORE a delete or rename, refuse the Backups root and this device's own backups
+        // (answered from the state DB, never the network). Explorer's Delete arrives as a rename.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DELETE,
+            Callback: Some(callbacks::notify_delete_callback),
+        },
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_RENAME,
+            Callback: Some(callbacks::notify_rename_callback),
+        },
+        // Delete trigger: a local delete completed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_DELETE_COMPLETION,
+            Callback: Some(callbacks::notify_delete_completion_callback),
+        },
+        // Rename/move trigger: a local rename completed.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NOTIFY_RENAME_COMPLETION,
+            Callback: Some(callbacks::notify_rename_completion_callback),
+        },
+        // Sentinel terminator — required by the API; MUST be last.
+        CF_CALLBACK_REGISTRATION {
+            Type: CF_CALLBACK_TYPE_NONE,
+            Callback: None,
+        },
+    ];
+
+    // SAFETY: `path_wide` and `table` are kept alive on this stack frame for
+    // the duration of the call. The callback function pointers have static
+    // lifetime. Retain the key for authoritative teardown.
+    unsafe {
+        CfConnectSyncRoot(
+            PCWSTR(path_wide.as_ptr()),
+            table.as_ptr(),
+            Some(generation as usize as *const std::ffi::c_void),
+            CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO,
+        )
+        .map_err(|e| anyhow::anyhow!("CfConnectSyncRoot failed: {e}"))
+    }
+}
+
+/// Connect once per runner generation. Existing placeholders may call us before
+/// the bridge is installed; those requests fail promptly until activation.
+pub fn connect_root(sync_root: &std::path::Path) {
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    let mut connection = CONNECTION.lock().unwrap();
+    if ensure_reactivation_allowed().is_err() {
+        return;
+    }
+    if let Some(current) = connection.as_ref() {
+        if current.root != sync_root {
+            tracing::error!("old Cloud Files root still connected");
+        }
+        return;
+    }
+    // Stash the current tokio runtime handle so the Cloud Files fetch
+    // callback (which fires on an OS filter-driver thread with no runtime
+    // attached) can `block_on` the async hydration. This runs on a tokio
+    // worker, so `Handle::current()` is valid here. Idempotent.
+    let _ = RUNTIME.set(tokio::runtime::Handle::current());
+
+    // Stash the sync-root path so the fetch callback can reconstruct an on-disk
+    // placeholder path from a state-DB relative path when `CF_CALLBACK_INFO`'s
+    // `NormalizedPath` is unavailable (task 0783 resolve-or-error fallback).
+    *SYNC_ROOT.write().unwrap() = Some(sync_root.to_path_buf());
+
+    if let Err(e) = register_sync_root(sync_root) {
+        tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
+        return;
+    }
+
+    // Write the Explorer SHELL registration (Status column + overlays + nav-pane
+    // entry + "Free up space" menu) via WinRT. PURELY ADDITIVE on top of the
+    // verified Win32 `register_sync_root` above. Best-effort: a failure here must
+    // NOT abort the connect/hydration path (which runs entirely off the Win32
+    // registration), so we log-and-continue exactly like a Cloud Files hiccup.
+    // Re-running on every engine spawn makes a re-login reconverge the shell entry.
+    if let Err(e) = register_shell_sync_root(sync_root) {
+        tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
+    }
+
+    // LD-0105 S7: the policy Windows holds now, after both registrations. Anything but PROGRESSIVE
+    // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
+    let read_back = hydration_policy_of(sync_root).ok();
+    *HYDRATION_IN_EFFECT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
+    streaming::read_switch_at_engine_start();
+    match read_back {
+        Some(policy) if hydration_policy_is_ours(Some(policy)) => {
+            tracing::info!("Cloud Files hydration policy in effect: progressive")
+        }
+        Some((primary, modifier)) => {
+            tracing::warn!(
+                primary,
+                modifier,
+                "Cloud Files hydration policy in effect is not progressive; whole-file path kept"
+            )
+        }
+        None => tracing::warn!("Cloud Files hydration policy could not be read back; whole-file path kept"),
+    }
+
+    // Stand up the OneDrive-style breadcrumb STATUS FLYOUT (clicking "Beebeeb" in
+    // the Explorer path-bar → synced state + storage bar + "Free up space").
+    // PURELY ADDITIVE: it spawns a dedicated COM thread that registers our
+    // status-UI source factory; it never touches the Win32 registration, the
+    // shell registration above, the callbacks, or hydration. Idempotent across
+    // re-logins (spawns at most once per process). Failures are logged inside the
+    // thread, so this call is infallible from connect_root's perspective.
+    register_status_ui_for_sync_root(sync_root);
+
+    // Stand up the Explorer media THUMBNAIL provider (task 0823) so cloud-only
+    // image/video placeholders render real tiles. An in-process IThumbnailProvider
+    // COM server (LocalServer32), bound to the sync root via the cloud-files
+    // `ThumbnailProvider` SyncRootManager value, fetches + decrypts the existing
+    // encrypted server thumbnail in memory (never hydrates the whole file, never
+    // writes plaintext to disk). PURELY ADDITIVE: a dedicated STA COM thread,
+    // independent of the Win32/shell registrations, the callbacks, and hydration.
+    // Idempotent across re-logins; failures are logged inside the thread.
+    register_thumbnail_provider_for_sync_root(sync_root);
+
+    let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match connect_callbacks(sync_root, generation) {
+        Ok(key) => {
+            *connection = Some(Connection {
+                key,
+                generation,
+                root: sync_root.to_path_buf(),
+            });
+            tracing::info!(generation, "Cloud Files callbacks connected");
+        }
+        Err(e) => tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled"),
+    }
+}
+
+/// **Phase 2 of activation — run LATE in `runner::run`, AFTER the state DB is
+/// opened and the engine bridge is built.**
+///
+/// 1. Stash the live [`EngineBridge`] so the in-process fetch callback
+///    ([`callbacks::fetch_data_callback`]) can reach it on hydration. Done here
+///    (not in [`connect_root`]) because the bridge needs the open DB, and the
+///    callback cannot fire until a placeholder exists — which only happens in
+///    step 2 below — so setting the bridge just before populating is in time.
+/// 2. Seed Explorer with cloud-only placeholders from the current DB file list
+///    ([`populate_placeholders`]). Existing placeholders return
+///    `ERROR_ALREADY_EXISTS`, which we swallow.
+///
+/// Requires [`connect_root`] to have run first so the root is connected and the
+/// placeholder writes land in a live (writable) Cloud Files root.
+pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path) {
+    // The callback can fire as soon as a placeholder exists, so the bridge must
+    // be reachable before we create any placeholder below.
+    set_bridge(bridge.clone());
+    crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
+    let created = populate_placeholders(bridge.db(), sync_root).created;
+    // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
+    tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
+}
+
+/// Re-run placeholder population from the current DB so cloud-only rows
+/// discovered by LATER `sync_tick`s (after the one-shot [`seed_placeholders`]
+/// at engine spawn) also appear in Explorer.
+///
+/// This is the fix for the "placeholders only seeded once on an empty DB" bug:
+/// `seed_placeholders` runs a single time at startup, when the DB is typically
+/// empty (placeholders=0), so the first metadata pull's rows — and every row
+/// added on subsequent ticks — never got a placeholder. The runner now calls
+/// this after each successful sync tick.
+///
+/// Idempotent and cheap to repeat: [`populate_placeholders`] only walks rows
+/// currently in `CloudOnly` status and skips any with an empty `path` (so a
+/// row whose name hasn't decrypted yet is simply retried next tick once the
+/// path is populated). `create_placeholder` maps the steady-state
+/// `ERROR_ALREADY_EXISTS` to `Ok(false)`, so re-creating an existing placeholder
+/// is a no-op rather than an error — calling this every tick is safe.
+///
+/// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
+/// the runner only calls this on ticks that run after the bridge is built, so
+/// in practice the bridge is always present here.
+pub fn refresh_placeholders(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        tracing::debug!("refresh_placeholders called before bridge was set; skipping");
+        return;
+    };
+    // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
+    // Counts and milliseconds only, never a path.
+    let s = populate_placeholders(bridge.db(), sync_root);
+    tracing::debug!(
+        rows = s.rows,
+        skipped = s.skipped,
+        ensure_dir_errors = s.ensure_dir_errors,
+        create_calls = s.create_calls,
+        created = s.created,
+        already_existed = s.already_existed,
+        create_errors = s.create_errors,
+        name_conflicts = s.name_conflicts,
+        name_check_errors = s.name_check_errors,
+        db_ms = s.db_ms,
+        elapsed_ms = s.elapsed_ms,
+        "placeholder refresh"
+    );
+}
+
+/// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
+/// state DB. Runs right after [`refresh_placeholders`] on every successful sync
+/// tick (see `runner::run`).
+///
+/// ## Why this exists
+///
+/// The in-app pin / free-up path writes the DB **and** the OS placeholder
+/// together, so the app's view always matches. But a user can pin or "Free up
+/// space" a file **natively** in Explorer's right-click menu — that path NEVER
+/// touches our DB. Without this pass, a native pin/free-up would be invisible to
+/// the app (wrong status badge, stale pin) and `free_up_space` would ignore a
+/// file the user pinned in Explorer. This pass reads each placeholder's actual
+/// on-disk attributes and writes back any DELTA, so native changes converge.
+///
+/// ## Idempotent + delta-only
+///
+/// We compute the desired status/pin from the on-disk attribute mask
+/// ([`crate::state_db::sql`]'s `decode_os_state`) and push to the batch **only** when it
+/// differs from the live row. In steady state — and for every file changed via
+/// the in-app path (DB + OS written together) — there is no delta, so nothing is
+/// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
+/// are never overridden — `decode_os_state` returns `None` for them.
+///
+/// ## Task 2240 slice 2: one listing per folder, and confirm before write
+///
+/// Each file row's attribute word comes from one listing of its parent folder, not one
+/// `GetFileAttributesW` per file (1.45–1.95 s of kernel time per tick on 37k files). A row whose
+/// listing word asks for a change is read again directly, and only that direct word decides what is
+/// written, so a listing that shows a change late (a handle still open) delays a detection but never
+/// writes a wrong pin or status. The decision lives in [`crate::os_state_reconcile`].
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only counts and milliseconds.
+#[cfg(target_os = "windows")]
+pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
+        return;
+    };
+    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
+}
+
+/// Where the next tick's sentinel window starts (spec D4). Only the sync tick touches it.
+#[cfg(target_os = "windows")]
+static RECONCILE_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`reconcile_placeholder_state`] against `db` instead of the bridge's, so the native tests run it on
+/// a scratch root. Writes the deltas, logs one counts line, and returns what it decided.
+#[cfg(target_os = "windows")]
+pub fn reconcile_placeholder_state_with(
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    cursor: &std::sync::atomic::AtomicUsize,
+) -> crate::os_state_reconcile::ReconcilePlan {
+    use std::sync::atomic::Ordering;
+    let started = std::time::Instant::now();
+
+    // `file_overview_rows` pairs each row with its EFFECTIVE-pinned flag, computed
+    // with the same predicate the in-app "Files" tab uses — exactly the current
+    // pin truth we must diff the OS-reported pin against.
+    let rows = match db.file_overview_rows() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_placeholder_state: could not list files");
+            return crate::os_state_reconcile::ReconcilePlan {
+                deltas: Vec::new(),
+                counts: Default::default(),
+                next_cursor: cursor.load(Ordering::Relaxed),
+            };
+        }
+    };
+    let db_ms = started.elapsed().as_millis() as u64;
+
+    // Relative '/'-joined keys map onto the sync root the SAME way `populate_placeholders` does.
+    let native = |rel: &str| sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let plan = crate::os_state_reconcile::plan_reconcile(
+        rows,
+        cursor.load(Ordering::Relaxed),
+        |parent| placeholders::list_dir_attributes(&native(parent)),
+        |rel| placeholders::read_os_placeholder_state(&native(rel)),
+    );
+    cursor.store(plan.next_cursor, Ordering::Relaxed);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match db.reconcile_os_state(&plan.deltas, now) {
+        Ok(updated) => {
+            if updated > 0 {
+                // Zero-knowledge: count only, never a path.
+                tracing::debug!(updates = updated, "reconcile_os_state");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_os_state failed");
+        }
+    }
+
+    // Spec D5: one counts line per tick; a warn when the listing was seen lagging.
+    let c = plan.counts;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    macro_rules! reconcile_line {
+        ($level:ident) => {
+            tracing::$level!(
+                rows = c.rows,
+                dirs_listed = c.dirs_listed,
+                listing_hits = c.listing_hits,
+                fallbacks = c.fallbacks,
+                list_errors = c.list_errors,
+                candidates = c.candidates,
+                confirmed = c.confirmed,
+                stale_candidates = c.stale_candidates,
+                sentinel_checked = c.sentinel_checked,
+                sentinel_mismatches = c.sentinel_mismatches,
+                db_ms,
+                elapsed_ms,
+                "reconcile"
+            )
+        };
+    }
+    if c.sentinel_mismatches > 0 || c.stale_candidates > 0 {
+        reconcile_line!(warn);
+    } else {
+        reconcile_line!(debug);
+    }
+    plan
+}
+
+/// Maximum number of `CfSetInSyncState` calls issued in a single
+/// [`stamp_local_files_in_sync`] pass. Mirrors the style of
+/// `watcher::MAX_NEW_UPLOADS_PER_SCAN` (256): bounded so a vault with many
+/// Local files doesn't block the tick loop. Remaining files are stamped on
+/// the next tick (the call is idempotent: `CfSetInSyncState` on an already-
+/// in-sync placeholder is a Windows no-op).
+const MAX_IN_SYNC_STAMPS_PER_PASS: usize = 512;
+
+#[cfg(target_os = "windows")]
+/// Task 2191 (D2, D9): at engine start, every file of unknown content (synced before task 1640)
+/// whose placeholder holds bytes and reads in sync is marked NOT in sync, so neither this app,
+/// Explorer nor Storage Sense frees it. No network. Counts only.
+///
+/// Desktop 0.8.15: this pass runs beside the engine (`runner::spawn_startup_guard`), as pass
+/// `generation` of [`crate::unknown_check::STARTUP_GUARD`]: it reports its progress there (and in
+/// an info line every [`crate::unknown_check::GUARD_PROGRESS_EVERY`] rows), stops between rows
+/// when the engine stops, and only a pass that walked every row lets freeing work run.
+pub fn guard_unknown_placeholders(sync_root: &std::path::Path, generation: u64) {
+    use crate::unknown_check::{GuardControl, STARTUP_GUARD, guard_progress_due};
+    let Some(bridge) = bridge() else {
+        STARTUP_GUARD.abandon(generation);
+        tracing::warn!("guard: the engine stopped before the start-up pass began");
+        return;
+    };
+    let rows = match bridge.db().list_guarded() {
+        Ok(rows) => rows,
+        Err(e) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: could not list the files of unknown content; freeing stays held");
+            return;
+        }
+    };
+    let total = rows.len();
+    STARTUP_GUARD.set_total(generation, total as u64);
+    tracing::info!(guarded = total, "guard: start-up pass began");
+    let started = std::time::Instant::now();
+    // A lock or a sign-out waits at most 3 s for this lease (`revoke_callbacks`): stop between rows.
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
+    let mut progress = |done: usize| {
+        STARTUP_GUARD.advance(generation, done as u64);
+        if guard_progress_due(done, total) {
+            tracing::info!(
+                done,
+                total,
+                elapsed_secs = started.elapsed().as_secs(),
+                "guard: progress"
+            );
+        }
+    };
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    let mut control = GuardControl {
+        stop: &stop,
+        progress: &mut progress,
+    };
+    match crate::unknown_check::guard_rows(
+        bridge.db(),
+        sync_root,
+        &rows,
+        &placeholders::platform_view,
+        &mut mark,
+        &mut control,
+    ) {
+        Ok(summary) if !summary.stopped => {
+            STARTUP_GUARD.finish(generation);
+            tracing::info!(
+                guarded = total,
+                marked = summary.marked,
+                emptied = summary.emptied,
+                mark_failed = summary.mark_failed,
+                elapsed_secs = started.elapsed().as_secs(),
+                "guard: files of unknown content kept from being freed"
+            );
+        }
+        Ok(summary) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::info!(
+                walked = summary.walked,
+                guarded = total,
+                "guard: the start-up pass stopped with the engine"
+            );
+        }
+        Err(e) => {
+            STARTUP_GUARD.abandon(generation);
+            tracing::warn!(error = %e, "guard: the start-up pass stopped; freeing stays held");
+        }
+    }
+}
+
+/// Task 2191 (D2, D12): every tick, the marks still to be made (a failed one, a row that joined
+/// the guarded set, a placeholder left at another path). No network. Counts only. Desktop
+/// 0.8.15: skipped while the start-up pass walks the rows (it covers them; two walkers would
+/// open every placeholder twice), and stopped between rows when the engine stops.
+pub fn retry_pending_marks(sync_root: &std::path::Path) {
+    if crate::unknown_check::STARTUP_GUARD.is_running() {
+        return;
+    }
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    let stop = || bridge.is_revoked() || bridge.is_stopping();
+    let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
+    match crate::unknown_check::retry_marks(bridge.db(), sync_root, &placeholders::platform_view, &mut mark, &stop) {
+        Ok(0) => {}
+        Ok(marked) => tracing::info!(marked, "guard: pending marks made"),
+        Err(e) => tracing::warn!(error = %e, "guard: the retry stopped"),
+    }
+}
+
+/// Task 1640 (review N13): retry the removal of every kept copy's original that was in use when
+/// the copy was made ([`crate::engine_bridge::landing`]'s `retry_kept_originals`).
+pub fn retry_kept_originals(sync_root: &std::path::Path) {
+    let Some(bridge) = bridge() else {
+        return;
+    };
+    crate::engine_bridge::retry_kept_originals(bridge.db(), sync_root, &placeholders::placeholder_local_entry_trusting);
+}
+
+/// Task 1640 (review P2-5): a file's size and modification time.
+#[cfg(target_os = "windows")]
+fn file_fingerprint(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Task 1640 (review P2-5): the files the stamp pass found or marked in sync, by their
+/// fingerprint then: unchanged since, they are not opened again.
+#[cfg(target_os = "windows")]
+fn in_sync_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>> {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// Mark in sync, in Explorer's terms, the `Local` files whose bytes are the content this device
+/// agreed with the server on, so Explorer shows the synced overlay.
+///
+/// ## Why this is needed
+///
+/// `CfSetInSyncState(IN_SYNC)` fires from `fetch_data_callback` only when one FETCH_DATA request
+/// covers the WHOLE file, which under `CF_HYDRATION_POLICY_PARTIAL` rarely holds, and a landing
+/// marks only a create. So a file can be fully local and agreed yet out of sync.
+///
+/// ## Task 1640: only agreed bytes
+///
+/// Before task 1640 this pass marked EVERY `Local` row in sync on every tick, unsent edits
+/// included, which let "Free up space" discard them. Now a file is marked only when
+/// [`placeholders::stamp_if_agreed`] finds its bytes equal to the agreed content, under one
+/// exclusive handle across the hash and the mark. An edit (the platform cleared its in-sync
+/// state), a queued upload, or a file with no agreed content recorded stays out of sync.
+///
+/// ## Bounded
+///
+/// Candidates come from `list_stamp_candidates` (agreed content recorded, no upload queued),
+/// filtered before the cap. A file found in sync whose size and modification time have not
+/// changed is skipped without opening it; at most [`MAX_IN_SYNC_STAMPS_PER_PASS`] files that need
+/// work are handled per pass.
+///
+/// ## Zero-knowledge
+///
+/// Never logs a path or filename — only aggregate counts.
+#[cfg(target_os = "windows")]
+pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
+    // All CF symbols (CfOpenFileWithOplock, CfSetInSyncState, CfCloseHandle,
+    // CF_IN_SYNC_STATE_IN_SYNC, CF_OPEN_FILE_FLAG_NONE, CF_SET_IN_SYNC_FLAG_NONE)
+    // and PCWSTR are in scope via the module-level
+    //   use windows::Win32::Storage::CloudFilters::*;
+    //   use windows::core::*;
+    // globs — no local re-import needed.
+
+    let Some(bridge) = bridge() else {
+        tracing::debug!("stamp_local_files_in_sync called before bridge was set; skipping");
+        return;
+    };
+
+    // Task 1640 (review P2-5): only rows that may be marked (agreed content recorded, no upload
+    // queued) are candidates, filtered before the cap; the cap bounds the work per pass.
+    let candidates = match bridge.db().list_stamp_candidates() {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            tracing::warn!(error = %e, "stamp_local_files_in_sync: could not list candidates");
+            return;
+        }
+    };
+
+    let mut stamped: usize = 0;
+    let mut errors: usize = 0;
+    let mut checked: usize = 0;
+
+    for (file_id, path) in &candidates {
+        if checked >= MAX_IN_SYNC_STAMPS_PER_PASS {
+            break;
+        }
+        // Map the server-relative '/'-joined path onto the on-disk placeholder
+        // path — the same safe-join that `populate_placeholders` and
+        // `reconcile_placeholder_state` use.
+        let rel = path.trim_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let local_path = sync_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Skip placeholders that don't exist on disk yet. They will be
+        // minted by `refresh_placeholders` (which runs before this pass) and
+        // will be stamped on the next tick once they appear.
+        let Some(fingerprint) = file_fingerprint(&local_path) else {
+            continue;
+        };
+        // A file found in sync whose size and modification time have not changed since is
+        // skipped without opening it: only files that need work count toward the cap.
+        if in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).get(file_id) == Some(&fingerprint) {
+            continue;
+        }
+        if placeholders::placeholder_in_sync(&local_path) == Some(true) {
+            // Task 1640 (review N1): a file range fetches brought in, now whole and in sync, gets
+            // its candidate as the agreed content. Until then it is not "seen": a fetch that
+            // completes it may leave its size and time as they were.
+            let has_baseline = bridge
+                .db()
+                .get_file_contract_state(file_id)
+                .ok()
+                .flatten()
+                .is_some_and(|contract| contract.local_hash.is_some());
+            if has_baseline {
+                in_sync_seen()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(file_id.clone(), fingerprint);
+                continue;
+            }
+            checked += 1;
+            match placeholders::promote_fetched_content(bridge.db(), file_id, &local_path) {
+                Ok(true) => {
+                    in_sync_seen()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(file_id.clone(), fingerprint);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "stamp_local_files_in_sync: promotion failed");
+                    errors += 1;
+                }
+            }
+            continue;
+        }
+        checked += 1;
+        // Task 1640: only agreed content is marked in sync, under one exclusive handle (P2-4).
+        // An edit the person made (the platform cleared its in-sync state), or a file whose
+        // upload is queued, stays out of sync, so neither this engine nor Explorer's "Free up
+        // space" can discard its bytes. Before, every `Local` row was stamped on every tick.
+        match placeholders::stamp_if_agreed(bridge.db(), file_id, &local_path) {
+            Ok(true) => {
+                stamped += 1;
+                if let Some(after) = file_fingerprint(&local_path) {
+                    in_sync_seen()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(file_id.clone(), after);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "stamp_local_files_in_sync: stamp failed");
+                errors += 1;
+            }
+        }
+    }
+
+    if stamped > 0 || errors > 0 {
+        // Zero-knowledge: counts only, never a path.
+        tracing::debug!(stamped, errors, "stamp_local_files_in_sync");
+    }
+}
+
+// The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
+mod populate;
+use populate::populate_placeholders;
+pub use populate::restore_placeholders;
+
+pub mod upload_finalization;

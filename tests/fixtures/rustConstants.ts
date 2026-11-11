@@ -12,6 +12,14 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const RUST_SRC = fileURLToPath(new URL('../../src-tauri/src/', import.meta.url))
+/** The engine crate: it took most of the shell's modules (engine step 2), under their old names. */
+const ENGINE_SRC = fileURLToPath(new URL('../../crates/beebeeb-engine/src/', import.meta.url))
+
+/**
+ * The Rust trees of the desktop, relative to the repository: the Tauri shell and the engine crate it runs. A
+ * guard that scans "the Rust source" scans both, or a module that moved to the engine leaves the guard unseen.
+ */
+export const RUST_ROOTS = ['src-tauri/src', 'crates/beebeeb-engine/src'] as const
 
 export function rustSource(file: string): string {
   if (file === 'lib.rs') return libRsSource()
@@ -91,11 +99,34 @@ export function libRsChildren(dir: string = RUST_SRC): string[] {
  */
 export function rustModuleSource(module: string): string {
   const files: string[] = []
-  const facade = join(RUST_SRC, `${module}.rs`)
-  if (existsSync(facade)) files.push(facade)
-  const dir = join(RUST_SRC, module)
-  if (existsSync(dir)) collect(dir, files)
+  // The shell's half first (a facade that re-exports, the command halves), then the engine's, when it holds one.
+  for (const root of [RUST_SRC, ENGINE_SRC]) {
+    const facade = join(root, `${module}.rs`)
+    if (existsSync(facade)) files.push(facade)
+    const dir = join(root, module)
+    if (existsSync(dir)) collect(dir, files)
+  }
   return files.map((file) => withoutTestModule(readFileSync(file, 'utf8'))).join('\n')
+}
+
+/**
+ * A file that is a list of `include!("…");` lines (a test module split by line count, like `reauth_tests.rs`)
+ * with each included part put back in its place, so the file reads as it did before its split. `file` and the
+ * included paths are relative to `src-tauri/src/`, as `include!` resolves them from a file at its top.
+ */
+export function rustSourceWithIncludes(file: string): string {
+  let parts = 0
+  const out = rustSource(file)
+    .split(/(?<=\n)/)
+    .map((line) => {
+      const included = /^\s*include!\("([^"]+)"\);\r?\n?$/.exec(line)?.[1]
+      if (included === undefined) return line
+      parts += 1
+      return rustSource(included)
+    })
+    .join('')
+  if (parts === 0) throw new Error(`${file} includes no parts`)
+  return out
 }
 
 function collect(dir: string, out: string[]): void {

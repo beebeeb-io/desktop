@@ -234,7 +234,11 @@ pub fn run() {
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
-            state_paths::init_from_app(&app_handle).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
+            let app_local_data_dir = app_handle
+                .path()
+                .app_local_data_dir()
+                .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!("resolve app-local-data dir: {e}")))?;
+            state_paths::init_from_app_local_data_dir(&app_local_data_dir).map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
             if let Ok(cfg) = DesktopConfig::load()
                 && let Some(sync_root) = cfg.sync_root
                 && let Err(error) = state_paths::prepare_beebeeb_state_dir_for_sync_root(&sync_root)
@@ -264,7 +268,7 @@ pub fn run() {
             };
             // Step 2 — synthesize the single account under the persisted id.
             // Idempotent; invisible at N=1.
-            synthesize_single_account(&app.state::<AppState>(), AccountId(account_id.clone()));
+            synthesize_single_account(&*app.state::<AppState>(), AccountId(account_id.clone()));
 
             // Step 3 — lazy migration: legacy flat trio → id-segmented trio. Runs
             // SYNCHRONOUSLY here (decision 0808) BEFORE the auth seed + restore so

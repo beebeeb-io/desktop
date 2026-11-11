@@ -1,0 +1,1352 @@
+//! Cloud Files callbacks — Windows calls these `extern "system"`
+//! functions when the user touches a cloud-only placeholder. We
+//! translate the callback shape into a hydration request against the
+//! live `EngineBridge`.
+//!
+//! Spec: `docs/superpowers/plans/2026-05-07-desktop-sync-client.md`
+//! Phase 2 Task 6.
+//!
+//! ## What Windows expects
+//!
+//! - `CF_CALLBACK_INFO` carries `FileIdentity` (the blob we stored
+//!   when minting the placeholder — for us, UTF-8 bytes of the file's
+//!   UUID), the `ConnectionKey`, and the `TransferKey`. The latter two
+//!   are required by the `CfExecute(TRANSFER_DATA)` call that streams
+//!   plaintext bytes back to the Cloud Files runtime.
+//! - `CF_CALLBACK_PARAMETERS.FetchData` carries the byte range Windows
+//!   wants: `RequiredFileOffset` / `RequiredLength` (we MUST satisfy at
+//!   least this) plus an `Optional*` hint we may over-serve. We hydrate
+//!   the whole file via `EngineBridge::hydrate_file_to_memory` (decrypt
+//!   entirely in memory) and then splice the required range back with
+//!   `CfExecute(TRANSFER_DATA)`.
+//!
+//! ## Threading
+//!
+//! Cloud Files callbacks are delivered on a worker thread the
+//! filter-driver picks. That thread is *not* attached to any tokio
+//! runtime, so `Handle::try_current()` returns `Err` there. We instead
+//! reach the daemon's runtime handle stashed by [`super::connect_root`]
+//! (via [`super::runtime`]) and `block_on` the hydration. Blocking the
+//! worker for the full hydration is OK; the Windows runtime keeps the
+//! placeholder marked "loading" without UI-thread impact.
+//!
+//! ## Failure handling
+//!
+//! Every exit path that cannot deliver bytes calls
+//! [`fail_transfer`], which issues `CfExecute(TRANSFER_DATA)` with a
+//! non-success `CompletionStatus` on the required range. Without this,
+//! Explorer's download spinner hangs forever. A bare `return;` is never
+//! correct once we have a valid `ConnectionKey` + `TransferKey`.
+//!
+//! ## Security
+//!
+//! Decrypted plaintext is NEVER written to disk. `hydrate_file_to_memory`
+//! decrypts entirely in memory and returns a [`zeroize::Zeroizing`] buffer
+//! that overwrites itself on drop. We never log plaintext, keys, or tokens.
+
+#![cfg(target_os = "windows")]
+
+use std::os::windows::ffi::OsStrExt;
+
+use windows::Win32::Foundation::{NTSTATUS, STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use windows::Win32::Storage::CloudFilters::*;
+use windows::Win32::System::CorrelationVector::CORRELATION_VECTOR;
+
+/// Chunk size for the `CfExecute(TRANSFER_DATA)` loop. Cloud Files
+/// requires every non-final transfer's `Offset` and `Length` to be a
+/// multiple of the volume sector/page size; 1 MiB is a safe multiple of
+/// the 4 KiB page size and keeps a single buffer in memory at a time for
+/// large files. The final chunk (the one that reaches the end of the
+/// requested range) may be shorter / unaligned.
+pub(super) const TRANSFER_CHUNK: i64 = 1024 * 1024;
+
+/// What to do once the plaintext is in hand, given the placeholder's recorded
+/// size vs the AES-256-GCM-authenticated decrypted length. Extracted as a pure
+/// decision so the resolve-or-error policy (task 0783) is unit-testable without
+/// a live Cloud Files transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeDecision {
+    /// The sizes agree — transfer the bytes as-is.
+    Transfer,
+    /// The sizes disagree. The decrypted length is ground truth, so fail this
+    /// fetch cleanly and resolve the placeholder/DB to `corrected_size` out of
+    /// band (Tier-1), falling back to a visible error if that can't be applied
+    /// (Tier-2). `corrected_size` is always the decrypted plaintext length.
+    ResolveTo { corrected_size: i64 },
+}
+
+/// Pure size-resolution policy for the hydration path (task 0783). Given the
+/// placeholder's recorded `file_size` and the decrypted `plaintext_len`, decide
+/// whether to transfer as-is or to resolve to the authenticated decrypted
+/// length. The decrypted length wins on any mismatch because successful
+/// AES-256-GCM decryption authenticates the bytes (and thus their length).
+fn decide_size_action(plaintext_len: i64, file_size: i64) -> SizeDecision {
+    if plaintext_len == file_size {
+        SizeDecision::Transfer
+    } else {
+        SizeDecision::ResolveTo {
+            corrected_size: plaintext_len,
+        }
+    }
+}
+
+/// Windows-installed fetch callback. Registered via `CfConnectSyncRoot`
+/// in [`super::connect_callbacks`]. Windows fires this when a user opens
+/// a cloud-only placeholder and the requested range isn't hydrated yet.
+///
+/// SAFETY: `callback_info` and `callback_parameters` are valid for the
+/// duration of this call per the Cloud Files API contract. We copy the
+/// scalar fields we need into owned values before doing any blocking
+/// work, so nothing borrowed from Windows is held across the
+/// `block_on` boundary.
+pub unsafe extern "system" fn fetch_data_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    // Defensive: null pointers here would be an OS bug, but it costs
+    // nothing to refuse to dereference. With no info we have no transfer
+    // key, so there's nothing to fail against — just bail.
+    if callback_info.is_null() || callback_parameters.is_null() {
+        tracing::warn!("fetch_data_callback fired with null CF_CALLBACK_INFO/PARAMETERS");
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let params = unsafe { &*callback_parameters };
+
+    // The connection + transfer keys identify the in-flight hydration to
+    // the Cloud Files runtime. Copy them out so we can satisfy or fail
+    // the transfer regardless of which exit path we take below.
+    let connection_key = info.ConnectionKey;
+    let transfer_key = info.TransferKey;
+    let request_key = info.RequestKey;
+    let file_size = info.FileSize;
+
+    // The fetch range. We must satisfy at least the *required* span; the
+    // optional span is a read-ahead hint we may over-serve. Copy scalars
+    // out of the union immediately.
+    let fetch = unsafe { params.Anonymous.FetchData };
+    let required_offset = fetch.RequiredFileOffset;
+    let required_length = fetch.RequiredLength;
+
+    // Decode FileIdentity → UTF-8 file_id. Stored as raw UTF-8 bytes in
+    // `placeholders::create_placeholder`, so no wide-string round trip.
+    let identity_bytes =
+        unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
+    let file_id = match std::str::from_utf8(identity_bytes) {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            tracing::warn!(error = %e, "FileIdentity is not valid UTF-8 — failing hydrate");
+            unsafe {
+                fail_transfer(
+                    connection_key,
+                    transfer_key,
+                    request_key,
+                    required_offset,
+                    required_length,
+                )
+            };
+            return;
+        }
+    };
+
+    // Task 2284 A1.2: this process's own fetch inside a no-fetch scope is refused before anything is served.
+    // SAFETY: `info` is this live callback's info.
+    if unsafe { refuse_own_scoped_fetch(info, &file_id, required_offset, required_length) } {
+        return;
+    }
+
+    // Desktop 0.8.15 (the hydration storm): which program asked for these bytes, by its image's
+    // file name and PID (never a path), and how much. The root is connected with
+    // `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`, so `ProcessInfo` is filled.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let (requester_pid, requester_image) = if info.ProcessInfo.is_null() {
+            (0, String::new())
+        } else {
+            // SAFETY: valid for the duration of the callback, like `info` itself.
+            let process = unsafe { &*info.ProcessInfo };
+            let image = wide_to_vec(process.ImagePath.0)
+                .map(|wide| crate::unknown_check::requester_image_name(&wide))
+                .unwrap_or_default();
+            (process.ProcessId, image)
+        };
+        tracing::debug!(
+            file_id = %file_id,
+            requester_pid,
+            requester_image = %requester_image,
+            ours = requester_pid == std::process::id(),
+            required_offset,
+            required_length,
+            file_size,
+            "Cloud Files fetch requested"
+        );
+    }
+
+    // Get the live engine bridge. Set by `runner::run` before any
+    // placeholder exists, so a missing bridge means the daemon isn't
+    // running or a logout raced this callback. Either way we can't
+    // hydrate — fail the transfer so Explorer stops spinning.
+    let bridge = match super::callback_bridge(info.CallbackContext) {
+        Some(b) => b,
+        None => {
+            tracing::warn!(file_id = %file_id, "fetch callback fired but no EngineBridge registered");
+            unsafe {
+                fail_transfer(
+                    connection_key,
+                    transfer_key,
+                    request_key,
+                    required_offset,
+                    required_length,
+                )
+            };
+            return;
+        }
+    };
+
+    // LD-0105 I5: a poisoned placeholder (a failed fetch wrote into it) is never fetched into again
+    // until the empty step has dehydrated it: fail at once, no request to the server.
+    // A database error counts as poisoned: the fetch fails closed.
+    if !matches!(bridge.db().poison(&file_id), Ok(None)) {
+        tracing::info!(file_id = %file_id, "fetch of a poisoned placeholder refused until it is emptied");
+        unsafe {
+            fail_transfer(
+                connection_key,
+                transfer_key,
+                request_key,
+                required_offset,
+                required_length,
+            )
+        };
+        return;
+    }
+
+    // Reach the daemon's tokio runtime. The filter-driver worker thread
+    // we're on has no runtime attached, so `Handle::try_current()` would
+    // fail — we use the handle stashed in `connect_root()` instead.
+    let handle = match super::runtime() {
+        Some(h) => h,
+        None => {
+            tracing::error!(
+                file_id = %file_id,
+                "no tokio runtime handle registered; cannot hydrate Cloud Files request"
+            );
+            unsafe {
+                fail_transfer(
+                    connection_key,
+                    transfer_key,
+                    request_key,
+                    required_offset,
+                    required_length,
+                )
+            };
+            return;
+        }
+    };
+
+    // LD-0105 W2: a pinned file streams through its range session (and W3 may decline a listed
+    // player's open-time fetch); a legacy file, or a root that is not progressive, takes the
+    // whole-file path below.
+    let streamed = super::streaming::Fetch {
+        connection: connection_key,
+        keys: crate::cf_range::RequestKeys {
+            transfer_key,
+            request_key,
+        },
+        file_id: file_id.clone(),
+        offset: required_offset,
+        length: required_length,
+        optional_length: fetch.OptionalLength,
+        file_size,
+        flags: fetch.Flags.0,
+        requester: if info.ProcessInfo.is_null() {
+            0
+        } else {
+            unsafe { (*info.ProcessInfo).ProcessId }
+        },
+        // SAFETY: valid for the duration of the callback, like `info` itself.
+        image: (!info.ProcessInfo.is_null())
+            .then(|| unsafe { (*info.ProcessInfo).ImagePath.to_string() }.ok())
+            .flatten(),
+        package: (!info.ProcessInfo.is_null())
+            .then(|| unsafe { (*info.ProcessInfo).PackageName.to_string() }.ok())
+            .flatten()
+            .filter(|p| !p.is_empty()),
+    };
+    if let super::streaming::Served::Done = super::streaming::serve(&streamed, &bridge, &handle) {
+        return;
+    }
+
+    // Decrypt the whole file entirely in memory — plaintext is NEVER written
+    // to disk. Zero-knowledge requirement: the Cloud Files runtime will receive
+    // the bytes via CfExecute(TRANSFER_DATA) and write them into the placeholder
+    // itself; we must not leave a copy in %TEMP% or anywhere else on disk.
+    // The Zeroizing wrapper ensures the buffer is wiped on drop (normal, early
+    // return, or panic unwind) without any explicit scrubbing call here.
+    //
+    // LD-0105 S0: while it downloads, the fetch reports the body bytes that really arrived (counted per
+    // read, `meter`) to Cloud Files at least every few seconds. Windows fails a request that sees no
+    // provider activity for 60 s and fetches the file again from its first byte; the reports reset that
+    // timer. A minute without a new byte stops them, so a dead network still fails the open.
+    let meter = crate::transfer_progress::ReceiveMeter::default();
+    // LD-0105 U1: the fetch's named "Downloading" row (tray, Activity), following the same meter; it
+    // ends with `finished()` once the whole file is transferred, and every other exit below marks it failed.
+    let row = bridge.whole_fetch_row(&file_id, u64::try_from(file_size).unwrap_or(0));
+    let buf = handle.block_on(async {
+        tokio::select! {
+            biased;
+            _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
+            result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&meter)) => result,
+            never = super::fetch_progress::keep_fetch_alive(connection_key, transfer_key, file_size, &meter) => match never {},
+            never = row.follow(&meter) => match never {},
+        }
+    });
+    let crate::engine_bridge::FetchedBytes {
+        bytes: buf,
+        version: fetched,
+        ticket,
+    } = match buf {
+        Ok(b) => b,
+        Err(e) => {
+            // Do NOT log the error's inner content at info+ if it could carry
+            // decrypted bytes; hydrate_file_to_memory errors are status strings only.
+            tracing::warn!(file_id = %file_id, error = %e, "hydrate_file_to_memory failed for Cloud Files callback");
+            unsafe {
+                fail_transfer(
+                    connection_key,
+                    transfer_key,
+                    request_key,
+                    required_offset,
+                    required_length,
+                )
+            };
+            return;
+        }
+    };
+
+    if bridge.is_revoked() || bridge.is_stopping() {
+        unsafe {
+            fail_transfer(
+                connection_key,
+                transfer_key,
+                request_key,
+                required_offset,
+                required_length,
+            )
+        };
+        return;
+    }
+
+    // Size sanity: the decrypted plaintext length must match the size
+    // Windows recorded on the placeholder (info.FileSize). A mismatch means
+    // our recorded size diverged from the file's real (decrypted) length —
+    // the dominant cause in production is the server having stored the
+    // *encrypted* size on some upload paths (task 0783 decision file), so
+    // file_size = plaintext_len + 28*chunk_count. Transferring against the
+    // wrong size risks an unaligned, non-EOF final chunk →
+    // STATUS_INVALID_PARAMETER on the last CfExecute.
+    //
+    // RESOLVE-OR-ERROR (task 0783) — never silently fail:
+    //
+    //   Tier-1 (resolve): hydrate_file_to_memory decrypted successfully, so the
+    //   bytes are AES-256-GCM AUTHENTICATED — `buf.len()` is GROUND TRUTH.
+    //   We cannot resize the placeholder DURING this fetch (the file is in-use
+    //   by the active transfer; CfUpdatePlaceholder would return
+    //   ERROR_CLOUD_FILE_IN_USE), so we fail THIS fetch cleanly, then correct
+    //   the size out-of-band — resize the CF placeholder to the decrypted
+    //   length AND rewrite the state_db size_bytes to it. The next open fires
+    //   a fresh, now-aligned FETCH_DATA and hydrates successfully, so the file
+    //   becomes openable at its true size.
+    //
+    //   Tier-2 (visible error): if the out-of-band correction itself can't be
+    //   applied (the resize failed — the placeholder is gone, or some other CF
+    //   error), we still must not be silent: flip the row to Error and mark the
+    //   placeholder NOT in-sync so Explorer shows a non-synced/error overlay
+    //   rather than a green check on a file that won't open. The failed
+    //   transfer (below) already surfaces an error on this open.
+    if let SizeDecision::ResolveTo { corrected_size } = decide_size_action(buf.len() as i64, file_size) {
+        tracing::warn!(
+            file_id = %file_id,
+            plaintext_len = buf.len(),
+            file_size,
+            "hydrated size != placeholder size; resolving to the decrypted (authenticated) length"
+        );
+
+        // Drop `buf` here — the resolution path works from the size only,
+        // never the bytes. The Zeroizing drop wipes the allocation.
+        drop(buf);
+
+        // Fail THIS fetch cleanly first: the file must not be mid-hydration
+        // when we resize, and Explorer must stop spinning on this open.
+        unsafe {
+            fail_transfer(
+                connection_key,
+                transfer_key,
+                request_key,
+                required_offset,
+                required_length,
+            )
+        };
+
+        // Tier-1: correct the placeholder + DB to the authenticated length so
+        // the NEXT open hydrates against an aligned size. `&*bridge` derefs the
+        // Arc to a plain `&EngineBridge` (a `&Arc<_>` would not coerce here).
+        unsafe { resolve_size_mismatch(info, &*bridge, &file_id, corrected_size) };
+        return;
+    }
+
+    // Splice the required range back into the placeholder. `buf` is kept alive
+    // here so the data is valid for every CfExecute call inside transfer_range.
+    let transfer_ok = unsafe {
+        transfer_range(
+            connection_key,
+            transfer_key,
+            request_key,
+            &buf,
+            || bridge.is_revoked() || bridge.is_stopping(),
+            required_offset,
+            required_length,
+        )
+    };
+
+    // Drop `buf` now — transfer_range has consumed all bytes it needs.
+    // The Zeroizing wrapper wipes the plaintext allocation on drop.
+    drop(buf);
+
+    match transfer_ok {
+        Ok(()) => {
+            row.finished();
+            tracing::info!(file_id = %file_id, "hydrated and transferred Cloud Files range");
+            // Best-effort: mark the placeholder IN_SYNC so Explorer flips
+            // the overlay from "downloading" to the synced check — but
+            // ONLY when this fetch delivered the whole file. With
+            // CF_HYDRATION_POLICY_PARTIAL a request may cover just a
+            // range; marking the file fully in-sync after a partial
+            // transfer would be a lie and could suppress later fetches.
+            // (hydrate_file_to_memory always decrypts the whole file, so a
+            // [0, file_size) required range means the file is now fully
+            // present.) A failure here doesn't undo the transfer, so we
+            // only log.
+            let whole_file = required_offset == 0 && required_length >= file_size;
+            if whole_file {
+                // Task 1640 (review F1): every byte on disk is this fetch's version now, so they
+                // become the agreed content; only now, after the transfer, never before (a
+                // transfer that fails or is cut off leaves the fetch's candidate, recorded before
+                // it, which only moves down). A failure leaves that candidate: never too high.
+                if let Some(fetched) = fetched.as_ref() {
+                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket) {
+                        tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
+                    }
+                }
+                if let Some(path) = normalized_path(info) {
+                    unsafe { mark_in_sync(&path) };
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(file_id = %file_id, error = %e, "CfExecute(TRANSFER_DATA) failed");
+            // The transfer call itself failed; tell Explorer to stop
+            // spinning. If this also fails there's nothing more we can do.
+            unsafe {
+                fail_transfer(
+                    connection_key,
+                    transfer_key,
+                    request_key,
+                    required_offset,
+                    required_length,
+                )
+            };
+        }
+    }
+    // Task 1640 (self-review #1): this fetch's transfer has ended; another fetch's agreed content
+    // may now be recorded.
+    drop(ticket);
+}
+
+/// Resolve a hydration size mismatch out-of-band (task 0783, Tier-1) with a
+/// Tier-2 visible-error fallback. Called AFTER the offending fetch has been
+/// failed cleanly (so the placeholder is no longer mid-hydration and a resize
+/// is API-legal).
+///
+/// `true_size` is the AES-256-GCM-authenticated decrypted plaintext length —
+/// ground truth. We:
+///
+///   1. Rewrite the state_db `size_bytes` to `true_size` so the row (and every
+///      other client reading the local mirror) reflects the real size, and so
+///      a future placeholder (re)creation mints the aligned size.
+///   2. Resolve the on-disk placeholder path (see below), resize the CF
+///      placeholder to `true_size` and re-mark it in-sync, so the NEXT open
+///      fires an aligned FETCH_DATA that succeeds.
+///
+/// ## Path resolution (the 0783 follow-up fix)
+///
+/// The FETCH_DATA callback's `CF_CALLBACK_INFO.NormalizedPath` is only
+/// populated when the root is connected with
+/// `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH`, which we do NOT set — so on a real
+/// fetch `normalized_path(info)` returns `None` and the resize was previously
+/// never attempted (Tier-1 was dead; only Tier-2 fired). We now fall back to
+/// reconstructing the path from the state DB: `<sync_root>/<entry.path>`, the
+/// SAME on-disk layout `windows_cf::populate_placeholders` mints. A path-safety
+/// guard (see [`db_placeholder_path`]) rejects any relative path that escapes
+/// the sync root before we touch it.
+///
+/// If the path cannot be resolved by EITHER route, or the resize genuinely
+/// fails, we DO NOT leave the file silently broken: flip the row to `Error` and
+/// (if we have a wide path) mark the placeholder NOT in-sync so Explorer
+/// surfaces a non-synced/error overlay (Tier-2). The earlier `fail_transfer`
+/// already surfaced an error on the open that triggered this.
+///
+/// Best-effort throughout: every DB / CF failure is logged (without sensitive
+/// content) and swallowed — there is no caller to propagate to (this runs at
+/// the tail of a fire-and-forget `extern "system"` callback).
+///
+/// SAFETY: `info` is the live `CF_CALLBACK_INFO` for this callback; we only
+/// read its path fields, which are valid for the duration of the call.
+unsafe fn resolve_size_mismatch(
+    info: &CF_CALLBACK_INFO,
+    bridge: &crate::engine_bridge::EngineBridge,
+    file_id: &str,
+    true_size: i64,
+) {
+    resolve_size_with_path(normalized_path(info), bridge, file_id, true_size);
+}
+
+/// [`resolve_size_mismatch`] for a range session's 0783 check (spec S9), which has no callback info:
+/// the path comes from the state DB.
+pub(super) fn resolve_size_mismatch_by_id(bridge: &crate::engine_bridge::EngineBridge, file_id: &str, true_size: i64) {
+    resolve_size_with_path(None, bridge, file_id, true_size);
+}
+
+fn resolve_size_with_path(
+    callback_path: Option<Vec<u16>>,
+    bridge: &crate::engine_bridge::EngineBridge,
+    file_id: &str,
+    true_size: i64,
+) {
+    // Step 1 — correct the recorded size to the authenticated length. A failure
+    // here is non-fatal: the placeholder resize below is what makes the next
+    // open succeed; the DB value is for cross-surface consistency + reseeding.
+    // Task 1640 (review F1): the resize below changes the placeholder without a fetch and does not
+    // dehydrate it, so whatever was on disk may stay in part: its agreed content and its candidate
+    // become mixed (never agreed; a change is sent on the oldest version), never reset.
+    if let Err(e) = bridge.db().poison_local_content(file_id) {
+        tracing::debug!(file_id = %file_id, error = %e, "size resolution: could not mark the local content mixed");
+    }
+    match bridge.db().set_size_bytes(file_id, true_size) {
+        Ok(0) => {
+            tracing::warn!(file_id = %file_id, "size correction matched no row (file_id absent from state DB)");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(file_id = %file_id, error = %e, "could not correct state DB size_bytes");
+        }
+    }
+
+    // Resolve the on-disk placeholder path. PRIMARY: the callback's
+    // NormalizedPath (a NUL-terminated wide string we strip below). FALLBACK
+    // (the common case — we connect without REQUIRE_FULL_FILE_PATH so this is
+    // usually empty): reconstruct `<sync_root>/<state-DB rel path>` by file_id.
+    // We keep the wide form (when available) so Tier-2's mark_not_in_sync can
+    // reuse the exact openable path the OS gave us.
+    let mut wide_path: Option<Vec<u16>> = callback_path;
+    let os_path: Option<std::path::PathBuf> = match &wide_path {
+        Some(path) => {
+            let path_no_nul: Vec<u16> = path.iter().copied().take_while(|&c| c != 0).collect();
+            Some(std::path::PathBuf::from(String::from_utf16_lossy(&path_no_nul)))
+        }
+        None => db_placeholder_path(bridge, file_id),
+    };
+
+    let Some(os_path) = os_path else {
+        // Neither route yielded a path — cannot resize. Tier-2: visible Error.
+        // (No wide path either, so no overlay to flip beyond the row status.)
+        tracing::warn!(file_id = %file_id, "no placeholder path (callback + state DB both unresolved); marking Error");
+        let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
+        return;
+    };
+
+    // If we resolved via the DB (no wide path from the callback), build a
+    // NUL-terminated wide form too so a Tier-2 fallback can mark_not_in_sync the
+    // same on-disk file.
+    if wide_path.is_none() {
+        let mut w: Vec<u16> = os_path.as_os_str().encode_wide().collect();
+        w.push(0);
+        wide_path = Some(w);
+    }
+
+    // Step 2 (Tier-1) — resize the placeholder to the authenticated length. On
+    // success the next open hydrates against the aligned size and the file is
+    // openable.
+    match super::placeholders::resize_placeholder(&os_path, true_size) {
+        Ok(()) => {
+            // The placeholder is now an in-sync, cloud-only stub at the correct
+            // size — no plaintext bytes were delivered to it (this fetch was
+            // failed). `hydrate_file_to_memory` had optimistically flipped the row
+            // to `Local`, so flip it back to `CloudOnly` to match on-disk reality.
+            // The next open fires a fresh, aligned FETCH_DATA that hydrates
+            // successfully.
+            let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::CloudOnly);
+            tracing::info!(file_id = %file_id, "resolved size mismatch; placeholder resized to decrypted length");
+        }
+        Err(e) => {
+            // Tier-2: the resize could not be applied — never leave it silent.
+            tracing::warn!(file_id = %file_id, error = %e, "placeholder resize failed; marking Error + not-in-sync");
+            let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
+            if let Some(path) = wide_path.as_deref() {
+                unsafe { mark_not_in_sync(path) };
+            }
+        }
+    }
+}
+
+// NOTE: `zero_bytes` and `secure_remove_temp` have been removed. The hydration
+// path now uses `Zeroizing<Vec<u8>>` (automatic wipe on drop) and never writes
+// plaintext to disk, so neither function is needed.
+
+/// Reconstruct the on-disk placeholder path for `file_id` from the state DB:
+/// `<sync_root>/<entry.path>` using the SAME mapping `populate_placeholders`
+/// uses (`trim_matches('/')` → `replace('/', MAIN_SEPARATOR)`). Used as the
+/// fallback when the FETCH_DATA callback's `NormalizedPath` is unavailable
+/// (task 0783).
+///
+/// PATH SAFETY: the relative path comes from server-controlled metadata, so we
+/// reject any component that could escape the sync root — an empty rel path, an
+/// absolute/root-prefixed component, or any `..` / `.` / non-normal component.
+/// Only when the rel path is a clean sequence of normal components do we join
+/// it onto the sync root. Returns `None` (→ Tier-2) on any failure: missing
+/// sync root, absent row, empty/illegal rel path.
+pub(super) fn db_placeholder_path(
+    bridge: &crate::engine_bridge::EngineBridge,
+    file_id: &str,
+) -> Option<std::path::PathBuf> {
+    let sync_root = super::sync_root()?;
+
+    let entry = match bridge.db().get_file(file_id) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            tracing::warn!(file_id = %file_id, "size-resolve fallback: file_id absent from state DB");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(file_id = %file_id, error = %e, "size-resolve fallback: state DB read failed");
+            return None;
+        }
+    };
+
+    match safe_join_under_root(&sync_root, &entry.path) {
+        Some(p) => Some(p),
+        None => {
+            tracing::warn!(file_id = %file_id, "size-resolve fallback: rejecting unsafe/empty relative path");
+            None
+        }
+    }
+}
+
+/// Join a server-relative, '/'-separated `rel_path` onto `sync_root`, returning
+/// the on-disk path ONLY if it is provably contained under the root. Pure +
+/// unit-testable (no CF / DB state). Mirrors `populate_placeholders`'
+/// `trim_matches('/')` → `replace('/', MAIN_SEPARATOR)` mapping, but rejects:
+///   - an empty rel path (would resolve to the root itself),
+///   - any segment that is empty, `.`, or `..` (traversal),
+/// then re-checks lexical containment as belt-and-suspenders. Returns `None` on
+/// any rejection so the caller falls through to Tier-2 (visible error).
+fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<std::path::PathBuf> {
+    let rel = rel_path.trim_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return None;
+    }
+    let native_rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let candidate = sync_root.join(&native_rel);
+    // The joined path must still be under the sync root. We compare lexically
+    // (we avoid canonicalize() — it would resolve the placeholder's reparse
+    // point; the per-segment check above already blocks traversal).
+    if !candidate.starts_with(sync_root) {
+        return None;
+    }
+    Some(candidate)
+}
+
+// ── Upload triggers — Cloud Files NOTIFY callbacks (task 0780) ───────────────
+//
+// These three `NOTIFY_*_COMPLETION` callbacks are the Windows UPLOAD path. They
+// fire AFTER the corresponding local operation completes on a CfConnectSyncRoot'd
+// root (where a `notify`/ReadDirectoryChanges watcher is starved by the CF
+// filter and never fires). Each one extracts the path(s) from `CF_CALLBACK_INFO`
+// (and, for rename, the params arm), then pushes a `crate::watcher::NotifyEvent`
+// into the upload driver's debounce loop. ALL feedback-loop filtering +
+// parent_id resolution + the actual `queue_finder_*` enqueue happen there, in
+// the one shared `EngineBridge::classify_local_path` — these callbacks only
+// translate the CF shape into a channel message and return fast.
+//
+// We do NOT `block_on` here: unlike `fetch_data_callback` (which must deliver
+// bytes synchronously or Explorer hangs), a NOTIFY completion has no transfer to
+// satisfy — dropping the work onto the async debounce loop keeps the
+// filter-driver worker thread free and lets us debounce chatty close bursts.
+
+/// `NOTIFY_FILE_CLOSE_COMPLETION` — fires after a handle that may have written a
+/// new/modified file in the sync root closes. The create/modify upload trigger.
+///
+/// We skip closes flagged `CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED` (the file
+/// was deleted, not written — the DELETE_COMPLETION callback handles that), then
+/// push the absolute path as a debounced `CloseCompletion` event. The pre-upload
+/// `CfConvertToPlaceholder` (no MARK_IN_SYNC) and the `queue_finder_create`
+/// happen in the debounce loop's `handle_settled_path`, immediately before
+/// queueing — so a path that gets filtered out is never converted.
+///
+/// SAFETY: `callback_info`/`callback_parameters` are valid for the duration of
+/// this call per the Cloud Files contract. We copy the path out before
+/// returning; nothing borrowed from Windows is retained.
+pub unsafe extern "system" fn notify_file_close_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
+
+    // The close-completion params arm carries a `Flags` field; a DELETED close
+    // is not a write we should upload. Defensive null-check on params.
+    if !callback_parameters.is_null() {
+        let params = unsafe { &*callback_parameters };
+        let close = unsafe { params.Anonymous.CloseCompletion };
+        if (close.Flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED) != CF_CALLBACK_CLOSE_COMPLETION_FLAG_NONE {
+            // Deleted on close — leave it to the delete-completion callback.
+            return;
+        }
+    }
+
+    // Task 1640: a close by this process (the upload driver reading a synced file to compare
+    // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
+    // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
+    if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
+        return;
+    }
+
+    // LD-0105 S6: a close is the moment a poisoned placeholder can be emptied (no handle is left to
+    // refuse the exclusive open). The empty step runs off this callback thread. Our own closes (the
+    // empty step's own handle among them) were filtered out above, so it cannot trigger itself.
+    if info.FileIdentityLength > 0 && !info.FileIdentity.is_null() {
+        // SAFETY: Windows hands us `FileIdentityLength` valid bytes for the duration of the callback.
+        let identity =
+            unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
+        if let Ok(file_id) = std::str::from_utf8(identity) {
+            super::poison::after_close(file_id);
+            super::streaming::after_close(file_id);
+        }
+    }
+
+    let Some(path) = notify_full_path(info) else {
+        return;
+    };
+    push_notify_event(crate::watcher::NotifyEvent::CloseCompletion(path));
+}
+
+/// `NOTIFY_DELETE_COMPLETION` — fires after a local delete completes. Pushes a
+/// `Delete` event; the debounce loop resolves the path to a known server file
+/// and enqueues the trash op (no-op if the path is untracked / engine-internal).
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_delete_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    _callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
+    let Some(path) = notify_full_path(info) else {
+        return;
+    };
+    push_notify_event(crate::watcher::NotifyEvent::Delete {
+        path,
+        by_this_process: from_this_process(info),
+    });
+}
+
+/// `NOTIFY_RENAME_COMPLETION` — fires after a local rename/move completes. The
+/// OLD (source) path is in the params arm's `SourcePath`; the NEW (target) path
+/// is `CF_CALLBACK_INFO.NormalizedPath`. Pushes a `Rename { source, target }`
+/// event; the debounce loop resolves the source to a known server file and
+/// enqueues a move (changed parent) or rename (name-only) via `queue_finder_modify`.
+///
+/// SAFETY: as above. `SourcePath` is a NUL-terminated PCWSTR valid for the
+/// duration of the call; we copy it into an owned path before returning.
+pub unsafe extern "system" fn notify_rename_completion_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() || callback_parameters.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let Some(_lease) = super::callback_bridge(info.CallbackContext) else {
+        return;
+    };
+    let params = unsafe { &*callback_parameters };
+
+    // NEW path: NormalizedPath (volume-relative) joined with the volume DOS name.
+    let Some(target) = notify_full_path(info) else {
+        return;
+    };
+
+    // OLD path: the rename-completion arm's SourcePath. Like NormalizedPath it is
+    // VOLUME-RELATIVE (no drive letter), so prefix the same VolumeDosName to make
+    // it openable / strippable against the sync root.
+    let rename = unsafe { params.Anonymous.RenameCompletion };
+    let Some(source) = volume_relative_to_full(info, rename.SourcePath.0) else {
+        return;
+    };
+
+    push_notify_event(crate::watcher::NotifyEvent::Rename {
+        source,
+        target,
+        by_this_process: from_this_process(info),
+    });
+}
+
+// ── LD-0113 §6.3: the pre-operation delete and rename callbacks ─────────────────
+//
+// Windows waits for our answer before it deletes or renames a placeholder, so every path answers at
+// once, from the state DB alone (no network: Explorer must never wait on the server): STATUS_SUCCESS
+// for everything else, STATUS_CLOUD_FILE_ACCESS_DENIED for the Backups root and this device's own
+// backups (`crate::backup_protect`). This process's own deletes and renames (the engine removing what
+// the server removed, a restore moving a folder back) are never refused. Without a live bridge (a
+// start or a stop in progress) the answer is STATUS_SUCCESS: the completion is dropped then too, so
+// nothing reaches the server, and the next placeholder refresh mints the item again.
+
+/// `NOTIFY_DELETE` (pre-operation): refuse deleting a protected item.
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_delete_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let refusal = super::callback_bridge(info.CallbackContext).and_then(|lease| {
+        // SAFETY: valid for the duration of the callback, like `info`.
+        let params = (!callback_parameters.is_null()).then(|| unsafe { &*callback_parameters });
+        delete_refusal(
+            lease.db(),
+            &crate::backup_protect::own_backups(),
+            super::sync_root().as_deref(),
+            info,
+            params,
+        )
+    });
+    // SAFETY: the keys come from this live callback.
+    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_DELETE, refusal.is_some()) };
+    if let Some(words) = refusal {
+        crate::backup_protect::note_refusal(&words);
+    }
+}
+
+/// `NOTIFY_RENAME` (pre-operation): refuse renaming or moving a protected item, the move into the
+/// Recycle Bin (Explorer's Delete) included.
+///
+/// SAFETY: as [`notify_file_close_completion_callback`].
+pub unsafe extern "system" fn notify_rename_callback(
+    callback_info: *const CF_CALLBACK_INFO,
+    callback_parameters: *const CF_CALLBACK_PARAMETERS,
+) {
+    if callback_info.is_null() {
+        return;
+    }
+    let info = unsafe { &*callback_info };
+    let refusal = super::callback_bridge(info.CallbackContext).and_then(|lease| {
+        // SAFETY: valid for the duration of the callback, like `info`.
+        let params = (!callback_parameters.is_null()).then(|| unsafe { &*callback_parameters });
+        rename_refusal(
+            lease.db(),
+            &crate::backup_protect::own_backups(),
+            super::sync_root().as_deref(),
+            info,
+            params,
+        )
+    });
+    // SAFETY: the keys come from this live callback.
+    unsafe { ack_pre_operation(info, CF_OPERATION_TYPE_ACK_RENAME, refusal.is_some()) };
+    if let Some(words) = refusal {
+        crate::backup_protect::note_refusal(&words);
+    }
+}
+
+/// The words a delete of `info`'s item is refused with; `None` allows it (an undelete, this process's
+/// own delete, an item that is not protected, or one the DB does not know).
+pub(super) fn delete_refusal(
+    db: &crate::state_db::StateDb,
+    own: &crate::backup_protect::OwnBackups,
+    sync_root: Option<&std::path::Path>,
+    info: &CF_CALLBACK_INFO,
+    params: Option<&CF_CALLBACK_PARAMETERS>,
+) -> Option<String> {
+    // SAFETY: the delete arm is the union's live arm in a NOTIFY_DELETE callback.
+    let undelete = params.is_some_and(|p| unsafe { p.Anonymous.Delete }.Flags & CF_CALLBACK_DELETE_FLAG_IS_UNDELETE == CF_CALLBACK_DELETE_FLAG_IS_UNDELETE);
+    if undelete || from_this_process(info) {
+        return None;
+    }
+    let rel = callback_rel_path(db, sync_root, info)?;
+    crate::backup_protect::protected_reason(db, own, &rel, beebeeb_core::backup::Mutation::Trash)
+}
+
+/// The words a rename or move of `info`'s item is refused with; `None` allows it. An item in the Backups
+/// tree is refused whatever its target (the Recycle Bin, out of the tree, a new name); an item from
+/// elsewhere in the drive is refused a target in the tree (Amendment 6).
+pub(super) fn rename_refusal(
+    db: &crate::state_db::StateDb,
+    own: &crate::backup_protect::OwnBackups,
+    sync_root: Option<&std::path::Path>,
+    info: &CF_CALLBACK_INFO,
+    params: Option<&CF_CALLBACK_PARAMETERS>,
+) -> Option<String> {
+    if from_this_process(info) {
+        return None;
+    }
+    let rel = callback_rel_path(db, sync_root, info)?;
+    // SAFETY: the rename arm is the union's live arm in a NOTIFY_RENAME callback.
+    let target = params.and_then(|p| volume_relative_to_full(info, unsafe { p.Anonymous.Rename }.TargetPath.0));
+    let mutation = match (notify_full_path(info), target.as_deref()) {
+        (Some(source), Some(target)) => crate::backup_protect::rename_mutation(&source, target),
+        _ => beebeeb_core::backup::Mutation::Move,
+    };
+    let target_rel = sync_root
+        .zip(target.as_deref())
+        .and_then(|(root, t)| crate::engine_bridge::relative_db_path(root, t));
+    crate::backup_protect::move_refusal(db, own, &rel, mutation, target_rel.as_deref())
+}
+
+/// Whether this process asked (the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`).
+fn from_this_process(info: &CF_CALLBACK_INFO) -> bool {
+    // SAFETY: valid for the duration of the callback, like `info` itself.
+    !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id()
+}
+
+/// The state DB path of the callback's item: through its placeholder identity (the file id it was
+/// minted with) first, so a folder renamed while the app was closed is still known; else its path
+/// under the sync root.
+fn callback_rel_path(
+    db: &crate::state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    info: &CF_CALLBACK_INFO,
+) -> Option<String> {
+    if let Some(row) = file_id_of(info).and_then(|id| db.get_file(&id).ok().flatten()) {
+        return Some(row.path);
+    }
+    crate::engine_bridge::relative_db_path(sync_root?, &notify_full_path(info)?)
+}
+
+/// Answer a pre-operation delete or rename: `refused` answers `STATUS_CLOUD_FILE_ACCESS_DENIED`.
+///
+/// SAFETY: `info` must be the live callback's info.
+pub(super) unsafe fn ack_pre_operation(info: &CF_CALLBACK_INFO, op: CF_OPERATION_TYPE, refused: bool) {
+    let status = if refused {
+        windows::Win32::Foundation::STATUS_CLOUD_FILE_ACCESS_DENIED
+    } else {
+        STATUS_SUCCESS
+    };
+    let op_info = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: op,
+        ConnectionKey: info.ConnectionKey,
+        TransferKey: info.TransferKey,
+        CorrelationVector: std::ptr::null::<CORRELATION_VECTOR>(),
+        SyncStatus: std::ptr::null::<CF_SYNC_STATUS>(),
+        RequestKey: info.RequestKey,
+    };
+    // ParamSize is the size of the arm in use, as in `transfer_one`.
+    let arm = if op == CF_OPERATION_TYPE_ACK_DELETE {
+        std::mem::size_of::<CF_OPERATION_PARAMETERS_0_2>()
+    } else {
+        std::mem::size_of::<CF_OPERATION_PARAMETERS_0_3>()
+    };
+    let mut params = CF_OPERATION_PARAMETERS {
+        ParamSize: (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous) + arm) as u32,
+        Anonymous: if op == CF_OPERATION_TYPE_ACK_DELETE {
+            CF_OPERATION_PARAMETERS_0 {
+                AckDelete: CF_OPERATION_PARAMETERS_0_2 {
+                    Flags: CF_OPERATION_ACK_DELETE_FLAG_NONE,
+                    CompletionStatus: status,
+                },
+            }
+        } else {
+            CF_OPERATION_PARAMETERS_0 {
+                AckRename: CF_OPERATION_PARAMETERS_0_3 {
+                    Flags: CF_OPERATION_ACK_RENAME_FLAG_NONE,
+                    CompletionStatus: status,
+                },
+            }
+        },
+    };
+    // SAFETY: both structs live on this frame for the call; CfExecute copies what it needs.
+    if let Err(error) = unsafe { CfExecute(&op_info, &mut params) } {
+        // Zero-knowledge: the result only, never the item.
+        tracing::warn!(hresult = %format!("0x{:08X}", error.code().0 as u32), refused, "CfExecute(ACK) failed");
+    }
+}
+
+/// Join `CF_CALLBACK_INFO.NormalizedPath` with the volume DOS name into an
+/// absolute [`PathBuf`] (e.g. `C:\Users\...\file`). Mirrors [`normalized_path`]
+/// but yields a `PathBuf` (for the upload driver) instead of a NUL-terminated
+/// wide string (for `CfOpenFileWithOplock`). Returns `None` if the relative path
+/// is missing/empty.
+fn notify_full_path(info: &CF_CALLBACK_INFO) -> Option<std::path::PathBuf> {
+    volume_relative_to_full(info, info.NormalizedPath.0)
+}
+
+/// Join an arbitrary VOLUME-RELATIVE wide path (`\Users\...\file`, no drive)
+/// with `info.VolumeDosName` (`C:`) into an absolute [`PathBuf`]. Shared by
+/// [`notify_full_path`] and the rename source-path decode. Returns `None` for a
+/// null/empty relative path.
+pub(super) fn volume_relative_to_full(info: &CF_CALLBACK_INFO, rel_ptr: *const u16) -> Option<std::path::PathBuf> {
+    let rel = wide_to_vec(rel_ptr)?;
+    if rel.is_empty() {
+        return None;
+    }
+    let vol = wide_to_vec(info.VolumeDosName.0).unwrap_or_default();
+    let mut full: Vec<u16> = Vec::with_capacity(vol.len() + rel.len());
+    full.extend_from_slice(&vol);
+    full.extend_from_slice(&rel);
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&full)))
+}
+
+/// Push a NOTIFY event into the upload driver's debounce loop. No-op (with a
+/// debug log) if `watcher::spawn` hasn't registered a sender yet, or if the
+/// receiver was torn down (logout/shutdown) — a dropped event is reconciled by
+/// the next `sync_tick`. Never blocks the filter-driver thread.
+fn push_notify_event(event: crate::watcher::NotifyEvent) {
+    match super::notify_sender() {
+        Some(tx) => {
+            if tx.send(event).is_err() {
+                tracing::debug!("NOTIFY event dropped: upload driver receiver is gone");
+            }
+        }
+        None => {
+            tracing::debug!("NOTIFY event dropped: no upload driver sender registered yet");
+        }
+    }
+}
+
+/// Stream `[offset, offset+length)` of `plaintext` back into the
+/// placeholder via `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`,
+/// chunked so each non-final transfer is page-aligned. Satisfies the
+/// caller's *required* range. If the requested range runs past the end
+/// of the decrypted data (shouldn't happen — the placeholder size and
+/// plaintext come from the same source) we transfer what we have.
+///
+/// SAFETY: `connection_key` / `transfer_key` come from a live
+/// `CF_CALLBACK_INFO`. `plaintext` outlives every `CfExecute` call (it's
+/// borrowed for the whole function). Each `CfExecute` copies the buffer
+/// synchronously before returning.
+pub(super) unsafe fn transfer_range(
+    connection_key: CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    plaintext: &[u8],
+    cancelled: impl Fn() -> bool,
+    required_offset: i64,
+    required_length: i64,
+) -> windows::core::Result<()> {
+    if cancelled() {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x800704C7u32 as i32,
+        )));
+    }
+    let total = plaintext.len() as i64;
+    // Clamp the requested range to what we actually have.
+    let start = required_offset.clamp(0, total);
+    let end = (required_offset + required_length).clamp(0, total);
+    if end <= start {
+        // Nothing to send for this range; report a zero-length success so
+        // Cloud Files marks the request satisfied rather than aborted.
+        return unsafe {
+            transfer_one(
+                connection_key,
+                transfer_key,
+                request_key,
+                std::ptr::null(),
+                start,
+                0,
+                STATUS_SUCCESS,
+            )
+        };
+    }
+
+    let mut off = start;
+    while off < end {
+        // The OS callback worker owns the lease and plaintext during CfExecute.
+        // A stalled call cannot hold up the async lock response indefinitely;
+        // bounded drain reports failure and refuses reactivation.
+        if cancelled() {
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0x800704C7u32 as i32,
+            )));
+        }
+        let remaining = end - off;
+        let len = remaining.min(TRANSFER_CHUNK);
+        let buf_ptr = unsafe { plaintext.as_ptr().add(off as usize) } as *const core::ffi::c_void;
+        unsafe {
+            transfer_one(
+                connection_key,
+                transfer_key,
+                request_key,
+                buf_ptr,
+                off,
+                len,
+                STATUS_SUCCESS,
+            )
+        }?;
+        off += len;
+    }
+    Ok(())
+}
+
+/// Issue a non-success `CfExecute(TRANSFER_DATA)` so Explorer stops
+/// spinning and surfaces an error for the requested range. Best-effort:
+/// logs (without sensitive content) and swallows any error from the call
+/// itself — there's no further recovery once hydration has failed.
+///
+/// SAFETY: keys come from a live `CF_CALLBACK_INFO`.
+pub(super) unsafe fn fail_transfer(
+    connection_key: CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    required_offset: i64,
+    required_length: i64,
+) {
+    // Length is required by the API on a transfer-data op; a non-success
+    // status on the required span tells Cloud Files to abort this fetch.
+    let len = required_length.max(0);
+    if let Err(e) = unsafe {
+        transfer_one(
+            connection_key,
+            transfer_key,
+            request_key,
+            std::ptr::null(),
+            required_offset,
+            len,
+            STATUS_UNSUCCESSFUL,
+        )
+    } {
+        tracing::warn!(hresult = %format!("0x{:08X}", e.code().0 as u32), required_offset, len, status = "0xC0000001", "CfExecute(TRANSFER_DATA) failure-report itself failed");
+    }
+}
+
+/// Task 2284 A1.2: refuse this process's own fetch of a file inside a no-fetch scope, so a data open that races a
+/// dehydration fails (os 389) instead of fetching. Another program's fetch, or a callback without process info, is
+/// never refused. `true`: refused, and the transfer was failed.
+///
+/// # Safety
+/// `info` must be the live callback's info, valid for the duration of the callback.
+pub(super) unsafe fn refuse_own_scoped_fetch(
+    info: &CF_CALLBACK_INFO,
+    identity: &str,
+    required_offset: i64,
+    required_length: i64,
+) -> bool {
+    if info.ProcessInfo.is_null() {
+        return false;
+    }
+    // SAFETY: valid for the duration of the callback, like `info` itself.
+    let requester_pid = unsafe { (*info.ProcessInfo).ProcessId };
+    if crate::no_fetch_scope::refuses(identity, requester_pid) {
+        tracing::debug!(file_id = %identity, "own fetch refused inside a no-fetch scope");
+        // SAFETY: the keys come from this live callback.
+        unsafe {
+            fail_transfer(
+                info.ConnectionKey,
+                info.TransferKey,
+                info.RequestKey,
+                required_offset,
+                required_length,
+            )
+        };
+        return true;
+    }
+    false
+}
+
+/// Low-level single `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)`. A
+/// success status with a real buffer delivers bytes; a non-success
+/// status aborts the fetch. `buffer` may be null when `length == 0` or
+/// when reporting a failure.
+///
+/// SAFETY: `connection_key` / `transfer_key` identify a live transfer;
+/// `buffer` (if non-null) is valid for `length` bytes for the duration
+/// of the call. `CfExecute` consumes the buffer synchronously.
+pub(super) unsafe fn transfer_one(
+    connection_key: CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    buffer: *const core::ffi::c_void,
+    offset: i64,
+    length: i64,
+    status: NTSTATUS,
+) -> windows::core::Result<()> {
+    let op_info = CF_OPERATION_INFO {
+        StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+        Type: CF_OPERATION_TYPE_TRANSFER_DATA,
+        ConnectionKey: connection_key,
+        TransferKey: transfer_key,
+        CorrelationVector: std::ptr::null::<CORRELATION_VECTOR>(),
+        SyncStatus: std::ptr::null::<CF_SYNC_STATUS>(),
+        // Plumb the callback's RequestKey through so CfExecute correlates
+        // this transfer with the originating fetch request. TransferKey is
+        // the primary correlator, but a meaningful RequestKey shouldn't be
+        // discarded — a 0 here is the first suspect if Explorer hangs
+        // despite a STATUS_SUCCESS transfer.
+        RequestKey: request_key,
+    };
+
+    let mut op_params = CF_OPERATION_PARAMETERS {
+        // Per the Cloud Files contract, ParamSize is the size of the
+        // specific operation arm in use (TransferData), NOT the full
+        // union. CF_OPERATION_PARAMETERS_0_6 is not the largest arm, so
+        // size_of::<CF_OPERATION_PARAMETERS>() would be oversized; compute
+        // the arm size exactly: offset of the union + size of the arm.
+        ParamSize: (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous)
+            + std::mem::size_of::<CF_OPERATION_PARAMETERS_0_6>()) as u32,
+        Anonymous: CF_OPERATION_PARAMETERS_0 {
+            TransferData: CF_OPERATION_PARAMETERS_0_6 {
+                Flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
+                CompletionStatus: status,
+                Buffer: buffer,
+                Offset: offset,
+                Length: length,
+            },
+        },
+    };
+
+    if status == STATUS_SUCCESS && length > 0 {
+        tracing::debug!(bytes = length, "Cloud Files plaintext transfer attempt");
+    }
+    unsafe { CfExecute(&op_info, &mut op_params) }
+}
+
+/// Mark the file at `path` IN_SYNC so Explorer flips the overlay from
+/// the downloading spinner to the synced check after a successful
+/// hydration. Best-effort: opens a Cloud Files handle via
+/// `CfOpenFileWithOplock`, calls `CfSetInSyncState`, logs and swallows
+/// any error. Does NOT attempt to manage the full upload-side overlay
+/// state machine — that lives in the sync runtime (runner.rs /
+/// engine_bridge), out of this module's scope. See REPORT.
+///
+/// We use the Cloud Files–native `CfOpenFileWithOplock` rather than
+/// `CreateFileW`: the latter is gated behind the `Win32_Security`
+/// feature (for `SECURITY_ATTRIBUTES`) which this crate doesn't enable,
+/// and the CF API is the documented way to obtain a handle for
+/// `CfSetInSyncState`.
+///
+/// SAFETY: `path` is a NUL-terminated wide string; the opened CF handle
+/// is closed via `CfCloseHandle` before return.
+pub(super) unsafe fn mark_in_sync(path: &[u16]) {
+    use windows::core::PCWSTR;
+
+    let handle = match unsafe { CfOpenFileWithOplock(PCWSTR(path.as_ptr()), CF_OPEN_FILE_FLAG_NONE) } {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::debug!(error = %e, "CfSetInSyncState: CfOpenFileWithOplock failed (overlay not updated)");
+            return;
+        }
+    };
+
+    if let Err(e) = unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) } {
+        tracing::debug!(error = %e, "CfSetInSyncState failed (overlay not updated)");
+    }
+
+    unsafe { CfCloseHandle(handle) };
+}
+
+/// Mark the file at `path` NOT in-sync so Explorer shows a non-synced (pending/
+/// error) cloud overlay rather than the green synced check. This is the
+/// Tier-2 visible-error signal (task 0783): when a hydration cannot be resolved
+/// (the placeholder resize failed), the file must not silently masquerade as
+/// synced. Paired with flipping the state_db row to `Error`, this keeps the
+/// Explorer overlay honest. Best-effort: opens a CF handle, calls
+/// `CfSetInSyncState(NOT_IN_SYNC)`, logs and swallows any error.
+///
+/// SAFETY: `path` is a NUL-terminated wide string; the opened CF handle is
+/// closed via `CfCloseHandle` before return.
+unsafe fn mark_not_in_sync(path: &[u16]) {
+    use windows::core::PCWSTR;
+
+    let handle = match unsafe { CfOpenFileWithOplock(PCWSTR(path.as_ptr()), CF_OPEN_FILE_FLAG_NONE) } {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::debug!(error = %e, "mark_not_in_sync: CfOpenFileWithOplock failed (overlay not updated)");
+            return;
+        }
+    };
+
+    if let Err(e) = unsafe { CfSetInSyncState(handle, CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None) } {
+        tracing::debug!(error = %e, "CfSetInSyncState(NOT_IN_SYNC) failed (overlay not updated)");
+    }
+
+    unsafe { CfCloseHandle(handle) };
+}
+
+/// Pull the placeholder's normalized path out of `CF_CALLBACK_INFO` as a
+/// NUL-terminated wide string suitable for `CfOpenFileWithOplock`. The
+/// Cloud Files `NormalizedPath` is volume-relative (it lacks the drive),
+/// so we prefix the volume DOS name (e.g. `C:`) to form an openable path.
+/// Returns `None` if the relative path is missing/empty.
+fn normalized_path(info: &CF_CALLBACK_INFO) -> Option<Vec<u16>> {
+    let rel = wide_to_vec(info.NormalizedPath.0)?;
+    let vol = wide_to_vec(info.VolumeDosName.0).unwrap_or_default();
+    if rel.is_empty() {
+        return None;
+    }
+    // Join `<VolumeDosName><NormalizedPath>`; NormalizedPath starts with a
+    // backslash, so concatenation yields e.g. `C:\Users\...\file`.
+    let mut full: Vec<u16> = Vec::with_capacity(vol.len() + rel.len() + 1);
+    full.extend_from_slice(&vol);
+    full.extend_from_slice(&rel);
+    full.push(0);
+    Some(full)
+}
+
+/// The file id a placeholder was minted with (`FileIdentity`, UTF-8), for the W2 callbacks.
+pub(super) fn file_id_of(info: &CF_CALLBACK_INFO) -> Option<String> {
+    if info.FileIdentity.is_null() || info.FileIdentityLength == 0 {
+        return None;
+    }
+    // SAFETY: Windows hands us `FileIdentityLength` valid bytes for the duration of the callback.
+    let bytes = unsafe { std::slice::from_raw_parts(info.FileIdentity as *const u8, info.FileIdentityLength as usize) };
+    std::str::from_utf8(bytes).ok().map(str::to_string)
+}
+
+/// Copy a Windows `*const u16` NUL-terminated string into an owned Vec
+/// WITHOUT the trailing NUL. Returns `None` for a null pointer.
+fn wide_to_vec(ptr: *const u16) -> Option<Vec<u16>> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut out = Vec::new();
+    // SAFETY: Cloud Files guarantees these PCWSTRs are NUL-terminated and
+    // valid for the duration of the callback.
+    unsafe {
+        let mut p = ptr;
+        while *p != 0 {
+            out.push(*p);
+            p = p.add(1);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+#[path = "callbacks_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "finalization_tests.rs"]
+mod finalization_tests;

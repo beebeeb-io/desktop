@@ -318,6 +318,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # The engine's test helpers (in-memory credential store, loopback API default) are on no normal or build edge
+      # of what is built here, and the engine names no tauri crate: from cargo's dependency graph, before the build.
+      - name: Engine boundary check
+        shell: bash
+        run: sh scripts/check-engine-boundary.sh
+
       - name: Set app version for this release
         shell: bash
         env:

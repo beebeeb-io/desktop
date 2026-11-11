@@ -1,5 +1,5 @@
 // Portable Windows cleanup regressions. Native identity/deletion stays in signout.rs.
-#[path = "../src/windows_cf/signout_cleanup.rs"]
+#[path = "../../crates/beebeeb-engine/src/windows_cf/signout_cleanup.rs"]
 mod cleanup;
 use std::{
     cell::{Cell, RefCell},
