@@ -131,12 +131,12 @@ impl StateDb {
             |row| row.get(0),
         )
     }
-    /// Task 2446 (review of PR 289): a change of this file made on this PC is queued, in any state, parked included
-    /// (an upload, a rename, a move, a trash: everything but a download, which follows its row).
-    pub fn has_queued_local_change(&self, file_id: &str) -> Result<bool> {
+    /// Task 2446 (review of PR 289): anything is queued for this file, in any state, parked included (an upload, a
+    /// rename, a move, a trash, a download: each op names the place it was queued at).
+    pub fn has_queued_operation(&self, file_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1 AND kind != 'hydrate_file')",
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1)",
             params![file_id],
             |row| row.get(0),
         )

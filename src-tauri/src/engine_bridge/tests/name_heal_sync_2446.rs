@@ -385,7 +385,8 @@ async fn a_busy_own_read_fails_the_pass_and_sync_goes_on() {
     );
     assert_eq!(bridge.db().get_file(OTHER).unwrap().expect("not pruned").path, before);
     let retry = bridge.db().name_heal_retry().unwrap().unwrap();
-    assert_eq!((retry.failures, retry.next_at, retry.rows_left), (1, T0 + 60, 0));
+    // The pass had begun (the snapshot was read), so it counts as unfinished: at least one row left.
+    assert_eq!((retry.failures, retry.next_at, retry.rows_left), (1, T0 + 60, 1));
     assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(5));
 
     server.own_read(OTHER, "200 OK", prod_row(OTHER, None, "Notes.txt", false));
@@ -584,10 +585,69 @@ async fn a_rightly_blocked_row_does_not_keep_the_heal_owed() {
     );
 }
 
-/// What does not hold a row back: a queued download follows its row (it is named in the same pass), and a row being
-/// trashed is never named again and is not waited for.
+/// A row being trashed is never named again and is not waited for. A row with a download queued is held like any
+/// other queued op (the op names the place it writes to), and a folder that waits keeps the rows under it with it.
 #[tokio::test]
-async fn a_queued_download_and_a_row_being_trashed_do_not_keep_the_heal_owed() {
+async fn a_row_being_trashed_is_not_waited_for_and_a_waiting_folder_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let listed = || serde_json::json!({"seq_id": 6, "nodes": healthy_rows()});
+    let server = Server::start(
+        6,
+        vec![("200 OK", listed()), ("200 OK", listed()), ("200 OK", listed())],
+    );
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), MK);
+    store_blocked(&bridge, dir.path(), healthy_rows()).await;
+    let db = bridge.db();
+    let other_label = crate::owner_keys::blocked_name(OTHER);
+    seed_bridge_entry(&bridge, OTHER, &other_label, None, FileStatus::Trashing, false, 50);
+    // The folder has a failed change parked; the file in it is on this PC (`Local`).
+    let folder_label = crate::owner_keys::blocked_name(FOLDER);
+    seed_bridge_entry(&bridge, FOLDER, &folder_label, None, FileStatus::Error, true, 50);
+    enqueue_test_operation(&bridge, "op-folder", OperationKind::HydrateFile, FOLDER, 100);
+    let file_before = db.get_file(FILE).unwrap().unwrap().path;
+    seed_bridge_entry(&bridge, FILE, &file_before, Some(FOLDER), FileStatus::Local, false, 50);
+
+    sync_tick_outcome_at(&bridge, dir.path(), T0).await.unwrap();
+    assert_eq!(
+        db.get_file(FOLDER).unwrap().unwrap().path,
+        folder_label,
+        "held with its op queued"
+    );
+    assert_eq!(
+        db.get_file(FILE).unwrap().unwrap().path,
+        file_before,
+        "the row under it waits with it"
+    );
+    assert_eq!(
+        db.name_heal_retry().unwrap().unwrap().rows_left,
+        2,
+        "the folder and the file in it"
+    );
+
+    db.remove_operation("op-folder").unwrap();
+    db.set_status(FOLDER, FileStatus::Local).unwrap();
+    sync_tick_outcome_at(&bridge, dir.path(), T0 + 60).await.unwrap();
+    assert_eq!(db.get_file(FOLDER).unwrap().unwrap().path, "Docs");
+    assert_eq!(
+        db.get_file(FILE).unwrap().unwrap().path,
+        "Docs/Report.pdf",
+        "named together with its folder"
+    );
+    assert_eq!(
+        db.get_file(OTHER).unwrap().unwrap().path,
+        other_label,
+        "a row being trashed stays as it is"
+    );
+    assert!(
+        db.name_heal_done().unwrap(),
+        "the row being trashed does not keep the heal owed"
+    );
+}
+
+/// Preparing the rows lifts their blocks before any row is named. A pass cut short after that (the app quit) is
+/// still owed: it was recorded as unfinished first, so the next start does not find "nothing blocked" and stop.
+#[tokio::test]
+async fn a_pass_cut_short_after_the_blocks_were_lifted_is_still_owed() {
     let dir = tempfile::tempdir().unwrap();
     let server = Server::start(
         6,
@@ -596,30 +656,23 @@ async fn a_queued_download_and_a_row_being_trashed_do_not_keep_the_heal_owed() {
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), MK);
     store_blocked(&bridge, dir.path(), healthy_rows()).await;
     let db = bridge.db();
-    let other_label = crate::owner_keys::blocked_name(OTHER);
-    seed_bridge_entry(&bridge, OTHER, &other_label, None, FileStatus::Error, false, 50);
-    enqueue_test_operation(&bridge, "op-download", OperationKind::HydrateFile, OTHER, 100);
-    let file_at_label = db.get_file(FILE).unwrap().unwrap().path;
-    seed_bridge_entry(
-        &bridge,
-        FILE,
-        &file_at_label,
-        Some(FOLDER),
-        FileStatus::Trashing,
-        false,
-        50,
+    // What a pass does up to the point it is cut: the mark, then the blocks lifted, no row named.
+    db.begin_name_heal_pass(T0).unwrap();
+    bridge.prepare_owned_rows(&healthy_rows()).await.unwrap();
+    assert!(
+        !db.has_blocked_or_nameless_rows().unwrap(),
+        "no blocked record is left to say a heal is owed"
+    );
+    assert_eq!(
+        db.get_file(FOLDER).unwrap().unwrap().path,
+        crate::owner_keys::blocked_name(FOLDER)
     );
 
-    sync_tick_outcome_at(&bridge, dir.path(), T0).await.unwrap();
-    assert_eq!(
-        db.get_file(OTHER).unwrap().unwrap().path,
-        "Notes.txt",
-        "named with its download queued"
-    );
-    assert_eq!(
-        db.get_file(FILE).unwrap().unwrap().path,
-        file_at_label,
-        "a row being trashed stays as it is"
-    );
-    assert!(db.name_heal_done().unwrap(), "neither keeps the heal owed");
+    sync_tick_outcome_at(&bridge, dir.path(), T0 + 30).await.unwrap();
+    assert!(!db.name_heal_done().unwrap(), "owed, and waiting");
+    assert_eq!(server.snapshots(), 0);
+    sync_tick_outcome_at(&bridge, dir.path(), T0 + 60).await.unwrap();
+    assert_eq!(server.snapshots(), 1);
+    assert_eq!(db.get_file(FOLDER).unwrap().unwrap().path, "Docs");
+    assert!(db.name_heal_done().unwrap());
 }

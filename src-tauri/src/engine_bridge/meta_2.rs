@@ -644,7 +644,10 @@ pub(super) fn awaits_its_name(entry: &FileEntry) -> bool {
 /// key record is readable: an upload, a conflict or a queued change of this PC kept it there. (A rightly blocked
 /// row has a blocked record and is not waiting for anything; a row being trashed is not named again.)
 pub(super) fn waits_for_its_change(db: &StateDb, file_id: &str, stored_path: &str) -> Result<bool, EngineError> {
-    if stored_path.rsplit('/').next() != Some(crate::owner_keys::blocked_name(file_id).as_str()) {
+    // No path at all, or the label: what `awaits_its_name` reads.
+    if !stored_path.is_empty()
+        && stored_path.rsplit('/').next() != Some(crate::owner_keys::blocked_name(file_id).as_str())
+    {
         return Ok(false);
     }
     if db
@@ -784,14 +787,15 @@ pub(super) fn process_metadata_row(
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
             // Task 2446: so is a row still waiting for its name, unless a pending upload or a conflict owns it, or
-            // (review of PR 289) a change made on this PC is still queued or parked for it. That change was queued
+            // (review of PR 289) anything is still queued or parked for it (a change made on this PC, or a download,
+            // whose op names the place it writes to). That op was queued
             // at the row's place and lands there (the landing writes its op's path, `state_db/landing.rs`), so the row stays where its
             // bytes and its change are, with its size, times and version as they were. The healing snapshot counts
             // such a row as left (`waits_for_its_change`) and reads it again once the change is gone.
             let names_it = source == RowSource::Snapshot
                 && awaits_its_name(&entry)
                 && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict)
-                && !bridge.db().has_queued_local_change(file_id)?;
+                && !bridge.db().has_queued_operation(file_id)?;
             if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || names_it {
                 return apply(bridge);
             }

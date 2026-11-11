@@ -228,13 +228,33 @@ impl StateDb {
     }
     /// Task 2446: record that the healing snapshot succeeded (or was never needed). The retry mark goes with it.
     pub fn mark_name_heal_done(&self) -> Result<()> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('name_heal_2446', '1') ON CONFLICT(key) DO NOTHING",
+            [],
+        )?;
+        tx.execute("DELETE FROM sync_state WHERE key = 'name_heal_2446_retry'", [])?;
+        tx.commit()
+    }
+    /// Task 2446: a healing pass is about to lift the blocks of the rows it read, before it names any. Records it
+    /// as unfinished (at least one row left), so a pass cut short (the app quit, a write failed) stays owed even
+    /// when no blocked record is left to say so. The failure count is kept; the pass is due again after its wait.
+    pub fn begin_name_heal_pass(&self, now: i64) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute_batch(
-            "BEGIN;
-             INSERT INTO sync_state (key, value) VALUES ('name_heal_2446', '1') ON CONFLICT(key) DO NOTHING;
-             DELETE FROM sync_state WHERE key = 'name_heal_2446_retry';
-             COMMIT;",
-        )
+        let before = Self::name_heal_retry_conn(&conn)?;
+        let failures = before.map_or(0, |retry| retry.failures);
+        let retry = NameHealRetry {
+            failures,
+            next_at: now.saturating_add(NameHealRetry::delay_secs(failures.saturating_add(1))),
+            rows_left: before.map_or(0, |retry| retry.rows_left).max(1),
+        };
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('name_heal_2446_retry', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![retry.stored()],
+        )?;
+        Ok(())
     }
     /// Task 2446: what the last healing snapshot that did not complete left behind, or `None` when none failed yet.
     /// A value this build cannot read counts as none, so the heal is asked for again at once.

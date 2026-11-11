@@ -502,6 +502,10 @@ pub(super) async fn bootstrap_from_snapshot(
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let mut snapshot = bridge.api().sync_snapshot().await?;
+    if heals_names {
+        // Preparing the rows lifts their blocks before any row is named: the pass is recorded as unfinished first.
+        bridge.db().begin_name_heal_pass(now_secs)?;
+    }
     snapshot.nodes = bridge
         .prepare_owned_rows(&snapshot.nodes)
         .await?
@@ -601,7 +605,7 @@ pub(super) fn apply_snapshot_leaving(
         if !seen.insert(file_id.to_string()) {
             continue;
         }
-        // Task 2446: a row under a row that was left is left too. It is seen (just above), so it is never pruned.
+        // Task 2446: a row under a row that was left is left too. It is seen (just above): never pruned as absent.
         if let Some(left) = left.as_deref_mut()
             && f["parent_id"].as_str().is_some_and(|pid| left.ids.contains(pid))
         {
@@ -649,18 +653,18 @@ pub(super) fn apply_snapshot_leaving(
             Err(error) => match left.as_deref_mut() {
                 // Task 2446: the healing snapshot goes on without this row.
                 Some(left) => {
-                    left.leave(file_id);
+                    left.leave(file_id, error_category(&error));
                     continue;
                 }
                 None => return Err(error),
             },
         };
-        if let Some((rel_path, _kind)) = placed {
+        if let Some((rel_path, kind)) = placed {
             // Task 2446: read, but kept at its label by a change of this PC: the heal is owed until that is gone.
             if let Some(left) = left.as_deref_mut()
                 && waits_for_its_change(bridge.db(), file_id, &rel_path)?
             {
-                left.waiting += 1;
+                left.waits(file_id, &kind);
             }
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);

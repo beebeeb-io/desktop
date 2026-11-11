@@ -12,9 +12,11 @@ pub(super) struct SnapshotPass {
 
 /// The rows a healing snapshot leaves exactly as they are stored: a row whose write failed and every row under it
 /// (its place depends on a row that was not stored), in `ids`; and the rows that were read but keep their blocked
-/// label until a change of this PC is done with them (`waits_for_its_change`), counted in `waiting` (the rows under
-/// one of those are applied as usual). Each was listed by the snapshot, so each is seen: the prune never takes one
-/// for a row the server no longer has.
+/// label until a change of this PC is done with them (`waits_for_its_change`): a file is counted in `waiting`, a
+/// folder joins `ids`, so the rows under it wait with it and are named together with it. Each was listed by the
+/// snapshot, so each is seen: the prune never takes one for a row the server no longer has. (A row stored under a
+/// folder the server no longer lists still goes with that folder, as every row under it does; the next pass, which
+/// is owed, stores it at its place.)
 #[derive(Default)]
 pub(super) struct LeftRows {
     pub(super) ids: HashSet<String>,
@@ -22,10 +24,20 @@ pub(super) struct LeftRows {
 }
 
 impl LeftRows {
-    /// Leaves `file_id` as it is stored. Zero-knowledge: the id, never a name or an error's text.
-    pub(super) fn leave(&mut self, file_id: &str) {
-        tracing::debug!(file_id = %file_id, "sync_tick: a row of the healing snapshot was not stored; left as it is");
+    /// Leaves `file_id` as it is stored. Zero-knowledge: the id and a fixed category, never a name or an error's
+    /// text.
+    pub(super) fn leave(&mut self, file_id: &str, reason: &'static str) {
+        tracing::warn!(file_id = %file_id, reason, "sync_tick: a row of the healing snapshot was not stored; left as it is");
         self.ids.insert(file_id.to_string());
+    }
+
+    /// A row that keeps its label until a change of this PC is done with it.
+    pub(super) fn waits(&mut self, file_id: &str, kind: &ItemKind) {
+        if *kind == ItemKind::Folder {
+            self.ids.insert(file_id.to_string());
+        } else {
+            self.waiting += 1;
+        }
     }
 
     /// How many rows the pass left, logged as a count when any.
@@ -48,16 +60,17 @@ pub(super) fn name_heal_is_due(db: &StateDb, now_secs: i64) -> Result<bool, Engi
         return Ok(false);
     }
     let retry = db.name_heal_retry()?;
+    // Inside the wait nothing else is read: the scan for blocked records runs only when a pass may be taken.
+    if retry.is_some_and(|retry| !retry.is_due(now_secs)) {
+        return Ok(false);
+    }
     let rows_left = retry.is_some_and(|retry| retry.rows_left > 0);
     if !rows_left && !db.has_blocked_or_nameless_rows()? {
         db.mark_name_heal_done()?;
         return Ok(false);
     }
-    let due = retry.is_none_or(|retry| retry.is_due(now_secs));
-    if due {
-        tracing::info!("sync_tick: rows without a name; taking one snapshot to read them again");
-    }
-    Ok(due)
+    tracing::info!("sync_tick: rows without a name; taking one snapshot to read them again");
+    Ok(true)
 }
 
 /// A healing snapshot was applied. With no row left as it was the heal is done; otherwise it stays owed and is
