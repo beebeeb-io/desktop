@@ -182,8 +182,24 @@ fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 // Entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Fonts: Inter (sans) + JetBrains Mono (mono), bundled as TTF
+// ---------------------------------------------------------------------------
+
+static FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/inter-latin-400-normal.ttf"),
+    include_bytes!("../assets/fonts/inter-latin-500-normal.ttf"),
+    include_bytes!("../assets/fonts/inter-latin-600-normal.ttf"),
+    include_bytes!("../assets/fonts/inter-latin-700-normal.ttf"),
+    include_bytes!("../assets/fonts/jetbrains-mono-latin-400-normal.ttf"),
+    include_bytes!("../assets/fonts/jetbrains-mono-latin-500-normal.ttf"),
+    include_bytes!("../assets/fonts/jetbrains-mono-latin-600-normal.ttf"),
+];
+
 fn main() {
     let spec = AppSpec::<State> {
+        fonts: FONTS,
+        families: ("Inter", "JetBrains Mono"),
         scenes: &[
             ("light", |_| {}),
             ("dark", |_| {}),
