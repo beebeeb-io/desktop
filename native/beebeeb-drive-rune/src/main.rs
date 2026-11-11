@@ -17,6 +17,7 @@
 //! cargo run -p beebeeb-drive-rune -- --snap DW-0401.png --size 1280x800 --scale 2 --theme light
 //! ```
 
+mod frames;
 mod source;
 mod source_engine;
 mod theme;
@@ -53,6 +54,8 @@ pub struct State {
     show_detail_pane: bool,
     /// What the Files window keeps beside the listing (`ui::FilesUi`).
     files: ui::FilesUi,
+    /// The sign-in window, while the person is not signed in (`frames::signin`).
+    signin: Option<frames::signin::Ui>,
 }
 
 /// `--db <path>`: show the files of that `state.db` (opened read-only) instead of the fixture.
@@ -125,6 +128,7 @@ fn init() -> State {
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,
         files: ui::FilesUi::default(),
+        signin: None,
     }
 }
 
@@ -133,6 +137,9 @@ fn init() -> State {
 // ---------------------------------------------------------------------------
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
+    if let Some(signin) = &s.signin {
+        return frames::signin::view(signin, cx);
+    }
     ui::window::files_window(s, cx)
 }
 
@@ -141,6 +148,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 // ---------------------------------------------------------------------------
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if s.signin.is_some() {
+        return frames::signin::on_key(s, ev, tx);
+    }
     ui::keys::on_key(s, ev, tx)
 }
 
@@ -176,6 +186,21 @@ const SCENES: &[ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
     }),
     ("DW-0401", |_| {}),
+    ("DW-A01", |s| frames::signin::set_scene(s, "DW-A01")),
+    ("DW-A02", |s| frames::signin::set_scene(s, "DW-A02")),
+    ("DW-A03", |s| frames::signin::set_scene(s, "DW-A03")),
+    ("DW-A04", |s| frames::signin::set_scene(s, "DW-A04")),
+    ("DW-A05", |s| frames::signin::set_scene(s, "DW-A05")),
+    ("DW-A06", |s| frames::signin::set_scene(s, "DW-A06")),
+    ("DW-A07", |s| frames::signin::set_scene(s, "DW-A07")),
+    ("DW-A08", |s| frames::signin::set_scene(s, "DW-A08")),
+    ("DW-A09", |s| frames::signin::set_scene(s, "DW-A09")),
+    ("DW-A10", |s| frames::signin::set_scene(s, "DW-A10")),
+    ("DW-A18", |s| frames::signin::set_scene(s, "DW-A18")),
+    ("DW-A19", |s| frames::signin::set_scene(s, "DW-A19")),
+    ("DW-A20", |s| frames::signin::set_scene(s, "DW-A20")),
+    ("DW-A21", |s| frames::signin::set_scene(s, "DW-A21")),
+    ("DW-A22", |s| frames::signin::set_scene(s, "DW-A22")),
 ];
 
 fn main() {

@@ -8,6 +8,10 @@
 //! Secrets cross this trait as `&str` borrowed from a secure `TextEdit` (wiped on drop). An
 //! implementation must not log, store or clone them beyond the call.
 
+// The whole contract is written down, also the values and calls of frames that are listed as not
+// built in `FRAMES.md`: the engine lane implements against this file.
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 
 /// `auth_v2::gate::GateState`: which screen the window shows before Files.
@@ -257,7 +261,8 @@ pub struct FixtureSignInSource {
     pub script: Script,
     queue: VecDeque<SignInEvent>,
     /// The calls made, by name: tests assert on them. Never the arguments.
-    pub calls: Vec<&'static str>,
+    #[cfg(test)]
+    pub calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
 }
 
 impl FixtureSignInSource {
@@ -267,6 +272,14 @@ impl FixtureSignInSource {
             ..Default::default()
         }
     }
+
+    #[cfg(test)]
+    fn called(&mut self, name: &'static str) {
+        self.calls.borrow_mut().push(name);
+    }
+
+    #[cfg(not(test))]
+    fn called(&mut self, _name: &'static str) {}
 
     /// Let held answers through.
     pub fn release(&mut self) {
@@ -307,7 +320,7 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn begin_sign_in(&mut self, _email: &str, _password: &str) {
-        self.calls.push("sign_in");
+        self.called("sign_in");
         self.queue.push_back(match self.script.sign_in {
             SignInAnswer::Next(next) => SignInEvent::SignedIn(Ok(next)),
             SignInAnswer::Problem(problem) => SignInEvent::SignedIn(Err(problem)),
@@ -316,12 +329,12 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn begin_hello(&mut self) {
-        self.calls.push("hello");
+        self.called("hello");
         self.queue.push_back(SignInEvent::Hello(self.script.hello));
     }
 
     fn begin_device_request(&mut self) {
-        self.calls.push("device_request");
+        self.called("device_request");
         self.queue.push_back(SignInEvent::DeviceRequested(Ok(Self::request())));
         if let Some(status) = self.script.device.clone() {
             self.queue.push_back(SignInEvent::Device(status));
@@ -329,15 +342,15 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn cancel_device_request(&mut self) {
-        self.calls.push("cancel_device_request");
+        self.called("cancel_device_request");
         self.queue
             .retain(|e| !matches!(e, SignInEvent::Device(_) | SignInEvent::DeviceTick { .. }));
     }
 
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind) {
-        self.calls.push("two_factor");
+        self.called("two_factor");
         let right = match kind {
-            CodeKind::Authenticator => "482013",
+            CodeKind::Authenticator => board::TOTP,
             CodeKind::Backup => board::BACKUP_CODE,
         };
         self.queue.push_back(SignInEvent::TwoFactor(if code == right {
@@ -348,19 +361,19 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn begin_restore(&mut self, words: &[&str]) {
-        self.calls.push("restore");
+        self.called("restore");
         self.queue.push_back(SignInEvent::PhraseRestored(
             check_phrase(words).map(|()| self.after_proof()),
         ));
     }
 
     fn begin_passkey(&mut self) {
-        self.calls.push("passkey");
+        self.called("passkey");
         self.queue.push_back(SignInEvent::Passkey(self.script.passkey));
     }
 
     fn begin_unlock(&mut self, password: &str) {
-        self.calls.push("unlock");
+        self.called("unlock");
         self.queue.push_back(SignInEvent::VaultUnlocked(
             if password.chars().count() == board::PASSWORD_LEN {
                 Ok(self.after_proof())
@@ -371,13 +384,13 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn begin_recovery_verify(&mut self, _email: &str, words: &[&str]) {
-        self.calls.push("recovery_verify");
+        self.called("recovery_verify");
         self.queue
             .push_back(SignInEvent::RecoveryPhraseVerified(check_phrase(words)));
     }
 
     fn begin_set_password(&mut self, _password: &str) {
-        self.calls.push("set_password");
+        self.called("set_password");
         self.queue.push_back(SignInEvent::PasswordSet(Ok(())));
     }
 

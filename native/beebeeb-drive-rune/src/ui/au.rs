@@ -10,9 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use rune::tok::Family;
 use rune::{
-    Align, Color, Cx, El, Icon, LineCap, Shape, Span, TextEdit, TextStyle, canvas, col, el, oklch, rich, row, text,
+    Align, Color, Cx, El, Icon, LineCap, Shape, Span, TextEdit, TextStyle, canvas, col, el, oklch, row, text,
     text_input,
 };
 
@@ -32,6 +31,8 @@ pub mod type_au {
     pub const LARGE: TextStyle = TextStyle::new(22.0, 650.0).lh(28.0).tracking(-0.484);
     /// `.t-sub`: 12px/400 on 15px.
     pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+    /// `.t-sub .au-mono`: the countdown's digits.
+    pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
     /// `.kit-btn-lg` label: 13px/500 on 19.5px.
     pub const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
     /// `.kit-btn-md` label: 13px/500 on 18.57px.
@@ -56,12 +57,6 @@ pub mod type_au {
     pub const ITEM_VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
     /// `.au-code` at 22px: mono 600, tracked 0.14em.
     pub const CODE: TextStyle = TextStyle::new(22.0, 600.0).family(Family::Mono).lh(17.0).tracking(3.08);
-    /// `.au-digit`: mono 22px/600.
-    pub const DIGIT: TextStyle = TextStyle::new(22.0, 600.0).family(Family::Mono).lh(28.0);
-    /// `.au-word span`: the word's number, mono 11px.
-    pub const WORD_N: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(15.0);
-    /// `.au-word em`: the word, mono 13px.
-    pub const WORD: TextStyle = TextStyle::new(13.0, 400.0).family(Family::Mono).lh(15.0);
     /// The wordmark beside a mark `mark` points across (the board scales it with the mark).
     pub const fn wordmark(mark: f32) -> TextStyle {
         let size = mark * 15.6923 / 24.0;
@@ -146,7 +141,7 @@ impl Keys {
 
 /// The three plain facts of the brand panel. Copy says Europe, never a provider or a city.
 pub const FACTS: [&str; 3] = [
-    "Encrypted on this PC before anything syncs. Beebeeb can\u{2019}t read it.",
+    "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
     "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
     "Stored in Europe.",
 ];
@@ -190,12 +185,17 @@ fn side_panel(product: &str, icons: [&'static Icon; 3], t: &Theme) -> El {
                 .items_start()
                 .min_h(16.0)
                 .child(kit::glyph(format!("fact-{i}-icon"), ic, 15.0, t.text_tertiary).mt(1.0))
-                .child(
-                    kit::label(format!("fact-{i}"), *fact, type_au::SUB, t.text_secondary)
-                        .wrap()
-                        .grow(1.0)
-                        .min_w(0.0),
-                ),
+                .child({
+                    // 320 less the panel's padding, the hairline, the icon and the gap.
+                    let room = 320.0 - 2.0 * 26.0 - kit::HAIR - 15.0 - 10.0;
+                    let words = kit::label(format!("fact-{i}"), *fact, type_au::SUB, t.text_secondary);
+                    // A fact that fits one line is as wide as its words; a longer one wraps in the room.
+                    if rune::text::advance(fact, type_au::SUB) <= room {
+                        words
+                    } else {
+                        words.wrap().grow(1.0).min_w(0.0)
+                    }
+                }),
         );
     }
     col()
@@ -245,7 +245,8 @@ pub fn page(product: &str, fact_icons: [&'static Icon; 3], column: El, t: &Theme
                         .grow(1.0)
                         .min_w(0.0)
                         .h_full()
-                        .p(20.0)
+                        .px(20.0)
+                        .py(20.0)
                         .fill(t.surface)
                         .center()
                         .child(column),
@@ -284,13 +285,15 @@ pub fn back_link(label: &str, chevron: &'static Icon, t: &Theme) -> El {
 /// first element for assistive technology.
 pub fn heading(title: &str, subtitle: Option<&str>, centered: bool, t: &Theme) -> El {
     let align = if centered { Align::Center } else { Align::Start };
-    let mut h = col().key("au-h").gap(6.0).w_full().child(
-        kit::label("title", title, type_au::LARGE, t.text)
-            .role("heading")
-            .level(1)
-            .w_full()
-            .align(align),
-    );
+    let title = kit::label("title", title, type_au::LARGE, t.text)
+        .role("heading")
+        .level(1);
+    let mut h = col().key("au-h").gap(6.0).w_full();
+    h = if centered {
+        h.items_center().child(title)
+    } else {
+        h.child(title.w_full())
+    };
     if let Some(subtitle) = subtitle {
         h = h.child(
             kit::label("subtitle", subtitle, type_au::SUB, t.text_secondary)
@@ -302,23 +305,42 @@ pub fn heading(title: &str, subtitle: Option<&str>, centered: bool, t: &Theme) -
     h
 }
 
-/// A paragraph that stands by itself in the column.
-pub fn note(keys: &mut Keys, content: &str, style: TextStyle, color: Color, align: Align) -> El {
-    kit::label(keys.next("note"), content, style, color)
-        .wrap()
-        .w_full()
-        .align(align)
+/// The underline of a link, as the board's browser draws it (`text-underline-offset: 2px`,
+/// skipping the ink of descenders): bars `(x, width)` under `label` set in `style`.
+/// Rune's own span underline sits lower and runs through descenders (see the PR's Rune notes).
+fn underline_bars(label: &str, style: TextStyle) -> Vec<(f32, f32)> {
+    let mut bars = Vec::new();
+    let mut from = 0.0;
+    let mut x = 0.0;
+    for (i, ch) in label.char_indices() {
+        let end = rune::text::advance(&label[..i + ch.len_utf8()], style);
+        let w = end - x;
+        // The part of a glyph that reaches below the baseline, as a fraction of its advance.
+        let gap = match ch {
+            'g' | 'j' => Some((0.02, 0.98)),
+            'p' => Some((0.02, 0.46)),
+            'q' => Some((0.54, 0.98)),
+            'y' => Some((0.10, 0.72)),
+            ',' | ';' => Some((0.10, 0.90)),
+            _ => None,
+        };
+        if let Some((a, b)) = gap {
+            if x + a * w > from {
+                bars.push((from, x + a * w - from));
+            }
+            from = x + b * w;
+        }
+        x = end;
+    }
+    if x > from {
+        bars.push((from, x - from));
+    }
+    bars
 }
 
 /// An underlined link (`.au-link`), with an icon before it if `icon` is given.
 pub fn link(keys: &mut Keys, label: &str, icon: Option<&'static Icon>, t: &Theme) -> El {
     let key = keys.next("link");
-    let underline = Span {
-        start: 0,
-        end: label.len() as u32,
-        underline: Some(t.text),
-        ..Span::default()
-    };
     let mut r = row()
         .key(format!("{key}-box"))
         .role("link")
@@ -332,7 +354,21 @@ pub fn link(keys: &mut Keys, label: &str, icon: Option<&'static Icon>, t: &Theme
     if let Some(icon) = icon {
         r = r.child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text));
     }
-    r.child(kit::label(key, label, type_au::SUB, t.text).spans(vec![underline]))
+    // 12px Inter on a 15px line: the baseline is 11.875 down, the underline 2 below it.
+    let bars = underline_bars(label, type_au::SUB)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, w))| {
+            el().key(format!("{key}-underline-{i}"))
+                .absolute(x, 13.875)
+                .w(w)
+                .h(0.875)
+                .fill(t.text)
+        });
+    r.child(
+        el().child(kit::label(key.clone(), label, type_au::SUB, t.text))
+            .children(bars.collect::<Vec<_>>()),
+    )
 }
 
 /// "New to Beebeeb? Create an account": a dim sentence that ends in a link, centred.
@@ -386,6 +422,19 @@ pub enum ButtonKind {
     Ghost,
 }
 
+/// How a button stands: the board draws a working button at half strength when pressing it
+/// only re-checks (offline), and a running one at full strength with its handler off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonState {
+    Enabled,
+    /// Half strength, still pressable (DW-A20: "dimmed but tappable").
+    Dim,
+    /// Work is running: full strength, takes no press and no focus (DW-A18).
+    Busy,
+    /// Not yet possible: half strength, takes no press and no focus.
+    Disabled,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonSize {
     /// 32 high.
@@ -394,15 +443,14 @@ pub enum ButtonSize {
     Md,
 }
 
-/// A full-width button. The caller adds `.on_press(..)`; a `disabled` one takes no handler,
-/// no focus, and draws at half strength, as the board does.
+/// A full-width button. The caller adds `.on_press(..)` (not for `Busy` or `Disabled`).
 pub fn button(
     keys: &mut Keys,
     label: &str,
     icon: Option<&'static Icon>,
     kind: ButtonKind,
     size: ButtonSize,
-    disabled: bool,
+    state: ButtonState,
     t: &Theme,
 ) -> El {
     let key = keys.next("btn");
@@ -442,10 +490,15 @@ pub fn button(
             .press(t.paper3),
         ButtonKind::Ghost => b.hover(t.hover).press(t.press),
     };
-    b = if disabled {
-        b.disabled(true).opacity(0.5)
+    if matches!(state, ButtonState::Dim | ButtonState::Disabled) {
+        b = b.opacity(0.5);
+    }
+    b = if matches!(state, ButtonState::Busy | ButtonState::Disabled) {
+        b.disabled(true)
     } else {
-        b.focusable(true).focus_ring(2.0, 2.0, t.accent_deep)
+        b.focusable(true)
+            .focus_ring(2.0, 2.0, t.accent_deep)
+            .cursor(rune::Cursor::Pointer)
     };
     if let Some(icon) = icon {
         b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
@@ -562,7 +615,7 @@ pub fn field(
     t: &Theme,
 ) -> El {
     let key = keys.next("field");
-    let secure = edit.is_masked();
+    let secure = edit.is_secure() && !edit.is_revealed();
     let style = if secure {
         type_au::FIELD_SECURE
     } else if spec.mono {
@@ -576,7 +629,13 @@ pub fn field(
         edit.text.clone()
     };
     if !shown.is_empty() {
-        kit::note_text(&format!("{key}-value"), input_key, &shown, style, t.text);
+        kit::note_text(
+            &format!("{key}-value"),
+            &format!("{key}-value-box"),
+            &shown,
+            style,
+            t.text,
+        );
     }
     let error = spec.state == FieldState::Error;
     let mut input = text_input(edit, style)
@@ -612,7 +671,14 @@ pub fn field(
     if let Some(icon) = spec.icon {
         well = well.child(kit::glyph(format!("{key}-icon"), icon, 16.0, t.text_tertiary));
     }
-    well = well.child(input);
+    // The typed text's own box, for the gate: as wide as the text Rune draws in the input.
+    let typed = el()
+        .key(format!("{key}-value-box"))
+        .a11y_hidden()
+        .absolute(0.0, 0.0)
+        .w(rune::text::advance(&shown, style))
+        .h_full();
+    well = well.child(row().grow(1.0).min_w(0.0).h_full().center_y().child(input).child(typed));
     if let Some(trailing) = trailing {
         well = well.child(trailing.key(format!("{key}-act")));
     }
@@ -736,7 +802,7 @@ pub fn item(
         .gap(8.0)
         .center_y()
         .child(
-            el().w(24.0)
+            el().w(30.0)
                 .center()
                 .child(kit::glyph(format!("{key}-icon"), icon, 18.0, t.text_secondary)),
         )
@@ -744,8 +810,8 @@ pub fn item(
     if !first {
         r = r.child(
             el().key(format!("{key}-rule"))
-                .absolute(42.0, 0.0)
-                .w(302.0)
+                .absolute(48.0, 0.0)
+                .w(296.0)
                 .h(kit::HAIR)
                 .fill(t.separator),
         );
@@ -798,10 +864,9 @@ pub fn ring(key: &str, d: f32, fraction: f32, color: Color, t: &Theme) -> El {
     };
     let mut shape = Shape::new()
         .view_box(d, d)
-        .stroke_with(arc(0.0, 1.0), 3.0, LineCap::Butt, t.separator);
-    if fraction > 0.0 {
-        shape = shape.stroke_with(arc(0.0, fraction.min(1.0)), 3.0, LineCap::Round, color);
-    }
+        .stroke_with(arc(0.0, 1.0), true, 3.0, LineCap::Butt, t.separator);
+    // A zero-length dash with round caps is a dot at twelve o'clock, as the board draws it.
+    shape = shape.stroke_with(arc(0.0, fraction.clamp(0.0005, 1.0)), false, 3.0, LineCap::Round, color);
     canvas(shape).key(key.to_string()).a11y_hidden().size(d, d)
 }
 
@@ -817,35 +882,4 @@ pub fn hero_ring(icon: &'static Icon, fraction: f32, tone_: Tone, t: &Theme) -> 
         .center()
         .child(ring("hero-ring", 104.0, fraction, mark, t).absolute(0.0, 0.0))
         .child(kit::glyph("hero-icon", icon, 46.0, t.text))
-}
-
-/// Plain rich text helper for callers that mix a mono run into a sentence.
-pub fn mono_span(start: usize, end: usize) -> Span {
-    Span {
-        start: start as u32,
-        end: end as u32,
-        mono: true,
-        ..Span::default()
-    }
-}
-
-/// A secret a person reads off the screen (a pairing code, a recovery word, a digit): drawn
-/// in clear, and marked secure so it is in no accessibility text, no element-tree text and no
-/// `Debug` output (`rune/src/el/input.rs:139`). The gate is told the string only while a gate
-/// export records, and only ever sees the board's fixture.
-pub fn secret_label(key: impl Into<String>, content: &str, style: TextStyle, color: Color) -> El {
-    let key = key.into();
-    let holder = format!("{key}-secure");
-    kit::note_text(&key, &holder, content, style, color);
-    text(content)
-        .key(holder)
-        .font(style)
-        .color(color)
-        .secure()
-        .revealed(true)
-}
-
-#[allow(dead_code)]
-fn _unused(_: Family) -> El {
-    rich("", vec![])
 }

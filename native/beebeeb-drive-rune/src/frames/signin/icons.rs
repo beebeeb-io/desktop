@@ -1,6 +1,9 @@
 //! The sign-in group's icons: each body is the board's inline `<svg>` of the `.au-mac` frames, copied by
 //! script (the gate compares the path data). All are 24-unit stroke icons, 1.6 wide, round caps and joins.
 
+// Copied for the whole group in one pass; some belong to frames listed as not built in `FRAMES.md`.
+#![allow(dead_code)]
+
 use rune::Icon;
 
 macro_rules! icon24 {
