@@ -240,22 +240,7 @@ pub(super) struct FolderAgg {
     pub(super) direct_on_disk: i64,
 }
 
-/// Derive a folder's display leaf name from its server-relative `path`.
-/// `"/Docs/Taxes"` → `"Taxes"`, `"Photos"` → `"Photos"`, `""` → `None`.
-pub(super) fn folder_leaf_name(path: &str) -> Option<String> {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    if leaf.is_empty() { None } else { Some(leaf.to_string()) }
-}
-
-/// Stable id-derived fallback label, mirroring the existing top-level path.
-pub(super) fn folder_fallback_label(id: &str) -> String {
-    let short = id.get(..8).unwrap_or(id);
-    format!("Folder {short}…")
-}
+pub(super) use beebeeb_engine::vault_tree::{folder_fallback_label, folder_leaf_name};
 
 pub(super) fn shared_permission_label(bits: i64) -> &'static str {
     if bits & state_db::PERMISSION_OWNER != 0 {
@@ -284,7 +269,10 @@ pub(super) fn local_path_under_sync_root(sync_root: &Path, rel_path: &str) -> Op
     )
 }
 
-pub(super) fn shared_roots_from_db(db: &state_db::StateDb, sync_root: Option<&Path>) -> Result<Vec<DesktopSharedRoot>, String> {
+pub(super) fn shared_roots_from_db(
+    db: &state_db::StateDb,
+    sync_root: Option<&Path>,
+) -> Result<Vec<DesktopSharedRoot>, String> {
     let contracts = db
         .list_contract_states_by_namespace(state_db::Namespace::SharedWithMe)
         .map_err(|e| format!("list shared roots: {e}"))?;
@@ -415,7 +403,10 @@ pub(super) fn build_vault_tree(rows: &[VaultEntryRow], excluded: &std::collectio
 }
 
 /// [`build_vault_tree`] over the rows as they are, with no merge: what 0.8.14 showed.
-pub(super) fn build_vault_tree_of_rows(rows: &[VaultEntryRow], excluded: &std::collections::HashSet<String>) -> Vec<VaultItem> {
+pub(super) fn build_vault_tree_of_rows(
+    rows: &[VaultEntryRow],
+    excluded: &std::collections::HashSet<String>,
+) -> Vec<VaultItem> {
     use std::collections::HashMap;
 
     // 1. Index folders.
@@ -697,7 +688,12 @@ pub(super) async fn list_vault_folders(state: State<'_, AppState>) -> Result<Vec
             // id-based label so the user can still tell folders apart.
             let display = owner_keys::display_name(f, id, &master_key)
                 .or_else(|| {
-                    if !f["acted_via_share_id"].is_null() || !f["uploaded_by"].is_null() || !f["owner_wrapped_file_key"].is_null() { return None; }
+                    if !f["acted_via_share_id"].is_null()
+                        || !f["uploaded_by"].is_null()
+                        || !f["owner_wrapped_file_key"].is_null()
+                    {
+                        return None;
+                    }
                     let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     if path.is_empty() {
                         None

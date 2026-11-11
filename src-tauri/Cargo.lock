@@ -450,6 +450,7 @@ dependencies = [
  "base64 0.22.1",
  "beebeeb-backup",
  "beebeeb-core",
+ "beebeeb-engine",
  "beebeeb-sync",
  "beebeeb-transfer",
  "beebeeb-types",
@@ -497,6 +498,25 @@ dependencies = [
  "windows-core 0.58.0",
  "windows-core 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "beebeeb-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "beebeeb-backup",
+ "beebeeb-core",
+ "beebeeb-types",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

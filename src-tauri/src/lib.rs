@@ -17,7 +17,7 @@ use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
 mod account;
-mod account_binding;
+pub(crate) use beebeeb_engine::account_binding;
 mod account_dto;
 mod api_client;
 mod auth_v2; // v2 b10
@@ -31,7 +31,7 @@ mod config;
 mod conflict;
 mod desktop_capabilities;
 mod desktop_search;
-mod diagnostic_redaction;
+pub(crate) use beebeeb_engine::diagnostic_redaction;
 mod direct_download;
 mod download_pin;
 mod engine_bridge;
@@ -97,9 +97,9 @@ mod found_while_paused;
 mod name_alias;
 // Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
 // memory. Windows and Linux run it; macOS keeps its own resume.
-mod held_queue;
+pub(crate) use beebeeb_engine::held_queue;
 // v2: the one lower-case hex encoder and 32-byte decoder (office_v2 pins, share_v2 keys).
-mod hexfmt;
+pub(crate) use beebeeb_engine::hexfmt;
 mod macos_popover;
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
@@ -109,14 +109,14 @@ mod reauth;
 mod runner;
 mod sign_out;
 mod staged_payload;
-mod state_db;
+pub(crate) use beebeeb_engine::state_db;
 mod state_paths;
 // 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
 mod sync_activity;
 mod transfer_progress;
 // 0.8.15: WebView2's browser shortcuts (print, reload, find, ...) are off in every window; no-op off Windows.
 mod webview_browser_keys;
-mod write_token;
+pub(crate) use beebeeb_engine::write_token;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
 // so dead-code is allowed for the module (remove the allow when slice 6 lands).
@@ -329,6 +329,8 @@ mod reveal_and_open_file_tests;
 mod selective_sync_wave2_tests;
 #[cfg(test)]
 mod state_db_purge_tests;
+#[cfg(test)]
+mod state_db_shell_tests;
 #[cfg(test)]
 mod tests;
 
