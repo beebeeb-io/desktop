@@ -25,6 +25,9 @@ async function readGate(): Promise<GateState> {
   // First call with no plan info: Rust checks signed-in + vault-unlocked. If not unlocked, skip the subscription.
   const probe = await command<GateState>('auth_gate_state', {})
   if (!probe.ok) return 'error' as GateState
+  // The credential store could not say whether the vault key is there (task 2447, P2-6): neither locked nor
+  // "needs the phrase". The error screen asks again; the native sign-in slice gives it its own words.
+  if ((probe.value as string) === 'key_store_unavailable') return 'error' as GateState
   if (probe.value === 'signed_out' || probe.value === 'locked' || probe.value === 'needs_recovery_phrase') return probe.value
   // Only when unlocked: read the subscription and let Rust check the plan.
   const sub = await command<{ plan_state?: string | null; plan?: string; status?: string; quota_bytes?: number }>('account_subscription')

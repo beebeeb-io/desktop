@@ -6,15 +6,15 @@ Modules 46–92, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
-| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Counts (21), NEEDS_REVIEW, Op (8), Options (2), Row (6), Unit (3), is_parent_404, same_leaf, PresendBlock (2), plan, presend_block |
+| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Row (6), Op (8), Options (2), Unit, Counts (21), NEEDS_REVIEW, same_leaf, is_parent_404, plan, presend_block, PresendBlock (2) |
 | `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
 | `install_guard_tests.rs` | P1c: one in-place install at a time, across every Beebeeb window. | — |
 | `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
-| `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | FileProviderChangePayload (5), FileProviderItemPayload (22), IpcRequest (11), IpcResponse (10), serve_ipc, serve_ipc_at |
+| `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | IpcRequest (11), IpcResponse (10), FileProviderItemPayload (22), FileProviderChangePayload (5), serve_ipc, serve_ipc_at |
 | `ipc_socket_framing_tests.rs` | End-to-end framing tests for the daemon IPC socket (task 1670 issue 3). | — |
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
 | `ipc_write_dedup_tests.rs` | Unit tests for the write-queue idempotency table (task 1684). | — |
-| `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthResult, AuthStoreError (4), VaultLockState (2), SessionToken, AuthSecretStore (15), AuthVault (3), holds_account_email, holds_session_token, holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for, migrate_legacy_keychain_between, … (+1 more) |
+| `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthResult, AuthStoreError (4), VaultLockState (2), SessionToken, AuthSecretStore (18), AuthVault (3), holds_account_email, holds_session_token, holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for, migrate_legacy_keychain_between, … (+1 more) |
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `known_folder.rs` | The known folders a backup can be turned on for (Windows' Desktop, Documents, Pictures, Music, Videos and Downloads), and what is left of th | resolve_known_folder, resolve_known_folder_current |
 | `launch_wiring_tests.rs` | (no //! header) | — |
@@ -38,12 +38,12 @@ Modules 46–92, sorted by path.
 | `no_fetch_scope.rs` | Task 2284 A1.2: the no-fetch scope. | — |
 | `open_folder_tests.rs` | (no //! header) | — |
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
-| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, Listing (2), Outcome (1), Probe (5), REQUIRED_PROOFS, Tally (10), Verdict (2), listing_from_status, eligible, listing_of, probe, verdict, … (+3 more) |
+| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (2), Probe (5), Tally (10), Verdict (2), Outcome (1), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
 | `owner_backfill_tests.rs` | (no //! header) | — |
 | `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | — |
 | `passkey_commands.rs` | v2 B15: the four passkey commands (crypto review 2026-11-08, rule 6), thin wrappers over core's passkey flows (`beebeeb_core::passkey`). | — |
 | `passkey_windows.rs` | v2 B15: the Windows platform call for core's passkey flows: webauthn.dll `WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAs | — |
-| `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | CONFLICT_FILES_LIMIT, DEFAULT_ACTIVITY_LIMIT, POPOVER_HIDDEN_EVENT, STORAGE_FAILURE_BACKOFF_SECS, STORAGE_TTL_SECS, STORAGE_WAIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageCache, StorageDto (4), StorageUsage (2), cached_storage, … (+16 more) |
+| `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageUsage (2), StorageCache, clear_storage, StorageDto (4), … (+16 more) |
 | `popover_snapshot_command_tests.rs` | (no //! header) | — |
 | `popover_wiring_tests.rs` | (no //! header) | — |
 | `reauth.rs` | Ruling R8 (spec 2026-10-06 §3): a sign-in on a Mac that already holds an account is either the same account signing in again (only the sessi | — |

@@ -60,6 +60,21 @@ pub trait AuthSecretStore: Send + Sync {
     fn delete_vault_key_owner(&self) -> AuthResult<()> {
         Ok(())
     }
+
+    /// Persist the server user id of the account the stored session token belongs to (task 2447).
+    fn save_session_owner(&self, _user_id: &str) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "session owner storage not supported by this store",
+        ))
+    }
+    /// Read the stored session owner. `Ok(None)` = unknown (a session stored before task 2447).
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        Ok(None)
+    }
+    /// Remove the stored session owner. No-op when absent.
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        Ok(())
+    }
 }
 
 /// One rule for every "is anything of an account left?" probe: present is present; a store that cannot hold secrets
@@ -116,7 +131,11 @@ impl<S: AuthSecretStore> AuthVault<S> {
         &self.store
     }
 
+    /// Store a session token. Its owner tag describes the token stored BEFORE, so it is removed first, and a removal
+    /// that fails stops the write (task 2447): a new token is never stored next to the id of another session. The
+    /// caller binds the new owner afterwards ([`Self::bind_session_owner`]); until then the session's owner is unknown.
     pub fn install_session(&self, token: SessionToken) -> AuthResult<()> {
+        self.store.delete_session_owner()?;
         self.store.save_session_token(&token)
     }
 
@@ -124,7 +143,11 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.store.load_session_token()
     }
 
+    /// Store a vault key. Its owner tag describes the key stored BEFORE, so it is removed first, and a removal that
+    /// fails stops the write (task 2447): a new key never carries an old owner. The caller binds the new owner
+    /// afterwards ([`Self::bind_vault_key_owner`]); a crash in between leaves a key of unknown owner, never a wrong one.
     pub fn store_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        self.store.delete_vault_key_owner()?;
         self.store.save_wrapped_master_key(wrapped)
     }
 
@@ -134,29 +157,51 @@ impl<S: AuthSecretStore> AuthVault<S> {
         self.store.holds_wrapped_master_key()
     }
 
-    /// Persist the server user id that owns the vault key (task 2447).
-    pub fn store_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+    /// Bind the stored vault key to its owner's server user id (task 2447). Only after the key was proved to be that
+    /// account's (the recovery check, a device approval, a browser handoff). A blank id binds nothing.
+    pub fn bind_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
         if user_id.trim().is_empty() {
             return Ok(());
         }
         self.store.save_vault_key_owner(user_id)
     }
 
-    /// Read the vault key owner, or `None` for a legacy key (no owner tag).
+    /// Read the vault key owner, or `None` for a key of unknown owner (stored before task 2447, or a write that
+    /// stopped between the key and its tag).
     pub fn vault_key_owner(&self) -> AuthResult<Option<String>> {
         match self.store.load_vault_key_owner() {
-            Ok(owner) => Ok(owner),
+            Ok(owner) => Ok(owner.filter(|owner| !owner.trim().is_empty())),
             Err(AuthStoreError::Unsupported(_)) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// Remove only the vault key and its owner tag. Used when a foreign key is
-    /// detected at sign-in time (task 2447).
+    /// Bind the stored session token to the server user id the server named for it (task 2447). A blank id binds
+    /// nothing.
+    pub fn bind_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        if user_id.trim().is_empty() {
+            return Ok(());
+        }
+        self.store.save_session_owner(user_id)
+    }
+
+    /// Read the session owner, or `None` when it is unknown.
+    pub fn session_owner(&self) -> AuthResult<Option<String>> {
+        match self.store.load_session_owner() {
+            Ok(owner) => Ok(owner.filter(|owner| !owner.trim().is_empty())),
+            Err(AuthStoreError::Unsupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Remove the vault key and its owner tag (task 2447: a key that is not the signing-in account's). The key goes
+    /// first and both removals are tried: what a failure leaves is a key with no tag (unknown, never trusted as a
+    /// match) or a tag with no key (removed before the next key is stored), never another key under this tag.
     pub fn delete_vault_key_and_owner(&mut self) -> AuthResult<()> {
-        self.store.delete_wrapped_master_key()?;
-        self.store.delete_vault_key_owner()?;
-        Ok(())
+        self.lock();
+        let key = self.store.delete_wrapped_master_key();
+        let tag = self.store.delete_vault_key_owner();
+        key.and(tag)
     }
 
     /// Persist the account email alongside the session. Empty/whitespace-only
@@ -203,20 +248,25 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// Remove only the session token: R8, a token the server rejected, found at startup. The wrapped vault key and the
     /// account email stay; [`Self::clear_session`] remains the full sign-out.
     pub fn clear_session_token(&mut self) -> AuthResult<()> {
-        self.store.delete_session_token()
+        let token = self.store.delete_session_token();
+        // The owner tag describes the token just removed (task 2447). Tried even when the token's removal failed.
+        let owner = self.store.delete_session_owner();
+        token.and(owner)
     }
 
+    /// The full sign-out. Every removal is tried, and the first failure is the result (task 2447): a token that
+    /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
-        self.store.delete_session_token()?;
-        self.store.delete_wrapped_master_key()?;
+        let token = self.store.delete_session_token();
+        let key = self.store.delete_wrapped_master_key();
         // Also drop the persisted account email so logout leaves no PII behind.
         // `delete_account_email` is a no-op success when absent, so this stays
         // idempotent and never fails just because email was never stored.
-        self.store.delete_account_email()?;
-        // Task 2447: also drop the vault key owner tag.
-        self.store.delete_vault_key_owner()?;
-        Ok(())
+        let email = self.store.delete_account_email();
+        let key_owner = self.store.delete_vault_key_owner();
+        let session_owner = self.store.delete_session_owner();
+        token.and(key).and(email).and(key_owner).and(session_owner)
     }
 
     pub fn master_key(&self) -> AuthResult<&[u8]> {

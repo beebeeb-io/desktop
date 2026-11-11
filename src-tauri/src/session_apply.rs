@@ -648,9 +648,17 @@ pub(crate) async fn apply_session(
         SESSION_COMMANDS.ensure_reactivation_allowed()?;
         windows_cf::ensure_reactivation_allowed()?;
     }
+    // P2-2 (task 2447): Windows refuses a sign-in while one is present, with one exception: the signed-in account,
+    // still locked (a password sign-in waiting for its key), is given its key by an approval from another device.
+    // Only when the server named the SAME user id for both sessions; anything else is refused as before.
     #[cfg(target_os = "windows")]
     if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
-        return Err("Sign out of the current account before signing in again.".into());
+        let acct = state.active_account()?;
+        let vault_unlocked = acct.session.lock().map(|session| session.is_some()).unwrap_or(true);
+        if !approval_adds_key_to_signed_in_session(acct.id.as_str(), profile.as_ref(), vault_unlocked) {
+            return Err("Sign out of the current account before signing in again.".into());
+        }
+        tracing::info!("the signed-in account received its vault key from another device");
     }
 
     #[cfg(target_os = "windows")]
@@ -709,17 +717,13 @@ pub(super) fn install_new_session(
         Ok(write) => write,
         Err(changed) => return Ok(NewSession::Refused(changed.sign_in_sentence().to_string())),
     };
-    // Task 2447: the vault key's owner is the profile's user_id (device
-    // approval / browser handoff carry the profile of the approving account).
-    let owner_user_id = profile.as_ref().map(|p| p.user_id.as_str());
-    persist_session_to_keychain(
-        &write,
-        acct.id.as_str(),
-        token,
-        master_key,
-        email.as_deref(),
-        owner_user_id,
-    )?;
+    persist_session_to_keychain(&write, acct.id.as_str(), token, master_key, email.as_deref())?;
+    // Task 2447: token and key arrived together for the account the server named for this token (`profile`): both
+    // are bound to its user id. With no profile (the fetch failed) both stay unknown; the next start's probe names
+    // the session.
+    if let Some(profile) = profile.as_ref() {
+        bind_session_and_key_owner_in_keychain(&write, acct.id.as_str(), &profile.user_id);
+    }
     if let Some(profile) = profile
         && let Ok(mut cached) = acct.cached_profile.lock()
     {

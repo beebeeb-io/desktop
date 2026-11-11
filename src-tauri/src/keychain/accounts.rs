@@ -62,16 +62,20 @@ pub enum KeychainAccount {
     /// (legacy, pre-tag). Written whenever the vault key is stored after a
     /// VERIFIED unlock (recovery phrase, device approval, browser handoff).
     VaultKeyOwner,
+    /// Server user id of the account the stored `SessionToken` belongs to (task 2447): written only from the
+    /// server's own answer for that token, and removed before any other token is stored. Not a secret.
+    SessionOwner,
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 impl KeychainAccount {
     #[cfg(test)]
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::SessionToken,
         Self::WrappedMasterKey,
         Self::AccountEmail,
         Self::VaultKeyOwner,
+        Self::SessionOwner,
     ];
 
     pub const fn leaf(self) -> &'static str {
@@ -80,6 +84,7 @@ impl KeychainAccount {
             Self::WrappedMasterKey => "wrapped-master-key",
             Self::AccountEmail => "account-email",
             Self::VaultKeyOwner => "vault-key-owner",
+            Self::SessionOwner => "session-owner",
         }
     }
 
@@ -150,6 +155,7 @@ mod tests {
                 KeychainAccount::WrappedMasterKey => "wrapped-master-key",
                 KeychainAccount::AccountEmail => "account-email",
                 KeychainAccount::VaultKeyOwner => "vault-key-owner",
+                KeychainAccount::SessionOwner => "session-owner",
             };
             assert_eq!(account.leaf(), leaf);
             assert_eq!(KeychainAccount::from_leaf(leaf), Some(account));
@@ -161,7 +167,8 @@ mod tests {
                 "session-token",
                 "wrapped-master-key",
                 "account-email",
-                "vault-key-owner"
+                "vault-key-owner",
+                "session-owner"
             ]
         );
         assert_eq!(KeychainAccount::from_leaf("master-key"), None);

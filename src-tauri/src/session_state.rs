@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Task 2447: whose vault key is stored next to whose session token (declared here: lib.rs is not rustfmt-clean on v2).
+#[path = "session_owner.rs"]
+mod session_owner;
+pub(crate) use session_owner::*;
+
 /// Work a command starts as a task of its own, which may outlive the command (the popover's storage fetch), is bound to
 /// the session when it is created: on Windows a lock cancels it and waits for what it holds to drop, and once the
 /// session is closed it never starts (#139 review P1; tests/windows_session_wiring.rs guards the callers).
@@ -510,7 +515,6 @@ pub(super) fn persist_session_to_keychain(
     token: &str,
     master_key: &[u8; 32],
     email: Option<&str>,
-    owner_user_id: Option<&str>,
 ) -> Result<(), String> {
     let vault = AuthVault::new(platform_keychain_store_for(account_id));
     let token = SessionToken::new(token.to_string()).map_err(|e| keychain_error("session token", e))?;
@@ -521,12 +525,6 @@ pub(super) fn persist_session_to_keychain(
     vault
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))?;
-    // Task 2447: tag the key with its owner.
-    if let Some(user_id) = owner_user_id {
-        if let Err(e) = vault.store_vault_key_owner(user_id) {
-            tracing::warn!(error = %e, "could not persist vault key owner to credential store (non-fatal)");
-        }
-    }
     // The session's own email, after its secrets: the Account page shows it after an auto-unlock on relaunch, and
     // the restore knows the stored session by it. None/empty (a sign-in that could not fetch the account record)
     // writes nothing, so the stored session has no email and stays unidentified until a fetch names it.
@@ -548,60 +546,6 @@ pub(super) fn persist_session_token_to_keychain(
         .install_session(token)
         .map_err(|e| keychain_error("store session in Keychain", e))?;
     persist_account_email_to_keychain(&vault, email)
-}
-
-/// Task 2447: on a token-only sign-in, check whether the credential store
-/// holds a vault key that belongs to a DIFFERENT account. If so, remove it
-/// (and its owner tag) before storing the new session's token, so the person
-/// cannot unlock with a foreign key. Uses the pure decision function
-/// `should_remove_stored_vault_key` (gate.rs) for the logic; the credential
-/// reads and deletes happen here.
-///
-/// Returns `Ok(true)` when a foreign key was removed, `Ok(false)` when the
-/// key was kept or absent. A removal failure refuses the sign-in (the
-/// person must not sign in while a foreign key cannot be removed).
-pub(super) fn remove_foreign_vault_key_if_needed(
-    account_id: &str,
-    signing_in_user_id: &str,
-    signing_in_email: &str,
-) -> Result<bool, String> {
-    use crate::auth_v2::gate::should_remove_stored_vault_key;
-
-    let mut vault = AuthVault::new(platform_keychain_store_for(account_id));
-    // Check if there is a vault key at all (via the trait's default that
-    // reads and drops; the macOS store has a cheaper attribute-only probe).
-    let has_key = vault
-        .has_vault_key()
-        .map_err(|e| keychain_error("check for vault key in credential store", e))?;
-    if !has_key {
-        return Ok(false);
-    }
-    // Read the owner tag (None = unknown/legacy).
-    let key_owner = vault
-        .vault_key_owner()
-        .map_err(|e| keychain_error("read vault key owner from credential store", e))?;
-    // Read the stored email (may differ from the signing-in email).
-    let stored_email = vault
-        .account_email()
-        .map_err(|e| keychain_error("read stored email from credential store", e))?;
-
-    if should_remove_stored_vault_key(
-        key_owner.as_deref(),
-        signing_in_user_id,
-        signing_in_email,
-        stored_email.as_deref(),
-    ) {
-        tracing::info!(
-            "removing foreign vault key before sign-in (task 2447): stored key owner \
-             does not match the signing-in account"
-        );
-        vault
-            .delete_vault_key_and_owner()
-            .map_err(|e| keychain_error("remove foreign vault key from credential store", e))?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
 }
 
 /// Remove the account email the Keychain kept for the session stored before. Every write of a new session token
@@ -637,27 +581,17 @@ pub(super) fn persist_account_email_to_keychain(
     Ok(())
 }
 
-/// Store the vault key the recovery phrase (or another trusted path) proved,
-/// bound to its owner's server user id (task 2447). Only inside a checked
-/// turn (`_write`). The key is borrowed: no copy of it is made here but the
-/// one the store wipes (`SecretBytes`).
+/// Store the vault key the recovery phrase proved. Only inside a checked turn (`_write`). The key is borrowed: no copy of
+/// it is made here but the one the store wipes (`SecretBytes`). The store removes the previous key's owner tag first
+/// (task 2447); the caller binds the new owner (`bind_vault_key_to_session_owner_in_keychain`).
 pub(super) fn persist_vault_key_to_keychain(
     _write: &SessionWrite,
     account_id: &str,
     master_key: &[u8; 32],
-    owner_user_id: Option<&str>,
 ) -> Result<(), String> {
-    let vault = AuthVault::new(platform_keychain_store_for(account_id));
-    vault
+    AuthVault::new(platform_keychain_store_for(account_id))
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
-        .map_err(|e| keychain_error("store vault key in Keychain", e))?;
-    // Task 2447: tag the key with its owner so a loader can refuse a mismatch.
-    if let Some(user_id) = owner_user_id {
-        if let Err(e) = vault.store_vault_key_owner(user_id) {
-            tracing::warn!(error = %e, "could not persist vault key owner to credential store (non-fatal)");
-        }
-    }
-    Ok(())
+        .map_err(|e| keychain_error("store vault key in Keychain", e))
 }
 
 pub(super) fn load_session_token_from_keychain(account_id: &str) -> Result<Option<String>, String> {
@@ -717,6 +651,15 @@ pub(super) fn load_session_from_vault<S: keychain::AuthSecretStore>(
     else {
         return Ok(None);
     };
+    // Task 2447: whose key is this? Asked before the key is read, here, where every loader of token + key passes
+    // (startup restore, unlock, re-sign-in; both layouts). Another account's key, or a tagged key next to a session
+    // nobody named, is refused; an untagged key (from before the tags) loads as it always did.
+    if !crate::auth_v2::key_owner::stored_key_ownership(&vault)
+        .map_err(|e| keychain_error("read the vault key's owner", e))?
+        .may_load()
+    {
+        return Err(crate::auth_v2::key_owner::KEY_NOT_THIS_ACCOUNTS.to_string());
+    }
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;

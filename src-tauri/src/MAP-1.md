@@ -11,9 +11,9 @@ Modules 1–45, sorted by path.
 | `account_binding_tests.rs` | (no //! header) | — |
 | `account_commands.rs` | `account_commands` items split out of `lib.rs`. | — |
 | `account_commands/tests.rs` | `account_session_list`'s decode: the shape the server's `list_sessions` builds. | — |
-| `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountAccess (1), AccountProfile (9), BillingUsage (3), Subscription (19), SetPreferredRegionResponse (2), UserRegionResponse (4), AccountActivity (2), SecurityScore (4), AccountSessionList (1), ClientDeviceList (1), ClientSyncSessionList (1), RevokeAllResult (1), … (+16 more) |
+| `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountProfile (9), Subscription (19), BillingUsage (3), AccountAccess (1), UserRegionResponse (4), SetPreferredRegionResponse (2), AccountActivity (2), SecurityScore (4), AccountSessionList (1), RevokeAllResult (1), ClientDeviceList (1), ClientSyncSessionList (1), … (+16 more) |
 | `activity_conflict_commands.rs` | `activity_conflict_commands` items split out of `lib.rs`. | — |
-| `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | DesktopApiError (7), Listing (2), FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, VersionId, CreatedSession (2), DesktopUploadInitRequest (10), DesktopUploadInitResponse (9), HeartbeatBody (8), … (+18 more) |
+| `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | DesktopApiError (8), Listing (2), FileId, FolderId, InviteId, SharedFolderId, UploadSessionId, VersionId, ListFilesScope (4), SyncSnapshot (2), SyncOp (3), SyncOps (3), … (+18 more) |
 | `app_run.rs` | `app_run` items split out of `lib.rs`. | — |
 | `auth_attempts.rs` | Authentication starts before there is an unlocked command session. | — |
 | `backup_protect.rs` | LD-0113 (spec §6.2, §6.3, Amendments 6, 7 and 8): what this device refuses to change in its drive. | — |
@@ -31,11 +31,11 @@ Modules 1–45, sorted by path.
 | `desktop_capabilities.rs` | Host support, deliberately independent of WebView layout/query parameters. | — |
 | `desktop_main_window.rs` | The main window's size and kept frame on Windows and Linux (v2 W1): the board's 1280 x 800 with a 960 x 640 minimum, fitted to the work area | — |
 | `desktop_search.rs` | The local search index and its server sync: build it from `state.db`, rank results for a query, and push/pull the encrypted shards. | — |
-| `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code, KnownNames, redact_for_export, redact_secrets_only |
+| `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), classify_error_code, QUEUE_KIND_LABELS, PAUSE_REASON_LABELS, allowed_label, KnownNames, redact_secrets_only, redact_for_export |
 | `diagnostics_export_tests.rs` | (no //! header) | — |
 | `direct_download.rs` | Direct S3 download driver (task 2173). | — |
 | `download_pin.rs` | Task 1643: one download, one immutable version. | — |
-| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, FetchedVersion (2), FpWrite (3), ParkedChoice (3), ParkedResolution (1), PinUpdateOutcome (2), … (+17 more) |
+| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | WireCounters (2), FpWrite (3), CachePolicy (2), PinUpdateOutcome (2), CacheCleanupOutcome (1), TransferLoopOutcome (8), ConflictContentSide (3), ParkedChoice (3), ParkedResolution (1), ConflictContentPreview (4), FetchedVersion (2), FetchTicket, … (+17 more) |
 | `engine_status.rs` | What the engine says about itself, and what the popover reads back (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` | — |
 | `extension_log_pin.rs` | The File Provider extension writes every log line through its one `os.Logger` (`BeebeebFileProvider/ExtensionLog.swift`, spec 2026-10-09 §11 | — |
 | `file_open_commands.rs` | `file_open_commands` items split out of `lib.rs`. | — |

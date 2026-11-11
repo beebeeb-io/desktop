@@ -2,11 +2,15 @@
 //! in Rust, not in TSX"). A non-Tauri caller (a future native UI) calls these directly; the TSX
 //! calls them through the `auth_gate_state` and `auth_sign_in_problem` commands.
 //!
-//! Nothing here reads a key, a token, or a credential; it reads only the flags the sign-in and
-//! lock paths already set (`auth_present`, `session`, `sync_status`). The engine start is still
-//! gated by `keys_for_engine_start` (session_reauth.rs); this module decides what the WINDOW shows.
+//! Nothing here returns or keeps a key, a token, or a credential. It reads the flags the sign-in and
+//! lock paths already set (`auth_present`, `session`, `sync_status`) and, for a signed-in locked
+//! window, asks the credential store whether a usable vault key is there (`stored_key_state_for`;
+//! on Windows that check loads the key and drops it at once). The engine start is still gated by
+//! `keys_for_engine_start` (session_reauth.rs); this module decides what the WINDOW shows.
 
 use serde::Serialize;
+
+use crate::auth_v2::key_owner::StoredKey;
 
 /// What the main window shows when it opens (or when it checks again on focus). The TypeScript
 /// gate reads this once and picks a screen; every screen checks again on `focus` (DW-0014).
@@ -24,6 +28,10 @@ pub enum GateState {
     NeedsRecoveryPhrase,
     /// Signed in and unlocked, but the account has no plan: show the choose-a-plan screen (DW-0014).
     NoPlan,
+    /// Signed in, but the credential store could not say whether the vault key is there (P2-6). Neither
+    /// "locked" (an unlock would fail) nor "needs the phrase" (a key may be there): the window says so
+    /// and asks again.
+    KeyStoreUnavailable,
 }
 
 /// What follows a successful `desktop_login` or `desktop_login_2fa` on this PC.
@@ -82,8 +90,9 @@ pub enum SignInProblem {
     Offline,
     /// HTTP 429: wait the named seconds (DW-A21).
     RateLimited { seconds: u32 },
-    /// The account was deleted (DW-A63).
-    Deleted,
+    /// Another account's vault key is still stored on this PC and could not be removed (task 2447):
+    /// the sign-in was refused and nothing was stored.
+    StaleKey,
     /// Anything else: "Sign-in didn't finish."
     Other,
 }
@@ -100,10 +109,13 @@ pub fn problem_from(code: &str, consecutive_failures: u32) -> SignInProblem {
         let seconds = code.split(':').nth(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(30);
         return SignInProblem::RateLimited { seconds };
     }
-    if code == "account_deleted" {
-        return SignInProblem::Deleted;
+    if code == crate::auth_v2::key_owner::FOREIGN_KEY_NOT_REMOVED {
+        return SignInProblem::StaleKey;
     }
-    if code == "invalid_credentials" || code.contains("Invalid email or password") {
+    // P3: `account_deleted` is one of the "wrong email or password" codes here. The sign-in form answers before
+    // the password is proven, so it must not say that an account exists or existed (DW-A63 moves to a place that
+    // follows a proven password).
+    if code == "invalid_credentials" || code == "account_deleted" || code.contains("Invalid email or password") {
         return if consecutive_failures >= LOCK_HINT_AFTER {
             SignInProblem::LockedHint
         } else {
@@ -122,7 +134,7 @@ pub fn problem_text(p: &SignInProblem) -> &'static str {
         SignInProblem::Offline => "You\u{2019}re offline. Nothing was sent.",
         // The countdown is rendered by the caller; this is the static part.
         SignInProblem::RateLimited { .. } => "Too many tries from this network. Wait and try again.",
-        SignInProblem::Deleted => "This account has been deleted. We can\u{2019}t recover it.",
+        SignInProblem::StaleKey => crate::auth_v2::key_owner::FOREIGN_KEY_NOT_REMOVED,
         SignInProblem::Other => "Sign-in didn\u{2019}t finish. Nothing was unlocked. Try again.",
     }
 }
@@ -165,8 +177,24 @@ pub const WRONG_PHRASE: &str = "That phrase doesn\u{2019}t open this account. No
 /// DW-A24: after the server's attempt limit.
 pub const TOO_MANY_PHRASE_TRIES: &str = "Too many tries. Wait an hour.";
 
+/// P3: the code of a recovery-phrase unlock whose phrase was RIGHT (the vault is unlocked) and whose engine start
+/// then failed. Its own code, so no screen can show it as a wrong phrase.
+pub const ENGINE_NOT_STARTED_AFTER_UNLOCK: &str = "vault_unlocked_engine_not_started";
+
+/// What the person reads for [`ENGINE_NOT_STARTED_AFTER_UNLOCK`].
+pub const UNLOCKED_SYNC_NOT_STARTED: &str =
+    "Your recovery phrase is right and this computer is unlocked. Sync didn\u{2019}t start yet. Try again.";
+
+/// The recovery-phrase command's error for an engine start that failed after the phrase was accepted.
+pub fn engine_not_started_after_unlock(error: String) -> String {
+    format!("{ENGINE_NOT_STARTED_AFTER_UNLOCK}: {error}")
+}
+
 /// Map a recovery-phrase error to the board's words.
 pub fn phrase_error(code: &str) -> &'static str {
+    if code.starts_with(ENGINE_NOT_STARTED_AFTER_UNLOCK) {
+        return UNLOCKED_SYNC_NOT_STARTED;
+    }
     if code.contains("Incorrect recovery phrase") {
         return WRONG_PHRASE;
     }
@@ -221,59 +249,6 @@ pub fn approve_error(code: &str) -> &'static str {
     "The approval didn\u{2019}t finish. Nothing was shared."
 }
 
-// ── Vault key ownership (task 2447) ────────────────────────────────────────
-//
-// Pure decision functions for the stale-vault-key fix: a stored vault key
-// is bound to the server user id that proved it. Nothing here reads the
-// credential store; the callers pass what they read.
-
-/// Whether a stored vault key should be REMOVED on a token-only sign-in
-/// (password / 2FA). Called BEFORE storing the new session's token, while
-/// the signing-in user's `profile.user_id` is known.
-///
-/// Returns `true` (remove) when the stored key does not belong to the
-/// signing-in user.
-///
-/// Decision (lane A1b, 2026-11-11): an unknown-owner key (legacy, pre-tag)
-/// whose stored email matches the signing-in email is KEPT and tagged after
-/// the next verified unlock, because removing it would force the person to
-/// re-enter 12 words when there is no evidence of a different account.
-pub fn should_remove_stored_vault_key(
-    key_owner: Option<&str>,
-    signing_in_user_id: &str,
-    signing_in_email: &str,
-    stored_email: Option<&str>,
-) -> bool {
-    match key_owner {
-        Some(owner) => owner != signing_in_user_id,
-        None => {
-            // Unknown owner (legacy entry): remove only when the stored
-            // email is known AND differs from the signing-in email.
-            match stored_email {
-                Some(email) if !email.is_empty() => !email.eq_ignore_ascii_case(signing_in_email),
-                // No stored email, or empty: fail safe — keep the key (the
-                // person is not asked for 12 words again on the same email).
-                _ => false,
-            }
-        }
-    }
-}
-
-/// Whether a loaded vault key's owner matches the session it would be
-/// installed into. Called at startup-restore and Hello-unlock time, after
-/// the session's `user_id` is known (from the probe or the cached profile).
-///
-/// Returns `true` when the key may be installed; `false` when it must be
-/// refused and the foreign key removed (gate → `NeedsRecoveryPhrase`).
-pub fn vault_key_owner_matches(key_owner: Option<&str>, session_user_id: &str) -> bool {
-    match key_owner {
-        Some(owner) => owner == session_user_id,
-        // Unknown owner (legacy): allow — the sign-in path is the primary
-        // defense, and a migration should tag it on the next verified unlock.
-        None => true,
-    }
-}
-
 // ── Engine gate ─────────────────────────────────────────────────────────────
 
 /// Whether the engine may start. A caller (the TSX gate, the startup path, or a
@@ -287,37 +262,20 @@ pub fn engine_allowed(vault_unlocked: bool, has_plan: bool) -> bool {
     vault_unlocked && has_plan
 }
 
-// ── Vault key probe ─────────────────────────────────────────────────────────
-
-/// Does the credential store hold a vault key for this account? The gate uses this
-/// to choose between the lock screen (key present, Windows Hello unlocks) and the
-/// recovery phrase (no key, the 12 words or another device provisions it).
-///
-/// Fails closed: if the store cannot answer (DPAPI error, locked Keychain), it
-/// says "present" so the window shows the lock, not the phrase. Only a definitive
-/// "not found" shows the phrase.
-fn vault_key_probe(account_id: &str) -> bool {
-    use crate::keychain::{holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for};
-    // Check the id-keyed store first, then the legacy store (the same read fallback
-    // `load_session_from_keychain` uses). `holds_vault_key` never unlocks or reads
-    // the key; a store that cannot answer counts as holding one (fail closed).
-    holds_vault_key(&platform_keychain_store_for(account_id)) || holds_vault_key(&legacy_platform_keychain_store())
-}
-
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
-/// Decide the gate state. `vault_key_in_keychain` distinguishes the lock screen
-/// (key present, Windows Hello can unlock) from the recovery-phrase step (no key,
-/// the 12 words or another device must provision it).
-pub fn decide_gate(logged_in: bool, vault_unlocked: bool, vault_key_in_keychain: bool, has_no_plan: bool) -> GateState {
+/// Decide the gate state. `stored_key` (asked only for a signed-in, locked window) distinguishes the lock screen (a
+/// key the loader accepts: Windows Hello can unlock) from the recovery-phrase step (no key, or a key that is not this
+/// account's: the 12 words or another device provide it) and from a store that could not answer.
+pub fn decide_gate(logged_in: bool, vault_unlocked: bool, stored_key: StoredKey, has_no_plan: bool) -> GateState {
     if !logged_in {
         return GateState::SignedOut;
     }
     if !vault_unlocked {
-        return if vault_key_in_keychain {
-            GateState::Locked
-        } else {
-            GateState::NeedsRecoveryPhrase
+        return match stored_key {
+            StoredKey::Usable => GateState::Locked,
+            StoredKey::Absent | StoredKey::NotThisAccounts => GateState::NeedsRecoveryPhrase,
+            StoredKey::Unreadable => GateState::KeyStoreUnavailable,
         };
     }
     if has_no_plan {
@@ -359,7 +317,7 @@ pub fn has_no_plan(
 /// `account_subscription` (already exists), 3) `auth_gate_state` with the results.
 /// This way the plan check stays one command call, and all rules live in Rust.
 #[tauri::command]
-pub(crate) fn auth_gate_state(
+pub(crate) async fn auth_gate_state(
     state: tauri::State<'_, crate::AppState>,
     plan_state: Option<String>,
     plan: Option<String>,
@@ -370,14 +328,17 @@ pub(crate) fn auth_gate_state(
     let vault_unlocked = acct.session.lock().map(|g| g.is_some()).unwrap_or(false);
     let auth_present = state.auth_present.lock().map(|g| *g).unwrap_or(false);
     let logged_in = vault_unlocked || auth_present;
-    // When signed in but not unlocked, check if the credential store holds the vault key.
-    // If yes: the lock screen (Windows Hello can unlock). If no: recovery phrase needed.
-    // On macOS: `keychain_vault_key_present` (fails closed). On Windows: try to load the
-    // session from the credential store; success means both token AND key are present.
-    let vault_key_in_keychain = if logged_in && !vault_unlocked {
-        vault_key_probe(acct.id.as_str())
+    // Signed in but not unlocked: ask the credential store about the key the loader would read (the store that holds
+    // the session token, with the loader's own ownership rule). The read can block (DPAPI, a locked Keychain) and on
+    // Windows it loads the key and drops it at once, so it runs off the command thread. A store, or a worker, that
+    // cannot answer is `Unreadable`: never "present".
+    let stored_key = if logged_in && !vault_unlocked {
+        let account_id = acct.id.as_str().to_string();
+        tauri::async_runtime::spawn_blocking(move || crate::stored_key_state_for(&account_id))
+            .await
+            .unwrap_or(StoredKey::Unreadable)
     } else {
-        false
+        StoredKey::Absent
     };
     let no_plan = has_no_plan(
         plan_state.as_deref(),
@@ -385,7 +346,7 @@ pub(crate) fn auth_gate_state(
         plan_status.as_deref(),
         quota_bytes,
     );
-    Ok(decide_gate(logged_in, vault_unlocked, vault_key_in_keychain, no_plan))
+    Ok(decide_gate(logged_in, vault_unlocked, stored_key, no_plan))
 }
 
 /// Map a sign-in error code and the failure count to the board's problem and text.
@@ -504,7 +465,12 @@ mod tests {
             problem_from("rate_limited:45", 0),
             SignInProblem::RateLimited { seconds: 45 }
         );
-        assert_eq!(problem_from("account_deleted", 0), SignInProblem::Deleted);
+        // P3: never its own kind on the sign-in form (it would say the account existed before a password is proven).
+        assert_eq!(problem_from("account_deleted", 0), SignInProblem::Invalid);
+        assert_eq!(
+            problem_text(&problem_from("account_deleted", 0)),
+            problem_text(&problem_from("invalid_credentials", 0))
+        );
         assert_eq!(problem_from("server_error", 0), SignInProblem::Other);
     }
 
@@ -512,7 +478,7 @@ mod tests {
     fn problem_text_returns_the_boards_words() {
         assert!(problem_text(&SignInProblem::Invalid).contains("don\u{2019}t match"));
         assert!(problem_text(&SignInProblem::Offline).contains("offline"));
-        assert!(problem_text(&SignInProblem::Deleted).contains("deleted"));
+        assert!(problem_text(&SignInProblem::StaleKey).contains("Nothing was signed in"));
     }
 
     #[test]
@@ -552,27 +518,33 @@ mod tests {
 
     #[test]
     fn decide_gate_signed_out() {
-        assert_eq!(decide_gate(false, false, false, false), GateState::SignedOut);
+        assert_eq!(
+            decide_gate(false, false, StoredKey::Absent, false),
+            GateState::SignedOut
+        );
     }
 
     #[test]
     fn decide_gate_locked_with_key() {
-        assert_eq!(decide_gate(true, false, true, false), GateState::Locked);
+        assert_eq!(decide_gate(true, false, StoredKey::Usable, false), GateState::Locked);
     }
 
     #[test]
     fn decide_gate_needs_recovery_phrase() {
-        assert_eq!(decide_gate(true, false, false, false), GateState::NeedsRecoveryPhrase);
+        assert_eq!(
+            decide_gate(true, false, StoredKey::Absent, false),
+            GateState::NeedsRecoveryPhrase
+        );
     }
 
     #[test]
     fn decide_gate_no_plan() {
-        assert_eq!(decide_gate(true, true, false, true), GateState::NoPlan);
+        assert_eq!(decide_gate(true, true, StoredKey::Absent, true), GateState::NoPlan);
     }
 
     #[test]
     fn decide_gate_ready() {
-        assert_eq!(decide_gate(true, true, false, false), GateState::Ready);
+        assert_eq!(decide_gate(true, true, StoredKey::Absent, false), GateState::Ready);
     }
 
     #[test]
@@ -698,88 +670,49 @@ mod tests {
         assert!(approve_error("offline").contains("offline"));
     }
 
-    // ── Vault key ownership (task 2447) ────────────────────────────────
+    // ── P2-6 / P3 (task 2447 delta 3) ───────────────────────────────────
 
     #[test]
-    fn stale_key_different_owner_is_removed() {
-        assert!(should_remove_stored_vault_key(
-            Some("user-A"),
-            "user-B",
-            "b@example.com",
-            Some("a@example.com"),
-        ));
+    fn a_store_that_cannot_answer_is_its_own_gate_state_and_a_foreign_key_asks_for_the_phrase() {
+        assert_eq!(
+            decide_gate(true, false, StoredKey::Unreadable, false),
+            GateState::KeyStoreUnavailable
+        );
+        assert_eq!(
+            decide_gate(true, false, StoredKey::NotThisAccounts, false),
+            GateState::NeedsRecoveryPhrase
+        );
+        assert_eq!(
+            serde_json::to_string(&GateState::KeyStoreUnavailable).unwrap(),
+            "\"key_store_unavailable\""
+        );
     }
 
     #[test]
-    fn same_owner_key_is_kept() {
-        assert!(!should_remove_stored_vault_key(
-            Some("user-A"),
-            "user-A",
-            "a@example.com",
-            Some("a@example.com"),
-        ));
+    fn an_engine_start_that_fails_after_a_right_phrase_is_never_the_wrong_phrase_error() {
+        // Even when the start's own text holds the words the other branches match on.
+        for start_error in [
+            "network error: Incorrect recovery phrase",
+            "offline",
+            "Too many open files",
+        ] {
+            let code = engine_not_started_after_unlock(start_error.to_string());
+            assert_eq!(phrase_error(&code), UNLOCKED_SYNC_NOT_STARTED, "{code}");
+        }
+        assert_ne!(UNLOCKED_SYNC_NOT_STARTED, WRONG_PHRASE);
+        assert_eq!(
+            phrase_error("Incorrect recovery phrase. Check your words and try again."),
+            WRONG_PHRASE
+        );
     }
 
     #[test]
-    fn unknown_owner_different_email_is_removed() {
-        assert!(should_remove_stored_vault_key(
-            None,
-            "user-B",
-            "b@example.com",
-            Some("a@example.com"),
-        ));
-    }
-
-    #[test]
-    fn unknown_owner_same_email_is_kept() {
-        assert!(!should_remove_stored_vault_key(
-            None,
-            "user-A",
-            "a@example.com",
-            Some("a@example.com"),
-        ));
-    }
-
-    #[test]
-    fn unknown_owner_same_email_case_insensitive() {
-        assert!(!should_remove_stored_vault_key(
-            None,
-            "user-A",
-            "A@Example.COM",
-            Some("a@example.com"),
-        ));
-    }
-
-    #[test]
-    fn unknown_owner_no_stored_email_is_kept() {
-        // No email to compare → fail safe, keep the key.
-        assert!(!should_remove_stored_vault_key(None, "user-B", "b@example.com", None,));
-    }
-
-    #[test]
-    fn unknown_owner_empty_stored_email_is_kept() {
-        assert!(!should_remove_stored_vault_key(
-            None,
-            "user-B",
-            "b@example.com",
-            Some(""),
-        ));
-    }
-
-    #[test]
-    fn vault_key_owner_match_allows() {
-        assert!(vault_key_owner_matches(Some("user-A"), "user-A"));
-    }
-
-    #[test]
-    fn vault_key_owner_mismatch_refuses() {
-        assert!(!vault_key_owner_matches(Some("user-A"), "user-B"));
-    }
-
-    #[test]
-    fn vault_key_unknown_owner_allows() {
-        // Legacy key with no owner tag → allow (the sign-in path is the
-        // primary defense).
-        assert!(vault_key_owner_matches(None, "user-B"));
+    fn a_sign_in_refused_over_a_leftover_key_says_so() {
+        let problem = problem_from(crate::auth_v2::key_owner::FOREIGN_KEY_NOT_REMOVED, 0);
+        assert_eq!(problem, SignInProblem::StaleKey);
+        assert_eq!(
+            problem_text(&problem),
+            crate::auth_v2::key_owner::FOREIGN_KEY_NOT_REMOVED
+        );
     }
 }
