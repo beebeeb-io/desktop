@@ -16,7 +16,7 @@ use super::flyout::{self, Toggle};
 use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayIcon};
-use super::tray::{LeftClick, MenuAction, TrayModel, tray_model};
+use super::tray::{LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
@@ -51,6 +51,7 @@ pub struct Shell {
     platform: Arc<dyn Platform>,
     tray: Option<Box<dyn TrayIcon>>,
     tray_model: TrayModel,
+    tray_inputs: TrayInputs,
     wiring: Wiring,
     /// The sidebar's own selection as the shell last saw it (see [`poll`]).
     sidebar_seen: SidebarSection,
@@ -59,13 +60,15 @@ pub struct Shell {
 impl Shell {
     pub fn new(actions: Arc<dyn ShellActions>, platform: Arc<dyn Platform>, wiring: Wiring) -> Shell {
         let app = AppMachine::new(actions.gate_state());
-        let tray_model = tray_model(&actions.tray_inputs());
+        let tray_inputs = actions.tray_inputs();
+        let tray_model = tray_model(&tray_inputs);
         Shell {
             app,
             actions,
             platform,
             tray: None,
             tray_model,
+            tray_inputs,
             wiring,
             sidebar_seen: SidebarSection::Files,
         }
@@ -99,14 +102,19 @@ impl Shell {
     /// True when the window's screen changed.
     pub fn refresh(&mut self) -> bool {
         let changed = self.app.apply(Event::Gate(self.actions.gate_state())) == Outcome::Changed;
-        let model = tray_model(&self.actions.tray_inputs());
+        let inputs = self.actions.tray_inputs();
+        if inputs != self.tray_inputs {
+            // The flyout reads the inputs themselves (counts), not only what the b shows.
+            self.tray_inputs = inputs;
+            if let Some(flyout) = &self.wiring.flyout {
+                flyout.update(|s, _| s.refresh());
+            }
+        }
+        let model = tray_model(&self.tray_inputs);
         if model != self.tray_model {
             self.tray_model = model;
             if let Some(tray) = &self.tray {
                 tray.apply(&self.tray_model);
-            }
-            if let Some(flyout) = &self.wiring.flyout {
-                flyout.update(|s, _| s.refresh());
             }
         }
         changed
@@ -119,8 +127,14 @@ impl Shell {
         let handler = Arc::new(move |event: TrayEvent| main.update(move |s: &mut State, tx| on_tray(s, event, tx)));
         match self.platform.create_tray(&self.tray_model, handler) {
             Ok(tray) => self.tray = Some(tray),
-            Err(PlatformError::NotBuilt(what)) => log(format!("not built yet: {what}; closing the window quits")),
-            Err(error) => log(format!("the b could not be added ({error}); closing the window quits")),
+            Err(error) => {
+                match error {
+                    PlatformError::NotBuilt(what) => log(format!("not built yet: {what}; closing the window quits")),
+                    error => log(format!("the b could not be added ({error}); closing the window quits")),
+                }
+                // A start at login has no window; without a b the app would be unreachable.
+                self.open_main();
+            }
         }
     }
 
@@ -253,11 +267,13 @@ pub fn poll(s: &mut State, _seconds: f64, _tx: &mut Tx) -> bool {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let plain_alt = ev.mods.alt && !ev.mods.cmd && !ev.mods.shift;
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
+    // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.
+    let slash_cmd = !ev.mods.alt;
     let event = match ev.key {
         Key::Left if plain_alt => Some(Event::Back),
         Key::Right if plain_alt => Some(Event::Forward),
         Key::Command(',') if plain_cmd => Some(Event::OpenSettings(SettingsPane::General)),
-        Key::Command('/') if plain_cmd => Some(Event::OpenDialog(Dialog::Shortcuts)),
+        Key::Command('/') if slash_cmd => Some(Event::OpenDialog(Dialog::Shortcuts)),
         Key::Escape => Some(Event::Escape),
         _ => None,
     };

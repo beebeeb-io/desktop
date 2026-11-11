@@ -53,6 +53,8 @@ use crate::shell::tray_icon::{self, SYNC_STEPS, TaskbarTheme};
 
 const CALLBACK: u32 = WM_APP + 1;
 const UPDATE: u32 = WM_APP + 2;
+/// The app's own request to remove the icon and end the tray thread (`WindowsTray::drop`).
+const SHUTDOWN: u32 = WM_APP + 3;
 const ICON_ID: u32 = 1;
 /// Turns the syncing badge: one turn a second.
 const TIMER_ANIMATE: usize = 1;
@@ -320,7 +322,12 @@ fn refresh(hwnd: HWND, context: &mut Context) {
     unsafe {
         if context.added {
             Shell_NotifyIconW(NIM_MODIFY, &data);
-        } else if Shell_NotifyIconW(NIM_ADD, &data) != 0 {
+        } else if {
+            // `TaskbarCreated` also arrives when the icon is still there (a DPI change of the
+            // primary display): adding over it fails, so clear the slot first.
+            Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd, 0));
+            Shell_NotifyIconW(NIM_ADD, &data) != 0
+        } {
             context.added = true;
             // Version 4: clicks arrive as NIN_SELECT / WM_CONTEXTMENU with coordinates.
             data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -499,6 +506,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 refresh(hwnd, context);
                 DefWindowProcW(hwnd, message, w, l)
             }
+            SHUTDOWN => {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                0
+            }
+            // Only the app ends the tray. A WM_CLOSE from outside (`taskkill` without /F, an
+            // installer closing the app) must not leave the process alive without its b.
+            WM_CLOSE => 0,
             WM_DESTROY => {
                 KillTimer(hwnd, TIMER_ANIMATE);
                 KillTimer(hwnd, TIMER_RETRY);
@@ -618,8 +632,8 @@ impl TrayIcon for WindowsTray {
 
 impl Drop for WindowsTray {
     fn drop(&mut self) {
-        // SAFETY: WM_CLOSE destroys the window on its own thread, which then ends its loop.
-        unsafe { PostMessageW(self.window as HWND, WM_CLOSE, 0, 0) };
+        // SAFETY: the tray thread destroys its own window on SHUTDOWN, which ends its loop.
+        unsafe { PostMessageW(self.window as HWND, SHUTDOWN, 0, 0) };
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -668,12 +682,23 @@ impl Platform for WindowsPlatform {
             RRF_RT_REG_BINARY,
         )
         .unwrap_or(None);
-        Ok(autostart::is_enabled(run.as_deref(), approved.as_deref()))
+        // An entry that starts another install is not this program's switch being on.
+        let exe = current_exe().unwrap_or_default();
+        let ours = run.as_deref().filter(|value| autostart::points_at(value, &exe));
+        Ok(autostart::is_enabled(ours, approved.as_deref()))
     }
 
     fn set_autostart(&self, enabled: bool) -> Result<(), PlatformError> {
         if !enabled {
-            return reg_delete(autostart::RUN_KEY, autostart::VALUE_NAME);
+            // Never delete an entry that starts another install (or the installed app, from a
+            // development build).
+            let run = reg_read_string(autostart::RUN_KEY, autostart::VALUE_NAME)?;
+            return match run {
+                Some(value) if autostart::points_at(&value, &current_exe()?) => {
+                    reg_delete(autostart::RUN_KEY, autostart::VALUE_NAME)
+                }
+                _ => Ok(()),
+            };
         }
         write_run_value()?;
         // Turning it on here also undoes "Disabled" in Task Manager, as the 0.8.x app did.

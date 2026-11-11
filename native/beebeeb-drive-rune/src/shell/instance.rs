@@ -21,26 +21,47 @@ pub const APP_ID: &str = "io.beebeeb.app";
 pub struct Launch {
     /// Started by Windows at login: stay in the notification area.
     pub autostart: bool,
-    /// `scheme://` arguments, unparsed and untrusted.
-    pub links: Vec<String>,
     /// A Rune tooling run (`--snap`, `--tree`, `--script`, …): a renderer, not the app. It must
     /// not claim the instance, show a tray icon or touch saved state.
     pub tooling: bool,
 }
 
-/// At most this many links from one launch are looked at.
-pub const MAX_LINKS: usize = 8;
+/// Rune's headless tooling flags (`crates/rune/src/tooling/args.rs`). Only these make a run a
+/// renderer: an unknown flag must never switch off the single instance or the profile check.
+const TOOLING_FLAGS: [&str; 22] = [
+    "--snap",
+    "--tree",
+    "--script",
+    "--video",
+    "--out",
+    "--strip",
+    "--html",
+    "--trace",
+    "--trace-all",
+    "--frames",
+    "--playground",
+    "--list-scenes",
+    "--list-windows",
+    "--first-pixels",
+    "--desktop",
+    "--scene",
+    "--window",
+    "--crop",
+    "--native",
+    "--realtime",
+    "-h",
+    "--help",
+];
 
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Launch {
     let mut launch = Launch::default();
     for arg in args {
         if arg == AUTOSTART_FLAG {
             launch.autostart = true;
-        } else if arg.starts_with('-') {
+        } else if TOOLING_FLAGS.contains(&arg.as_str()) {
             launch.tooling = true;
-        } else if arg.contains("://") && launch.links.len() < MAX_LINKS {
-            launch.links.push(arg);
         }
+        // Links (`scheme://…`) are not read here: Rune hands each to `host::on_open_url`.
     }
     launch
 }
@@ -134,12 +155,11 @@ mod tests {
     }
 
     #[test]
-    fn links_are_collected_unparsed_and_capped() {
-        let launch = args(&["beebeeb://open/photos", "C:\\file.txt", "https://example.com/x"]);
-        assert_eq!(launch.links, vec!["beebeeb://open/photos", "https://example.com/x"]);
-        assert!(!launch.tooling);
-        let many: Vec<String> = (0..50).map(|i| format!("beebeeb://open/files?folder=f{i}")).collect();
-        assert_eq!(parse_args(many).links.len(), MAX_LINKS);
+    fn links_files_and_unknown_flags_leave_it_the_app() {
+        let launch = args(&["beebeeb://open/photos", "C:\\file.txt", "--foo", "-x", "--snapshot"]);
+        assert_eq!(launch, Launch::default());
+        // So the single instance and the profile check still apply.
+        assert_eq!(decide(&launch, false, None), Start::Forwarded);
     }
 
     #[test]

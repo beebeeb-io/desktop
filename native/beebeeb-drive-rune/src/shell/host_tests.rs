@@ -197,6 +197,13 @@ fn ctrl_slash_opens_the_shortcuts_dialog_and_esc_closes_it() {
 }
 
 #[test]
+fn ctrl_slash_works_where_slash_is_a_shifted_key() {
+    let (_, _, mut rt) = fixture();
+    press(&mut rt, Key::Command('/'), Mods { shift: true, ..ctrl() });
+    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::ShortcutsDialog);
+}
+
+#[test]
 fn signed_out_takes_no_shortcut_to_the_account() {
     let engine = Arc::new(FixtureEngine::signed_out());
     let mut rt = runtime(state::init_with(Shell::fixture_on(

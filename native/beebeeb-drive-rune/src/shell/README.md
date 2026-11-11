@@ -69,7 +69,9 @@ Read where the window is from `s.shell.app` (`screen()`, `route()`, `dialog()`, 
 
 The shell already handles Alt+Left / Alt+Right, Ctrl+, , Ctrl+/ and Esc (`host::on_key`).
 `ui::sidebar` selects by writing `State::sidebar_section`; `host::poll` turns that into a navigation,
-so the sidebar routes today.
+so the sidebar routes today. It can only see a CHANGE of that value: a click on the row that is
+already highlighted (to leave a folder, or from Sync history, which has no highlight of its own) does
+nothing until the sidebar calls `host::dispatch` itself.
 
 The gate (`app::GateState`, the names of `auth_v2/gate.rs`) is an input: signed out shows only
 sign-in and forgets the place, the history and any waiting request that names account data; locked
@@ -118,5 +120,7 @@ install, a development build) is never touched, so an installer that moves the p
   (`crates/rune/src/window/events.rs:461,489` at c92e462); `Event::Back` / `Forward` are ready.
 - The sidebar's highlight for Sync history and Available offline: `ui::sidebar::SidebarSection` has
   no value for them (the route is right; the highlight stays where it was).
+- Files does not follow the route yet: `files_frame` draws `State::listing` whatever
+  `Route::folder` says, and its Enter-into-folder does not dispatch `Navigate` (the Files lane's).
 - Windows code is type-checked from Linux (`cargo check --target x86_64-pc-windows-msvc`) but has
   not run: the native checks are in the PR body.
