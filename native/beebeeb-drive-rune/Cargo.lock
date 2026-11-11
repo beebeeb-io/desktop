@@ -373,10 +373,13 @@ name = "beebeeb-drive-rune"
 version = "0.0.1"
 dependencies = [
  "chrono",
+ "png",
+ "raw-window-handle",
  "rune",
  "rune-kit",
  "rune-notify",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

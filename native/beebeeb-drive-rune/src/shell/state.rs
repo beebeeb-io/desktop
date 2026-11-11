@@ -6,6 +6,7 @@
 
 use rune::TextEdit;
 
+use super::host::Shell;
 use crate::source::{self, BoardFixtureSource, DriveSource, Listing};
 use crate::ui::sidebar::SidebarSection;
 
@@ -18,10 +19,17 @@ pub struct State {
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
     pub(crate) show_detail_pane: bool,
+    /// The shell: the route machine, the gate, the b, the actions (`shell/host.rs`).
+    pub shell: Shell,
     // --- one line per frame group below ---
 }
 
+/// The state headless renders and tests start from: the fixture engine, nothing wired.
 pub fn init() -> State {
+    init_with(Shell::fixture())
+}
+
+pub fn init_with(shell: Shell) -> State {
     let source = Box::new(BoardFixtureSource::new());
     let listing = source.list(None);
     let storage = source.storage();
@@ -33,5 +41,6 @@ pub fn init() -> State {
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
         show_detail_pane: true,
+        shell,
     }
 }
