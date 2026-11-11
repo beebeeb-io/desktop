@@ -17,7 +17,7 @@ use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
 #[allow(unused_imports)]
-pub(crate) use beebeeb_engine::account;
+mod account;
 pub(crate) use beebeeb_engine::account_binding;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::account_dto;

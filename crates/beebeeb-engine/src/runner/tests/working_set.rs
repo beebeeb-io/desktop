@@ -170,7 +170,7 @@ fn a_failed_tick_pays_a_pending_debt_with_one_signal() {
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let mut owed = OwedWorkingSetSignal::owing(vec!["reset-1".to_string()]);
     let before = SIGNALS_ASKED.with(|asked| asked.get());
-    crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+    crate::file_provider_port::with_busy_gate(|| {
         signal_owed_debt_after_a_failed_tick(&mut owed, &db);
     });
     assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 1, "one signal");
@@ -188,7 +188,7 @@ fn a_failed_tick_with_nothing_owed_sends_no_signal() {
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let mut owed = OwedWorkingSetSignal::default();
     let before = SIGNALS_ASKED.with(|asked| asked.get());
-    crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+    crate::file_provider_port::with_busy_gate(|| {
         signal_owed_debt_after_a_failed_tick(&mut owed, &db);
     });
     assert_eq!(SIGNALS_ASKED.with(|asked| asked.get()) - before, 0, "no signal");
@@ -205,7 +205,7 @@ fn a_working_set_signal_that_meets_a_busy_gate_reports_the_drop_and_the_debt_car
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let ids = vec!["f-1".to_string()];
     let mut owed = OwedWorkingSetSignal::default();
-    crate::finder_setup::macos_ports::with_shared_gate_held(|| {
+    crate::file_provider_port::with_busy_gate(|| {
         assert!(
             signal_file_provider_working_set(&db, "operations_applied", &ids),
             "a busy gate drops the signal, and says so"
@@ -461,22 +461,19 @@ fn an_attempts_refusal_reaches_the_phase_signals() {
 // Task 1697: the retired `file-provider-invalidate` Tauri event and its
 // payload builder are gone — the only replica-refresh channel is the
 // working-set signal (see `signal_file_provider_working_set`). The pure
-// decision core for that signal is tested in `macos_file_provider`.
+// decision core for that signal is tested in `file_provider_port`.
 
-// macOS-only like the module it exercises: `macos_file_provider` is
-// `#[cfg(target_os = "macos")]`, so an unguarded reference breaks the
-// Windows/Linux compile targets (caught by CI Rust check Windows +
-// Rust test Linux on the 1697 branch; the runtime call sites above are
-// gated with `signal_file_provider_working_set`).
+// macOS-only like the signal path it mirrors (the runtime call sites above are gated with
+// `signal_file_provider_working_set`).
 #[test]
 #[cfg(target_os = "macos")]
 fn signal_file_provider_working_set_decision_gates_on_changed_items() {
-    // Mirrors macos_file_provider::should_signal_working_set so a runner
+    // Mirrors file_provider_port::should_signal_working_set so a runner
     // change that bypasses the gate fails here too.
-    assert!(crate::macos_file_provider::should_signal_working_set(&[
+    assert!(crate::file_provider_port::should_signal_working_set(&[
         "f-1".to_string()
     ]));
-    assert!(!crate::macos_file_provider::should_signal_working_set(&[]));
+    assert!(!crate::file_provider_port::should_signal_working_set(&[]));
 }
 
 // Task 1697 audit P0 item 4: working-set signals filtered to changes

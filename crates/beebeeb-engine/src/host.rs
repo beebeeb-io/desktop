@@ -232,6 +232,12 @@ pub trait EngineHost: Send + Sync + 'static {
         None
     }
 
+    /// macOS: the shell's File Provider bridge, taken once when the runner starts
+    /// ([`crate::file_provider_port`]). `None`: this host has no File Provider to signal.
+    fn file_provider(&self) -> Option<Arc<dyn crate::file_provider_port::FileProviderPort>> {
+        None
+    }
+
     /// The wall clock. The engine's own tick stamps still read the system clock directly; this is for the code
     /// that moves behind the seam next (the session's expiry checks).
     fn now(&self) -> std::time::SystemTime {

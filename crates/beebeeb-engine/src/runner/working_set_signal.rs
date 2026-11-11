@@ -53,7 +53,7 @@ pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], material
 /// re-sends them.
 #[cfg(target_os = "macos")]
 pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_ids: &[String]) -> bool {
-    if !crate::macos_file_provider::should_signal_working_set(item_ids) {
+    if !crate::file_provider_port::should_signal_working_set(item_ids) {
         return false;
     }
     // Audit P0 item 4: filter the signal to changes whose old-or-new parent
@@ -77,7 +77,7 @@ pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_
     let mut dropped = false;
     #[cfg(any(test, feature = "test-support"))]
     SIGNALS_ASKED.with(|asked| asked.set(asked.get() + 1));
-    match crate::finder_setup::macos_ports::signal_working_set() {
+    match crate::file_provider_port::signal_working_set() {
         Ok(outcome) => {
             tracing::debug!(
                 reason,
@@ -86,7 +86,7 @@ pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_
                 "signaled the File Provider working set"
             );
         }
-        Err(e) if crate::finder_setup::macos_ports::is_gate_busy(&e) => {
+        Err(e) if crate::file_provider_port::is_gate_busy(&e) => {
             dropped = true;
             tracing::warn!(
                 reason,

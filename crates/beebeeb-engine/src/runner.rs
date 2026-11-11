@@ -163,6 +163,8 @@ async fn run(
     }
     #[cfg(target_os = "windows")]
     crate::backup_protect::set_notifier(app.clone());
+    // macOS: the working-set signal goes through the host's File Provider bridge (a host without one: no-op).
+    crate::file_provider_port::install_from(app.as_ref());
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.

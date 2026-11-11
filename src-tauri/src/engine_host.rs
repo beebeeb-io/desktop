@@ -63,11 +63,30 @@ impl EngineHost for TauriHost {
         )
     }
 
+    // The runner's working-set signal: through the one bridge gate, as when the runner named `macos_ports` itself.
+    #[cfg(target_os = "macos")]
+    fn file_provider(&self) -> Option<Arc<dyn beebeeb_engine::file_provider_port::FileProviderPort>> {
+        Some(Arc::new(GatedBridge))
+    }
+
     // Task 1683 slice 2: the board the popover snapshot reads (managed app state); a runner without app state
     // (tests) keeps a private one.
     fn transfer_board(&self) -> Option<Arc<beebeeb_engine::transfer_progress::TransferBoard>> {
         self.app
             .try_state::<crate::popover_data::PopoverRuntime>()
             .map(|runtime| runtime.transfers.clone())
+    }
+}
+
+/// The macOS File Provider bridge behind its gate (`finder_setup::macos_ports`), as the engine's port.
+#[cfg(target_os = "macos")]
+struct GatedBridge;
+
+#[cfg(target_os = "macos")]
+impl beebeeb_engine::file_provider_port::FileProviderPort for GatedBridge {
+    fn signal_working_set(
+        &self,
+    ) -> Result<beebeeb_engine::file_provider_port::WorkingSetSignalOutcome, crate::finder_setup::error::FpError> {
+        crate::finder_setup::macos_ports::signal_working_set()
     }
 }

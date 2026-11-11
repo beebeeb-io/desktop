@@ -35,6 +35,7 @@ pub mod download_pin;
 pub mod drive_v2;
 pub mod engine_bridge;
 pub mod engine_status;
+pub mod file_provider_port;
 pub mod finder_setup;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod found_while_paused;

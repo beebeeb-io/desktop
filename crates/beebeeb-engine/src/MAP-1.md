@@ -26,6 +26,7 @@ Modules 1–34, sorted by path.
 | `download_pin.rs` | Task 1643: one download, one immutable version. | — |
 | `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | BackupChild (6), BackupFolderState (2), tighter_clock, PrepEnd (3), RangePrep (5), FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, … (+72 more) |
 | `engine_status.rs` | What the engine says about itself, and what the popover reads back (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` | — |
+| `file_provider_port.rs` | What the engine asks of the macOS File Provider bridge: one working-set signal, through the shell's bridge gate. | — |
 | `finder_setup.rs` | The part of the macOS Finder setup the configuration file stores: the failure record. | — |
 | `finder_setup/error.rs` | One NSError as the ObjC bridge saw it (spec §6.1), plus the errors we synthesize ourselves. | — |
 | `finder_show.rs` | Whether a Mac may ask for an item's Finder location: only for one of the person's own rows. | — |
@@ -39,4 +40,3 @@ Modules 1–34, sorted by path.
 | `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | CAP_WRITE, FP_TRASH_APPLE, FileProviderChangePayload (5), FileProviderItemPayload (22), IpcRequest (11), IpcResponse (10), file_entry_payload_for_db, persist_thumbnail_plaintext, thumbnail_variant, StagedContents, StagingDir, StagingDirRefusal (3), … (+10 more) |
 | `ipc_socket_framing_tests.rs` | End-to-end framing tests for the daemon IPC socket (task 1670 issue 3). | — |
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
-| `ipc_write_dedup_tests.rs` | Unit tests for the write-queue idempotency table (task 1684). | — |
