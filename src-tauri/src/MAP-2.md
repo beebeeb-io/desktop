@@ -12,7 +12,7 @@ Modules 48–97, sorted by path.
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `known_folder.rs` | The known folders a backup can be turned on for (Windows' Desktop, Documents, Pictures, Music, Videos and Downloads), and what is left of th | sanitize_device_segment, resolve_known_folder, resolve_known_folder_current |
 | `launch_wiring_tests.rs` | (no //! header) | — |
-| `lib.rs` | (no //! header) | AppState (5), Session (3), SpeedtestLatency (3), SpeedtestResult (3), run |
+| `lib.rs` | (no //! header) | AppState (5), Session (2), SpeedtestLatency (3), SpeedtestResult (3), run |
 | `lifecycle_log.rs` | The lifecycle log (spec 2026-10-06 §8). | — |
 | `link_health.rs` | Can Beebeeb reach its server, and when did it last get an answer? | — |
 | `linux_thumbnail.rs` | Freedesktop thumbnails for Linux: encode a synced file's preview into the user's thumbnail cache and delete it on removal. | — |
@@ -32,7 +32,7 @@ Modules 48–97, sorted by path.
 | `no_fetch_scope.rs` | Task 2284 A1.2: the no-fetch scope. | — |
 | `open_folder_tests.rs` | (no //! header) | — |
 | `os_state_reconcile.rs` | Task 2240 slice 2: the Windows tick's placeholder reconcile, decided from directory listings. | — |
-| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (5), Probe (5), Tally (10), Verdict (3), Outcome (1), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
+| `own_data_proof.rs` | Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the account no longer uses, refus | name_opens, REQUIRED_PROOFS, Listing (5), Probe (5), Tally (10), Verdict (3), Outcome (4), eligible, probe, verdict, listing_of, listing_from_status, … (+3 more) |
 | `owner_backfill_tests.rs` | (no //! header) | — |
 | `owner_keys.rs` | Opaque owner-key state and account-scoped transport. | AccountScope (4), normalize_wrap, OwnedKeyRecord (12), blocked_name |
 | `passkey_commands.rs` | v2 B15: the four passkey commands (crypto review 2026-11-08, rule 6), thin wrappers over core's passkey flows (`beebeeb_core::passkey`). | — |
