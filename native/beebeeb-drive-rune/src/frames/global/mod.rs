@@ -8,6 +8,7 @@
 //! The toasts of this board group (DW-0107 to DW-0109) are the Files frames' (`ui::toast`,
 //! `frames::files`): an action there shows them.
 
+pub mod samples;
 pub mod source;
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,7 @@ use crate::State;
 use crate::ui::banner::Run;
 use crate::ui::gate::Scene;
 pub use source::{GlobalFixture, GlobalSource, GlobalStatus, Quiet, StorageLevel};
-pub use view::{fit, over_body, under_toolbar};
+pub use view::{dims, fit, over_body, status_line, under_toolbar};
 
 /// The banners, in the order the board gives them the window: "One banner at a time, in this
 /// order: signed out, storage full, sync problem, backup problem, storage almost full, offline."
@@ -133,7 +134,7 @@ pub fn sentence_of(kind: BannerKind, status: &GlobalStatus) -> Vec<Run> {
 pub enum Intent {
     /// A board frame this group does not draw ("Opens where it is solved").
     Frame(&'static str),
-    /// The connection is back: open the file the preview could not show.
+    /// The connection is back: open the file (by id) the preview could not show (DW-0408).
     OpenPreview(String),
 }
 
@@ -152,8 +153,8 @@ struct Dismissed {
 pub struct Ui {
     pub source: Box<dyn GlobalSource>,
     dismissed: Dismissed,
-    /// The file a preview could not open without a connection (DW-0121): its name.
-    pub blocked_preview: Option<String>,
+    /// The file a preview could not open without a connection (DW-0121): its id and its name.
+    pub blocked_preview: Option<(String, String)>,
     /// The last things asked for, oldest first (at most [`INTENTS_KEPT`]).
     pub intents: Vec<Intent>,
     /// A board frame that draws only the upper part of the window (`.mk-cropfade.at-bottom`):
@@ -286,8 +287,8 @@ impl State {
     }
 
     /// A file that is not on this PC was opened without a connection (DW-0121).
-    pub fn block_preview(&mut self, name: impl Into<String>) {
-        self.global.blocked_preview = Some(name.into());
+    pub fn block_preview(&mut self, id: impl Into<String>, name: impl Into<String>) {
+        self.global.blocked_preview = Some((id.into(), name.into()));
     }
 
     /// Esc, or the panel's cross: back to the list (DW-1108).
@@ -297,12 +298,12 @@ impl State {
 
     /// Try again: "Checks the connection; opens the file if it's back".
     pub fn retry_blocked_preview(&mut self) -> bool {
-        let Some(name) = self.global.blocked_preview.clone() else {
+        let Some((id, _)) = self.global.blocked_preview.clone() else {
             return false;
         };
         if self.global.source.check_connection() {
             self.global.blocked_preview = None;
-            self.global.ask(Intent::OpenPreview(name));
+            self.global.ask(Intent::OpenPreview(id));
             return true;
         }
         false
@@ -316,6 +317,16 @@ fn act_banner(s: &mut State, _: &mut Tx) {
 fn dismiss_banner(s: &mut State, tx: &mut Tx) {
     if s.global.dismiss() {
         // The cross is gone with the banner: the list takes the keyboard back.
+        tx.focus("rows", false);
+    }
+}
+
+fn retry_preview(s: &mut State, _: &mut Tx) {
+    s.retry_blocked_preview();
+}
+
+fn close_preview(s: &mut State, tx: &mut Tx) {
+    if s.close_blocked_preview() {
         tx.focus("rows", false);
     }
 }
@@ -336,4 +347,20 @@ pub const FRAMES: &[Scene<State>] = &[
     ("DW-0105", |s| scene(s, source::board::signed_out())),
     ("DW-0106", |s| scene(s, source::board::backup_problem())),
     ("DW-0118", |s| scene(s, source::board::loading())),
+    // DW-0121: offline, and Contract draft.pdf (online only) was opened.
+    ("DW-0121", |s| {
+        s.actions = crate::frames::files::Actions::new(Box::new(samples::SampleFiles::offline()));
+        s.select_only(6);
+        s.global = Ui::new(Box::new(GlobalFixture::of(source::board::offline())));
+        let item = &s.listing.items[6];
+        s.global.blocked_preview = Some((item.id.clone(), item.name.clone()));
+    }),
+    // DW-0114: a new account, nothing in it yet.
+    ("DW-0114", |s| {
+        s.source = Box::new(samples::EmptyDrive);
+        (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
+        (s.storage, s.storage_known) = (samples::STORAGE, true);
+        s.actions = crate::frames::files::Actions::new(Box::new(samples::SampleFiles::new_account()));
+        s.clear_selection();
+    }),
 ];

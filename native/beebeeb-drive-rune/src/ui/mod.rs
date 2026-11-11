@@ -2,6 +2,7 @@
 
 pub mod au;
 pub mod banner;
+pub mod blocked_preview;
 pub mod button;
 pub mod caption;
 pub mod detail_pane;
@@ -22,6 +23,7 @@ pub mod settings_shell;
 pub mod sidebar;
 pub mod status_bar;
 pub mod status_line;
+pub mod status_offline;
 pub mod toast;
 pub mod toolbar;
 pub mod window;

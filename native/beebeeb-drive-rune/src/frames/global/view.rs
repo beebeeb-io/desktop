@@ -2,11 +2,11 @@
 
 use rune::{El, el};
 
-use super::{BannerKind, Ui, act_banner, dismiss_banner, sentence_of, source};
+use super::{BannerKind, Ui, act_banner, close_preview, dismiss_banner, retry_preview, sentence_of, source};
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::banner::{self, Banner, Run, Tone};
-use crate::ui::{global_icons, load_strip};
+use crate::ui::{blocked_preview, global_icons, load_strip, status_offline};
 
 fn banner_el(kind: BannerKind, status: &source::GlobalStatus, t: &Theme) -> El {
     let (tone, icon) = match kind {
@@ -84,9 +84,61 @@ pub fn under_toolbar(s: &State, t: &Theme) -> Option<El> {
     status.loading.as_ref().map(|loading| strip_el(loading, t))
 }
 
-/// What sits over the window's body (the sidebar and the content area, under the caption).
-pub fn over_body(_s: &State, _t: &Theme) -> Option<El> {
-    None
+/// What sits over the window's body (the sidebar and the content area, under the caption): the
+/// preview panel that needs a connection, on the scrim. `window` is the window's size.
+pub fn over_body(s: &State, window: (f32, f32), t: &Theme) -> Option<El> {
+    let (_, name) = s.global.blocked_preview.as_ref()?;
+    let card = blocked_preview::blocked_preview(
+        name,
+        &global_icons::OFFLINE,
+        "Needs a connection",
+        &format!("{name} isn't on this PC yet. Connect to open it."),
+        ("Try again", retry_preview),
+        close_preview,
+        t,
+    );
+    // The board puts the panel at 420, 150 of a 1278 x 766 body: left of the middle and above
+    // it, by the same shares at any size.
+    let (w, h) = (window.0, (window.1 - crate::TITLEBAR_H).max(0.0));
+    let left = ((w - blocked_preview::CARD_W) * (420.0 / 798.0)).max(0.0);
+    let top = ((h - blocked_preview::CARD_H) * (150.0 / 436.0)).max(0.0);
+    Some(
+        el().key("preview-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .child(
+                el().key("scrim")
+                    .a11y_hidden()
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .fill(crate::shell::registry::scrim(t.dark)),
+            )
+            .child(
+                el().key("preview-place")
+                    .absolute(left, top)
+                    // The window behind is inert while the panel is open; Esc closes it.
+                    .modal(false, |s: &mut State| {
+                        s.close_blocked_preview();
+                    })
+                    .child(card),
+            ),
+    )
+}
+
+/// The status line while the sync state says there is no connection: a grey dot and "Offline".
+/// `None`: the Files window's own.
+pub fn status_line(state: Option<&str>, details: &str, t: &Theme) -> Option<El> {
+    (state == Some(super::samples::OFFLINE)).then(|| status_offline::status_offline(details, t))
+}
+
+/// Is this row the one that could not open (drawn at 45 %, `.mk-row.is-dim`)?
+pub fn dims(s: &State, id: &str) -> bool {
+    s.global
+        .blocked_preview
+        .as_ref()
+        .is_some_and(|(blocked, _)| blocked == id)
 }
 
 /// The body in its place in the window. In the app it fills what the caption leaves. A board

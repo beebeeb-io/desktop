@@ -12,7 +12,12 @@ use rune::{Cx, El, Tx, col, el, row};
 /// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
 pub fn pc_summary(s: &State) -> String {
     if s.listing.items.is_empty() {
-        return "Nothing in this folder yet".to_string();
+        // The whole account is empty (DW-0114), or this folder is (DW-1106).
+        return if s.listing.folder.id.is_none() {
+            "Nothing on this PC yet".to_string()
+        } else {
+            "Nothing in this folder yet".to_string()
+        };
     }
     let count = |status: &str| {
         s.listing
@@ -122,12 +127,17 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
 }
 
 /// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
-fn empty_folder(t: &Theme) -> El {
+fn empty_folder(root: bool, t: &Theme) -> El {
     let body = empty::empty_state(
         "empty",
         &icons::FILES,
         "Nothing here yet",
-        "Add files or photos, and they're encrypted on this PC before they upload.",
+        // The board's two sentences: a new account's Files (DW-0114), an empty folder (DW-1106).
+        if root {
+            "Add files or photos. They're encrypted on this PC before they upload."
+        } else {
+            "Add files or photos, and they're encrypted on this PC before they upload."
+        },
         t,
     )
     .child(
@@ -172,7 +182,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
     if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
-        body = body.child(empty_folder(&t));
+        body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
     } else {
         body = body.child(
             col()
@@ -214,7 +224,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 Some(state) => format!("{state}. {details}"),
                 None => details.clone(),
             };
-            status_line::status_line(state.as_deref(), &details, &t)
+            // Without a connection the line says so (`frames::global`, DW-0121).
+            crate::frames::global::status_line(state.as_deref(), &details, &t)
+                .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)
                 .description("Shows sync status")
@@ -226,7 +238,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
 
     let crop = s.actions.board_crop_top;
-    let mut body = row().key("body").w_full().child(sidebar::sidebar(s, &t)).child(main);
+    let mut body = row()
+        .key("body")
+        .w_full()
+        .child(sidebar::sidebar(s, &t))
+        .child(main)
+        // What is in front of the whole body: a preview that needs a connection (`frames::global`).
+        .children(crate::frames::global::over_body(s, s.actions.window, &t));
     body = if crop > 0.0 {
         // A board frame that draws the lower part of the window only (`.mk-cropfade.at-top`): the
         // body keeps its full height and moves up under the caption, its top fading into it.
