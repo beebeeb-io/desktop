@@ -2,3 +2,4 @@
 # Use -text (rather than binary) so textual fixtures retain readable diffs.
 fixtures/** -text
 tests/fixtures/** -text
+src-tauri/src/update_window/fixtures/** -text

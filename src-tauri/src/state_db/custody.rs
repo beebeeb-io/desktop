@@ -226,13 +226,132 @@ impl StateDb {
             .optional()?
             .is_some())
     }
-    /// Task 2446: record that the healing snapshot succeeded (or was never needed).
+    /// Task 2446: record that the healing snapshot succeeded (or was never needed). The retry mark goes with it.
     pub fn mark_name_heal_done(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute_batch(
+            "BEGIN;
+             INSERT INTO sync_state (key, value) VALUES ('name_heal_2446', '1') ON CONFLICT(key) DO NOTHING;
+             DELETE FROM sync_state WHERE key = 'name_heal_2446_retry';
+             COMMIT;",
+        )
+    }
+    /// Task 2446: what the last healing snapshot that did not complete left behind, or `None` when none failed yet.
+    /// A value this build cannot read counts as none, so the heal is asked for again at once.
+    pub fn name_heal_retry(&self) -> Result<Option<NameHealRetry>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Self::name_heal_retry_conn(&conn)
+    }
+    fn name_heal_retry_conn(conn: &Connection) -> Result<Option<NameHealRetry>> {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'name_heal_2446_retry'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored.as_deref().and_then(NameHealRetry::parse))
+    }
+    /// Task 2446: a healing snapshot failed as a whole (`rows_left` is `None`: the count an earlier one left is
+    /// kept), or was applied but left `rows_left` rows as they were. Counts it and records when the next one may be
+    /// asked for (`NameHealRetry::delay_secs`), in the state database, so a restart keeps the wait.
+    pub fn note_name_heal_failed(&self, now: i64, rows_left: Option<u32>) -> Result<NameHealRetry> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let before = Self::name_heal_retry_conn(&conn)?;
+        let failures = before.map_or(0, |retry| retry.failures).saturating_add(1);
+        let retry = NameHealRetry {
+            failures,
+            next_at: now.saturating_add(NameHealRetry::delay_secs(failures)),
+            rows_left: rows_left.unwrap_or_else(|| before.map_or(0, |retry| retry.rows_left)),
+        };
         conn.execute(
-            "INSERT INTO sync_state (key, value) VALUES ('name_heal_2446', '1') ON CONFLICT(key) DO NOTHING",
-            [],
+            "INSERT INTO sync_state (key, value) VALUES ('name_heal_2446_retry', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![retry.stored()],
         )?;
-        Ok(())
+        Ok(retry)
+    }
+}
+
+/// Task 2446: the wait between two healing snapshots that did not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameHealRetry {
+    /// Healing snapshots in a row that failed or left rows as they were.
+    pub failures: u32,
+    /// The second from which the next one may be asked for.
+    pub next_at: i64,
+    /// Rows the last one left as they were (0 when it failed as a whole). While any is left the heal stays owed,
+    /// whether or not a blocked record still exists.
+    pub rows_left: u32,
+}
+
+impl NameHealRetry {
+    /// The first wait.
+    pub const FIRST_DELAY_SECS: i64 = 60;
+    /// The longest wait.
+    pub const MAX_DELAY_SECS: i64 = 60 * 60;
+
+    /// One minute after the first failure, twice as long after each further one, at most an hour.
+    pub fn delay_secs(failures: u32) -> i64 {
+        let doublings = failures.saturating_sub(1).min(16);
+        (Self::FIRST_DELAY_SECS << doublings).min(Self::MAX_DELAY_SECS)
+    }
+
+    /// Whether the next healing snapshot may be asked for at `now`. A mark further ahead than the longest wait was
+    /// written by a clock that has since been set back: it is not believed.
+    pub fn is_due(&self, now: i64) -> bool {
+        now >= self.next_at || self.next_at > now.saturating_add(Self::MAX_DELAY_SECS)
+    }
+
+    fn stored(&self) -> String {
+        format!("{}:{}:{}", self.failures, self.next_at, self.rows_left)
+    }
+
+    fn parse(stored: &str) -> Option<Self> {
+        let mut parts = stored.split(':');
+        let retry = Self {
+            failures: parts.next()?.parse().ok()?,
+            next_at: parts.next()?.parse().ok()?,
+            rows_left: parts.next()?.parse().ok()?,
+        };
+        parts.next().is_none().then_some(retry)
+    }
+}
+
+#[cfg(test)]
+mod name_heal_retry_tests {
+    use super::NameHealRetry;
+
+    /// The wait: one minute, doubling, at most an hour; a mark a clock that ran ahead wrote is not believed.
+    #[test]
+    fn the_wait_doubles_from_a_minute_to_an_hour() {
+        let waits: Vec<i64> = (1..=9).map(NameHealRetry::delay_secs).collect();
+        assert_eq!(waits, vec![60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
+        assert_eq!(NameHealRetry::delay_secs(0), 60);
+        assert_eq!(NameHealRetry::delay_secs(u32::MAX), 3600, "no overflow at any count");
+
+        let retry = NameHealRetry {
+            failures: 1,
+            next_at: 1060,
+            rows_left: 0,
+        };
+        assert!(!retry.is_due(1059));
+        assert!(retry.is_due(1060));
+        assert!(
+            !retry.is_due(1060 - 3600),
+            "exactly the longest wait ahead is a real mark"
+        );
+        assert!(
+            retry.is_due(1060 - 3601),
+            "further ahead than the longest wait: the clock was set back"
+        );
+        assert_eq!(NameHealRetry::parse(&retry.stored()), Some(retry));
+        for unreadable in ["", "1:2", "1:2:3:4", "a:2:3", "1:2:-3"] {
+            assert_eq!(
+                NameHealRetry::parse(unreadable),
+                None,
+                "{unreadable:?} counts as no mark"
+            );
+        }
     }
 }

@@ -210,12 +210,22 @@ pub async fn sync_tick_outcome(
     // Files placeholder of a remotely-deleted row — not just its DB row (task
     // 0806). Unused on macOS/Linux (the OS extension owns the namespace there);
     // `#[cfg_attr]` silences the unused warning on those builds.
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    sync_root: &Path,
 ) -> anyhow::Result<SyncTickOutcome> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    sync_tick_outcome_at(bridge, sync_root, now_secs).await
+}
+
+/// [`sync_tick_outcome`] at a given second: the whole tick body. The tick reads the time once, here, so a test
+/// moves it.
+pub(crate) async fn sync_tick_outcome_at(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    now_secs: i64,
+) -> anyhow::Result<SyncTickOutcome> {
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
     let mut applied_item_ids: Vec<String> = Vec::new();
     bridge.maintain_owned_keys(now_secs).await?;
@@ -254,20 +264,12 @@ pub async fn sync_tick_outcome(
     // authoritative, so a re-bootstrap can never lose data.
 
     // Task 2446: builds up to 0.8.24 blocked every row of a snapshot the server sent with null request fields, so
-    // a state database may hold rows with no name. Once per database: when such rows exist, ask for one snapshot,
-    // which prepares every row again (`prepare_owned_rows` lifts a block the row no longer earns; nothing here
-    // lifts one). It is marked done only after that snapshot succeeded, so a failed one is asked for again on the
-    // next pass; a database with no such row is marked done at once and takes no extra snapshot.
-    let heals_names = if bridge.db().name_heal_done()? {
-        false
-    } else if bridge.db().has_blocked_or_nameless_rows()? {
-        tracing::info!("sync_tick: rows without a name; asking for one snapshot to read them again");
-        bridge.db().request_resnapshot()?;
-        true
-    } else {
-        bridge.db().mark_name_heal_done()?;
-        false
-    };
+    // a state database may hold rows with no name. Once per database: when such rows exist, this tick takes one
+    // snapshot, which prepares every row again (`prepare_owned_rows` lifts a block the row no longer earns; nothing
+    // here lifts one). It is done only after a snapshot was applied with no row left as it was; until then it is
+    // asked for again after a wait that doubles, kept in the state database (`name_heal_is_due`). A database with
+    // no such row is marked done at once and takes no extra snapshot.
+    let heals_names = name_heal_is_due(bridge.db(), now_secs)?;
 
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
@@ -284,15 +286,17 @@ pub async fn sync_tick_outcome(
         bridge.db().peek_resnapshot_request()?
     };
     #[cfg(target_os = "macos")]
-    let needs_resnapshot = resnapshot_request.is_some();
+    let resnapshot_requested = resnapshot_request.is_some();
     #[cfg(not(target_os = "macos"))]
-    let needs_resnapshot = bridge.db().take_needs_resnapshot()?;
+    let resnapshot_requested = bridge.db().take_needs_resnapshot()?;
+    // The heal asks through no stored request: a snapshot only it asked for never ends the tick when it fails.
+    let needs_resnapshot = resnapshot_requested || heals_names;
 
     let cursor = match bridge.db().get_sync_cursor()? {
         // Never bootstrapped, or a re-snapshot was explicitly requested → full
         // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
         None => {
-            let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            let pass = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts, heals_names).await?;
             #[cfg(target_os = "macos")]
             {
                 bridge.failed_snapshots.store(0, Ordering::SeqCst);
@@ -301,9 +305,9 @@ pub async fn sync_tick_outcome(
                 }
             }
             if heals_names {
-                bridge.db().mark_name_heal_done()?;
+                settle_name_heal(bridge.db(), now_secs, pass.rows_left)?;
             }
-            applied_item_ids.extend(applied);
+            applied_item_ids.extend(pass.applied);
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
@@ -312,8 +316,8 @@ pub async fn sync_tick_outcome(
         }
         Some(c) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
-            match bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await {
-                Ok(applied) => {
+            match bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts, heals_names).await {
+                Ok(pass) => {
                     #[cfg(target_os = "macos")]
                     {
                         bridge.failed_snapshots.store(0, Ordering::SeqCst);
@@ -322,16 +326,29 @@ pub async fn sync_tick_outcome(
                         }
                     }
                     if heals_names {
-                        bridge.db().mark_name_heal_done()?;
+                        settle_name_heal(bridge.db(), now_secs, pass.rows_left)?;
                     }
-                    applied_item_ids.extend(applied);
+                    applied_item_ids.extend(pass.applied);
                     return Ok(SyncTickOutcome {
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
                     });
                 }
-                Err(e) => after_failed_snapshot(bridge, c, e.into())?,
+                Err(e) => {
+                    let error: anyhow::Error = e.into();
+                    if heals_names {
+                        name_heal_snapshot_failed(bridge, now_secs, &error)?;
+                    }
+                    if heals_names && !resnapshot_requested {
+                        // Task 2446 (review of PR 289, P1): only the heal asked for this snapshot, and the heal can
+                        // wait. The tick goes on from `c` with the ops pull, and the queue runs after it: what
+                        // synced before the heal existed still syncs while its snapshot fails.
+                        c
+                    } else {
+                        after_failed_snapshot(bridge, c, error)?
+                    }
+                }
             }
         }
         Some(c) => c,
@@ -476,7 +493,10 @@ pub(super) async fn bootstrap_from_snapshot(
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> Result<Vec<String>, EngineError> {
+    // Task 2446: the healing snapshot leaves a row it cannot store as it was and applies the rest ([`LeftRows`]).
+    // Any other snapshot fails as a whole on such a row, as before.
+    heals_names: bool,
+) -> Result<SnapshotPass, EngineError> {
     // `now_secs` is captured at tick start, BEFORE this request — so it is the
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
@@ -488,8 +508,18 @@ pub(super) async fn bootstrap_from_snapshot(
         .into_iter()
         .map(|p| p.row)
         .collect();
+    let mut left = heals_names.then(LeftRows::default);
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
+    let mut applied = apply_snapshot_leaving(
+        bridge,
+        sync_root,
+        &snapshot,
+        now_secs,
+        fetched_at,
+        conflicts,
+        left.as_mut(),
+    )?;
+    let rows_left = left.map_or(0, |left| left.count());
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
     // one more; at the 10th it parks with its bytes. The park changes how its item is
     // presented (spec §9.1), and the snapshot did not list the file, so its id joins the
@@ -499,7 +529,7 @@ pub(super) async fn bootstrap_from_snapshot(
         log_parked(&op_id, file_id.as_deref(), ParkReason::BaseUnknown);
         applied.extend(file_id);
     }
-    Ok(applied)
+    Ok(SnapshotPass { applied, rows_left })
 }
 
 /// Reconcile the local mirror against an already-fetched snapshot:
@@ -525,6 +555,28 @@ pub(super) fn apply_snapshot(
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
+    apply_snapshot_leaving(
+        bridge,
+        sync_root,
+        snapshot,
+        now_secs,
+        snapshot_fetched_at,
+        conflicts,
+        None,
+    )
+}
+
+/// [`apply_snapshot`]; with `left` (the healing snapshot, task 2446) a row that cannot be stored does not fail the
+/// pass: it joins [`LeftRows`] with every row under it, stays as it is stored, and is never pruned.
+pub(super) fn apply_snapshot_leaving(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    snapshot: &crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    snapshot_fetched_at: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+    mut left: Option<&mut LeftRows>,
+) -> Result<Vec<String>, EngineError> {
     // Task 1697 review fix (T3): every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
     let mut applied: Vec<String> = Vec::new();
@@ -541,13 +593,19 @@ pub(super) fn apply_snapshot(
     // Task 2413: nodes not placed in the mirror (the store refused a row it did not hold): their rows are not placed
     // either, never at the top level. They stay in `seen`, so nothing stored for them is pruned.
     let mut unplaced: HashSet<String> = HashSet::new();
-
     for f in order {
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
         }
         if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        // Task 2446: a row under a row that was left is left too. It is seen (just above), so it is never pruned.
+        if let Some(left) = left.as_deref_mut()
+            && f["parent_id"].as_str().is_some_and(|pid| left.ids.contains(pid))
+        {
+            left.ids.insert(file_id.to_string());
             continue;
         }
         if f["parent_id"].as_str().is_some_and(|pid| unplaced.contains(pid)) {
@@ -585,9 +643,25 @@ pub(super) fn apply_snapshot(
             None => String::new(),
         };
 
-        if let Some((rel_path, _kind)) =
-            process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
-        {
+        let stored = store_snapshot_row(bridge, f, &parent_rel_path, now_secs, conflicts);
+        let placed = match stored {
+            Ok(placed) => placed,
+            Err(error) => match left.as_deref_mut() {
+                // Task 2446: the healing snapshot goes on without this row.
+                Some(left) => {
+                    left.leave(file_id);
+                    continue;
+                }
+                None => return Err(error),
+            },
+        };
+        if let Some((rel_path, _kind)) = placed {
+            // Task 2446: read, but kept at its label by a change of this PC: the heal is owed until that is gone.
+            if let Some(left) = left.as_deref_mut()
+                && waits_for_its_change(bridge.db(), file_id, &rel_path)?
+            {
+                left.waiting += 1;
+            }
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }

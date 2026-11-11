@@ -24,25 +24,49 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+# Nothing by default: each job names what it needs. Only `upload` may write to the release, and it holds no key.
+permissions: {}
 
 jobs:
   sign:
     name: Sign Beebeeb.app.tar.gz
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The updater key is read only through the GitHub environment `desktop-release` (its deployment
     # branches and protection rules), like the `build` job of release.yml. See task 2451.
     environment: desktop-release
+    permissions:
+      contents: read
     steps:
+      # The tag reaches the shell as a variable, never as text pasted into the script, and only a release tag
+      # passes.
+      - name: Check the release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release_tag must look like desktop-v0.8.5"
+            exit 1
+          fi
+
+      # Only the signer's two pinned files (scripts/updater-signer): its package.json and its lockfile.
+      - name: Checkout the signer's lockfile
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/updater-signer
+          sparse-checkout-cone-mode: false
+
       - name: Download updater artifact from the release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           mkdir -p dl
-          gh release download "${{ inputs.release_tag }}" \
-            --repo "${{ github.repository }}" \
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --pattern 'Beebeeb.app.tar.gz' \
             --dir dl \
             --clobber
@@ -51,15 +75,14 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
-      # The signer is installed here, in a step that does not hold the key: nothing is downloaded
-      # in the step that does.
-      - name: Install the Tauri CLI (no key in this step)
+      # The signer is installed here, in a step that does not hold the key, from the committed lockfile: the
+      # install fails when a package differs from the hash recorded there. Nothing is downloaded in the step
+      # that holds the key.
+      - name: Install the Tauri CLI from the lockfile (no key in this step)
+        working-directory: scripts/updater-signer
         run: |
           set -euo pipefail
-          mkdir signer
-          cd signer
-          printf '{"private":true}\n' > package.json
-          bun add --exact @tauri-apps/cli@2.11.4
+          bun install --frozen-lockfile --ignore-scripts
           ./node_modules/.bin/tauri --version
 
       - name: Sign with the updater private key
@@ -68,16 +91,52 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          # The key and its password are read from the environment by the signer; they are not arguments.
-          ./signer/node_modules/.bin/tauri signer sign dl/Beebeeb.app.tar.gz
-          test -f dl/Beebeeb.app.tar.gz.sig
+          # The key and its password are read from the environment by the signer; they are not arguments. Its
+          # output is dropped: it would print the signature.
+          ./scripts/updater-signer/node_modules/.bin/tauri signer sign dl/Beebeeb.app.tar.gz > /dev/null
+          test -s dl/Beebeeb.app.tar.gz.sig
+
+      - name: Hand the signature to the upload job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-updater-signature
+          path: dl/Beebeeb.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    name: Upload the signature to the release
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No environment and no key here: this job only writes the one file the `sign` job made.
+    permissions:
+      contents: write
+    steps:
+      - name: Check the release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release_tag must look like desktop-v0.8.5"
+            exit 1
+          fi
+
+      - name: Fetch the signature
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-updater-signature
+          path: dl
 
       - name: Upload signature to the release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          gh release upload "${{ inputs.release_tag }}" \
+          test -s dl/Beebeeb.app.tar.gz.sig
+          gh release upload "$RELEASE_TAG" \
             dl/Beebeeb.app.tar.gz.sig \
-            --repo "${{ github.repository }}" \
+            --repo "$GITHUB_REPOSITORY" \
             --clobber

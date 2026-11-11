@@ -292,6 +292,9 @@ mod tests {
     mod unsent_retry;
     // Task 2413: a server row is stored only at a path of plain names; the one map onto the sync root.
     mod name_heal_2446;
+    // Task 2446 (review of PR 289): sync goes on while the healing snapshot fails; the wait; rows left as they were.
+    mod name_heal_sync_2446;
+    pub(super) use name_heal_sync_2446::snapshot_row_fault;
     mod snapshot_names_2446;
     mod stored_path_2413;
     #[cfg(windows)]
@@ -518,6 +521,9 @@ pub use landing::{
     version_conflict_feed_from_db,
 };
 
+// Task 2446: when the snapshot that reads names again is due, and the rows it leaves.
+mod name_heal;
+use name_heal::*;
 mod syncflow;
 #[cfg(test)]
 pub use syncflow::sync_tick;
