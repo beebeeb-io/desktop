@@ -204,7 +204,7 @@ pub fn macos_ensure_private_staging_dir(dir: &std::path::Path) -> std::io::Resul
 /// rest from being purged. A missing `dir` (nothing hydrated yet this run) is
 /// not an error — returns `Ok(0)`.
 #[cfg(target_os = "macos")]
-pub fn macos_purge_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<usize> {
+pub(crate) fn macos_purge_hydrate_cache_dir(dir: &std::path::Path) -> std::io::Result<usize> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),

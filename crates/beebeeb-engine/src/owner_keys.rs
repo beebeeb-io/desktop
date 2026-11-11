@@ -224,10 +224,9 @@ mod scope;
 pub use scope::{AccountScope, normalize_wrap};
 
 #[allow(unused_imports)]
-pub use requests::{
-    RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope,
-    request_upload_fields,
-};
+pub(crate) use requests::{RequestKeys, rename_material};
+#[allow(unused_imports)]
+pub use requests::{RequestName, RequestNameKey, block_malformed_row, request_envelope, request_upload_fields};
 
 /// The item's real kind as this device last stored it. A key record does not
 /// carry one, and assuming a file would ask the resolver for the wrong L7 kind.
@@ -886,7 +885,7 @@ impl crate::engine_bridge::EngineBridge {
         Ok(prepared)
     }
 
-    pub async fn resolved_owned_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
+    pub(crate) async fn resolved_owned_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
         let scope = self.owner_key_scope();
         scope.check()?;
         let master = MasterKey::from_bytes(*self.api().master_key());
@@ -906,7 +905,10 @@ impl crate::engine_bridge::EngineBridge {
     /// request key `C`, the name key is whatever authenticates the served name.
     /// The owner's request list is cached per bridge (P2-2), so two calls on
     /// this bridge cost one GET; a prepare pass loads its own copy.
-    pub async fn request_row_keys(&self, row: &Value) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
+    pub(crate) async fn request_row_keys(
+        &self,
+        row: &Value,
+    ) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
         let master = MasterKey::from_bytes(*self.api().master_key());
         if let Some(found) = self
             .request_keys
@@ -926,7 +928,7 @@ impl crate::engine_bridge::EngineBridge {
         found.ok_or_else(|| anyhow::anyhow!("request keys are unavailable"))
     }
 
-    pub async fn request_content_key(&self, row: &Value) -> anyhow::Result<FileKey> {
+    pub(crate) async fn request_content_key(&self, row: &Value) -> anyhow::Result<FileKey> {
         self.request_row_keys(row).await.map(|found| found.content_key)
     }
 
@@ -957,7 +959,7 @@ impl crate::engine_bridge::EngineBridge {
         Ok(confirmed)
     }
 
-    pub async fn shared_folder_custody_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
+    pub(crate) async fn shared_folder_custody_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
         let scope = self.owner_key_scope();
         let mut batch = Batch::default();
         batch.custody(&scope, id).await?;
