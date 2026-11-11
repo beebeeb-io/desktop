@@ -21,11 +21,10 @@ mod source;
 mod theme;
 mod ui;
 
-use rune::tok::Family;
-use rune::{App, Cx, El, Key, KeyEvent, TextEdit, Titlebar, Tx, col, el, row, text};
+use rune::{App, Cx, El, Key, KeyEvent, TextEdit, Titlebar, Tx, col, el, row};
 
 use source::{BoardFixtureSource, DriveSource, LargeFixtureSource, Listing};
-use theme::tokens::{self, Theme, radius, space, type_};
+use theme::tokens::{self};
 use ui::sidebar::SidebarSection;
 
 // Re-export AppSpec from the tooling module (used by both App and tests)

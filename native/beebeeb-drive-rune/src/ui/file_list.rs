@@ -13,7 +13,7 @@
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, radius, space, type_};
+use crate::theme::tokens::{self, Theme, space, type_};
 use chrono::Timelike;
 use rune::{Color, Cx, El, col, el, icon, row, text};
 use std::borrow::Cow;
@@ -85,7 +85,7 @@ pub fn column_headers(t: &Theme) -> El {
 }
 
 /// The virtual-scrolled file list.
-pub fn file_list(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
+pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
     let count = s.listing.items.len();
     let selection_color = t.selection_row;
     let hover_color = t.hover;

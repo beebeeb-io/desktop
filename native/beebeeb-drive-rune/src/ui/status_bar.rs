@@ -2,9 +2,8 @@
 //!
 //! Board: 28 pt tall, paper-2 bg, green dot + status text in 11.5px/400.
 
-use crate::theme::icons;
 use crate::theme::tokens::{Theme, space, type_};
-use rune::{El, el, icon, row, text};
+use rune::{El, el, row, text};
 
 const STATUS_H: f32 = 28.0;
 

@@ -13,8 +13,8 @@
 
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, radius, space, type_};
-use rune::{Color, El, col, el, icon, row, text};
+use crate::theme::tokens::{Theme, radius, space, type_};
+use rune::{El, col, el, icon, row, text};
 
 const PANE_W: f32 = 268.0;
 const PREVIEW_H: f32 = 170.0;

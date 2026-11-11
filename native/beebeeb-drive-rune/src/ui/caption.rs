@@ -6,7 +6,7 @@
 
 use crate::State;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, radius, space, type_};
+use crate::theme::tokens::{self, Theme, space, type_};
 use rune::{Cx, El, el, icon, row, text};
 
 const TITLEBAR_H: f32 = 32.0;

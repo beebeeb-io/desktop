@@ -9,9 +9,8 @@
 //! - Account row: avatar 26x26, name 12/600, email 11/400
 
 use crate::State;
-use crate::source::StorageSummary;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, radius, space, type_};
+use crate::theme::tokens::{Theme, radius, space, type_};
 use rune::{Color, El, col, el, icon, row, text};
 
 const SIDEBAR_W: f32 = 210.0;

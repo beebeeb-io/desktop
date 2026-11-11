@@ -6,6 +6,8 @@
 //! - `LargeFixtureSource`: 5,000 items for scrolling/perf tests.
 //! - (future) `EngineSource`: the real `drive_v2::model` over `StateDb`, no Tauri.
 
+#![allow(dead_code)] // Fields are part of the data contract; not all are read by every component yet.
+
 use rune::Color;
 
 /// A file or folder in a listing.

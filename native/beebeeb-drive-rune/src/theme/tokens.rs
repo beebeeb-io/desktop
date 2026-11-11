@@ -9,8 +9,9 @@
 //! - No blue warning hue, selection neutral, never Amber for selection.
 //! - File-type icons keep their colours from the ONE shared palette.
 
-use rune::tok::Family;
-use rune::{Color, TextStyle, oklch};
+#![allow(dead_code)] // Tokens are generated; not all are used yet.
+
+use rune::{Color, oklch};
 
 // ---------------------------------------------------------------------------
 // Accent

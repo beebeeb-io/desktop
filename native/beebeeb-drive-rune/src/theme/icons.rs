@@ -5,6 +5,8 @@
 //!
 //! DO NOT EDIT BY HAND — extracted by Playwright from `design/desktop-v2/board.html`.
 
+#![allow(dead_code)] // Icons are extracted; not all are used yet.
+
 use rune::Icon;
 
 // ---------------------------------------------------------------------------

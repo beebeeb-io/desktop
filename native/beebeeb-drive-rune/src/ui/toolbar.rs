@@ -15,7 +15,7 @@
 use crate::State;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, space, type_};
-use rune::{Color, El, TextEdit, col, el, icon, row, text, text_input};
+use rune::{Color, El, col, el, icon, row, text, text_input};
 
 pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     let item_count = s.listing.items.len();
