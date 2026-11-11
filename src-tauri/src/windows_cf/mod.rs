@@ -63,7 +63,7 @@ mod registration;
 use notify_slot::NOTIFY_TX;
 pub(crate) use notify_slot::notify_sender;
 pub use notify_slot::set_notify_sender;
-pub use provider_identity::*;
+pub use provider_identity::{BEEBEEB_PROVIDER_GUID, PROVIDER_ID, PROVIDER_VERSION};
 pub(crate) use registration::*;
 #[cfg(test)]
 mod reconcile_tests;
