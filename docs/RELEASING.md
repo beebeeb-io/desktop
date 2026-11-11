@@ -233,7 +233,7 @@ it accepts (`src-tauri/src/update_window/trust.rs` holds the rules, `flow.rs` th
   `desktop/<latest|beta|alpha>.json`; a missing or wrong signature, another channel or product, or any other answer
   is an error and nothing is installed.
 - **Signed-time bounds of a v2 manifest** (the `timestamp:` of its signature's trusted comment, unix seconds).
-  Refused when earlier than `V2_KEY_NOT_BEFORE` (`2026-11-11T00:00:00Z`, the day the v2 key was made: one fixed
+  Refused when earlier than `V2_KEY_CREATED` (`2026-11-11T00:00:00Z`, the day the v2 key was made: one fixed
   value for the whole 0.8.x line, so the order in which 0.8.x and 0.9.x builds are published never strands an
   install), when more than 24 hours ahead of the PC's clock (never recorded), or when older than the channel's
   replay mark. The mark is the newest signed time accepted on that channel, kept in `update-v2-seen.json` beside the

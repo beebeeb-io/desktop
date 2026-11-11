@@ -1,5 +1,8 @@
-//! What must be quiet before a native installer (0.9.0 or later) replaces this app in place: no upload cut
-//! mid-file, the sync engine stopped, the Cloud Files provider disconnected (bridge plan 2026-11-11, item 2).
+//! What must be quiet before a native installer (0.9.0 or later) replaces this app in place: uploads in flight
+//! finished, the sync engine stopped, the Cloud Files provider disconnected (bridge plan 2026-11-11, item 2).
+//! Known limit: the engine reads the pause between its steps, so an upload that starts after the board stayed
+//! empty for [`QUIET_LOOKS`] looks (about 2 s) gets only the engine's own graceful stop before it is cut; the
+//! file stays queued and is sent again by the next version.
 //!
 //! Owns: the bounded wait for uploads in flight, with new work held back while it waits; the engine stop through
 //! the app's one stop helper (`stop_engine_in_slot`, which on Windows disconnects the Cloud Files provider before
@@ -29,20 +32,35 @@ pub(crate) fn uploads_in_flight(board: &TransferBoard) -> usize {
         .count()
 }
 
-/// Waits until `in_flight` reports none, at most `limit`. `Err(n)`: `n` were still in flight at the end.
+/// How many looks in a row must find no upload before sync counts as quiet. The pause is read by the engine between
+/// its steps, so a step that is sending several files starts the next one a moment after the last ended: one empty
+/// look can fall in that gap.
+pub(crate) const QUIET_LOOKS: u32 = 8;
+
+/// Waits until `in_flight` reports none `quiet_looks` times in a row, at most `limit`. `Err(n)`: `n` were still in
+/// flight at the end (at least 1: a board that never stayed empty is not quiet).
 pub(crate) async fn wait_for_uploads(
     in_flight: impl Fn() -> usize,
+    quiet_looks: u32,
     limit: Duration,
     poll: Duration,
 ) -> Result<(), usize> {
     let deadline = tokio::time::Instant::now() + limit;
+    let mut quiet = 0;
+    let mut last_seen = 0;
     loop {
         let left = in_flight();
         if left == 0 {
-            return Ok(());
+            quiet += 1;
+            if quiet >= quiet_looks {
+                return Ok(());
+            }
+        } else {
+            quiet = 0;
+            last_seen = left;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(left);
+            return Err(left.max(last_seen).max(1));
         }
         tokio::time::sleep(poll).await;
     }
@@ -78,7 +96,7 @@ pub(crate) async fn quiet_engine<'a>(
 ) -> Result<QuietEngine<'a>, String> {
     let was_paused = acct.sync_paused.swap(true, Ordering::SeqCst);
     let in_flight = || board.map_or(0, uploads_in_flight);
-    if let Err(left) = wait_for_uploads(in_flight, limit, UPLOAD_POLL).await {
+    if let Err(left) = wait_for_uploads(in_flight, QUIET_LOOKS, limit, UPLOAD_POLL).await {
         acct.sync_paused.store(was_paused, Ordering::SeqCst);
         tracing::warn!(
             left,

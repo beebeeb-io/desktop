@@ -9,31 +9,40 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
-async fn the_wait_for_uploads_is_bounded_and_ends_as_soon_as_none_is_left() {
+async fn the_wait_for_uploads_is_bounded_and_needs_the_board_to_stay_empty() {
     let poll = Duration::from_millis(250);
-    // None in flight: at once, asked once.
+    let limit = Duration::from_secs(120);
+    // None in flight: quiet after the looks in a row, not sooner.
     let asked = AtomicUsize::new(0);
     let none = || {
         asked.fetch_add(1, Ordering::SeqCst);
         0
     };
-    assert_eq!(wait_for_uploads(none, Duration::from_secs(120), poll).await, Ok(()));
-    assert_eq!(asked.load(Ordering::SeqCst), 1);
-    // Two in flight that finish after 3 polls.
-    let asked = AtomicUsize::new(0);
-    let finishing = || if asked.fetch_add(1, Ordering::SeqCst) < 3 { 2 } else { 0 };
     let started = tokio::time::Instant::now();
-    assert_eq!(
-        wait_for_uploads(finishing, Duration::from_secs(120), poll).await,
-        Ok(())
-    );
+    assert_eq!(wait_for_uploads(none, 4, limit, poll).await, Ok(()));
+    assert_eq!(asked.load(Ordering::SeqCst), 4);
     assert_eq!(started.elapsed(), Duration::from_millis(750));
+    // A step sending three files: the board is empty for one look between two files. That gap is not quiet.
+    let looks = [1, 0, 1, 0, 0, 1, 0, 0, 0, 0];
+    let asked = AtomicUsize::new(0);
+    let gaps = || looks.get(asked.fetch_add(1, Ordering::SeqCst)).copied().unwrap_or(0);
+    assert_eq!(wait_for_uploads(gaps, 4, limit, poll).await, Ok(()));
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        10,
+        "only the four empty looks in a row at the end count"
+    );
     // One that never finishes: the bound, and how many were left.
     let started = tokio::time::Instant::now();
-    assert_eq!(wait_for_uploads(|| 1, Duration::from_secs(120), poll).await, Err(1));
-    assert_eq!(started.elapsed(), Duration::from_secs(120));
+    assert_eq!(wait_for_uploads(|| 1, 4, limit, poll).await, Err(1));
+    assert_eq!(started.elapsed(), limit);
+    // A board that flickers and never stays empty is not quiet either, and never reports "0 left".
+    let asked = AtomicUsize::new(0);
+    let flicker = || (asked.fetch_add(1, Ordering::SeqCst) % 2 == 0) as usize * 2;
+    assert_eq!(wait_for_uploads(flicker, 4, Duration::from_secs(1), poll).await, Err(2));
     // A zero bound still looks once.
-    assert_eq!(wait_for_uploads(|| 3, Duration::ZERO, poll).await, Err(3));
+    assert_eq!(wait_for_uploads(|| 3, 4, Duration::ZERO, poll).await, Err(3));
+    assert!(QUIET_LOOKS >= 4);
 }
 
 #[test]
@@ -87,5 +96,5 @@ async fn an_upload_in_flight_puts_the_update_off_and_leaves_the_pause_as_it_was(
     assert!(!acct.sync_paused.load(Ordering::SeqCst));
     assert!(acct.engine.try_lock().is_ok());
     // No board at all (no popover runtime): nothing to wait for.
-    assert!(quiet_engine(&acct, None, Duration::ZERO).await.is_ok());
+    assert!(quiet_engine(&acct, None, Duration::from_secs(5)).await.is_ok());
 }

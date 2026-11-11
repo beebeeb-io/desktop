@@ -178,6 +178,20 @@ async fn only_a_missing_v2_manifest_falls_back_to_the_unsigned_feed() {
 }
 
 #[test]
+fn the_updater_target_is_os_and_arch_in_the_updater_s_names() {
+    let rows = [
+        ("windows", "x86_64", "windows-x86_64"),
+        ("windows", "aarch64", "windows-aarch64"),
+        ("windows", "x86", "windows-i686"),
+        ("linux", "arm", "linux-armv7"),
+        ("macos", "aarch64", "darwin-aarch64"),
+    ];
+    for (os, arch, want) in rows {
+        assert_eq!(updater_target(os, arch), want);
+    }
+}
+
+#[test]
 fn the_v2_manifest_addresses_are_one_per_channel() {
     let urls: Vec<_> = [ReleaseChannel::Stable, ReleaseChannel::Beta, ReleaseChannel::Alpha]
         .into_iter()
@@ -314,6 +328,7 @@ fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
         at("trust::is_native_line(&to)"),
         at("preflight::quiet_engine("),
         at("record_then_install("),
+        at("if trust::is_native_line(&to)\n                && let Some(dir) = handoff_dir.as_deref()"),
         at("write_update_handoff("),
         at("update.install(bytes)"),
     ];
