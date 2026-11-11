@@ -8,7 +8,9 @@ pub mod details;
 pub mod keys;
 pub mod list;
 pub mod menus;
+pub mod sidebar;
 pub mod source;
+pub mod toolbar;
 pub mod window;
 
 #[cfg(test)]
@@ -22,6 +24,14 @@ use rune::Tx;
 use source::{FilesFixture, FilesSource};
 
 pub use window::view;
+
+/// The design system's own Files window and keyboard, which these frames supersede (same pieces,
+/// plus menus, selection and toasts). Named here so they stay compiled and checked until the
+/// design-system lane folds the variants in (PR body: "Requests to the design-system lane").
+const _: (
+    fn(&State, &mut rune::Cx<State>) -> rune::El,
+    fn(&mut State, &rune::KeyEvent, &mut Tx) -> bool,
+) = (crate::ui::window::files_window, crate::ui::keys::on_key);
 
 /// Which menu is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +119,9 @@ pub struct Actions {
     pub intents: Vec<Intent>,
     /// The window's size, for keeping a menu inside it.
     pub window: (f32, f32),
+    /// A board frame that draws only the lower part of the window (DW-0107, DW-0108): how many
+    /// points of the window's top are out of the picture. 0 in the app.
+    pub board_crop_top: f32,
 }
 
 impl Default for Actions {
@@ -124,6 +137,7 @@ impl Default for Actions {
             undo: Vec::new(),
             intents: Vec::new(),
             window: (1278.0, 798.0),
+            board_crop_top: 0.0,
         }
     }
 }
@@ -253,7 +267,7 @@ impl State {
         }
     }
 
-    fn intent(&mut self, intent: Intent) {
+    pub(super) fn intent(&mut self, intent: Intent) {
         self.actions.intents.push(intent);
     }
 
@@ -533,10 +547,13 @@ pub const SCENES: &[(&str, fn(&mut State))] = &[
     ("DW-0405", |s| {
         s.select_only(6);
         s.show_detail_pane = false;
-        let item = s.listing.items.remove(6);
-        s.actions.undo = vec![(6, item)];
-        s.clear_selection();
-        s.actions.toast = Some(Toast::Trashed);
+        let item = s.listing.items[6].clone();
+        if s.actions.source.trash(std::slice::from_ref(&item)).is_ok() {
+            s.listing.items.remove(6);
+            s.actions.undo = vec![(6, item)];
+            s.clear_selection();
+            s.actions.toast = Some(Toast::Trashed);
+        }
     }),
     ("DW-0406", |s| {
         s.select_only(6);
@@ -546,5 +563,18 @@ pub const SCENES: &[(&str, fn(&mut State))] = &[
             s.select_only(7);
             s.actions.toast = Some(Toast::Duplicated);
         }
+    }),
+    // DW-0107, DW-0108: the two kinds of message, over the list as it is.
+    ("DW-0107", |s| {
+        s.show_detail_pane = false;
+        s.clear_selection();
+        s.actions.board_crop_top = 240.0;
+        s.actions.toast = Some(Toast::LinkCopied);
+    }),
+    ("DW-0108", |s| {
+        s.show_detail_pane = false;
+        s.clear_selection();
+        s.actions.board_crop_top = 240.0;
+        s.actions.toast = Some(Toast::Trashed);
     }),
 ];

@@ -44,7 +44,17 @@ pub enum Call {
     Sort(super::Sort),
 }
 
+/// The counts beside the sidebar's sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Shares that wait for an answer.
+    pub shared_waiting: u32,
+    pub trash: u32,
+    pub available_offline: u32,
+}
+
 pub trait FilesSource: Send + 'static {
+    fn counts(&self) -> Counts;
     fn details(&self, item: &DriveItem, folder: &str) -> Details;
     /// A date the list shows in other words than its own ("Just now" for a copy made a moment ago).
     fn changed_label(&self, item: &DriveItem) -> Option<String>;
@@ -59,6 +69,8 @@ pub trait FilesSource: Send + 'static {
 #[derive(Default)]
 pub struct FilesFixture {
     pub calls: Vec<Call>,
+    /// How many items this session moved to Trash and did not take back.
+    pub trashed: u32,
     /// Ids of the copies made in this session: the board shows them as changed "Just now" on "This PC".
     copies: Vec<String>,
 }
@@ -97,6 +109,15 @@ pub fn copy_name(name: &str, taken: &[&str]) -> String {
 }
 
 impl FilesSource for FilesFixture {
+    fn counts(&self) -> Counts {
+        // The board's sample: 1 share waiting, 12 in Trash, 3 kept offline.
+        Counts {
+            shared_waiting: 1,
+            trash: 12 + self.trashed,
+            available_offline: 3,
+        }
+    }
+
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
         let size = if item.is_folder {
             item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
@@ -183,12 +204,14 @@ impl FilesSource for FilesFixture {
         }
         self.calls
             .push(Call::Trash(items.iter().map(|i| i.id.clone()).collect()));
+        self.trashed += items.len() as u32;
         Ok(())
     }
 
     fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         self.calls
             .push(Call::Restore(items.iter().map(|i| i.id.clone()).collect()));
+        self.trashed = self.trashed.saturating_sub(items.len() as u32);
         Ok(())
     }
 

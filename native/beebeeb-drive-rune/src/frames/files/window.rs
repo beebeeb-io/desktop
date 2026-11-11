@@ -2,10 +2,11 @@
 //! the selected item's own details.
 
 use super::{MenuKind, Toast, details, list, menus};
+use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
-use crate::ui::{caption, file_list, menu, sidebar, status_line, toast, toolbar};
+use crate::ui::{caption, file_list, menu, status_line, toast};
 use rune::{Cx, El, Tx, col, el, row};
 
 /// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
@@ -160,6 +161,28 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         main = main.child(toast::layer(toast_of(kind, &t)));
     }
 
+    let crop = s.actions.board_crop_top;
+    let mut body = row().key("body").w_full().child(sidebar::sidebar(s, &t)).child(main);
+    body = if crop > 0.0 {
+        // A board frame that draws the lower part of the window only (`.mk-cropfade.at-top`): the
+        // body keeps its full height and moves up under the caption, its top fading into it.
+        let fade = t.sidebar_bg;
+        el().key("body-crop")
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .clip_rounded(0.0)
+            .child(body.absolute(0.0, -crop).h(768.0))
+            .child(
+                el().key("crop-fade")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h(44.0)
+                    .gradient(fade, fade.alpha(0.0)),
+            )
+    } else {
+        body.grow(1.0).min_h(0.0)
+    };
     let window = col()
         .key("window")
         .role("window")
@@ -170,15 +193,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(t.bg)
         .child(caption::caption_bar(&t, cx))
-        .child(
-            row()
-                .key("body")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .child(sidebar::sidebar(s, &t))
-                .child(main),
-        );
+        .child(body);
     match menu_layer(s, &t) {
         Some(layer) => el().key("files-root").w_full().h_full().child(window).child(layer),
         None => window,

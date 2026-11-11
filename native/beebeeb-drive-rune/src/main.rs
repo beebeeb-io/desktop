@@ -180,24 +180,20 @@ const SCENES: &[ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
     }),
     ("DW-0401", |_| {}),
-    frames::files::SCENES[0],
-    frames::files::SCENES[1],
-    frames::files::SCENES[2],
-    frames::files::SCENES[3],
-    frames::files::SCENES[4],
-    frames::files::SCENES[5],
-    frames::files::SCENES[6],
 ];
 
 fn main() {
     // `--gate-export out.json --scene DW-0401 [--theme dark] [--size 1278x798]`: the frame gate's native half.
-    if let Some(code) = ui::gate::run_from_args(SCENES, init, view, FONTS, FAMILIES) {
+    // The window's own scenes, then each frame group's (`frames::<group>::SCENES`).
+    let scenes: &'static [ui::gate::Scene<State>] =
+        Box::leak([SCENES, frames::files::SCENES].concat().into_boxed_slice());
+    if let Some(code) = ui::gate::run_from_args(scenes, init, view, FONTS, FAMILIES) {
         std::process::exit(code);
     }
     let spec = AppSpec::<State> {
         fonts: FONTS,
         families: FAMILIES,
-        scenes: SCENES,
+        scenes,
         on_key: Some(on_key),
         ..AppSpec::new("Beebeeb Drive", (1280.0, 800.0), init, view)
     };
