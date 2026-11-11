@@ -2,30 +2,34 @@
 
 Lane E, 2026-11-11. Ruling (Guus, 2026-11-11): "for 0.9.0 we go full rust, one big bang, one shot". Companion to
 `2026-11-11-desktop-v2-native-rune-design.md`, whose §3 claims are checked here against `v2-native` at `b9e73441`.
-Every number is measured (`grep`/`wc` over `src-tauri/src`, the script is in the PR body). "Tauri refs" counts
-`tauri::`, `tauri_plugin_*::`, `use tauri`, `AppHandle` and `tauri::State` occurrences; "cmds" counts `#[tauri::command]`.
+Every number is measured; §1 says how.
 
 ## 1. Headline numbers
 
-- `src-tauri/src`: 190,700 lines in 135 top-level modules; 43 of them are test modules (27,956 lines), 92 are product.
-- 1,012 Tauri references, 275 commands, 41 `emit` call sites, 7 Tauri plugins. 81 of the 135 modules have 0 Tauri references.
-- By bucket (product modules, lines before this PR): ENGINE 44 modules / 115,510; SESSION 21 / 18,633; SHELL 12 / 8,759;
+How they are counted: `scripts/measure-engine-boundary.py <dir>` (its header states the method). Lines are newline
+characters in `.rs` files, tests and comments included. A "Tauri ref" is a match of `\btauri(_plugin_\w+)?::`, `use tauri\b`,
+`AppHandle` or `tauri::State` (the bare type names count, so the number is higher than `\btauri\b` alone). The `src-tauri`
+numbers are the tree at `b9e73441`, BEFORE this PR (`git archive b9e73441 src-tauri/src`); the engine numbers are this branch.
+
+- `src-tauri/src` before this PR: 217,856 lines in 141 top-level modules; 43 are test modules (27,726 lines), 98 are product (190,130 lines).
+- 1,012 Tauri references, 275 commands, 41 `emit` call sites, 7 Tauri plugins. 87 of the 141 modules have 0 Tauri references.
+- By bucket (product modules): ENGINE 50 modules / 142,268 lines; SESSION 21 / 19,263; SHELL 12 / 8,757;
   MAC-ONLY 8 / 14,387; DEAD-IN-NATIVE 3 / 4,855; test support 4 / 600.
 - The spike's claim "0 Tauri dependencies in `state_db`, `engine_bridge`, `config`, `runner`, `windows_cf`, `keychain`,
-  `passkey_windows`, `account_binding`, `own_data_proof`, `name_alias`": **true for 9 of 10, false for `runner`** (28 refs, 3 emits:
-  it holds the `AppHandle` to emit `engine-status` and `engine-conflict` and to notify).
-- "0 Tauri references" is not "movable today": `engine_bridge` (43,774 lines, 0 refs) names `watcher`, `ipc_socket`, `api_client`,
-  `windows_cf`, `owner_keys`; the ENGINE bucket is one strongly connected group and moves in the order of §6.
-- **This PR moved 28,820 lines (14 modules) into `crates/beebeeb-engine`**: 0 Tauri references, `cargo tree | grep -c tauri` = 0.
+  `passkey_windows`, `account_binding`, `own_data_proof`, `name_alias`": **true for 9 of 10, false for `runner`** (28 refs by the
+  method above, 3 emits: it holds the `AppHandle` to emit `engine-status` and `engine-conflict` and to notify).
+- "0 Tauri references" is not "movable today": `engine_bridge` (43,833 lines, 0 refs) names `watcher`, `ipc_socket`, `api_client`,
+  `windows_cf`, `owner_keys`; the ENGINE bucket is one strongly connected group and moves in the order of §7.
+- **`crates/beebeeb-engine` on this branch: 29,080 lines**, 0 Tauri references, `cargo tree | grep -c tauri` = 0. Its `lib.rs` declares
+  12 public modules (the table in §2 has 14 rows because it also lists `lib` and the test file `reconcile_measure_tests`).
+  6 of the 12 moved whole out of `src-tauri` (25,541 lines there before); the other 6 hold the parts of a shell module the database needs.
 
 ## 2. What exists after this PR
 
 ```mermaid
 graph LR
-    subgraph shells
-        TAURI[src-tauri<br/>Tauri shell: macOS, and Windows until the swap]
-        RUNE[native/beebeeb-drive-rune<br/>Rune shell: Windows 0.9.0]
-    end
+    TAURI[src-tauri<br/>Tauri shell: macOS, and Windows until the swap]
+    RUNE[native/beebeeb-drive-rune<br/>Rune shell: Windows 0.9.0]
     subgraph "crates/beebeeb-engine (no tauri)"
         SDB[state_db]
         DV2[drive_v2: dto + model + DriveError]
@@ -43,7 +47,7 @@ graph LR
 
 | engine module | lines | Tauri refs | depends on (engine modules) |
 |---|---|---|---|
-| `state_db` | 21,805 | 0 | held_queue, account_binding, write_token |
+| `state_db` | 22,057 | 0 | held_queue, account_binding, write_token |
 | `held_queue` | 2,306 | 0 | known_folder |
 | `diagnostic_redaction` | 1,514 | 0 | operation_failure |
 | `drive_v2` | 1,090 | 0 | vault_tree, state_db, owner_keys |
@@ -55,31 +59,32 @@ graph LR
 | `operation_failure` | 57 | 0 | state_db |
 | `hexfmt` | 49 | 0 | - |
 | `known_folder` | 40 | 0 | - |
-| `lib` | 19 | 0 | state_db |
+| `lib` | 27 | 0 | state_db |
 | `vault_tree` | 18 | 0 | - |
-Rules of the seam: (1) the engine crate never depends on `tauri` (CI should run the `cargo tree` count); (2) `src-tauri/src/lib.rs`
+
+Rules of the seam: (1) the engine crate never depends on `tauri` (CI job `engine-boundary`, `scripts/check-engine-boundary.sh`); (2) `src-tauri/src/lib.rs`
 re-exports each moved module under its old path, so shell code keeps `crate::state_db::…`; (3) a helper another crate's tests need is
-`#[cfg(any(test, feature = "test-support"))]`, and only `[dev-dependencies]` turn that feature on; (4) a fragment moved out of a file
+`#[cfg(any(test, feature = "test-support"))]`, and only `[dev-dependencies]` turn that feature on (the same CI job, and a `compile_error!` in a release build); (4) a fragment moved out of a file
 that stays is re-exported from the old place (`owner_keys::OwnedKeyRecord`, `engine_bridge::classify_operation_error`, …).
 
-## 3. Every top-level product module of `src-tauri/src` (before this PR; the 14 moved modules are in §2)
+## 3. Every top-level product module of `src-tauri/src` at `b9e73441` (before this PR: all 98, the 6 that moved whole included)
 
 Buckets: ENGINE (no UI in purpose), SESSION (auth, keychain, session state), SHELL (windows, tray, command wiring, updater glue),
 MAC (macOS-only, stays on Tauri for the Mac app), DEAD (web-view only: gone in the native build), TEST (source-pin helpers).
 A module with commands in an ENGINE row keeps its logic and loses only the `#[tauri::command]` wrappers.
-
 | module | lines | Tauri refs | cmds | emits | depends on (top 3) | bucket |
 |---|---|---|---|---|---|---|
-| `engine_bridge` | 43,774 | 0 | 0 | 0 | state_db, watcher, ipc_socket | ENGINE |
+| `engine_bridge` | 43,833 | 0 | 0 | 0 | state_db, watcher, ipc_socket | ENGINE |
+| `state_db` | 21,252 | 0 | 0 | 0 | held_queue, account_binding, write_token | ENGINE |
 | `windows_cf` | 13,930 | 0 | 0 | 0 | unknown_check, state_db, engine_bridge | ENGINE |
 | `ipc_socket` | 7,246 | 0 | 0 | 0 | state_db, engine_bridge, backup_protect | ENGINE |
-| `finder_setup` | 7,079 | 13 | 0 | 1 | finder_removal, surfaces, config | MAC |
-| `owner_keys` | 6,221 | 0 | 0 | 0 | engine_bridge, state_db, api_client | ENGINE |
-| `surfaces` | 4,408 | 11 | 0 | 0 | root_source | DEAD (web-view windows) |
+| `finder_setup` | 7,079 | 13 | 0 | 1 | surfaces, finder_removal, config | MAC |
+| `owner_keys` | 6,298 | 0 | 0 | 0 | engine_bridge, state_db, api_client | ENGINE |
+| `drive_v2` | 4,781 | 96 | 36 | 2 | state_db, backup_protect, vault_tree | ENGINE |
+| `surfaces` | 4,408 | 11 | 0 | 0 | root_source | DEAD |
 | `runner` | 4,149 | 28 | 0 | 3 | windows_cf, transfer_progress, engine_bridge | ENGINE |
 | `api_client` | 4,140 | 0 | 0 | 0 | account_dto, link_health, transfer_progress | ENGINE |
-| `drive_v2` | 3,711 | 96 | 36 | 2 | state_db, backup_protect, file_open_commands | ENGINE |
-| `sign_out` | 3,232 | 0 | 0 | 0 | finder_removal, config, state_db | SESSION |
+| `sign_out` | 3,862 | 0 | 0 | 0 | finder_removal, state_db, config | SESSION |
 | `share_v2` | 3,076 | 34 | 17 | 2 | auth_v2, state_db, hexfmt | ENGINE |
 | `backup` | 2,706 | 1 | 1 | 0 | state_db, config, engine_bridge | ENGINE |
 | `keychain` | 2,484 | 0 | 0 | 0 | - | SESSION |
@@ -89,7 +94,9 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `account_dto` | 1,848 | 0 | 0 | 0 | - | ENGINE |
 | `direct_download` | 1,825 | 0 | 0 | 0 | api_client, download_pin, engine_bridge | ENGINE |
 | `finder_removal` | 1,802 | 0 | 0 | 0 | config | MAC |
+| `held_queue` | 1,669 | 0 | 0 | 0 | known_folder | ENGINE |
 | `watcher` | 1,519 | 0 | 0 | 0 | engine_bridge, windows_cf, backup_protect | ENGINE |
+| `diagnostic_redaction` | 1,506 | 0 | 0 | 0 | engine_bridge | ENGINE |
 | `found_while_paused` | 1,495 | 0 | 0 | 0 | engine_bridge, state_db, windows_cf | ENGINE |
 | `engine_status` | 1,329 | 0 | 0 | 0 | transfer_progress, state_db, link_health | ENGINE |
 | `transfer_progress` | 1,291 | 0 | 0 | 0 | state_db | ENGINE |
@@ -100,7 +107,7 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `sign_out_commands` | 1,123 | 17 | 6 | 2 | account, test_sandbox | SESSION |
 | `file_open_commands` | 1,117 | 16 | 13 | 0 | state_db, windows_cf, surfaces | SHELL |
 | `unknown_check` | 1,084 | 0 | 0 | 1 | windows_cf, state_db, engine_bridge | ENGINE |
-| `auth_v2` | 1,078 | 38 | 9 | 0 | api_client, runner, login_commands | SESSION |
+| `auth_v2` | 1,078 | 38 | 9 | 0 | api_client, runner, vault_lock_commands | SESSION |
 | `macos_file_provider` | 1,072 | 0 | 0 | 0 | finder_removal, finder_setup, macos_workspace | MAC |
 | `login_commands` | 1,070 | 34 | 6 | 0 | auth_v2 | SESSION |
 | `session_state` | 1,057 | 7 | 2 | 0 | account | SESSION |
@@ -117,12 +124,13 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `activity_conflict_commands` | 830 | 37 | 12 | 2 | runner, finder_setup | SHELL |
 | `staged_payload` | 797 | 0 | 0 | 0 | engine_bridge, state_db, ipc_socket | ENGINE |
 | `vault_lock_commands` | 791 | 52 | 15 | 3 | ipc_socket | SESSION |
-| `vault_tree` | 776 | 5 | 5 | 0 | windows_cf, name_alias | ENGINE |
+| `vault_tree` | 780 | 5 | 5 | 0 | windows_cf, name_alias | ENGINE |
 | `reauth` | 770 | 0 | 0 | 0 | account_binding | SESSION |
+| `account_binding` | 761 | 0 | 0 | 0 | - | ENGINE |
 | `finder_open` | 755 | 2 | 1 | 0 | finder_setup_command_tests, root_source, source_pin | MAC |
 | `passkey_commands` | 562 | 10 | 4 | 0 | passkey_windows | SESSION |
 | `backup_protect` | 560 | 8 | 0 | 0 | windows_cf, state_db, backup | ENGINE |
-| `lib` | 537 | 5 | 0 | 0 | - | SHELL |
+| `lib` | 535 | 5 | 0 | 0 | - | SHELL |
 | `macos_popover` | 534 | 51 | 6 | 2 | sign_out, popover_data, surfaces | MAC |
 | `link_health` | 530 | 0 | 0 | 0 | surfaces | ENGINE |
 | `app_run` | 524 | 26 | 0 | 0 | auth_v2, share_v2, passkey_commands | SHELL |
@@ -135,11 +143,11 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `linux_thumbnail` | 372 | 0 | 0 | 0 | reject_unsafe_rel_path | ENGINE |
 | `account` | 368 | 0 | 0 | 0 | runner, account_dto, account_binding | SESSION |
 | `office_v2` | 367 | 16 | 2 | 2 | hexfmt | DEAD |
-| `extension_log_pin` | 363 | 0 | 0 | 0 | - | TEST |
-| `known_folder` | 359 | 0 | 0 | 0 | runner, backup | ENGINE |
+| `known_folder` | 366 | 0 | 0 | 0 | runner, backup | ENGINE |
 | `ipc_write_dedup` | 351 | 0 | 0 | 0 | - | ENGINE |
 | `passkey_windows` | 334 | 0 | 0 | 0 | - | SESSION |
 | `linux_fuse` | 309 | 0 | 0 | 0 | engine_bridge, state_db | ENGINE |
+| `write_token` | 304 | 0 | 0 | 0 | engine_bridge | ENGINE |
 | `name_alias` | 298 | 0 | 0 | 0 | - | ENGINE |
 | `shared_folder_index` | 295 | 0 | 0 | 0 | - | ENGINE |
 | `download_pin` | 288 | 0 | 0 | 0 | - | ENGINE |
@@ -155,13 +163,13 @@ A module with commands in an ENGINE row keeps its logic and loses only the `#[ta
 | `auth_attempts` | 183 | 0 | 0 | 0 | callback_gate | SESSION |
 | `cf_keepalive` | 175 | 0 | 0 | 0 | transfer_progress | ENGINE |
 | `v2_snap` | 132 | 2 | 1 | 0 | - | SHELL |
-| `test_sandbox` | 125 | 0 | 0 | 0 | - | TEST |
 | `no_fetch_scope` | 108 | 0 | 0 | 0 | - | ENGINE |
 | `sync_activity` | 104 | 0 | 0 | 0 | engine_status, state_db | ENGINE |
 | `webview_browser_keys` | 80 | 7 | 0 | 0 | - | DEAD |
-| `root_source` | 72 | 0 | 0 | 0 | - | TEST |
-| `source_pin` | 40 | 0 | 0 | 0 | - | TEST |
+| `hexfmt` | 49 | 0 | 0 | 0 | - | ENGINE |
 | `main` | 8 | 0 | 0 | 0 | - | SHELL |
+Not in the table: the 4 test-support modules `extension_log_pin` (363), `test_sandbox` (125), `root_source` (72), `source_pin` (40).
+
 ## 4. Events the engine pushes to the UI today (each becomes a typed Rust event)
 
 41 `emit` call sites, 21 event names. The native shell needs one `enum EngineEvent` in the engine crate and an `EventSink` trait
@@ -239,11 +247,4 @@ Stays desktop: `state_db` (the desktop's own SQLite schema), `windows_cf` (CFAPI
   `settings_commands`, `file_open_commands`, `activity_conflict_commands`, `account_commands`, `sign_out_commands`, `vault_lock_commands`.
 - `capabilities/`, `tauri.conf.json`'s Windows parts, `webview2-com` and `windows-core-webview2` in `Cargo.toml`, the 7 plugins, `src/` (React), `index.html`, `vite.config.ts`.
 - Not dead: the MAC bucket and the Tauri shell itself, until the Mac app moves.
-
-## 9. Not covered by this PR (the precise edge of the move)
-
-- The move stops at `state_db`'s own closure. `engine_bridge`, `runner`, `windows_cf`, `api_client`, `config` and SESSION are untouched.
-- Guards that walk `src-tauri/src` only (bun: `tests/fixtures/copyGuard.ts`, `cityGuard.ts`, `rustConstants.ts`; Rust:
-  `keychain_isolation_tests`, `config_write_pin_tests`, `finder_setup_wiring_tests`, `finder_removal_wiring_tests`) do not read
-  `crates/`. The 4 Rust ones name shell symbols the engine cannot reference; the 3 bun ones scan copy and should gain the root.
-- macOS: nothing in this PR was compiled on a Mac. `#[cfg(target_os = "macos")]` code in the moved files and two relocated tests need the Mac rung.
+- Not covered by this PR: the move stops at `state_db`'s own closure (`engine_bridge`, `runner`, `windows_cf`, `api_client`, `config` and SESSION are untouched). The Rust source censuses read both trees (`src-tauri/src/source_census.rs`); the bun copy guards (`copyGuard.ts`, `cityGuard.ts`) still walk `src-tauri/src` only.
