@@ -126,6 +126,19 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
     ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
     ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
+    ("DW-0601", |s| crate::frames::photos::set_scene(s, "DW-0601")),
+    ("DW-0116", |s| crate::frames::photos::set_scene(s, "DW-0116")),
+    ("DW-0602", |s| crate::frames::photos::set_scene(s, "DW-0602")),
+    ("DW-0603", |s| crate::frames::photos::set_scene(s, "DW-0603")),
+    ("DW-0604", |s| crate::frames::photos::set_scene(s, "DW-0604")),
+    ("DW-0605", |s| crate::frames::photos::set_scene(s, "DW-0605")),
+    ("DW-0605b", |s| crate::frames::photos::set_scene(s, "DW-0605b")),
+    ("DW-0606", |s| crate::frames::photos::set_scene(s, "DW-0606")),
+    ("DW-0607", |s| crate::frames::photos::set_scene(s, "DW-0607")),
+    ("DW-0608", |s| crate::frames::photos::set_scene(s, "DW-0608")),
+    ("DW-0609", |s| crate::frames::photos::set_scene(s, "DW-0609")),
+    ("DW-0610", |s| crate::frames::photos::set_scene(s, "DW-0610")),
+    ("DW-0611", |s| crate::frames::photos::set_scene(s, "DW-0611")),
 ];
 
 fn scene(s: &mut State, event: Event) {
