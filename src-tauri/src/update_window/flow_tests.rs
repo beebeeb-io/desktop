@@ -3,7 +3,7 @@
 //! server; the keys are made in the test.
 
 use super::flow::*;
-use super::trust::TrustedKeys;
+use super::trust::{Direction, Feed, Host, Line, TrustedKeys};
 use super::trust_tests::kit::{SIGNED_AT, TestKey, URL_090, manifest};
 use super::*;
 use std::io::{Read as _, Write as _};
@@ -334,4 +334,115 @@ fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
         at("update.install(bytes)"),
     ];
     assert!(order.is_sorted(), "{order:?}");
+}
+
+/// The manifest of the native line exactly as its publisher writes it: `fixtures/native-v2/alpha.json` is the output
+/// of `scripts/native-channel-manifest.mjs` (branch `v2-native` at `aeaa14bb`) for a 49-byte stand-in installer, and
+/// `alpha.json.sig` and the artefact signature inside it were made by `tauri signer sign` (CLI 2.11.4) with a key
+/// made for this fixture and deleted after (`fixture-key.pub` is its public half; it signs nothing else).
+mod native_v2_fixture {
+    pub(super) const MANIFEST: &[u8] = include_bytes!("fixtures/native-v2/alpha.json");
+    pub(super) const SIGNATURE: &str = include_str!("fixtures/native-v2/alpha.json.sig");
+    pub(super) const PUBKEY: &str = include_str!("fixtures/native-v2/fixture-key.pub");
+    pub(super) const URL: &str = "https://releases.beebeeb.io/desktop/artifacts/0.9.0/Beebeeb_0.9.0_x64-setup.exe";
+    /// The signed time in `alpha.json.sig`'s trusted comment.
+    pub(super) const SIGNED_AT: u64 = 1_794_400_866;
+}
+
+/// Review of PR 289 (P2-4): the format the native line publishes is read by the Tauri updater's own parser, and what
+/// that parser yields is accepted by `trust::accept` against the same bytes verified as a signed manifest: the two
+/// reads `checked_update` makes of one manifest agree. A manifest the plugin cannot read is an error with no
+/// fallback on Windows, so a change of the publisher's format must change this fixture and stay green here.
+#[test]
+fn the_native_publisher_s_manifest_is_read_by_the_tauri_updater_and_accepted() {
+    use native_v2_fixture as fixture;
+    let keys = TrustedKeys::new(&TestKey::generate().tauri_pubkey(), fixture::PUBKEY).unwrap();
+
+    // Read 1: this app's own check of the signed manifest.
+    let signed = trust::verify_v2_manifest(
+        &keys,
+        "alpha",
+        fixture::MANIFEST,
+        fixture::SIGNATURE,
+        fixture::SIGNED_AT,
+        None,
+    )
+    .expect("the publisher's manifest and its signature pass");
+    assert_eq!(
+        (signed.version.as_str(), signed.signed_at),
+        ("0.9.0", fixture::SIGNED_AT)
+    );
+
+    // Read 2: the Tauri updater's parser, on the same bytes.
+    let release: tauri_plugin_updater::RemoteRelease =
+        serde_json::from_slice(fixture::MANIFEST).expect("tauri-plugin-updater reads the publisher's manifest");
+    assert_eq!(release.version.to_string(), "0.9.0");
+    assert!(
+        release.pub_date.is_some(),
+        "the publisher's date form is one the updater reads"
+    );
+    assert!(release.notes.as_deref().is_some_and(|notes| notes.contains("0.9.0")));
+    // The updater asks for `<os>-<arch>-<installer>` first, then `<os>-<arch>`: the publisher writes both.
+    let target = updater_target("windows", "x86_64");
+    for key in [format!("{target}-nsis"), target.clone()] {
+        assert_eq!(release.download_url(&key).unwrap().as_str(), fixture::URL, "{key}");
+        let signature = release.signature(&key).unwrap();
+        // What the updater read is what `accept` allows, with the native line's key and no other.
+        let key_for_bytes = trust::accept(
+            &keys,
+            &Feed::Signed(&signed),
+            Host {
+                macos: false,
+                target: &target,
+            },
+            Direction::NewerOnly,
+            "0.8.25",
+            &release.version.to_string(),
+            release.download_url(&key).unwrap().as_str(),
+            signature,
+            strictly_newer,
+        )
+        .expect("accepted");
+        assert_eq!(
+            key_for_bytes.tauri_pubkey,
+            keys.for_line(Line::Native).unwrap().tauri_pubkey,
+            "the downloaded bytes are verified with the native line's key"
+        );
+    }
+    assert!(
+        release.download_url("windows-aarch64").is_err(),
+        "no entry for another PC"
+    );
+}
+
+/// What the Tauri updater cannot read, so the publisher must never write it: each is a hard error on Windows.
+#[test]
+fn a_manifest_the_tauri_updater_cannot_read_is_an_error_not_an_absent_update() {
+    use native_v2_fixture as fixture;
+    let good: serde_json::Value = serde_json::from_slice(fixture::MANIFEST).unwrap();
+    let parse = |manifest: &serde_json::Value| {
+        serde_json::from_value::<tauri_plugin_updater::RemoteRelease>(manifest.clone()).map(|_| ())
+    };
+    assert!(parse(&good).is_ok());
+
+    let mut date = good.clone();
+    date["pub_date"] = serde_json::json!("2026-11-11 14:00");
+    assert!(parse(&date).is_err(), "a date that is not RFC 3339");
+
+    let mut unsigned = good.clone();
+    unsigned["platforms"]["windows-x86_64"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signature");
+    assert!(parse(&unsigned).is_err(), "a platform without its signature");
+
+    let mut version = good.clone();
+    version["version"] = serde_json::json!("0.9");
+    assert!(parse(&version).is_err(), "a version that is not semver");
+
+    // Fields the updater does not know (`product`, `channel`, `size`) are ignored by it; this app's own check
+    // reads them.
+    let mut extra = good;
+    extra["something_new"] = serde_json::json!(1);
+    assert!(parse(&extra).is_ok());
 }
