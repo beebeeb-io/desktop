@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import {
   checkStableMatchesLatest,
+  openLeadMarkers,
   MAC_INSTALL_LINE,
   MACOS_NOT_IN_RELEASE_LINE,
   validateReleaseNotes,
@@ -171,6 +172,54 @@ describe('checkStableMatchesLatest', () => {
   test('fails closed when either value is missing', () => {
     expect(checkStableMatchesLatest('', 'desktop-v0.8.3')).toHaveLength(1)
     expect(checkStableMatchesLatest('0.8.3', undefined)).toHaveLength(1)
+  })
+})
+
+describe('lines the lead still has to fill', () => {
+  const filled = notes('0.8.21', STABLE_INSTALL_UPDATE)
+  const open = `${filled}\n### Verification\n\n- Test suite: <!-- lead: the counts from the pull request -->\n- Native Windows 11: <!--lead:\n  the native rung -->\n`
+
+  test('notes with an open lead marker are refused, each marker named by its line', () => {
+    expect(validateReleaseNotes(filled, '0.8.21', 'stable')).toEqual([])
+    const errors = validateReleaseNotes(open, '0.8.21', 'stable')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('2 line(s) the lead has to fill')
+    expect(openLeadMarkers(open)).toEqual([
+      'line 15: lead: the counts from the pull request',
+      'line 16: lead: the native rung',
+    ])
+  })
+
+  test('a marker that is never closed counts, another HTML comment does not', () => {
+    expect(openLeadMarkers(`${filled}\n<!-- LEAD: fill this`)).toHaveLength(1)
+    expect(openLeadMarkers(`${filled}\n<!-- a note for editors -->\nThe lead: Guus.`)).toEqual([])
+  })
+
+  test('the CLI exits 1 while a marker remains, on every channel', () => {
+    for (const channel of ['alpha', 'beta', 'stable']) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-release-notes-'))
+      const file = path.join(dir, 'RELEASE_NOTES.md')
+      const run = (body: string) => {
+        fs.writeFileSync(file, body)
+        try {
+          execFileSync('node', ['scripts/release-channel-checks.mjs', 'notes', '0.8.21', channel, file], {
+            cwd: repoRoot,
+            stdio: 'pipe',
+          })
+          return { status: 0, stderr: '' }
+        } catch (error) {
+          const failed = error as { status: number; stderr: Buffer }
+          return { status: failed.status, stderr: String(failed.stderr) }
+        }
+      }
+      // The channel-aware wording, so only the marker decides.
+      const body = notes('0.8.21', channel === 'stable' ? STABLE_INSTALL_UPDATE : CHANNEL_AWARE_WINDOWS_INSTALL_UPDATE)
+      expect(run(body).status).toBe(0)
+      const refused = run(`${body}\n- Release code: <!-- lead: the merge commit -->\n`)
+      expect(refused.status).toBe(1)
+      expect(refused.stderr).toContain('the lead has to fill')
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

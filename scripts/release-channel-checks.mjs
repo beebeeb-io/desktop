@@ -53,6 +53,20 @@ export const MACOS_NOT_IN_RELEASE_LINE =
 // A sentence about delivering the release to existing installs (hyphen variants included).
 const DELIVERY_WORDS = /\b(?:in[-\u2010\u2011 ]?app|(?:auto[-\u2010\u2011 ]?)?updat(?:e|er|es|ed|ing)|automatically)\b/i
 
+// A line of the notes that the lead still has to fill before the release: `<!-- lead: ... -->`. HTML
+// comments are invisible on the release page, so a note left like this ships an evidence line
+// that says nothing ("- Test suite:"). `notes` fails while one remains.
+const LEAD_MARKER = /<!--\s*lead\s*:[\s\S]*?(?:-->|(?![\s\S]))/gi
+
+// The open lead markers of the notes, each as "line N: <its first words>".
+export function openLeadMarkers(notes) {
+  return [...notes.matchAll(LEAD_MARKER)].map((match) => {
+    const line = notes.slice(0, match.index).split('\n').length
+    const text = collapse(match[0].replace(/^<!--\s*/, '').replace(/\s*-->$/, ''))
+    return `line ${line}: ${text.length > 80 ? `${text.slice(0, 80)}...` : text}`
+  })
+}
+
 function collapse(text) {
   return text.replace(/\s+/g, ' ').trim()
 }
@@ -117,6 +131,13 @@ export function validateReleaseNotes(notes, version, channel, options = {}) {
         `RELEASE_NOTES.md claims automatic delivery to existing installs ("${claim[0].trim()}"), but this release is published to the ${channel} channel only — stable installs will not see it until it is promoted. Use the channel-aware Install / Update wording from docs/RELEASING.md.`,
       )
     }
+  }
+
+  const markers = openLeadMarkers(notes)
+  if (markers.length > 0) {
+    errors.push(
+      `RELEASE_NOTES.md still holds ${markers.length} line(s) the lead has to fill before a release ("<!-- lead: ... -->"): ${markers.join('; ')}. Replace each with what was measured, or remove the item it belongs to.`,
+    )
   }
 
   const section = installUpdateSection(notes)
