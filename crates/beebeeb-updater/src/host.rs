@@ -212,9 +212,16 @@ mod tests {
     #[test]
     fn the_build_time_is_plain_digits_or_nothing() {
         assert_eq!(parse_build_time(Some("1800000000")), Some(1_800_000_000));
+        assert_eq!(
+            parse_build_time(Some("1794355200")),
+            Some(crate::policy::V2_KEY_CREATED)
+        );
         for bad in [
             None,
             Some(""),
+            // Before the day the v2 key was made: digits, but not a build time.
+            Some("0"),
+            Some("1794355199"),
             Some("18e8"),
             Some(" 1800000000"),
             Some("-1"),
