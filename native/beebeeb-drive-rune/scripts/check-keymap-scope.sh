@@ -18,7 +18,10 @@ for frame in "$@"; do
         stem="$frame"; [ -n "$dark" ] && stem="$frame-dark"
         [ -s "$CRATE_DIR/golden/$stem.json" ] || continue
         # shellcheck disable=SC2086
-        node "$SCRIPT_DIR/capture-golden.mjs" "$frame" $dark --out "$OUT" >/dev/null
+        # A capture that warns (Trash has a header cell with no words) still writes its export:
+        # the export is what is compared; no export is a failure of this check.
+        node "$SCRIPT_DIR/capture-golden.mjs" "$frame" $dark --out "$OUT" >/dev/null 2>&1 || true
+        [ -s "$OUT/$stem.json" ] || { echo "$stem: the capture wrote no export"; checked=$((checked + 1)); differing=$((differing + 1)); continue; }
         checked=$((checked + 1))
         if ! python3 - "$CRATE_DIR/golden/$stem.json" "$OUT/$stem.json" "$stem" <<'PY'
 import json, sys
