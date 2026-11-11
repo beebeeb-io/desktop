@@ -398,9 +398,15 @@ mod finder_error_redaction_tests;
 /// Task 9 fix round 1 (item D): no unit test of the lib reaches the developer's real Keychain. The
 /// sign-out tests used to: a sign-out ends in `clear_keychain_session`, which also clears the legacy
 /// flat Keychain items. In a macOS test build `keychain::PlatformKeychainStore` is an in-memory store
-/// (`keychain::TestKeychainStore`), and no source file but `keychain.rs` can name the real one.
-#[cfg(all(test, target_os = "macos"))]
+/// (`keychain::TestKeychainStore`), and no source file but `keychain.rs` can name the real one. Task 2447: the same
+/// in-memory store on every OS's test build, so this guard runs on every OS.
+#[cfg(test)]
 mod keychain_isolation_tests;
+
+/// Task 2447: the sign-in, restore and recovery commands themselves, run on the test build's in-memory store against
+/// a loopback server, on every OS (`key_owner_wiring_tests` pins their calls; these run them).
+#[cfg(test)]
+mod key_owner_command_tests;
 
 /// A stand-in for the Finder reconciler that confirms every Lock and every removal and ignores the
 /// rest. On a Mac, Lock and Sign-out wait for the reconciler and report one they cannot confirm

@@ -80,16 +80,6 @@ pub fn should_remove_stored_key(
     }
 }
 
-/// A sign-in that brings token + key (the browser handoff; on the v2 line also a device approval) while this PC is
-/// already signed in. Allowed only to give the signed-in account its key: the vault is still locked, both ids are known, and they are equal.
-pub fn may_add_key_to_signed_in_session(
-    signed_in_user_id: Option<&str>,
-    approving_user_id: Option<&str>,
-    vault_unlocked: bool,
-) -> bool {
-    !vault_unlocked && key_ownership(approving_user_id, signed_in_user_id) == KeyOwnership::Matches
-}
-
 fn is_absent(error: &AuthStoreError) -> bool {
     matches!(error, AuthStoreError::NotFound | AuthStoreError::Unsupported(_))
 }

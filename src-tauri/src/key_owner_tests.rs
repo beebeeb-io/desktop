@@ -433,7 +433,7 @@ fn a_clear_tries_every_item_even_when_one_refuses() {
     }
 }
 
-// ── the startup probe, the pending clear, the re-sign-in, the signed-in exception ────────
+// ── the startup probe, the pending clear, the re-sign-in ──────────────────────────────
 
 #[test]
 fn the_probe_names_the_session_and_judges_the_key_by_the_servers_id() {
@@ -509,28 +509,10 @@ fn a_re_sign_in_in_place_names_the_new_token_and_the_kept_key_still_loads() {
     assert_eq!(load(&store).unwrap().expect("unlocks in place").master_key, KEY_A);
 }
 
+/// The install of a session that arrives with its key (`install_new_session`, the browser handoff): token and key,
+/// both bound; the loader accepts it.
 #[test]
-fn a_sign_in_with_its_key_adds_it_only_to_the_same_signed_in_account_while_it_is_locked() {
-    assert!(may_add_key_to_signed_in_session(Some("user-a"), Some("user-a"), false));
-    assert!(
-        !may_add_key_to_signed_in_session(Some("user-a"), Some("user-b"), false),
-        "another account"
-    );
-    assert!(
-        !may_add_key_to_signed_in_session(Some("user-a"), Some("user-a"), true),
-        "already unlocked"
-    );
-    assert!(
-        !may_add_key_to_signed_in_session(None, Some("user-a"), false),
-        "nobody named the signed-in session"
-    );
-    assert!(
-        !may_add_key_to_signed_in_session(Some("user-a"), None, false),
-        "no profile for the arriving session"
-    );
-    assert!(!may_add_key_to_signed_in_session(Some(""), Some(""), false));
-
-    // The install that follows (`install_new_session`): token and key, both bound; the loader accepts it.
+fn a_session_installed_with_its_key_is_bound_and_loads() {
     let store = MemStore::default();
     token_only_sign_in(&store, "tok-a", "user-a", "a@beebeeb.io").unwrap();
     assert_eq!(store.vault().has_vault_key(), Ok(false));

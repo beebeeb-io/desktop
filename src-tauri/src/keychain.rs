@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// The service every platform store (and the test store) names its items with; the Linux stub has no item to name.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
 const MASTER_KEY_BYTES: usize = 32;
 
@@ -206,6 +206,8 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 }
 
+// A test build uses the in-memory store on every OS, so this one is not constructed there.
+#[cfg_attr(test, allow(dead_code))]
 #[cfg(not(target_os = "macos"))]
 pub struct MacOsKeychainStore {
     // Carried for type parity with the macOS store so the same
@@ -215,6 +217,7 @@ pub struct MacOsKeychainStore {
     account_prefix: Option<AccountId>,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 #[cfg(not(target_os = "macos"))]
 impl MacOsKeychainStore {
     pub fn new() -> Self {
@@ -287,11 +290,14 @@ impl AuthSecretStore for MacOsKeychainStore {
 // per-user (`CRED_PERSIST_ENTERPRISE`) so the secrets follow the signed-in user
 // rather than the machine.
 
+// A test build uses the in-memory store on every OS, so this one is not constructed there.
+#[cfg_attr(test, allow(dead_code))]
 #[cfg(target_os = "windows")]
 pub struct WindowsCredentialStore {
     account_prefix: Option<AccountId>,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 #[cfg(target_os = "windows")]
 impl WindowsCredentialStore {
     /// Legacy flat store (no account segmentation). Prefer `with_account`.
@@ -416,28 +422,28 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 }
 
-// ── In-memory store for unit tests (macOS test builds) ───────────────────────
+// ── In-memory store for unit tests (every OS's test build) ───────────────────────
 
 /// Every item a test-build store holds, keyed `<service>/<account path>`, shared by the whole test
 /// process like the real Keychain is shared by the whole machine (but never touching it).
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 static TEST_KEYCHAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Which account ids a test-build store was asked about (`None` prefix: the legacy flat layout).
 /// Lets a test prove that the code it ran went through THIS store: `test_store_touched`.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 static TEST_KEYCHAIN_TOUCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Account prefixes whose email writes fail, as a locked Keychain's would (Task 12 fix round 2, item 3). Tests only.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 static TEST_KEYCHAIN_EMAIL_WRITES_FAIL: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<Option<String>>>,
 > = std::sync::LazyLock::new(Default::default);
 
 /// Make the test-build store's email writes for this account prefix fail (`true`) or work again (`false`).
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
 pub fn test_fail_account_email_writes(account_prefix: Option<&str>, fail: bool) {
     let mut failing = TEST_KEYCHAIN_EMAIL_WRITES_FAIL
@@ -451,12 +457,12 @@ pub fn test_fail_account_email_writes(account_prefix: Option<&str>, fail: bool) 
 }
 
 /// Account prefixes whose deletes fail, as a Keychain that refuses a removal would (task 1886). Tests only.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 static TEST_KEYCHAIN_DELETES_FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
     std::sync::LazyLock::new(Default::default);
 
 /// Make the test-build store's deletes for this account prefix fail (`true`) or work again (`false`).
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
 pub fn test_fail_deletes(account_prefix: Option<&str>, fail: bool) {
     let mut failing = TEST_KEYCHAIN_DELETES_FAIL.lock().unwrap_or_else(|e| e.into_inner());
@@ -467,8 +473,36 @@ pub fn test_fail_deletes(account_prefix: Option<&str>, fail: bool) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The flat (legacy) layout this thread's test-build stores see; `None`: the one the whole test process shares.
+    static TEST_FLAT_LAYOUT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ends a test's private flat layout when dropped ([`test_flat_layout_scope`]).
+#[cfg(test)]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub struct TestFlatLayoutScope(());
+
+#[cfg(test)]
+impl Drop for TestFlatLayoutScope {
+    fn drop(&mut self) {
+        TEST_FLAT_LAYOUT.with(|scope| *scope.borrow_mut() = None);
+    }
+}
+
+/// Give this thread a flat (legacy) layout of its own, named `scope`, until the guard is dropped: a test that needs
+/// items in the flat layout (an install from before the id-keyed one) seeds them here, where no other test's loader,
+/// migration or sign-out can find or clear them. The test must stay on this thread (a current-thread runtime).
+#[cfg(test)]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_flat_layout_scope(scope: &str) -> TestFlatLayoutScope {
+    TEST_FLAT_LAYOUT.with(|current| *current.borrow_mut() = Some(scope.to_string()));
+    TestFlatLayoutScope(())
+}
+
 /// Whether any test-build store with this account prefix has been read, written or cleared.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
 pub fn test_store_touched(account_prefix: Option<&str>) -> bool {
     TEST_KEYCHAIN_TOUCHED
@@ -477,15 +511,16 @@ pub fn test_store_touched(account_prefix: Option<&str>) -> bool {
         .contains(&account_prefix.map(str::to_string))
 }
 
-/// The in-memory stand-in for `MacOsKeychainStore` (which does not exist in a test build), with the same semantics (absent → `None`, a
-/// delete of an absent item succeeds) and the same item layout.
-#[cfg(all(test, target_os = "macos"))]
+/// The in-memory stand-in for the platform store in a test build, on every OS (task 2447: the commands are run on it
+/// on Windows and Linux too), with the real stores' semantics (absent → `None`, a delete of an absent item succeeds)
+/// and the same item layout. Never compiled into the app: `cfg(test)` only.
+#[cfg(test)]
 #[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses it
 pub struct TestKeychainStore {
     account_prefix: Option<AccountId>,
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[allow(dead_code)]
 impl TestKeychainStore {
     pub fn new() -> Self {
@@ -503,10 +538,16 @@ impl TestKeychainStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.account_prefix.as_deref().map(str::to_string));
-        format!(
-            "{KEYCHAIN_SERVICE}/{}",
-            account_path(self.account_prefix.as_ref(), account)
-        )
+        let path = account_path(self.account_prefix.as_ref(), account);
+        // The flat layout has no account id in its names, so every test of the process would share it: a test that
+        // seeds it does so in a namespace of its own (`test_flat_layout_scope`), which only its thread sees.
+        match (
+            &self.account_prefix,
+            TEST_FLAT_LAYOUT.with(|scope| scope.borrow().clone()),
+        ) {
+            (None, Some(scope)) => format!("{KEYCHAIN_SERVICE}/#flat:{scope}/{path}"),
+            _ => format!("{KEYCHAIN_SERVICE}/{path}"),
+        }
     }
 
     fn save(&self, account: KeychainAccount, bytes: &[u8]) -> AuthResult<()> {
@@ -543,7 +584,7 @@ impl TestKeychainStore {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 impl AuthSecretStore for TestKeychainStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
         self.save(KeychainAccount::SessionToken, token.expose_for_request().as_bytes())
@@ -651,19 +692,20 @@ impl AuthSecretStore for TestKeychainStore {
 #[cfg(all(target_os = "macos", not(test)))]
 pub type PlatformKeychainStore = MacOsKeychainStore;
 
-/// A unit-test build of the lib never reaches the real Keychain: `PlatformKeychainStore` is an
-/// in-memory store, so no test can read, write or clear the developer's own items (the installed app
-/// uses the same service name; a full sign-out also clears the legacy flat items). Task 9 fix round 1:
-/// the sign-out tests wrote to the real Keychain through `clear_keychain_session`. Pinned by
-/// `keychain_isolation_tests` in `lib.rs`. Windows and Linux are unchanged.
-#[cfg(all(target_os = "macos", test))]
+/// A unit-test build of the lib never reaches the real credential store, on any OS: `PlatformKeychainStore` is an
+/// in-memory store, so no test can read, write or clear the developer's own items (the installed app uses the same
+/// service name; a full sign-out also clears the legacy flat items). Task 9 fix round 1: the sign-out tests wrote to
+/// the real Keychain through `clear_keychain_session`. Task 2447: the same on Windows (Credential Manager) and Linux
+/// (the fail-closed stub), so the sign-in, restore and unlock commands run on a store in every OS's tests. Pinned by
+/// `keychain_isolation_tests` in `lib.rs`. The app's build is unchanged on every OS.
+#[cfg(test)]
 #[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses the alias
 pub type PlatformKeychainStore = TestKeychainStore;
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 pub type PlatformKeychainStore = WindowsCredentialStore;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
 pub type PlatformKeychainStore = MacOsKeychainStore;
 
 // ── Lazy migration: legacy flat trio → id-segmented trio (task 0800) ─────────
@@ -674,6 +716,7 @@ pub type PlatformKeychainStore = MacOsKeychainStore;
 // The function is IDEMPOTENT and INTERRUPT-CONVERGENT: interrupted after a crash
 // at any step, a re-run ends fully-migrated-with-legacy-gone.
 
+#[cfg_attr(test, allow(dead_code))]
 #[cfg(target_os = "windows")]
 mod windows_credentials {
     //! Win32 Credential Manager backing for `WindowsCredentialStore`.

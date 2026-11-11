@@ -11,6 +11,7 @@ Modules 46–94, sorted by path.
 | `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |
 | `ipc_write_dedup_tests.rs` | Unit tests for the write-queue idempotency table (task 1684). | — |
 | `key_owner.rs` | Whose vault key is this? | — |
+| `key_owner_command_tests.rs` | Task 2447: the commands themselves, run. | — |
 | `key_owner_tests.rs` | Task 2447: the ownership rules, driven through the real `AuthVault` and the real loader over an in-memory store (one that can refuse a delet | — |
 | `key_owner_wiring_tests.rs` | Task 2447: the call sites of the ownership rules. | — |
 | `keychain.rs` | Desktop auth, unlock, and secret-storage primitives. | AuthResult, AuthStoreError (4), VaultLockState (2), SessionToken, AuthSecretStore (18), AuthVault (3), holds_account_email, holds_session_token, holds_vault_key, legacy_platform_keychain_store, platform_keychain_store_for, migrate_legacy_keychain_between, … (+1 more) |
@@ -54,4 +55,3 @@ Modules 46–94, sorted by path.
 | `session_apply.rs` | `session_apply` items split out of `lib.rs`. | — |
 | `session_commands.rs` | Windows command admission, independent of whether a sync root/runner exists. | — |
 | `session_owner.rs` | Task 2447: the credential-store side of [`crate::key_owner`] (whose vault key is stored next to whose session token). | — |
-| `session_reauth.rs` | `session_reauth` items split out of `lib.rs`. | — |

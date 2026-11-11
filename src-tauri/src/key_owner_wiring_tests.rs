@@ -1,12 +1,12 @@
 //! Task 2447: the call sites of the ownership rules. A rule that no command calls protects nothing, so each call
 //! site has a test here that goes red when its call is deleted: the store-level cores (`*_over`, the real loader, the
-//! real migration) run over the in-memory store; the commands themselves need a window system or the platform
-//! store, so their calls are pinned by reading the source (order and arguments). Then the two stories end to end:
+//! real migration) run over the in-memory store; the commands' calls are pinned by reading the source (order and
+//! arguments), and the commands themselves run in `key_owner_command_tests`. Then the two stories end to end:
 //! the upgrade from 0.8.24 without the recovery phrase, and the stale key next to another account's token.
 
 use super::*;
 use crate::source_pin::squeeze;
-use crate::{layout_holding_session, settle_owner_after_probe_over, sign_in_adds_key_over};
+use crate::{layout_holding_session, settle_owner_after_probe_over};
 
 /// The production part of the crate root, children spliced back in (`pub(super) ` dropped, as `root_source` does).
 fn production() -> String {
@@ -97,26 +97,55 @@ fn the_startup_restore_finishes_a_failed_clear_first_and_judges_the_key_by_the_s
     );
 }
 
+/// Lead ruling on review P2-1 (lane H2b): the signed-in exception is gone. Windows refuses a sign-in that arrives
+/// while a session is present, before anything else and on nothing but that flag, as 0.8.24 did. (The refusal itself
+/// runs in `key_owner_command_tests`.)
 #[test]
-fn a_sign_in_while_signed_in_is_refused_on_windows_unless_it_brings_the_same_accounts_key() {
-    let apply = code_of(&production(), "pub(crate) async fn apply_session(");
-    let present = at(
+fn a_sign_in_while_signed_in_is_refused_on_windows_unconditionally() {
+    let production = production();
+    let apply = code_of(&production, "pub(crate) async fn apply_session(");
+    let refusal = at(
         &apply,
-        "#[cfg(target_os = \"windows\")] if state.auth_present.lock().map(|present| *present).unwrap_or(true) {",
-        "Windows asks whether a session is present",
+        "#[cfg(target_os = \"windows\")] refuse_sign_in_while_signed_in(state)?;",
+        "Windows refuses while a session is present",
     );
-    let locked = at(
-        &apply,
-        "let vault_unlocked = acct.session.lock().map(|session| session.is_some()).unwrap_or(true);",
-        "locked is read from the session in memory, and a poisoned lock counts as unlocked",
-    );
-    let exception = at(
-        &apply,
-        "if !sign_in_adds_key_to_signed_in_session(acct.id.as_str(), profile.as_ref(), vault_unlocked) { return Err(\"Sign out of the current account before signing in again.\".into()); }",
-        "the equal-ids exception, refusing with the unchanged sentence",
-    );
+    let attempt = at(&apply, "AUTH_ATTEMPTS.validate(attempt)?;", "the attempt check");
     let install = at(&apply, "install_new_session_or_revoke(", "the install");
-    assert!(present < locked && locked < exception && exception < install);
+    assert!(refusal < attempt && attempt < install);
+    assert_eq!(
+        code_of(&production, "fn refuse_sign_in_while_signed_in("),
+        squeeze(
+            "fn refuse_sign_in_while_signed_in(state: &AppState) -> Result<(), String> { if state.auth_present.lock().map(|present| *present).unwrap_or(true) { return Err(\"Sign out of the current account before signing in again.\".into()); } Ok(())"
+        ),
+        "the refusal asks the flag and nothing else (a poisoned flag refuses)"
+    );
+    for (file, source) in [
+        ("the crate root", production.as_str()),
+        ("key_owner.rs", include_str!("key_owner.rs")),
+    ] {
+        for gone in ["sign_in_adds_key", "may_add_key_to_signed_in_session"] {
+            assert!(!source.contains(gone), "{file} still has the exception ({gone})");
+        }
+    }
+}
+
+/// Review P3-1: a key the loader's guard refused at startup is logged as that, not as a credential-store error, and
+/// the line carries no field (no id, no error text).
+#[test]
+fn a_key_the_guard_refused_at_startup_is_logged_as_that() {
+    let restore = code_of(&production(), "async fn restore_stored_session(");
+    let absent = at(&restore, "if error.contains(\"secret not found\") {", "the absent key");
+    let refused = at(
+        &restore,
+        "} else if error == crate::key_owner::KEY_NOT_THIS_ACCOUNTS { tracing::warn!(\"startup restore: the stored vault key is not this session's account's; not loaded\"); } else {",
+        "the refused key has its own line",
+    );
+    let store_error = at(
+        &restore,
+        "tracing::warn!(%error, \"credential-store error while attempting auto-unlock at startup\");",
+        "a store error keeps its line",
+    );
+    assert!(absent < refused && refused < store_error);
 }
 
 #[test]
@@ -284,10 +313,6 @@ fn every_platform_form_calls_its_core_on_the_right_layout() {
             "fn complete_pending_keychain_clear(",
             "complete_pending_clear_over(both_layouts(account_id));",
         ),
-        (
-            "fn sign_in_adds_key_to_signed_in_session(",
-            "sign_in_adds_key_over(both_layouts(account_id), profile.map(|profile| profile.user_id.as_str()), vault_unlocked)",
-        ),
     ] {
         let at = source.find(&squeeze(form)).unwrap_or_else(|| panic!("{form} exists"));
         let body = &source[at..];
@@ -416,42 +441,6 @@ fn a_failed_clear_is_finished_in_every_layout_whatever_the_first_one_answers() {
 }
 
 #[test]
-fn a_key_is_added_to_a_signed_in_session_only_for_the_id_recorded_at_its_sign_in() {
-    // A password sign-in waiting for its key, as `store_first_sign_in` leaves it.
-    let waiting = MemStore::default();
-    token_only_sign_in(&waiting, "tok-a", "user-a", "a@beebeeb.io").unwrap();
-    let layouts = || [waiting.vault(), empty().vault()];
-    assert!(sign_in_adds_key_over(layouts(), Some("user-a"), false));
-    assert!(
-        !sign_in_adds_key_over(layouts(), Some("user-b"), false),
-        "another account"
-    );
-    assert!(
-        !sign_in_adds_key_over(layouts(), Some("user-a"), true),
-        "already unlocked"
-    );
-    assert!(
-        !sign_in_adds_key_over(layouts(), None, false),
-        "the arriving session has no profile"
-    );
-    // A session nobody named (stored by 0.8.24, never probed since) allows nothing.
-    let unnamed = legacy_a();
-    assert!(!sign_in_adds_key_over(
-        [unnamed.vault(), empty().vault()],
-        Some("user-a"),
-        false
-    ));
-    // Nor does a store that cannot answer, or one with no session at all.
-    waiting.fail_reads(SESSION_OWNER);
-    assert!(!sign_in_adds_key_over(layouts(), Some("user-a"), false));
-    assert!(!sign_in_adds_key_over(
-        [empty().vault(), empty().vault()],
-        Some("user-a"),
-        false
-    ));
-}
-
-#[test]
 fn the_layout_migration_never_moves_a_session_under_the_tags_of_the_one_before() {
     // The id-keyed layout kept A's key and tags after a rejected token (a Mac does); the flat one holds B whole.
     let id_keyed = signed_in_as_a();
@@ -489,6 +478,36 @@ fn the_layout_migration_never_moves_a_session_under_the_tags_of_the_one_before()
             "{stuck_tag}: the flat layout is untouched"
         );
     }
+}
+
+/// Review P3-2: the flat layout's two tags go with its session. (A session served from the flat layout gets its
+/// `session-owner` there; left behind, the next start would report it as a vault key a clear had left.)
+#[test]
+fn the_layout_migration_sweeps_the_flat_layouts_tags_too() {
+    // Moved now: token, key, email in the flat layout, named by a probe while the fallback served it.
+    let (id_keyed, flat) = (empty(), legacy_a());
+    bind_session_and_key(&flat.vault(), "user-a").unwrap();
+    crate::keychain::migrate_legacy_keychain_between(&id_keyed, &flat).unwrap();
+    assert!(id_keyed.has(TOKEN) && id_keyed.has(KEY), "moved");
+    for leaf in [TOKEN, KEY, EMAIL, KEY_OWNER, SESSION_OWNER] {
+        assert!(!flat.has(leaf), "{leaf} is left in the flat layout");
+    }
+    assert_eq!(crate::complete_pending_clear_over([id_keyed.vault(), flat.vault()]), 0);
+    assert!(id_keyed.has(TOKEN) && id_keyed.has(KEY), "and nothing was cleared");
+    // Already moved (the short-circuit's sweep): a tag that was left behind earlier goes at the next start.
+    flat.vault().bind_session_owner("user-a").unwrap();
+    flat.vault().bind_vault_key_owner("user-a").unwrap();
+    crate::keychain::migrate_legacy_keychain_between(&id_keyed, &flat).unwrap();
+    assert!(!flat.has(KEY_OWNER) && !flat.has(SESSION_OWNER));
+    // A tag that cannot be removed is an error (logged by the caller; the migration runs again at the next start).
+    let (id_keyed, flat) = (empty(), legacy_a());
+    flat.vault().bind_session_owner("user-a").unwrap();
+    flat.fail_deletes(SESSION_OWNER, true);
+    assert!(crate::keychain::migrate_legacy_keychain_between(&id_keyed, &flat).is_err());
+    assert!(
+        id_keyed.has(TOKEN) && id_keyed.has(KEY),
+        "the session was moved all the same"
+    );
 }
 
 // ── the upgrade from 0.8.24: no recovery phrase, online or offline ─────────────────────────

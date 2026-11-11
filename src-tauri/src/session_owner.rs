@@ -148,34 +148,3 @@ pub(crate) fn complete_pending_clear_over<S: AuthSecretStore>(
 pub(crate) fn complete_pending_keychain_clear(_write: &SessionWrite, account_id: &str) {
     complete_pending_clear_over(both_layouts(account_id));
 }
-
-/// [`sign_in_adds_key_to_signed_in_session`] over any two layouts: the stored session's recorded owner against the
-/// id the server named for the arriving session. A store that cannot answer, or names nobody, allows nothing.
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
-pub(crate) fn sign_in_adds_key_over<S: AuthSecretStore>(
-    layouts: impl IntoIterator<Item = AuthVault<S>>,
-    arriving_user_id: Option<&str>,
-    vault_unlocked: bool,
-) -> bool {
-    let signed_in = layout_holding_session(layouts)
-        .ok()
-        .flatten()
-        .and_then(|vault| vault.session_owner().ok().flatten());
-    key_owner::may_add_key_to_signed_in_session(signed_in.as_deref(), arriving_user_id, vault_unlocked)
-}
-
-/// Windows: may a session that arrives with its key (the browser handoff) be installed while this PC is already
-/// signed in? Only for the signed-in account itself, while it is still locked: the stored session's recorded owner
-/// (the id the server named at its sign-in) equals the id the server named for the arriving session (`profile`).
-#[cfg(target_os = "windows")]
-pub(crate) fn sign_in_adds_key_to_signed_in_session(
-    account_id: &str,
-    profile: Option<&account_dto::AccountProfile>,
-    vault_unlocked: bool,
-) -> bool {
-    sign_in_adds_key_over(
-        both_layouts(account_id),
-        profile.map(|profile| profile.user_id.as_str()),
-        vault_unlocked,
-    )
-}

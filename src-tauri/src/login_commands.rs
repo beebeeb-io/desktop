@@ -42,16 +42,20 @@ pub(super) async fn restore_stored_session(state: &AppState, acct: &AccountRunti
         // Leave onboarding to prompt for sign-in. Not an error.
         Ok(None) => return false,
         Err(error) => {
-            // The token IS present but `unlock()` failed. Two very different cases:
+            // The token IS present but the load failed. Three very different cases:
             //   1. Key genuinely ABSENT — `AuthStoreError::NotFound` (Display:
             //      "secret not found"). This is the legitimate "this PC has your
             //      session but not your vault key" state; onboarding's recovery-
             //      phrase step must appear. Expected → log at debug, not warn.
-            //   2. A real credential-store / backend failure (locked keychain,
+            //   2. The loader's guard refused the key (task 2447: it is not this session's
+            //      account's). Not a store failure; the recovery-phrase step appears too.
+            //   3. A real credential-store / backend failure (locked keychain,
             //      DPAPI error, deserialisation). Worth a warning so the user can
             //      see why auto-unlock didn't happen — but must NOT block startup.
             if error.contains("secret not found") {
                 tracing::debug!(%error, "no vault key to auto-unlock at startup; recovery-phrase unlock required");
+            } else if error == crate::key_owner::KEY_NOT_THIS_ACCOUNTS {
+                tracing::warn!("startup restore: the stored vault key is not this session's account's; not loaded");
             } else {
                 tracing::warn!(%error, "credential-store error while attempting auto-unlock at startup");
             }

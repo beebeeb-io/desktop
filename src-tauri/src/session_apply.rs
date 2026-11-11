@@ -618,6 +618,17 @@ pub(super) fn sign_out_api_base() -> String {
 
 // ── IPC commands: session ─────────────────────────────────────────────────────
 
+/// Windows: a sign-in that arrives while a session is present is refused, whoever it is for and whatever the
+/// credential store says about either session, as 0.8.24 did (lead ruling on the review of task 2447: no exception
+/// for "the same account, still locked"). A flag that cannot be read refuses.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn refuse_sign_in_while_signed_in(state: &AppState) -> Result<(), String> {
+    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
+        return Err("Sign out of the current account before signing in again.".into());
+    }
+    Ok(())
+}
+
 /// Persist a freshly-authenticated session and start the engine.
 ///
 /// This is the shared core used by `start_browser_login` (the live browser-
@@ -648,18 +659,8 @@ pub(crate) async fn apply_session(
         SESSION_COMMANDS.ensure_reactivation_allowed()?;
         windows_cf::ensure_reactivation_allowed()?;
     }
-    // Task 2447: Windows refuses a sign-in while one is present, with one exception: the signed-in account, still
-    // locked (a password sign-in waiting for its key), is given its key by a sign-in that brings it. Only when the
-    // server named the SAME user id for both sessions; anything else is refused as before.
     #[cfg(target_os = "windows")]
-    if state.auth_present.lock().map(|present| *present).unwrap_or(true) {
-        let acct = state.active_account()?;
-        let vault_unlocked = acct.session.lock().map(|session| session.is_some()).unwrap_or(true);
-        if !sign_in_adds_key_to_signed_in_session(acct.id.as_str(), profile.as_ref(), vault_unlocked) {
-            return Err("Sign out of the current account before signing in again.".into());
-        }
-        tracing::info!("the signed-in account received its vault key from a sign-in that brought it");
-    }
+    refuse_sign_in_while_signed_in(state)?;
 
     #[cfg(target_os = "windows")]
     AUTH_ATTEMPTS.validate(attempt)?;
