@@ -20,6 +20,10 @@ struct Fake {
     /// cross-process send does. (The nested messages' own notify calls do not nest again.)
     reenter_on_notify: Cell<bool>,
     inside_notify: Cell<bool>,
+    /// How deep `Shell_NotifyIconW` calls are nested right now, and the deepest it got: a
+    /// refresh that ran INSIDE another refresh's notify call shows as 2.
+    notify_depth: Cell<u32>,
+    max_notify_depth: Cell<u32>,
     /// How many times a message was delivered inside a notify call.
     reentries: Cell<u32>,
     /// What the "menu" returns, after pumping this thread's queue like its modal loop.
@@ -30,6 +34,14 @@ struct Fake {
 }
 
 struct FakeShell(Rc<Fake>);
+
+struct Leave<'a>(&'a Cell<u32>);
+
+impl Drop for Leave<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
 
 fn pump() {
     // SAFETY: drains this thread's own queue; MSG is plain data filled by PeekMessageW.
@@ -50,6 +62,10 @@ fn send(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
 impl ShellCalls for FakeShell {
     fn notify(&self, message: u32, _data: &NOTIFYICONDATAW) -> bool {
         self.0.calls.borrow_mut().push(message);
+        let depth = self.0.notify_depth.get() + 1;
+        self.0.notify_depth.set(depth);
+        self.0.max_notify_depth.set(self.0.max_notify_depth.get().max(depth));
+        let _leave = Leave(&self.0.notify_depth);
         if self.0.reenter_on_notify.get() && !self.0.inside_notify.replace(true) {
             let hwnd = self.0.hwnd.get() as HWND;
             send(hwnd, WM_TIMER, TIMER_ANIMATE, 0);
@@ -186,6 +202,11 @@ fn messages_delivered_inside_the_menu_and_inside_notify_find_no_live_borrow() {
     );
     assert_eq!(h.faults(), 0, "a borrow was live across a re-entrant call");
     assert!(!h.context.refreshing.get());
+    assert_eq!(
+        h.fake.max_notify_depth.get(),
+        1,
+        "a refresh asked for inside a refresh waits for it: the passes never nest"
+    );
 }
 
 /// The model changes while the menu is open: the pick is read against the menu that was

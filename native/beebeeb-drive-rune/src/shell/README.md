@@ -80,36 +80,111 @@ and the other not-ready states hide the account and return to the same place.
 ## Actions
 
 `s.shell.actions` is an `Arc<dyn ShellActions>`: `pause_sync`, `resume_sync`, `open_in_file_explorer`,
-`autostart_enabled`, `set_autostart`, `gate_state`, `tray_inputs`. Engine-dependent ones go to
-`EngineActions`, which the engine/session lane implements and passes in `shell::run` (one line:
-`let engine = …`); today that is `FixtureEngine` (in memory, nothing leaves the process). After a
-state change the engine calls `handle.update(|s, _| { s.shell.refresh(); })` so the gate, the b and
-the flyout follow.
+`autostart_enabled`, `set_autostart`, `session`, `tray_inputs`, `start_sync`, `stop_for_quit`,
+`resume_after_cancelled_quit`. Engine-dependent ones go to `EngineActions`, which the engine/session
+lane implements and passes in `shell::run` (one line: `let engine = …`); today that is
+`FixtureEngine` (in memory, nothing leaves the process). After a state change the engine calls
+`handle.update(|s, _| { s.shell.refresh(); })` so the gate, the b and the flyout follow.
+
+**The session lane's contract:** `EngineActions::session()` returns `Session { gate, account }`:
+the gate AND the user id, read together. The shell samples it, so the account is what lets it see
+a change of account it never saw a sign-out for (`Ready(A)` then `Ready(B)`): another account
+clears the route, the history, the settings pane, the dialog and every waiting intent.
+`GateState::FirstRun` is new (setup on this PC not finished): the first-run lane adds it to
+`gate.rs`.
+
+**The engine lane's contract:** `start_sync` is only reached through `ShellActions::start_sync`,
+which refuses while `profile_holder()` names another agent (a Tauri 0.8.x app of the same identity,
+`bb watch`): the native app never syncs beside it. `stop_for_quit` is the ONE engine hook of the
+quit path (the b's menu, the installer's `quit-for-update`, a Windows shutdown); it must return
+promptly and be safe to call twice. Rune runs the quit hook when Windows only ASKS to shut down, so
+`resume_after_cancelled_quit` undoes it when another app refuses the shutdown.
+
+## Dialogs: over the frame behind them
+
+A dialog is not a screen. The shell draws the state's own frame, then the scrim (the board's
+`--kit-scrim`: black at 28 % in light, 55 % in dark), then the dialog's card, centred; the window
+behind is inert and gets no keys. A dialog lane writes ONE function and ONE line in
+`registry::DIALOGS`:
+
+```rust
+pub fn card(dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El   // registry::DialogFn
+// DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None },
+```
+
+It returns its card and nothing else: no scrim, no window chrome, no copy of what is behind it.
+Open one with `host::dispatch(s, Event::OpenDialog(..))`; Esc closes it (and only it).
+
+## Windows: the main window, the first-run window, the flyout
+
+`surfaces::WindowKind` is `Main` (1280 x 800, at least 960 x 640), `FirstRun` (960 x 640) and
+`Flyout` (340 x 520). The board draws sign-in and the first-run steps in the first-run window
+(DW-A01 "First-run window 960 × 640 with the brand panel"; DW-A02 "Window with the brand panel";
+DW-0201 "A window of its own between sign-in and the main window (960 × 640, like the shared
+first-run window)"). It comes before the main window, never beside it, so the shell keeps ONE
+native window and gives it the kind's size when `surfaces::kind_for(&screen)` changes
+(`host::poll`). `Screen::SignIn` and `Screen::Gate(GateState::FirstRun)` are first-run screens
+(`FrameGroup::SignIn`, `FrameGroup::FirstRun`); every other screen is the main window's. The main
+window's place is not saved while it is the first-run window.
+
+The main window's place is in `native-window-state.json` in this identity's state folder. With no
+such file yet, the 0.8.x app's `main-window-frame.json` (its config folder) is read ONCE as the
+first position; it is never written.
+
+## Identity
+
+`identity.rs` is the one place a per-app name comes from: `AppIdentity::CURRENT` is `Real`
+(`io.beebeeb.app`, "Beebeeb") unless the build sets `BEEBEEB_APP_IDENTIFIER` to anything else, which
+makes it `Test` (`io.beebeeb.app.test`, "Beebeeb Test"). The control channel, the state folder, the
+Run value's name, the window titles, the tray window's class, the tooltip and the link scheme all
+derive from it, and a test asserts each differs between the two. Never write one of those names
+anywhere else. Same names and values as `src-tauri/src/app_identity.rs`
+(`fix/2445-test-build-isolation`), to be unified.
 
 ## The b
 
-`tray::tray_model(&TrayInputs)` gives the icon state, tooltip and menu (DW-1230, DW-1231);
-`tray_icon::render` draws each state for a light or dark taskbar at any size;
-`platform::windows` shows it. A left click toggles the flyout (signed out: opens the window on
-sign-in); a right click or Shift+F10 opens the menu. Closing the window leaves the b running; Quit is
-only in the b's menu. Without a b (the stubs), closing the window quits.
+`tray::tray_model(&TrayInputs)` gives the icon state, tooltip and menu (DW-1230, DW-1231), in the
+board's order (DW-1201); `tray_icon::render` draws each state for a light or dark taskbar at any
+size; `platform/windows_tray.rs` shows it (its pure decisions are `tray_win.rs`). A left click
+toggles the flyout (no account on this PC: opens the window on sign-in; signed out after 90 days:
+the flyout, DW-1219); a right click or Shift+F10 opens the menu. Closing the window leaves the b
+running; Quit is only in the b's menu. **`Shell::has_tray()` is whether the icon is IN the
+notification area right now**, not whether a tray object exists: with no icon (Explorer not running,
+a failed add, the stubs) closing the window quits, and an icon that goes while the window is closed
+opens the window. `platform/windows_tray.rs` starts with the aliasing rule of its window procedure:
+read it before touching that file.
 
 ## Starting
 
-`instance.rs`: Rune tooling flags (`--snap`, …) make the run a renderer (no instance claim, no tray,
-no saved state). Otherwise `rune::single_instance("io.beebeeb.app")` hands a second launch's
-arguments to the first over a per-user named pipe; `EngineActions::profile_holder` (the sync lock of
-`lockfile.rs`, once the engine is linked) refuses a start beside a running 0.8.x app. `--autostart`
-(what the Run value passes) starts in the notification area.
+`instance::parse_args` reads the command line, which is untrusted when the OS starts the app for a
+link: the app takes a link ONLY as `--open-link <link>`, and a command line that has it honours no
+other flag. `--autostart` (what the Run value passes) starts in the notification area;
+`--quit-for-update` (the installer) asks the running instance to quit and exits 0 once that is
+acknowledged, exits 0 at once when nothing runs, and exits 1 when the instance did not answer.
+Development and diagnostic flags (Rune's `--snap`, `--out`, `--html`, `--script`, …, and `--db`) are
+read only in a dev build (`instance::DEV_BUILD`: a debug build, or the `dev-tools` feature); a
+shipped build ignores every one, and Rune is handed an empty argument list (`App::args`).
+
+One instance per identity and user: `control.rs` is the protocol and `platform/windows_control.rs`
+the named pipe (ACL: the current user only). Serving the pipe IS being the instance. A later launch
+hands over one request (`show`, `open <link>`, `quit-for-update`), waits for `ok` and exits; if the
+first instance does not answer in 5 seconds, or the channel is unusable, it says so in a native
+message box and exits 1: it never starts a second instance. Rune's `single_instance` is not used.
+`EngineActions::profile_holder` (the sync lock of `lockfile.rs`, once the engine is linked) refuses a
+start beside a running 0.8.x app.
 
 `deeplink.rs`: `beebeeb://open[/<section>[?folder=<id>]]` and `beebeeb://settings[/<pane>]`, nothing
-else; a link can only show a place. The scheme is not registered by the app (0.8.x has none):
-`deeplink::scheme_registration` lists the registry values for the installer.
+else; a link can only show a place. **The scheme is not registered in 0.9.0**;
+`deeplink::scheme_registration` lists the registry values for the installer
+(`"<exe>" --open-link "%1"`).
 
-`autostart.rs`: `HKCU\…\CurrentVersion\Run`, value `Beebeeb`, the value 0.8.x's autostart plugin
+`autostart.rs`: `HKCU\…\CurrentVersion\Run`, value `Beebeeb` (this identity's), the value 0.8.x's autostart plugin
 writes, so the setting carries over; ours is `"<exe>" --autostart`. A value 0.8.x left for this same
 program path is rewritten at start (`Platform::adopt_autostart`); a value for another path (another
 install, a development build) is never touched, so an installer that moves the program updates it.
+`autostart::plan(wish, existing, exe)` is the one decision (enable, disable, adopt): whatever the
+wish, a value that starts a program at another path is never written over and never deleted, and
+turning the switch on then fails with "set for another copy of this app".
 
 ## Stubbed or not here
 
@@ -122,5 +197,10 @@ install, a development build) is never touched, so an installer that moves the p
   no value for them (the route is right; the highlight stays where it was).
 - Files does not follow the route yet: `files_frame` draws `State::listing` whatever
   `Route::folder` says, and its Enter-into-folder does not dispatch `Navigate` (the Files lane's).
-- Windows code is type-checked from Linux (`cargo check --target x86_64-pc-windows-msvc`) but has
-  not run: the native checks are in the PR body.
+- Windows code is compiled and its tests run on the Windows build VM
+  (`scripts/coord/remote-build.sh win desktop <branch> --dir native/beebeeb-drive-rune -- …`):
+  `platform/windows_tray_tests.rs` drives the real window procedure through a hidden window, and
+  `platform/windows_control.rs` round-trips real named pipes. What needs a desktop session (the
+  icon in a real notification area, the menu, Explorer restarting) is in the PR body.
+- A real-desktop check of the first-run window's resize, and a non-resizable first-run window
+  (Rune sets resizability at creation only).

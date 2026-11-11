@@ -127,12 +127,12 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Enter => {
-            if let Some(idx) = s.selected {
-                if s.listing.items[idx].is_folder {
-                    let folder_id = s.listing.items[idx].id.clone();
-                    (s.listing, s.list_error) = crate::shell::state::load(s.source.as_ref(), Some(&folder_id));
-                    s.selected = None;
-                }
+            if let Some(idx) = s.selected
+                && s.listing.items[idx].is_folder
+            {
+                let folder_id = s.listing.items[idx].id.clone();
+                (s.listing, s.list_error) = crate::shell::state::load(s.source.as_ref(), Some(&folder_id));
+                s.selected = None;
             }
             true
         }

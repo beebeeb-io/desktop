@@ -82,7 +82,8 @@ const FAMILIES: (&str, &str) = ("Inter", "JetBrains Mono");
 /// Named states for headless renders (`--scene NAME`). The first three are DW-0401's; the
 /// rest put the route machine somewhere, so a frame lane can render its group before any
 /// navigation exists.
-const SCENES: &[(&str, fn(&mut State))] = &[
+type Scene = (&'static str, fn(&mut State));
+const SCENES: &[Scene] = &[
     ("light", |_| {}),
     ("dark", |_| {}),
     ("large-folder", |s| {

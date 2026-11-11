@@ -54,7 +54,9 @@ fn template() -> &'static Template {
         Template {
             size: info.width,
             alpha: buf[..(info.width * info.height * 4) as usize]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| p[3])
                 .collect(),
         }
@@ -208,10 +210,10 @@ mod tests {
     use super::*;
 
     fn alpha_sum(icon: &Rgba) -> u64 {
-        icon.pixels.chunks_exact(4).map(|p| u64::from(p[3])).sum()
+        icon.pixels.as_chunks::<4>().0.iter().map(|p| u64::from(p[3])).sum()
     }
     fn count(icon: &Rgba, pred: impl Fn(&[u8]) -> bool) -> usize {
-        icon.pixels.chunks_exact(4).filter(|p| pred(p)).count()
+        icon.pixels.as_chunks::<4>().0.iter().filter(|p| pred(*p)).count()
     }
 
     #[test]
