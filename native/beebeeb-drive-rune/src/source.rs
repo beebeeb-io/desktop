@@ -143,7 +143,7 @@ impl DriveSource for BoardFixtureSource {
                 shared_type: None,
                 shared_badges: vec![SharedBadge {
                     initials: "PS".into(),
-                    color: oklch(0.65, 0.14, 150.0),
+                    color: oklch(0.88, 0.05, 150.0),
                 }],
                 pc_status: Some("on_this_pc".into()),
                 is_protected: false,
@@ -162,11 +162,11 @@ impl DriveSource for BoardFixtureSource {
                 shared_badges: vec![
                     SharedBadge {
                         initials: "JI".into(),
-                        color: oklch(0.62, 0.21, 25.0),
+                        color: oklch(0.88, 0.05, 25.0),
                     },
                     SharedBadge {
                         initials: "MD".into(),
-                        color: oklch(0.55, 0.18, 250.0),
+                        color: oklch(0.88, 0.05, 250.0),
                     },
                 ],
                 pc_status: Some("online_only".into()),
@@ -185,7 +185,7 @@ impl DriveSource for BoardFixtureSource {
                 shared_type: None,
                 shared_badges: vec![SharedBadge {
                     initials: "LD".into(),
-                    color: oklch(0.65, 0.18, 30.0),
+                    color: oklch(0.88, 0.05, 60.0),
                 }],
                 pc_status: Some("online_only".into()),
                 is_protected: false,
@@ -218,7 +218,7 @@ impl DriveSource for BoardFixtureSource {
                 shared_type: None,
                 shared_badges: vec![SharedBadge {
                     initials: "SO".into(),
-                    color: oklch(0.65, 0.14, 150.0),
+                    color: oklch(0.88, 0.05, 150.0),
                 }],
                 pc_status: Some("online_only".into()),
                 is_protected: false,

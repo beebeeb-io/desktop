@@ -152,7 +152,9 @@ fn file_row(
     let type_icon = file_type_icon(item.mime.as_deref(), item.is_folder);
 
     let size_text = if item.is_folder {
-        item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
+        // The protected Backups root lists devices, not items (board: "4 devices").
+        let unit = if item.is_protected { "devices" } else { "items" };
+        item.child_count.map(|c| format!("{c} {unit}")).unwrap_or_default()
     } else {
         item.size.map(format_size).unwrap_or_default()
     };
@@ -237,7 +239,9 @@ fn shared_cell(label: &str, item: &DriveItem, text_secondary: Color) -> El {
                         text(&badge.initials)
                             .key("init")
                             .font(type_::AVATAR_INITIALS)
-                            .color(rune::Color::WHITE),
+                            // Badge tints are pale in both themes, so the initials
+                            // are a fixed dark ink rather than the theme text colour.
+                            .color(rune::oklch(0.28, 0.01, 80.0)),
                     ),
             );
         }
@@ -267,12 +271,18 @@ fn pc_status_icon(status: Option<&str>) -> Option<&'static rune::Icon> {
     }
 }
 
-fn file_type_icon(_mime: Option<&str>, is_folder: bool) -> &'static rune::Icon {
+fn file_type_icon(mime: Option<&str>, is_folder: bool) -> &'static rune::Icon {
     if is_folder {
         return &icons::FILES;
     }
-    // In the board, each file type has a distinct icon. For now use doc variants.
-    &icons::DOC_GENERIC
+    match mime {
+        Some(m) if m.contains("spreadsheet") || m.contains("excel") || m == "text/csv" => &icons::DOC_SPREADSHEET,
+        Some(m) if m.contains("presentation") || m.contains("keynote") || m.contains("powerpoint") => {
+            &icons::DOC_MINIMAL
+        }
+        Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
+        _ => &icons::DOC_GENERIC,
+    }
 }
 
 fn file_type_color(mime: Option<&str>, is_folder: bool) -> Color {

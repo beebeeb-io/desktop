@@ -174,7 +174,8 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                     el().key("meter-fill")
                         .h(4.0)
                         .radius(2.0)
-                        .fill(t.accent)
+                        // Neutral fill: Amber is only encryption state + the primary action.
+                        .fill(t.text_quaternary)
                         .w((SIDEBAR_W - space::MD * 2.0) * used_pct as f32),
                 ),
         )
