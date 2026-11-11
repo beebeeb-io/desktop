@@ -473,6 +473,25 @@ update or downgrade is actually installed from that channel.
 10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
 11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
 
+## Native Windows releases (0.9.0 and later)
+
+The native Windows app has its own workflow, `.github/workflows/release-native-windows.yml`; `release.yml` stays the
+0.8.x path and is the only writer of `desktop/latest.json`, `beta.json` and `alpha.json`. Design and open decisions:
+`docs/superpowers/specs/2026-11-11-native-installer-updater.md`. **Status: the workflow has never run.**
+
+- Same inputs (`version`, `channel`, `publish_existing`); a version below 0.9.0 is refused. Same gates: authored
+  `RELEASE_NOTES.md` (validated with `--no-macos`: a native release is Windows only), `RELEASE_BLOCKERS.md`, the
+  branch-point check, the Authenticode gate (1 installer, no MSI), the updater-signature key guard.
+- The installer is built by `packaging/windows/build-installer.ps1 -Mode release` (plain `makensis`), not by the
+  Tauri bundler. It is signed for the updater with the same key and tool as 0.8.x (`tauri signer sign`).
+- A native release is published to the **v2** manifests only: `desktop/v2/{stable,beta,alpha}.json`, each with a
+  detached signature `….json.sig` (the native updater refuses an unsigned manifest), and the installer under
+  `desktop/artifacts/<version>/`. `scripts/publish-release-files.sh` puts the staged files where
+  `releases.beebeeb.io` is served from (repository variable `DESKTOP_RELEASE_PUBLISH_TARGET`; default: the
+  `beebeeb-io/releases` checkout). Installs on 0.8.24 or older never see a native release: they first update to
+  0.8.25, the bridge (`docs/superpowers/plans/2026-11-11-bridge-0.8.25.md`).
+- GitHub "Latest" is not moved by this workflow.
+
 ## Style Notes
 
 - Be specific about what changed and what was verified.

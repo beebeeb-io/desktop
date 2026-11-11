@@ -337,6 +337,10 @@ jobs:
       VER: ${{ inputs.version }}
       CHANNEL: ${{ inputs.channel }}
       TAG: desktop-v${{ inputs.version }}
+      # Where releases.beebeeb.io is served from (scripts/publish-release-files.sh): the checkout of
+      # beebeeb-io/releases today; an S3-compatible bucket or an rsync target on our own hosting once the repository
+      # variable is set (decision 2450). The files are signed before this step and the host never holds a key.
+      PUBLISH_TARGET: ${{ vars.DESKTOP_RELEASE_PUBLISH_TARGET || 'dir:releases-repo' }}
     steps:
       - name: Checkout the scripts at the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -359,8 +363,7 @@ jobs:
 
       # The installer and its signature come from the GitHub release this workflow created (assets API, the
       # authenticated route release.yml uses), and the installer is published under our own host name:
-      # releases.beebeeb.io/desktop/artifacts/<version>/. Where that name is served from is an open question of the
-      # spec (it must be our own hosting in the EU before a native build is offered on stable).
+      # releases.beebeeb.io/desktop/artifacts/<version>/ (spec section 6).
       - name: Fetch the release's installer, signature and notes
         shell: bash
         env:
@@ -393,11 +396,11 @@ jobs:
             alpha) file=alpha.json ;;
             *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;;
           esac
-          mkdir -p "releases-repo/desktop/v2" "releases-repo/desktop/artifacts/$VER"
+          mkdir -p "stage/desktop/v2" "stage/desktop/artifacts/$VER"
           node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
             --installer "work/$installer" --sig "work/$installer.sig" --notes work/notes.md \
-            --out "releases-repo/desktop/v2/$file"
-          cp "work/$installer" "releases-repo/desktop/artifacts/$VER/$installer"
+            --out "stage/desktop/v2/$file"
+          cp "work/$installer" "stage/desktop/artifacts/$VER/$installer"
           echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
 
       # The manifest is signed too (the native updater refuses an unsigned one): same key, same tool, and the
@@ -411,14 +414,26 @@ jobs:
         run: |
           set -euo pipefail
           bun install --frozen-lockfile
-          manifest="../releases-repo/desktop/v2/$MANIFEST_FILE"
-          rm -f "$manifest.sig"
+          manifest="../stage/desktop/v2/$MANIFEST_FILE"
           bun run tauri signer sign "$manifest" > /dev/null
           test -s "$manifest.sig"
           node scripts/check-updater-signature-key.mjs --sig "$manifest.sig"
           node scripts/check-updater-signature-key.mjs --manifest "$manifest"
 
+      # Artefacts first, manifests last; a published artefact is never replaced by other bytes.
+      - name: Publish the staged files
+        shell: bash
+        env:
+          AWS_ENDPOINT_URL: ${{ vars.DESKTOP_RELEASE_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.DESKTOP_RELEASE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DESKTOP_RELEASE_S3_SECRET }}
+        run: |
+          set -euo pipefail
+          bash desktop-src/scripts/publish-release-files.sh --self-test
+          bash desktop-src/scripts/publish-release-files.sh stage "$PUBLISH_TARGET"
+
       - name: Commit and push to releases repo
+        if: ${{ startsWith(env.PUBLISH_TARGET, 'dir:') }}
         working-directory: releases-repo
         shell: bash
         env:

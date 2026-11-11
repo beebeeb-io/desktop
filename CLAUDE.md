@@ -16,6 +16,7 @@ cd src-tauri && cargo check --locked --all-targets           # Rust side without
 cd src-tauri && cargo test --locked 2>&1 | tee /tmp/bb-desktop-test.log
 python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard CI uses (proves it rejects empty runs)
 scripts/release-macos-local.sh <VERSION> <CHANNEL>           # macOS release: local only, fail-closed (docs/RELEASING.md)
+cd crates/beebeeb-updater && cargo test --locked             # the native updater's rules (truth line: test result: ok. N passed; 0 failed)
 ```
 
 Truth lines: `cargo test` → per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
@@ -44,6 +45,8 @@ src-tauri/src/windows_cf/   Windows Cloud Files (CFAPI); linux_fuse/ = unmounted
 BeebeebFileProvider/        macOS File Provider extension (Swift; ExtensionLog.swift is its only logger); built by scripts/build-fileprovider-extension.sh
 src-tauri/macos/FileProviderBridge.m   ObjC bridge; tests/ (bun tests incl. macCopyGuard, macNoInPlaceInstall); scripts/ (release, signing, count guards)
 docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)   linux/, macos/, windows/ = pre-Tauri scaffolds kept for reference
+crates/beebeeb-updater/     the native updater (no Tauri, no UI): manifest, minisign check, policy, one State + step; `cargo test --locked` there
+packaging/windows/          the native app's NSIS installer by plain makensis (README.md = the lead's Windows commands and the upgrade rehearsal)
 ```
 
 ## Traps
