@@ -20,7 +20,11 @@ impl StateDb {
         // Every listing row that carries the field lands here: read first, so an unchanged role (or an
         // unknown id) opens no write transaction.
         let stored: Option<Option<String>> = conn
-            .query_row("SELECT system_role FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))
+            .query_row(
+                "SELECT system_role FROM files WHERE file_id = ?1",
+                params![file_id],
+                |r| r.get(0),
+            )
             .optional()?;
         if stored.is_none_or(|stored| stored.as_deref() == role.map(SystemRole::as_str)) {
             return Ok(false);
@@ -32,8 +36,11 @@ impl StateDb {
         )? > 0;
         if changed {
             record_file_change_conn(&tx, file_id, FpChangeKind::Modified, None)?;
-            let path: String =
-                tx.query_row("SELECT trim(path, '/') FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))?;
+            let path: String = tx.query_row(
+                "SELECT trim(path, '/') FROM files WHERE file_id = ?1",
+                params![file_id],
+                |r| r.get(0),
+            )?;
             if !path.is_empty() {
                 let under: Vec<String> = tx
                     // A child may be stored with a leading slash (`/Backups/x`), as `untrash_subtree` allows.
@@ -56,7 +63,11 @@ impl StateDb {
     pub fn system_role(&self, file_id: &str) -> Result<Option<SystemRole>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let raw: Option<String> = conn
-            .query_row("SELECT system_role FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0))
+            .query_row(
+                "SELECT system_role FROM files WHERE file_id = ?1",
+                params![file_id],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
         Ok(raw.as_deref().and_then(SystemRole::parse))
@@ -68,9 +79,8 @@ impl StateDb {
     /// on every delete reads a handful of index entries, never the whole table.
     pub fn backups_roots(&self) -> Result<Vec<(String, String)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare_cached(
-            "SELECT file_id, path FROM files WHERE system_role = 'backups_root' ORDER BY file_id",
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT file_id, path FROM files WHERE system_role = 'backups_root' ORDER BY file_id")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect()
     }

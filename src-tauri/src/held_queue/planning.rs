@@ -33,8 +33,11 @@ pub fn plan(
     counts.landed = landed.len();
     let landed_ops: HashSet<&str> = landed.iter().copied().collect();
     // A file named by an op that stays: a twin it names takes a pending change, so no ghost is folded into it.
-    let busy: HashSet<&str> =
-        ops.iter().filter(|op| !landed_ops.contains(op.op_id.as_str())).filter_map(|op| op.file_id.as_deref()).collect();
+    let busy: HashSet<&str> = ops
+        .iter()
+        .filter(|op| !landed_ops.contains(op.op_id.as_str()))
+        .filter_map(|op| op.file_id.as_deref())
+        .collect();
     let mut server_folders: HashMap<Option<&str>, Vec<&Row>> = HashMap::new();
     for row in rows.iter().filter(|r| r.is_folder && r.server_known) {
         server_folders.entry(row.parent_id.as_deref()).or_default().push(row);
@@ -42,8 +45,10 @@ pub fn plan(
     // D6, before D2: the parent of a create queued with none, by path. The rest of the plan reads the parents it sets.
     let by_path = parents_by_path(rows, ops, &create_of, &landed_ops, &row_of, opts, &mut counts);
 
-    let mut ghosts: Vec<&Row> =
-        rows.iter().filter(|r| r.is_folder && !r.server_known && create_of.contains_key(r.file_id.as_str())).collect();
+    let mut ghosts: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.is_folder && !r.server_known && create_of.contains_key(r.file_id.as_str()))
+        .collect();
     ghosts.sort_by_key(|r| depth(&r.path));
     let mut fate: HashMap<&str, Fate> = HashMap::new();
     let mut remaps: Vec<Unit> = Vec::new();
@@ -83,17 +88,27 @@ pub fn plan(
             counts.parent_unresolved += 1;
             fate.insert(id, Fate::Stays);
             if create.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
-                holds.push(Unit::Hold { op_id: create.op_id.clone() });
+                holds.push(Unit::Hold {
+                    op_id: create.op_id.clone(),
+                });
             }
             continue;
         }
         let twins: Vec<&Row> = server_folders
             .get(&parent)
-            .map(|rows| rows.iter().copied().filter(|t| same_leaf(leaf(&t.path), leaf(&ghost.path), opts.case_insensitive)).collect())
+            .map(|rows| {
+                rows.iter()
+                    .copied()
+                    .filter(|t| same_leaf(leaf(&t.path), leaf(&ghost.path), opts.case_insensitive))
+                    .collect()
+            })
             .unwrap_or_default();
         // D5: a ghost at or under `Backups/unknown` with no twin never replays. Its subtree is dropped whole when it is
         // only scaffolding; otherwise it is held as D4 and the folders under it wait.
-        if let Some(scaffolding) = scaffolding.as_ref().filter(|s| twins.is_empty() && s.holds(&ghost.path)) {
+        if let Some(scaffolding) = scaffolding
+            .as_ref()
+            .filter(|s| twins.is_empty() && s.holds(&ghost.path))
+        {
             if let Some((unit, ghosts, op_ids)) = scaffolding.drop_at(ghost, &create_of, &fate, disk_has_file) {
                 if let Unit::DropScaffold { dirs, .. } = &unit {
                     counts.scaffold_dirs.extend(dirs.iter().cloned());
@@ -106,12 +121,17 @@ pub fn plan(
                 counts.backup_unknown_kept += 1;
                 fate.insert(id, Fate::Stays);
                 if create.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
-                    holds.push(Unit::Hold { op_id: create.op_id.clone() });
+                    holds.push(Unit::Hold {
+                        op_id: create.op_id.clone(),
+                    });
                 }
             }
             continue;
         }
-        let held = if ops.iter().any(|op| op.file_id.as_deref() == Some(id) && op.op_id != create.op_id) {
+        let held = if ops
+            .iter()
+            .any(|op| op.file_id.as_deref() == Some(id) && op.op_id != create.op_id)
+        {
             Some(&mut counts.held_acts_on_ghost)
         } else if by_path.of_op(create).is_some_and(|p| Some(p) != row_parent) {
             Some(&mut counts.held_parents_disagree)
@@ -126,7 +146,9 @@ pub fn plan(
             *count += 1;
             fate.insert(id, Fate::Stays);
             if create.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
-                holds.push(Unit::Hold { op_id: create.op_id.clone() });
+                holds.push(Unit::Hold {
+                    op_id: create.op_id.clone(),
+                });
             }
         } else if let [twin] = twins[..] {
             counts.remapped += 1;
@@ -144,7 +166,9 @@ pub fn plan(
             fate.insert(id, Fate::Replay);
             if create.paused_reason.as_deref() == Some(NEEDS_REVIEW) {
                 counts.released += 1;
-                releases.push(Unit::Release { op_id: create.op_id.clone() });
+                releases.push(Unit::Release {
+                    op_id: create.op_id.clone(),
+                });
             }
         }
     }
@@ -218,10 +242,17 @@ pub fn plan(
     // A ghost kept for replay whose own create gave up on anything but a parent 404 under a moved or replayed folder.
     counts.replay_given_up = fate
         .iter()
-        .filter(|(id, f)| matches!(f, Fate::Replay) && create_of[*id].given_up && !rearmed.contains(create_of[*id].op_id.as_str()))
+        .filter(|(id, f)| {
+            matches!(f, Fate::Replay) && create_of[*id].given_up && !rearmed.contains(create_of[*id].op_id.as_str())
+        })
         .count();
 
-    let mut units: Vec<Unit> = landed.into_iter().map(|op_id| Unit::DropLanded { op_id: op_id.to_string() }).collect();
+    let mut units: Vec<Unit> = landed
+        .into_iter()
+        .map(|op_id| Unit::DropLanded {
+            op_id: op_id.to_string(),
+        })
+        .collect();
     units.extend(by_path.units);
     units.extend(remaps);
     units.extend(drops);
@@ -251,7 +282,9 @@ pub enum PresendBlock {
 pub fn presend_block(op: &Op, row: Option<&Row>, payload_exists: &dyn Fn(&str) -> bool) -> Option<PresendBlock> {
     let superseded = row.is_some_and(|row| {
         (op.create_file && row.server_known)
-            || (op.kind == "upload_version" && !op.create_file && op.base_version.is_some_and(|b| row.current_version > b))
+            || (op.kind == "upload_version"
+                && !op.create_file
+                && op.base_version.is_some_and(|b| row.current_version > b))
     });
     if superseded {
         Some(PresendBlock::Superseded)
@@ -264,5 +297,9 @@ pub fn presend_block(op: &Op, row: Option<&Row>, payload_exists: &dyn Fn(&str) -
 
 /// `≡` as a lookup key: two names are `same_leaf` exactly when their keys are equal (spec §3).
 pub(super) fn fold(name: &str, case_insensitive: bool) -> String {
-    if case_insensitive { name.to_lowercase() } else { name.to_string() }
+    if case_insensitive {
+        name.to_lowercase()
+    } else {
+        name.to_string()
+    }
 }

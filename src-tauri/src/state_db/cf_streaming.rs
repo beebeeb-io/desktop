@@ -69,7 +69,9 @@ impl StateDb {
             "SELECT file_id FROM files WHERE current_object_version_id IS NOT NULL
                AND minted_object_version_id IS NOT current_object_version_id",
         )?;
-        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(ids)
     }
 
@@ -118,7 +120,10 @@ impl StateDb {
     /// shown as needing attention until the person discards it. `Ok(true)`: the row was there.
     pub fn mark_poison_needs_attention(&self, file_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.execute("UPDATE cf_poison SET needs_attention = 1 WHERE file_id = ?1", params![file_id])? == 1)
+        Ok(conn.execute(
+            "UPDATE cf_poison SET needs_attention = 1 WHERE file_id = ?1",
+            params![file_id],
+        )? == 1)
     }
 
     /// Amendment 4 (desktop #225 review P2): a pin state (`CF_PIN_STATE` value) the empty step could put
@@ -139,7 +144,11 @@ impl StateDb {
     pub fn pin_to_restore(&self, file_id: &str) -> Result<Option<i32>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn
-            .query_row("SELECT pin FROM cf_pin_restore WHERE file_id = ?1", params![file_id], |row| row.get(0))
+            .query_row(
+                "SELECT pin FROM cf_pin_restore WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            )
             .optional()?)
     }
 
@@ -147,7 +156,9 @@ impl StateDb {
     pub fn pins_to_restore(&self) -> Result<Vec<(String, i32)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare("SELECT file_id, pin FROM cf_pin_restore ORDER BY file_id")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -176,7 +187,13 @@ impl StateDb {
             .query_row(
                 "SELECT minted_object_version_id, minted_format, minted_version_id FROM files WHERE file_id = ?1",
                 params![file_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .and_then(|(version, format, id)| {
@@ -243,7 +260,8 @@ impl StateDb {
     #[cfg(all(test, windows))]
     pub(crate) fn make_file_rows_unreadable_for_test(&self) {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute_batch("ALTER TABLE files RENAME TO files_unreadable_for_test").unwrap();
+        conn.execute_batch("ALTER TABLE files RENAME TO files_unreadable_for_test")
+            .unwrap();
     }
 }
 
@@ -426,7 +444,11 @@ mod tests {
         assert_eq!(db.pin_to_restore("f").unwrap(), Some(1), "the pin is still to restore");
         assert_eq!(db.pins_to_restore().unwrap(), vec![("f".to_string(), 1)]);
         db.record_poison("f", "corrupt", Some((3, 4)), 2).unwrap();
-        assert_eq!(db.pin_to_restore("f").unwrap(), Some(1), "a new poison does not drop it either");
+        assert_eq!(
+            db.pin_to_restore("f").unwrap(),
+            Some(1),
+            "a new poison does not drop it either"
+        );
         assert!(db.clear_pin_to_restore("f").unwrap());
         assert!(!db.clear_pin_to_restore("f").unwrap());
         assert_eq!(db.pins_to_restore().unwrap(), Vec::<(String, i32)>::new());
@@ -437,7 +459,11 @@ mod tests {
         let (_dir, db) = db_with("f", Some(A));
         assert_eq!(db.range_identity("f").unwrap(), None, "nothing recorded");
         assert!(db.record_minted_version("f", 10).unwrap());
-        assert_eq!(db.range_identity("f").unwrap(), None, "a minted version alone is no session identity");
+        assert_eq!(
+            db.range_identity("f").unwrap(),
+            None,
+            "a minted version alone is no session identity"
+        );
         let id = RecordedIdentity {
             object_version_id: A.into(),
             format: "v2".into(),

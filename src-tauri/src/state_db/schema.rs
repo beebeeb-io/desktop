@@ -175,12 +175,7 @@ impl StateDb {
         ensure_column(conn, "files", "cache_path", "TEXT")?;
         ensure_column(conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
-        ensure_column(
-            conn,
-            "files",
-            "inherited_pin_state",
-            "TEXT NOT NULL DEFAULT 'unpinned'",
-        )?;
+        ensure_column(conn, "files", "inherited_pin_state", "TEXT NOT NULL DEFAULT 'unpinned'")?;
         ensure_column(conn, "files", "last_opened_at", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "operation_queue", "last_error_class", "TEXT")?;
@@ -412,8 +407,8 @@ impl StateDb {
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
             )?;
         } else {
-        conn.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
              AFTER INSERT ON files
              WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
              BEGIN
@@ -436,7 +431,7 @@ impl StateDb {
                  DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
              END;
              DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
-        ))?;
+            ))?;
         }
         // LD-0105 / task 2180: the version a Windows placeholder was minted from (`cf_streaming.rs`).
         // NULL on every row from before it: no identity, so bytes on disk for it are never trusted.
@@ -612,7 +607,12 @@ impl StateDb {
         // LD-0139 (spec Amendment 12d, core v0.2.5): the notice ids the backup's last pass acknowledged (core's
         // `acknowledged`, a sorted JSON array of strings), written in the same transaction as its `last_pass_at_ms`
         // and any stop, and kept by "Back up again". A column, not a table, so one row write carries both.
-        ensure_column(conn, "backup_pass_marks", "acknowledged_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        ensure_column(
+            conn,
+            "backup_pass_marks",
+            "acknowledged_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         Ok(())
     }
 }

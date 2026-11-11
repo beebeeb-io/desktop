@@ -350,8 +350,7 @@ impl StateDb {
         mime_type: Option<&str>,
     ) -> Result<bool> {
         let claim = ClaimId::parse(claim_id).map_err(StateDbError::into_sql)?;
-        let object_version =
-            VersionId::parse(object_version_id).map_err(StateDbError::into_sql)?;
+        let object_version = VersionId::parse(object_version_id).map_err(StateDbError::into_sql)?;
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let n = conn.execute(
             "UPDATE upload_resume
@@ -375,8 +374,7 @@ impl StateDb {
         // the runner's op): a blank one is refused before it reaches SQL.
         let local = LocalFileId::parse(input.local_file_id).map_err(StateDbError::into_sql)?;
         let server = ServerFileId::parse(input.server_file_id).map_err(StateDbError::into_sql)?;
-        let produced_version_id =
-            VersionId::parse(input.produced_object_version_id).map_err(StateDbError::into_sql)?;
+        let produced_version_id = VersionId::parse(input.produced_object_version_id).map_err(StateDbError::into_sql)?;
         let claim = input
             .claim_id
             .map(ClaimId::parse)
@@ -658,7 +656,10 @@ impl StateDb {
             match kept_path {
                 Some(path) => insert_upload_finalization_conn(
                     &tx,
-                    &UploadFinalization { target_path: path, ..finalization.clone() },
+                    &UploadFinalization {
+                        target_path: path,
+                        ..finalization.clone()
+                    },
                 )?,
                 None => insert_upload_finalization_conn(&tx, finalization)?,
             }

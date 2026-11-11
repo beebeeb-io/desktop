@@ -564,14 +564,33 @@ fn try_again_refuses_a_change_a_newer_version_has_superseded() {
     let edit = ("upload_version", Some(r#"{"operation":"update_file"}"#));
     queue(&db, "old-edit", edit, (None, 5, 0), None, 1);
     queue(&db, "old-edit-backing-off", edit, (None, 2, NOW + 600), None, 2);
-    queue(&db, "new-file", ("upload_version", Some(r#"{"operation":"create_file"}"#)), (None, 5, 0), None, 3);
+    queue(
+        &db,
+        "new-file",
+        ("upload_version", Some(r#"{"operation":"create_file"}"#)),
+        (None, 5, 0),
+        None,
+        3,
+    );
     queue(&db, "current-edit", edit, (None, 5, 0), None, 4);
     for op in ["old-edit", "old-edit-backing-off", "new-file", "current-edit"] {
         stage(&db, &dir, op);
     }
-    sql(&db, "UPDATE operation_queue SET base_version = 3 WHERE op_id LIKE 'old-edit%' OR op_id = 'current-edit'", []);
-    sql(&db, "UPDATE files SET current_version = 4 WHERE file_id IN ('file-old-edit', 'file-old-edit-backing-off', 'file-new-file')", []);
-    sql(&db, "UPDATE files SET current_version = 3 WHERE file_id = 'file-current-edit'", []);
+    sql(
+        &db,
+        "UPDATE operation_queue SET base_version = 3 WHERE op_id LIKE 'old-edit%' OR op_id = 'current-edit'",
+        [],
+    );
+    sql(
+        &db,
+        "UPDATE files SET current_version = 4 WHERE file_id IN ('file-old-edit', 'file-old-edit-backing-off', 'file-new-file')",
+        [],
+    );
+    sql(
+        &db,
+        "UPDATE files SET current_version = 3 WHERE file_id = 'file-current-edit'",
+        [],
+    );
 
     let items = db.unsent_changes(0, 100, NOW).unwrap().items;
     for id in ["old-edit", "old-edit-backing-off", "new-file"] {
@@ -586,9 +605,16 @@ fn try_again_refuses_a_change_a_newer_version_has_superseded() {
     let outcomes: Vec<_> = ids.iter().map(|id| db.retry_unsent_change(id, NOW).unwrap()).collect();
 
     assert_eq!(outcomes, [RetryOutcome::Superseded; 3]);
-    assert_eq!(ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(), before, "nothing changed");
+    assert_eq!(
+        ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(),
+        before,
+        "nothing changed"
+    );
     assert!(due_ids(&db).is_empty(), "none of them is sent");
-    assert_eq!(db.retry_unsent_change("current-edit", NOW).unwrap(), RetryOutcome::Retried);
+    assert_eq!(
+        db.retry_unsent_change("current-edit", NOW).unwrap(),
+        RetryOutcome::Retried
+    );
     assert_eq!(due_ids(&db), ["current-edit"]);
 }
 
@@ -598,7 +624,14 @@ fn try_again_refuses_a_change_a_newer_version_has_superseded() {
 fn try_again_refuses_an_upload_whose_copy_is_gone() {
     let (dir, db) = db();
     queue(&db, "copy-deleted", ("upload_file", None), (None, 5, 0), None, 1);
-    queue(&db, "copy-deleted-backing-off", ("upload_version", None), (None, 1, NOW + 60), None, 2);
+    queue(
+        &db,
+        "copy-deleted-backing-off",
+        ("upload_version", None),
+        (None, 1, NOW + 60),
+        None,
+        2,
+    );
     queue(&db, "no-copy-recorded", ("upload_file", None), (None, 5, 0), None, 3);
     queue(&db, "rename", ("rename_file", None), (None, 5, 0), None, 4);
     for op in ["copy-deleted", "copy-deleted-backing-off"] {
@@ -611,13 +644,20 @@ fn try_again_refuses_an_upload_whose_copy_is_gone() {
         let item = listed(&items, id);
         assert_eq!((item.retryable, item.blocked), (false, Some("copy_gone")), "{id}");
     }
-    assert_eq!((listed(&items, "rename").retryable, listed(&items, "rename").blocked), (true, None));
+    assert_eq!(
+        (listed(&items, "rename").retryable, listed(&items, "rename").blocked),
+        (true, None)
+    );
     let before: Vec<_> = ids.iter().map(|id| row_state(&db, id)).collect();
 
     let outcomes: Vec<_> = ids.iter().map(|id| db.retry_unsent_change(id, NOW).unwrap()).collect();
 
     assert_eq!(outcomes, [RetryOutcome::CopyGone; 3]);
-    assert_eq!(ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(), before, "nothing changed");
+    assert_eq!(
+        ids.iter().map(|id| row_state(&db, id)).collect::<Vec<_>>(),
+        before,
+        "nothing changed"
+    );
     assert_eq!(db.retry_unsent_change("rename", NOW).unwrap(), RetryOutcome::Retried);
 }
 
@@ -642,12 +682,24 @@ fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
          VALUES ('completed', '/gone', 1, 1, 's', 'file-completed', 'o', 1, 1, 7)",
         [],
     );
-    sql(&db, "UPDATE files SET current_version = 7 WHERE file_id = 'file-completed'", []);
-    sql(&db, "UPDATE operation_queue SET base_version = 6 WHERE op_id = 'completed'", []);
+    sql(
+        &db,
+        "UPDATE files SET current_version = 7 WHERE file_id = 'file-completed'",
+        [],
+    );
+    sql(
+        &db,
+        "UPDATE operation_queue SET base_version = 6 WHERE op_id = 'completed'",
+        [],
+    );
 
     let items = db.unsent_changes(0, 100, NOW).unwrap().items;
     for id in ["backup", "completed"] {
-        assert_eq!((listed(&items, id).retryable, listed(&items, id).blocked), (true, None), "{id}");
+        assert_eq!(
+            (listed(&items, id).retryable, listed(&items, id).blocked),
+            (true, None),
+            "{id}"
+        );
         assert_eq!(db.retry_unsent_change(id, NOW).unwrap(), RetryOutcome::Retried, "{id}");
     }
 }
@@ -658,10 +710,17 @@ fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
 fn a_claimed_change_that_gave_up_offers_no_try_again() {
     let (_dir, db) = db();
     queue(&db, "claimed", ("rename_file", None), (None, 5, 0), None, 1);
-    sql(&db, "UPDATE operation_queue SET claim_id = 'claim', claimed_at = 1 WHERE op_id = 'claimed'", []);
+    sql(
+        &db,
+        "UPDATE operation_queue SET claim_id = 'claim', claimed_at = 1 WHERE op_id = 'claimed'",
+        [],
+    );
     let items = db.unsent_changes(0, 100, NOW).unwrap().items;
     assert!(!listed(&items, "claimed").retryable);
-    assert_eq!(db.retry_unsent_change("claimed", NOW).unwrap(), RetryOutcome::AlreadyQueued);
+    assert_eq!(
+        db.retry_unsent_change("claimed", NOW).unwrap(),
+        RetryOutcome::AlreadyQueued
+    );
 }
 
 // ── Task 2414: "Not downloaded" ────────────────────────────────────────────────────────────────────────────────────
@@ -698,10 +757,16 @@ fn failed_and_paused_pin_downloads_are_counted_and_listed_as_not_downloaded() {
 
     assert_eq!(hold.not_downloaded, expected.len() as i64, "the count");
     assert_eq!(first.total, hold.not_downloaded, "the list's total is the count");
-    let listed: BTreeMap<String, (&str, String)> =
-        items.iter().map(|i| (i.id.clone(), (i.kind, i.group.clone()))).collect();
+    let listed: BTreeMap<String, (&str, String)> = items
+        .iter()
+        .map(|i| (i.id.clone(), (i.kind, i.group.clone())))
+        .collect();
     assert_eq!(listed, expected, "each listed once, under its kind and group");
-    assert!(items.iter().all(|i| !i.retryable && i.blocked.is_none() && i.path.starts_with("docs/")));
+    assert!(
+        items
+            .iter()
+            .all(|i| !i.retryable && i.blocked.is_none() && i.path.starts_with("docs/"))
+    );
     let dates: Vec<i64> = items.iter().map(|i| i.queued_at).collect();
     assert!(dates.windows(2).all(|w| w[0] <= w[1]), "oldest first");
     assert_eq!(items[0].queued_at, 4, "the oldest, given up long ago, is still there");

@@ -75,7 +75,10 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
 }
 
 /// [`StateDb::get_file`] on an open connection or transaction.
-pub(super) fn get_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<Option<FileEntry>> {
+pub(super) fn get_file_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    file_id: &str,
+) -> Result<Option<FileEntry>> {
     let mut stmt = conn.prepare(
         "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
                 parent_id, item_kind
@@ -307,7 +310,9 @@ pub(super) fn queued_save_move_conn<C: std::ops::Deref<Target = Connection>>(
     )?;
     let rows = stmt.query_map(params![file_id], |row| row.get::<_, Option<String>>(0))?;
     for raw in rows {
-        let Some(metadata) = raw?.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        let Some(metadata) = raw?
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         else {
             continue;
         };
@@ -351,7 +356,8 @@ pub(super) fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connec
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn keep_ops_conn(conn: &Connection, ids: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut ops: Vec<(String, Option<String>)> = Vec::new();
-    let mut stmt = conn.prepare("SELECT op_id, payload_path FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1")?;
+    let mut stmt =
+        conn.prepare("SELECT op_id, payload_path FROM operation_queue WHERE file_id = ?1 OR parent_id = ?1")?;
     for id in ids {
         for op in stmt.query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?)))? {
             let op = op?;
@@ -363,9 +369,19 @@ pub(super) fn keep_ops_conn(conn: &Connection, ids: &[String]) -> Result<(Vec<St
     let mut staged: Vec<String> = Vec::new();
     for (op_id, payload) in &ops {
         let resumed: Option<String> = conn
-            .query_row("SELECT payload_path FROM upload_resume WHERE op_id = ?1", params![op_id], |row| row.get(0))
+            .query_row(
+                "SELECT payload_path FROM upload_resume WHERE op_id = ?1",
+                params![op_id],
+                |row| row.get(0),
+            )
             .optional()?;
-        staged.extend(payload.iter().chain(resumed.iter()).filter(|path| !path.is_empty()).cloned());
+        staged.extend(
+            payload
+                .iter()
+                .chain(resumed.iter())
+                .filter(|path| !path.is_empty())
+                .cloned(),
+        );
     }
     staged.sort();
     staged.dedup();
@@ -561,7 +577,10 @@ pub(super) fn park_unclaimed_conn(conn: &Connection, op_id: &str, reason: ParkRe
 /// moves: a `Trashing` row keeps its trash presentation (m-8), a `Conflict` row its own.
 /// Write-keyed: only a Finder upload is ever parked, so Windows and Linux never reach it. A flip
 /// is recorded for the system, as every status change is.
-pub(super) fn settle_status_after_park_conn<C: std::ops::Deref<Target = Connection>>(conn: &C, file_id: &str) -> Result<()> {
+pub(super) fn settle_status_after_park_conn<C: std::ops::Deref<Target = Connection>>(
+    conn: &C,
+    file_id: &str,
+) -> Result<()> {
     let flipped = conn.execute(
         "UPDATE files SET status = 'error'
          WHERE file_id = ?1 AND status = 'uploading'
@@ -713,7 +732,10 @@ pub(super) fn hand_over_conn(
 }
 
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(super) fn held_write_conn(conn: &Connection, file_id: &str) -> Result<(Option<crate::write_token::HeldWrite>, bool)> {
+pub(super) fn held_write_conn(
+    conn: &Connection,
+    file_id: &str,
+) -> Result<(Option<crate::write_token::HeldWrite>, bool)> {
     conn.query_row(
         "SELECT held_write_id, held_base, held_version, held_object_version_id, version_filled
          FROM files WHERE file_id = ?1",

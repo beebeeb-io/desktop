@@ -46,39 +46,21 @@ pub enum Mode {
     Export,
 }
 
-
-
-
 mod classify;
-pub use classify::{DiagnosticErrorCode, classify_error_code, QUEUE_KIND_LABELS, PAUSE_REASON_LABELS, allowed_label};
-
-
-
+pub use classify::{DiagnosticErrorCode, PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code};
 
 mod known_names;
+pub use known_names::KnownNames;
 use known_names::*;
-pub use known_names::{KnownNames};
-
-
-
 
 mod export;
-pub use export::{redact_secrets_only, redact_for_export};
-
-
-
+pub use export::{redact_for_export, redact_secrets_only};
 
 mod credential_shapes;
 use credential_shapes::*;
 
-
-
-
 mod tokens;
 use tokens::*;
-
-
-
 
 mod standard_words;
 use standard_words::*;
@@ -97,9 +79,9 @@ mod tests {
 
     const ISSUE_ERROR: &str = "/Users/guus/Library/CloudStorage/Beebeeb-Drive/Tax 2025/aangifte.pdf failed";
 
-    mod names;
-    mod urls;
-    mod credentials;
     mod bounds;
     mod codes;
+    mod credentials;
+    mod names;
+    mod urls;
 }

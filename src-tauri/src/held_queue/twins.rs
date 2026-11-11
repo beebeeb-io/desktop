@@ -17,12 +17,18 @@ pub(super) struct ByPath<'a> {
 impl<'a> ByPath<'a> {
     /// The op's parent once D6 applied.
     pub(super) fn of_op(&self, op: &'a Op) -> Option<&'a str> {
-        self.op_parent.get(op.op_id.as_str()).copied().or(op.parent_id.as_deref())
+        self.op_parent
+            .get(op.op_id.as_str())
+            .copied()
+            .or(op.parent_id.as_deref())
     }
 
     /// The row's parent once D6 applied.
     pub(super) fn of_row(&self, row: &'a Row) -> Option<&'a str> {
-        self.row_parent.get(row.file_id.as_str()).copied().or(row.parent_id.as_deref())
+        self.row_parent
+            .get(row.file_id.as_str())
+            .copied()
+            .or(row.parent_id.as_deref())
     }
 }
 
@@ -48,19 +54,32 @@ pub(super) fn parents_by_path<'a>(
         if !is_create || op.parent_id.is_some() || landed_ops.contains(op.op_id.as_str()) {
             continue;
         }
-        let Some((dir, _)) = op.target_path.as_deref().and_then(|path| path.trim_matches('/').rsplit_once('/')) else {
+        let Some((dir, _)) = op
+            .target_path
+            .as_deref()
+            .and_then(|path| path.trim_matches('/').rsplit_once('/'))
+        else {
             continue;
         };
         let folders_at = folders_at.get_or_insert_with(|| {
             let mut at: HashMap<String, Vec<&Row>> = HashMap::new();
             for row in rows.iter().filter(|r| r.is_folder) {
-                at.entry(fold(row.path.trim_matches('/'), opts.case_insensitive)).or_default().push(row);
+                at.entry(fold(row.path.trim_matches('/'), opts.case_insensitive))
+                    .or_default()
+                    .push(row);
             }
             at
         });
-        let at = folders_at.get(&fold(dir, opts.case_insensitive)).map(Vec::as_slice).unwrap_or_default();
+        let at = folders_at
+            .get(&fold(dir, opts.case_insensitive))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let server: Vec<&Row> = at.iter().copied().filter(|r| r.server_known).collect();
-        let new: Vec<&Row> = at.iter().copied().filter(|r| ghosts.contains_key(r.file_id.as_str())).collect();
+        let new: Vec<&Row> = at
+            .iter()
+            .copied()
+            .filter(|r| ghosts.contains_key(r.file_id.as_str()))
+            .collect();
         let parent = match (&server[..], &new[..]) {
             ([one], _) | ([], [one]) => Some(*one),
             _ => None,
@@ -81,7 +100,9 @@ pub(super) fn parents_by_path<'a>(
             counts.parent_unresolved += 1;
             out.unresolved.insert(op.op_id.as_str());
             if op.paused_reason.as_deref() != Some(NEEDS_REVIEW) {
-                out.holds.push(Unit::Hold { op_id: op.op_id.clone() });
+                out.holds.push(Unit::Hold {
+                    op_id: op.op_id.clone(),
+                });
             }
         }
     }
@@ -89,7 +110,11 @@ pub(super) fn parents_by_path<'a>(
 }
 
 /// The effective parent of a row (spec §3): its parent once D6 applied, or that parent's twin when the plan remaps it.
-pub(super) fn effective_parent<'a>(row: &'a Row, by_path: &ByPath<'a>, fate: &HashMap<&str, Fate<'a>>) -> Option<&'a str> {
+pub(super) fn effective_parent<'a>(
+    row: &'a Row,
+    by_path: &ByPath<'a>,
+    fate: &HashMap<&str, Fate<'a>>,
+) -> Option<&'a str> {
     let parent = by_path.of_row(row);
     match parent.and_then(|p| fate.get(p)) {
         Some(Fate::Remapped(twin)) => Some(twin),
@@ -135,23 +160,39 @@ pub(super) fn file_twins<'a>(
     opts: &Options,
     counts: &mut Counts,
 ) -> FileTwins<'a> {
-    let mut out = FileTwins { holds: Vec::new(), releases: Vec::new(), held: HashSet::new() };
+    let mut out = FileTwins {
+        holds: Vec::new(),
+        releases: Vec::new(),
+        held: HashSet::new(),
+    };
     let ci = opts.case_insensitive;
     let mut server_files: Option<HashMap<Option<&str>, Vec<&Row>>> = None;
-    for op in ops.iter().filter(|op| op.create_file && pass_decides(op) && !unresolved.contains(op.op_id.as_str())) {
-        let Some(row) = op.file_id.as_deref().and_then(|id| row_of.get(id)).copied() else { continue };
+    for op in ops
+        .iter()
+        .filter(|op| op.create_file && pass_decides(op) && !unresolved.contains(op.op_id.as_str()))
+    {
+        let Some(row) = op.file_id.as_deref().and_then(|id| row_of.get(id)).copied() else {
+            continue;
+        };
         if row.server_known {
             continue;
         }
         let server_files = server_files.get_or_insert_with(|| {
             let mut by_parent: HashMap<Option<&str>, Vec<&Row>> = HashMap::new();
-            for row in rows.iter().filter(|r| !r.is_folder && r.server_known && !busy.contains(r.file_id.as_str())) {
+            for row in rows
+                .iter()
+                .filter(|r| !r.is_folder && r.server_known && !busy.contains(r.file_id.as_str()))
+            {
                 by_parent.entry(row.parent_id.as_deref()).or_default().push(row);
             }
             by_parent
         });
         let same_name = |f: &&Row| f.file_id != row.file_id && same_leaf(leaf(&f.path), leaf(&row.path), ci);
-        let twin_under = |parent: Option<&str>| server_files.get(&parent).is_some_and(|files| files.iter().any(same_name));
+        let twin_under = |parent: Option<&str>| {
+            server_files
+                .get(&parent)
+                .is_some_and(|files| files.iter().any(same_name))
+        };
         // Under the folder the create is sent to; and under the row's own parent when it names another one. A row that
         // names no parent names no folder: it is never matched at the top level.
         let (sent, named) = (sent_to(op), parent_of(row));
@@ -161,11 +202,15 @@ pub(super) fn file_twins<'a>(
             counts.file_twin += 1;
             out.held.insert(op.op_id.as_str());
             if !held {
-                out.holds.push(Unit::Hold { op_id: op.op_id.clone() });
+                out.holds.push(Unit::Hold {
+                    op_id: op.op_id.clone(),
+                });
             }
         } else if held {
             counts.released += 1;
-            out.releases.push(Unit::Release { op_id: op.op_id.clone() });
+            out.releases.push(Unit::Release {
+                op_id: op.op_id.clone(),
+            });
         }
     }
     out

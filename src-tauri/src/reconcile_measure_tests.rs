@@ -8,7 +8,13 @@ use std::time::Instant;
 
 fn printable(counts: &Counts) -> String {
     let dirs = counts.scaffold_dirs.len();
-    format!("{:?} scaffold_dirs={dirs}", Counts { scaffold_dirs: Vec::new(), ..counts.clone() })
+    format!(
+        "{:?} scaffold_dirs={dirs}",
+        Counts {
+            scaffold_dirs: Vec::new(),
+            ..counts.clone()
+        }
+    )
 }
 
 fn second_copy(src: &str, dir: &Path) -> StateDb {
@@ -27,14 +33,26 @@ fn reconcile_on_a_copy() {
     };
     // `BB_RECONCILE_SYNC_ROOT`: the real sync folder, only listed (never written), so D5 sees what is on disk. Without
     // it every directory counts as holding a file and no scaffolding is dropped.
-    let sync_root = std::env::var("BB_RECONCILE_SYNC_ROOT").ok().map(std::path::PathBuf::from);
-    let keep = |rel: &str| sync_root.as_ref().map_or(true, |root| tree_holds_a_file(&root.join(rel)));
+    let sync_root = std::env::var("BB_RECONCILE_SYNC_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let keep = |rel: &str| {
+        sync_root
+            .as_ref()
+            .map_or(true, |root| tree_holds_a_file(&root.join(rel)))
+    };
     let now = chrono::Utc::now().timestamp();
 
     let runs: Vec<(usize, bool)> = match std::env::var("BB_RECONCILE_RUNS").as_deref() {
         Ok("index") => vec![(256, true), (128, true), (64, true)],
         Ok("dry") => vec![(RECONCILE_UNITS_PER_TX, false)],
-        _ => vec![(usize::MAX, false), (512, false), (256, false), (128, false), (64, false)],
+        _ => vec![
+            (usize::MAX, false),
+            (512, false),
+            (256, false),
+            (128, false),
+            (64, false),
+        ],
     };
     for (per_tx, with_index) in runs {
         let dir = tempfile::tempdir().unwrap();
@@ -76,8 +94,19 @@ fn reconcile_on_a_copy() {
             .unwrap();
         let total = started.elapsed().as_millis();
         let again = db.reconcile_dry_run(&opts, &keep).unwrap();
-        let label = format!("{}{}", if per_tx == usize::MAX { "all".to_string() } else { per_tx.to_string() }, if with_index { "+index" } else { "" });
-        println!("per_tx={label} batches={} total_ms={total} batch_ms={batch_ms:?}", batch_ms.len());
+        let label = format!(
+            "{}{}",
+            if per_tx == usize::MAX {
+                "all".to_string()
+            } else {
+                per_tx.to_string()
+            },
+            if with_index { "+index" } else { "" }
+        );
+        println!(
+            "per_tx={label} batches={} total_ms={total} batch_ms={batch_ms:?}",
+            batch_ms.len()
+        );
         println!("per_tx={label} dry_equals_run={}", dry == counts);
         println!("per_tx={label} counts {}", printable(&counts));
         println!("per_tx={label} second_pass {}", printable(&again));

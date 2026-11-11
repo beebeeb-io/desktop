@@ -6,7 +6,7 @@ Modules 46–92, sorted by path.
 
 | Module | Purpose | Public API |
 |---|---|---|
-| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Row (6), Op (8), Options (2), Unit, Counts (21), NEEDS_REVIEW, same_leaf, is_parent_404, plan, presend_block, PresendBlock (2) |
+| `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Counts (21), NEEDS_REVIEW, Op (8), Options (2), Row (6), Unit (3), is_parent_404, same_leaf, PresendBlock (2), plan, presend_block |
 | `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
 | `install_guard_tests.rs` | P1c: one in-place install at a time, across every Beebeeb window. | — |
 | `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |

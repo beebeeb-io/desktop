@@ -114,8 +114,11 @@ impl StateDb {
     /// are not transfer work ([`Self::transfer_backlog`] leaves them out).
     pub fn count_operations_on_hold(&self) -> Result<u32> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let held: i64 =
-            conn.query_row("SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NOT NULL", [], |row| row.get(0))?;
+        let held: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operation_queue WHERE paused_reason IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(u32::try_from(held.max(0)).unwrap_or(u32::MAX))
     }
     /// Pages this connection has read from the database file since it opened: SQLite's page-cache misses. Task 2243's

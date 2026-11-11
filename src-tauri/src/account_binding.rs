@@ -80,7 +80,11 @@ pub enum BindingKind {
 
 impl BindingKind {
     pub fn of(has_local_data: bool) -> Self {
-        if has_local_data { Self::LocalData } else { Self::NoLocalData }
+        if has_local_data {
+            Self::LocalData
+        } else {
+            Self::NoLocalData
+        }
     }
 
     pub fn has_data(self) -> bool {
@@ -288,7 +292,11 @@ mod tests {
     #[test]
     fn binding_kind_maps_the_has_local_data_flag_table_driven() {
         for (has_local_data, kind) in [(false, BindingKind::NoLocalData), (true, BindingKind::LocalData)] {
-            assert_eq!(BindingKind::of(has_local_data), kind, "has_local_data = {has_local_data}");
+            assert_eq!(
+                BindingKind::of(has_local_data),
+                kind,
+                "has_local_data = {has_local_data}"
+            );
             assert_eq!(kind.has_data(), has_local_data, "has_local_data = {has_local_data}");
         }
     }

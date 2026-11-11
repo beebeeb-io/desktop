@@ -4,13 +4,21 @@ use super::*;
 
 /// `a ≡ b` for two leaf names (spec §3).
 pub fn same_leaf(a: &str, b: &str, case_insensitive: bool) -> bool {
-    if case_insensitive { a.to_lowercase() == b.to_lowercase() } else { a == b }
+    if case_insensitive {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
 }
 
 /// A parent 404: the error text before `" for url ("` contains `404` (spec §3), so a UUID with "404" in the URL never
 /// counts.
 pub fn is_parent_404(last_error: &str) -> bool {
-    last_error.split(" for url (").next().unwrap_or_default().contains("404")
+    last_error
+        .split(" for url (")
+        .next()
+        .unwrap_or_default()
+        .contains("404")
 }
 
 pub(super) fn leaf(path: &str) -> &str {
@@ -44,7 +52,9 @@ pub(super) const BACKUPS_UNKNOWN: &str = "Backups/unknown";
 /// `path` is `root` or lies under it, whole segment by segment under `≡`.
 pub(super) fn at_or_under(path: &str, root: &str, case_insensitive: bool) -> bool {
     let mut segments = path.trim_matches('/').split('/');
-    root.trim_matches('/').split('/').all(|seg| segments.next().is_some_and(|s| same_leaf(s, seg, case_insensitive)))
+    root.trim_matches('/')
+        .split('/')
+        .all(|seg| segments.next().is_some_and(|s| same_leaf(s, seg, case_insensitive)))
 }
 
 /// `dirs` in an order the caller can remove them in, one at a time: deepest first (then by path, so the order is the

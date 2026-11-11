@@ -19,17 +19,26 @@ impl<'a> Scaffolding<'a> {
         if same_leaf(&device, leaf(BACKUPS_UNKNOWN), ci) {
             return None;
         }
-        let there: HashSet<&str> =
-            rows.iter().filter(|r| at_or_under(&r.path, BACKUPS_UNKNOWN, ci)).map(|r| r.file_id.as_str()).collect();
+        let there: HashSet<&str> = rows
+            .iter()
+            .filter(|r| at_or_under(&r.path, BACKUPS_UNKNOWN, ci))
+            .map(|r| r.file_id.as_str())
+            .collect();
         let names = |id: Option<&str>| id.is_some_and(|id| there.contains(id));
         Some(Scaffolding {
-            rows: rows.iter().filter(|r| there.contains(r.file_id.as_str()) || names(r.parent_id.as_deref())).collect(),
+            rows: rows
+                .iter()
+                .filter(|r| there.contains(r.file_id.as_str()) || names(r.parent_id.as_deref()))
+                .collect(),
             ops: ops
                 .iter()
                 .filter(|op| {
                     names(op.file_id.as_deref())
                         || names(op.parent_id.as_deref())
-                        || op.target_path.as_deref().is_some_and(|t| at_or_under(t, BACKUPS_UNKNOWN, ci))
+                        || op
+                            .target_path
+                            .as_deref()
+                            .is_some_and(|t| at_or_under(t, BACKUPS_UNKNOWN, ci))
                 })
                 .collect(),
             case_insensitive: ci,
@@ -53,14 +62,23 @@ impl<'a> Scaffolding<'a> {
         disk_has_file: &dyn Fn(&str) -> bool,
     ) -> Option<(Unit, Vec<&'a str>, Vec<&'a str>)> {
         let ci = self.case_insensitive;
-        let ghosts: Vec<&'a Row> = self.rows.iter().copied().filter(|r| at_or_under(&r.path, &root.path, ci)).collect();
+        let ghosts: Vec<&'a Row> = self
+            .rows
+            .iter()
+            .copied()
+            .filter(|r| at_or_under(&r.path, &root.path, ci))
+            .collect();
         let undecided_ghost = |id: &str| ghost_creates.contains_key(id) && !fate.contains_key(id);
         if !ghosts.iter().all(|r| undecided_ghost(r.file_id.as_str())) {
             return None;
         }
         let ids: HashSet<&str> = ghosts.iter().map(|r| r.file_id.as_str()).collect();
         let names = |id: Option<&str>| id.is_some_and(|id| ids.contains(id));
-        if self.rows.iter().any(|r| names(r.parent_id.as_deref()) && !ids.contains(r.file_id.as_str())) {
+        if self
+            .rows
+            .iter()
+            .any(|r| names(r.parent_id.as_deref()) && !ids.contains(r.file_id.as_str()))
+        {
             return None;
         }
         let on_them: Vec<&'a Op> = self
@@ -70,10 +88,16 @@ impl<'a> Scaffolding<'a> {
             .filter(|op| {
                 names(op.file_id.as_deref())
                     || names(op.parent_id.as_deref())
-                    || op.target_path.as_deref().is_some_and(|t| at_or_under(t, &root.path, ci))
+                    || op
+                        .target_path
+                        .as_deref()
+                        .is_some_and(|t| at_or_under(t, &root.path, ci))
             })
             .collect();
-        if on_them.iter().any(|op| op.kind != "create_folder" || !names(op.file_id.as_deref()) || !pass_decides(op)) {
+        if on_them
+            .iter()
+            .any(|op| op.kind != "create_folder" || !names(op.file_id.as_deref()) || !pass_decides(op))
+        {
             return None;
         }
         if disk_has_file(&root.path) {
@@ -86,6 +110,10 @@ impl<'a> Scaffolding<'a> {
             file_ids: ghosts.iter().map(|r| r.file_id.clone()).collect(),
             dirs,
         };
-        Some((unit, ids.into_iter().collect(), on_them.iter().map(|op| op.op_id.as_str()).collect()))
+        Some((
+            unit,
+            ids.into_iter().collect(),
+            on_them.iter().map(|op| op.op_id.as_str()).collect(),
+        ))
     }
 }

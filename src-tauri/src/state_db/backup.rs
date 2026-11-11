@@ -10,16 +10,12 @@ use beebeeb_core::backup::{BackupRecord, RecordRef, RecordState};
 
 /// `backup_records.account_owner` for an owner record: the user id when it is known, else the canonical email.
 fn backup_owner_key(owner: &crate::account_binding::Identity) -> Option<String> {
-    owner
-        .user_id
-        .as_deref()
-        .map(|id| format!("user:{id}"))
-        .or_else(|| {
-            owner
-                .email
-                .as_deref()
-                .map(|email| format!("email:{}", crate::account_binding::canonical_email(email)))
-        })
+    owner.user_id.as_deref().map(|id| format!("user:{id}")).or_else(|| {
+        owner
+            .email
+            .as_deref()
+            .map(|email| format!("email:{}", crate::account_binding::canonical_email(email)))
+    })
 }
 
 fn owner_key_conn(conn: &Connection) -> Result<Option<String>> {
@@ -29,8 +25,8 @@ fn owner_key_conn(conn: &Connection) -> Result<Option<String>> {
 /// LD-0139 (spec Amendment 12d): one backup's `last_pass_at_ms` and acknowledged set, in one row write (the setup
 /// time is kept).
 fn upsert_pass_record(conn: &Connection, owner: &str, pass: &BackupPassRecord) -> Result<()> {
-    let acknowledged = serde_json::to_string(&pass.acknowledged)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let acknowledged =
+        serde_json::to_string(&pass.acknowledged).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         "INSERT INTO backup_pass_marks (account_owner, category, last_pass_at_ms, acknowledged_json)
          VALUES (?1, ?2, ?3, ?4)
@@ -125,7 +121,13 @@ impl StateDb {
             "SELECT EXISTS (SELECT 1 FROM backup_records
                             WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND state = 'backed_up'
                               AND size = ?4 AND modified_ms = ?5)",
-            params![owner, up.category, up.key, i64::try_from(up.queued.size).unwrap_or(i64::MAX), up.queued.modified_ms],
+            params![
+                owner,
+                up.category,
+                up.key,
+                i64::try_from(up.queued.size).unwrap_or(i64::MAX),
+                up.queued.modified_ms
+            ],
             |row| row.get(0),
         )?;
         if backed_up {
@@ -189,7 +191,10 @@ impl StateDb {
                     key: text("/backup/key").unwrap_or_default(),
                     source_path: std::path::PathBuf::from(row.get::<_, String>(4)?),
                     file_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    replace: metadata.pointer("/backup/replace").and_then(|v| v.as_bool()).unwrap_or(false),
+                    replace: metadata
+                        .pointer("/backup/replace")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     record_key: text("/backup/record_key"),
                     parent_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     name_encrypted: text("/name_encrypted").unwrap_or_default(),
@@ -458,7 +463,12 @@ impl StateDb {
              ON CONFLICT(account_owner) DO UPDATE SET root_id = excluded.root_id,
                 device_folder_id = excluded.device_folder_id, device_folder_name = excluded.device_folder_name,
                 updated_at = excluded.updated_at",
-            params![owner, layout.root_id, layout.device_folder_id, layout.device_folder_name],
+            params![
+                owner,
+                layout.root_id,
+                layout.device_folder_id,
+                layout.device_folder_name
+            ],
         )?;
         Ok(true)
     }
@@ -544,7 +554,11 @@ impl StateDb {
                 if named {
                     return Ok(false);
                 }
-                (i64::try_from(record.size).unwrap_or(i64::MAX), record.modified_ms, record.uploaded_at_ms)
+                (
+                    i64::try_from(record.size).unwrap_or(i64::MAX),
+                    record.modified_ms,
+                    record.uploaded_at_ms,
+                )
             }
         };
         tx.execute(
@@ -629,8 +643,8 @@ impl StateDb {
         let Some(owner) = owner_key_conn(&conn)? else {
             return Ok(Vec::new());
         };
-        let mut stmt =
-            conn.prepare("SELECT category, reason, at_ms FROM backup_stops WHERE account_owner = ?1 ORDER BY category")?;
+        let mut stmt = conn
+            .prepare("SELECT category, reason, at_ms FROM backup_stops WHERE account_owner = ?1 ORDER BY category")?;
         let rows = stmt.query_map(params![owner], |row| {
             Ok(BackupStop {
                 category: row.get(0)?,
@@ -780,8 +794,12 @@ impl StateDb {
         let Some(owner) = owner_key_conn(&conn)? else {
             return Ok(None);
         };
-        conn.query_row("SELECT root_id FROM backup_root WHERE account_owner = ?1", params![owner], |row| row.get(0))
-            .optional()
+        conn.query_row(
+            "SELECT root_id FROM backup_root WHERE account_owner = ?1",
+            params![owner],
+            |row| row.get(0),
+        )
+        .optional()
     }
 
     /// Cache the current owner's flagged root. `false`: no owner is recorded, nothing was written.
@@ -800,7 +818,13 @@ impl StateDb {
 
     /// Amendment 9: ask about the moved folder `category` (its default and its moved location) once. `true` only
     /// when the question is new: not asked before, or asked about other locations.
-    pub fn ask_backup_source_question(&self, category: &str, default_path: &str, moved_path: &str, at_ms: i64) -> Result<bool> {
+    pub fn ask_backup_source_question(
+        &self,
+        category: &str,
+        default_path: &str,
+        moved_path: &str,
+        at_ms: i64,
+    ) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let changed = conn.execute(
             "INSERT INTO backup_source_questions (category, default_path, moved_path, asked_at_ms) VALUES (?1, ?2, ?3, ?4)
@@ -816,8 +840,8 @@ impl StateDb {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn backup_source_questions(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn
-            .prepare("SELECT category, default_path, moved_path FROM backup_source_questions ORDER BY category")?;
+        let mut stmt =
+            conn.prepare("SELECT category, default_path, moved_path FROM backup_source_questions ORDER BY category")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect()
     }
@@ -825,7 +849,10 @@ impl StateDb {
     /// The question about `category` is settled (answered, the folder is no longer moved, or its backup is off).
     pub fn settle_backup_source_question(&self, category: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute("DELETE FROM backup_source_questions WHERE category = ?1", params![category])?;
+        conn.execute(
+            "DELETE FROM backup_source_questions WHERE category = ?1",
+            params![category],
+        )?;
         Ok(())
     }
 }

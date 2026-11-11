@@ -360,7 +360,10 @@ impl StateDb {
         // Task 2204 S0 (review-155 R1, P2): a Windows rename waits for the file's earlier
         // sync-folder uploads that can still run, so their queue-time name lands first and the
         // rename lands last; a trash of the file waits for its earlier Windows rename the same way.
-        if matches!(op.kind, OperationKind::RenameFile | OperationKind::MoveFile | OperationKind::TrashFile) {
+        if matches!(
+            op.kind,
+            OperationKind::RenameFile | OperationKind::MoveFile | OperationKind::TrashFile
+        ) {
             let earlier: bool = tx.query_row(
                 &format!(
                     "SELECT EXISTS(

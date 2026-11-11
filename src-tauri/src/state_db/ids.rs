@@ -41,10 +41,26 @@ macro_rules! id_type {
     };
 }
 
-id_type!(LocalFileId, "local file id", "A File Provider/local id for a file row, before its server id is known.");
-id_type!(ServerFileId, "server file id", "The server's UUID for a file: the `files` key once the row is landed.");
-id_type!(VersionId, "version id", "A server object version id: which bytes a row or an op was made from.");
-id_type!(ClaimId, "claim id", "One runner claim on a queued op: the token a later report must carry.");
+id_type!(
+    LocalFileId,
+    "local file id",
+    "A File Provider/local id for a file row, before its server id is known."
+);
+id_type!(
+    ServerFileId,
+    "server file id",
+    "The server's UUID for a file: the `files` key once the row is landed."
+);
+id_type!(
+    VersionId,
+    "version id",
+    "A server object version id: which bytes a row or an op was made from."
+);
+id_type!(
+    ClaimId,
+    "claim id",
+    "One runner claim on a queued op: the token a later report must carry."
+);
 
 #[cfg(test)]
 mod tests {
@@ -71,19 +87,13 @@ mod tests {
 
     #[test]
     fn a_version_id_refuses_a_blank_id() {
-        assert_eq!(
-            VersionId::parse(" ").unwrap_err().to_string(),
-            "a version id is empty"
-        );
+        assert_eq!(VersionId::parse(" ").unwrap_err().to_string(), "a version id is empty");
         assert_eq!(VersionId::parse("v-9").unwrap().as_str(), "v-9");
     }
 
     #[test]
     fn a_claim_id_refuses_a_blank_id() {
-        assert_eq!(
-            ClaimId::parse("").unwrap_err().to_string(),
-            "a claim id is empty"
-        );
+        assert_eq!(ClaimId::parse("").unwrap_err().to_string(), "a claim id is empty");
         assert_eq!(ClaimId::parse("c1a1m").unwrap().as_str(), "c1a1m");
     }
 }

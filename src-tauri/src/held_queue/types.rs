@@ -48,7 +48,13 @@ pub enum Unit {
     /// D2: fold `ghost` into `twin`: re-point every child row and op, re-arm `rearm` and hold `hold` (D8: superseded),
     /// delete `ghost_op` and the ghost's row. The holds ride in the unit, so no batch separates them from the remap that
     /// takes their ghost away.
-    Remap { ghost: String, twin: String, ghost_op: String, rearm: Vec<String>, hold: Vec<String> },
+    Remap {
+        ghost: String,
+        twin: String,
+        ghost_op: String,
+        rearm: Vec<String>,
+        hold: Vec<String>,
+    },
     /// D4 / D8 superseded: `needs_review`.
     Hold { op_id: String },
     /// A `needs_review` op whose cause is gone: back to `auth`, for the key check that follows the pass (D12).
@@ -56,9 +62,17 @@ pub enum Unit {
     /// D8 under a ghost kept for replay.
     Rearm { op_id: String },
     /// D6: the parent found by path, for the op and for its row (`file_id`, when the row exists).
-    ResolveParent { op_id: String, file_id: Option<String>, parent: String },
+    ResolveParent {
+        op_id: String,
+        file_id: Option<String>,
+        parent: String,
+    },
     /// D5: empty `Backups/unknown` scaffolding.
-    DropScaffold { op_ids: Vec<String>, file_ids: Vec<String>, dirs: Vec<String> },
+    DropScaffold {
+        op_ids: Vec<String>,
+        file_ids: Vec<String>,
+        dirs: Vec<String>,
+    },
 }
 
 /// What the plan does, by D row. The dry run (D14).

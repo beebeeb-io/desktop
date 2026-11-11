@@ -62,10 +62,18 @@ pub(super) fn reconcile_plan_conn(
         .query_map([], reconcile_row)?
         .collect::<Result<Vec<_>>>()?;
     let ops = conn
-        .prepare(&format!("SELECT {RECONCILE_OP_COLUMNS} FROM operation_queue {DUE_ORDER_SQL}"))?
+        .prepare(&format!(
+            "SELECT {RECONCILE_OP_COLUMNS} FROM operation_queue {DUE_ORDER_SQL}"
+        ))?
         .query_map([], reconcile_op)?
         .collect::<Result<Vec<_>>>()?;
-    Ok(crate::held_queue::plan(&rows, &ops, opts, &payload_on_disk, disk_has_file))
+    Ok(crate::held_queue::plan(
+        &rows,
+        &ops,
+        opts,
+        &payload_on_disk,
+        disk_has_file,
+    ))
 }
 
 /// Task 2414: spec D8's pre-send checks ([`crate::held_queue::presend_block`]) for one queued op, read as the reconcile
@@ -87,7 +95,9 @@ pub(super) fn presend_block_conn(conn: &Connection, op_id: &str) -> Result<Optio
             |row| Ok((reconcile_op(row)?, row.get::<_, bool>(12)?, row.get::<_, bool>(13)?)),
         )
         .optional()?;
-    let Some((op, backup, completed)) = read else { return Ok(None) };
+    let Some((op, backup, completed)) = read else {
+        return Ok(None);
+    };
     if backup || completed {
         return Ok(None);
     }
@@ -109,7 +119,8 @@ pub(super) fn presend_block_conn(conn: &Connection, op_id: &str) -> Result<Optio
 /// without them, 0.25 s with).
 pub(super) const REMAP_FILES_SQL: &str = "UPDATE files SET parent_id = ?2 WHERE parent_id = ?1";
 
-pub(super) const REMAP_OPS_SQL: &str = "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1";
+pub(super) const REMAP_OPS_SQL: &str =
+    "UPDATE operation_queue SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1";
 
 /// I1: how many rows and ops still name the ghost.
 pub(super) const GHOST_REFERENCES_SQL: &str = "SELECT (SELECT COUNT(*) FROM files WHERE file_id = ?1 OR parent_id = ?1)
@@ -144,7 +155,13 @@ pub(super) fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_qu
             conn.execute("DELETE FROM operation_queue WHERE op_id = ?1", params![op_id])?;
             drop_orphaned_upload_resumes(conn)?;
         }
-        Unit::Remap { ghost, twin, ghost_op, rearm, hold: superseded } => {
+        Unit::Remap {
+            ghost,
+            twin,
+            ghost_op,
+            rearm,
+            hold: superseded,
+        } => {
             conn.execute(REMAP_FILES_SQL, params![ghost, twin])?;
             conn.execute(REMAP_OPS_SQL, params![ghost, twin, now])?;
             for op_id in rearm {
@@ -182,7 +199,10 @@ pub(super) fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_qu
                 params![op_id, parent, now],
             )?;
             if let Some(file_id) = file_id {
-                conn.execute("UPDATE files SET parent_id = ?2 WHERE file_id = ?1", params![file_id, parent])?;
+                conn.execute(
+                    "UPDATE files SET parent_id = ?2 WHERE file_id = ?1",
+                    params![file_id, parent],
+                )?;
             }
         }
         Unit::DropScaffold { op_ids, file_ids, .. } => {
@@ -196,7 +216,8 @@ pub(super) fn apply_reconcile_unit_conn(conn: &Connection, unit: &crate::held_qu
             drop_orphaned_upload_resumes(conn)?;
             // I1: nothing names a dropped row any more, or the whole unit rolls back with its transaction. One scan for
             // the whole subtree (`parent_id` has no index).
-            let ids = serde_json::to_string(file_ids).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let ids =
+                serde_json::to_string(file_ids).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             let left: i64 = conn.query_row(
                 "SELECT (SELECT COUNT(*) FROM files
                          WHERE file_id IN (SELECT value FROM json_each(?1)) OR parent_id IN (SELECT value FROM json_each(?1)))

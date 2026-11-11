@@ -28,7 +28,7 @@ pub enum DiagnosticErrorCode {
 /// Classify a raw engine error into a [`DiagnosticErrorCode`]. Reads the raw
 /// message (names and all) but returns a value that cannot contain any of it.
 pub fn classify_error_code(error: &str) -> DiagnosticErrorCode {
-    use crate::engine_bridge::{classify_operation_error, OperationFailureClass};
+    use crate::engine_bridge::{OperationFailureClass, classify_operation_error};
     match classify_operation_error(error) {
         OperationFailureClass::Auth => return DiagnosticErrorCode::Auth,
         OperationFailureClass::Quota => return DiagnosticErrorCode::Quota,

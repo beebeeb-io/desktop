@@ -10,43 +10,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(test)]
 mod tests;
 
 mod types;
 use types::*;
-pub use types::{Row, Op, Options, Unit, Counts, NEEDS_REVIEW};
+pub use types::{Counts, NEEDS_REVIEW, Op, Options, Row, Unit};
 
 mod paths;
 use paths::*;
-pub use paths::{same_leaf, is_parent_404};
+pub use paths::{is_parent_404, same_leaf};
 
 mod scaffolding;
 use scaffolding::*;
@@ -56,4 +29,4 @@ use twins::*;
 
 mod planning;
 use planning::*;
-pub use planning::{plan, presend_block, PresendBlock};
+pub use planning::{PresendBlock, plan, presend_block};

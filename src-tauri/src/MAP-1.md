@@ -31,7 +31,7 @@ Modules 1–45, sorted by path.
 | `desktop_capabilities.rs` | Host support, deliberately independent of WebView layout/query parameters. | — |
 | `desktop_main_window.rs` | The main window's size and kept frame on Windows and Linux (v2 W1): the board's 1280 x 800 with a 960 x 640 minimum, fitted to the work area | — |
 | `desktop_search.rs` | The local search index and its server sync: build it from `state.db`, rank results for a query, and push/pull the encrypted shards. | — |
-| `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), classify_error_code, QUEUE_KIND_LABELS, PAUSE_REASON_LABELS, allowed_label, KnownNames, redact_secrets_only, redact_for_export |
+| `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code, KnownNames, redact_for_export, redact_secrets_only |
 | `diagnostics_export_tests.rs` | (no //! header) | — |
 | `direct_download.rs` | Direct S3 download driver (task 2173). | — |
 | `download_pin.rs` | Task 1643: one download, one immutable version. | — |
