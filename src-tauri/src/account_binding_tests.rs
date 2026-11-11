@@ -237,11 +237,11 @@ fn the_keys_travel_as_zeroizing_values_and_no_start_takes_them_as_parameters() {
         "the alias is the wrapped pair"
     );
     let runner = [
-        include_str!("runner.rs"),
-        include_str!("runner/lifecycle.rs"),
-        include_str!("runner/telemetry.rs"),
-        include_str!("runner/tick_loop.rs"),
-        include_str!("runner/working_set_signal.rs"),
+        include_str!("../../crates/beebeeb-engine/src/runner.rs"),
+        include_str!("../../crates/beebeeb-engine/src/runner/lifecycle.rs"),
+        include_str!("../../crates/beebeeb-engine/src/runner/telemetry.rs"),
+        include_str!("../../crates/beebeeb-engine/src/runner/tick_loop.rs"),
+        include_str!("../../crates/beebeeb-engine/src/runner/working_set_signal.rs"),
     ]
     .join("\n")
     .replace("\r\n", "\n");
@@ -519,7 +519,7 @@ fn the_found_while_paused_decision_is_wired_and_an_interrupted_keep_is_settled_b
     let windows = "#[cfg(target_os = \"windows\")]\n#[tauri::command]\n";
     for (signature, steps) in [
         (
-            "async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {",
+            "async fn found_while_paused_review(\n    state: State<'_, AppState>,\n) -> Result<found_while_paused::Review, String> {",
             &[
                 "let _transition = SESSION_TRANSITION.lock().await;",
                 "let identity = decision_identity(&state)?;",
@@ -530,7 +530,7 @@ fn the_found_while_paused_decision_is_wired_and_an_interrupted_keep_is_settled_b
         ),
         (
             // Lead review round 3, P3-1: only the changes the card showed.
-            "async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {",
+            "async fn found_while_paused_upload(\n    state: State<'_, AppState>,\n    op_ids: Vec<String>,\n) -> Result<FoundWhilePausedReleased, String> {",
             &[
                 "let _transition = SESSION_TRANSITION.lock().await;",
                 "let identity = decision_identity(&state)?;",

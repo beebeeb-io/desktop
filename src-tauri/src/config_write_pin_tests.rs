@@ -241,10 +241,10 @@ fn test_1889_the_census_reads_the_whole_tree() {
     assert!(files.len() >= 20, "read only {}: {names:?}", files.len());
     for must in [
         "lib.rs",
-        "config.rs",
+        "crates/beebeeb-engine/src/config.rs",
         "finder_removal.rs",
         "finder_setup/macos_ports.rs",
-        "keychain.rs",
+        "crates/beebeeb-engine/src/keychain.rs",
     ] {
         assert!(names.contains(&must), "{must} was not read: {names:?}");
     }
@@ -261,7 +261,7 @@ fn test_1889_the_census_reads_the_whole_tree() {
 fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_helper() {
     let files = production_files();
     for (name, text) in &files {
-        if name == "config/store.rs" {
+        if name == "crates/beebeeb-engine/src/config/store.rs" {
             continue;
         }
         for banned in [".save()", ".save_to("] {
@@ -273,7 +273,11 @@ fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_help
         }
     }
 
-    let config = &files.iter().find(|(name, _)| name == "config/store.rs").unwrap().1;
+    let config = &files
+        .iter()
+        .find(|(name, _)| name == "crates/beebeeb-engine/src/config/store.rs")
+        .unwrap()
+        .1;
     assert!(!config.contains("fn save("), "config/store.rs has no `save` to call");
     assert_eq!(
         config.matches("save_to(").count(),
@@ -284,7 +288,7 @@ fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_help
         config.matches("config_write_guard()").count()
             + files
                 .iter()
-                .find(|(name, _)| name == "config/lock.rs")
+                .find(|(name, _)| name == "crates/beebeeb-engine/src/config/lock.rs")
                 .expect("config/lock.rs is production")
                 .1
                 .matches("config_write_guard()")
@@ -314,23 +318,21 @@ fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_help
 
     // Every other way in is that one place.
     for (start, calls) in [
-        ("    pub(crate) fn update_at<R>(", "Self::try_update_at("),
-        ("    pub(crate) fn try_update_at<R>(", "Self::try_update_at_then("),
-        ("    pub(crate) fn update_at_then<R>(", "Self::try_update_at_then("),
-        (
-            "    pub(crate) fn update_at_durable_with<R>(",
-            "Self::try_update_at_then(",
-        ),
-        (
-            "    pub(crate) fn update<R>(",
-            "Self::update_at(&Self::path()?, change)",
-        ),
-        ("    pub(crate) fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
-        ("    pub(crate) fn ensure_account_id_at(", "Self::try_update_at(path,"),
+        ("    pub fn update_at<R>(", "Self::try_update_at("),
+        ("    pub fn try_update_at<R>(", "Self::try_update_at_then("),
+        ("    pub fn update_at_then<R>(", "Self::try_update_at_then("),
+        ("    pub fn update_at_durable_with<R>(", "Self::try_update_at_then("),
+        ("    pub fn update<R>(", "Self::update_at(&Self::path()?, change)"),
+        ("    pub fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
+        ("    pub fn ensure_account_id_at(", "Self::try_update_at(path,"),
     ] {
         let body = item(
             if start.contains("update_held_at") {
-                &files.iter().find(|(name, _)| name == "config/lock.rs").unwrap().1
+                &files
+                    .iter()
+                    .find(|(name, _)| name == "crates/beebeeb-engine/src/config/lock.rs")
+                    .unwrap()
+                    .1
             } else {
                 config
             },
@@ -720,7 +722,7 @@ fn test_1889_the_scanners_find_the_shapes_they_are_for_and_pass_the_real_ones() 
 fn test_1889_no_stale_whole_copy_is_written_through_an_update_closure() {
     let mut found = Vec::new();
     for (name, text) in production_files() {
-        if name == "config/store.rs" || name == "config/lock.rs" {
+        if name == "crates/beebeeb-engine/src/config/store.rs" || name == "crates/beebeeb-engine/src/config/lock.rs" {
             continue;
         }
         for line in whole_copy_writes(&text) {

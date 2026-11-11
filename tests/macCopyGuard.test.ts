@@ -19,7 +19,7 @@ import {
   scanRust,
   violationsInSource,
 } from './fixtures/copyGuard'
-import { libRsChildren } from './fixtures/rustConstants'
+import { RUST_ROOTS, libRsChildren } from './fixtures/rustConstants'
 
 /**
  * Task 1683 slice 5 (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md` §10.1, §12 row 5): no developer
@@ -295,15 +295,16 @@ describe('what a command says (Rust sentences, which reach the screen as the rea
 
   test('no sentence a command answers with holds a developer word', () => {
     const result = scanRust(ROOT)
-    expect(result.files).toBeGreaterThanOrEqual(50)
-    expect(result.sentences).toBeGreaterThanOrEqual(100)
+    // 478 files and 251 sentences with the engine crate's tree (125 and 198 without it): a tree that is not read drops below.
+    expect(result.files).toBeGreaterThanOrEqual(430)
+    expect(result.sentences).toBeGreaterThanOrEqual(230)
     expect(result.violations.map(describeViolation)).toEqual([])
   })
 
   test('a mutated copy of the real tree goes red: a developer word in a command\'s error is found', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'copy-guard-rust-'))
     try {
-      cpSync(join(ROOT, 'src-tauri/src'), join(scratch, 'src-tauri/src'), { recursive: true })
+      for (const rustRoot of RUST_ROOTS) cpSync(join(ROOT, rustRoot), join(scratch, rustRoot), { recursive: true })
       expect(scanRust(scratch).violations).toEqual([])
       const path = join(scratch, 'src-tauri/src/vault_tree.rs')
       const source = readFileSync(path, 'utf8')
@@ -311,6 +312,13 @@ describe('what a command says (Rust sentences, which reach the screen as the rea
       expect(source).toContain(anchor)
       writeFileSync(path, source.replace(anchor, 'Choose a sync folder, then start the daemon, before changing offline availability.'))
       expect(scanRust(scratch).violations.map((v) => `${v.file}:${v.rule}`)).toEqual(['src-tauri/src/lib.rs:daemon'])
+      // The engine crate's tree is read too: most of what a command answers with is written there.
+      const enginePath = join(scratch, 'crates/beebeeb-engine/src/finder_show.rs')
+      const engineSource = readFileSync(enginePath, 'utf8')
+      const engineAnchor = 'That item is not known on this Mac yet.'
+      expect(engineSource).toContain(engineAnchor)
+      writeFileSync(enginePath, engineSource.replace(engineAnchor, 'That item is not known to the daemon yet.'))
+      expect(scanRust(scratch).violations.map((v) => `${v.file}:${v.rule}`)).toEqual(['crates/beebeeb-engine/src/finder_show.rs:daemon', 'src-tauri/src/lib.rs:daemon'])
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }

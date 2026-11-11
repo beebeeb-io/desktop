@@ -325,7 +325,7 @@ mod tests {
 
         // Every other save stays as it was: no flush in `save_to` (spec §7.3, amended for 1889). Line ends are read as
         // LF, because a Windows checkout has CRLF.
-        let config_rs = include_str!("../config/store.rs").replace("\r\n", "\n");
+        let config_rs = include_str!("../../../crates/beebeeb-engine/src/config/store.rs").replace("\r\n", "\n");
         let from = config_rs.find("fn save_to(&self, path: &Path)").expect("save_to");
         let save_to = &config_rs[from..from + config_rs[from..].find("\n    }\n").unwrap()];
         assert!(!save_to.contains("sync_all"), "{save_to}");
@@ -334,11 +334,11 @@ mod tests {
         let production = production_text(&config_rs);
         for (start, plain) in [
             (
-                "    pub(crate) fn try_update_at<R>(",
+                "    pub fn try_update_at<R>(",
                 "Self::try_update_at_then(path, change, |_| {}, None)",
             ),
             (
-                "    pub(crate) fn update_at_then<R>(",
+                "    pub fn update_at_then<R>(",
                 "Self::try_update_at_then(path, change, saved, None)",
             ),
         ] {
