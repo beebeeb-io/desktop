@@ -177,6 +177,9 @@ pub fn run() {
     {
         std::process::exit(code);
     }
+    // Before any state exists: the feedback mode's inbox is chosen when the state is made.
+    #[cfg(feature = "feedback")]
+    crate::feedback::paths::set_flag_dir(launch.feedback_dir.clone());
     let platform = platform::current();
     // The engine lane replaces this with the real engine; nothing else in `run` changes.
     let engine: Arc<dyn EngineActions> = Arc::new(FixtureEngine::ready());
@@ -278,6 +281,10 @@ pub fn run() {
             registry::view,
         )
     };
+    // The live feedback mode (test builds) draws over the main window's view and looks at its
+    // inbox in the poll; its keys come through `host::on_key`.
+    #[cfg(feature = "feedback")]
+    let main_spec = crate::feedback::hook_spec(main_spec);
     let flyout_spec = AppSpec::<FlyoutState> {
         fonts: FONTS,
         families: FAMILIES,
@@ -295,7 +302,7 @@ pub fn run() {
     let window_slot = window.clone();
     // Rune reads only what `parse_args` let through: nothing in a shipped build, nothing on a
     // command line that carries a link.
-    let mut main_app = App::new(main_spec)
+    let main_app = App::new(main_spec)
         .args(launch.rune_args.clone())
         .titlebar(Titlebar::new(TITLEBAR_H))
         .on_open_url(host::on_open_url)
@@ -303,6 +310,10 @@ pub fn run() {
         .on_window(move |native| {
             *window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(native.clone())
         });
+    // The compositor that reads the live window's tree and pixels for a note.
+    #[cfg(feature = "feedback")]
+    let main_app = crate::feedback::install(main_app);
+    let mut main_app = main_app;
     let flyout_platform = platform.clone();
     let mut flyout_app = App::new(flyout_spec)
         .args(launch.rune_args.clone())
