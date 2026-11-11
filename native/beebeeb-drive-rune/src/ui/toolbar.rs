@@ -1,191 +1,267 @@
-//! Toolbar: back/forward arrows, folder title + item count,
-//! view toggle (list/grid), sort button, details-panel toggle,
-//! "+ New" amber button, search field with icon and Ctrl+F hint.
-//!
-//! Board measurements (from Playwright):
-//! - Toolbar height: ~40 pt (from y=68 to y=108 approximately)
-//! - Back/forward: 28x28 rounded pill buttons with chevron icons
-//! - "Files" title: 14px/650, "11 items" subtitle: 11px/400
-//! - View toggle buttons: 28x24 each, list active (filled bg), grid inactive
-//! - Sort: 42x28 icon button with sort icon
-//! - Details panel toggle: 28x28
-//! - "+ New": 81x28, amber bg, white text, 13px/600
-//! - Search: 210x28, paper-3 bg, "Search names" 12.5px/400, "Ctrl+F" 11px/500 mono
+//! Toolbar (`.mk-tb`): back and forward, the folder's title and item count, the list/grid
+//! switch, sort, the details-panel toggle, New (the one Amber control) and the search field.
 
 use crate::State;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, space, type_};
-use rune::{Color, El, col, el, icon, row, text, text_input};
+use crate::theme::tokens::{Theme, radius, type_};
+use rune::{Color, El, Icon, col, el, row, text_input};
+
+use super::kit;
+
+/// How a toolbar button (`.mk-tbtn`) shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolState {
+    /// Ready (ink-2).
+    Idle,
+    /// Pressed in: a toggle that is on, a menu that is open (neutral wash, ink).
+    On,
+    /// Nothing to do (ink-4): back with no history.
+    Off,
+}
+
+/// A toolbar button: 28 pt tall, at least 28 wide, one or more 15/16 pt glyphs.
+/// Keys: `<key>` and `<key>-icon` (further glyphs are added by the caller).
+pub fn tool_button(
+    key: &'static str,
+    name: &'static str,
+    ic: &'static Icon,
+    icon_size: f32,
+    state: ToolState,
+    t: &Theme,
+) -> El {
+    let ink = match state {
+        ToolState::Idle => t.text_secondary,
+        ToolState::On => t.text,
+        ToolState::Off => t.text_quaternary,
+    };
+    let icon_key = match key {
+        "panel-toggle-btn" => "panel-icon".to_string(),
+        "sort-btn" => "sort-icon".to_string(),
+        _ => format!("{key}-icon"),
+    };
+    row()
+        .key(key)
+        .role("button")
+        .label(name)
+        .disabled(state == ToolState::Off)
+        .h(28.0)
+        .min_w(28.0)
+        .px(6.0)
+        .gap(4.0)
+        .center()
+        .radius(radius::CONTROL)
+        .fill(if state == ToolState::On {
+            t.selection
+        } else {
+            Color::TRANSPARENT
+        })
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(state != ToolState::Off)
+        .child(kit::glyph(icon_key, ic, icon_size, ink))
+}
+
+/// One segment of a segmented control (`.mk-tgroup .mk-tbtn`): the chosen one is raised.
+pub fn segment(key: &'static str, name: &'static str, ic: &'static Icon, on: bool, t: &Theme) -> El {
+    let mut seg = el()
+        .key(key)
+        .role("radio")
+        .label(name)
+        .checked(on)
+        .h(24.0)
+        .min_w(28.0)
+        .px(6.0)
+        .center()
+        .radius(radius::CONTROL)
+        .focusable(true)
+        .child(kit::glyph(
+            format!("{key}-icon"),
+            ic,
+            15.0,
+            if on { t.text } else { t.text_secondary },
+        ));
+    if on {
+        seg = seg
+            .fill(t.card)
+            .box_shadow(kit::drop(1.0, 2.0, t.shadow_raised))
+            .box_shadow(kit::ring(kit::HAIR, t.separator));
+    } else {
+        seg = seg.hover(t.hover).press(t.press);
+    }
+    seg
+}
+
+/// A segmented control's well (`.mk-tgroup`).
+pub fn segmented(key: &'static str, name: &'static str, segments: Vec<El>, t: &Theme) -> El {
+    row()
+        .key(key)
+        .role("radiogroup")
+        .label(name)
+        .padding(2.0)
+        .gap(1.0)
+        .radius(9.0)
+        .fill(t.field)
+        .box_shadow(kit::ring_inset(t.separator))
+        .children(segments)
+}
+
+/// A keyboard hint (`.kit-kbd`): "Ctrl+F".
+pub fn kbd(key: &'static str, keys: &str, t: &Theme) -> El {
+    el().key(format!("{key}-box"))
+        .h(20.0)
+        .px(6.0)
+        .radius(6.0)
+        .fill(t.card)
+        .box_shadow(kit::ring_inset(t.separator))
+        .box_shadow(kit::drop(1.0, 0.0, t.separator))
+        .center()
+        .child(kit::label(key, keys, type_::KBD, t.text_tertiary))
+}
 
 pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     let item_count = s.listing.items.len();
 
-    // Back / forward navigation arrows
     let nav = row()
         .key("nav")
-        .gap(0.0)
-        .center_y()
-        .child(nav_button("back", &icons::CHEVRON_LEFT, t))
-        .child(nav_button("forward", &icons::CHEVRON_RIGHT, t));
+        .child(tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Off, t).shortcut_hint("Alt+Left"))
+        .child(
+            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
+                .shortcut_hint("Alt+Right"),
+        );
 
-    // Folder title + item count
-    // Board .mk-title { padding: 0 4px } places "Files" at x=299 (nav end 287 + gap 8 + pad 4 = 299)
     let title = col()
         .key("folder-info")
-        .pl(4.0)
-        .pr(4.0)
-        .child(text("Files").key("folder-title").font(type_::TITLE).color(t.text))
-        .child(
-            text(format!("{item_count} items"))
-                .key("item-count")
-                .font(type_::BODY_SM)
-                .color(t.text_tertiary),
-        );
+        .px(4.0)
+        .min_w(0.0)
+        .child(kit::label("folder-title", s.listing.folder.name.clone(), type_::TITLE, t.text).truncate())
+        .child(kit::label(
+            "item-count",
+            if item_count == 1 {
+                "1 item".to_string()
+            } else {
+                format!("{item_count} items")
+            },
+            type_::TITLE_SUB,
+            t.text_tertiary,
+        ));
 
-    // View toggle: list | grid
-    let view_toggle = row()
-        .key("view-toggle")
-        .gap(0.0)
-        .center_y()
-        .child(toggle_button("view-list", &icons::VIEW_LIST, true, t))
-        .child(toggle_button("view-grid", &icons::VIEW_GRID, false, t));
+    let view_toggle = segmented(
+        "view-toggle",
+        "View",
+        vec![
+            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
+            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t),
+        ],
+        t,
+    );
 
-    // Sort button
-    let sort_btn = row()
-        .key("sort-btn")
-        .role("button")
-        .label("Sort")
-        .h(28.0)
-        .px(space::SM)
-        .center()
-        .radius(radius::MD)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(icon(&icons::SORT, 15.0).key("sort-icon").color(t.text_secondary))
-        .child(
-            icon(&icons::CHEVRON_DOWN, 11.0)
-                .key("sort-caret")
-                .color(t.text_secondary),
-        );
+    let sort_on = s.menu_open("sort");
+    let sort_btn = tool_button(
+        "sort-btn",
+        "Sort",
+        &icons::SORT,
+        15.0,
+        if sort_on { ToolState::On } else { ToolState::Idle },
+        t,
+    )
+    .expanded(sort_on)
+    .child(kit::glyph(
+        "sort-caret",
+        &icons::CHEVRON_DOWN,
+        11.0,
+        if sort_on { t.text } else { t.text_secondary },
+    ))
+    .on_press(|s: &mut State| s.toggle_menu("sort"));
 
-    // Details panel toggle
-    let panel_btn = el()
-        .key("panel-toggle-btn")
-        .role("button")
-        .label("Toggle details panel")
-        .size(28.0, 28.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.selection)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(icon(&icons::PANEL_TOGGLE, 15.0).key("panel-icon").color(t.text));
+    let panel_btn = tool_button(
+        "panel-toggle-btn",
+        "Details panel",
+        &icons::PANEL_TOGGLE,
+        16.0,
+        if s.show_detail_pane {
+            ToolState::On
+        } else {
+            ToolState::Idle
+        },
+        t,
+    )
+    .shortcut_hint("Alt+Shift+P")
+    .checked(s.show_detail_pane)
+    .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
 
-    // "+ New" amber button
-    // Board: new-btn w=81, h=28. Set explicit w to match board measurement.
+    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
+
     let new_btn = row()
         .key("new-btn")
         .role("button")
         .label("New")
         .h(28.0)
-        .w(81.0) // board: new-btn w=81 (overrides natural content width)
-        .px(space::MD)
-        .center()
-        .radius(radius::MD)
+        .pl(8.0)
+        .pr(9.0)
+        .gap(5.0)
+        .center_y()
+        .radius(radius::CONTROL)
         .fill(t.accent)
-        .hover(t.accent) // TODO: slightly different hover
-        .press(t.accent)
+        .hover(t.press)
+        .press(t.press)
         .focusable(true)
-        .gap(space::XS)
-        .child(icon(&icons::PLUS, 14.0).key("plus-icon").color(t.accent_text_on))
-        .child(text("New").key("new-label").font(type_::LABEL).color(t.accent_text_on))
-        .child(
-            icon(&icons::CHEVRON_DOWN, 11.0)
-                .key("new-caret")
-                .color(t.accent_text_on),
-        );
+        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
+        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
+        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
 
-    // Search field
+    kit::note_text(
+        "search-placeholder",
+        "search-input",
+        "Search names",
+        type_::SEARCH,
+        t.text_tertiary,
+    );
     let search_field = row()
         .key("search-box")
-        .h(28.0)
+        .role("search")
         .w(210.0)
-        .px(space::SM)
-        .radius(radius::MD)
-        .fill(t.surface)
-        .border(1.0, t.card_border)
+        .h(28.0)
+        .gap(6.0)
+        .pl(9.0)
+        .pr(6.0)
+        .radius(8.0)
+        .fill(t.field)
+        .box_shadow(kit::ring_inset(t.separator))
         .center_y()
-        .gap(space::XS)
-        .child(icon(&icons::SEARCH, 13.0).key("search-icon").color(t.text_tertiary))
+        .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
         .child(
             text_input(&s.search, type_::SEARCH)
                 .key("search-input")
+                .label("Search names")
+                .shortcut_hint("Ctrl+F")
                 .single_line()
                 .color(t.text)
                 .placeholder("Search names", t.text_tertiary)
                 .on_edit(|s: &mut State| &mut s.search)
                 .grow(1.0),
         )
-        .child(
-            el().key("kbd-hint")
-                .h(20.0)
-                .w(54.0) // board: kbd-hint w=54 (wider than natural text width due to board CSS)
-                .px(space::XS)
-                .radius(radius::SM)
-                .fill(t.card)
-                .center()
-                .child(text("Ctrl+F").key("kbd-text").font(type_::KBD).color(t.text_tertiary)),
-        );
+        .child(kbd("kbd-hint", "Ctrl+F", t));
 
-    // Assemble toolbar
     row()
         .key("toolbar")
-        .h(46.0) // Board: toolbar h=46 (y=33 to y=79)
+        .role("toolbar")
+        .label("Files")
+        .h(46.0)
         .w_full()
-        .fill(t.bg)
-        .pl(10.0) // Board: back arrow at x=231, toolbar at x=221 -> 10px left padding
-        .pr(trailing_inset.max(12.0)) // Board: .mk-tb { padding: 0 12px 0 10px } -> 12px right padding
+        .fill(t.toolbar_bg)
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
+        .pl(10.0)
+        .pr(trailing_inset.max(12.0))
         .center_y()
-        .gap(space::SM)
+        .gap(8.0)
         .child(nav)
         .child(title)
         .child(el().key("toolbar-spacer").grow(1.0))
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
+        .child(sep)
         .child(new_btn)
         .child(search_field)
-}
-
-fn nav_button(key: &'static str, ic: &'static rune::Icon, t: &Theme) -> El {
-    el().key(key)
-        .role("button")
-        .label(key)
-        .size(28.0, 28.0)
-        .center()
-        .radius(radius::MD)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(icon(ic, 15.0).key("icon").color(t.text_quaternary))
-}
-
-fn toggle_button(key: &'static str, ic: &'static rune::Icon, active: bool, t: &Theme) -> El {
-    el().key(key)
-        .role("button")
-        .label(key)
-        .size(28.0, 24.0)
-        .center()
-        .radius(radius::SM)
-        .fill(if active { t.card } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(
-            icon(ic, 15.0)
-                .key("icon")
-                .color(if active { t.text } else { t.text_secondary }),
-        )
 }

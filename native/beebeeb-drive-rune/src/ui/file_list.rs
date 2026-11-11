@@ -1,126 +1,231 @@
-//! File list: column headers with sort arrow, file rows with type icon,
-//! name, date, size, Shared cell, PC cell, and selection highlight.
+//! File list (`.mk-listwrap`): the column headers and the rows.
 //!
-//! Board measurements:
-//! - Column headers: 11px/600 Inter, ink-3 colour, 28pt row height, mt=4px
-//!   padding: 0 20px, gap: 12px between columns
-//! - Name column has sort arrow (ascending); flex grow fills remaining width
-//! - Columns: Name (flex), Date changed (132px), Size (84px), Shared (92px), PC (34px)
-//! - File rows: 30 pt tall, 13px/400 name, 11.5px/400 mono for dates
-//!   padding: 0 14px, gap: 12px between cells, 6px side margins
-//! - File-type icons: FTile 22x22, rounded bg, inner icon 14px
-//! - Shared cell: link icon or letter badge circles
-//! - PC cell: check-circle (On this PC), cloud (Online only), clock (Available offline)
+//! Columns (`--mk-cols`): Name (takes the rest) · Date changed 132 · Size 84, right-aligned ·
+//! Shared 92 · PC 34, centred; 12 pt between columns. Sizes and times are JetBrains Mono.
+//!
+//! The PC column has three states, each its own glyph (frames.json DW-0401: "online only,
+//! downloaded, available offline: the same states File Explorer shows"):
+//! `online-only` a cloud · `downloaded` an outlined check · `available-offline` a solid
+//! disc with a down arrow.
 
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{self, Theme, space, type_};
+use crate::theme::tokens::{Theme, radius, type_};
 use chrono::Timelike;
-use rune::{Color, Cx, El, col, el, icon, row, text};
+use rune::{Align, Color, Cx, El, Icon, col, el, row};
 use std::borrow::Cow;
 
-/// FTile background: board CSS `.mk-ftile { background: color-mix(in oklch, var(--color-ink) 7%, transparent); }`
-/// Ink is near-white in dark / near-black in light. Approximated as oklab(0.98,0,0) at 7% alpha.
-fn ftile_bg() -> Color {
-    Color::from_oklab([0.98, 0.0, 0.0, 0.07])
-}
+use super::kit;
 
-/// Board: rows are 30px tall (y=115,145,175... spacing 30).
-const ROW_H: f32 = 30.0;
-/// Board: column headers are 28px tall (less than rows), with 4px top margin.
+/// `.mk-row { height: 30px }`
+pub const ROW_H: f32 = 30.0;
 const COLUMN_HEADER_H: f32 = 28.0;
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
 const COL_SHARED_W: f32 = 92.0;
-/// Board: PC column is 34px wide (x=941, 34px).
 const COL_PC_W: f32 = 34.0;
+const COL_GAP: f32 = 12.0;
 
-/// Column headers row.
-/// Board: .mk-thead { height: 28px; padding: 0 20px; margin-top: 4px; column-gap: 12px; }
-/// Keys match the board golden: col-name (the name container h=17), col-date, col-size, col-shared, col-pc.
+/// Where an item is, in the PC column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PcState {
+    OnlineOnly,
+    Downloaded,
+    AvailableOffline,
+}
+
+impl PcState {
+    /// From the data contract's `pc_status`.
+    pub fn of(status: Option<&str>) -> Option<PcState> {
+        match status {
+            Some("online_only") => Some(PcState::OnlineOnly),
+            Some("on_this_pc") => Some(PcState::Downloaded),
+            Some("available_offline") => Some(PcState::AvailableOffline),
+            _ => None,
+        }
+    }
+
+    /// The state's name in the gate and in frames.json.
+    pub fn id(self) -> &'static str {
+        match self {
+            PcState::OnlineOnly => "online-only",
+            PcState::Downloaded => "downloaded",
+            PcState::AvailableOffline => "available-offline",
+        }
+    }
+
+    /// What Narrator reads (the board's tooltip).
+    pub fn name(self) -> &'static str {
+        match self {
+            PcState::OnlineOnly => "Online only",
+            PcState::Downloaded => "Downloaded",
+            PcState::AvailableOffline => "Available offline",
+        }
+    }
+
+    pub fn icon(self) -> &'static Icon {
+        match self {
+            PcState::OnlineOnly => &icons::CLOUD,
+            PcState::Downloaded => &icons::CHECK_CIRCLE,
+            PcState::AvailableOffline => &icons::AVAILABLE_OFFLINE,
+        }
+    }
+}
+
+/// The PC column's glyph for a state (`.mk-mac`), 15 pt. `surface` is what it sits on: the
+/// kept state's arrow is cut out in that colour.
+pub fn pc_glyph(key: impl Into<String>, state: PcState, surface: Color, t: &Theme) -> El {
+    match state {
+        PcState::AvailableOffline => kit::state_glyph(
+            key,
+            state.icon(),
+            Some((&icons::AVAILABLE_OFFLINE_DISC, &icons::AVAILABLE_OFFLINE_ARROW, surface)),
+            state.id(),
+            15.0,
+            t.text,
+        ),
+        _ => kit::state_glyph(key, state.icon(), None, state.id(), 15.0, t.text_tertiary),
+    }
+    .role("image")
+    .label(state.name())
+}
+
+/// A file's tile (`.mk-ftile`): 22 pt, the kind's outlined glyph on a neutral wash, or the
+/// file's thumbnail. Keys: `<key>-tile`, `<key>-icon`.
+pub fn file_tile(key: &str, item: &DriveItem, t: &Theme) -> El {
+    let tile = el()
+        .key(format!("{key}-tile"))
+        .size(22.0, 22.0)
+        .radius(6.0)
+        .clip_rounded(6.0)
+        .center();
+    if item.has_thumbnail {
+        return thumbnail(tile);
+    }
+    tile.fill(t.tile).child(kit::glyph(
+        format!("{key}-icon"),
+        file_type_icon(item),
+        14.0,
+        t.text_secondary,
+    ))
+}
+
+/// A thumbnail's stand-in until the engine hands over pixels: the board's sample photo
+/// (`.mk-ph5`, a harbour at dusk).
+pub fn thumbnail(tile: El) -> El {
+    let stop = |r: u8, g: u8, b: u8| rune::color::hex(&format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or(Color::BLACK);
+    tile.linear_gradient(
+        std::f32::consts::PI,
+        [
+            (0.0, stop(243, 217, 168)),
+            (0.5, stop(213, 140, 106)),
+            (1.0, stop(63, 58, 88)),
+        ],
+    )
+}
+
+/// The board draws one outlined glyph per kind, all in ink-2 (no per-type colour in the
+/// desktop list): a folder, the Backups drive, a sheet, a deck or media file, a document.
+pub fn file_type_icon(item: &DriveItem) -> &'static Icon {
+    if item.is_folder {
+        return if item.is_protected {
+            &icons::BACKUPS
+        } else {
+            &icons::FILES
+        };
+    }
+    match item.mime.as_deref() {
+        Some(m) if m.contains("spreadsheet") || m.contains("excel") || m == "text/csv" => &icons::DOC_SPREADSHEET,
+        Some(m) if m.contains("presentation") || m.contains("keynote") || m.contains("powerpoint") => {
+            &icons::DOC_MINIMAL
+        }
+        Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
+        _ => &icons::DOC_GENERIC,
+    }
+}
+
+/// A header cell's label.
+fn head(key: &'static str, label: &'static str, t: &Theme) -> El {
+    kit::label(key, label, type_::COLUMN_HEADER, t.text_tertiary)
+}
+
+/// Column headers (`.mk-thead`).
 pub fn column_headers(t: &Theme) -> El {
     row()
         .key("column-headers")
-        .h(COLUMN_HEADER_H) // 28px (not 30)
+        .role("row")
+        .h(COLUMN_HEADER_H)
         .w_full()
-        .pl(20.0) // Board: col-name at x=241, file-list at x=221 -> 20px padding
-        .pr(20.0)
-        .gap(12.0) // Board: column-gap: 12px
+        .mt(4.0)
+        .px(20.0)
+        .gap(COL_GAP)
         .center_y()
-        .mt(4.0) // Board: .mk-thead { margin-top: 4px }
-        // Name column: board measures col-name as the flex cell (h=17 = text height)
-        // row() with explicit h=17 and grow(1.0) matches board x=241, y=88, w=344, h=17
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
         .child(
             row()
-                .key("col-name")
+                .key("col-name-cell")
+                .role("columnheader")
+                .label("Name")
+                .sorted(Some(true))
                 .grow(1.0)
-                .h(17.0) // match board text/cell height
+                .min_w(0.0)
                 .center_y()
-                .gap(space::XS)
-                .child(
-                    text("Name")
-                        .key("col-name-text")
-                        .font(type_::COLUMN_HEADER)
-                        .color(t.text_tertiary),
-                )
-                .child(
-                    icon(&icons::CHEVRON_DOWN, 11.0)
-                        .key("sort-arrow")
-                        .color(t.text_tertiary),
-                ),
+                .gap(3.0)
+                .child(head("col-name", "Name", t))
+                .child(kit::glyph("sort-arrow", &icons::CHEVRON_DOWN, 11.0, t.text_tertiary)),
         )
-        // Board measures text nodes at h=17; set explicit h so center_y places them correctly.
         .child(
-            text("Date changed")
-                .key("col-date")
-                .font(type_::COLUMN_HEADER)
-                .color(t.text_tertiary)
+            row()
+                .key("col-date-cell")
+                .role("columnheader")
                 .w(COL_DATE_W)
-                .h(17.0),
+                .center_y()
+                .child(head("col-date", "Date changed", t)),
         )
         .child(
-            text("Size")
-                .key("col-size")
-                .font(type_::COLUMN_HEADER)
-                .color(t.text_tertiary)
+            row()
+                .key("col-size-cell")
+                .role("columnheader")
                 .w(COL_SIZE_W)
-                .h(17.0),
+                .center_y()
+                .justify_end()
+                .child(head("col-size", "Size", t)),
         )
         .child(
-            text("Shared")
-                .key("col-shared")
-                .font(type_::COLUMN_HEADER)
-                .color(t.text_tertiary)
+            row()
+                .key("col-shared-cell")
+                .role("columnheader")
                 .w(COL_SHARED_W)
-                .h(17.0),
+                .center_y()
+                .child(head("col-shared", "Shared", t)),
         )
         .child(
-            text("PC")
-                .key("col-pc")
-                .font(type_::COLUMN_HEADER)
-                .color(t.text_tertiary)
+            row()
+                .key("col-pc-cell")
+                .role("columnheader")
+                .label("On this PC")
                 .w(COL_PC_W)
-                .h(17.0),
+                .center()
+                .child(head("col-pc", "PC", t)),
         )
 }
 
-/// The virtual-scrolled file list.
+/// The rows, virtualised (`.mk-rows`).
 pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
     let count = s.listing.items.len();
-    let selection_color = t.selection_row;
-    let hover_color = t.hover;
-    let press_color = t.press;
-    let text_color = t.text;
-    let text_secondary = t.text_tertiary;
-    let text_mono = t.text;
+    let t = *t;
 
     col()
-        .key("file-list-scroll")
+        .key("rows")
+        .role("list")
+        .label(s.listing.folder.name.clone())
         .grow(1.0)
+        .min_h(0.0)
         .w_full()
-        .pt(space::XS) // Board: .mk-rows { padding: 4px 6px } -> pt=4
-        .px(6.0) // Board: .mk-rows { padding: 4px 6px } -> px=6 (rows sit 6px inset)
+        .py(4.0)
+        .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(
             col()
@@ -137,269 +242,176 @@ pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             Cow::Borrowed("row-oob")
                         }
                     },
-                    move |s: &State, i| {
-                        if i >= s.listing.items.len() {
-                            return el().key("empty");
-                        }
-                        let item = &s.listing.items[i];
-                        let selected = s.selected == Some(i);
-
-                        file_row(
-                            i,
-                            item,
-                            selected,
-                            selection_color,
-                            hover_color,
-                            press_color,
-                            text_color,
-                            text_secondary,
-                            text_mono,
-                        )
+                    move |s: &State, i| match s.listing.items.get(i) {
+                        Some(item) => file_row(i, item, s.is_selected(i), s.files.renaming(i), &t)
+                            .on_press(move |s: &mut State| s.select_only(i)),
+                        None => el().key("empty"),
                     },
                 ),
         )
 }
 
-fn file_row(
-    i: usize,
-    item: &DriveItem,
-    selected: bool,
-    selection_color: Color,
-    hover_color: Color,
-    press_color: Color,
-    text_color: Color,
-    text_secondary: Color,
-    _text_mono: Color,
-) -> El {
-    let icon_color = file_type_color(item.mime.as_deref(), item.is_folder);
-    let type_icon = file_type_icon(item.mime.as_deref(), item.is_folder);
+/// One row (`.mk-row`). Keys: `row-<i>` and `row-<i>-tile|icon|name|lock|date|size|dash|link|avatar-<j>|pc`.
+pub fn file_row(i: usize, item: &DriveItem, selected: bool, rename: Option<&rune::TextEdit>, t: &Theme) -> El {
+    let k = format!("row-{i}");
+    let meta = if selected { t.text_secondary } else { t.text_tertiary };
+    // What the row sits on, for the rings and cut-outs drawn in the surface's colour.
+    let surface = t.bg;
+
+    let mut name = row()
+        .key("name-cell")
+        .grow(1.0)
+        .min_w(0.0)
+        .center_y()
+        .gap(8.0)
+        .child(file_tile(&k, item, t));
+    name = match rename {
+        Some(edit) => name.child(super::overlays::rename_field(&k, edit, &item.name, t)),
+        None => name.child(
+            kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
+                .truncate()
+                .min_w(0.0),
+        ),
+    };
+    if item.is_protected && rename.is_none() {
+        name = name.child(
+            kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
+                .ml(2.0)
+                .role("image")
+                .label("Protected"),
+        );
+    }
 
     let size_text = if item.is_folder {
         // The protected Backups root lists devices, not items (board: "4 devices").
         let unit = if item.is_protected { "devices" } else { "items" };
         item.child_count.map(|c| format!("{c} {unit}")).unwrap_or_default()
     } else {
-        item.size.map(format_size).unwrap_or_default()
+        item.size.map(crate::source::format_size).unwrap_or_default()
     };
 
-    let date_text = format_date(&item.modified_at);
-    let shared_text = item.shared_type.as_deref().unwrap_or("\u{2014}");
-    let pc_icon = pc_status_icon(item.pc_status.as_deref());
+    let mut pc = el().key("pc-cell").w(COL_PC_W).center();
+    if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+        pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
+    }
 
-    // Board .mk-rows { padding: 4px 6px } -> px(6) on file-list-scroll, NOT on the row.
-    // Board .mk-row { height: 30px; padding: 0 14px; border-radius: 7px; column-gap: 12px; }
-    // Row fills the full width of the px(6)-inset container -> row x=227, w=762.
-    let mut r = row()
-        .key(format!("row-{i}"))
+    row()
+        .key(k.clone())
         .role("listitem")
         .label(&item.name)
         .h(ROW_H)
-        .pl(14.0) // Board: .mk-row { padding: 0 14px }
-        .pr(14.0)
-        .gap(12.0) // Board: column-gap: 12px between cells
+        .w_full()
+        .px(14.0)
+        .gap(COL_GAP)
         .center_y()
-        .radius(if selected { 7.0 } else { 0.0 }) // Board: border-radius: 7px
-        .fill(if selected { selection_color } else { Color::TRANSPARENT })
-        .hover(hover_color)
-        .press(press_color)
+        .radius(radius::CONTROL)
+        .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
+        .hover(t.hover)
+        .press(t.press)
         .focusable(true)
-        .on_press(move |s: &mut State| {
-            s.selected = Some(i);
-        });
-
-    // Name column: FTile(22x22) + gap(8) + name text (grow:1)
-    // Board: .mk-name { display: flex; align-items: center; gap: 8px; }
-    // FTile: .mk-ftile { width: 22px; height: 22px; border-radius: 6px; }
-    // Name text at x=271: row_start(227)+pl(14)+ftile(22)+gap(8)=271 ✓
-    let mut name_col = row()
-        .key("name-cell")
-        .grow(1.0)
-        .center_y()
-        .gap(8.0) // Board: .mk-name { gap: 8px } between FTile and name text
+        .focus_selected(selected)
+        .child(name)
         .child(
-            // FTile: 22x22 rounded container with centred icon inside
-            el().key("type-tile")
-                .size(22.0, 22.0)
-                .radius(6.0)
-                .fill(ftile_bg())
-                .center()
-                .child(icon(type_icon, 14.0).key("type-icon").color(icon_color)),
-        );
-
-    // Name text with unique key per row for geometry check
-    name_col = name_col.child(
-        text(&item.name)
-            .key(format!("row-{i}-name"))
-            .font(type_::LIST_ITEM)
-            .color(text_color),
-    );
-    if item.is_protected {
-        name_col = name_col.child(icon(&icons::LOCK, 11.0).key("lock").color(text_secondary));
-    }
-    r = r.child(name_col);
-
-    // Date changed
-    r = r.child(
-        text(date_text)
-            .key("date")
-            .font(type_::META_MONO)
-            .color(text_secondary)
-            .w(COL_DATE_W),
-    );
-
-    // Size
-    r = r.child(
-        text(size_text)
-            .key("size")
-            .font(type_::META_MONO)
-            .color(text_secondary)
-            .w(COL_SIZE_W),
-    );
-
-    // Shared
-    r = r.child(shared_cell(shared_text, item, text_secondary));
-
-    // PC status
-    r = r.child(pc_cell(pc_icon, text_secondary));
-
-    r
+            kit::label(
+                format!("{k}-date"),
+                format_date(&item.modified_at),
+                type_::META_MONO,
+                meta,
+            )
+            .w(COL_DATE_W)
+            .truncate(),
+        )
+        .child(
+            kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
+                .w(COL_SIZE_W)
+                .align(Align::End),
+        )
+        .child(shared_cell(&k, item, meta, surface, t))
+        .child(pc)
 }
 
-fn shared_cell(label: &str, item: &DriveItem, text_secondary: Color) -> El {
-    let mut cell = row().key("shared-cell").w(COL_SHARED_W).center_y().gap(space::XS);
-
-    if let Some(ref st) = item.shared_type {
-        if st == "Link" {
-            cell = cell
-                .child(icon(&icons::LINK, 12.0).key("link-icon").color(text_secondary))
-                .child(text("Link").key("link-text").font(type_::BODY_SM).color(text_secondary));
-        }
-    }
-
-    // Show shared badges (letter circles) if present
+/// The Shared column: who it is shared with, "Link", or a dash.
+fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
+    let mut cell = row().key("shared-cell").w(COL_SHARED_W).min_w(0.0).center_y();
     if !item.shared_badges.is_empty() {
+        let mut stack = row().key("avatars").role("group").label("Shared with");
         for (j, badge) in item.shared_badges.iter().enumerate() {
-            cell = cell.child(
-                el().key(format!("badge-{j}"))
-                    .size(18.0, 18.0)
-                    .radius(9.0)
-                    .fill(badge.color)
-                    .center()
-                    .child(
-                        text(&badge.initials)
-                            .key("init")
-                            .font(type_::AVATAR_INITIALS)
-                            // Badge tints are pale in both themes, so the initials
-                            // are a fixed dark ink rather than the theme text colour.
-                            .color(rune::oklch(0.28, 0.01, 80.0)),
-                    ),
+            let mut a = kit::avatar(
+                format!("{k}-avatar-{j}"),
+                &badge.initials,
+                20.0,
+                badge.color,
+                surface,
+                t,
             );
+            if j > 0 {
+                a = a.ml(-7.0);
+            }
+            stack = stack.child(a);
         }
-    }
-
-    if label == "\u{2014}" && item.shared_badges.is_empty() && item.shared_type.is_none() {
-        cell = cell.child(text("\u{2014}").key("dash").font(type_::BODY_SM).color(text_secondary));
-    }
-
-    cell
-}
-
-fn pc_cell(ic: Option<&'static rune::Icon>, text_secondary: Color) -> El {
-    let mut cell = el().key("pc-cell").w(COL_PC_W).center();
-    if let Some(ic) = ic {
-        cell = cell.child(icon(ic, 14.0).key("pc-icon").color(text_secondary));
-    }
-    cell
-}
-
-fn pc_status_icon(status: Option<&str>) -> Option<&'static rune::Icon> {
-    match status {
-        Some("on_this_pc") => Some(&icons::CHECK_CIRCLE),
-        Some("online_only") => Some(&icons::CLOUD),
-        Some("available_offline") => Some(&icons::AVAILABLE_OFFLINE),
-        _ => None,
-    }
-}
-
-fn file_type_icon(mime: Option<&str>, is_folder: bool) -> &'static rune::Icon {
-    if is_folder {
-        return &icons::FILES;
-    }
-    match mime {
-        Some(m) if m.contains("spreadsheet") || m.contains("excel") || m == "text/csv" => &icons::DOC_SPREADSHEET,
-        Some(m) if m.contains("presentation") || m.contains("keynote") || m.contains("powerpoint") => {
-            &icons::DOC_MINIMAL
-        }
-        Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
-        _ => &icons::DOC_GENERIC,
-    }
-}
-
-fn file_type_color(mime: Option<&str>, is_folder: bool) -> Color {
-    if is_folder {
-        return tokens::file_icon::folder();
-    }
-    match mime {
-        Some(m) if m.starts_with("image/") => tokens::file_icon::image(),
-        Some(m) if m.starts_with("video/") => tokens::file_icon::video(),
-        Some(m) if m.starts_with("audio/") => tokens::file_icon::audio(),
-        Some("application/pdf") => tokens::file_icon::pdf(),
-        Some(m) if m.contains("spreadsheet") => tokens::file_icon::spreadsheet(),
-        Some(m) if m.contains("presentation") => tokens::file_icon::presentation(),
-        Some(m) if m.contains("document") || m.contains("text") => tokens::file_icon::document(),
-        Some(m) if m.contains("zip") || m.contains("archive") => tokens::file_icon::archive(),
-        _ => tokens::file_icon::generic(),
-    }
-}
-
-fn format_size(bytes: i64) -> String {
-    crate::source::format_size(bytes)
-}
-
-/// Format a date string from ISO to the board's relative format.
-/// Board shows: "Today, 07:02", "Yesterday, 16:42", "Sunday", "5 Nov 2026", "28 Oct 2026"
-fn format_date(iso: &str) -> String {
-    use chrono::{Datelike, Duration, NaiveDateTime};
-
-    let dt = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ")
-        .or_else(|_| NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S"))
-        .unwrap_or_else(|_| return NaiveDateTime::default());
-
-    // Use a fixed "now" for the fixture (5 Nov 2026)
-    let now = NaiveDateTime::parse_from_str("2026-11-05T12:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
-
-    let date = dt.date();
-    let today = now.date();
-    let yesterday = today - Duration::days(1);
-    let time = format!("{:02}:{:02}", dt.hour(), dt.minute());
-
-    if date == today {
-        format!("Today, {time}")
-    } else if date == yesterday {
-        format!("Yesterday, {time}")
+        cell = cell.child(stack);
+    } else if item.shared_type.as_deref() == Some("Link") {
+        cell = cell.child(
+            row()
+                .key("link")
+                .center_y()
+                .gap(4.0)
+                .child(kit::glyph(
+                    format!("{k}-link-icon"),
+                    &icons::LINK,
+                    12.0,
+                    t.text_secondary,
+                ))
+                .child(kit::label(
+                    format!("{k}-link"),
+                    "Link",
+                    type_::STATUS_STRONG.lh(14.0),
+                    t.text_secondary,
+                )),
+        );
     } else {
-        // Check if within the last week
-        let days_ago = (today - date).num_days();
-        if days_ago > 0 && days_ago <= 6 {
-            let weekday = date.weekday();
-            return format!("{weekday}");
+        cell = cell.child(kit::label(format!("{k}-dash"), "\u{2014}", type_::META_MONO, meta));
+    }
+    cell
+}
+
+/// A date as the board shows it: "Today, 07:02", "Yesterday, 16:42", "Sunday" within the
+/// last week, else "28 Oct 2026".
+pub fn format_date(iso: &str) -> String {
+    use chrono::{Datelike, Duration, NaiveDateTime, Weekday};
+
+    let Ok(dt) = NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%SZ")
+        .or_else(|_| NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S"))
+    else {
+        return String::new();
+    };
+    // The fixture's "now" (5 Nov 2026); the engine's source brings its own clock.
+    let Ok(now) = NaiveDateTime::parse_from_str("2026-11-05T12:00:00", "%Y-%m-%dT%H:%M:%S") else {
+        return String::new();
+    };
+
+    let (date, today) = (dt.date(), now.date());
+    let time = format!("{:02}:{:02}", dt.hour(), dt.minute());
+    let days_ago = (today - date).num_days();
+    if days_ago == 0 {
+        format!("Today, {time}")
+    } else if date == today - Duration::days(1) {
+        format!("Yesterday, {time}")
+    } else if (2..=6).contains(&days_ago) {
+        match date.weekday() {
+            Weekday::Mon => "Monday",
+            Weekday::Tue => "Tuesday",
+            Weekday::Wed => "Wednesday",
+            Weekday::Thu => "Thursday",
+            Weekday::Fri => "Friday",
+            Weekday::Sat => "Saturday",
+            Weekday::Sun => "Sunday",
         }
-        // Full date
-        let month = match date.month() {
-            1 => "Jan",
-            2 => "Feb",
-            3 => "Mar",
-            4 => "Apr",
-            5 => "May",
-            6 => "Jun",
-            7 => "Jul",
-            8 => "Aug",
-            9 => "Sep",
-            10 => "Oct",
-            11 => "Nov",
-            12 => "Dec",
-            _ => "???",
-        };
-        format!("{} {} {}", date.day(), month, date.year())
+        .to_string()
+    } else {
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        format!("{} {} {}", date.day(), MONTHS[date.month0() as usize], date.year())
     }
 }
