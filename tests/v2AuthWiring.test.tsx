@@ -150,6 +150,31 @@ describe('DW-A30: a failed Unlock after the passkey is said on the screen', () =
         last_signed_in_email: () => 'anna@northwind.studio',
         auth_passkey_sign_in: () => ({ requires_2fa: false, reauthenticated: false, vault_unlocked: false, key_replaced: false, account_mismatch: null }),
         desktop_login: () => { throw 'invalid_credentials' },
+        auth_sign_in_problem: (args: Record<string, unknown>) => {
+          // P1-1: reject unknown keys.
+          const allowed = new Set(['code', 'consecutiveFailures'])
+          for (const k of Object.keys(args)) if (!allowed.has(k)) throw new Error(`auth_sign_in_problem: unknown key '${k}'`)
+          const code = args.code as string
+          const consecutiveFailures = args.consecutiveFailures as number
+          const isInvalid = code === 'invalid_credentials' || /Invalid email or password/i.test(code)
+          const problem = isInvalid
+            ? (consecutiveFailures >= 5 ? { kind: 'locked_hint' } : { kind: 'invalid' })
+            : { kind: 'other' }
+          const text = isInvalid
+            ? 'That email and password don’t match. Nothing was unlocked.'
+            : 'Sign-in didn’t finish. Nothing was unlocked. Try again.'
+          return { problem, text, wait_seconds: undefined }
+        },
+        auth_next_after_sign_in: (args: Record<string, unknown>) => {
+          // P1-1: reject unknown keys (the Rust command expects camelCase from Tauri's invoke).
+          const allowed = new Set(['requires2fa', 'vaultUnlocked', 'reauthenticated', 'accountMismatch'])
+          for (const k of Object.keys(args)) if (!allowed.has(k)) throw new Error(`auth_next_after_sign_in: unknown key '${k}' (expected camelCase: ${[...allowed].join(', ')})`)
+          if (args.requires2fa) return 'two_factor'
+          if (args.accountMismatch) return 'account_mismatch'
+          if (args.reauthenticated) return 'reauthenticated'
+          if (args.vaultUnlocked) return 'drive'
+          return 'recovery_phrase'
+        },
       },
       bindings: {
         ...api, ...model, CREATE_ACCOUNT_URL: '', FORGOT_PASSWORD_URL: '', openUrl() {}, EMPTY_WORDS: Array.from({ length: 12 }, () => ''),
@@ -168,6 +193,9 @@ describe('DW-A30: a failed Unlock after the passkey is said on the screen', () =
       await m.flush()
       m.elements()
       await signInView!.onSubmit()
+      await m.flush()
+      await m.flush()
+      await m.flush()
       await m.flush()
       m.elements()
       expect(signInView!.problem).toEqual({ kind: 'invalid' })

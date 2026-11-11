@@ -219,6 +219,8 @@ export function ConfirmStep({ positions, answers, suggestions, active, wrong, bu
   positions: number[]; answers: string[]; suggestions: string[]; active: number; wrong: boolean; busy: boolean
   onAnswer: (i: number, v: string) => void; onActive: (i: number) => void; onShowAgain: () => void; onConfirm: () => void
 }) {
+  // PhraseStep unmounts here, and its cleanup turns capture exclusion off while these words are typed.
+  usePrivateScreen()
   const full = answers.every((a) => a.trim().length > 0)
   return (
     <AuthWindow>

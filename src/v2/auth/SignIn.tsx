@@ -78,7 +78,7 @@ export function SignInView(p: SignInViewProps) {
           onChange={(e) => p.onEmail(e.target.value)} />
         <Field label="Password" icon="lock" secret ref={passwordRef} value={p.password} disabled={p.busy} error={fieldError}
           onChange={(e) => p.onPassword(e.target.value)} />
-        {p.problem?.kind === 'locked-hint' && <p data-lock-note className="-mt-1 mb-3 text-[12px] leading-4 text-ink-2">{LOCK_NOTE}</p>}
+        {p.problem?.kind === 'locked_hint' && <p data-lock-note className="-mt-1 mb-3 text-[12px] leading-4 text-ink-2">{LOCK_NOTE}</p>}
         <div className="mb-3 flex items-center justify-between">
           <TextLink onClick={p.onForgot}>Forgot password?</TextLink>
           <span className="inline-flex items-center gap-1.5 text-ink-2"><Icon name="key" size={13} /><TextLink onClick={p.onPasskey}>Use a passkey</TextLink></span>

@@ -10,7 +10,9 @@
 //! `dto_tests`'s no-secret list, which fails on a planted field.
 pub(crate) mod approve;
 pub(crate) mod device;
+pub(crate) mod gate;
 pub(crate) mod hello;
+pub(crate) mod key_owner;
 pub(crate) mod password;
 pub(crate) mod phrase;
 pub(crate) mod private_screen;
