@@ -137,7 +137,11 @@ pub(super) fn derive_recipient_share_key(
     ))
 }
 
-pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> Result<Zeroizing<[u8; 32]>, EngineError> {
+pub(super) fn unwrap_key_frame(
+    wrap_key: &[u8; 32],
+    encrypted_key_b64: &str,
+    label: &str,
+) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let raw = decode_standard_b64(label, encrypted_key_b64)?;
     let frame_key = beebeeb_core::kdf::FileKey::from_bytes(*wrap_key);
     let plaintext = Zeroizing::new(
@@ -210,12 +214,26 @@ impl KeyCustody {
     }
 }
 
-pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: KeyCustody) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+pub(super) fn unwrap_folder_child_for_format(
+    folder: &[u8; 32],
+    root: &str,
+    id: &str,
+    kind: u8,
+    wrap: &str,
+    custody: KeyCustody,
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     if custody.is_custody() {
         let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
         Ok(beebeeb_sync::key_resolution::unwrap_child_key(
-            &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)
-    } else { unwrap_child_file_key(folder, wrap) }
+            &beebeeb_core::kdf::FileKey::from_bytes(*folder),
+            root,
+            id,
+            kind,
+            &frame,
+        )?)
+    } else {
+        unwrap_child_file_key(folder, wrap)
+    }
 }
 
 pub(super) fn unwrap_child_file_key(
@@ -223,7 +241,7 @@ pub(super) fn unwrap_child_file_key(
     encrypted_file_key_b64: &str,
 ) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     #[cfg(test)]
-    LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
+    LEGACY_CHILD_READS.with(|n| n.set(n.get() + 1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
@@ -292,8 +310,13 @@ pub(super) fn safe_shared_leaf_name(name: &str) -> Option<String> {
     Some(leaf.to_string())
 }
 
-pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
-    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
+pub(crate) fn decrypt_shared_name_with_key(
+    file_key: &beebeeb_core::kdf::FileKey,
+    name_encrypted: &str,
+) -> Option<String> {
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted)
+        .ok()
+        .map(|m| m.name)
 }
 
 pub(super) fn shared_name_from_metadata(
@@ -415,7 +438,15 @@ pub(super) fn apply_metadata_file_row(
     let existing = db.get_file(file_id)?;
     let size = f["size_bytes"].as_i64().or_else(|| f["size"].as_i64()).unwrap_or(0);
     let remote_updated = f["updated_at"].as_i64().unwrap_or(0);
-    let leaf = crate::owner_keys::stored_name(db,file_id,master_key)?.unwrap_or_else(||resolve_relative_path(f,file_id,master_key));
+    let stored = crate::owner_keys::stored_name(db, file_id, master_key)?;
+    // The unavailable label is a display name only. Stored as the path, the
+    // watcher would upload it as a new file; keep the path empty so the row
+    // retries its name on the next sync with the right key (task 2445).
+    let leaf = match stored {
+        Some(name) if name == crate::owner_keys::blocked_name(file_id) => String::new(),
+        Some(name) => name,
+        None => resolve_relative_path(f, file_id, master_key),
+    };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
     // tick) rather than seeding a bare parent dir. A leaf that already carries
@@ -433,7 +464,9 @@ pub(super) fn apply_metadata_file_row(
     // path and parent are where the file is on disk; the server's are still the old ones.
     let held = match existing.as_ref() {
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
-        Some(entry) if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? => {
+        Some(entry)
+            if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? =>
+        {
             Some(entry.clone())
         }
         _ => None,
@@ -685,7 +718,9 @@ pub(super) fn process_metadata_row(
             // path/kind so a folder we already have locally is still descended.
             // Snapshot rows only: an op row's `updated_at` is a local
             // same-second stamp, not a freshness token (see `RowSource::Op`).
-            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at {
+            // Task 2445: a row written with an empty path (vault was locked)
+            // must be re-applied now that the key may be correct.
+            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at && !entry.path.is_empty() {
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
@@ -707,7 +742,9 @@ pub(super) fn process_metadata_row(
             // (3) Pending download/upload/conflict/error — let the dedicated
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
-            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+            // Task 2445: an empty path means the name never decrypted (vault was
+            // locked); re-apply now that the key may be correct.
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || entry.path.is_empty() {
                 return apply(bridge);
             }
             Ok(Some((entry.path, entry.item_kind)))

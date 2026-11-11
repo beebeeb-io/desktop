@@ -30,9 +30,17 @@ pub(crate) fn now_iso() -> String {
 }
 
 /// The display name of a row: its path's leaf, or the stable id label the rest of the app uses.
+/// A file whose name never decrypted (empty path, vault was locked) shows the existing
+/// "Unavailable file <hex>" label rather than vanishing from the list (task 2445).
 pub(crate) fn leaf_name(entry: &FileEntry) -> String {
-    crate::vault_tree::folder_leaf_name(&entry.path)
-        .unwrap_or_else(|| crate::vault_tree::folder_fallback_label(&entry.file_id))
+    crate::vault_tree::folder_leaf_name(&entry.path).unwrap_or_else(|| {
+        if entry.is_dir() {
+            crate::vault_tree::folder_fallback_label(&entry.file_id)
+        } else {
+            // Display only. The path stays empty, so this label is never uploaded.
+            crate::owner_keys::blocked_name(&entry.file_id)
+        }
+    })
 }
 
 fn extension(name: &str) -> Option<String> {
@@ -378,33 +386,61 @@ pub(crate) fn crumbs(db: &StateDb, folder: Option<&FileEntry>) -> Result<Vec<Cru
     Ok(chain)
 }
 
-/// `drive_list`: one folder's children from the copy on this PC.
+/// `drive_list`: one folder's children from the copy on this PC, using the
+/// `idx_files_parent_id` index (task 2445). A 70k-row DB reads only one
+/// folder's children instead of every row.
 pub(crate) fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: bool) -> Result<Listing, DriveError> {
     let folder = resolve_folder(db, folder_id)?;
-    let want_parent = folder.as_ref().map(|f| f.file_id.clone());
-    let rows = live_rows(db)?;
-    let mut counts: HashMap<&str, i64> = HashMap::new();
-    for row in &rows {
-        if let Some(parent) = row.parent_id.as_deref() {
-            *counts.entry(parent).or_default() += 1;
-        }
-    }
-    let mut items = Vec::new();
-    for row in rows.iter().filter(|r| r.parent_id == want_parent) {
-        let contract = db.get_file_contract_state(&row.file_id).map_err(DriveError::db)?;
-        // Shared-with-me roots have no parent too; they are listed in Shared, not in Files.
-        if want_parent.is_none()
-            && contract
+    let want_parent = folder.as_ref().map(|f| f.file_id.as_str());
+    let children = db.children_of(want_parent).map_err(DriveError::db)?;
+    // Dedupe: a row the server never confirmed folds into the server's row at the same path.
+    let mut best: HashMap<(bool, String), (FileEntry, bool)> = HashMap::new();
+    let mut unkeyed: Vec<(FileEntry, bool)> = Vec::new();
+    for (entry, pinned) in children {
+        // Shared-with-me roots have no parent; listed in Shared, not in Files.
+        if want_parent.is_none() {
+            let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
+            if contract
                 .as_ref()
                 .is_some_and(|c| c.namespace == Namespace::SharedWithMe)
-        {
+            {
+                continue;
+            }
+        }
+        let path = entry.path.trim_matches('/').to_lowercase();
+        if path.is_empty() {
+            unkeyed.push((entry, pinned));
             continue;
         }
-        items.push(item_from(
-            row,
-            contract.as_ref(),
-            counts.get(row.file_id.as_str()).copied().or(Some(0)),
-        ));
+        let key = (entry.is_dir(), path);
+        match best.get(&key) {
+            Some((kept, _)) if !prefer(&entry, kept) => {}
+            _ => {
+                best.insert(key, (entry, pinned));
+            }
+        }
+    }
+    let all_entries: Vec<(FileEntry, bool)> = {
+        let mut v: Vec<_> = best.into_values().collect();
+        v.extend(unkeyed);
+        v
+    };
+    // Batch child counts for every folder in this listing.
+    let folder_ids: Vec<&str> = all_entries
+        .iter()
+        .filter(|(e, _)| e.is_dir())
+        .map(|(e, _)| e.file_id.as_str())
+        .collect();
+    let counts = db.child_counts(&folder_ids).map_err(DriveError::db)?;
+    let mut items: Vec<DriveItem> = Vec::with_capacity(all_entries.len());
+    for (entry, pinned) in &all_entries {
+        let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
+        let child_count = if entry.is_dir() {
+            Some(counts.get(&entry.file_id).copied().unwrap_or(0))
+        } else {
+            None
+        };
+        items.push(item_from(entry, contract.as_ref(), child_count));
     }
     sort_items(&mut items, sort);
     let path = crumbs(db, folder.as_ref())?;
@@ -419,6 +455,68 @@ pub(crate) fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: boo
         as_of: now_iso(),
         stale,
     })
+}
+
+/// Task 2445: a paged listing for the native virtual list. `children_of` with sort, offset and
+/// limit, plus the total count for the caller's scroll bar. Pure over `StateDb`; no Tauri types.
+pub(crate) fn children_of(
+    db: &StateDb,
+    folder_id: Option<&str>,
+    sort: Sort,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<DriveItem>, usize), DriveError> {
+    let folder = resolve_folder(db, folder_id)?;
+    let want_parent = folder.as_ref().map(|f| f.file_id.as_str());
+    let children = db.children_of(want_parent).map_err(DriveError::db)?;
+    // Dedupe (same logic as list).
+    let mut best: HashMap<(bool, String), (FileEntry, bool)> = HashMap::new();
+    let mut unkeyed: Vec<(FileEntry, bool)> = Vec::new();
+    for (entry, pinned) in children {
+        if want_parent.is_none() {
+            let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
+            if contract
+                .as_ref()
+                .is_some_and(|c| c.namespace == Namespace::SharedWithMe)
+            {
+                continue;
+            }
+        }
+        let path = entry.path.trim_matches('/').to_lowercase();
+        if path.is_empty() {
+            unkeyed.push((entry, pinned));
+            continue;
+        }
+        let key = (entry.is_dir(), path);
+        match best.get(&key) {
+            Some((kept, _)) if !prefer(&entry, kept) => {}
+            _ => {
+                best.insert(key, (entry, pinned));
+            }
+        }
+    }
+    let mut all_entries: Vec<(FileEntry, bool)> = best.into_values().collect();
+    all_entries.extend(unkeyed);
+    let folder_ids: Vec<&str> = all_entries
+        .iter()
+        .filter(|(e, _)| e.is_dir())
+        .map(|(e, _)| e.file_id.as_str())
+        .collect();
+    let counts = db.child_counts(&folder_ids).map_err(DriveError::db)?;
+    let mut items: Vec<DriveItem> = Vec::with_capacity(all_entries.len());
+    for (entry, _) in &all_entries {
+        let contract = db.get_file_contract_state(&entry.file_id).map_err(DriveError::db)?;
+        let child_count = if entry.is_dir() {
+            Some(counts.get(&entry.file_id).copied().unwrap_or(0))
+        } else {
+            None
+        };
+        items.push(item_from(entry, contract.as_ref(), child_count));
+    }
+    sort_items(&mut items, sort);
+    let total = items.len();
+    let page: Vec<DriveItem> = items.into_iter().skip(offset).take(limit).collect();
+    Ok((page, total))
 }
 
 /// `drive_details`. `versionCount` is the current version number the server recorded (the version

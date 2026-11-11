@@ -402,7 +402,10 @@ impl StateDb {
     /// never promoted at the new place (it becomes mixed, its version kept); agreed content stays.
     pub fn poison_fetched_content(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.execute("UPDATE files SET fetched_hash = NULL WHERE file_id = ?1", params![file_id])?;
+        conn.execute(
+            "UPDATE files SET fetched_hash = NULL WHERE file_id = ?1",
+            params![file_id],
+        )?;
         Ok(())
     }
     /// Task 1640 (review N1, condition 2): make the candidate the agreed content, only while the
@@ -648,6 +651,39 @@ impl StateDb {
             params![folder_id],
             |row| row.get(0),
         )
+    }
+    /// Task 2445: the children of `parent_id` (or root when `None`), not trashing,
+    /// as `(FileEntry, pinned)` pairs, using `idx_files_parent_id`. Replaces the
+    /// `live_rows` full-table scan for `model::list`.
+    pub fn children_of(&self, parent_id: Option<&str>) -> Result<Vec<(FileEntry, bool)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {FILE_OVERVIEW_COLUMNS} FROM files
+             WHERE parent_id IS ?1 AND status != 'trashing'
+             ORDER BY item_kind ASC, path ASC"
+        ))?;
+        let rows = stmt.query_map(params![parent_id], file_overview_row)?;
+        rows.collect()
+    }
+    /// Task 2445: count of children for each folder id in `folder_ids`, in one query.
+    pub fn child_counts(&self, folder_ids: &[&str]) -> Result<std::collections::HashMap<String, i64>> {
+        if folder_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let placeholders: String = folder_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT parent_id, COUNT(*) FROM files
+             WHERE parent_id IN ({placeholders}) AND status != 'trashing'
+             GROUP BY parent_id"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            folder_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<std::collections::HashMap<_, _>>>()
     }
     pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

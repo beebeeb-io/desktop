@@ -1,10 +1,7 @@
 //! Opaque owner-key state and account-scoped transport. Crypto belongs to core.
 
 use crate::{api_client::ApiClient, state_db::StateDb};
-use base64::{
-    Engine as _,
-    engine::general_purpose::STANDARD,
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -224,8 +221,16 @@ pub(crate) fn safe_display_name(name: &str) -> bool {
 mod activity;
 mod moves;
 mod requests;
+mod scope;
+mod snapshot_keep;
 
-#[allow(unused_imports)] pub(crate) use requests::{RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope, request_upload_fields};
+pub use scope::{AccountScope, normalize_wrap};
+
+#[allow(unused_imports)]
+pub(crate) use requests::{
+    RequestKeys, RequestName, RequestNameKey, block_malformed_row, rename_material, request_envelope,
+    request_upload_fields,
+};
 
 /// A failed row remains visible and deletable; this label is never ciphertext
 /// or a path supplied by the server.
@@ -724,8 +729,11 @@ impl crate::engine_bridge::EngineBridge {
                 scope.check()?;
                 row = match canonical {
                     Ok(row) => row,
-                    // The listing/event raced deletion. Omit this obsolete row;
-                    // the delta loop still applies later ops and acknowledges it.
+                    // An unreadable name whose canonical row is gone: keep it
+                    // blocked so the mirror does not prune a file the snapshot
+                    // still lists (task 2445, night slice 65).
+                    Err(error) if missing(&error) && !sparse && !needs_envelope => input.clone(),
+                    // A sparse or envelope-only row that is truly gone: omit it.
                     Err(error) if missing(&error) => continue,
                     Err(error) => return Err(error),
                 };
@@ -759,12 +767,15 @@ impl crate::engine_bridge::EngineBridge {
                 .await;
             let Ok(outcome) = outcome else {
                 block_malformed_row(&scope, old.as_ref(), &mut record)?;
-                prepared.push(PreparedOwnedRow { row, record, readable: false });
+                prepared.push(PreparedOwnedRow {
+                    row,
+                    record,
+                    readable: false,
+                });
                 continue;
             };
             // Review 4 P2-2: carrying but unresolved is never an owner row.
-            let unresolved_request =
-                matches!(&outcome, crate::owner_keys::requests::EnvelopeOutcome::Unresolved);
+            let unresolved_request = matches!(&outcome, crate::owner_keys::requests::EnvelopeOutcome::Unresolved);
             let mut candidate = (!malformed && !unresolved_request && class.is_some())
                 .then(|| record_key(&master, &record, row_kind(&row)).ok())
                 .flatten();
@@ -806,8 +817,7 @@ impl crate::engine_bridge::EngineBridge {
                                 wrap,
                                 &record.name_encrypted,
                                 None,
-                            )
-                                && let Ok(metadata) = authenticate(&resolved.key, &record.name_encrypted)
+                            ) && let Ok(metadata) = authenticate(&resolved.key, &record.name_encrypted)
                             {
                                 candidate = Some((resolved.key, metadata));
                             }
@@ -890,7 +900,10 @@ impl crate::engine_bridge::EngineBridge {
     /// request key `C`, the name key is whatever authenticates the served name.
     /// The owner's request list is cached per bridge (P2-2), so two calls on
     /// this bridge cost one GET; a prepare pass loads its own copy.
-    pub(crate) async fn request_row_keys(&self, row: &Value) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
+    pub(crate) async fn request_row_keys(
+        &self,
+        row: &Value,
+    ) -> anyhow::Result<beebeeb_core::owned_keys::RequestRowKeys> {
         let master = MasterKey::from_bytes(*self.api().master_key());
         if let Some(found) = self
             .request_keys
@@ -903,7 +916,10 @@ impl crate::engine_bridge::EngineBridge {
         }
         let mut keys = RequestKeys::load(&self.api()).await;
         let found = keys.row_keys(&master, row);
-        *self.request_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(keys);
+        *self
+            .request_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(keys);
         found.ok_or_else(|| anyhow::anyhow!("request keys are unavailable"))
     }
 
@@ -1033,103 +1049,7 @@ impl OwnedKeyRecord {
     }
 }
 
-pub fn normalize_wrap(value: &Value) -> anyhow::Result<Option<Vec<u8>>> {
-    let frame = match value {
-        Value::Null => return Ok(None),
-        Value::String(text) => STANDARD.decode(text)?,
-        Value::Array(values) => values
-            .iter()
-            .map(|v| {
-                v.as_u64()
-                    .and_then(|n| u8::try_from(n).ok())
-                    .ok_or_else(|| anyhow::anyhow!("invalid envelope byte"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?,
-        _ => anyhow::bail!("invalid envelope encoding"),
-    };
-    anyhow::ensure!(frame.len() == 60, "invalid envelope length");
-    Ok(Some(frame))
-}
-
-/// A request result belongs to the account/session that started it. No mutex is
-/// held over an await, and the DB performs the final generation check itself.
-pub struct AccountScope<'a> {
-    pub db: &'a StateDb,
-    pub api: &'a ApiClient,
-    pub stopping: &'a AtomicBool,
-    revision: u64,
-}
-
-impl<'a> AccountScope<'a> {
-    pub fn new(db: &'a StateDb, api: &'a ApiClient, stopping: &'a AtomicBool) -> Self {
-        Self {
-            db,
-            api,
-            stopping,
-            revision: db.account_revision(),
-        }
-    }
-
-    pub fn check(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.stopping.load(Ordering::Acquire) && self.db.account_revision() == self.revision,
-            "owner key request cancelled by account change"
-        );
-        Ok(())
-    }
-
-    pub fn remember_custody(&self, folder_id: &str) -> anyhow::Result<()> {
-        self.check()?;
-        self.db.remember_folder_custody_at_revision(folder_id, self.revision)?;
-        // Task 2279 item 1: index work that was deferred because this root had
-        // no custody can run now. A custody GET that opens (200 with a record
-        // that opens, `remember: true`) or a purpose-bound registration both
-        // reach here, and the next maintenance pass repairs the root.
-        self.db.revive_deferred_shared_index(folder_id)?;
-        Ok(())
-    }
-
-    pub fn put(&self, row: &OwnedKeyRecord) -> anyhow::Result<()> {
-        self.check()?;
-        self.db.put_owned_key_record_at_revision(row, self.revision)?;
-        Ok(())
-    }
-
-    pub async fn inventory(&self, root: &str) -> anyhow::Result<Vec<Value>> {
-        let mut inventory = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            self.check()?;
-            let page = self.api.get_shared_folder_keys(root, cursor.as_deref()).await?;
-            self.check()?;
-            inventory.extend(
-                page["keys"]
-                    .as_array()
-                    .ok_or_else(|| anyhow::anyhow!("invalid key inventory"))?
-                    .iter()
-                    .cloned(),
-            );
-            match &page["next_cursor"] {
-                Value::Null => break,
-                Value::String(next) if !next.is_empty() && seen.insert(next.clone()) => cursor = Some(next.clone()),
-                _ => anyhow::bail!("invalid or repeated key inventory cursor"),
-            }
-        }
-        Ok(inventory)
-    }
-
-    pub async fn adopt(&self, row: &OwnedKeyRecord) -> anyhow::Result<bool> {
-        let frame = row
-            .pending_owner_wrap
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no pending owner envelope"))?;
-        self.put(row)?;
-        let result = self.api.adopt_owner_key(&row.file_id, &STANDARD.encode(frame)).await;
-        self.check()?;
-        result
-    }
-}
+// normalize_wrap and AccountScope moved to owner_keys/scope.rs for the size ratchet.
 
 impl crate::engine_bridge::EngineBridge {
     /// The nearest ancestor (the id itself included) whose custody this device
@@ -1141,7 +1061,12 @@ impl crate::engine_bridge::EngineBridge {
             if self.db().has_seen_folder_custody(&folder).unwrap_or(false) {
                 return Some(folder);
             }
-            current = self.db().get_file(&folder).ok().flatten().and_then(|entry| entry.parent_id);
+            current = self
+                .db()
+                .get_file(&folder)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.parent_id);
         }
         None
     }
@@ -1155,7 +1080,12 @@ impl crate::engine_bridge::EngineBridge {
             if self.db().has_seen_folder_custody(&folder).unwrap_or(false) {
                 return true;
             }
-            current = self.db().get_file(&folder).ok().flatten().and_then(|entry| entry.parent_id);
+            current = self
+                .db()
+                .get_file(&folder)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.parent_id);
         }
         false
     }
@@ -1165,16 +1095,14 @@ impl crate::engine_bridge::EngineBridge {
     /// nothing: if that item is foreign or already wrapped, the sentence would
     /// be false. Only an owner-class, self-minted create in a shared folder
     /// stays unpublished here.
-    pub(crate) fn owner_only_notice(
-        &self,
-        item_id: Option<&str>,
-        parent_id: Option<&str>,
-    ) -> Option<&'static str> {
+    pub(crate) fn owner_only_notice(&self, item_id: Option<&str>, parent_id: Option<&str>) -> Option<&'static str> {
         let id = item_id?;
         if beebeeb_core::item_id::item_class(id).ok() != Some(ItemClass::Owner) || self.is_request_row(id) {
             return None;
         }
-        parent_id.filter(|parent| self.inside_shared_folder(parent)).map(|_| OWNER_ONLY_NOTICE)
+        parent_id
+            .filter(|parent| self.inside_shared_folder(parent))
+            .map(|_| OWNER_ONLY_NOTICE)
     }
 }
 

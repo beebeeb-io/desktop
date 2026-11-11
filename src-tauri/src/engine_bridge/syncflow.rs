@@ -491,7 +491,7 @@ pub(super) async fn bootstrap_from_snapshot(
 ///
 /// Split out from `bootstrap_from_snapshot` so it's directly unit-testable with
 /// a synthetic `SyncSnapshot` (no HTTP).
-pub(super) fn apply_snapshot(
+pub(crate) fn apply_snapshot(
     bridge: &EngineBridge,
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     snapshot: &crate::api_client::SyncSnapshot,
