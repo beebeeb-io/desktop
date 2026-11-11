@@ -76,10 +76,30 @@ pub fn is_enabled(run_value: Option<&str>, startup_approved: Option<&[u8]>) -> b
     run_value.is_some() && approved
 }
 
-/// Whether an existing Run value should be replaced by [`command_line`]: it is on, but it is
-/// the old app's bare path, or points at another install path.
+/// Whether a Run value starts the program at `exe`, in either shape: ours (quoted) or the
+/// 0.8.x plugin's (bare, also when the path has spaces). Windows paths compare without case.
+pub fn points_at(run_value: &str, exe: &str) -> bool {
+    let value = run_value.trim();
+    let program = match value.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default(),
+        None => {
+            // Bare: the path is the whole value, or everything before the first " -" argument.
+            let bytes = value.as_bytes();
+            let end = (0..bytes.len())
+                .find(|i| value[*i..].starts_with(" -"))
+                .unwrap_or(bytes.len());
+            value[..end].trim_end()
+        }
+    };
+    !exe.is_empty() && program.eq_ignore_ascii_case(exe)
+}
+
+/// Whether an existing Run value should be replaced by [`command_line`]: it starts THIS
+/// program, but in the old app's shape (a bare path, no `--autostart`). A value that starts
+/// another program (another install, a development build elsewhere) is not ours to change,
+/// and "off" stays off.
 pub fn needs_rewrite(run_value: Option<&str>, exe: &str) -> bool {
-    run_value.is_some_and(|value| value != command_line(exe))
+    run_value.is_some_and(|value| value != command_line(exe) && points_at(value, exe))
 }
 
 #[cfg(test)]
@@ -132,13 +152,27 @@ mod tests {
     }
 
     #[test]
-    fn the_old_apps_value_is_rewritten_and_ours_is_left_alone() {
+    fn the_old_apps_value_for_this_program_is_rewritten_and_nothing_else() {
         let exe = "C:\\Program Files\\Beebeeb\\Beebeeb.exe";
         // What tauri-plugin-autostart wrote: the bare path and a trailing space.
         assert!(needs_rewrite(Some("C:\\Program Files\\Beebeeb\\Beebeeb.exe "), exe));
-        assert!(needs_rewrite(Some("\"D:\\Old\\Beebeeb.exe\" --autostart"), exe));
+        assert!(needs_rewrite(Some("c:\\program files\\beebeeb\\beebeeb.exe"), exe));
+        assert!(needs_rewrite(Some("\"C:\\Program Files\\Beebeeb\\Beebeeb.exe\""), exe));
+        assert!(needs_rewrite(
+            Some("C:\\Program Files\\Beebeeb\\Beebeeb.exe --minimized"),
+            exe
+        ));
         assert!(!needs_rewrite(Some(&command_line(exe)), exe));
+        // Another install, or a development build run from elsewhere: not ours to change.
+        assert!(!needs_rewrite(Some("\"D:\\Old\\Beebeeb.exe\" --autostart"), exe));
+        assert!(!needs_rewrite(
+            Some("C:\\Program Files\\Beebeeb\\Beebeeb.exe "),
+            "C:\\dev\\target\\debug\\beebeeb-drive.exe"
+        ));
+        assert!(!needs_rewrite(Some("C:\\Program Files\\Beebeeb\\Beebeeb.exe.bak"), exe));
         // Off stays off: nothing to rewrite.
         assert!(!needs_rewrite(None, exe));
+        assert!(!points_at("", exe));
+        assert!(!points_at("anything", ""));
     }
 }

@@ -105,8 +105,9 @@ else; a link can only show a place. The scheme is not registered by the app (0.8
 `deeplink::scheme_registration` lists the registry values for the installer.
 
 `autostart.rs`: `HKCU\…\CurrentVersion\Run`, value `Beebeeb`, the value 0.8.x's autostart plugin
-writes, so the setting carries over; ours is `"<exe>" --autostart`, and a value 0.8.x left is
-rewritten at start (`Platform::adopt_autostart`).
+writes, so the setting carries over; ours is `"<exe>" --autostart`. A value 0.8.x left for this same
+program path is rewritten at start (`Platform::adopt_autostart`); a value for another path (another
+install, a development build) is never touched, so an installer that moves the program updates it.
 
 ## Stubbed or not here
 

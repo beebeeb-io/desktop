@@ -205,7 +205,7 @@ pub fn run() {
 
     if !tooling {
         match platform.adopt_autostart() {
-            Ok(true) => host::log("start at login: the earlier app's entry now points at this one"),
+            Ok(true) => host::log("start at login: the earlier app's entry for this program is now in this app's form"),
             Ok(false) => {}
             Err(error) => host::log(format!("start at login was not checked ({error})")),
         }

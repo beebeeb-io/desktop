@@ -61,8 +61,9 @@ pub trait Platform: Send + Sync {
     fn taskbar_theme(&self) -> TaskbarTheme;
     fn autostart_enabled(&self) -> Result<bool, PlatformError>;
     fn set_autostart(&self, enabled: bool) -> Result<(), PlatformError>;
-    /// Replaces a start-at-login entry the 0.8.x app left (a bare path, or another install's)
-    /// with this program's, leaving "off" off. True when it rewrote one.
+    /// Brings a start-at-login entry the 0.8.x app left FOR THIS PROGRAM (the bare path) into
+    /// this app's shape. An entry for another program, and "off", are left alone. True when
+    /// it rewrote one.
     fn adopt_autostart(&self) -> Result<bool, PlatformError> {
         Ok(false)
     }
