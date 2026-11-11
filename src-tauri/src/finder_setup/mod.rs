@@ -7,7 +7,7 @@
 
 pub mod core;
 pub mod driver;
-pub mod error;
+pub use beebeeb_engine::finder_setup::error;
 pub mod launch_location;
 #[cfg(target_os = "macos")]
 pub mod macos_ports;

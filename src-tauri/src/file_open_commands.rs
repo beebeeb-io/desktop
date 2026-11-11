@@ -1,6 +1,7 @@
 //! `file_open_commands` items split out of `lib.rs`.
 
 use super::*;
+pub(crate) use beebeeb_engine::path_safety::{is_contained, reject_unsafe_rel_path};
 
 /// Runs `call` on tokio's blocking pool and awaits its answer. For work that blocks, such as the File Provider reads
 /// that wait up to 3 s (`BRIDGE_GATE_WAIT`) for the bridge gate: a plain `#[tauri::command]` fn and a native-menu
@@ -157,99 +158,6 @@ pub(super) fn open_in_finder_blocking(item_id: String, path: Option<String>) -> 
 // called from a #[cfg(target_os="windows")] block; under `cargo test` (which
 // compiles the test module) they are referenced and the allow never fires.
 
-/// Layer 1: Pure, cross-platform path-traversal guard.
-///
-/// Validates `rel_path` (as received from the IPC call, before any separator
-/// normalisation) against every traversal vector we know of. Must be kept
-/// platform-deterministic — it must catch Windows-style attacks even when
-/// compiled and tested on Linux.
-///
-/// Returns `Err(reason)` on any dangerous input.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn reject_unsafe_rel_path(rel_path: &str) -> Result<(), String> {
-    // 1. Reject empty or whitespace-only input.
-    if rel_path.trim().is_empty() {
-        return Err("rel_path must not be empty".to_string());
-    }
-
-    // 2. Reject UNC paths (\\server\share or //server/share).
-    if rel_path.starts_with("\\\\") || rel_path.starts_with("//") {
-        return Err("rel_path must not be a UNC path".to_string());
-    }
-
-    // 3. Reject absolute Unix paths (leading '/') and root-relative Windows
-    //    paths (leading '\').
-    if rel_path.starts_with('/') || rel_path.starts_with('\\') {
-        return Err("rel_path must not be absolute".to_string());
-    }
-
-    // 4. Reject Windows drive-letter prefixes: 'C:' (followed by anything,
-    //    including just 'C:foo' or 'C:\foo'). On Linux `std::path::Component`
-    //    never returns `Prefix`, so we must catch this with string inspection.
-    {
-        let bytes = rel_path.as_bytes();
-        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-            return Err("rel_path must not contain a drive-letter prefix".to_string());
-        }
-    }
-
-    // 5. Inspect every path component (split on BOTH '/' and '\') for
-    //    traversal and ambiguous components in any separator convention.
-    for component in rel_path.split(['/', '\\']) {
-        if component.is_empty() || component == "." {
-            return Err("rel_path must not contain empty or '.' components".to_string());
-        }
-        if component == ".." {
-            return Err("rel_path must not contain '..' components".to_string());
-        }
-    }
-
-    // 6. Defense-in-depth: also run the platform's path parser.  On Windows
-    //    this catches `Component::Prefix` (drive letters, UNC) and
-    //    `Component::RootDir`; on Linux it catches `Component::RootDir` and
-    //    `Component::ParentDir` for Unix-style paths. Cross-platform: catches
-    //    `Component::ParentDir` regardless of OS.
-    use std::path::{Component, Path};
-    for component in Path::new(rel_path).components() {
-        match component {
-            Component::ParentDir => {
-                return Err("rel_path must not contain '..' (ParentDir) components".to_string());
-            }
-            Component::RootDir => {
-                return Err("rel_path must not be rooted".to_string());
-            }
-            Component::Prefix(_) => {
-                return Err("rel_path must not contain a drive/UNC prefix".to_string());
-            }
-            Component::CurDir => {
-                return Err("rel_path must not contain '.' (CurDir) components".to_string());
-            }
-            Component::Normal(_) => {}
-        }
-    }
-
-    Ok(())
-}
-
-/// Layer 2: Canonicalization containment check.
-///
-/// Returns true iff `full` is strictly inside (or equal to) `root` after
-/// both paths are canonicalized with the same function — keeping the `\\?\`
-/// verbatim prefix consistent on Windows so `starts_with` works correctly.
-///
-/// `pub(crate)` and no longer `allow(dead_code)`: it is now used cross-platform
-/// by `engine_bridge::hydrate_dest_is_allowed` (task 1247 — validating the
-/// IPC-supplied hydrate destination), not just by the Windows reveal path.
-pub(crate) fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
-    let Ok(root_canon) = std::fs::canonicalize(root) else {
-        return false;
-    };
-    let Ok(full_canon) = std::fs::canonicalize(full) else {
-        return false;
-    };
-    full_canon.starts_with(&root_canon)
-}
-
 /// Layer 3: Executable denylist for the OPEN step.
 ///
 /// Returns true when the file's extension (case-insensitive) is a type that
@@ -362,7 +270,6 @@ pub(super) fn reveal_and_open_file(app: tauri::AppHandle, rel_path: String) -> R
     }
 }
 
-
 /// What [`sync_status`] counts in the state DB: rows moving (downloading + uploading), cloud-only rows (files and
 /// folders, as before task 2243), conflicts, and changes held back.
 pub(super) fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32) {
@@ -405,7 +312,10 @@ pub(super) fn sync_status_counts(db: &state_db::StateDb) -> (u32, u32, u32, u32)
 /// memory, with no config file and no state DB. `AccountSessionBoundary` polls
 /// this every second in every window, hidden ones included, to see a sign-out.
 #[tauri::command]
-pub(super) async fn sync_status(state: State<'_, AppState>, session_only: Option<bool>) -> Result<serde_json::Value, String> {
+pub(super) async fn sync_status(
+    state: State<'_, AppState>,
+    session_only: Option<bool>,
+) -> Result<serde_json::Value, String> {
     // session / engine / engine_state are per-account (decision 0800);
     // `auth_present` stays on `AppState`.
     let acct = state.active_account()?;
@@ -695,7 +605,12 @@ pub(super) async fn popover_snapshot(
         snapshot.update = macos_popover::update_offer();
         #[cfg(target_os = "macos")]
         {
-            let sending = state.sign_out.phase.lock().map(|phase| phase.is_some()).unwrap_or(false);
+            let sending = state
+                .sign_out
+                .phase
+                .lock()
+                .map(|phase| phase.is_some())
+                .unwrap_or(false);
             if sending {
                 let read = tokio::task::spawn_blocking(read_waiting_changes)
                     .await
@@ -712,10 +627,6 @@ pub(super) async fn popover_snapshot(
 
 // `pub(crate)` so `free_up_space_blocking` (also `pub(crate)`, reused by the
 // Windows shell status-flyout command) can name it as its return type.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct FreeUpSpaceResult {
-    pub(crate) bytes_freed: u64,
-}
 
 /// "Free up space now" — dehydrate every unpinned, fully-local file back to a
 /// cloud-only placeholder and delete its on-disk cache copy. Pinned files
@@ -743,266 +654,10 @@ pub(super) async fn free_up_space() -> Result<FreeUpSpaceResult, String> {
         .map_err(|e| format!("free_up_space task join: {e}"))?
 }
 
-/// Allowed roots a cache file may live under for `free_up_space` to delete it.
-/// The engine writes hydrated cache copies under the sync root (Windows
-/// Cloud Files placeholders) and under the system cache dir
-/// (`dirs::cache_dir()/beebeeb`, e.g. the macOS File Provider staging area).
-/// Both are trusted, engine-written locations.
-pub(super) fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(canon) = sync_root.canonicalize() {
-        roots.push(canon);
-    } else {
-        roots.push(sync_root.to_path_buf());
-    }
-    if let Some(cache_dir) = dirs::cache_dir() {
-        let beebeeb_cache = cache_dir.join("beebeeb");
-        match beebeeb_cache.canonicalize() {
-            Ok(canon) => roots.push(canon),
-            Err(_) => roots.push(beebeeb_cache),
-        }
-    }
-    // Task 1670 round 2, Codex P1 (PR #75): same reasoning as
-    // `disposable_cache_roots` above — a macOS hydrate-cache `cache_path`
-    // must be an allowed target for the smart-cache "free up space" eviction
-    // path too, not just sign-out's purge.
-    #[cfg(target_os = "macos")]
-    {
-        let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir();
-        match hydrate_dir.canonicalize() {
-            Ok(canon) => roots.push(canon),
-            Err(_) => roots.push(hydrate_dir),
-        }
-    }
-    roots
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn remove_linux_freedesktop_thumbnails_for_evicted_files(
-    db: &state_db::StateDb,
-    sync_root: &std::path::Path,
-    file_ids: &[String],
-) {
-    for file_id in file_ids {
-        let entry = match db.get_file(file_id) {
-            Ok(Some(entry)) if !entry.is_dir() => entry,
-            Ok(_) => continue,
-            Err(error) => {
-                tracing::debug!(file_id = %file_id, error = %error, "linux thumbnail cleanup skipped: state row unavailable");
-                continue;
-            }
-        };
-        let Some(source_path) = linux_thumbnail::source_path_under_sync_root(sync_root, &entry.path) else {
-            continue;
-        };
-        if let Err(error) = linux_thumbnail::remove_freedesktop_thumbnails(&source_path) {
-            tracing::warn!(file_id = %file_id, error = %error, "linux freedesktop thumbnail cleanup failed");
-        }
-    }
-}
-
-// `pub(crate)` so the Windows Explorer status-flyout command
-// (`windows_cf::status_ui::FreeUpSpaceCommand::Invoke`) can reuse the exact same
-// reclaim path the `free_up_space` IPC uses — one implementation, two callers
-// (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
-// (DB + filesystem work), so the COM `Invoke` can call it directly off the
-// arbitrary thread Windows delivers the command on, without a tokio runtime.
-pub(crate) fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
-    let cfg = DesktopConfig::load()?;
-    let Some(sync_root) = cfg.sync_root.clone() else {
-        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
-    };
-    let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
-    if !db_path.exists() {
-        return Ok(FreeUpSpaceResult { bytes_freed: 0 });
-    }
-    let db = state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        free_up_space_windows(&db, &sync_root)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Snapshot the on-disk cache paths of every UNPINNED, LOCAL file BEFORE
-        // any DB transition (eviction nulls `cache_path`). Pinned files are
-        // excluded by the query, so they are always kept.
-        let paths = db
-            .disposable_unpinned_cache_paths()
-            .map_err(|e| format!("list cache paths: {e}"))?;
-        free_up_space_unix(&db, &sync_root, paths)
-    }
-}
-
-/// Windows reclaim path (task 0781). On Cloud Files the hydrated bytes live
-/// INSIDE the placeholder's data stream, not in a separate cache copy — so the
-/// old Unix-style `remove_file` would either delete the user's whole file or
-/// (on a still-present placeholder) no-op while the DB falsely flipped the row
-/// to cloud_only with `bytes_freed = 0` (fictional free).
-///
-/// Here we `CfDehydratePlaceholder` each unpinned file, computing `bytes_freed`
-/// from the REAL reclaimed size, and only mark a row cloud_only AFTER its
-/// dehydrate succeeds. Pinned files are already excluded from `paths`. The same
-/// allowed-roots guard is kept: we only touch placeholders under the sync root
-/// (or the engine cache dir), never an arbitrary path from a corrupt DB row.
-#[cfg(target_os = "windows")]
-pub(super) fn free_up_space_windows(db: &state_db::StateDb, sync_root: &std::path::Path) -> Result<FreeUpSpaceResult, String> {
-    // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
-    // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
-    // inside the placeholder in the sync root, and `cache_path` records the
-    // already-deleted `%TEMP%` decrypt path from the fetch callback, so it is
-    // useless as a dehydration target. We reconstruct the real placeholder path
-    // exactly as `windows_cf::populate_placeholders` does.
-    let candidates = db
-        .unpinned_local_files_for_dehydration()
-        .map_err(|e| format!("list dehydration candidates: {e}"))?;
-
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
-    let mut bytes_freed: u64 = 0;
-    let mut dehydrated_ids: Vec<String> = Vec::new();
-
-    for (file_id, rel_path, _size_bytes) in candidates {
-        // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
-        // follow it to that file's long name). A check that cannot finish keeps the file local.
-        let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
-            continue;
-        };
-        // Path-safety: only dehydrate placeholders that actually resolve under
-        // an allowed engine root (the sync root). A corrupt `path` row can
-        // never point us at a file outside the vault.
-        let Ok(canonical) = local_path.canonicalize() else {
-            // Placeholder missing on disk — nothing to reclaim; leave the row
-            // for the next reconcile to re-seed.
-            continue;
-        };
-        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
-            continue;
-        }
-        // Pin TOCTOU re-check: `unpinned_local_files_for_dehydration()` filtered
-        // on pin state at query time, but the user could have PINNED this file in
-        // the window between that query and now. Dehydrating it would evict bytes
-        // the user just asked to keep offline. `mark_cloud_only_after_dehydrate`
-        // already re-applies the pin predicate (so a newly-pinned file is never
-        // flipped to cloud_only — it self-heals on next open), but that runs
-        // AFTER the destructive dehydrate. Re-read the row's effective pin state
-        // immediately before dehydrating and skip if it is now pinned, so we
-        // never reclaim a pinned file's bytes in the first place. A read error
-        // here is non-fatal: fall through to the existing dehydrate + the
-        // post-dehydrate predicate guard.
-        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
-            if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
-                tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
-                continue;
-            }
-        }
-        // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
-        // reaches the DB only when the tick's folder listing shows it, and a listing can lag while another process
-        // holds the file open, so the DB's "unpinned" may be stale. The file's own attributes decide: pinned on disk
-        // (or unreadable) keeps it local, and its OS pin is never cleared below.
-        let direct = crate::windows_cf::placeholders::read_os_placeholder_state(&canonical);
-        let pinned_on_disk = |attrs: u32| {
-            crate::state_db::decode_os_state(attrs, crate::state_db::FileStatus::Local).1
-                == Some(crate::state_db::PinState::Pinned)
-        };
-        if direct.is_none_or(pinned_on_disk) {
-            tracing::info!(file_id = %file_id, "free_up_space: the file is pinned on disk (or unreadable); keeping it local");
-            continue;
-        }
-        // OS-level unpin BEFORE dehydrating. This file passed both pin checks
-        // above, so it is MEANT to be reclaimed — but its placeholder may still
-        // carry a pin it inherits from a pinned folder, which the DB does not
-        // reflect (an explicit pin on the file itself was refused just above).
-        // `CfDehydratePlaceholder` fails with ERROR_CLOUD_FILE_PINNED on
-        // any OS-pinned placeholder, so we clear the OS pin first (non-recursive —
-        // this is a single file). Best-effort: a failure here is logged (never the
-        // path) and we still attempt the dehydrate, which simply no-ops/errors if
-        // the file was genuinely pinned.
-        // Task 1640: never free a file whose bytes are a change that is not sent (an edit, a
-        // queued upload) or are not known to be the agreed content: they are the only copy.
-        if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
-            tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
-            continue;
-        }
-        if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
-            tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
-        }
-        match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
-            Ok(freed) => {
-                bytes_freed = bytes_freed.saturating_add(freed);
-                // Only NOW is this file genuinely cloud-only on disk — record
-                // it so the DB flip below applies ONLY to files we actually
-                // dehydrated. (`freed == 0` still means "successfully cloud-only
-                // / already dehydrated", a valid end state.)
-                dehydrated_ids.push(file_id);
-            }
-            Err(error) => {
-                // Leave the DB row `local` so the next sweep retries; never
-                // claim space we did not actually reclaim. Zero-knowledge: log
-                // the file_id only.
-                tracing::warn!(file_id = %file_id, error = %error, "free_up_space: CfDehydratePlaceholder failed; keeping file local");
-            }
-        }
-    }
-
-    // Mark cloud_only ONLY for the files we actually dehydrated.
-    let now = now_unix_seconds();
-    if let Err(e) = db.mark_cloud_only_after_dehydrate(&dehydrated_ids, now) {
-        tracing::warn!(error = %e, "free_up_space: could not mark dehydrated files cloud_only");
-    }
-
-    tracing::info!(bytes_freed, "free_up_space dehydrated unpinned placeholders");
-    Ok(FreeUpSpaceResult { bytes_freed })
-}
-
-/// Unix reclaim path (macOS File Provider / Linux FUSE). Unchanged from the
-/// original: the engine stores hydrated copies as separate cache files, so a
-/// `remove_file` genuinely reclaims the bytes. The DB eviction flips rows to
-/// cloud_only and the on-disk cache copies are unlinked.
-#[cfg(not(target_os = "windows"))]
-pub(super) fn free_up_space_unix(
-    db: &state_db::StateDb,
-    sync_root: &std::path::Path,
-    paths: Vec<String>,
-) -> Result<FreeUpSpaceResult, String> {
-    // Flip every unpinned local file to cloud_only in the DB. A budget of 0
-    // means "evict everything unpinned."
-    let now = now_unix_seconds();
-    let evicted_ids = db
-        .evict_unpinned_cache_until_under(0, now)
-        .map_err(|e| format!("evict unpinned cache: {e}"))?;
-    #[cfg(target_os = "linux")]
-    remove_linux_freedesktop_thumbnails_for_evicted_files(db, sync_root, &evicted_ids);
-
-    // Delete the actual cache files, bounded to paths under one of the allowed
-    // engine cache roots so a bad cache_path can't delete outside the vault.
-    // Sum the real file sizes we remove so `bytes_freed` is an exact count, not
-    // an estimate. A missing file contributes 0 (already gone — nothing
-    // reclaimed by us).
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
-    let mut bytes_freed: u64 = 0;
-    for path in paths {
-        let path_buf = PathBuf::from(&path);
-        let Ok(canonical) = path_buf.canonicalize() else {
-            // Unresolvable path — never delete.
-            continue;
-        };
-        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
-            // Outside every allowed cache root — never delete.
-            continue;
-        }
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&canonical) {
-            Ok(()) => bytes_freed = bytes_freed.saturating_add(size),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(error = %error, path = %canonical.display(), "free_up_space: could not remove cache file");
-            }
-        }
-    }
-
-    tracing::info!(bytes_freed, "free_up_space evicted unpinned cache");
-    Ok(FreeUpSpaceResult { bytes_freed })
-}
+// The reclaim itself is the engine's (`beebeeb_engine::free_up_space`): the Explorer flyout calls it too.
+pub(crate) use beebeeb_engine::free_up_space::{
+    FreeUpSpaceResult, free_up_space_allowed_roots, free_up_space_blocking,
+};
 
 /// Version of the support-bundle shape. 2 = task 1685: `queue.last_error` is an
 /// allow-list-filtered message plus `last_error_code` and `last_error_redactions`.
@@ -1072,7 +727,6 @@ pub(super) fn export_diagnostics_from(sync_root: Option<&Path>, db_path: &Path) 
         "queue": queue,
     }))
 }
-
 
 // ── IPC commands: conflict/version center ───────────────────────────────────
 

@@ -262,13 +262,8 @@ pub fn remove() -> Result<crate::finder_removal::DomainRemoval, BridgeRemovalFai
     decode_removal(code, kept_state, &location_buffer, out)
 }
 
-/// Result of a best-effort working-set signal (task 1697).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkingSetSignalOutcome {
-    /// The system accepted the signal (or the domain is not registered —
-    /// nothing to signal is not a failure; sync continues regardless).
-    Delivered,
-}
+// The signal's outcome and its pure decision core live with the engine's port (the runner reads them).
+pub use beebeeb_engine::file_provider_port::{WorkingSetSignalOutcome, should_signal_working_set};
 
 /// Task 1698 part 3 (closes 1696, audit G8): the ONE domain we own. The
 /// zombie `io.beebeeb.desktop.FileProvider` domain from the pre-rename bundle
@@ -434,13 +429,6 @@ pub fn cleanup_stale_domains() -> Result<StaleDomainCleanup, FpError> {
         }
     }
     Ok(cleanup)
-}
-
-/// Pure decision core for the runner's signal path: an operation batch that
-/// changed items always asks for a working-set signal (Replicated honors ONLY
-/// `.workingSet`); anything else never touches the bridge.
-pub fn should_signal_working_set(changed_item_ids: &[String]) -> bool {
-    !changed_item_ids.is_empty()
 }
 
 /// Task 1697: call the FFI bridge to signal the replica's working set after

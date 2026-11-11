@@ -317,7 +317,7 @@ pub(super) fn spawn_bound_engine(
     let surface_app = app.clone();
     let started = start_engine_bound(state, acct, engine_slot, &paths, |sync_root, token, key| {
         EngineRunner::spawn(
-            app,
+            crate::engine_host::host(&app),
             sync_root,
             token,
             key,
@@ -394,7 +394,10 @@ pub(super) fn prove_own_data_in_background(
         let _flight = flight;
         match prove_own_data_of_session(&app, &sync_root, &acct, turn).await {
             Ok(own_data_proof::Outcome::Adopted(tally)) => {
-                tracing::info!(?tally, "R10: this PC's local data is proven this account's own; starting sync");
+                tracing::info!(
+                    ?tally,
+                    "R10: this PC's local data is proven this account's own; starting sync"
+                );
                 let transition = SESSION_TRANSITION.lock().await;
                 if !session_still_active(&app, &acct, turn) {
                     tracing::info!("R10: the session changed after the proof; nothing to start");
@@ -418,7 +421,8 @@ pub(super) fn prove_own_data_in_background(
 /// (its client is registered with `windows_cf::track_credentials`), so a Lock and a sign-out stop them
 /// (`stop_own_data_proofs`) before they wait for every credential to be released.
 #[cfg(target_os = "windows")]
-pub(super) static OWN_DATA_PROOFS: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+pub(super) static OWN_DATA_PROOFS: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Stop every running ownership proof. Both callers hold the session-transition lock, which a proof takes only to
 /// start sync after an adoption, so a proof is never stopped half way through a start. A proof stopped after it
@@ -433,7 +437,11 @@ pub(super) fn stop_own_data_proofs() {
 
 /// Whether `acct` is still the active account and its session is still the one read at `turn`.
 #[cfg(target_os = "windows")]
-pub(super) fn session_still_active(app: &tauri::AppHandle, acct: &Arc<account::AccountRuntime>, turn: account::SessionGeneration) -> bool {
+pub(super) fn session_still_active(
+    app: &tauri::AppHandle,
+    acct: &Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
+) -> bool {
     acct.session_unchanged_since(turn)
         && app
             .state::<AppState>()
@@ -530,7 +538,8 @@ pub(super) const FOUND_WHILE_PAUSED_UPLOAD_FAILED: &str =
 
 /// Task 2267 (fix round 2): what "Show in Explorer" says when the folder the last keep recorded is not there.
 #[cfg(any(target_os = "windows", test))]
-pub(super) const KEPT_FOLDER_GONE: &str = "Beebeeb can’t find the folder it moved them to. It may have been moved or renamed.";
+pub(super) const KEPT_FOLDER_GONE: &str =
+    "Beebeeb can’t find the folder it moved them to. It may have been moved or renamed.";
 
 /// Task 2267 (fix round 2): who is signed in, for a decision about the changes found while sync was paused: the
 /// session's own email and, when the cached profile is that account's, its user id ([`identity_of_session`]). No key is
@@ -555,7 +564,10 @@ pub(super) fn decision_identity(state: &AppState) -> Result<account_binding::Ide
 /// Task 2267 (fix round 2): this PC's `state.db` under `state_dir`, only when its recorded owner is `identity`'s
 /// account. Another account's data, data nobody owns yet and no database decide nothing.
 #[cfg(any(target_os = "windows", test))]
-pub(super) fn own_state_db(identity: &account_binding::Identity, state_dir: &Path) -> Result<state_db::StateDb, String> {
+pub(super) fn own_state_db(
+    identity: &account_binding::Identity,
+    state_dir: &Path,
+) -> Result<state_db::StateDb, String> {
     let db = state_db_from_state_dir(state_dir)?.ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
     let owner = db.owner().map_err(|e| format!("read the local data owner: {e}"))?;
     match owner {
@@ -566,7 +578,9 @@ pub(super) fn own_state_db(identity: &account_binding::Identity, state_dir: &Pat
 
 /// Task 2267 (fix round 2): the signed-in account's own local data and the Beebeeb folder, for Upload and Keep.
 #[cfg(target_os = "windows")]
-pub(super) fn own_local_data_for_decision(identity: &account_binding::Identity) -> Result<(state_db::StateDb, PathBuf), String> {
+pub(super) fn own_local_data_for_decision(
+    identity: &account_binding::Identity,
+) -> Result<(state_db::StateDb, PathBuf), String> {
     let sync_root = DesktopConfig::load()?
         .sync_root
         .ok_or_else(|| FOUND_WHILE_PAUSED_NOT_YOURS.to_string())?;
@@ -576,7 +590,10 @@ pub(super) fn own_local_data_for_decision(identity: &account_binding::Identity) 
 /// Task 2267 (fix round 2): the folder "Show in Explorer" opens: the dated folder the last keep recorded, only when it
 /// is a `YYYY-MM-DD` folder directly inside `Beebeeb - not uploaded` next to the Beebeeb folder, and is there.
 #[cfg(any(target_os = "windows", test))]
-pub(super) fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<Option<String>>) -> Result<PathBuf, String> {
+pub(super) fn kept_folder_to_show(
+    sync_root: &Path,
+    recorded: rusqlite::Result<Option<String>>,
+) -> Result<PathBuf, String> {
     let folder = PathBuf::from(
         recorded
             .map_err(|e| format!("read the kept folder: {e}"))?
@@ -587,10 +604,13 @@ pub(super) fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<O
         .map(|parent| parent.join(found_while_paused::KEPT_FOLDER_NAME));
     let dated = folder.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
         name.len() == 10
-            && name
-                .bytes()
-                .enumerate()
-                .all(|(at, byte)| if at == 4 || at == 7 { byte == b'-' } else { byte.is_ascii_digit() })
+            && name.bytes().enumerate().all(|(at, byte)| {
+                if at == 4 || at == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            })
     });
     if dated && kept.is_some_and(|kept| folder.parent() == Some(kept.as_path())) && folder.is_dir() {
         Ok(folder)
@@ -611,7 +631,10 @@ pub(super) fn settle_an_interrupted_keep(paths: &LocalDataPaths) {
         .and_then(|db| found_while_paused::recover(&db, &paths.sync_root));
     match settled {
         Ok(found_while_paused::Recovery::Nothing) => {}
-        Ok(recovery) => tracing::info!(?recovery, "keep: a move a crash interrupted was settled before sync started"),
+        Ok(recovery) => tracing::info!(
+            ?recovery,
+            "keep: a move a crash interrupted was settled before sync started"
+        ),
         Err(error) => tracing::warn!(%error, "keep: a move a crash interrupted is settled at the next start"),
     }
 }
@@ -628,7 +651,9 @@ pub(super) struct FoundWhilePausedReleased {
 /// own data, under the session-transition lock. Counts and ids only, never a name.
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub(super) async fn found_while_paused_review(state: State<'_, AppState>) -> Result<found_while_paused::Review, String> {
+pub(super) async fn found_while_paused_review(
+    state: State<'_, AppState>,
+) -> Result<found_while_paused::Review, String> {
     let _transition = SESSION_TRANSITION.lock().await;
     let identity = decision_identity(&state)?;
     tokio::task::spawn_blocking(move || -> Result<found_while_paused::Review, String> {
@@ -658,7 +683,10 @@ pub(super) fn kept_folder_synced_by(sync_root: &Path) -> Option<String> {
 /// under the session-transition lock, so no sign-out or Lock runs in between.
 #[cfg(target_os = "windows")]
 #[tauri::command]
-pub(super) async fn found_while_paused_upload(state: State<'_, AppState>, op_ids: Vec<String>) -> Result<FoundWhilePausedReleased, String> {
+pub(super) async fn found_while_paused_upload(
+    state: State<'_, AppState>,
+    op_ids: Vec<String>,
+) -> Result<FoundWhilePausedReleased, String> {
     let _transition = SESSION_TRANSITION.lock().await;
     let identity = decision_identity(&state)?;
     // Task 1888 (Task 1's ruling on 2267's held changes; review P2): a released change may be a ghost folder's create
@@ -674,10 +702,12 @@ pub(super) async fn found_while_paused_upload(state: State<'_, AppState>, op_ids
     let released = tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let (db, _) = own_local_data_for_decision(&identity)?;
         pass_wanted.fetch_add(1, Ordering::SeqCst);
-        let released = db.release_found_while_paused(&op_ids, now_unix_seconds()).map_err(|error| {
-            tracing::warn!(%error, "found while paused: the held changes could not be released");
-            FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
-        })?;
+        let released = db
+            .release_found_while_paused(&op_ids, now_unix_seconds())
+            .map_err(|error| {
+                tracing::warn!(%error, "found while paused: the held changes could not be released");
+                FOUND_WHILE_PAUSED_UPLOAD_FAILED.to_string()
+            })?;
         pass_wanted.fetch_add(1, Ordering::SeqCst);
         Ok(released)
     })
@@ -702,11 +732,12 @@ pub(super) async fn found_while_paused_keep(
     let kept = tokio::task::spawn_blocking(move || -> Result<found_while_paused::KeepResult, String> {
         let (db, sync_root) = own_local_data_for_decision(&identity)?;
         let today = found_while_paused::today();
-        let mut kept = found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)
-            .map_err(|error| {
-                tracing::warn!(%error, "found while paused: the keep stopped");
-                FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
-            })?;
+        let mut kept =
+            found_while_paused::keep(&db, &sync_root, &today, &found_while_paused::rename_no_replace, &op_ids)
+                .map_err(|error| {
+                    tracing::warn!(%error, "found while paused: the keep stopped");
+                    FOUND_WHILE_PAUSED_KEEP_STOPPED.to_string()
+                })?;
         kept.synced_by = kept_folder_synced_by(&sync_root);
         Ok(kept)
     })
@@ -865,7 +896,9 @@ pub(super) fn adopt_unbound_local_data_in(state_dir: &Path, candidate: Option<&a
 /// The account to adopt unowned local data into at startup: only a session the Keychain gave back COMPLETE
 /// (token and wrapped vault key), and only by its email. A Keychain with a token but no key (a sign-in that
 /// stopped before the recovery-phrase step, or any failure to read) names nobody.
-pub(super) fn startup_adoption_candidate(loaded: &Result<Option<Session>, String>) -> Option<account_binding::Identity> {
+pub(super) fn startup_adoption_candidate(
+    loaded: &Result<Option<Session>, String>,
+) -> Option<account_binding::Identity> {
     let session = loaded.as_ref().ok()?.as_ref()?;
     let candidate = account_binding::Identity::new(None, session.email.as_deref());
     candidate.is_known().then_some(candidate)

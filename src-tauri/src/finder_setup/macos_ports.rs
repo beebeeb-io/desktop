@@ -223,11 +223,9 @@ impl BridgeGate {
 // two reads a person waits on, after `BRIDGE_GATE_WAIT`. No other file names a bridge function;
 // `no_file_provider_bridge_call_is_made_outside_the_bridge_gate` (lib.rs) pins it.
 
-/// Whether `error` is the gate answering "busy" (an earlier bridge call has not returned), as opposed to
-/// the OS failing. The engine's working-set signal owes its ids to the next tick in that case.
-pub(crate) fn is_gate_busy(error: &FpError) -> bool {
-    error.domain == super::error::APP_DOMAIN && error.code == app_code::OP_TIMEOUT
-}
+// Whether an error is the gate answering "busy": the engine's port owns the rule (its signal path reads it).
+#[cfg(test)]
+pub(crate) use beebeeb_engine::file_provider_port::is_gate_busy;
 
 /// Run `f` with the shared gate held, as if a bridge call were in flight (tests only). The gate is one per
 /// process and tests run in parallel, so another test may hold it for a moment: this waits for it, at

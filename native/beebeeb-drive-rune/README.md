@@ -112,6 +112,31 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 | Outline button | `button::outline_button(key, label, icon, t)` | `<key>`, `<key>-icon`, `<key>-label` |
 | Empty state | `empty::empty_state(key, icon, title, sentence, t)` | `<key>`, `<key>-tile`, `<key>-icon`, `<key>-title`, `<key>-text` |
 
+### Settings, inside the window (`src/frames/settings/`, `src/ui/settings_*.rs`)
+
+Settings is a state of the main window (DW-0701). The shell routes the section (`Screen::Settings`); `frames::settings`
+draws the sidebar and the pane, and keeps what is open inside a section (`SettingsUi`: sub-pane, menu, dialog, toast).
+Its checklist of the 50 board frames is `src/frames/settings/FRAMES.md`; its scenes are `frames::settings::FRAMES`.
+
+- **Whether settings shows is the shell's route, and nothing else.** `SettingsUi` has no "open" flag; `frames::settings::sync`
+  (called from `shell::host::dispatch`, one line) forgets what was open inside settings whenever the route leaves it.
+- **Keyboard:** the view sets `cx.web_focus()`: Tab visits every control, Space and Enter press the focused one, a
+  dialog's primary button is its `default_button()`. A row with a pop-up button is ONE control (`Role::PopUp`).
+- **Data:** `SettingsSource` (`source.rs`). `source::first(dev_build)` is what settings starts on: the board's sample
+  content in a development build, `Unwired` in a build that ships (the view then draws the shell's "not built yet"
+  frame, never sample values). The engine lane replaces it, and takes `SettingsUi::take_intents()` in the shell.
+- **Layout:** a pane scrolls when it is taller than the window; a menu is anchored to a point its own row marks
+  (`Trailing::Pop { menu_at }`), so it follows the row.
+
+| Piece | Where | Keys |
+| --- | --- | --- |
+| Sidebar, pane, crumb, heading | `settings_shell.rs` | `<label>-row`, `side-title-*`, `side-foot`, `set-main`, `crumb`, `set-title`, `set-sub` |
+| List, row, pop-up button, switch | `settings_list.rs` | `list-<L>-title/body/foot`, `item-<L>-<I>` + `-icon/-title/-sub/-value/-chev/-ext/-check/-pop/-switch/-knob/-time` |
+| Small button, inline notice, menu | `settings_controls.rs` | `btn-<N>`, `banner-<N>`, `menu-<M>-item-<I>` |
+| Dialog on its scrim, dialog button | `settings_dialog.rs` | `scrim`, `dlg`, `dlg-title`, `dlg-sub`, `dlg-text-<I>`, `dlg-li-<I>`, `dlg-foot` |
+| Card | `settings_card.rs` | `card-<N>`, `-mark`, `-head`, `-sub` |
+| Notice, toast, toned tile, pill, could-not-load and empty cards | `settings_notice.rs` | `note-<N>`, `toast-<N>`, `tile-<N>`, `pill-<N>` |
+
 A hairline is `kit::HAIR` (half a point) in `t.separator`: `.border_sides([..], t.separator).border_layout()` for a
 CSS border, `.box_shadow(kit::ring_inset(t.separator))` for a CSS `inset 0 0 0 .5px` ring.
 

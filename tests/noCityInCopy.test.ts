@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hits, scan, stripRustTestItems } from './fixtures/cityGuard'
+import { RUST_ROOTS } from './fixtures/rustConstants'
 
 /**
  * Task 2050 (Guus, 2026-10-19): no city in the desktop. See tests/fixtures/cityGuard.ts for the two
@@ -54,17 +55,21 @@ describe('the guard itself', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'city-guard-'))
     try {
       cpSync(join(ROOT, 'src'), join(scratch, 'src'), { recursive: true })
-      cpSync(join(ROOT, 'src-tauri/src'), join(scratch, 'src-tauri/src'), { recursive: true })
+      for (const rustRoot of RUST_ROOTS) cpSync(join(ROOT, rustRoot), join(scratch, rustRoot), { recursive: true })
       const total = (o: Record<string, string[]>) => Object.values(o).reduce((n, h) => n + h.length, 0)
       const before = total(scan(scratch).offenders)
       const tsFile = join(scratch, 'src/windows/useRegion.ts')
       writeFileSync(tsFile, `${readFileSync(tsFile, 'utf8')}\nexport const leaked = 'Stored in Helsinki'\n`)
-      const rsFile = join(scratch, 'src-tauri/src/account_dto.rs')
-      writeFileSync(rsFile, `${readFileSync(rsFile, 'utf8')}\npub fn leaked() -> &'static str { "Falkenstein" }\n`)
+      // One file in each Rust tree: the shell's, and the engine crate's (where `account_dto.rs` moved).
+      const rustFiles = ['src-tauri/src/engine_host.rs', 'crates/beebeeb-engine/src/account_dto.rs']
+      for (const file of rustFiles) {
+        const rsFile = join(scratch, file)
+        writeFileSync(rsFile, `${readFileSync(rsFile, 'utf8')}\npub fn leaked() -> &'static str { "Falkenstein" }\n`)
+      }
       const after = scan(scratch).offenders
-      expect(total(after)).toBe(before + 2)
+      expect(total(after)).toBe(before + 3)
       expect(after['src/windows/useRegion.ts'].at(-1)).toContain('city name')
-      expect(after['src-tauri/src/account_dto.rs'].at(-1)).toContain('city name')
+      for (const file of rustFiles) expect(after[file].at(-1)).toContain('city name')
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
@@ -75,10 +80,11 @@ describe('no city in the desktop', () => {
   const result = scan(ROOT)
 
   test('the scan found the source trees (a guard that scans nothing is red)', () => {
-    expect(result.files).toBeGreaterThan(100)
+    // 697 when the engine crate's tree joined the scan (447 without it): a tree that is not read drops below.
+    expect(result.files).toBeGreaterThan(650)
   })
 
-  test('no city name and no read of a city field in src/ or src-tauri/src/ (outside comments and cfg(test) items)', () => {
+  test('no city name and no read of a city field in src/, src-tauri/src/ or the engine crate (outside comments and cfg(test) items)', () => {
     expect(result.offenders).toEqual({})
   })
 })

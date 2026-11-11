@@ -128,16 +128,6 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
 ];
 
-/// The shell's scenes, then each frame group's (`frames::<group>::SCENES`): ONE line per group.
-fn scenes() -> &'static [crate::ui::gate::Scene<State>] {
-    static ALL: std::sync::OnceLock<Vec<crate::ui::gate::Scene<State>>> = std::sync::OnceLock::new();
-    ALL.get_or_init(|| {
-        let mut all = SCENES.to_vec();
-        all.extend_from_slice(crate::frames::files::SCENES);
-        all
-    })
-}
-
 fn scene(s: &mut State, event: Event) {
     host::dispatch(s, event);
 }
@@ -183,7 +173,13 @@ pub fn run() {
     // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
     if launch.tooling
         && launch.rune_args.iter().any(|arg| arg == instance::GATE_EXPORT_FLAG)
-        && let Some(code) = crate::ui::gate::run_from_args(scenes(), state::init, registry::view, FONTS, FAMILIES)
+        && let Some(code) = crate::ui::gate::run_from_args(
+            crate::frames::scenes(SCENES),
+            state::init,
+            registry::view,
+            FONTS,
+            FAMILIES,
+        )
     {
         std::process::exit(code);
     }
@@ -280,7 +276,7 @@ pub fn run() {
     let main_spec = AppSpec::<State> {
         fonts: FONTS,
         families: FAMILIES,
-        scenes: scenes(),
+        scenes: crate::frames::scenes(SCENES),
         min_size: Some(WindowKind::Main.min_size()),
         poll: Some(host::poll),
         on_key: Some(host::on_key),
