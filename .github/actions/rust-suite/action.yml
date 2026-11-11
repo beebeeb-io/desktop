@@ -24,25 +24,19 @@ runs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-    # GitHub-hosted only: a self-hosted runner keeps its own warm CARGO_TARGET_DIR (docs/ci/self-hosted-runners.md).
-    # Saved only by pushes to a base branch: a pull request restores its base branch's cache and never writes a
-    # 1 GB copy of its own. `cache-on-failure`: a red test run still leaves the compiled dependencies behind.
-    - name: Cache cargo
-      if: runner.environment == 'github-hosted'
-      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      with:
-        workspaces: ${{ inputs.crate-dir }}
-        shared-key: ${{ inputs.cache-key }}
-        save-if: true # MEASUREMENT COMMIT ONLY: reverted to pushes-only in this pull request's last commit
-        cache-on-failure: true
-
+    # Before the cache step: the cache key includes the CARGO_* settings.
     - name: Build settings and test directories
       shell: bash
       run: |
-        # Line tables keep file:line in a panic's backtrace; full debuginfo only makes the test binary 3x larger
-        # and the build slower. On a hosted runner nothing is incremental (every run starts from the cache).
-        echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
-        if [ "${{ runner.environment }}" = github-hosted ]; then echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"; fi
+        # GitHub-hosted: no debuginfo and nothing incremental (every run starts from the cache). CI sets no
+        # RUST_BACKTRACE, so debuginfo was never read there; a failed test still prints its own file:line (that
+        # comes from the panic location, not from debuginfo). Measured on a clean build: 79 s and a 141 MB test
+        # binary without it, 117 s and 781 MB with it. A self-hosted runner keeps cargo's defaults: its target
+        # directory is kept, so incremental compilation is what makes it fast.
+        if [ "${{ runner.environment }}" = github-hosted ]; then
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        fi
         echo "RUST_TEST_THREADS=${{ inputs.test-threads }}" >> "$GITHUB_ENV"
         # Temporary test files (hundreds of SQLite databases, one fsync per commit) go to memory on Linux.
         # Config stays out of the runner's real home there. TEMP/TMP are Windows', TMPDIR is Linux' and macOS'.
@@ -59,6 +53,18 @@ runs:
         fi
         # Windows: `python` (python3 can be the Store stub there); elsewhere python3.
         if [ "$RUNNER_OS" = Windows ]; then echo "BB_PY=python" >> "$GITHUB_ENV"; else echo "BB_PY=python3" >> "$GITHUB_ENV"; fi
+
+    # GitHub-hosted only: a self-hosted runner keeps its own warm CARGO_TARGET_DIR (docs/ci/self-hosted-runners.md).
+    # Saved only by pushes to a base branch: a pull request restores its base branch's cache and never writes a
+    # 1 GB copy of its own. `cache-on-failure`: a red test run still leaves the compiled dependencies behind.
+    - name: Cache cargo
+      if: runner.environment == 'github-hosted'
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        workspaces: ${{ inputs.crate-dir }}
+        shared-key: ${{ inputs.cache-key }}
+        save-if: true # MEASUREMENT COMMIT ONLY: reverted to pushes-only in this pull request's last commit
+        cache-on-failure: true
 
     - name: Test count guard self-test
       shell: bash
