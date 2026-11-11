@@ -6,8 +6,11 @@ pub mod file_list;
 pub mod gate;
 pub mod keys;
 pub mod kit;
+pub mod menu;
 pub mod sidebar;
 pub mod status_bar;
+pub mod status_line;
+pub mod toast;
 pub mod toolbar;
 pub mod window;
 

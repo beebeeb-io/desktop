@@ -175,11 +175,26 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         t,
     );
 
-    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t).child(kit::glyph(
+    // Pressed while its menu is open (DW-0404).
+    let sorting = s
+        .actions
+        .menu
+        .is_some_and(|m| m.kind == crate::frames::files::MenuKind::Sort);
+    let sort_btn = tool_button(
+        "sort-btn",
+        "Sort",
+        &icons::SORT,
+        15.0,
+        if sorting { ToolState::On } else { ToolState::Idle },
+        t,
+    )
+    .expanded(sorting)
+    .on_press(|s: &mut State| s.toggle_menu(crate::frames::files::MenuKind::Sort))
+    .child(kit::glyph(
         "sort-caret",
         &icons::CHEVRON_DOWN,
         11.0,
-        t.text_secondary,
+        if sorting { t.text } else { t.text_secondary },
     ));
 
     let panel_btn = tool_button(
@@ -200,8 +215,15 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
 
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
 
+    // Ringed while its menu is open (DW-0414: `box-shadow: 0 0 0 3px` amber at 32 %).
+    let adding = s
+        .actions
+        .menu
+        .is_some_and(|m| m.kind == crate::frames::files::MenuKind::New);
     let new_btn = row()
         .key("new-btn")
+        .expanded(adding)
+        .box_shadow(kit::ring(if adding { 3.0 } else { 0.0 }, t.accent.alpha(0.32)))
         .role("button")
         .label("New")
         .h(28.0)
@@ -214,6 +236,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .hover(t.press)
         .press(t.press)
         .focusable(true)
+        .on_press(|s: &mut State| s.toggle_menu(crate::frames::files::MenuKind::New))
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
         .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));

@@ -1,0 +1,186 @@
+//! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
+//! the selected item's own details.
+
+use super::{MenuKind, Toast, details, list, menus};
+use crate::State;
+use crate::theme::tokens::{self, Theme};
+use crate::theme::{icons, icons_files};
+use crate::ui::{caption, file_list, menu, sidebar, status_line, toast, toolbar};
+use rune::{Cx, El, Tx, col, el, row};
+
+/// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
+pub fn pc_summary(s: &State) -> String {
+    let count = |status: &str| {
+        s.listing
+            .items
+            .iter()
+            .filter(|i| i.pc_status.as_deref() == Some(status))
+            .count()
+    };
+    format!(
+        "{} on this PC \u{00B7} {} available offline \u{00B7} {} online only",
+        count("on_this_pc"),
+        count("available_offline"),
+        count("online_only")
+    )
+}
+
+fn pick(s: &mut State, index: usize, tx: &mut Tx) {
+    s.pick_menu(index, tx);
+}
+
+fn hover(s: &mut State, index: usize) {
+    if let Some(open) = s.actions.menu.as_mut() {
+        open.hot = Some(index);
+    }
+}
+
+fn close(s: &mut State) {
+    s.close_menu();
+}
+
+fn undo(s: &mut State, _tx: &mut Tx) {
+    s.undo();
+}
+
+/// The open menu, where the board puts it: the file menu at its point, Sort and New under the toolbar.
+fn menu_layer(s: &State, t: &Theme) -> Option<El> {
+    let open = s.actions.menu?;
+    let layer = |right: f32, surface: El| {
+        row()
+            .key("menu-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .pt(112.0)
+            .pr(right)
+            .justify_end()
+            .items_start()
+            .child(surface)
+    };
+    Some(match open.kind {
+        MenuKind::File => menu::menu(
+            "menu",
+            "File",
+            menus::FILE_MENU_W,
+            &menus::file_menu(s),
+            open.hot,
+            t,
+            pick,
+            hover,
+            close,
+        )
+        .absolute(open.at.0, open.at.1),
+        // `.wn-menu` of Sort: 226 pt from the window's right edge; of New: 42 pt.
+        MenuKind::Sort => layer(
+            226.0,
+            menu::menu(
+                "menu",
+                "Sort",
+                menus::SORT_MENU_W,
+                &menus::sort_menu(s.actions.sort),
+                open.hot,
+                t,
+                pick,
+                hover,
+                close,
+            ),
+        ),
+        MenuKind::New => layer(
+            42.0,
+            menu::menu(
+                "menu",
+                "New",
+                menus::NEW_MENU_W,
+                &menus::new_menu(),
+                open.hot,
+                t,
+                pick,
+                hover,
+                close,
+            ),
+        ),
+    })
+}
+
+fn toast_of(kind: Toast, t: &Theme) -> El {
+    match kind {
+        Toast::Trashed => toast::toast(
+            &icons::TRASH,
+            toast::Tone::Neutral,
+            "Moved to Trash",
+            Some(("Undo Ctrl+Z", undo)),
+            t,
+        ),
+        Toast::Duplicated => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Duplicated", None, t),
+        Toast::Keeping => toast::toast(
+            &icons::AVAILABLE_OFFLINE,
+            toast::Tone::Neutral,
+            "Keeping on this PC",
+            None,
+            t,
+        ),
+        Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
+    }
+}
+
+pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let t = tokens::theme(cx.system_dark());
+
+    let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full().child(
+        col()
+            .key("file-list-col")
+            .grow(1.0)
+            .min_w(0.0)
+            .h_full()
+            .child(file_list::column_headers(&t))
+            // A folder that could not be read says so. It never draws as an empty folder.
+            .child(match s.list_error {
+                Some(error) => file_list::list_error(error, &t),
+                None => list::rows(s, cx, &t),
+            }),
+    );
+    if s.show_detail_pane {
+        let selected = s.selected.and_then(|i| s.listing.items.get(i));
+        let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
+        body = body.child(details::details_pane(facts, &t));
+    }
+
+    let mut main = col()
+        .key("content-area")
+        .role("main")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .fill(t.bg)
+        .child(toolbar::toolbar(s, &t, 0.0))
+        .child(body)
+        .child(status_line::status_line("Up to date", &pc_summary(s), &t));
+    if let Some(kind) = s.live_toast() {
+        main = main.child(toast::layer(toast_of(kind, &t)));
+    }
+
+    let window = col()
+        .key("window")
+        .role("window")
+        .label("Beebeeb Drive")
+        .on_key(super::keys::on_key)
+        .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
+        .w_full()
+        .h_full()
+        .fill(t.bg)
+        .child(caption::caption_bar(&t, cx))
+        .child(
+            row()
+                .key("body")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(sidebar::sidebar(s, &t))
+                .child(main),
+        );
+    match menu_layer(s, &t) {
+        Some(layer) => el().key("files-root").w_full().h_full().child(window).child(layer),
+        None => window,
+    }
+}

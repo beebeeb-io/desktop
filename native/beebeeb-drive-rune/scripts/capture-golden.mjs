@@ -13,7 +13,7 @@
 // Keys come from `keymap()` below, by the board's own class names. A frame that draws
 // something new adds its keys there (see README "Add a frame").
 import { createRequire } from 'module';
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
@@ -155,7 +155,7 @@ try {
     // eslint-disable-next-line no-new-func
     new Function('win', 'api', keymapSrc)(screen, api);
     return { frame: frameId, width: screen.clientWidth, height: screen.clientHeight, elements: out, problems };
-  }, { frameId, keymapSrc: readFileSync(join(HERE, 'keymap.js'), 'utf-8') });
+  }, { frameId, keymapSrc: [join(HERE, 'keymap.js'), ...(existsSync(join(HERE, 'keymap.d')) ? readdirSync(join(HERE, 'keymap.d')).filter((f) => f.endsWith('.js')).sort().map((f) => join(HERE, 'keymap.d', f)) : [])].map((f) => readFileSync(f, 'utf-8')).join('\n') });
 
   const flat = JSON.stringify(geo);
   if (/â€|Â·/.test(flat)) { console.error('capture-golden: mojibake in the exported text (the board must be served as utf-8)'); code = 1; }
