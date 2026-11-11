@@ -4,6 +4,7 @@
 //! A new group adds TWO lines here: its `pub mod`, and its `FRAMES` in [`scenes`]. The shell
 //! names its own scenes once (`shell::SCENES`) and never changes for a new group.
 
+pub mod account;
 pub mod settings;
 pub mod signin;
 
@@ -16,5 +17,5 @@ use crate::ui::gate::Scene;
 /// then every group's board frames. Built once.
 pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
     static ALL: OnceLock<Vec<Scene<State>>> = OnceLock::new();
-    ALL.get_or_init(|| [shell, settings::FRAMES].concat())
+    ALL.get_or_init(|| [shell, settings::FRAMES, account::FRAMES].concat())
 }

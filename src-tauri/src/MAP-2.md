@@ -12,7 +12,7 @@ Modules 48–97, sorted by path.
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `known_folder.rs` | The known folders a backup can be turned on for (Windows' Desktop, Documents, Pictures, Music, Videos and Downloads), and what is left of th | sanitize_device_segment, resolve_known_folder, resolve_known_folder_current |
 | `launch_wiring_tests.rs` | (no //! header) | — |
-| `lib.rs` | (no //! header) | AppState (5), Session (2), SpeedtestLatency (3), SpeedtestResult (3), run |
+| `lib.rs` | (no //! header) | AppState (5), Session (8), SpeedtestLatency (3), SpeedtestResult (3), run |
 | `lifecycle_log.rs` | The lifecycle log (spec 2026-10-06 §8). | — |
 | `link_health.rs` | Can Beebeeb reach its server, and when did it last get an answer? | — |
 | `linux_thumbnail.rs` | Freedesktop thumbnails for Linux: encode a synced file's preview into the user's thumbnail cache and delete it on removal. | — |
