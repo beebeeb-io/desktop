@@ -23,15 +23,161 @@ uuid = { version = "1", features = ["v4", "serde"] }
 beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
 beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
 beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
-# Only with `test-support`: the helpers a shell's own tests build databases with.
-tempfile = { version = "3", optional = true }
+# The running engine (API client, sync bridge, credential stores): the same versions as `src-tauri/Cargo.toml`.
+toml = "0.8"
+dirs = "6"
+tokio = { version = "1", features = ["time", "rt", "rt-multi-thread", "sync"] }
+reqwest = { version = "0.12", features = ["json"] }
+urlencoding = "2"
+notify = "8"
+zeroize = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
+png = "0.18"
+sysinfo = "0.38.4"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+webpki-roots = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+bytes = "1"
+rand = "0.8"
+bip39 = { version = "2", default-features = false, features = ["std"] }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+hostname = "0.4"
+# Production on unix (staged copies) and the test-support helpers.
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.16"
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    # v2 B15: webauthn.dll (passkey ceremonies with PRF), passkey_windows.rs.
+    "Win32_Networking_WindowsWebServices",
+    "Win32_System_Com",
+    "Win32_Security_Credentials",
+    # CF_CALLBACK_INFO embeds a *CORRELATION_VECTOR, so the struct itself is
+    # gated behind this feature in windows 0.58 — without it the type is
+    # absent and callbacks.rs fails to resolve CF_CALLBACK_INFO.
+    "Win32_System_CorrelationVector",
+    # OpenProcess / GetExitCodeProcess for the .beebeeb-sync.lock liveness
+    # probe (lockfile.rs) — the Windows equivalent of libc::kill(pid, 0).
+    "Win32_System_Threading",
+    # `OVERLAPPED` lives in `Win32::System::IO`. In windows 0.58 the
+    # `CfConvertToPlaceholder` and `CfDehydratePlaceholder` bindings are
+    # themselves `#[cfg(feature = "Win32_System_IO")]`-gated because their
+    # signatures take an `Option<*mut OVERLAPPED>` — so without this feature
+    # those two functions DO NOT EXIST in the generated bindings. We need
+    # `CfConvertToPlaceholder` to flip a freshly-uploaded local file into an
+    # in-sync placeholder (task 0780) and `CfDehydratePlaceholder` to reclaim
+    # bytes from inside a placeholder on "Free up space" (task 0781). We only
+    # ever pass `None` for the overlapped arg (synchronous calls), but the
+    # type must still resolve for the function to compile.
+    "Win32_System_IO",
+    # ── WinRT Explorer SHELL registration (task: OneDrive-class shell entry) ──
+    # `register_sync_root` above registers the sync root with the Cloud Files
+    # PLATFORM (Win32 CfRegisterSyncRoot) — that drives placeholders + hydration
+    # but writes NO Explorer shell metadata, so Explorer shows no Status column,
+    # no overlays, no sidebar entry, no "Free up space" menu. The WinRT
+    # `StorageProviderSyncRootManager::Register(StorageProviderSyncRootInfo)`
+    # call (windows_cf::register_shell_sync_root) writes the SyncRootManager shell
+    # entry + CLSID namespace tree + nav-pane mount in one call. These features
+    # expose that API surface (verified present in windows-0.58 on disk):
+    #   - Storage_Provider: StorageProviderSyncRootManager / …SyncRootInfo /
+    #     StorageProviderItemPropertyDefinition + the policy enums.
+    #   - Storage: StorageFolder::GetFolderFromPathAsync (Path = a StorageFolder).
+    #   - Foundation / Foundation_Collections: IAsyncOperation::get() +
+    #     the IVector<…> for the Status-column property definitions.
+    #   - Storage_Streams: the IBuffer type for StorageProviderSyncRootInfo.Context
+    #     (its setter is `#[cfg(feature = "Storage_Streams")]`-gated in 0.58).
+    #   - Security_Cryptography: CryptographicBuffer::CreateFromByteArray to build
+    #     the opaque Context IBuffer from the Id bytes without hand-rolling a
+    #     DataWriter.
+    "Storage_Provider",
+    "Storage",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Security_Cryptography",
+    # ── OneDrive-style Explorer breadcrumb STATUS FLYOUT (windows_cf::status_ui) ──
+    # The flyout that opens when the user clicks "Beebeeb" in the Explorer
+    # path-bar is driven by a cloud-provider-implemented WinRT status UI source
+    # (IStorageProviderStatusUISource[Factory], StorageProviderStatusUI/QuotaUI/
+    # UICommand). To IMPLEMENT (not just call) those WinRT interfaces in Rust we
+    # need the `implement` feature, which gates the generated `*_Impl` traits and
+    # the `#[windows::core::implement]` macro (re-exported from windows-implement).
+    "implement",
+    # We register the status-UI source factory the way the Microsoft CloudMirror
+    # sample does, adapted for an UNPACKAGED Win32 app: a COM IClassFactory handed
+    # to `CoRegisterClassObject(CLSID, …, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)`,
+    # plus a registry binding tying the CLSID to our sync root. These features
+    # expose those APIs:
+    #   - Win32_System_Com (already enabled above): CoRegisterClassObject /
+    #     CoRevokeClassObject / IClassFactory(+_Impl) / CLSCTX_LOCAL_SERVER /
+    #     REGCLS_MULTIPLEUSE.
+    #   - Win32_System_Registry: RegCreateKeyExW / RegSetValueExW / RegCloseKey /
+    #     RegDeleteKeyValueW / RegDeleteTreeW to write the CLSID LocalServer32 key
+    #     and the `StorageProviderStatusUISourceFactory` value under the
+    #     SyncRootManager sync-root key.
+    #   - Win32_Security: in windows-0.58 `RegCreateKeyExW` is itself
+    #     `#[cfg(feature = "Win32_Security")]`-gated because its signature takes an
+    #     `Option<*const SECURITY_ATTRIBUTES>` — without this feature that function
+    #     DOES NOT EXIST in the generated bindings (we always pass None).
+    "Win32_System_Registry",
+    "Win32_Security",
+    # ── Known-folder backup ("Manage backup", task 0797) ──────────────────────
+    # `SHGetKnownFolderPath` + the `FOLDERID_*` GUID constants (FOLDERID_Desktop,
+    # _Documents, _Pictures, _Music, _Videos, _Downloads) and KF_FLAG_DEFAULT live
+    # in `Win32::UI::Shell`. `known_folder.rs` resolves each enabled folder's real
+    # path with it, then one-way mirrors its contents into the sync root (the
+    # existing scan uploads them). `Win32_UI_Shell_Common` carries the shared
+    # shell types `Win32_UI_Shell` re-exports.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+
+    # ── Explorer media THUMBNAILS (windows_cf::thumbnail_provider, task 0823) ──
+    # An in-process `IThumbnailProvider` COM server (CoRegisterClassObject +
+    # LocalServer32, bound to the sync root via the `ThumbnailProvider` value under
+    # the SyncRootManager key — the cloud-files registry binding the shell honors
+    # for placeholder thumbnails, confirmed against OneDrive + Nextcloud). It runs
+    # in THIS process, so it reaches the in-process EngineBridge directly. Needs:
+    #   - Win32_UI_Shell (already enabled above): `IThumbnailProvider`(+_Impl),
+    #     `WTS_ALPHATYPE`/`WTSAT_ARGB`, `IInitializeWithItem`(+_Impl), `IShellItem`,
+    #     `SIGDN_FILESYSPATH` (all under Win32::UI::Shell in windows-0.58).
+    #   - Win32_Graphics_Gdi: `CreateDIBSection` / `HBITMAP` / `BITMAPINFO` /
+    #     `DeleteObject` to build the 32-bit top-down ARGB bitmap Explorer renders.
+    #   - Win32_UI_WindowsAndMessaging: `GetMessageW` / `TranslateMessage` /
+    #     `DispatchMessageW` / `MSG` for the STA message pump the thumbnail-provider
+    #     COM thread MUST run (task 0823 diagnosis 2026-06-20). The class object is
+    #     registered with `CoRegisterClassObject(CLSCTX_LOCAL_SERVER)` on a
+    #     single-threaded apartment; COM delivers the shell's cross-process
+    #     `IThumbnailProvider` activation + method calls to that apartment as window
+    #     messages, so the thread must pump messages rather than `park()` — without
+    #     pumping the object is registered but unreachable and `GetThumbnail` never
+    #     fires (the shell's CoCreateInstance hangs on an unserviced message queue).
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    # v2 B10: Windows Hello (UserConsentVerifier + its window interop) before an approval and for the app lock.
+    "Security_Credentials_UI",
+    "Win32_System_WinRT",
+] }
+windows-core = "0.58"
 
 [dev-dependencies]
-tempfile = "3"
-# `reconcile_measure_tests` (an `#[ignore]`d measurement on a copy) names this PC as the runner does.
-hostname = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+aes-gcm = "0.10"
+json-patch = { version = "3", default-features = false }
+tokio = { version = "1", features = ["test-util"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d", features = ["test-support"] }
 
 [features]
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
 # one. Never enabled by a release build: `src-tauri` turns it on under `[dev-dependencies]` only.
-test-support = ["dep:tempfile"]
+test-support = []
