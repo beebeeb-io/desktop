@@ -264,7 +264,7 @@ pub fn ring(key: &str, d: f32, width: f32, fraction: f32, color: Color, t: &Them
         .view_box(d, d)
         .stroke_with(arc(0.0, 1.0), true, width, LineCap::Butt, t.separator);
     if fraction >= 1.0 {
-        shape = shape.stroke_with(arc(0.0, 1.0), true, width, LineCap::Butt, color);
+        shape = shape.stroke_with(arc(0.0, 1.0), true, width, LineCap::Round, color);
     } else {
         // Part of the circle, with round ends: filled as its own outline. (Rune's stroke of an
         // OPEN line with round caps is anti-aliased differently from its closed strokes and
