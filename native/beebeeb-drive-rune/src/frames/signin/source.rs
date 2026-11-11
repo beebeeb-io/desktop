@@ -204,7 +204,7 @@ pub mod board {
     pub const EMAIL: &str = "anna@northwind.studio";
     pub const HELD_BY: &str = "Drive";
     pub const DEVICE: &str = "Anna-Laptop";
-    pub const OTHER_DEVICE: &str = "Anna\u{2019}s iPhone";
+    pub const OTHER_DEVICE: &str = "Anna's iPhone";
     pub const CODE: &str = "K7QM-4WTD";
     pub const SECONDS_LEFT: u32 = 4 * 60 + 12;
     /// The length of the password the board draws (14 bullets). The fixture never holds a real one.

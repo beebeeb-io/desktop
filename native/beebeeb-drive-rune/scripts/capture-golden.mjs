@@ -84,16 +84,18 @@ try {
       if ((cs.position === 'sticky' || cs.position === 'fixed') && !screen.contains(el)) el.style.display = 'none';
     }
     if (dark) screen.classList.add('dark');
-    screen.scrollIntoView({ block: 'start' });
+    screen.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' }); // instant: a smooth scroll of the frame's row is still moving when the box is read
     window.scrollBy(0, -20);
     const r = screen.getBoundingClientRect();
-    return { x: r.x + screen.clientLeft + window.scrollX, y: r.y + screen.clientTop + window.scrollY, width: screen.clientWidth, height: screen.clientHeight };
+    // Viewport coordinates, for a viewport screenshot: a full-page one re-lays the page out and a frame
+    // further along its row (a horizontal scroller) is no longer where this box says.
+    return { x: r.x + screen.clientLeft, y: r.y + screen.clientTop, width: screen.clientWidth, height: screen.clientHeight };
   }, { frameId, dark });
   await page.waitForTimeout(400);
 
   const stem = dark ? `${frameId}-dark` : frameId;
   const png = join(outDir, `${stem}-board.png`);
-  await page.screenshot({ path: png, clip, fullPage: true });
+  await page.screenshot({ path: png, clip });
 
   const geo = await page.evaluate(({ frameId, keymapSrc }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);

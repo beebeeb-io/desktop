@@ -329,11 +329,11 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
     let Some(session) = ui.shared() else {
         return au::column();
     };
-    // The ring is the prompt's progress while Windows Hello is up, and empty once it answered.
+    // The ring as the board draws it: seven tenths in ink, and empty in red when not recognized.
     let (fraction, tone) = match failure {
         None => (0.7, Tone::Ink),
         Some(HelloFailure::NotRecognized) => (0.0, Tone::Red),
-        Some(HelloFailure::Cancelled) => (0.0, Tone::Ink),
+        Some(HelloFailure::Cancelled) => (0.7, Tone::Ink),
     };
     let mut c = au::column()
         .child(back(t))
@@ -467,7 +467,22 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                     .role("timer")
                     .label(format!("Expires in {}", clock(ui.seconds_left())))
                     .center_y()
-                    .child(kit::label("status-expires", "Expires in ", type_au::SUB, t.text_tertiary).a11y_hidden())
+                    // The board's text node is "Expires in" and the space before the digits: the gate is
+                    // told the words, in the box of the words and their space.
+                    .child({
+                        kit::note_text(
+                            "status-expires",
+                            "status-expires-box",
+                            "Expires in",
+                            type_au::SUB,
+                            t.text_tertiary,
+                        );
+                        rune::text("Expires in ")
+                            .key("status-expires-box")
+                            .font(type_au::SUB)
+                            .color(t.text_tertiary)
+                            .a11y_hidden()
+                    })
                     .child(
                         kit::label(
                             "status-time",
