@@ -687,7 +687,7 @@ fn frame_content(frame: &str) -> (Status, Changes) {
                     "44 min",
                 ),
             ];
-            list.extend(recent().into_iter().take(8));
+            list.extend(recent().into_iter().skip(1).take(8));
             (explorer_failed, rows(list))
         }
         "DW-1222" => (Status::WaitingMetered, rows(recent())),

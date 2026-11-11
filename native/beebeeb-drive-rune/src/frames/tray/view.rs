@@ -5,7 +5,7 @@
 //! `.wn-fly`), read from the goldens' `css` records. Keys are `scripts/keymap-tray.js`'s.
 
 use rune::tok::Family;
-use rune::{Align, Color, Cursor, El, Icon, ScrollPos, ScrollSpec, TextStyle, col, el, oklch, row};
+use rune::{Align, Color, Cursor, El, Icon, ScrollFade, ScrollPos, ScrollSpec, TextStyle, col, el, oklch, row};
 
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
@@ -477,7 +477,8 @@ fn empty(icon: &'static Icon, title: &str, sentence: &str, t: &Theme) -> El {
         .key("empty")
         .w_full()
         .h_full()
-        .px(32.0)
+        // The list's own 6 px, and the 32 px of the empty state (`px-8`).
+        .px(38.0)
         .gap(8.0)
         .center()
         .child(
@@ -525,14 +526,13 @@ fn changes_list<S: 'static>(ui: &Ui, host: Host<S>, t: &Theme) -> El {
         .w_full()
         .h_full()
         .px(6.0)
-        // The end block stops 6 px short of the list's end (DW-1220).
-        .pb(6.0)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.accent_deep)
         .scroll(ScrollSpec {
             stick_bottom: ui.opens_at_end,
         })
-        .scroll_edge_fade(30.0);
+        // `.mk-plist.is-more` / `.is-end`: the 30 px next to hidden rows fade out, in a straight ramp.
+        .scroll_fade(ScrollFade::strength(30.0).linear().full_at(1.0));
     if let Some(row) = ui.selected() {
         content = content.active_descendant(row_key(row));
     }
@@ -560,6 +560,8 @@ fn changes_list<S: 'static>(ui: &Ui, host: Host<S>, t: &Theme) -> El {
     content = content.child(
         end.child(small_button("end-btn", "View full history", false, t).on_press_tx(host.act(Ui::open_full_history))),
     );
+    // The end block stops 6 px short of the list's end (DW-1220).
+    content = content.child(el().key("end-room").w_full().h(6.0));
     list.child(content).child(
         el().key("scroll-thumb")
             .absolute(SIZE.0 - 3.0 - 6.0, THUMB.1)
