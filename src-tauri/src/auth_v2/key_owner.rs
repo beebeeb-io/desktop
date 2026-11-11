@@ -143,24 +143,34 @@ pub fn remove_foreign_key<S: AuthSecretStore>(
     signing_in_user_id: &str,
     signing_in_email: &str,
 ) -> AuthResult<bool> {
-    if !key_present(vault)? {
-        if vault.vault_key_owner()?.is_some() {
-            vault.delete_vault_key_and_owner()?;
+    // A store that cannot say what it holds has not shown the key to be this account's: the removal is tried all the
+    // same (a read that fails must not block every sign-in while a delete would work).
+    let keep = (|| -> AuthResult<Option<bool>> {
+        if !key_present(vault)? {
+            return Ok(match vault.vault_key_owner()? {
+                Some(_) => Some(false),
+                None => None,
+            });
         }
-        return Ok(false);
+        let key_owner = vault.vault_key_owner()?;
+        let stored_email = vault.account_email()?;
+        Ok(Some(!should_remove_stored_key(
+            key_owner.as_deref(),
+            signing_in_user_id,
+            signing_in_email,
+            stored_email.as_deref(),
+        )))
+    })();
+    match keep {
+        // No key and no tag: nothing to do.
+        Ok(None) => Ok(false),
+        Ok(Some(true)) => Ok(false),
+        Ok(Some(false)) | Err(_) => {
+            let had_key = !matches!(key_present(vault), Ok(false));
+            vault.delete_vault_key_and_owner()?;
+            Ok(had_key)
+        }
     }
-    let key_owner = vault.vault_key_owner()?;
-    let stored_email = vault.account_email()?;
-    if !should_remove_stored_key(
-        key_owner.as_deref(),
-        signing_in_user_id,
-        signing_in_email,
-        stored_email.as_deref(),
-    ) {
-        return Ok(false);
-    }
-    vault.delete_vault_key_and_owner()?;
-    Ok(true)
 }
 
 /// After a write of token AND key for one session the server named (`user_id`): bind both. Called in the write's own
@@ -205,7 +215,8 @@ pub fn settle_owner_after_probe<S: AuthSecretStore>(
         return Ok(KeyOwnership::SessionUnknown);
     }
     if vault.session_owner()?.as_deref() != Some(server_user_id) {
-        vault.bind_session_owner(server_user_id)?;
+        // A tag that cannot be written does not make the key another account's: the server's id judges it below.
+        let _ = vault.bind_session_owner(server_user_id);
     }
     Ok(key_ownership(vault.vault_key_owner()?.as_deref(), Some(server_user_id)))
 }
@@ -223,7 +234,10 @@ pub fn complete_pending_clear<S: AuthSecretStore>(vault: &mut AuthVault<S>) -> A
         Err(error) if is_absent(&error) => {}
         Err(error) => return Err(error),
     }
-    let leftover = key_present(vault)? || vault.vault_key_owner()?.is_some() || vault.session_owner()?.is_some();
+    // An item that cannot be read counts as left over: the clear is tried.
+    let leftover = !matches!(key_present(vault), Ok(false))
+        || !matches!(vault.vault_key_owner(), Ok(None))
+        || !matches!(vault.session_owner(), Ok(None));
     if !leftover {
         return Ok(false);
     }

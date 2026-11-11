@@ -177,22 +177,21 @@ pub const WRONG_PHRASE: &str = "That phrase doesn\u{2019}t open this account. No
 /// DW-A24: after the server's attempt limit.
 pub const TOO_MANY_PHRASE_TRIES: &str = "Too many tries. Wait an hour.";
 
-/// P3: the code of a recovery-phrase unlock whose phrase was RIGHT (the vault is unlocked) and whose engine start
-/// then failed. Its own code, so no screen can show it as a wrong phrase.
-pub const ENGINE_NOT_STARTED_AFTER_UNLOCK: &str = "vault_unlocked_engine_not_started";
-
-/// What the person reads for [`ENGINE_NOT_STARTED_AFTER_UNLOCK`].
+/// P3: what a recovery-phrase unlock returns when the phrase was RIGHT (the vault is unlocked) and the engine start
+/// then failed. Its own sentence, so no screen can show it as a wrong phrase; it is a sentence and not a code because
+/// the older sign-in screens print the command's error as it is.
 pub const UNLOCKED_SYNC_NOT_STARTED: &str =
     "Your recovery phrase is right and this computer is unlocked. Sync didn\u{2019}t start yet. Try again.";
 
 /// The recovery-phrase command's error for an engine start that failed after the phrase was accepted.
 pub fn engine_not_started_after_unlock(error: String) -> String {
-    format!("{ENGINE_NOT_STARTED_AFTER_UNLOCK}: {error}")
+    tracing::warn!(%error, "the recovery phrase unlocked the vault, but the engine did not start");
+    UNLOCKED_SYNC_NOT_STARTED.to_string()
 }
 
 /// Map a recovery-phrase error to the board's words.
 pub fn phrase_error(code: &str) -> &'static str {
-    if code.starts_with(ENGINE_NOT_STARTED_AFTER_UNLOCK) {
+    if code == UNLOCKED_SYNC_NOT_STARTED {
         return UNLOCKED_SYNC_NOT_STARTED;
     }
     if code.contains("Incorrect recovery phrase") {
@@ -690,14 +689,15 @@ mod tests {
 
     #[test]
     fn an_engine_start_that_fails_after_a_right_phrase_is_never_the_wrong_phrase_error() {
-        // Even when the start's own text holds the words the other branches match on.
+        // Whatever the start's own text says (it is logged, never shown as the reason).
         for start_error in [
             "network error: Incorrect recovery phrase",
             "offline",
             "Too many open files",
         ] {
-            let code = engine_not_started_after_unlock(start_error.to_string());
-            assert_eq!(phrase_error(&code), UNLOCKED_SYNC_NOT_STARTED, "{code}");
+            let reason = engine_not_started_after_unlock(start_error.to_string());
+            assert_eq!(reason, UNLOCKED_SYNC_NOT_STARTED);
+            assert_eq!(phrase_error(&reason), UNLOCKED_SYNC_NOT_STARTED);
         }
         assert_ne!(UNLOCKED_SYNC_NOT_STARTED, WRONG_PHRASE);
         assert_eq!(

@@ -152,6 +152,8 @@ export function SignInFlow({ onSignedIn, onCreateAccount, onForgotPassword, star
     if (r.ok) { setWords(EMPTY_WORDS); setPhraseState('idle'); onSignedIn(); return }
     // The error text lives in Rust (auth_v2::gate::phrase_error); the TSX branches on the code.
     if (/too many/i.test(r.reason)) { setPhraseState('too-many'); return }
+    // The phrase was right and the vault is unlocked; only the sync start failed (auth_v2::gate, P3): never "wrong".
+    if (/phrase is right/i.test(r.reason)) { setWords(EMPTY_WORDS); setPhraseState('idle'); onSignedIn(); return }
     const marks = await unknownPhraseWords(words)
     setUnknown(marks.ok ? marks.value : [])
     setPhraseState('wrong')

@@ -529,3 +529,44 @@ fn an_approval_adds_the_key_only_to_the_same_signed_in_account_while_it_is_locke
     assert_eq!(stored_key_ownership(&store.vault()), Ok(KeyOwnership::Matches));
     assert_eq!(load(&store).unwrap().expect("a session").master_key, KEY_A);
 }
+
+/// Review (delta 3): a store that cannot be READ must not block every sign-in while a delete would work.
+#[test]
+fn an_unreadable_leftover_is_removed_not_trusted_and_not_a_permanent_refusal() {
+    for unreadable in [KEY, KEY_OWNER, EMAIL] {
+        let store = signed_in_as_a();
+        store.vault().clear_session_token().unwrap();
+        store.fail_reads(unreadable);
+        assert!(
+            token_only_sign_in(&store, "tok-a2", "user-a", "a@beebeeb.io").is_ok(),
+            "{unreadable}"
+        );
+        assert!(
+            !store.has(KEY) && !store.has(KEY_OWNER),
+            "{unreadable}: not shown to be this account's, so removed"
+        );
+    }
+    let pending = signed_in_as_a();
+    pending.vault().clear_session_token().unwrap();
+    pending.fail_reads(KEY);
+    assert_eq!(complete_pending_clear(&mut pending.vault()), Ok(true));
+    assert!(!pending.has(KEY));
+}
+
+/// Review (delta 3): a tag write that fails after the probe does not turn the person's own key into a foreign one.
+#[test]
+fn a_session_tag_that_cannot_be_written_after_the_probe_does_not_refuse_the_key() {
+    let legacy = legacy_a();
+    legacy.fail_writes(SESSION_OWNER);
+    assert_eq!(
+        settle_owner_after_probe(&legacy.vault(), "tok-a", "user-a"),
+        Ok(KeyOwnership::Unknown)
+    );
+    let tagged = signed_in_as_a();
+    tagged.delete(SESSION_OWNER).unwrap();
+    tagged.fail_writes(SESSION_OWNER);
+    assert_eq!(
+        settle_owner_after_probe(&tagged.vault(), "tok-a", "user-a"),
+        Ok(KeyOwnership::Matches)
+    );
+}
