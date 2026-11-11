@@ -24,7 +24,7 @@ Modules 1–33, sorted by path.
 | `diagnostic_redaction.rs` | Structurally safe diagnostics export (task 1685). | DiagnosticErrorCode (17), PAUSE_REASON_LABELS, QUEUE_KIND_LABELS, allowed_label, classify_error_code, KnownNames, redact_for_export, redact_secrets_only |
 | `direct_download.rs` | Direct S3 download driver (task 2173). | FileTransport (3), Storage (2), Transport (2), DirectError (3), Outcome (2), Progress (3), Request (7), download, paced_until_ms |
 | `download_pin.rs` | Task 1643: one download, one immutable version. | — |
-| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | BackupChild (6), BackupFolderState (2), tighter_clock, PrepEnd (3), RangePrep (5), FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, … (+72 more) |
+| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | BackupChild (6), BackupFolderState (2), tighter_clock, PrepEnd (3), RangePrep (5), FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, … (+70 more) |
 | `engine_status.rs` | What the engine says about itself, and what the popover reads back (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` | — |
 | `finder_setup.rs` | The part of the macOS Finder setup the configuration file stores: the failure record. | — |
 | `finder_setup/error.rs` | One NSError as the ObjC bridge saw it (spec §6.1), plus the errors we synthesize ourselves. | — |

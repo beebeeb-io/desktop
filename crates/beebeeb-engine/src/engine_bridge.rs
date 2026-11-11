@@ -158,7 +158,7 @@ mod tests {
     fn production_tree(module: &str) -> String {
         production_tree_parts(module)
             .into_iter()
-            .map(|text| crate::source_pin::without_items(&text, &["#[cfg(test)]", "#[cfg(all(test"]))
+            .map(|text| crate::source_pin::without_items(&text, &crate::source_census::TEST_ITEM_GATES))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -436,7 +436,9 @@ pub use types::{
 pub use types::{LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, SyncFolderContent, log_alias_resolved};
 // LD-0113 Amendment 7: the Windows-native rung removes a read-only Backups file the way the engine does.
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
-pub use types::{RemovedKind, engine_remove};
+pub use types::RemovedKind;
+#[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
+pub(crate) use types::engine_remove;
 
 mod errors;
 use errors::*;
@@ -468,8 +470,9 @@ pub use meta::{
 pub use meta::{HydrateSource, SharedRootRefreshOutcome};
 
 mod meta_2;
+pub(crate) use meta_2::decrypt_shared_name_with_key;
+pub use meta_2::parse_base_version_number;
 use meta_2::*;
-pub use meta_2::{decrypt_shared_name_with_key, parse_base_version_number};
 
 mod landing;
 #[cfg(windows)]

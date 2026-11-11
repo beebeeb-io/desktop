@@ -445,7 +445,7 @@ pub(super) struct RunnerControls {
 
 /// Desktop 0.8.15: every `engine-status` payload carries the start-up guard's progress as
 /// `startup_guard`: `{running, done, total}`, counts only.
-pub fn with_startup_guard(status: crate::engine_status::StatusPayload) -> crate::host::EngineStatus {
+pub(crate) fn with_startup_guard(status: crate::engine_status::StatusPayload) -> crate::host::EngineStatus {
     crate::host::EngineStatus {
         status,
         startup_guard: crate::unknown_check::STARTUP_GUARD.progress(),

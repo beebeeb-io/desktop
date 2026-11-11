@@ -93,7 +93,7 @@ const PATH_NOT_FOUND: HRESULT = HRESULT(0x8007_0003_u32 as i32);
 /// through an attribute-only handle opened as the reparse point (nothing is fetched). A poison records
 /// it right after the file is marked not in sync; the empty step reads the same pair through its own
 /// handle ([`key_of_handle`]), so one function computes both sides of the comparison.
-pub fn content_key(path: &Path) -> Option<(i64, i64)> {
+pub(crate) fn content_key(path: &Path) -> Option<(i64, i64)> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Storage::FileSystem::{
@@ -109,7 +109,7 @@ pub fn content_key(path: &Path) -> Option<(i64, i64)> {
 }
 
 /// The content key of the file behind `win32` (an open Win32 handle).
-pub fn key_of_handle(win32: HANDLE) -> Option<(i64, i64)> {
+pub(crate) fn key_of_handle(win32: HANDLE) -> Option<(i64, i64)> {
     use windows::Win32::Storage::FileSystem::{
         FILE_BASIC_INFO, FILE_STANDARD_INFO, FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx,
     };
@@ -679,7 +679,7 @@ const NOT_POISONED: &str = "not_poisoned";
 
 /// Delta review P2-1: may the discard empty the placeholder it holds? Only if its FileIdentity is
 /// `file_id` (none: not this file) and, asked last, the poison row is still there.
-pub fn discard_guard(
+pub(crate) fn discard_guard(
     identity: Option<&[u8]>,
     file_id: &str,
     still_poisoned: impl FnOnce() -> bool,

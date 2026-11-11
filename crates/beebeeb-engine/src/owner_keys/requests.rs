@@ -92,7 +92,11 @@ impl RequestKeys {
     /// checks, the row-bound seal, then the shipped empty-id seal. Content is
     /// `C`; the rename target is the string-derived key and the recorded pin,
     /// never `C`, and `None` for an upper-repair (read-only) name.
-    pub fn row_keys(&mut self, master: &MasterKey, row: &Value) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
+    pub(crate) fn row_keys(
+        &mut self,
+        master: &MasterKey,
+        row: &Value,
+    ) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
         let fields = request_upload_fields(row)?;
         let id = row.get("id")?.as_str()?;
         let encrypted = row.get("name_encrypted")?.as_str()?;

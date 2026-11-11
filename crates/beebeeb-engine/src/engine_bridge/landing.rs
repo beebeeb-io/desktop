@@ -700,7 +700,7 @@ pub(super) fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
 /// name, is not this item's entry: nothing is removed or copied, and nothing of the item is on disk (`Gone`). A check
 /// that cannot finish removes nothing either; the entry is kept for the retry.
 #[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
-pub fn remove_pruned_entry(
+pub(crate) fn remove_pruned_entry(
     sync_root: &Path,
     path: &Path,
     kind: RemovedKind,

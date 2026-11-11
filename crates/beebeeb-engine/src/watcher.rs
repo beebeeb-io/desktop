@@ -427,7 +427,7 @@ pub fn dispatch_local_create_verdict(
 /// existing trash op so the server deletes it too. If there is no DB row, the
 /// delete was of an untracked local file (or an engine-internal file) — nothing
 /// to propagate.
-pub async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
+pub(crate) async fn handle_delete(bridge: &EngineBridge, sync_root: &std::path::Path, path: &std::path::Path) {
     handle_delete_with(bridge, sync_root, path, ProtectionCheck::Check).await;
 }
 
@@ -446,7 +446,7 @@ impl ProtectionCheck {
 }
 
 /// [`handle_delete`], with the LD-0113 check as told.
-pub async fn handle_delete_with(
+pub(crate) async fn handle_delete_with(
     bridge: &EngineBridge,
     sync_root: &std::path::Path,
     path: &std::path::Path,

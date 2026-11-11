@@ -19,7 +19,7 @@ static REVIEW_RETRIED: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
 
 /// Tests only: as if the engine started again for `root`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn forget_review_retry(root: &Path) {
+pub(crate) fn forget_review_retry(root: &Path) {
     REVIEW_RETRIED
         .lock()
         .unwrap_or_else(|e| e.into_inner())

@@ -67,7 +67,7 @@ impl EngineBridge {
                 .is_some_and(|record| record.request_row)
     }
 
-    pub fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {
+    pub(crate) fn owner_key_scope(&self) -> crate::owner_keys::AccountScope<'_> {
         crate::owner_keys::AccountScope::new(&self.db, &self.api, &self.stopping)
     }
 

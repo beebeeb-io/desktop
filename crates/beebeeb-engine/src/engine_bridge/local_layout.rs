@@ -336,7 +336,7 @@ impl EngineBridge {
 
     /// Desktop 0.8.15: [`Self::enforce_local_cache_limit`], which evicts nothing until `guard`'s
     /// start-up pass has walked every file of unknown content (the pass runs beside the engine).
-    pub fn enforce_local_cache_limit_after_guard(
+    pub(crate) fn enforce_local_cache_limit_after_guard(
         &self,
         max_local_cache_bytes: Option<i64>,
         guard: &crate::unknown_check::StartupGuard,

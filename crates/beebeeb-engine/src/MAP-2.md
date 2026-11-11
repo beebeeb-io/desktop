@@ -25,7 +25,7 @@ Modules 34–68, sorted by path.
 | `reauth.rs` | Ruling R8 (spec 2026-10-06 §3): a sign-in on a Mac that already holds an account is either the same account signing in again (only the sessi | — |
 | `reconcile_measure_tests.rs` | Tasks 1888 + 2226, plan Task 1 Step 7: the reconcile pass on a copy of a real queue, timed per transaction, to set [`super::RECONCILE_UNITS_ | — |
 | `root_source.rs` | Scanner input after the lib.rs split (LD-0057 PR 2, spec §4.8): the text the source-reading tests used to `include_str!("lib.rs")`. | — |
-| `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, device_name, hostname_or_unknown, AbortOutcome (2), AttemptSignals (3), EngineRunner, ResumeTicket (4), SendPhaseLink (2), Wake (4), nudge_wait, phase_step_due, with_startup_guard, … (+2 more) |
+| `runner.rs` | Long-running engine task: owns the lock file + state DB + API client, runs a periodic sync tick, emits status events to the WebView via Taur | AuthHealth, device_name, hostname_or_unknown, AbortOutcome (2), AttemptSignals (3), EngineRunner, ResumeTicket (4), SendPhaseLink (2), Wake (4), nudge_wait, phase_step_due, RunMode (2), … (+1 more) |
 | `session.rs` | The signed-in session as the engine holds it: the token and the vault key, wiped when dropped. | — |
 | `session_commands.rs` | Windows command admission, independent of whether a sync root/runner exists. | — |
 | `shared_folder_index.rs` | Shared-folder index repair. | — |

@@ -303,7 +303,7 @@ pub mod test_support {
             .collect()
     }
 
-    pub fn encrypt_frame(file_key: &beebeeb_core::kdf::FileKey, plain: &[u8]) -> Vec<u8> {
+    pub(crate) fn encrypt_frame(file_key: &beebeeb_core::kdf::FileKey, plain: &[u8]) -> Vec<u8> {
         beebeeb_core::encrypt::encrypt_chunk_raw(file_key, plain).unwrap()
     }
 
@@ -323,7 +323,7 @@ pub mod test_support {
         pub fn chunk_count(&self) -> u32 {
             self.frames.len() as u32
         }
-        pub fn encrypted_size(&self) -> u64 {
+        pub(crate) fn encrypted_size(&self) -> u64 {
             self.frames.iter().map(|f| f.len() as u64).sum()
         }
         /// `download_version` exactly as the server builds it (task 1643 contract).

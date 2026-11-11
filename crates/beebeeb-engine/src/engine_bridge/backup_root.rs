@@ -118,7 +118,7 @@ impl EngineBridge {
     }
 
     /// The merge's last step: an emptied duplicate root goes to Trash (never a permanent delete).
-    pub async fn backup_trash(&self, id: &str) -> Result<(), EngineError> {
+    pub(crate) async fn backup_trash(&self, id: &str) -> Result<(), EngineError> {
         self.backup_api().trash_file(id).await?;
         tracing::info!(file_id = %id, "backup: emptied duplicate moved to Trash");
         Ok(())

@@ -164,10 +164,10 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
         [
             "fn ",
             "pub fn ",
-            "pub fn ",
+            "pub(crate) fn ",
             "async fn ",
             "pub async fn ",
-            "pub async fn ",
+            "pub(crate) async fn ",
         ]
         .iter()
         .any(|prefix| line.starts_with(prefix))

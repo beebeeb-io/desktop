@@ -92,6 +92,8 @@ pub fn macos_compiled(source: &str) -> String {
         &[
             "#[cfg(test)]",
             "#[cfg(all(test",
+            "#[cfg(any(test, feature = \"test-support\"))]",
+            "#[cfg(all(any(test, feature = \"test-support\")",
             "#[cfg(any(target_os = \"windows\", test))]",
             "#[cfg(not(target_os = \"macos\"))]",
             "#[cfg(target_os = \"windows\")]",

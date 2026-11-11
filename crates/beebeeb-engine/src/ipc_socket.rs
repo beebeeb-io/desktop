@@ -323,7 +323,7 @@ pub const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::fro
 /// would delete another folder's files. Every entry is inspected and removed
 /// through that descriptor.
 #[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
-pub fn purge_stale_upload_staging(
+pub(crate) fn purge_stale_upload_staging(
     dir: &std::path::Path,
     max_age: std::time::Duration,
     now: std::time::SystemTime,
@@ -350,7 +350,10 @@ pub enum UploadStagingPurge {
 
 /// [`purge_stale_upload_staging`] with the scope as a parameter.
 #[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
-pub fn purge_upload_staging(dir: &std::path::Path, scope: UploadStagingPurge) -> Result<usize, StagingDirRefusal> {
+pub(crate) fn purge_upload_staging(
+    dir: &std::path::Path,
+    scope: UploadStagingPurge,
+) -> Result<usize, StagingDirRefusal> {
     match StagingDir::open(dir) {
         Ok(staging) => purge_upload_staging_in(&staging, scope),
         Err(StagingDirRefusal::Missing) => Ok(0),

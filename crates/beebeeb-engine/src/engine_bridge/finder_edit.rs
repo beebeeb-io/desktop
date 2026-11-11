@@ -443,7 +443,7 @@ impl EngineBridge {
     }
 
     /// [`Self::queue_finder_delete`] for the Windows watcher, which applied the drive rule itself.
-    pub fn queue_finder_delete_decided(&self, file_id: &str) -> anyhow::Result<FinderWriteOutcome> {
+    pub(crate) fn queue_finder_delete_decided(&self, file_id: &str) -> anyhow::Result<FinderWriteOutcome> {
         self.queue_finder_delete_guarded(file_id, None, crate::backup_protect::DriveGuard::Decided)
     }
 

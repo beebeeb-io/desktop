@@ -864,7 +864,7 @@ pub enum RemovedKind {
     not(any(target_os = "windows", any(test, feature = "test-support"))),
     allow(dead_code)
 )]
-pub fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
+pub(crate) fn engine_remove(path: &Path, kind: RemovedKind) -> std::io::Result<()> {
     crate::watcher::suppress_engine_delete(path);
     let removed = match kind {
         RemovedKind::Dir => std::fs::remove_dir(path),

@@ -1060,9 +1060,10 @@ pub use telemetry::hostname_or_unknown;
 use telemetry::*;
 
 mod lifecycle;
+pub(crate) use lifecycle::with_startup_guard;
 use lifecycle::*;
 pub use lifecycle::{AbortOutcome, AttemptSignals, EngineRunner, ResumeTicket, SendPhaseLink};
-pub use lifecycle::{Wake, nudge_wait, phase_step_due, with_startup_guard};
+pub use lifecycle::{Wake, nudge_wait, phase_step_due};
 
 mod tick_loop;
 pub use tick_loop::RunMode;

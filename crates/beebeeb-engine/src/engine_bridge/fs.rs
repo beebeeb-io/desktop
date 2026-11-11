@@ -275,7 +275,7 @@ pub fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// The second step of a move by hard link: remove the old name `from` (`to` is its new link). Task 2407: when that
 /// fails, the new link `to` is removed again and the error returned, so a failed move leaves one name, never two.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
-pub fn remove_after_link(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_after_link(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     let removed = if FAIL_REMOVE_AFTER_LINK.with(std::cell::Cell::get) {
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
