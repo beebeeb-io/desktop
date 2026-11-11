@@ -25,9 +25,32 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
         Screen::ContinueAs(failure) => continue_as(ui, *failure, &mut k, &t),
         Screen::Device { expired } => device(ui, *expired, &mut k, &t),
         Screen::Approved { by } => approved(by, &mut k, &t),
+        Screen::KeysNotReceived => keys_not_received(&mut k, &t),
         Screen::Denied { by } => denied(by, &mut k, &t),
     };
     au::page(PRODUCT, [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE], column, &t, cx).on_key(super::on_key)
+}
+
+/// The window with nothing in its column: the state was dropped (signed in) and the shell has
+/// not left this group yet.
+pub fn closed(cx: &mut Cx<State>) -> El {
+    let t = tokens::theme(cx.system_dark());
+    au::page(
+        PRODUCT,
+        [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE],
+        au::column(),
+        &t,
+        cx,
+    )
+}
+
+/// A link out of the screen. While a sign-in runs it takes no press and no focus (DW-A18).
+fn way_out(link: El, ui: &Ui, to: fn(&mut Ui)) -> El {
+    if ui.busy {
+        link.disabled(true)
+    } else {
+        link.on_press_tx(act(to))
+    }
 }
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, `top` below the column's gap.
@@ -36,7 +59,7 @@ fn actions(top: f32) -> El {
 }
 
 fn back(t: &Theme) -> El {
-    au::back_link("Sign in", &icons::BACK, t).on_press(act(Ui::open_sign_in))
+    au::back_link("Sign in", &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
 }
 
 fn use_password_instead(k: &mut Keys, label: &str, t: &Theme) -> El {
@@ -49,7 +72,7 @@ fn use_password_instead(k: &mut Keys, label: &str, t: &Theme) -> El {
         ButtonState::Enabled,
         t,
     )
-    .on_press(act(Ui::open_sign_in))
+    .on_press_tx(act(Ui::open_sign_in))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +99,7 @@ fn welcome(k: &mut Keys, t: &Theme) -> El {
                         ButtonState::Enabled,
                         t,
                     )
-                    .on_press(act(|ui| ui.go(Intent::CreateAccount))),
+                    .on_press_tx(act(|ui| ui.leave(Intent::CreateAccount))),
                 )
                 .child(
                     au::button(
@@ -88,7 +111,7 @@ fn welcome(k: &mut Keys, t: &Theme) -> El {
                         ButtonState::Enabled,
                         t,
                     )
-                    .on_press(act(Ui::open_sign_in)),
+                    .on_press_tx(act(Ui::open_sign_in)),
                 ),
         )
 }
@@ -103,7 +126,8 @@ fn problem_message(problem: SignInProblem) -> Option<String> {
         // One message for a wrong email and a wrong password: Beebeeb does not say which.
         SignInProblem::Invalid => Some("That email and password do not match an account. Nothing was unlocked.".into()),
         SignInProblem::RateLimited { seconds } => Some(format!(
-            "Too many tries from this network. Wait {seconds} seconds, then try again. Nothing was unlocked."
+            "Too many tries from this network. Wait {seconds} {}, then try again. Nothing was unlocked.",
+            if seconds == 1 { "second" } else { "seconds" }
         )),
         SignInProblem::LockedHint | SignInProblem::StaleKey | SignInProblem::Other => Some(GENERIC_FAILURE.into()),
         SignInProblem::Offline => None,
@@ -162,7 +186,7 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
         t,
     );
     if !ui.busy {
-        hello = hello.on_press(act(Ui::continue_as));
+        hello = hello.on_press_tx(act(Ui::continue_as));
     }
     card.role("group")
         .label(format!("{}, {}", session.display_name, session.email))
@@ -188,7 +212,7 @@ fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     if ui.busy {
         b
     } else {
-        b.on_press(act(Ui::ask_other_device))
+        b.on_press_tx(act(Ui::ask_other_device))
     }
 }
 
@@ -240,7 +264,7 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         &icons::EYE,
         t,
     )
-    .on_press(act(Ui::toggle_password));
+    .on_press_tx(act(Ui::toggle_password));
     c = c.child(au::field(
         k,
         FieldSpec {
@@ -278,15 +302,23 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             .h(15.0)
             .center_y()
             .justify_between()
-            .child(au::link(k, "Forgot password?", None, t).on_press(act(|ui| ui.go(Intent::ForgotPassword))))
-            .child(
-                au::link(k, "Use a passkey", Some(&icons::PASSKEY), t).on_press(act(|ui| ui.go(Intent::UsePasskey))),
-            ),
+            .child(way_out(au::link(k, "Forgot password?", None, t), ui, |ui| {
+                ui.leave(Intent::ForgotPassword)
+            }))
+            .child(way_out(
+                au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
+                ui,
+                |ui| ui.leave(Intent::UsePasskey),
+            )),
     );
 
     let with_card = ui.shared().is_some();
     let (label, state) = if ui.busy {
         ("Unlocking vault\u{2026}", ButtonState::Busy)
+    } else if ui.retry_wait().is_some() {
+        // The per-network wait runs (DW-A21): drawn as the board draws it, and it takes no press
+        // until the wait is over. The message above counts the seconds.
+        ("Sign in", ButtonState::Busy)
     } else if offline {
         // Dimmed but pressable: a press checks the connection again (DW-A20).
         ("Sign in", ButtonState::Dim)
@@ -303,7 +335,7 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     };
     let mut submit = au::button(k, label, None, kind, ButtonSize::Lg, state, t);
     if matches!(state, ButtonState::Enabled | ButtonState::Dim) {
-        submit = submit.on_press(act(Ui::submit)).default_button();
+        submit = submit.on_press_tx(act(Ui::submit)).default_button();
     }
     let mut foot = actions(if with_card { 4.0 } else { 0.0 }).child(submit);
     if !with_card {
@@ -314,7 +346,7 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     c.child(
         foot.child(
             au::sentence_link(k, "New to Beebeeb?", "Create an account", t, |link| {
-                link.on_press(act(|ui| ui.go(Intent::CreateAccount)))
+                way_out(link, ui, |ui| ui.leave(Intent::CreateAccount))
             })
             .mt(4.0),
         ),
@@ -393,7 +425,7 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
                     ButtonState::Enabled,
                     t,
                 )
-                .on_press(act(Ui::continue_as)),
+                .on_press_tx(act(Ui::continue_as)),
             )
             .child(use_password_instead(k, "Use another way to sign in", t)),
     )
@@ -493,7 +525,18 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                         .a11y_hidden(),
                     ),
             )
-            .child(au::pill("status-pill", "Waiting for approval", Tone::Neutral, true, t))
+            .child(au::pill(
+                "status-pill",
+                // The countdown goes on while the connection is down (DW-A07).
+                if ui.reconnecting() {
+                    "Reconnecting\u{2026}"
+                } else {
+                    "Waiting for approval"
+                },
+                Tone::Neutral,
+                true,
+                t,
+            ))
     };
     c = c.child(stack.child(status.key("status")));
     if let Some(request) = ui.request() {
@@ -521,7 +564,7 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                 ButtonState::Enabled,
                 t,
             )
-            .on_press(act(Ui::ask_other_device)),
+            .on_press_tx(act(Ui::ask_other_device)),
         );
     }
     c.child(foot.child(use_password_instead(k, "Use email and password instead", t)))
@@ -555,7 +598,7 @@ fn approved(by: &str, k: &mut Keys, t: &Theme) -> El {
         .child(
             actions(6.0).child(
                 au::button(k, "Open Drive", None, ButtonKind::Primary, ButtonSize::Lg, ButtonState::Enabled, t)
-                    .on_press(act(|ui| ui.go(Intent::Next(super::source::NextAfterSignIn::Drive)))),
+                    .on_press_tx(act(Ui::open_drive)),
             ),
         )
 }
@@ -584,7 +627,41 @@ fn denied(by: &str, k: &mut Keys, t: &Theme) -> El {
                         ButtonState::Enabled,
                         t,
                     )
-                    .on_press(act(Ui::ask_other_device)),
+                    .on_press_tx(act(Ui::ask_other_device)),
+                )
+                .child(use_password_instead(k, "Use email and password instead", t)),
+        )
+}
+
+/// DW-A08's error state, which the board gives words and no drawing: "Approved, but the keys
+/// did not arrive. Nothing was signed in. Ask again." Laid out as DW-A10 (the other ending of
+/// a request with nothing signed in): the group's heading, a red alert, Ask again.
+fn keys_not_received(k: &mut Keys, t: &Theme) -> El {
+    au::column()
+        .child(back(t))
+        .child(au::heading("Sign in with another device", None, false, t))
+        .child(au::banner(
+            k,
+            Tone::Red,
+            &icons::INFO,
+            Some("Approved, but the keys did not arrive"),
+            Some("Nothing was signed in. Ask again."),
+            true,
+            t,
+        ))
+        .child(
+            actions(6.0)
+                .child(
+                    au::button(
+                        k,
+                        "Ask again",
+                        Some(&icons::RETRY),
+                        ButtonKind::Primary,
+                        ButtonSize::Lg,
+                        ButtonState::Enabled,
+                        t,
+                    )
+                    .on_press_tx(act(Ui::ask_other_device)),
                 )
                 .child(use_password_instead(k, "Use email and password instead", t)),
         )

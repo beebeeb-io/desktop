@@ -285,9 +285,13 @@ pub fn back_link(label: &str, chevron: &'static Icon, t: &Theme) -> El {
 /// first element for assistive technology.
 pub fn heading(title: &str, subtitle: Option<&str>, centered: bool, t: &Theme) -> El {
     let align = if centered { Align::Center } else { Align::Start };
+    // Focus can be moved to the title (a result that replaces the screen: DW-A08); Tab skips it.
     let title = kit::label("title", title, type_au::LARGE, t.text)
         .role("heading")
-        .level(1);
+        .level(1)
+        .focusable(true)
+        .tab_index(-1)
+        .no_focus_ring();
     let mut h = col().key("au-h").gap(6.0).w_full();
     h = if centered {
         h.items_center().child(title)
@@ -599,6 +603,20 @@ pub struct FieldSpec<'a> {
     pub mono: bool,
 }
 
+/// What the frame gate is told a field holds, and what this file measures: a plain field's
+/// text (borrowed), a hidden secure field's bullets (their count, never the characters), and
+/// NOTHING for a secure field that is shown. A secret is drawn by Rune's secure text input
+/// alone, which keeps it out of the shared layout cache (`rune/src/text/rich_layout.rs:137-139`)
+/// and wipes its buffers; it is never copied into a `String` here, measured with
+/// `rune::text::advance` (the shared cache, `rune/src/text/measure.rs:216`) or noted.
+pub fn gate_text(edit: &TextEdit) -> Option<std::borrow::Cow<'_, str>> {
+    match (edit.is_secure(), edit.is_revealed()) {
+        (false, _) => Some(std::borrow::Cow::Borrowed(edit.text.as_str())),
+        (true, false) => Some(std::borrow::Cow::Owned("\u{2022}".repeat(edit.text.chars().count()))),
+        (true, true) => None,
+    }
+}
+
 /// A labelled one-line field. `input_key` is the text input's own key (focus, tests).
 /// `trailing` is the button at the field's end (show or hide the password), if any.
 ///
@@ -615,24 +633,20 @@ pub fn field(
     t: &Theme,
 ) -> El {
     let key = keys.next("field");
-    let secure = edit.is_secure() && !edit.is_revealed();
-    let style = if secure {
+    let hidden = edit.is_secure() && !edit.is_revealed();
+    let style = if hidden {
         type_au::FIELD_SECURE
     } else if spec.mono {
         type_au::FIELD_MONO
     } else {
         type_au::FIELD_VALUE
     };
-    let shown: String = if secure {
-        "\u{2022}".repeat(edit.text.chars().count())
-    } else {
-        edit.text.clone()
-    };
-    if !shown.is_empty() {
+    let shown = gate_text(edit);
+    if let Some(shown) = shown.as_deref().filter(|shown| !shown.is_empty()) {
         kit::note_text(
             &format!("{key}-value"),
             &format!("{key}-value-box"),
-            &shown,
+            shown,
             style,
             t.text,
         );
@@ -676,7 +690,7 @@ pub fn field(
         .key(format!("{key}-value-box"))
         .a11y_hidden()
         .absolute(0.0, 0.0)
-        .w(rune::text::advance(&shown, style))
+        .w(shown.as_deref().map_or(0.0, |shown| rune::text::advance(shown, style)))
         .h_full();
     well = well.child(row().grow(1.0).min_w(0.0).h_full().center_y().child(input).child(typed));
     if let Some(trailing) = trailing {

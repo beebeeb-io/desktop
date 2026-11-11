@@ -6,6 +6,10 @@
 
 use rune::Icon;
 
+// The same drawing as one the Files window already has: one body, in `theme/icons.rs`.
+#[allow(unused_imports)] // CLOCK and TRASH belong to frames listed as not built
+pub use crate::theme::icons::{CHEVRON_LEFT as BACK, LOCK, SHARED as PEOPLE, SYNC_HISTORY as CLOCK, TRASH};
+
 macro_rules! icon24 {
     ($name:expr, $body:expr) => {
         Icon {
@@ -20,14 +24,6 @@ macro_rules! icon24 {
     };
 }
 
-pub static LOCK: Icon = icon24!(
-    "lock",
-    r#"<path d="M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"></path>"#
-);
-pub static PEOPLE: Icon = icon24!(
-    "people",
-    r#"<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>"#
-);
 pub static GLOBE: Icon = icon24!(
     "globe",
     r#"<path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"></path>"#
@@ -52,7 +48,6 @@ pub static PASSKEY: Icon = icon24!(
     "passkey",
     r#"<path d="M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"></path><path d="M2.5 20v-1a4.5 4.5 0 0 1 4.5-4.5h3"></path><path d="M17 12.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"></path><path d="M17 17.5V21"></path><path d="M17 19.5h2"></path>"#
 );
-pub static BACK: Icon = icon24!("back", r#"<path d="M15 5l-7 7 7 7"></path>"#);
 pub static INFO: Icon = icon24!(
     "info",
     r#"<path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01"></path>"#
@@ -75,15 +70,7 @@ pub static KEY: Icon = icon24!(
     "key",
     r#"<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>"#
 );
-pub static CLOCK: Icon = icon24!(
-    "clock",
-    r#"<path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"></path>"#
-);
 pub static CHEVRON: Icon = icon24!("chevron", r#"<path d="M9 18l6-6-6-6"></path>"#);
-pub static TRASH: Icon = icon24!(
-    "trash",
-    r#"<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>"#
-);
 pub static SHIELD: Icon = icon24!(
     "shield",
     r#"<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>"#

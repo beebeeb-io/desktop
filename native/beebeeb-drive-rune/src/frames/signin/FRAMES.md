@@ -1,10 +1,11 @@
 # Sign-in, gate and first run: the frame checklist (lane f-signin)
 
 The Windows frames of the board's groups First run, Sign in, Continue as, Another device, Approving a sign-in,
-Email and password, Two-factor and passkeys, Forgot password, Before Files, and The first-time guide: 45 frames.
-"Create an account" (DW-A31 on) is not a desktop frame: its two entry points emit `Intent::CreateAccount`.
+Email and password, Two-factor and passkeys, Forgot password, Before Files, and The first-time guide: 45 frames;
+and Create an account (DW-A31 to DW-A44): 14 more Windows frames, which the board reaches from DW-A01, DW-A02 and
+DW-A03 ("Starts sign-up at the email step DW-A31"). 59 frames in all.
 
-Built = drawn from `Ui`, reachable by its controls, a scene in `main.rs`, gated in light and dark.
+Built = drawn from `Ui`, reachable by its controls, a scene in `shell/mod.rs`, gated in light and dark.
 Gate state per frame is in the PR body; `0` = all six counts at 0 failing in both themes.
 
 | Frame | What | State |
@@ -25,6 +26,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A21 | Sign in: too many tries from this network | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A22 | Sign in: the lock explained | built; the note wraps one word later than the board (3 pixel lines), dark also `card-0-avatar` |
+| DW-A31 to DW-A44 | Create an account: email, verify, terms, password, phrase, this device (14 frames) | not built; no goldens yet; "Create a Beebeeb account" and "Create an account" emit `Intent::CreateAccount` for DW-A31. Which lane builds them is the lead's call |
 | DW-A63 | The account was deleted | not built; golden captured; `Intent::AccountDeleted` leads to it |
 | DW-A23, DW-A24, DW-A25 | The 12 words on a new device, wrong words, no way in | not built; goldens captured |
 | DW-A26, DW-A27, DW-A28 | Two-factor code, wrong code, backup code | not built; goldens captured |
@@ -34,7 +36,11 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-0009, DW-0014 | Locked, no plan yet | not built; no goldens yet |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
 
-Built: 15 of 45. Not built: 30 (12 with goldens captured, 18 without).
+Built: 15 of 59. Not built: 44 (12 with goldens captured, 32 without).
+
+States the board gives a rule and no drawing, built from the rule's own words (no golden, tests only):
+DW-A07 with the pill reading "Reconnecting…"; DW-A08's error state "Approved, but the keys did not arrive.
+Nothing was signed in. Ask again."; DW-A21's wait counting down in the message.
 
 ## For whoever builds the rest
 
@@ -44,5 +50,9 @@ Built: 15 of 45. Not built: 30 (12 with goldens captured, 18 without).
 - `SignInSource` already carries the calls and events of the frames above (`begin_two_factor`, `begin_restore`,
   `begin_passkey`, `begin_unlock`, `begin_recovery_verify`, `begin_set_password`); `Ui::apply` ignores their events
   until the frames exist.
-- Secrets: a recovery word, a 2FA digit and a new password go in secure `TextEdit`s, as the password does
-  (`tests.rs`: `a_password_is_in_no_tree_and_no_label` is the pattern to copy for each).
+- Secrets: a recovery word, a 2FA digit and a new password go in secure `TextEdit`s made ONCE in `Ui::new`, as
+  the password is; a test types into the product's field and never makes one of its own (`tests.rs`:
+  `a_password_typed_into_the_products_field_is_in_no_tree_and_no_label` and
+  `a_shown_password_is_not_noted_measured_or_copied` are the patterns to copy for each).
+- An engine answer is applied only by the wait it answers (`Ui::apply`: every arm has a guard); a new wait gets a
+  guard and a line in `answers_of_a_request_already_left_change_nothing`.

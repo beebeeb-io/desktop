@@ -99,6 +99,9 @@ pub enum DeviceStatus {
     Denied { by: String },
     /// DW-A10.
     Expired,
+    /// DW-A08's error state: the other device approved, and the key payload did not decrypt
+    /// here. Nothing was signed in.
+    KeysNotReceived { by: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +158,15 @@ pub enum SignInEvent {
         seconds_left: u32,
     },
     Device(DeviceStatus),
+    /// The waiting request's socket dropped (`false`) or is back (`true`). The countdown goes
+    /// on either way; the request is lost only when the code expires (DW-A07).
+    DeviceConnection {
+        connected: bool,
+    },
+    /// The wait after `SignInProblem::RateLimited`, once a second; `0` when it is over (DW-A21).
+    RetryAfter {
+        seconds: u32,
+    },
     TwoFactor(Result<NextAfterSignIn, TwoFactorProblem>),
     PhraseRestored(Result<NextAfterSignIn, PhraseProblem>),
     Passkey(PasskeyOutcome),
@@ -173,9 +185,12 @@ pub trait SignInSource {
     fn begin_sign_in(&mut self, email: &str, password: &str);
     /// Engine: Windows Hello (`UserConsentVerifier`), then the shared credential store entry.
     fn begin_hello(&mut self);
+    /// The person left while the Windows Hello prompt was up: dismiss it. No `Hello` event of
+    /// that attempt may arrive after this call.
+    fn cancel_hello(&mut self);
     /// Engine: `auth_v2::device_request_start`; ticks and the outcome follow as events.
     fn begin_device_request(&mut self);
-    /// Engine: `auth_v2::device_request_cancel`.
+    /// Engine: `auth_v2::device_request_cancel`. No event of that request may arrive after this call.
     fn cancel_device_request(&mut self);
     /// Engine: `auth_v2::verify_two_factor`.
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind);
@@ -333,6 +348,11 @@ impl SignInSource for FixtureSignInSource {
         self.queue.push_back(SignInEvent::Hello(self.script.hello));
     }
 
+    fn cancel_hello(&mut self) {
+        self.called("cancel_hello");
+        self.queue.retain(|e| !matches!(e, SignInEvent::Hello(_)));
+    }
+
     fn begin_device_request(&mut self) {
         self.called("device_request");
         self.queue.push_back(SignInEvent::DeviceRequested(Ok(Self::request())));
@@ -344,8 +364,15 @@ impl SignInSource for FixtureSignInSource {
 
     fn cancel_device_request(&mut self) {
         self.called("cancel_device_request");
-        self.queue
-            .retain(|e| !matches!(e, SignInEvent::Device(_) | SignInEvent::DeviceTick { .. }));
+        self.queue.retain(|e| {
+            !matches!(
+                e,
+                SignInEvent::Device(_)
+                    | SignInEvent::DeviceTick { .. }
+                    | SignInEvent::DeviceRequested(_)
+                    | SignInEvent::DeviceConnection { .. }
+            )
+        });
     }
 
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind) {

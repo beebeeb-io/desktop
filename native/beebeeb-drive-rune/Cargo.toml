@@ -18,6 +18,21 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 serde_json = "1"
+# Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
+png = "0.18"
+
+[features]
+# Development and diagnostic flags in a RELEASE build (Rune's `--snap`, `--out`, `--html`,
+# `--script`, …, and `--db`). Debug builds have them without it. A shipped build is built
+# without this feature and ignores every one of them (`shell/instance.rs`: `DEV_BUILD`).
+dev-tools = []
+
+[target.'cfg(windows)'.dependencies]
+# The same windows-sys Rune builds with: the notification-area icon, the registry Run value,
+# the taskbar's mode and the control channel's named pipe (`shell/platform/windows*.rs`).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Names the Win32 window handle Rune's `WindowHandle::with_raw_handle` lends.
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 # `source_engine` tests build a state.db with the engine's own writers.
