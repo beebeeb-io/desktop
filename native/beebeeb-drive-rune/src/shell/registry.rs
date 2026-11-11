@@ -82,6 +82,47 @@ impl FrameGroup {
     }
 }
 
+impl FrameGroup {
+    /// The board frame the group draws (`design/desktop-v2/frames.json`), where the board has
+    /// ONE for it; a note of the live feedback mode names it (`feedback/frame.rs`).
+    #[cfg_attr(not(feature = "feedback"), allow(dead_code))]
+    pub fn frame_id(self) -> Option<&'static str> {
+        match self {
+            FrameGroup::SignIn => Some("DW-A01"),
+            FrameGroup::Locked => Some("DW-0009"),
+            FrameGroup::RecoveryPhrase => Some("DW-A23"),
+            FrameGroup::NoPlan => Some("DW-0014"),
+            FrameGroup::KeyStoreUnavailable => None,
+            FrameGroup::FirstRun => Some("DW-0201"),
+            FrameGroup::Section(Section::Files) => Some("DW-0401"),
+            FrameGroup::Section(Section::Shared) => Some("DW-0501"),
+            FrameGroup::Section(Section::Photos) => Some("DW-0601"),
+            FrameGroup::Section(Section::Backups) => Some("DW-0737"),
+            FrameGroup::Section(Section::Trash) => Some("DW-0747"),
+            FrameGroup::Section(Section::SyncHistory) => Some("DW-1301"),
+            FrameGroup::Section(Section::AvailableOffline) => None,
+            FrameGroup::Viewer => Some("DW-0408"),
+            FrameGroup::Settings(_) => Some("DW-0701"),
+            FrameGroup::ConflictDialog => Some("DW-0429"),
+            FrameGroup::ShortcutsDialog => Some("DW-1232"),
+            FrameGroup::Flyout => Some("DW-1201"),
+        }
+    }
+}
+
+/// Whether the live feedback mode (test builds: the `feedback` feature, `src/feedback/`) may run
+/// on a frame group: its comment mode writes the window's picture and element tree to a local
+/// folder. **Default deny:** a group says `Allowed` only once its lane has met the three duties
+/// of `src/feedback/README.md` ("For frame lanes": mark every secret, prove it, keep secrets
+/// still); until then its line says `Denied` with the reason the person reads after "Comment
+/// mode is off on this screen: ". A group with no line is denied (`feedback::frame`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "feedback"), allow(dead_code))]
+pub enum FeedbackPolicy {
+    Allowed,
+    Denied(&'static str),
+}
+
 pub type FrameFn = fn(&State, &mut Cx<State>) -> El;
 pub type KeyFn = fn(&mut State, &KeyEvent, &mut Tx) -> bool;
 pub type FlyoutFn = fn(&FlyoutState, &mut Cx<FlyoutState>) -> El;
@@ -92,6 +133,9 @@ pub struct Frame {
     pub group: FrameGroup,
     pub view: FrameFn,
     pub on_key: Option<KeyFn>,
+    /// Read only by a build with the `feedback` feature.
+    #[cfg_attr(not(feature = "feedback"), allow(dead_code))]
+    pub feedback: FeedbackPolicy,
 }
 
 /// The built frame groups of the main window. ONE line per group.
@@ -100,8 +144,9 @@ pub const FRAMES: &[Frame] = &[
         group: FrameGroup::Section(Section::Files),
         view: files_frame::view,
         on_key: Some(files_frame::on_key),
+        feedback: FeedbackPolicy::Allowed,
     },
-    // Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None },
+    // Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
 /// The flyout's content, once the tray lane builds it: `Some(crate::frames::tray::view)`.
@@ -118,11 +163,15 @@ pub struct DialogFrame {
     pub group: FrameGroup,
     pub view: DialogFn,
     pub on_key: Option<KeyFn>,
+    /// As [`Frame::feedback`]. With a dialog open, comment mode needs the dialog AND the frame
+    /// behind it to allow it.
+    #[cfg_attr(not(feature = "feedback"), allow(dead_code))]
+    pub feedback: FeedbackPolicy,
 }
 
 /// The built dialogs. ONE line per dialog.
 pub const DIALOGS: &[DialogFrame] = &[
-    // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None },
+    // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
 /// The scrim between a dialog and the window: the board's `--kit-scrim`, "color-mix(in oklch,
