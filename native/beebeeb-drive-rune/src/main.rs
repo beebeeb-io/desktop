@@ -25,7 +25,7 @@ mod ui;
 
 use rune::{App, Cx, El, KeyEvent, TextEdit, Titlebar, Tx};
 
-use source::{BoardFixtureSource, DriveSource, LargeFixtureSource, Listing};
+use source::{DriveSource, LargeFixtureSource, Listing};
 use ui::sidebar::SidebarSection;
 
 // Re-export AppSpec from the tooling module (used by both App and tests)
@@ -205,6 +205,7 @@ fn main() {
 mod tests {
     use super::*;
     use rune::{Env, Runtime};
+    use source::BoardFixtureSource;
 
     #[test]
     fn db_option_takes_one_path_and_refuses_to_be_given_none() {

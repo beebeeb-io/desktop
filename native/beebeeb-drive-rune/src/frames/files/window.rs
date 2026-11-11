@@ -39,8 +39,8 @@ fn hover(s: &mut State, index: usize) {
     }
 }
 
-fn close(s: &mut State) {
-    s.close_menu();
+fn close(s: &mut State, tx: &mut Tx) {
+    s.close_menu_tx(tx);
 }
 
 fn undo(s: &mut State, _tx: &mut Tx) {
@@ -62,48 +62,19 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
             .items_start()
             .child(surface)
     };
+    let (name, width, entries) = match open.kind {
+        MenuKind::File => ("File", menus::FILE_MENU_W, menus::file_menu(s)),
+        MenuKind::Sort => ("Sort", menus::SORT_MENU_W, menus::sort_menu(s.actions.sort)),
+        MenuKind::New => ("New", menus::NEW_MENU_W, menus::new_menu()),
+    };
+    // The menu is modal, so what is outside it hears no key: its keys are heard on the menu itself.
+    let surface =
+        menu::menu("menu", name, width, &entries, open.hot, t, pick, hover, close).on_key(super::keys::on_key);
     Some(match open.kind {
-        MenuKind::File => menu::menu(
-            "menu",
-            "File",
-            menus::FILE_MENU_W,
-            &menus::file_menu(s),
-            open.hot,
-            t,
-            pick,
-            hover,
-            close,
-        )
-        .absolute(open.at.0, open.at.1),
+        MenuKind::File => surface.absolute(open.at.0, open.at.1),
         // `.wn-menu` of Sort: 226 pt from the window's right edge; of New: 42 pt.
-        MenuKind::Sort => layer(
-            226.0,
-            menu::menu(
-                "menu",
-                "Sort",
-                menus::SORT_MENU_W,
-                &menus::sort_menu(s.actions.sort),
-                open.hot,
-                t,
-                pick,
-                hover,
-                close,
-            ),
-        ),
-        MenuKind::New => layer(
-            42.0,
-            menu::menu(
-                "menu",
-                "New",
-                menus::NEW_MENU_W,
-                &menus::new_menu(),
-                open.hot,
-                t,
-                pick,
-                hover,
-                close,
-            ),
-        ),
+        MenuKind::Sort => layer(226.0, surface),
+        MenuKind::New => layer(42.0, surface),
     })
 }
 
@@ -144,7 +115,7 @@ fn empty_folder(t: &Theme) -> El {
             .gap(8.0)
             .items_center()
             .child(
-                button::outline_button("empty-add", "Add files", Some(&icons::PLUS), button::Size::Md, t)
+                button::outline_button("empty-add", "Add files", Some(&icons::PLUS), t)
                     .expanded(false)
                     .on_press(|s: &mut State| s.toggle_menu(MenuKind::New)),
             )

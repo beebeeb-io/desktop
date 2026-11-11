@@ -143,7 +143,7 @@ pub fn menu(
     t: &Theme,
     pick: fn(&mut State, usize, &mut Tx),
     hover: fn(&mut State, usize),
-    close: fn(&mut State),
+    close: fn(&mut State, &mut Tx),
 ) -> El {
     let mut surface = col()
         .key(key)
@@ -155,7 +155,7 @@ pub fn menu(
         .fill(raised(t))
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.20)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .modal(true, close);
+        .modal_tx(true, close);
     let (mut n_item, mut n_sep) = (0, 0);
     for (i, entry) in entries.iter().enumerate() {
         match *entry {

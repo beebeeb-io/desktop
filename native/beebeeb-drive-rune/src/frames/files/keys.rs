@@ -46,7 +46,7 @@ fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         Key::Escape => {
-            s.close_menu();
+            s.close_menu_tx(tx);
             return true;
         }
         // Type-to-select: the next item that starts with the letter.

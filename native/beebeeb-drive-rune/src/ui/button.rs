@@ -1,4 +1,4 @@
-//! A plain button (`.kit-btn`, outlined): "Add files" in an empty folder, the selection bar's actions.
+//! A plain button (`.kit-btn.kit-btn-md`, outlined): "Add files" in an empty folder.
 //!
 //! Keys: `<key>`, `<key>-icon`, `<key>-label`.
 
@@ -7,24 +7,12 @@ use rune::{El, Icon, TextStyle, row};
 
 use super::kit;
 
-/// `.kit-btn-md` (28 pt tall, a 16 pt glyph) and `.kit-btn-sm` (22 pt, 14 pt).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Size {
-    Md,
-    Sm,
-}
-
 /// `.kit-btn-md span`: 13/500 on the button's 10/7 line, tracked -0.005em.
 pub const LABEL_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
-/// `.kit-btn-sm span`
-pub const LABEL_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).tracking(-0.06);
-
 /// The button. The caller adds `.on_press(..)`.
-pub fn outline_button(key: &str, label: &str, ic: Option<&'static Icon>, size: Size, t: &Theme) -> El {
-    let (h, glyph, style) = match size {
-        Size::Md => (28.0, 16.0, LABEL_MD),
-        Size::Sm => (22.0, 14.0, LABEL_SM),
-    };
+pub fn outline_button(key: &str, label: &str, ic: Option<&'static Icon>, t: &Theme) -> El {
+    // `.kit-btn-md`: 28 pt tall, a 16 pt glyph.
+    let (h, glyph, style) = (28.0, 16.0, LABEL_MD);
     let mut button = row()
         .key(key)
         .role("button")

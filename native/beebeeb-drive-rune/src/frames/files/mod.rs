@@ -264,6 +264,14 @@ impl State {
         self.actions.menu = None;
     }
 
+    /// Close the menu and give the keyboard back to the list: the row the menu was for.
+    pub fn close_menu_tx(&mut self, tx: &mut Tx) {
+        self.actions.menu = None;
+        if let Some(row) = self.selected {
+            tx.focus(format!("row-{row}"), false);
+        }
+    }
+
     /// The toast to draw now: none once its time is over.
     pub fn live_toast(&self) -> Option<Toast> {
         match self.actions.toast_until {
@@ -485,7 +493,7 @@ impl State {
         };
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
-            self.close_menu();
+            self.close_menu_tx(tx);
         }
         let lead = self
             .selected
