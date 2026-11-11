@@ -32,12 +32,8 @@ pub fn column_headers(t: &Theme) -> El {
         .key("column-headers")
         .h(ROW_H)
         .w_full()
-        .px(space::LG)
+        .ml(20.0) // Board: col-name at x=241, content at x=221 -> 20px left margin
         .center_y()
-        .child(
-            // Icon spacer
-            el().key("icon-spacer").w(20.0),
-        )
         .child(
             row()
                 .key("name-header")
@@ -172,7 +168,8 @@ fn file_row(
         .label(&item.name)
         .h(ROW_H)
         .w_full()
-        .px(space::LG)
+        .ml(6.0) // Board: row at x=227, content starts at x=221, so 6px margin
+        .mr(6.0)
         .center_y()
         .radius(if selected { 6.0 } else { 0.0 })
         .fill(if selected { selection_color } else { Color::TRANSPARENT })

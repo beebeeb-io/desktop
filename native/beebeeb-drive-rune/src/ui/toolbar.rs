@@ -140,8 +140,8 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .h(46.0) // Board: toolbar h=46 (y=33 to y=79)
         .w_full()
         .fill(t.bg)
-        .pl(space::LG)
-        .pr(trailing_inset.max(space::LG))
+        .pl(10.0) // Board: back arrow at x=231, toolbar at x=221 -> 10px padding
+        .pr(trailing_inset.max(10.0))
         .center_y()
         .gap(space::SM)
         .child(nav)

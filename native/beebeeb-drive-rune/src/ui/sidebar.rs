@@ -1,8 +1,8 @@
 //! Sidebar: section items with icon/label/count badge, THIS PC section,
 //! storage meter, and account row.
 //!
-//! Board measurements (from Playwright):
-//! - Sidebar width: 210 pt (content area)
+//! Board measurements (from Playwright geometry export):
+//! - Sidebar width: 220 pt (board: x=1, w=220)
 //! - Section items: 30 pt tall, 12 pt font, icon 16x16
 //! - Section label "THIS PC": 10 pt/600, ink-3 colour
 //! - Storage meter: 4 pt bar, "240 GB of 1 TB" + breakdown
