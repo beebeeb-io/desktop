@@ -35,7 +35,7 @@ Modules 1–45, sorted by path.
 | `diagnostics_export_tests.rs` | (no //! header) | — |
 | `direct_download.rs` | Direct S3 download driver (task 2173). | — |
 | `download_pin.rs` | Task 1643: one download, one immutable version. | — |
-| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | WireCounters (2), FpWrite (3), CachePolicy (2), PinUpdateOutcome (2), CacheCleanupOutcome (1), TransferLoopOutcome (8), ConflictContentSide (3), ParkedChoice (3), ParkedResolution (1), ConflictContentPreview (4), FetchedVersion (2), FetchTicket, … (+17 more) |
+| `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, FetchedVersion (2), FpWrite (3), ParkedChoice (3), ParkedResolution (1), PinUpdateOutcome (2), … (+17 more) |
 | `engine_status.rs` | What the engine says about itself, and what the popover reads back (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` | — |
 | `extension_log_pin.rs` | The File Provider extension writes every log line through its one `os.Logger` (`BeebeebFileProvider/ExtensionLog.swift`, spec 2026-10-09 §11 | — |
 | `file_open_commands.rs` | `file_open_commands` items split out of `lib.rs`. | — |

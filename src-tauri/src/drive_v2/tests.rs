@@ -782,3 +782,69 @@ fn drive_v2_no_dto_has_a_secret_shaped_field() {
     assert_eq!(dtos[12].1["folderId"], "d");
     assert_eq!(dtos[6].1["phase"], "up-to-date");
 }
+
+#[test]
+fn drive_v2_list_uses_indexed_children_and_matches_full_scan() {
+    let f = fixture();
+    drive(&f);
+    // The indexed list must produce the same items as the full-scan version.
+    let root = model::list(&f.db, None, Sort::default(), false).unwrap();
+    assert_eq!(
+        names(&root.items),
+        ["Docs", "Beach.jpg", "zebra.txt"],
+        "indexed list matches expected root children"
+    );
+    let docs = model::list(
+        &f.db,
+        Some("d0c5"),
+        Sort {
+            key: SortKey::Name,
+            dir: SortDir::Asc,
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(names(&docs.items), ["notes.txt", "Report.pdf"]);
+    assert_eq!(docs.items[0].is_folder, false);
+}
+
+#[test]
+fn drive_v2_children_of_paged() {
+    let f = fixture();
+    drive(&f);
+    let (page, total) = model::children_of(&f.db, None, Sort::default(), 0, 2).unwrap();
+    assert_eq!(total, 3, "root has 3 visible children");
+    assert_eq!(page.len(), 2, "page 0 with limit 2");
+    let (page2, total2) = model::children_of(&f.db, None, Sort::default(), 2, 2).unwrap();
+    assert_eq!(total2, 3);
+    assert_eq!(page2.len(), 1, "page 1 with limit 2");
+    // The paged items match the full list in order.
+    let full = model::list(&f.db, None, Sort::default(), false).unwrap();
+    assert_eq!(page[0].id, full.items[0].id);
+    assert_eq!(page[1].id, full.items[1].id);
+    assert_eq!(page2[0].id, full.items[2].id);
+}
+
+#[test]
+fn drive_v2_empty_path_row_shows_blocked_label() {
+    let f = fixture();
+    // Insert a file with an empty path (simulating a row written with a locked vault).
+    row(
+        &f.db,
+        "empty1",
+        "",
+        Some("d0c5"),
+        false,
+        500,
+        100,
+        FileStatus::CloudOnly,
+    );
+    row(&f.db, "d0c5", "Docs", None, true, 0, 100, FileStatus::Local);
+    let listing = model::list(&f.db, Some("d0c5"), Sort::default(), false).unwrap();
+    let item = listing.items.iter().find(|i| i.id == "empty1").unwrap();
+    assert!(
+        item.name.starts_with("Unavailable file "),
+        "an empty-path file shows the blocked label: {}",
+        item.name
+    );
+}

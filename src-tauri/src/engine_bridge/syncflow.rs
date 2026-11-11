@@ -249,6 +249,25 @@ pub async fn sync_tick_outcome(
     // place), we re-bootstrap from a fresh snapshot — the snapshot is always
     // authoritative, so a re-bootstrap can never lose data.
 
+    // Task 2445: a one-time heal for DBs hit by the null-envelope bug. Forces a
+    // re-snapshot so every row is re-prepared with the fixed request_envelope.
+    // P2-A: do NOT clear blocked_fingerprint (that would lift legitimate blocks
+    // from malformed envelopes and lost adoption races). prepare_owned_rows
+    // already resets blocked_fingerprint on every pass.
+    // P1-B: mark done only AFTER the snapshot succeeds (see below); requesting
+    // here and marking after bootstrap prevents a lost heal on network failure.
+    let needs_envelope_heal = if bridge.db().envelope_heal_done()? {
+        false
+    } else if bridge.db().has_blocked_or_nameless_rows()? {
+        tracing::info!("task 2445: requesting re-snapshot for the null-envelope heal");
+        bridge.db().request_resnapshot()?;
+        true
+    } else {
+        // (b) Healthy DB: mark done so the json_extract scan does not run every tick.
+        bridge.db().mark_envelope_heal_done()?;
+        false
+    };
+
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
     // tick regardless of the cursor. On macOS the request is read here and cleared
@@ -280,6 +299,10 @@ pub async fn sync_tick_outcome(
                     bridge.db().clear_resnapshot_request(seen)?;
                 }
             }
+            // P1-B: mark the heal done only after a successful bootstrap.
+            if needs_envelope_heal {
+                bridge.db().mark_envelope_heal_done()?;
+            }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome {
                 conflicts,
@@ -297,6 +320,10 @@ pub async fn sync_tick_outcome(
                         if let Some(seen) = resnapshot_request {
                             bridge.db().clear_resnapshot_request(seen)?;
                         }
+                    }
+                    // P1-B: mark the heal done only after a successful bootstrap.
+                    if needs_envelope_heal {
+                        bridge.db().mark_envelope_heal_done()?;
                     }
                     applied_item_ids.extend(applied);
                     return Ok(SyncTickOutcome {
@@ -491,7 +518,7 @@ pub(super) async fn bootstrap_from_snapshot(
 ///
 /// Split out from `bootstrap_from_snapshot` so it's directly unit-testable with
 /// a synthetic `SyncSnapshot` (no HTTP).
-pub(super) fn apply_snapshot(
+pub(crate) fn apply_snapshot(
     bridge: &EngineBridge,
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     snapshot: &crate::api_client::SyncSnapshot,
@@ -512,6 +539,9 @@ pub(super) fn apply_snapshot(
     let mut seen: HashSet<String> = HashSet::new();
     // file_id → resolved FULL relative path (so children can prefix their leaf).
     let mut resolved_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // P2-2 (task 2445, restored from main): nodes not placed in the mirror.
+    // Their children are skipped instead of being placed at the root.
+    let mut unplaced: HashSet<String> = HashSet::new();
 
     for f in order {
         let file_id = f["id"].as_str().unwrap_or_default();
@@ -519,6 +549,15 @@ pub(super) fn apply_snapshot(
             continue;
         }
         if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        // P2-2: children of an unplaced folder are skipped until the folder is placed.
+        if f["parent_id"].as_str().is_some_and(|pid| unplaced.contains(pid)) {
+            tracing::debug!(
+                file_id = %file_id,
+                "sync_tick: snapshot node under a folder not placed; not placed either"
+            );
+            unplaced.insert(file_id.to_string());
             continue;
         }
         // Parent's resolved path ("" at the vault root, or when the parent
@@ -551,8 +590,18 @@ pub(super) fn apply_snapshot(
         {
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
+                applied.push(file_id.to_string());
+            } else {
+                // P2-B: a blocked folder returns ("", kind). Its children must
+                // not be placed at the root; treat it as unplaced.
+                applied.push(file_id.to_string());
+                unplaced.insert(file_id.to_string());
             }
-            applied.push(file_id.to_string());
+        } else if let Some(stored) = bridge.db().get_file(file_id)?.filter(|row| !row.path.is_empty()) {
+            // A stored row the store refused now keeps its place; the rows below it stay under it.
+            resolved_paths.insert(file_id.to_string(), stored.path);
+        } else {
+            unplaced.insert(file_id.to_string());
         }
     }
 
