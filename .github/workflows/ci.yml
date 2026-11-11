@@ -129,6 +129,70 @@ jobs:
           evidence-name: rust-test-linux
           cache-key: desktop-linux
 
+  # The native updater (crates/beebeeb-updater): its rules decide what an install will run, so a pull request that
+  # weakens one fails here, not at the next release. The count line is asserted: a run without tests is a failure.
+  updater:
+    name: Updater crate (tests, Windows check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: Test, lint and cross-check
+        working-directory: crates/beebeeb-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
+          cargo clippy --locked --all-targets --features net -- -D warnings
+          cargo check --locked --features net --target x86_64-pc-windows-msvc
+          test "$(cargo tree --locked -e normal --features net | grep -c tauri)" -eq 0
+
+      - name: Release script self-tests
+        run: |
+          set -euo pipefail
+          bash scripts/publish-release-files.sh --self-test
+          bash scripts/native-release-ref-check.sh --self-test
+
+  # The updater's Windows-only rules (the staged installer is held so that nothing can replace it between the check
+  # and the start) exist only under cfg(windows): they are tested where they exist. Each test is named, so a run in
+  # which they were filtered out or compiled away is a failure. A hosted runner, no secret, no environment.
+  updater-windows:
+    name: Updater crate (Windows-only tests)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Test on Windows
+        working-directory: crates/beebeeb-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test-windows.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test-windows.log"
+          for name in \
+            'host::tests::a_held_installer_cannot_be_written_replaced_renamed_or_deleted' \
+            'machine_tests::the_staged_file_cannot_be_replaced_between_the_check_and_the_start'; do
+            grep -Fxq "test $name ... ok" "$RUNNER_TEMP/updater-test-windows.log" || { echo "::error::$name did not run"; exit 1; }
+          done
+
   # Windows and macOS are two jobs, not a matrix: a skipped matrix job reports under its unexpanded name and would
   # leave the required "Rust check (Windows)" / "Rust check (macOS)" checks waiting for ever.
   # Task 2272 / 2271: macOS runs the tests too. The 0.8.18 release found a macOS-only test failure on the
