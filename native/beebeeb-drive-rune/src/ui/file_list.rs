@@ -243,8 +243,12 @@ pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                         }
                     },
                     move |s: &State, i| match s.listing.items.get(i) {
-                        Some(item) => file_row(i, item, s.is_selected(i), s.files.renaming(i), &t)
-                            .on_press(move |s: &mut State| s.select_only(i)),
+                        Some(item) => file_row(i, item, s.selected == Some(i), &t)
+                            .on_press(move |s: &mut State| s.select(i))
+                            .on_double_press(move |s: &mut State| {
+                                s.select(i);
+                                s.open_selected();
+                            }),
                         None => el().key("empty"),
                     },
                 ),
@@ -252,7 +256,7 @@ pub fn file_list(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
 }
 
 /// One row (`.mk-row`). Keys: `row-<i>` and `row-<i>-tile|icon|name|lock|date|size|dash|link|avatar-<j>|pc`.
-pub fn file_row(i: usize, item: &DriveItem, selected: bool, rename: Option<&rune::TextEdit>, t: &Theme) -> El {
+pub fn file_row(i: usize, item: &DriveItem, selected: bool, t: &Theme) -> El {
     let k = format!("row-{i}");
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
     // What the row sits on, for the rings and cut-outs drawn in the surface's colour.
@@ -265,15 +269,12 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, rename: Option<&rune
         .center_y()
         .gap(8.0)
         .child(file_tile(&k, item, t));
-    name = match rename {
-        Some(edit) => name.child(super::overlays::rename_field(&k, edit, &item.name, t)),
-        None => name.child(
-            kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
-                .truncate()
-                .min_w(0.0),
-        ),
-    };
-    if item.is_protected && rename.is_none() {
+    name = name.child(
+        kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
+            .truncate()
+            .min_w(0.0),
+    );
+    if item.is_protected {
         name = name.child(
             kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
                 .ml(2.0)

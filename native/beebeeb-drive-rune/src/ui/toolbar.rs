@@ -123,7 +123,24 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
 
     let nav = row()
         .key("nav")
-        .child(tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Off, t).shortcut_hint("Alt+Left"))
+        .child(
+            tool_button(
+                "back",
+                "Back",
+                &icons::CHEVRON_LEFT,
+                16.0,
+                if s.can_go_back() {
+                    ToolState::Idle
+                } else {
+                    ToolState::Off
+                },
+                t,
+            )
+            .shortcut_hint("Alt+Left")
+            .on_press(|s: &mut State| {
+                s.go_back();
+            }),
+        )
         .child(
             tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
                 .shortcut_hint("Alt+Right"),
@@ -155,23 +172,12 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         t,
     );
 
-    let sort_on = s.menu_open("sort");
-    let sort_btn = tool_button(
-        "sort-btn",
-        "Sort",
-        &icons::SORT,
-        15.0,
-        if sort_on { ToolState::On } else { ToolState::Idle },
-        t,
-    )
-    .expanded(sort_on)
-    .child(kit::glyph(
+    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t).child(kit::glyph(
         "sort-caret",
         &icons::CHEVRON_DOWN,
         11.0,
-        if sort_on { t.text } else { t.text_secondary },
-    ))
-    .on_press(|s: &mut State| s.toggle_menu("sort"));
+        t.text_secondary,
+    ));
 
     let panel_btn = tool_button(
         "panel-toggle-btn",

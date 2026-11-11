@@ -21,7 +21,7 @@ mod source;
 mod theme;
 mod ui;
 
-use rune::{App, Cx, El, Key, KeyEvent, TextEdit, Titlebar, Tx};
+use rune::{App, Cx, El, KeyEvent, TextEdit, Titlebar, Tx};
 
 use source::{BoardFixtureSource, DriveSource, LargeFixtureSource, Listing};
 use ui::sidebar::SidebarSection;
@@ -46,7 +46,7 @@ pub struct State {
     search: TextEdit,
     sidebar_section: SidebarSection,
     show_detail_pane: bool,
-    /// Menus, multi-selection and inline rename of the Files window (`ui::FilesUi`).
+    /// What the Files window keeps beside the listing (`ui::FilesUi`).
     files: ui::FilesUi,
 }
 
@@ -78,33 +78,8 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 // Key handling
 // ---------------------------------------------------------------------------
 
-fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
-    let count = s.listing.items.len();
-    if count == 0 {
-        return false;
-    }
-    match ev.key {
-        Key::Down => {
-            let next = s.selected.map(|i| (i + 1).min(count - 1)).unwrap_or(0);
-            s.selected = Some(next);
-            true
-        }
-        Key::Up => {
-            let prev = s.selected.map(|i| i.saturating_sub(1)).unwrap_or(0);
-            s.selected = Some(prev);
-            true
-        }
-        Key::Enter => {
-            if let Some(idx) = s.selected {
-                if s.listing.items[idx].is_folder {
-                    s.listing = s.source.list(Some(&s.listing.items[idx].id));
-                    s.selected = None;
-                }
-            }
-            true
-        }
-        _ => false,
-    }
+fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    ui::keys::on_key(s, ev, tx)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +103,7 @@ static FONTS: &[&[u8]] = &[
 
 /// Named states of the window: `--snap out.png --scene DW-0401`, and the frame gate
 /// (`scripts/compare.sh DW-0401`). One per board frame, by its frame id.
-const SCENES: &[(&str, fn(&mut State))] = &[
+const SCENES: &[ui::gate::Scene<State>] = &[
     ("light", |_| {}),
     ("dark", |_| {}),
     ("large-folder", |s| {

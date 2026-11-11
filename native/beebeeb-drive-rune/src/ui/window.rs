@@ -39,6 +39,7 @@ pub fn files_window(s: &State, cx: &mut Cx<State>) -> El {
         .key("window")
         .role("window")
         .label("Beebeeb Drive")
+        .on_key(super::keys::on_key)
         .w_full()
         .h_full()
         .fill(t.bg)

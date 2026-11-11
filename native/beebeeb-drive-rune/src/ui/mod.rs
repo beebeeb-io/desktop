@@ -4,8 +4,8 @@ pub mod caption;
 pub mod detail_pane;
 pub mod file_list;
 pub mod gate;
+pub mod keys;
 pub mod kit;
-pub mod overlays;
 pub mod sidebar;
 pub mod status_bar;
 pub mod toolbar;
@@ -15,57 +15,61 @@ pub mod window;
 mod tests;
 
 use crate::State;
-use rune::TextEdit;
 
-/// What the Files window shows over or instead of its plain list: an open menu, further
-/// selected rows, a name being edited, a list that is empty or could not load.
+/// What the Files window keeps beside the listing: where Back goes.
 #[derive(Default)]
 pub struct FilesUi {
-    pub menu: Option<overlays::Menu>,
-    /// Rows selected beside `State::selected` (Ctrl+click, Shift+click).
-    pub also_selected: Vec<usize>,
-    /// The row whose name is being edited, and the field.
-    pub rename: Option<(usize, TextEdit)>,
-}
-
-impl FilesUi {
-    pub fn renaming(&self, row: usize) -> Option<&TextEdit> {
-        self.rename.as_ref().filter(|(i, _)| *i == row).map(|(_, e)| e)
-    }
+    /// The folders left behind, nearest last (`None` is the root).
+    pub back: Vec<Option<String>>,
 }
 
 impl State {
-    pub fn menu_open(&self, name: &str) -> bool {
-        self.files.menu.as_ref().is_some_and(|m| m.name() == name)
+    /// Select one row; the details panel follows.
+    pub fn select(&mut self, row: usize) {
+        if row < self.listing.items.len() {
+            self.selected = Some(row);
+        }
     }
 
-    pub fn toggle_menu(&mut self, name: &str) {
-        self.files.menu = if self.menu_open(name) {
-            None
-        } else {
-            overlays::Menu::named(name, self.selected)
+    /// Move the selection by `delta` rows, stopping at the ends. With nothing selected, the first row.
+    pub fn move_selection(&mut self, delta: isize) {
+        let count = self.listing.items.len();
+        if count == 0 {
+            return;
+        }
+        self.selected = Some(match self.selected {
+            Some(i) => i.saturating_add_signed(delta).min(count - 1),
+            None => 0,
+        });
+    }
+
+    /// Open the selected row if it is a folder: the list becomes its contents. A file does
+    /// nothing here (opening it is the engine's, not the fixture's).
+    pub fn open_selected(&mut self) -> bool {
+        let Some(item) = self.selected.and_then(|i| self.listing.items.get(i)) else {
+            return false;
         };
+        if !item.is_folder {
+            return false;
+        }
+        let id = item.id.clone();
+        self.files.back.push(self.listing.folder.id.clone());
+        self.listing = self.source.list(Some(&id));
+        self.selected = None;
+        true
     }
 
-    pub fn is_selected(&self, row: usize) -> bool {
-        self.selected == Some(row) || self.files.also_selected.contains(&row)
+    pub fn can_go_back(&self) -> bool {
+        !self.files.back.is_empty()
     }
 
-    /// Every selected row, in list order.
-    pub fn selection(&self) -> Vec<usize> {
-        let mut rows: Vec<usize> = self
-            .selected
-            .into_iter()
-            .chain(self.files.also_selected.iter().copied())
-            .collect();
-        rows.sort_unstable();
-        rows.dedup();
-        rows
-    }
-
-    pub fn select_only(&mut self, row: usize) {
-        self.selected = Some(row);
-        self.files.also_selected.clear();
-        self.files.menu = None;
+    /// Back to the folder this one was opened from.
+    pub fn go_back(&mut self) -> bool {
+        let Some(parent) = self.files.back.pop() else {
+            return false;
+        };
+        self.listing = self.source.list(parent.as_deref());
+        self.selected = None;
+        true
     }
 }

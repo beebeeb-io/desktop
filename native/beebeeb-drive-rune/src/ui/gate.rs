@@ -145,10 +145,13 @@ pub fn export<S: 'static>(
     })
 }
 
+/// A named state of the window: its name (a frame id) and what it sets on a fresh `State`.
+pub type Scene<S> = (&'static str, fn(&mut S));
+
 /// `--gate-export <out.json> --scene <frame-id> [--theme light|dark] [--size WxH]`: write the
 /// export and return the process's exit code. `None` when the arguments ask for something else.
 pub fn run_from_args<S: 'static>(
-    scenes: &[(&str, fn(&mut S))],
+    scenes: &[Scene<S>],
     init: fn() -> S,
     view: fn(&S, &mut Cx<S>) -> El,
     fonts: &'static [&'static [u8]],
