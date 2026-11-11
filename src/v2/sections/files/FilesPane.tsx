@@ -350,9 +350,17 @@ export function Toolbar({ p, h }: { p: PaneProps; h: PaneHandlers }) {
         <span className="flex-none font-mono text-[12px] text-ink-3" data-count>{fmtCount(p.items.length)}</span>
       </div>
       <span className="flex-1" />
-      <button type="button" onClick={h.onFind} className={`inline-flex h-8 items-center gap-2 rounded-md border border-line bg-paper px-3 text-[13px] text-ink-3 hover:bg-paper-2 ${FOCUS}`}>
-        <Icon name="search" size={14} />Search names <span className="font-mono text-[11px]">Ctrl+F</span>
-      </button>
+      <label className={`inline-flex h-8 w-[210px] flex-none items-center gap-2 rounded-md border border-line bg-paper px-3 text-[13px] text-ink-3 ${FOCUS}`}>
+        <Icon name="search" size={14} />
+        <input
+          type="text"
+          aria-label="Search names"
+          placeholder="Search names"
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); h.onFind?.() } }}
+          className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
+        />
+        <span className="flex-none font-mono text-[11px]">Ctrl+F</span>
+      </label>
       <div role="group" aria-label="View" className="flex rounded-md border border-line">
         <IconButton icon="menu" label="as List" pressed={p.prefs.view === 'list'} onClick={() => h.onView?.('list')} />
         <IconButton icon="columns" label="as Grid" pressed={p.prefs.view === 'grid'} onClick={() => h.onView?.('grid')} />
