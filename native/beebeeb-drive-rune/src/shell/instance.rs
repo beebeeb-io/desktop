@@ -1,4 +1,5 @@
-//! One Beebeeb per identity and user: the pure half of starting up.
+//! One Beebeeb per identity, user AND Windows session (exclusivity across sessions comes from the
+//! engine/profile lock, not linked yet): the pure half of starting up.
 //!
 //! Three mechanisms:
 //! - **The control channel** (`control.rs`; a named pipe on Windows, open to this user only).
@@ -316,6 +317,42 @@ mod tests {
     use super::*;
 
     const REAL: AppIdentity = AppIdentity::Real;
+
+    /// Task 2455: the control channel's name is taken by a server that is not this user's
+    /// Beebeeb. Creating our own pipe fails (the name exists), so the launch tries to hand
+    /// over, the platform refuses to write to a stranger (`Delivery::Unreachable`), and the
+    /// start is refused with words and exit code 1: never a second instance, never "forwarded".
+    #[test]
+    fn a_channel_served_by_someone_else_refuses_the_start_with_a_clear_message() {
+        for list in [
+            &[][..],
+            &["--open-link", "beebeeb://open/photos"],
+            &["--quit-for-update"],
+            &["--autostart"],
+        ] {
+            let launch = parse(list, false);
+            let Plan::Hand(_) = plan(&launch, Claim::Running, REAL) else {
+                panic!("{list:?}: a taken name is handed to, never started beside");
+            };
+            let start = after_hand(Delivery::Unreachable);
+            assert_eq!(start, Start::Refuse(Refusal::ChannelUnavailable), "{list:?}");
+            assert_ne!(start, Start::Forwarded);
+        }
+        let words = refusal_message(&Refusal::ChannelUnavailable, REAL);
+        assert!(
+            words.contains("could not check whether it is already running")
+                && words.contains("did not start a second time"),
+            "{words}"
+        );
+        // A person who opened the app is told; a start at login and the installer get the exit code.
+        assert!(refusal_is_shown(&parse(&[], false)));
+        assert!(refusal_is_shown(&parse(
+            &["--open-link", "beebeeb://open/photos"],
+            false
+        )));
+        assert!(!refusal_is_shown(&parse(&["--quit-for-update"], false)));
+        assert!(!refusal_is_shown(&parse(&["--autostart"], false)));
+    }
 
     fn parse(list: &[&str], dev: bool) -> Launch {
         parse_args(list.iter().map(|s| (*s).to_owned()), dev)
