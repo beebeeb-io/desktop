@@ -131,6 +131,16 @@ impl StateDb {
             |row| row.get(0),
         )
     }
+    /// Task 2446 (review of PR 289): anything is queued for this file, in any state, parked included (an upload, a
+    /// rename, a move, a trash, a download: each op names the place it was queued at).
+    pub fn has_queued_operation(&self, file_id: &str) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue WHERE file_id = ?1)",
+            params![file_id],
+            |row| row.get(0),
+        )
+    }
     /// Clear transient transfer states left behind by a previous process.
     ///
     /// `Uploading` and `Downloading` mean "the current engine is actively moving

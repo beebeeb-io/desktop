@@ -73,7 +73,10 @@ pub(super) fn guard_init_base(base_version: Option<i64>, kind: InitKind) -> Resu
 /// op is updating. Anything else means the server handed back a different item
 /// than the client chose, so the op must abort.
 ///
-pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, local_file_id: LocalFileId<'_>) -> Result<(), EngineError> {
+pub(super) fn ensure_session_item_id(
+    session: &crate::state_db::UploadResume,
+    local_file_id: LocalFileId<'_>,
+) -> Result<(), EngineError> {
     let ours = if session.is_create {
         session.self_minted
     } else {
@@ -82,9 +85,10 @@ pub(super) fn ensure_session_item_id(session: &crate::state_db::UploadResume, lo
     if ours {
         return Ok(());
     }
-    Err(anyhow::anyhow!(
-        "server_changed_item_id: the upload init answered with an id this device did not choose"
-    ).into())
+    Err(
+        anyhow::anyhow!("server_changed_item_id: the upload init answered with an id this device did not choose")
+            .into(),
+    )
 }
 
 /// The server no longer accepts writes to this upload session: 404 (session
@@ -133,11 +137,17 @@ pub(crate) fn local_file_path_under_sync_root(sync_root: &Path, rel_path: &str) 
         .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     // Task 2413: and every segment one name this host can hold, the rule a server row is stored under (on Windows no
     // `:`, reserved device name, or trailing dot or space, which would reach another entry than the row's own).
-    crate::stored_path::check_path(rel_path).map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
+    crate::stored_path::check_path(rel_path)
+        .map_err(|e| anyhow::anyhow!("local path must stay under the sync root: {e}"))?;
     Ok(sync_root.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
-pub(super) fn record_moved_to_trash_activity(db: &StateDb, file_id: &str, rel_path: &str, occurred_at: i64) -> Result<(), EngineError> {
+pub(super) fn record_moved_to_trash_activity(
+    db: &StateDb,
+    file_id: &str,
+    rel_path: &str,
+    occurred_at: i64,
+) -> Result<(), EngineError> {
     db.record_local_activity(LocalActivityEventInput {
         event_type: LocalActivityKind::MovedToTrash,
         file_id: Some(file_id.to_string()),
@@ -160,7 +170,11 @@ pub(super) const FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS: u32 = 3;
 /// endpoint that times out on a large tree) stopped every upload on the Mac. A successful
 /// snapshot resets the count. Elsewhere the request was taken before the snapshot, so a failure
 /// ends only this tick.
-pub(super) fn after_failed_snapshot(bridge: &EngineBridge, cursor: i64, error: anyhow::Error) -> Result<i64, EngineError> {
+pub(super) fn after_failed_snapshot(
+    bridge: &EngineBridge,
+    cursor: i64,
+    error: anyhow::Error,
+) -> Result<i64, EngineError> {
     #[cfg(target_os = "macos")]
     {
         let failures = bridge.failed_snapshots.fetch_add(1, Ordering::SeqCst).saturating_add(1);
@@ -196,12 +210,22 @@ pub async fn sync_tick_outcome(
     // Files placeholder of a remotely-deleted row — not just its DB row (task
     // 0806). Unused on macOS/Linux (the OS extension owns the namespace there);
     // `#[cfg_attr]` silences the unused warning on those builds.
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    sync_root: &Path,
 ) -> anyhow::Result<SyncTickOutcome> {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    sync_tick_outcome_at(bridge, sync_root, now_secs).await
+}
+
+/// [`sync_tick_outcome`] at a given second: the whole tick body. The tick reads the time once, here, so a test
+/// moves it.
+pub(crate) async fn sync_tick_outcome_at(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    now_secs: i64,
+) -> anyhow::Result<SyncTickOutcome> {
     let mut conflicts: Vec<ConflictDetected> = Vec::new();
     let mut applied_item_ids: Vec<String> = Vec::new();
     bridge.maintain_owned_keys(now_secs).await?;
@@ -239,6 +263,14 @@ pub async fn sync_tick_outcome(
     // place), we re-bootstrap from a fresh snapshot — the snapshot is always
     // authoritative, so a re-bootstrap can never lose data.
 
+    // Task 2446: builds up to 0.8.24 blocked every row of a snapshot the server sent with null request fields, so
+    // a state database may hold rows with no name. Once per database: when such rows exist, this tick takes one
+    // snapshot, which prepares every row again (`prepare_owned_rows` lifts a block the row no longer earns; nothing
+    // here lifts one). It is done only after a snapshot was applied with no row left as it was; until then it is
+    // asked for again after a wait that doubles, kept in the state database (`name_heal_is_due`). A database with
+    // no such row is marked done at once and takes no extra snapshot.
+    let heals_names = name_heal_is_due(bridge.db(), now_secs)?;
+
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
     // couldn't materialise from its `{id}`-only payload) forces a bootstrap this
     // tick regardless of the cursor. On macOS the request is read here and cleared
@@ -254,15 +286,17 @@ pub async fn sync_tick_outcome(
         bridge.db().peek_resnapshot_request()?
     };
     #[cfg(target_os = "macos")]
-    let needs_resnapshot = resnapshot_request.is_some();
+    let resnapshot_requested = resnapshot_request.is_some();
     #[cfg(not(target_os = "macos"))]
-    let needs_resnapshot = bridge.db().take_needs_resnapshot()?;
+    let resnapshot_requested = bridge.db().take_needs_resnapshot()?;
+    // The heal asks through no stored request: a snapshot only it asked for never ends the tick when it fails.
+    let needs_resnapshot = resnapshot_requested || heals_names;
 
     let cursor = match bridge.db().get_sync_cursor()? {
         // Never bootstrapped, or a re-snapshot was explicitly requested → full
         // snapshot. (Some(0) is a real cursor and does NOT bootstrap here.)
         None => {
-            let applied = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await?;
+            let pass = bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts, heals_names).await?;
             #[cfg(target_os = "macos")]
             {
                 bridge.failed_snapshots.store(0, Ordering::SeqCst);
@@ -270,7 +304,10 @@ pub async fn sync_tick_outcome(
                     bridge.db().clear_resnapshot_request(seen)?;
                 }
             }
-            applied_item_ids.extend(applied);
+            if heals_names {
+                settle_name_heal(bridge.db(), now_secs, pass.rows_left)?;
+            }
+            applied_item_ids.extend(pass.applied);
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
@@ -279,8 +316,8 @@ pub async fn sync_tick_outcome(
         }
         Some(c) if needs_resnapshot => {
             tracing::info!("sync_tick: re-snapshot requested (gap recovery); bootstrapping");
-            match bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts).await {
-                Ok(applied) => {
+            match bootstrap_from_snapshot(bridge, sync_root, now_secs, &mut conflicts, heals_names).await {
+                Ok(pass) => {
                     #[cfg(target_os = "macos")]
                     {
                         bridge.failed_snapshots.store(0, Ordering::SeqCst);
@@ -288,14 +325,30 @@ pub async fn sync_tick_outcome(
                             bridge.db().clear_resnapshot_request(seen)?;
                         }
                     }
-                    applied_item_ids.extend(applied);
+                    if heals_names {
+                        settle_name_heal(bridge.db(), now_secs, pass.rows_left)?;
+                    }
+                    applied_item_ids.extend(pass.applied);
                     return Ok(SyncTickOutcome {
                         conflicts,
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
                     });
                 }
-                Err(e) => after_failed_snapshot(bridge, c, e.into())?,
+                Err(e) => {
+                    let error: anyhow::Error = e.into();
+                    if heals_names {
+                        name_heal_snapshot_failed(bridge, now_secs, &error)?;
+                    }
+                    if heals_names && !resnapshot_requested {
+                        // Task 2446 (review of PR 289, P1): only the heal asked for this snapshot, and the heal can
+                        // wait. The tick goes on from `c` with the ops pull, and the queue runs after it: what
+                        // synced before the heal existed still syncs while its snapshot fails.
+                        c
+                    } else {
+                        after_failed_snapshot(bridge, c, error)?
+                    }
+                }
             }
         }
         Some(c) => c,
@@ -336,7 +389,12 @@ pub async fn sync_tick_outcome(
         let fetched_at = now_secs;
         match bridge.api().sync_snapshot().await {
             Ok(mut snap) if snap.seq_id < cursor => {
-                snap.nodes=bridge.prepare_owned_rows(&snap.nodes).await?.into_iter().map(|p|p.row).collect();
+                snap.nodes = bridge
+                    .prepare_owned_rows(&snap.nodes)
+                    .await?
+                    .into_iter()
+                    .map(|p| p.row)
+                    .collect();
                 tracing::warn!(
                     cursor,
                     server_seq = snap.seq_id,
@@ -363,7 +421,9 @@ pub async fn sync_tick_outcome(
         let prepared = prepare_owned_sync_op(bridge, original).await?;
         bridge.owner_key_scope().check()?;
         max_seq = max_seq.max(original.seq_id);
-        let Some(op) = prepared else { continue; };
+        let Some(op) = prepared else {
+            continue;
+        };
         match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
             Ok(applied) => applied_item_ids.extend(applied),
             Err(e) => {
@@ -383,19 +443,45 @@ pub async fn sync_tick_outcome(
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
-pub(super) async fn prepare_owned_sync_op(bridge:&EngineBridge,op:&crate::api_client::SyncOp)->Result<Option<crate::api_client::SyncOp>, EngineError> {
-    if !matches!(op.op_type.as_str(),"file_create"|"folder_create"|"file_update"|"file_rename"|"folder_rename"|"file_move"|"folder_move") {return Ok(Some(op.clone()));}
-    let Some(id)=op.payload["id"].as_str() else{return Ok(Some(op.clone()))};
+pub(super) async fn prepare_owned_sync_op(
+    bridge: &EngineBridge,
+    op: &crate::api_client::SyncOp,
+) -> Result<Option<crate::api_client::SyncOp>, EngineError> {
+    if !matches!(
+        op.op_type.as_str(),
+        "file_create" | "folder_create" | "file_update" | "file_rename" | "folder_rename" | "file_move" | "folder_move"
+    ) {
+        return Ok(Some(op.clone()));
+    }
+    let Some(id) = op.payload["id"].as_str() else {
+        return Ok(Some(op.clone()));
+    };
     // L12: the id class decides. A foreign row needs the canonical listing so
     // `prepare_owned_rows` can see its envelope; an owner row never does.
     let known_foreign = beebeeb_core::item_id::is_foreign_item_id(id).unwrap_or(false);
-    let mut row=synthesize_op_row(bridge,id,op,op.payload["new_name_encrypted"].as_str().or_else(||op.payload["name_encrypted"].as_str()));
-    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {row=serde_json::json!({"id":id});}
-    let mut prepared=bridge.prepare_owned_rows(&[row]).await?;
-    let Some(prepared)=prepared.pop() else{return Ok(None)};
-    let mut result=op.clone();result.payload=prepared.row;
-    if matches!(op.op_type.as_str(),"file_move"|"folder_move") {result.payload["new_parent_id"]=result.payload["parent_id"].clone();}
-    if matches!(op.op_type.as_str(),"file_rename"|"folder_rename") {result.payload["new_name_encrypted"]=result.payload["name_encrypted"].clone();}
+    let mut row = synthesize_op_row(
+        bridge,
+        id,
+        op,
+        op.payload["new_name_encrypted"]
+            .as_str()
+            .or_else(|| op.payload["name_encrypted"].as_str()),
+    );
+    if known_foreign && op.payload["name_encrypted"].is_null() && op.payload["new_name_encrypted"].is_null() {
+        row = serde_json::json!({"id":id});
+    }
+    let mut prepared = bridge.prepare_owned_rows(&[row]).await?;
+    let Some(prepared) = prepared.pop() else {
+        return Ok(None);
+    };
+    let mut result = op.clone();
+    result.payload = prepared.row;
+    if matches!(op.op_type.as_str(), "file_move" | "folder_move") {
+        result.payload["new_parent_id"] = result.payload["parent_id"].clone();
+    }
+    if matches!(op.op_type.as_str(), "file_rename" | "folder_rename") {
+        result.payload["new_name_encrypted"] = result.payload["name_encrypted"].clone();
+    }
     Ok(Some(result))
 }
 
@@ -407,15 +493,37 @@ pub(super) async fn bootstrap_from_snapshot(
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
-) -> Result<Vec<String>, EngineError> {
+    // Task 2446: the healing snapshot leaves a row it cannot store as it was and applies the rest ([`LeftRows`]).
+    // Any other snapshot fails as a whole on such a row, as before.
+    heals_names: bool,
+) -> Result<SnapshotPass, EngineError> {
     // `now_secs` is captured at tick start, BEFORE this request — so it is the
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
     let fetched_at = now_secs;
     let mut snapshot = bridge.api().sync_snapshot().await?;
-    snapshot.nodes=bridge.prepare_owned_rows(&snapshot.nodes).await?.into_iter().map(|p|p.row).collect();
+    if heals_names {
+        // Preparing the rows lifts their blocks before any row is named: the pass is recorded as unfinished first.
+        bridge.db().begin_name_heal_pass(now_secs)?;
+    }
+    snapshot.nodes = bridge
+        .prepare_owned_rows(&snapshot.nodes)
+        .await?
+        .into_iter()
+        .map(|p| p.row)
+        .collect();
+    let mut left = heals_names.then(LeftRows::default);
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
+    let mut applied = apply_snapshot_leaving(
+        bridge,
+        sync_root,
+        &snapshot,
+        now_secs,
+        fetched_at,
+        conflicts,
+        left.as_mut(),
+    )?;
+    let rows_left = left.map_or(0, |left| left.count());
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
     // one more; at the 10th it parks with its bytes. The park changes how its item is
     // presented (spec §9.1), and the snapshot did not list the file, so its id joins the
@@ -425,7 +533,7 @@ pub(super) async fn bootstrap_from_snapshot(
         log_parked(&op_id, file_id.as_deref(), ParkReason::BaseUnknown);
         applied.extend(file_id);
     }
-    Ok(applied)
+    Ok(SnapshotPass { applied, rows_left })
 }
 
 /// Reconcile the local mirror against an already-fetched snapshot:
@@ -451,6 +559,28 @@ pub(super) fn apply_snapshot(
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
+    apply_snapshot_leaving(
+        bridge,
+        sync_root,
+        snapshot,
+        now_secs,
+        snapshot_fetched_at,
+        conflicts,
+        None,
+    )
+}
+
+/// [`apply_snapshot`]; with `left` (the healing snapshot, task 2446) a row that cannot be stored does not fail the
+/// pass: it joins [`LeftRows`] with every row under it, stays as it is stored, and is never pruned.
+pub(super) fn apply_snapshot_leaving(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    snapshot: &crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    snapshot_fetched_at: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+    mut left: Option<&mut LeftRows>,
+) -> Result<Vec<String>, EngineError> {
     // Task 1697 review fix (T3): every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
     let mut applied: Vec<String> = Vec::new();
@@ -467,13 +597,19 @@ pub(super) fn apply_snapshot(
     // Task 2413: nodes not placed in the mirror (the store refused a row it did not hold): their rows are not placed
     // either, never at the top level. They stay in `seen`, so nothing stored for them is pruned.
     let mut unplaced: HashSet<String> = HashSet::new();
-
     for f in order {
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
         }
         if !seen.insert(file_id.to_string()) {
+            continue;
+        }
+        // Task 2446: a row under a row that was left is left too. It is seen (just above): never pruned as absent.
+        if let Some(left) = left.as_deref_mut()
+            && f["parent_id"].as_str().is_some_and(|pid| left.ids.contains(pid))
+        {
+            left.ids.insert(file_id.to_string());
             continue;
         }
         if f["parent_id"].as_str().is_some_and(|pid| unplaced.contains(pid)) {
@@ -511,9 +647,25 @@ pub(super) fn apply_snapshot(
             None => String::new(),
         };
 
-        if let Some((rel_path, _kind)) =
-            process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
-        {
+        let stored = store_snapshot_row(bridge, f, &parent_rel_path, now_secs, conflicts);
+        let placed = match stored {
+            Ok(placed) => placed,
+            Err(error) => match left.as_deref_mut() {
+                // Task 2446: the healing snapshot goes on without this row.
+                Some(left) => {
+                    left.leave(file_id, error_category(&error));
+                    continue;
+                }
+                None => return Err(error),
+            },
+        };
+        if let Some((rel_path, kind)) = placed {
+            // Task 2446: read, but kept at its label by a change of this PC: the heal is owed until that is gone.
+            if let Some(left) = left.as_deref_mut()
+                && waits_for_its_change(bridge.db(), file_id, &rel_path)?
+            {
+                left.waits(file_id, &kind);
+            }
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
             }
@@ -872,8 +1024,10 @@ pub(super) fn apply_sync_op(
     // A sparse folder rename/move has no descendant events. Reuse the same
     // metadata write for their new parent paths, then signal those identities
     // with the folder. This preserves content baselines and queued rename holds.
-    if matches!(op.op_type.as_str(), "folder_rename" | "folder_move" | "file_rename" | "file_move")
-        && applied.iter().any(|changed| changed == id)
+    if matches!(
+        op.op_type.as_str(),
+        "folder_rename" | "folder_move" | "file_rename" | "file_move"
+    ) && applied.iter().any(|changed| changed == id)
         && bridge.db().get_file(id)?.is_some_and(|row| row.is_dir())
     {
         rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
@@ -911,9 +1065,13 @@ pub(super) fn rebase_folder_descendants(
         if !visited.insert(parent_id.clone()) {
             continue;
         }
-        let Some(parent) = bridge.db().get_file(&parent_id)? else { continue };
+        let Some(parent) = bridge.db().get_file(&parent_id)? else {
+            continue;
+        };
         for child in rows.iter().filter(|row| row.parent_id.as_deref() == Some(&parent_id)) {
-            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else { continue };
+            let Some(contract) = bridge.db().get_file_contract_state(&child.file_id)? else {
+                continue;
+            };
             let row = serde_json::json!({
                 "id": child.file_id,
                 "name": child.path.rsplit('/').next().unwrap_or_default(),
@@ -926,8 +1084,15 @@ pub(super) fn rebase_folder_descendants(
                 "content_type": contract.content_type,
             });
             if let Some(updated) = apply_metadata_file_row(
-                bridge.db(), &row, contract.namespace, contract.shared_root_id,
-                contract.share_id, contract.permission_bits, now, bridge.api().master_key(), &parent.path,
+                bridge.db(),
+                &row,
+                contract.namespace,
+                contract.shared_root_id,
+                contract.share_id,
+                contract.permission_bits,
+                now,
+                bridge.api().master_key(),
+                &parent.path,
             )? {
                 if updated.path != child.path {
                     applied.push(child.file_id.clone());

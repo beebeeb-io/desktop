@@ -77,6 +77,10 @@ pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(n
     if !key_existed {
         new.delete_wrapped_master_key()?;
     }
+    // Task 2447: owner tags the segmented store kept describe what it held before, not the legacy token or key
+    // written below; they go first, and a removal that fails stops the migration (it runs again at the next start).
+    new.delete_session_owner()?;
+    new.delete_vault_key_owner()?;
     // Token: SessionToken is Clone, but we own `legacy_token` here so pass by ref.
     new.save_session_token(&legacy_token)?;
     // Key: SecretBytes is !Clone → MOVE the loaded value straight into save.
@@ -111,12 +115,15 @@ pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(n
     sweep_legacy(legacy)
 }
 
-/// Delete the legacy flat trio. Each delete is idempotent (NotFound → Ok), so
-/// this is safe to call when some/all entries are already gone — used both as
-/// the final migration step and the opportunistic short-circuit sweep.
+/// Delete the legacy flat trio and its two owner tags (task 2447: a session served from the flat layout gets its
+/// `session-owner` there, and a tag left behind would later read as a clear that did not finish). Each delete is
+/// idempotent (NotFound → Ok), so this is safe to call when some/all entries are already gone — used both as the
+/// final migration step and the opportunistic short-circuit sweep. The secrets go first.
 pub(super) fn sweep_legacy<L: AuthSecretStore>(legacy: &L) -> AuthResult<()> {
     legacy.delete_session_token()?;
     legacy.delete_wrapped_master_key()?;
     legacy.delete_account_email()?;
+    legacy.delete_vault_key_owner()?;
+    legacy.delete_session_owner()?;
     Ok(())
 }

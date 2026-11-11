@@ -40,8 +40,6 @@ pub(super) async fn close_session_commands() -> Result<(), String> {
         .map_err(|e| format!("Vault lock failed: {e}"))?
 }
 
-
-
 // ── Session bridge (web ↔ rust) ───────────────────────────────────────────────
 
 /// Authenticated session pushed in from the WebView after login.
@@ -222,7 +220,11 @@ pub(super) struct HeldSetup {
     pub(super) account: account_binding::Identity,
 }
 
-pub(super) fn remember_pending_setup(slot: &Mutex<Option<HeldSetup>>, key_replaced: bool, account: account_binding::Identity) {
+pub(super) fn remember_pending_setup(
+    slot: &Mutex<Option<HeldSetup>>,
+    key_replaced: bool,
+    account: account_binding::Identity,
+) {
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(HeldSetup {
         step: PendingSetup { key_replaced },
         account,
@@ -576,7 +578,11 @@ pub(super) fn persist_account_email_to_keychain(
 
 /// Store the vault key the recovery phrase proved. Only inside a checked turn (`_write`). The key is borrowed: no copy of
 /// it is made here but the one the store wipes (`SecretBytes`).
-pub(super) fn persist_vault_key_to_keychain(_write: &SessionWrite, account_id: &str, master_key: &[u8; 32]) -> Result<(), String> {
+pub(super) fn persist_vault_key_to_keychain(
+    _write: &SessionWrite,
+    account_id: &str,
+    master_key: &[u8; 32],
+) -> Result<(), String> {
     AuthVault::new(platform_keychain_store_for(account_id))
         .store_wrapped_master_key(SecretBytes::new_master_key(master_key))
         .map_err(|e| keychain_error("store vault key in Keychain", e))
@@ -639,6 +645,15 @@ pub(super) fn load_session_from_vault<S: keychain::AuthSecretStore>(
     else {
         return Ok(None);
     };
+    // Task 2447: whose key is this? Asked before the key is read, here, where every loader of token + key passes
+    // (startup restore, unlock, re-sign-in; both layouts). Another account's key, or a tagged key next to a session
+    // nobody named, is refused; an untagged key (from before the tags) loads as it always did.
+    if !crate::key_owner::stored_key_ownership(&vault)
+        .map_err(|e| keychain_error("read the vault key's owner", e))?
+        .may_load()
+    {
+        return Err(crate::key_owner::KEY_NOT_THIS_ACCOUNTS.to_string());
+    }
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;
@@ -907,7 +922,11 @@ pub(super) async fn probe_startup_session(base_url: &str, token: &str) -> Startu
 /// fail-closed stub) must not panic startup — log and continue, the flags
 /// still route the app to signed-out.
 #[cfg(target_os = "windows")]
-pub(super) fn discard_unusable_startup_session(state: &AppState, acct: &crate::account::AccountRuntime, email: Option<String>) {
+pub(super) fn discard_unusable_startup_session(
+    state: &AppState,
+    acct: &crate::account::AccountRuntime,
+    email: Option<String>,
+) {
     tracing::info!(
         account_id = acct.id.as_str(),
         "stored session token was rejected by the server (HTTP 401) at startup; \

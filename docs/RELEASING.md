@@ -202,6 +202,83 @@ worktree without `node_modules`, set `TAURI_CLI` to the installed `@tauri-apps/c
 node scripts/verify-updater-key-rotation.mjs
 ```
 
+## Two updater keys and the signed v2 manifest (from 0.8.25)
+
+From 0.8.25 the app trusts two updater public keys, each for its own release line, and decides itself which update
+it accepts (`src-tauri/src/update_window/trust.rs` holds the rules, `flow.rs` the fetch and the install,
+`preflight.rs` the quiet engine before a native installer; tasks 2449 and 2451):
+
+- **The keys.** `plugins.updater.pubkey` in `tauri.conf.json` is the key every 0.8.x release is signed with
+  (`C6FADFD59D732197`). `src-tauri/updater-v2.pub` is the next key, in the form `tauri signer generate` writes its
+  `.pub` file; the native line (0.9.0 and later) signs with it. 0.8.25 itself is signed with the first key, so 0.8.24
+  and older accept it. A build with `BEEBEEB_RELEASE_VERSION` set fails in `build.rs` while that file holds a
+  placeholder, and a test fails when the file does not hold a key distinct from the baked one.
+- **Key scopes, never mixed.** The legacy feed (`desktop/<latest|beta|alpha>.json`) is verified with the baked key
+  only and may offer only versions below 0.9.0, on every OS. The v2 manifest is verified with the v2 key only and
+  may offer only 0.9.0 and later; its artefacts must be signed with the v2 key too. A signature by the other
+  line's key is refused (`update_key_not_for_this_line`) before the download, and the Tauri updater is built with
+  the one key of the feed's line, so the downloaded bytes are verified with that key and no other. **Never sign a
+  0.8.x artefact with the v2 key, or a native one with the baked key:** 0.8.25 refuses both.
+- **Where the keys live in CI (the target state, checked before every release).** Both private keys are meant to be
+  secrets of the GitHub environment `desktop-release` and of nothing else: every job that signs names
+  `environment: desktop-release` (`build` in `release.yml`, `sign` in `sign-macos-updater-artifact.yml`,
+  `updater-key` in `signing-login-check.yml`), and no step that holds a key installs or downloads anything. This
+  document does not claim that state; the release checklist proves it each time (see task 2451):
+  1. `gh secret list --repo beebeeb-io/desktop` (the repository level) lists no updater signing key and no
+     password for one. Only the names are read; a listed name is a stop, not a note.
+  2. `gh workflow run signing-login-check.yml --ref main`, approved in the environment, ends green: its
+     `updater-key` job signs one throwaway file through the environment and checks the signature against the baked
+     key. Dispatched from a branch that is not allowed to deploy, the same job must be refused before it starts.
+- **The signer is installed from a lockfile.** `scripts/updater-signer/` holds a `package.json` naming one exact
+  `@tauri-apps/cli` version and its `bun.lock` with the hash of every package. The signing jobs run
+  `bun install --frozen-lockfile --ignore-scripts` there, in a step without the key: a package whose bytes differ
+  from the recorded hash, or a manifest that no longer matches the lockfile, fails the job before the key is read.
+  To move to another CLI version, change the version in `package.json`, run `bun install` in that folder and commit
+  both files in a reviewed pull request.
+- **Every update, both feeds.** Offered or installed only when its version is strictly newer than the installed one
+  (the named channel downgrade in Settings excepted), and, off macOS, when its signature signs the file the address
+  ends in and that file name carries the version as one `_`-separated part (`Beebeeb_0.8.26_x64-setup.exe`). Keep
+  that naming: an artefact whose name lacks its version is refused by 0.8.25 and later.
+- **Windows reads `desktop/v2/<stable|beta|alpha>.json` first.** With it comes `<file>.sig`, a detached signature by
+  a trusted key whose signed file name is that manifest's (`stable.json`, …). The manifest must name
+  `"product": "desktop"` and its own channel, a plain version at or above 0.9.0, and artefacts under
+  `https://releases.beebeeb.io/` with a `size`. Only a **404 for the manifest** falls back to
+  `desktop/<latest|beta|alpha>.json`; a missing or wrong signature, another channel or product, or any other answer
+  is an error and nothing is installed.
+- **Only an exact 404 falls back: a rule for the release host, now and after any move.** 403, a redirect, a 5xx, a
+  TLS failure and a timeout are all errors on Windows from 0.8.25 on; none of them falls back to the legacy feed.
+  The host that serves `releases.beebeeb.io` must therefore answer a plain **404** for a missing
+  `desktop/v2/<channel>.json`. A host that answers a missing file with 403 (some object stores), with a redirect to
+  a landing page, or with 200 and an error page stops every Windows install from 0.8.25 on from updating until a
+  valid v2 manifest exists for its channel. Before moving the host: `curl -sI` a path that does not exist under
+  `desktop/v2/` on the new host and read `404` in the status line; do not move while it says anything else.
+- **The escape hatch.** A v2 manifest the installed apps cannot read (a format the Tauri updater does not parse, a
+  wrong signature, a wrong channel) is an error with no fallback, so a bad one stops Windows updates on that
+  channel. The way out needs no new build: **remove `desktop/v2/<channel>.json` and its `.sig` from the release
+  host.** The path answers 404 again and every 0.8.25 and later install reads the legacy feed, where a 0.8.x
+  release can reach it. Then fix the manifest and publish it again, signed anew. The format the plugin reads is
+  pinned by a test (`update_window::flow_tests`, the v2 manifest fixture): change the publisher's format only
+  together with that fixture.
+- **The first native release goes to alpha, and 0.8.25 is proven not to strand before stable.** Publish the first
+  v2 manifest on the alpha channel only. Before any v2 manifest is published on beta or stable, one real 0.8.25
+  install (not a test build) must take a later 0.8.x release from the legacy feed through "Check for updates",
+  and the release notes of that 0.8.x name the PC and the two versions. That is the proof that 0.8.25 can still
+  be reached by a fix signed with the first key.
+- **Signed-time bounds of a v2 manifest** (the `timestamp:` of its signature's trusted comment, unix seconds).
+  Refused when earlier than `V2_KEY_CREATED` (`2026-11-11T00:00:00Z`, the day the v2 key was made: one fixed
+  value for the whole 0.8.x line, so the order in which 0.8.x and 0.9.x builds are published never strands an
+  install), when more than 24 hours ahead of the PC's clock (never recorded), or when older than the channel's
+  replay mark. The mark is the newest signed time accepted on that channel, kept in `update-v2-seen.json` beside the
+  config; it only grows. **Sign every v2 manifest with a correct clock**, and re-sign (do not re-publish an old
+  `.sig`) when a channel's manifest changes.
+- **Before a native installer runs** (0.9.0 and later) the app waits up to two minutes for uploads in flight, stops
+  the sync engine through the one stop helper (on Windows this disconnects the Cloud Files provider; the sync root
+  stays registered) and keeps the engine slot until the installer has taken over. An upload still running after the
+  wait puts the update off (`update_sync_not_quiet`); nothing is interrupted.
+- **Before the installer runs** the app records `installed_release_channel` and, for a native release only, writes `update-handoff.json`
+  (`{"from","to","channel","at"}`) beside its config file; the native app reads that note once and deletes it. On
+  Windows Tauri's install exits the process, so nothing after it runs.
+
 ## Windows Authenticode signing (Azure Artifact Signing)
 
 Since 0.8.8, Windows release artifacts are Authenticode-signed with **Azure Artifact Signing**

@@ -137,7 +137,11 @@ pub(super) fn derive_recipient_share_key(
     ))
 }
 
-pub(super) fn unwrap_key_frame(wrap_key: &[u8; 32], encrypted_key_b64: &str, label: &str) -> Result<Zeroizing<[u8; 32]>, EngineError> {
+pub(super) fn unwrap_key_frame(
+    wrap_key: &[u8; 32],
+    encrypted_key_b64: &str,
+    label: &str,
+) -> Result<Zeroizing<[u8; 32]>, EngineError> {
     let raw = decode_standard_b64(label, encrypted_key_b64)?;
     let frame_key = beebeeb_core::kdf::FileKey::from_bytes(*wrap_key);
     let plaintext = Zeroizing::new(
@@ -210,12 +214,26 @@ impl KeyCustody {
     }
 }
 
-pub(super) fn unwrap_folder_child_for_format(folder: &[u8;32], root: &str, id: &str, kind: u8, wrap: &str, custody: KeyCustody) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
+pub(super) fn unwrap_folder_child_for_format(
+    folder: &[u8; 32],
+    root: &str,
+    id: &str,
+    kind: u8,
+    wrap: &str,
+    custody: KeyCustody,
+) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     if custody.is_custody() {
         let frame = base64::engine::general_purpose::STANDARD.decode(wrap)?;
         Ok(beebeeb_sync::key_resolution::unwrap_child_key(
-            &beebeeb_core::kdf::FileKey::from_bytes(*folder), root, id, kind, &frame)?)
-    } else { unwrap_child_file_key(folder, wrap) }
+            &beebeeb_core::kdf::FileKey::from_bytes(*folder),
+            root,
+            id,
+            kind,
+            &frame,
+        )?)
+    } else {
+        unwrap_child_file_key(folder, wrap)
+    }
 }
 
 pub(super) fn unwrap_child_file_key(
@@ -223,7 +241,7 @@ pub(super) fn unwrap_child_file_key(
     encrypted_file_key_b64: &str,
 ) -> Result<beebeeb_core::kdf::FileKey, EngineError> {
     #[cfg(test)]
-    LEGACY_CHILD_READS.with(|n| n.set(n.get()+1));
+    LEGACY_CHILD_READS.with(|n| n.set(n.get() + 1));
     let file_key = unwrap_key_frame(folder_key, encrypted_file_key_b64, "encrypted_file_key")?;
     Ok(beebeeb_core::kdf::FileKey::from_bytes(*file_key))
 }
@@ -301,8 +319,13 @@ fn refused_server_row(file_id: &str, rule: &beebeeb_core::path_safety::UnsafeNam
     None
 }
 
-pub(crate) fn decrypt_shared_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted: &str) -> Option<String> {
-    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted).ok().map(|m| m.name)
+pub(crate) fn decrypt_shared_name_with_key(
+    file_key: &beebeeb_core::kdf::FileKey,
+    name_encrypted: &str,
+) -> Option<String> {
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted)
+        .ok()
+        .map(|m| m.name)
 }
 
 /// A shared row's own name: its decrypted name, or the placeholder name when it does not decrypt (or is blank).
@@ -456,7 +479,9 @@ pub(super) fn apply_metadata_file_row(
     // path and parent are where the file is on disk; the server's are still the old ones.
     let held = match existing.as_ref() {
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
-        Some(entry) if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? => {
+        Some(entry)
+            if cfg!(any(target_os = "windows", test)) && !entry.is_dir() && db.has_queued_local_rename(file_id)? =>
+        {
             Some(entry.clone())
         }
         _ => None,
@@ -607,6 +632,35 @@ pub(super) fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, dep
     true
 }
 
+/// Task 2446: whether a stored row has no name of its own yet: no path at all, or the label a blocked key record gives
+/// it (`owner_keys::blocked_name`). A snapshot applies such a row again, so a row an earlier build blocked by mistake
+/// gets its name; one that is rightly blocked gets the same label again and nothing changes.
+pub(super) fn awaits_its_name(entry: &FileEntry) -> bool {
+    entry.path.is_empty()
+        || entry.path.rsplit('/').next() == Some(crate::owner_keys::blocked_name(&entry.file_id).as_str())
+}
+
+/// Task 2446 (review of PR 289): whether a row the snapshot just read is still at its blocked label although its
+/// key record is readable: an upload, a conflict or a queued change of this PC kept it there. (A rightly blocked
+/// row has a blocked record and is not waiting for anything; a row being trashed is not named again.)
+pub(super) fn waits_for_its_change(db: &StateDb, file_id: &str, stored_path: &str) -> Result<bool, EngineError> {
+    // No path at all, or the label: what `awaits_its_name` reads.
+    if !stored_path.is_empty()
+        && stored_path.rsplit('/').next() != Some(crate::owner_keys::blocked_name(file_id).as_str())
+    {
+        return Ok(false);
+    }
+    if db
+        .get_owned_key_record(file_id)?
+        .is_some_and(|record| record.blocked_fingerprint.is_some())
+    {
+        return Ok(false);
+    }
+    Ok(db
+        .get_file(file_id)?
+        .is_some_and(|entry| entry.status != FileStatus::Trashing))
+}
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -712,7 +766,8 @@ pub(super) fn process_metadata_row(
             // path/kind so a folder we already have locally is still descended.
             // Snapshot rows only: an op row's `updated_at` is a local
             // same-second stamp, not a freshness token (see `RowSource::Op`).
-            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at {
+            // Task 2446: a row still waiting for its name is applied again, whatever its time says.
+            if source == RowSource::Snapshot && remote_updated <= entry.remote_updated_at && !awaits_its_name(&entry) {
                 return Ok(Some((entry.path, entry.item_kind)));
             }
 
@@ -731,7 +786,17 @@ pub(super) fn process_metadata_row(
             // (3) Pending download/upload/conflict/error — let the dedicated
             // path own its transitions, but still refresh cloud_only/downloading
             // metadata (and always report path/kind so folders are descended).
-            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) {
+            // Task 2446: so is a row still waiting for its name, unless a pending upload or a conflict owns it, or
+            // (review of PR 289) anything is still queued or parked for it (a change made on this PC, or a download,
+            // whose op names the place it writes to). That op was queued
+            // at the row's place and lands there (the landing writes its op's path, `state_db/landing.rs`), so the row stays where its
+            // bytes and its change are, with its size, times and version as they were. The healing snapshot counts
+            // such a row as left (`waits_for_its_change`) and reads it again once the change is gone.
+            let names_it = source == RowSource::Snapshot
+                && awaits_its_name(&entry)
+                && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict)
+                && !bridge.db().has_queued_operation(file_id)?;
+            if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || names_it {
                 return apply(bridge);
             }
             Ok(Some((entry.path, entry.item_kind)))
