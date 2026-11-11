@@ -36,7 +36,34 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-0009, DW-0014 | Locked, no plan yet | not built; no goldens yet |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
 
-Built: 15 of 59. Not built: 44 (12 with goldens captured, 32 without).
+Built: 15 of 59. Not built: 44 (12 with goldens captured, 32 without). Lane f-signin-rest (below) adds the
+first run on Windows: 11 more frames built, 26 of 70 in all.
+
+## First run on Windows (lane f-signin-rest): `setup/`
+
+The board's group "First run on Windows", 11 frames, in the same 960 x 640 window: `setup/mod.rs` (state, scenes),
+`setup/view.rs`, `setup/source.rs` (`SetupSource` and the board's fixture), `ui/setup.rs` (the window and its controls).
+`0` = all six gate counts at 0 failing in both themes.
+
+| Frame | What | State |
+| --- | --- | --- |
+| DW-0201 | Step 1: add a passkey | built, 0 |
+| DW-0202 | Step 2: app lock, lock again after | built, 0 |
+| DW-0203 | Step 3: back up the six known folders | built, 0 |
+| DW-0204 | Step 4: thumbnails and previews (sample, size, format, space) | built, 0 |
+| DW-0209 | The compare view over step 4 (700 x 520 sheet) | built; light 0, dark 1 pixel line open (`cmp-opt-5 tile 27 > 26`) |
+| DW-0206 | Step 5: Beebeeb is in File Explorer | built; 1 pixel line open in each theme (`nav-2-b`, the b's plate) |
+| DW-0206b | Step 5: still adding | built, 0 |
+| DW-0280 | Step 5: Windows did not add it | built, 0 |
+| DW-0207 | Step 6: notifications | built, 0 |
+| DW-0281 | Step 7: open at login | built, 0 |
+| DW-0208 | You're set up | built, 0 |
+
+States with a rule and no drawing, built from the rule's words (tests only): the compare view's Stacked and Hold to
+flip; "You're set up" after Not now or Skip setup ("Not added", "Off"); Turn on backup with no folder on (disabled).
+
+Still not built after this lane (33 of the group's frames above): DW-A11 to A17, A23 to A30, A31 to A44, A45 to A50,
+A63, DW-0009, DW-0014, DW-0380, DW-0301 to 0305.
 
 States the board gives a rule and no drawing, built from the rule's own words (no golden, tests only):
 DW-A07 with the pill reading "Reconnecting…"; DW-A08's error state "Approved, but the keys did not arrive.

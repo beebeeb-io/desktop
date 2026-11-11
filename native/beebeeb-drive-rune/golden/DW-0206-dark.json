@@ -638,20 +638,13 @@
     "gap": "9px"
    }
   },
-  "nav-2-icon": {
-   "kind": "icon",
+  "nav-2-b": {
+   "kind": "box",
    "x": 437,
    "y": 295.75,
    "w": 15,
    "h": 15,
-   "icon": [],
-   "filled": false,
-   "color": [
-    183,
-    183,
-    183,
-    255
-   ]
+   "css": {}
   },
   "nav-2": {
    "kind": "text",

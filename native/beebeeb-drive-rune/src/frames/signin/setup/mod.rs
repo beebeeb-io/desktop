@@ -38,7 +38,7 @@ pub const SHEET: (f32, f32) = (700.0, 520.0);
 /// The photo in the compare view.
 pub const PHOTO: (f32, f32) = (560.0, 330.0);
 /// How far an arrow key moves the wipe line.
-const WIPE_STEP: f32 = 0.05;
+pub(super) const WIPE_STEP: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
@@ -507,7 +507,7 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 /// What the engine changed between presses (File Explorer finished). For `shell::host::poll`.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
+#[allow(dead_code)] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
     let changed = ui.pump();
@@ -515,26 +515,18 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     changed
 }
 
-/// Esc closes the compare view. In it, the arrow keys move the wipe line and Space flips.
+/// Esc closes the compare view. In it the photo is a slider: with focus on it the arrow keys
+/// move the wipe line (`view::photo`: Rune hands a focused slider its arrows).
 /// Return is Rune's: it presses the step's amber button (its default button).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
-    let Some(compare) = ui.compare else { return false };
-    let handled = match (&ev.key, compare.mode) {
-        (Key::Escape, _) => {
-            ui.close_compare();
-            true
-        }
-        (Key::Left, CompareMode::Wipe) => {
-            ui.move_wipe(-WIPE_STEP);
-            true
-        }
-        (Key::Right, CompareMode::Wipe) => {
-            ui.move_wipe(WIPE_STEP);
-            true
-        }
-        _ => false,
-    };
+    if ui.compare.is_none() {
+        return false;
+    }
+    let handled = ev.key == Key::Escape;
+    if handled {
+        ui.close_compare();
+    }
     ui.settle(tx);
     handled
 }

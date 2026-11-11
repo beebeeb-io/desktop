@@ -38,7 +38,6 @@ pub static FOLDER: Icon = icon24!(
     "folder",
     r#"<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>"#
 );
-pub static CARET: Icon = icon24!("caret-down", r#"<path d="M7 10l5 5 5-5"></path>"#);
 pub static HOME: Icon = icon24!(
     "home",
     r#"<path d="M4 11l8-7 8 7"></path><path d="M6 9.5V20h12V9.5"></path><path d="M10 20v-5h4v5"></path>"#
@@ -67,3 +66,10 @@ pub static POWER: Icon = icon24!(
     "power",
     r#"<path d="M12 3v8"></path><path d="M6.6 6.6a7.5 7.5 0 1 0 10.8 0"></path>"#
 );
+
+/// The plate of the b as Windows shows it in File Explorer's pane (the board's `#mk-b` symbol without its mask).
+pub static B_PLATE: Icon = Icon {
+    name: "b-plate",
+    view: 512.0,
+    body: r#"<rect width="512" height="512" rx="118" fill="currentColor"></rect>"#,
+};

@@ -227,6 +227,8 @@ pub fn page(
                 row()
                     .key("sheet-at")
                     .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                    // The sheet's shadow stays under the caption and inside the window.
+                    .clip_rounded(0.0)
                     .items_start()
                     .justify_center()
                     .child(over),
@@ -366,7 +368,8 @@ pub fn small_button(key: &str, label: &str, t: &Theme) -> El {
 }
 
 /// One row of a list (`.kit-item` at the desktop density): 28 high, 40 with a second line (or
-/// `min_h`). `trailing` sits at its end (a switch, a value, a segmented choice).
+/// `min_h`). `trailing` sits at its end (a switch, a value, a segmented choice). `ruled`: a hairline
+/// above it (the board rules a row off from the one above where the two are siblings in its markup).
 pub fn item(
     keys: &mut Keys,
     icon: Option<&'static Icon>,
@@ -374,10 +377,10 @@ pub fn item(
     sub: Option<&str>,
     trailing: impl FnOnce(&str) -> Vec<El>,
     min_h: Option<f32>,
+    ruled: bool,
     t: &Theme,
 ) -> El {
     let key = keys.next("item");
-    let first = key.ends_with("-0");
     let mut r = row()
         .key(key.clone())
         .role("listitem")
@@ -386,14 +389,6 @@ pub fn item(
         .px(10.0)
         .gap(8.0)
         .center_y();
-    if !first {
-        r = r.child(
-            el().key(format!("{key}-rule"))
-                .pin(Some(10.0), Some(0.0), Some(0.0), None)
-                .h(kit::HAIR)
-                .fill(t.separator),
-        );
-    }
     if let Some(icon) = icon {
         r = r.child(
             el().w(30.0)
@@ -416,6 +411,15 @@ pub fn item(
     r = r.child(words);
     for piece in trailing(&key) {
         r = r.child(piece);
+    }
+    // The board's rule is the row's `::before`, positioned: it paints over what the row holds.
+    if ruled {
+        r = r.child(
+            el().key(format!("{key}-rule"))
+                .pin(Some(10.0), Some(0.0), Some(0.0), None)
+                .h(kit::HAIR)
+                .fill(t.separator),
+        );
     }
     r
 }

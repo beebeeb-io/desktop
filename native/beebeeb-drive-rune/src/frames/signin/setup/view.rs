@@ -145,6 +145,7 @@ fn passkey(k: &mut Keys, t: &Theme) -> El {
             Some("In Passwords or your password manager, behind Windows Hello"),
             |_| Vec::new(),
             None,
+            false,
             t,
         ),
         setup::item(
@@ -154,6 +155,7 @@ fn passkey(k: &mut Keys, t: &Theme) -> El {
             Some("Beebeeb can't use it to open your files by itself."),
             |_| Vec::new(),
             None,
+            true,
             t,
         ),
     ];
@@ -188,6 +190,7 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             Some("Your PC's password works if Windows Hello doesn't"),
             |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
             None,
+            false,
             t,
         ),
         setup::item(
@@ -208,6 +211,7 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 )]
             },
             None,
+            true,
             t,
         ),
     ];
@@ -252,6 +256,7 @@ fn backup(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                     })]
                 },
                 None,
+                i > 0,
                 t,
             )
         })
@@ -366,6 +371,7 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         None,
         |key| vec![settings_list::pop_button(key, &limit, t).a11y_hidden()],
         None,
+        false,
         t,
     )
     .label(format!("Space on this PC, {limit}"));
@@ -446,10 +452,10 @@ fn os(t: &Theme) -> Os {
     let grey = |v: u8| rune::color::hex(&format!("#{v:02x}{v:02x}{v:02x}")).unwrap_or(Color::BLACK);
     if t.dark {
         Os {
-            card: grey(0x2b),
-            selected: grey(0x3d),
-            ink: grey(0xf2),
-            icon: grey(0xc4),
+            card: grey(0x16),
+            selected: grey(0x29),
+            ink: grey(0xe4),
+            icon: grey(0xb7),
         }
     } else {
         Os {
@@ -489,24 +495,25 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
             None => ni.key("nav-on").fill(os.ink.alpha(0.09)).child(
                 el().key(format!("nav-{i}-b"))
                     .size(15.0, 15.0)
-                    .radius(15.0 * 118.0 / 512.0)
-                    .fill(os.ink)
+                    // The plate is a glyph, as the board's is an SVG: it keeps its soft edge on a half pixel.
+                    // Its top is on half a device pixel (y 295.75 at 200 %): the board's browser draws it from
+                    // the pixel above (rows 591 to 620, measured), Rune from the pixel below. A quarter point
+                    // up puts both layers on the board's rows; at 100 % and 150 % nothing changes.
+                    .mt(-0.25)
+                    .mb(0.25)
+                    .child(rune::icon(&icons::B_PLATE, 15.0).color(os.icon).absolute(0.0, 0.0))
+                    // The mark's b, moved to the middle of the plate as the board's symbol has it
+                    // (its mask sits 34.018, 22.026 of 512 further right and down than the mark's).
                     .child(
                         rune::icon(&crate::theme::icons::MARK_B, 15.0)
                             .color(os.selected)
-                            .absolute(0.0, 0.0),
+                            .absolute(15.0 * 34.018 / 512.0, 15.0 * 22.026 / 512.0),
                     ),
             ),
         };
         nav = nav.child(ni.child(kit::label(format!("nav-{i}"), *name, NAV, os.ink).a11y_hidden()));
         if i == 2 {
-            nav = nav.child(
-                el().key("nav-sep")
-                    .h(kit::HAIR)
-                    .mx(8.0)
-                    .my(5.0)
-                    .fill(os.ink.alpha(0.09)),
-            );
+            nav = nav.child(el().key("nav-sep").h(kit::HAIR).mx(8.0).my(5.0).fill(t.separator));
         }
     }
     setup::column()
@@ -686,6 +693,7 @@ fn login(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         None,
         |key| vec![switch(key, "Open at login", on, t, Ui::toggle_login)],
         None,
+        false,
         t,
     )];
     setup::column()
@@ -738,6 +746,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 None,
                 |key| vec![setup::value(key, &value, t).a11y_hidden()],
                 Some(26.0),
+                false,
                 t,
             )
             .role("link")
@@ -806,6 +815,11 @@ fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
                 .role("slider")
                 .label("Wipe between the original and the preview")
                 .range_value(f64::from(compare.wipe * 100.0), 0.0, 100.0)
+                .on_step(|s: &mut State, delta: i32, _: &mut rune::Tx| {
+                    if let Some(ui) = s.setup.as_mut() {
+                        ui.move_wipe(delta as f32 * super::WIPE_STEP);
+                    }
+                })
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .pixels(original)
@@ -887,8 +901,11 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
             None => label.to_string(),
         })
         .checked(on)
+        // As wide as its wider line, to the fraction of a point: the row is centred.
+        .w(24.0
+            + rune::text::advance(label, type_::HEAD)
+                .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
         .h(43.0)
-        .px(12.0)
         .py(6.0)
         .items_center()
         .radius(8.0)
