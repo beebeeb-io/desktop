@@ -8,11 +8,14 @@
 //
 // Usage:
 //   node scripts/native-channel-manifest.mjs --version 0.9.0 --channel stable --installer <setup.exe> \
-//     --sig <setup.exe.sig> --notes <RELEASE_NOTES.md> --config src-tauri/tauri.conf.json \
+//     --sig <setup.exe.sig> --notes <RELEASE_NOTES.md> --pubkey crates/beebeeb-updater/keys/updater-v2.pub \
 //     [--date 2026-11-20T10:00:00Z] --out <stable.json>
+//   node scripts/native-channel-manifest.mjs --verify <file> --sig <file.sig> --signed-name <name> --pubkey <.pub>
 //
-// The installer's bytes are verified against the signature and the baked updater public key (--config) before
-// anything is written: a truncated or replaced file never gets a manifest, and so is never published.
+// The installer's bytes are verified against the signature and the native line's public key (--pubkey, the file
+// the updater crate bakes in) before anything is written: a truncated or replaced file, or one signed by the
+// 0.8.x key, never gets a manifest, and so is never published. `--verify` is the same check for any signed file
+// (the workflow runs it on the manifest it has just signed): right key, right bytes, right signed name.
 //
 // The installer is published at https://releases.beebeeb.io/desktop/artifacts/<version>/<file name>: the one host
 // the native updater accepts. Exits 1 with one line on any input it does not like; writes nothing in that case.
@@ -109,7 +112,19 @@ function main(argv) {
     if (!argv[i].startsWith('--') || argv[i + 1] === undefined) throw new Error(`bad argument '${argv[i]}'`)
     args[argv[i].slice(2)] = argv[i + 1]
   }
-  for (const required of ['version', 'channel', 'installer', 'sig', 'notes', 'config', 'out']) {
+  if (args.verify) {
+    for (const required of ['sig', 'signed-name', 'pubkey']) if (!args[required]) throw new Error(`--${required} is required`)
+    const signature = readFileSync(args.sig, 'utf8')
+    if (signedFileName(signature) !== args['signed-name']) {
+      throw new Error(`the signature signs '${signedFileName(signature)}', not ${args['signed-name']}`)
+    }
+    if (!verifyMinisign(readFileSync(args.verify), signature, readFileSync(args.pubkey, 'utf8'))) {
+      throw new Error(`${args.verify} is not the file its signature signs (or another key signed it)`)
+    }
+    console.log(`verified ${args.verify}: signed as ${args['signed-name']} by the key in ${args.pubkey}`)
+    return
+  }
+  for (const required of ['version', 'channel', 'installer', 'sig', 'notes', 'pubkey', 'out']) {
     if (!args[required]) throw new Error(`--${required} is required`)
   }
   const manifest = buildManifest({
@@ -118,7 +133,7 @@ function main(argv) {
     installerName: basename(args.installer),
     installerBytes: readFileSync(args.installer),
     signature: readFileSync(args.sig, 'utf8'),
-    pubkey: JSON.parse(readFileSync(args.config, 'utf8'))?.plugins?.updater?.pubkey ?? '',
+    pubkey: readFileSync(args.pubkey, 'utf8'),
     notes: readFileSync(args.notes, 'utf8'),
     date: args.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
   })

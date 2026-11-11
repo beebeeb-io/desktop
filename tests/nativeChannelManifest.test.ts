@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 import { buildManifest, parseVersion, signedFileName, verifyMinisign } from '../scripts/native-channel-manifest.mjs'
@@ -94,5 +95,53 @@ describe('native channel manifest', () => {
     expect(signedFileName('')).toBeNull()
     expect(verifyMinisign(INSTALLER, honest.signature, key.pubkey)).toBe(true)
     expect(verifyMinisign(INSTALLER, honest.signature, 'AAAA')).toBe(false)
+  })
+})
+
+// The native line has its own key (crates/beebeeb-updater/keys/updater-v2.pub). The pipeline reads that one file:
+// the command line takes it as --pubkey, and the key guard as --pubkey-file.
+describe('the native line is signed by the v2 key only', () => {
+  const V2_PUB = path.join(import.meta.dir, '..', 'crates', 'beebeeb-updater', 'keys', 'updater-v2.pub')
+  const script = (name: string) => path.join(import.meta.dir, '..', 'scripts', name)
+  const run = (args: string[]) => Bun.spawnSync(['node', ...args], { stdout: 'pipe', stderr: 'pipe' })
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'native-manifest-'))
+  const write = (name: string, content: Buffer | string) => {
+    const file = path.join(tmp, name)
+    fs.writeFileSync(file, content)
+    return file
+  }
+
+  test('the committed v2 key is a minisign public key and not the 0.8.x one', () => {
+    const v2 = fs.readFileSync(V2_PUB, 'utf8').trim()
+    const old = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', 'src-tauri', 'tauri.conf.json'), 'utf8')).plugins.updater.pubkey
+    expect(v2).not.toBe(old)
+    expect(Buffer.from(v2, 'base64').toString('utf8')).toStartWith('untrusted comment: minisign public key: FED25848C41F2348\n')
+  })
+
+  test('--verify accepts the right key, bytes and name, and refuses each single lie', () => {
+    const manifest = Buffer.from('{"version":"0.9.0"}\n')
+    const file = write('stable.json', manifest)
+    const pub = write('test.pub', key.pubkey)
+    const sig = write('stable.json.sig', key.sigFor(manifest, 'stable.json'))
+    const verify = (overrides: Record<string, string>) => {
+      const args = { verify: file, sig, 'signed-name': 'stable.json', pubkey: pub, ...overrides }
+      return run([script('native-channel-manifest.mjs'), ...Object.entries(args).flatMap(([k, v]) => [`--${k}`, v])]).exitCode
+    }
+    expect(verify({})).toBe(0)
+    expect(verify({ 'signed-name': 'beta.json' })).toBe(1)
+    expect(verify({ verify: write('other.json', '{"version":"0.9.1"}\n') })).toBe(1)
+    expect(verify({ pubkey: write('other.pub', testKey().pubkey) })).toBe(1)
+    // A manifest signed by a test key is not signed by the committed v2 key.
+    expect(verify({ pubkey: V2_PUB })).toBe(1)
+  })
+
+  test('the key guard, pointed at the v2 key, refuses a signature the 0.8.x key made', () => {
+    const published = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', 'crates', 'beebeeb-updater', 'tests', 'fixtures', 'desktop-latest-0.8.22.json'), 'utf8'))
+    const oldSig = write('old.sig', published.platforms['windows-x86_64-nsis'].signature)
+    const guard = script('check-updater-signature-key.mjs')
+    expect(run([guard, '--sig', oldSig]).exitCode).toBe(0) // the control: it IS the 0.8.x key's
+    const refused = run([guard, '--pubkey-file', V2_PUB, '--sig', oldSig])
+    expect(refused.exitCode).toBe(1)
+    expect(refused.stdout.toString()).toContain('the expected key is FED25848C41F2348')
   })
 })

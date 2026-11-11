@@ -25,11 +25,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($Mode -eq 'release') { $product = 'Beebeeb'; $bundleId = 'io.beebeeb.app' }
-else { $product = 'Beebeeb Test'; $bundleId = 'io.beebeeb.app.test' }
+if ($Mode -eq 'release') { $product = 'Beebeeb'; $bundleId = 'io.beebeeb.app'; $binary = 'beebeeb-desktop.exe' }
+else { $product = 'Beebeeb Test'; $bundleId = 'io.beebeeb.app.test'; $binary = 'beebeeb-desktop-test.exe' }
 
 $installDir = Join-Path $env:LOCALAPPDATA $product
-$exe = Join-Path $installDir 'beebeeb-desktop.exe'
+$exe = Join-Path $installDir $binary
 $uninstKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$product"
 $manuKey = "HKCU:\Software\beebeeb\$product"
 $startLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$product.lnk"
@@ -79,11 +79,11 @@ if ($Phase -eq 'installed') {
   Check 'the app binary is installed' (Test-Path -LiteralPath $exe)
   Check 'the uninstaller is installed' (Test-Path -LiteralPath (Join-Path $installDir 'uninstall.exe'))
   $files = @(Get-ChildItem -LiteralPath $installDir -Force -ErrorAction SilentlyContinue | ForEach-Object Name | Sort-Object)
-  Check 'the install folder holds exactly the binary and the uninstaller' (($files -join ',') -eq 'beebeeb-desktop.exe,uninstall.exe') ($files -join ',')
+  Check 'the install folder holds exactly the binary and the uninstaller' (($files -join ',') -eq "$binary,uninstall.exe") ($files -join ',')
   Check 'uninstall entry: DisplayName' ((RegValue $uninstKey 'DisplayName') -eq $product)
   Check 'uninstall entry: DisplayVersion' ((RegValue $uninstKey 'DisplayVersion') -eq $Version) "$(RegValue $uninstKey 'DisplayVersion')"
   Check 'uninstall entry: Publisher' ((RegValue $uninstKey 'Publisher') -eq 'beebeeb')
-  Check 'uninstall entry: MainBinaryName' ((RegValue $uninstKey 'MainBinaryName') -eq 'beebeeb-desktop.exe')
+  Check 'uninstall entry: MainBinaryName' ((RegValue $uninstKey 'MainBinaryName') -eq $binary)
   Check 'uninstall entry: UninstallString' ((RegValue $uninstKey 'UninstallString') -eq "`"$installDir\uninstall.exe`"")
   $entries = UninstallEntries
   Check 'exactly one uninstall entry for this product' ($entries.Count -eq 1) ($entries -join ' | ')

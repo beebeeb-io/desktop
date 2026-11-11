@@ -14,21 +14,36 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 the lead, on the Windows host, under the native-windows lock. Expect to fix small things on the first run and
 record them in the PR.
 
-Needs: NSIS 3 and `nsis_tauri_utils.dll` 0.5.3. Both are in `%LOCALAPPDATA%\tauri\NSIS` on a PC that has built
-0.8.x (the lead's has: `C:\Users\GuusLangelaar\AppData\Local\tauri\NSIS`). The plugin is checked by SHA-256.
+Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. Both are in `%LOCALAPPDATA%\tauri\NSIS` on a PC that has built
+0.8.x (the lead's has: `C:\Users\GuusLangelaar\AppData\Local\tauri\NSIS`). The plugin, `Bin\makensis.exe` and the
+stub `Stubs\lzma_solid-x86-unicode` are checked by SHA-256 (NSIS 3.11 as released): a release build refuses any
+other file, a test build prints a `NOTE` line and goes on.
+
+**A test build shares nothing with the real Beebeeb (review P2-4).** It is `Beebeeb Test`, `io.beebeeb.app.test`,
+`beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config and
+credentials. The installer looks only at processes of its own binary name and **never ends a process**: it asks a
+running native app to quit (`--quit-for-update`), waits 20 seconds, then says "still running" and offers Retry or
+Cancel. `build-installer.ps1 -Mode test` refuses a binary that was not built with
+`BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test`, because such a binary would open the real account's data.
+
+**The installer refuses to run over an install older than 0.8.25** (review P2-2): a message says to update through
+the app first, nothing is changed, exit code 3; when an old updater started it (`/UPDATE`), the old app is started
+again.
 
 ## A. Test installer of the native app: build, install, verify, uninstall, verify
 
-PowerShell, from a clone of this branch (for example `C:\bb-win\native\desktop`). **Quit the real Beebeeb first:**
-the test build is also `beebeeb-desktop.exe`, and the installer and uninstaller close every process of that name for
-this user (the Tauri test build does the same today).
+PowerShell, from a clone of this branch (for example `C:\bb-win\native\desktop`). The real Beebeeb can stay
+running: nothing below looks at it. Check that afterwards (step 8).
 
 ```powershell
 # 1. Build the native binary (its own toolchain: native\beebeeb-drive-rune\rust-toolchain.toml).
 $env:CARGO_TARGET_DIR = 'C:\bb-win\native\target'
 Set-Location C:\bb-win\native\desktop\native\beebeeb-drive-rune
+$env:BEEBEEB_APP_IDENTIFIER = 'io.beebeeb.app.test'     # the test identity is compiled in; the packager checks it
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+Remove-Item Env:BEEBEEB_APP_IDENTIFIER
+$real = @(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id)   # for step 8
 
 # 2. Build the test installer. Prints INSTALLER, SIZE, SHA256.
 Set-Location C:\bb-win\native\desktop\packaging\windows
@@ -41,7 +56,7 @@ Start-Process -FilePath $installer -ArgumentList '/S' -Wait
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 
 # 5. Start it once, look at it, quit it. Then: no WebView2 process may belong to it, and no profile may appear.
-Start-Process "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop.exe"
+Start-Process "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop-test.exe"
 Start-Sleep 10
 @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*io.beebeeb.app.test*' }).Count   # must print 0
 Test-Path "$env:LOCALAPPDATA\io.beebeeb.app.test\EBWebView"                                                                            # must print False
@@ -51,7 +66,24 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 1..30 | ForEach-Object { if (Test-Path "$env:LOCALAPPDATA\Beebeeb Test") { Start-Sleep 1 } }
 # 7. Verify: must end with "VERIFY uninstalled: 6 passed, 0 failed".
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase uninstalled
+
+# 8. The real Beebeeb was never touched: the same process ids as before step 1. Must print True.
+"$(@(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id))" -eq "$real"
 ```
+
+**Native checks added by the security review's delta (never run; the lead's):**
+
+1. Step 2 with a binary built WITHOUT `BEEBEEB_APP_IDENTIFIER` must print `FAILED the binary was not built as the
+   test app` and exit 1 (the guard can fail). Until the shell lane makes the native binary honour
+   `BEEBEEB_APP_IDENTIFIER`, every test build is refused: that is the intended state, not a bug in the script.
+2. With the test app running, run the installer without `/S`: after about 20 seconds it must show "Beebeeb Test is
+   still running" with Retry and Cancel, and `Get-Process beebeeb-desktop-test` must still list the same id.
+3. The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v
+   DisplayVersion /d 0.8.24 /f`, run the installer: the message, exit code 3, no file changed. Then with `/d
+   0.8.25`: it installs. Then with `/d banana`: refused (a version that does not parse is not "at least 0.8.25").
+4. `cargo test --locked --features net` in `crates\beebeeb-updater` on Windows: the two `#[cfg(windows)]` tests
+   (`a_held_installer_cannot_be_written_replaced_renamed_or_deleted`,
+   `the_staged_file_cannot_be_replaced_between_the_check_and_the_start`) run only there.
 
 Prove the checker can fail before trusting it: run step 4 with `-Version 9.9.9` (must print `FAIL  uninstall entry:
 DisplayVersion` and exit 1), and step 7 while the app is still installed (must fail 5 of 6).
@@ -63,6 +95,15 @@ real Beebeeb is closed (see above), and the two builds share the credentials
 today (spec §3).
 
 ## B. Upgrade rehearsal: a Tauri build updates itself to the native build
+
+> **2026-11-11, after the security review: do not run this section on a PC with a real Beebeeb account, and not
+> as written.** A test build no longer shares the binary name, the data folder or the credentials with anything
+> (see above), so an upgrade from a Tauri "Beebeeb Test" to a native "Beebeeb Test" lands on another binary name
+> and other credential names: it can no longer show that the autostart entry, the Explorer integration and the
+> sign-in survive. That proof needs the RELEASE identity on both sides, in a disposable Windows VM
+> (`docs/runbook/build-vms.md`) with a test account and no real install, with the rehearsal's own throwaway key
+> pair baked into both builds. The steps below are kept as the outline; the release-identity variant (an unsigned
+> `-Mode rehearsal` that refuses to run outside a VM) is **not built** and is an open rung of this PR.
 
 What it proves: the updater inside a real Tauri build accepts a v2-shaped manifest (spec R1), runs our installer
 with its own flags, and ends on the native binary in the same folder with the same data (R2-R5). It uses the test

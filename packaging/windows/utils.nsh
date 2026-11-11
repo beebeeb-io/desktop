@@ -18,56 +18,97 @@
   ${EndIf}
 !macroend
 
-; Checks whether app is running or not and prompts to kill it.
+; Beebeeb: the installer never ends a process. (The NSIS template killed every process of the binary's name, without
+; asking in passive mode: an upload in progress was cut, and a test build's installer closed the real app.)
+;
+; If this user runs the app, the installer asks it to quit and waits:
+;   1. A native app (0.9.0 and later) is asked through its own single-instance channel: the installed binary is
+;      started with --quit-for-update, which hands the request to the running instance; that instance stops the
+;      engine, parks its uploads and exits (contract for the shell lane, spec section 5). An update started by the
+;      app itself needs no asking: the app is already on its way out and the installer only waits.
+;   2. It waits up to 20 seconds for the process to be gone.
+;   3. Still running: it says so and offers Retry / Cancel. It does not kill. A silent install (/S) fails with a
+;      line on the console. A hung app is ended by the person, in Task Manager; the message says so.
+; Only the process of this product's own binary name is looked at; a test build has another name
+; (beebeeb-desktop-test.exe), so its installer cannot see, wait for or disturb the real app.
 !macro CheckIfAppIsRunning executableName productName
   !define UniqueID ${__LINE__}
 
-  ; Replace {{product_name}} placeholder in the messages with the passed product name
   nsis_tauri_utils::StrReplace "$(appRunning)" "{{product_name}}" "${productName}"
   Pop $R1
-  nsis_tauri_utils::StrReplace "$(appRunningOkKill)" "{{product_name}}" "${productName}"
-  Pop $R2
-  nsis_tauri_utils::StrReplace "$(failedToKillApp)" "{{product_name}}" "${productName}"
-  Pop $R3
+  StrCpy $R2 0 ; 1 once the app was asked to quit
 
-  !if "${INSTALLMODE}" == "currentUser"
-    nsis_tauri_utils::FindProcessCurrentUser "${executableName}"
-  !else
-    nsis_tauri_utils::FindProcess "${executableName}"
-  !endif
-  Pop $R0
-  ${If} $R0 = 0
-      IfSilent kill_${UniqueID} 0
-      ${IfThen} $PassiveMode != 1 ${|} MessageBox MB_OKCANCEL $R2 IDOK kill_${UniqueID} IDCANCEL cancel_${UniqueID} ${|}
-      kill_${UniqueID}:
-        !if "${INSTALLMODE}" == "currentUser"
-          nsis_tauri_utils::KillProcessCurrentUser "${executableName}"
-        !else
-          nsis_tauri_utils::KillProcess "${executableName}"
-        !endif
-        Pop $R0
-        Sleep 500
-        ${If} $R0 = 0
-        ${OrIf} $R0 = 2
-          Goto app_check_done_${UniqueID}
-        ${Else}
-          IfSilent silent_${UniqueID} ui_${UniqueID}
-          silent_${UniqueID}:
-            System::Call 'kernel32::AttachConsole(i -1)i.r0'
-            ${If} $0 != 0
-              System::Call 'kernel32::GetStdHandle(i -11)i.r0'
-              System::call 'kernel32::SetConsoleTextAttribute(i r0, i 0x0004)' ; set red color
-              FileWrite $0 "$R1$\n"
-            ${EndIf}
-            Abort
-          ui_${UniqueID}:
-            Abort $R3
+  wait_${UniqueID}:
+  StrCpy $R3 0 ; half seconds waited in this round
+  poll_${UniqueID}:
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::FindProcessCurrentUser "${executableName}"
+    !else
+      nsis_tauri_utils::FindProcess "${executableName}"
+    !endif
+    Pop $R0
+    ; 0 means "found"; anything else: not running.
+    ${If} $R0 <> 0
+      Goto app_check_done_${UniqueID}
+    ${EndIf}
+    ${If} $R2 = 0
+      StrCpy $R2 1
+      ReadRegStr $R4 SHCTX "${UNINSTKEY}" "DisplayVersion"
+      ${If} $R4 != ""
+        nsis_tauri_utils::SemverCompare "$R4" "0.9.0"
+        Pop $R4
+        ${If} $R4 = 0
+        ${OrIf} $R4 = 1
+          ${If} ${FileExists} "$INSTDIR\${executableName}"
+            Exec '"$INSTDIR\${executableName}" --quit-for-update'
+          ${EndIf}
         ${EndIf}
-      cancel_${UniqueID}:
-        Abort $R1
-  ${EndIf}
+      ${EndIf}
+    ${EndIf}
+    ${If} $R3 < 40
+      Sleep 500
+      IntOp $R3 $R3 + 1
+      Goto poll_${UniqueID}
+    ${EndIf}
+
+  IfSilent silent_${UniqueID}
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$R1" IDRETRY wait_${UniqueID}
+  Abort "$R1"
+  silent_${UniqueID}:
+    System::Call 'kernel32::AttachConsole(i -1)i.r0'
+    ${If} $0 != 0
+      System::Call 'kernel32::GetStdHandle(i -11)i.r0'
+      System::call 'kernel32::SetConsoleTextAttribute(i r0, i 0x0004)' ; set red color
+      FileWrite $0 "$R1$\n"
+    ${EndIf}
+    Abort
   app_check_done_${UniqueID}:
     !undef UniqueID
+!macroend
+
+; Beebeeb: this installer upgrades ${MINUPGRADEFROM} and later only (spec section 2). ${MINUPGRADEFROM} is the bridge
+; release: the first one that writes the credential owner tags and runs the pre-flight the native engine relies on.
+; An install whose version is lower, empty or not a plain version is refused: unless the version is known to be
+; at least the bridge, nothing is replaced. The person is told how to go on, and when an old updater started this
+; installer (it has already closed the app), the app they had is started again.
+!macro RefuseBelowBridge installedVersion
+  StrCpy $R9 -9
+  ${If} "${installedVersion}" != ""
+    nsis_tauri_utils::SemverCompare "${installedVersion}" "${MINUPGRADEFROM}"
+    Pop $R9
+  ${EndIf}
+  ${If} $R9 <> 0
+  ${AndIf} $R9 <> 1
+    ${IfNot} ${Silent}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(needsBridgeFirst)"
+    ${EndIf}
+    ${If} $UpdateMode = 1
+    ${AndIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+      Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
+    ${EndIf}
+    SetErrorLevel 3
+    Quit
+  ${EndIf}
 !macroend
 
 ; Sets AppUserModelId on a shortcut

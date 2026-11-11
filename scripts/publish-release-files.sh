@@ -32,6 +32,16 @@ MANIFEST_RE='^desktop/v2/(stable|beta|alpha)\.json(\.sig)?$'
 fail() { echo "publish-release-files: $*" >&2; exit 1; }
 
 # Prints the staged files, artefacts first, then manifests; fails on any other path.
+# True when an `aws s3 ls <key>` listing ($1) has a line for exactly the file name $2. The listing is a prefix
+# match: asking for `…/a.exe` also lists `…/a.exe.sig`, which must not count as "already published".
+s3_has_exact_key() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+[0-9]+[[:space:]](.+)$ && "${BASH_REMATCH[1]}" == "$2" ]] && return 0
+  done <<< "$1"
+  return 1
+}
+
 staged_files() {
   local staging="$1" file artifacts=() manifests=()
   while IFS= read -r file; do
@@ -64,7 +74,8 @@ publish() {
         local cache='public, max-age=300, must-revalidate'
         if [[ "$file" =~ $ARTIFACT_RE ]]; then
           cache='public, max-age=31536000, immutable'
-          if aws s3 ls "${target%/}/$file" > /dev/null 2>&1; then
+          # Exact key only: `aws s3 ls <key>` also answers for every key that merely starts with it.
+          if s3_has_exact_key "$(aws s3 ls "${target%/}/$file" 2> /dev/null || true)" "$(basename "$file")"; then
             echo "kept $file (already published)"
             continue
           fi
@@ -74,7 +85,8 @@ publish() {
       rsync:*)
         local keep=()
         [[ "$file" =~ $ARTIFACT_RE ]] && keep=(--ignore-existing)
-        rsync --relative --times "${keep[@]}" "$staging/./$file" "${target#rsync:}/"
+        # `--`: a target that starts with a dash is a path, never an option.
+        rsync --relative --times "${keep[@]}" -- "$staging/./$file" "${target#rsync:}/"
         ;;
       *) fail "unknown target '$target' (dir:<path>, s3://<bucket>[/<prefix>] or rsync:<user@host:/path>)" ;;
     esac
@@ -118,8 +130,23 @@ self_test() {
   rm "$tmp/stage/desktop/v2/stable.json" "$tmp/stage/desktop/v2/stable.json.sig"
   check refuses publish "$tmp/stage" "dir:$tmp/site"
 
+  # The s3 "already published" check is an exact match on the listing, not a prefix match.
+  local listing=$'2026-11-20 10:00:00    9000001 Beebeeb_0.9.0_x64-setup.exe.sig\n2026-11-20 10:00:00         12 Beebeeb_0.9.0_x64-setup.exe.old'
+  check refuses s3_has_exact_key "$listing" 'Beebeeb_0.9.0_x64-setup.exe'
+  check refuses s3_has_exact_key '' 'Beebeeb_0.9.0_x64-setup.exe'
+  check s3_has_exact_key "$listing"$'\n2026-11-20 10:00:00    9000001 Beebeeb_0.9.0_x64-setup.exe' 'Beebeeb_0.9.0_x64-setup.exe'
+  # rsync gets `--` before its paths (a fake rsync records its arguments).
+  mkdir -p "$tmp/bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "%s"\n' "$tmp/rsync-args" > "$tmp/bin/rsync"
+  chmod +x "$tmp/bin/rsync"
+  echo manifest > "$tmp/stage/desktop/v2/stable.json"
+  echo sig > "$tmp/stage/desktop/v2/stable.json.sig"
+  ( PATH="$tmp/bin:$PATH" publish "$tmp/stage" "rsync:-e-evil@host:/srv" ) >/dev/null
+  check test "$(grep -c -x -- '--' "$tmp/rsync-args")" -eq 3
+  check test "$(grep -n -x -- '--' "$tmp/rsync-args" | head -1 | cut -d: -f1)" -lt "$(grep -n -x -- '-e-evil@host:/srv/' "$tmp/rsync-args" | head -1 | cut -d: -f1)"
+
   echo "publish-release-files: $passed passed, $failed failed"
-  [[ $failed -eq 0 && $passed -eq 12 ]]
+  [[ $failed -eq 0 && $passed -eq 17 ]]
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

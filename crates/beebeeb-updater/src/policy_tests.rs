@@ -478,3 +478,22 @@ fn refuses_a_release_without_a_build_for_this_pc() {
         Err(Refusal::NoBuildForThisPc)
     );
 }
+
+/// Signed is not enough: a manifest with a field this build does not know is refused, however honest its signature.
+#[test]
+fn policy_strict_a_signed_manifest_with_an_unknown_field_is_refused() {
+    let key = TestKey::generate();
+    let (manifest, _) = honest("0.9.1").manifest(&key);
+    let resigned = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value: serde_json::Value = serde_json::from_slice(&manifest).expect("json");
+        edit(&mut value);
+        let bytes = serde_json::to_vec(&value).expect("json");
+        let detached = key.sign(&bytes, 1_800_000_000, "stable.json");
+        run_with(&trust(&key), "0.9.0", None, NOW, &bytes, &detached)
+    };
+    assert!(matches!(resigned(&|_| {}), Ok(Verdict::Upgrade(_))), "the control");
+    assert_eq!(
+        resigned(&|manifest| manifest["install_args"] = "/S".into()),
+        Err(Refusal::ManifestUnreadable)
+    );
+}

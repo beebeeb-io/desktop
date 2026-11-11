@@ -55,6 +55,7 @@ ${StrLoc}
 !insertmacro RequireDefine BUNDLEID               ; "io.beebeeb.app" (release) or "io.beebeeb.app.test" (test)
 !insertmacro RequireDefine VERSION                ; plain semver, 0.9.0
 !insertmacro RequireDefine VERSIONWITHBUILD       ; 0.9.0.0
+!insertmacro RequireDefine MAINBINARYNAME         ; "beebeeb-desktop" (release) or "beebeeb-desktop-test" (test)
 !insertmacro RequireDefine MAINBINARYSRCPATH      ; the built native exe, already named ${MAINBINARYNAME}.exe
 !insertmacro RequireDefine INSTALLERICON          ; src-tauri/icons/icon.ico
 !insertmacro RequireDefine OUTFILE
@@ -65,7 +66,8 @@ ${StrLoc}
 ; ---- The identity 0.8.x installed under. These stay byte-identical so an upgrade lands on the same install:
 ; ---- same folder, same uninstall entry, same shortcuts, same autostart entry (spec section 3).
 !define MANUFACTURER "beebeeb"
-!define MAINBINARYNAME "beebeeb-desktop"
+; The oldest installed version this installer upgrades: the bridge release (utils.nsh, RefuseBelowBridge).
+!define MINUPGRADEFROM "0.8.25"
 !define INSTALLMODE "currentUser"
 !define ARCH "x64"
 !define ALLOWDOWNGRADES "true"
@@ -241,6 +243,11 @@ Function PageReinstall
     ReadRegStr $R0 SHCTX "${UNINSTKEY}" "DisplayVersion"
   ${EndIf}
   ${IfThen} $R0 == "" ${|} StrCpy $R4 "$(unknown)" ${|}
+
+  ; Beebeeb: an MSI install is held to the same rule as an NSIS one (.onInit checks the NSIS entry).
+  ${If} $WixMode = 1
+    !insertmacro RefuseBelowBridge "$R0"
+  ${EndIf}
 
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
@@ -529,6 +536,14 @@ Function .onInit
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
   !endif
+
+  ; Beebeeb: refuse to run over an install older than the bridge release, in every mode (interactive, /P, /S),
+  ; before a page is shown or a file is touched. No uninstall entry: a first install, nothing to refuse.
+  ReadRegStr $R0 SHCTX "${UNINSTKEY}" "DisplayVersion"
+  ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
+  ${If} "$R0$R1" != ""
+    !insertmacro RefuseBelowBridge "$R0"
+  ${EndIf}
 FunctionEnd
 
 
