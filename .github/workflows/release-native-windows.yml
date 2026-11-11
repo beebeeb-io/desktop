@@ -1,0 +1,437 @@
+name: Desktop release (native Windows)
+
+# The release path of the NATIVE Windows app (0.9.0 and later): native/beebeeb-drive-rune packaged by
+# packaging/windows/build-installer.ps1 (plain makensis, no Tauri bundler) and published to the v2 channel manifests
+# (desktop/v2/<channel>.json) that the bridge release 0.8.25 and every native build read.
+#
+# It is a separate workflow on purpose: release.yml stays the 0.8.x path, byte for byte, and the manifests 0.8.24
+# and older read (desktop/latest.json, beta.json, alpha.json) are never written here, so a native build can never
+# reach a client that did not pass through the bridge. Design, decisions and what is still open:
+# docs/superpowers/specs/2026-11-11-native-installer-updater.md.
+#
+# Same gates as release.yml: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
+# branch point, the Authenticode gate, the updater-signature key guard. Same signing boundary: only the `build` job
+# names the GitHub environment `desktop-release` (docs/RELEASING.md, "Windows Authenticode signing").
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Plain semver version to release or promote, 0.9.0 or later
+        required: true
+        type: string
+      channel:
+        description: v2 channel manifest to publish
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+      publish_existing:
+        description: Publish only the selected v2 channel manifest for an existing desktop-v<version> release
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  validate-release-inputs:
+    name: Validate release inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate version and channel
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Desktop release version '$RELEASE_VERSION' must be plain semver like 0.9.0."
+            exit 1
+          fi
+          IFS=. read -r major minor _ <<< "$RELEASE_VERSION"
+          if (( major == 0 && minor < 9 )); then
+            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version: release it with release.yml. This workflow publishes native builds, 0.9.0 and later."
+            exit 1
+          fi
+          case "$RELEASE_CHANNEL" in
+            alpha|beta|stable) ;;
+            *) echo "::error::Desktop release channel '$RELEASE_CHANNEL' must be alpha, beta, or stable."; exit 1 ;;
+          esac
+
+  validate-release-notes:
+    name: Validate release notes
+    if: ${{ !inputs.publish_existing }}
+    needs: validate-release-inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse while RELEASE_BLOCKERS.md lists a Windows item
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          items="$(bash scripts/release-blockers-check.sh windows)" || rc=$?
+          if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+            echo "::error::release-blockers-check.sh exited $rc (expected 0 or 1). Refusing the release. See docs/RELEASING.md."
+            exit 1
+          fi
+          if [[ -n "$items" ]]; then
+            echo "::error file=RELEASE_BLOCKERS.md::RELEASE_BLOCKERS.md lists release blockers binding Windows. See docs/RELEASING.md."
+            printf '%s\n' "$items"
+            exit 1
+          fi
+          echo "RELEASE_BLOCKERS.md lists no item for windows"
+
+      # A native release is Windows only: the notes carry the "macOS: not in this release" line (--no-macos), and
+      # every sentence about updating names Windows. Authored notes stay mandatory (docs/RELEASING.md).
+      - name: Validate authored release notes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: node scripts/release-channel-checks.mjs notes "$RELEASE_VERSION" "$RELEASE_CHANNEL" RELEASE_NOTES.md --no-macos
+
+  test:
+    name: Run release test gate
+    if: ${{ !inputs.publish_existing }}
+    needs: validate-release-notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Release script tests
+        run: bun test tests/nativeChannelManifest.test.ts tests/releaseChannelChecks.test.ts
+
+      # The count line is asserted: a run that executed no test is a failure, not a pass.
+      - name: Updater tests
+        working-directory: crates/beebeeb-updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
+          test "$(cargo tree --locked -e normal | grep -c tauri)" -eq 0
+
+  verify-branch-point:
+    name: Verify release branch point
+    if: ${{ !inputs.publish_existing && startsWith(github.ref, 'refs/heads/release/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release branch started from reviewed commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          MAIN_REF: origin/main
+        run: bash scripts/verify-release-branch-point.sh
+
+  build:
+    name: Build native Windows
+    if: >-
+      ${{
+        !cancelled() &&
+        !inputs.publish_existing &&
+        needs.test.result == 'success' &&
+        (needs.verify-branch-point.result == 'success' || needs.verify-branch-point.result == 'skipped')
+      }}
+    needs:
+      - test
+      - verify-branch-point
+    runs-on: windows-latest
+    # The signing trust boundary of release.yml, unchanged: Azure trusts only this environment's OIDC subject.
+    environment: desktop-release
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # The native crate pins its own toolchain (native/beebeeb-drive-rune/rust-toolchain.toml); rustup installs it
+      # on the first cargo call in that directory.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The compile runs BEFORE the Azure login (release.yml's measured timing constraint: the OIDC assertion is
+      # valid about 5 minutes, so nothing slow may sit between the login and the first signature).
+      - name: Build the native app
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        env:
+          BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      # NSIS 3 is part of the windows-latest image. The helper plugin is the one the 0.8.x installer already
+      # carries (nsis_tauri_utils 0.5.3); build-installer.ps1 refuses any other file by SHA-256.
+      - name: Fetch the NSIS helper plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'nsis-plugins'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll' -OutFile (Join-Path $dir 'nsis_tauri_utils.dll')
+          if (!(Test-Path 'C:\Program Files (x86)\NSIS\makensis.exe')) { throw 'NSIS is not on this runner image' }
+          "NSIS_PLUGIN_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Azure login for Artifact Signing (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Signs the app binary, the uninstaller and the installer (scripts/windows/sign-artifact.ps1) and fails
+      # closed: release mode refuses to run without BEEBEEB_REQUIRE_SIGNING=1.
+      - name: Build and sign the installer
+        shell: powershell
+        env:
+          BEEBEEB_REQUIRE_SIGNING: '1'
+        run: |
+          & .\packaging\windows\build-installer.ps1 -Mode release -Version $env:RELEASE_VERSION `
+            -Exe 'native\beebeeb-drive-rune\target\x86_64-pc-windows-msvc\release\beebeeb-drive.exe' `
+            -OutDir 'release-assets' -NsisDir 'C:\Program Files (x86)\NSIS' -PluginDir $env:NSIS_PLUGIN_DIR
+          if ($LASTEXITCODE -ne 0) { throw "build-installer.ps1 failed (exit $LASTEXITCODE)" }
+          Remove-Item -Recurse -Force 'release-assets\stage-release'
+
+      - name: Authenticode gate - self-test
+        shell: powershell
+        run: |
+          & .\scripts\windows\verify-authenticode.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw "verify-authenticode self-test failed: the gate accepted a bad fixture (exit $LASTEXITCODE)" }
+
+      - name: Authenticode gate - verify release artifacts
+        shell: powershell
+        run: |
+          $assets = @(Get-ChildItem 'release-assets/*' -File | Where-Object { $_.Name -match '\.exe$' })
+          Write-Host ("installer assets: {0}" -f $assets.Count)
+          if ($assets.Count -ne 1) { throw "expected exactly 1 Windows installer asset (NSIS .exe), found $($assets.Count)" }
+          & .\scripts\windows\verify-authenticode.ps1 -Files @($assets.FullName) -ExtractInstallers @($assets.FullName)
+          if ($LASTEXITCODE -ne 0) { throw "Authenticode gate failed (exit $LASTEXITCODE): refusing to publish unsigned or wrongly-signed Windows artifacts" }
+
+      # The updater signature: the same key and the same format 0.8.x verifies (docs/RELEASING.md, "Updater Signing
+      # Key Rotation"). The key reaches the signer through the environment only, never a command line. The Tauri
+      # CLI is used as a signing tool here; nothing of Tauri is in the app.
+      - name: Sign the installer for the updater
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          installer="release-assets/Beebeeb_${RELEASE_VERSION}_x64-setup.exe"
+          test -s "$installer"
+          bun run tauri signer sign "$installer" > /dev/null
+          test -s "$installer.sig"
+          node scripts/check-updater-signature-key.mjs --sig "$installer.sig"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beebeeb-desktop-windows-native
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    if: ${{ !inputs.publish_existing }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+
+      # make_latest stays false: GitHub's "Latest" is what beebeeb.io/download offers and what release.yml's
+      # delivery check compares with desktop/latest.json. Moving it to a native release is its own decision
+      # (spec, open questions).
+      - name: Create release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: desktop-v${{ inputs.version }}
+          name: Beebeeb Desktop ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          make_latest: 'false'
+          fail_on_unmatched_files: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-manifest:
+    name: Publish v2 update manifest
+    if: >-
+      ${{
+        always() &&
+        needs.validate-release-inputs.result == 'success' &&
+        (inputs.publish_existing || needs.release.result == 'success')
+      }}
+    needs:
+      - validate-release-inputs
+      - release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VER: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+      TAG: desktop-v${{ inputs.version }}
+    steps:
+      - name: Checkout the scripts at the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: desktop-v${{ inputs.version }}
+          persist-credentials: false
+          path: desktop-src
+
+      - name: Checkout releases repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          repository: beebeeb-io/releases
+          ref: main
+          token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          persist-credentials: false
+          path: releases-repo
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      # The installer and its signature come from the GitHub release this workflow created (assets API, the
+      # authenticated route release.yml uses), and the installer is published under our own host name:
+      # releases.beebeeb.io/desktop/artifacts/<version>/. Where that name is served from is an open question of the
+      # spec (it must be our own hosting in the EU before a native build is offered on stable).
+      - name: Fetch the release's installer, signature and notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          gh api "repos/$REPO/releases/tags/$TAG" > work/release.json
+          jq -r '.body // ""' work/release.json > work/notes.md
+          installer="Beebeeb_${VER}_x64-setup.exe"
+          for name in "$installer" "$installer.sig"; do
+            id=$(jq -r --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' work/release.json)
+            if [[ -z "$id" ]]; then
+              echo "::error::$name is not an uploaded asset of $TAG"
+              exit 1
+            fi
+            gh api "repos/$REPO/releases/assets/$id" -H 'Accept: application/octet-stream' > "work/$name"
+            test -s "work/$name"
+          done
+
+      - name: Generate the v2 channel manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="Beebeeb_${VER}_x64-setup.exe"
+          case "$CHANNEL" in
+            stable) file=stable.json ;;
+            beta) file=beta.json ;;
+            alpha) file=alpha.json ;;
+            *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;;
+          esac
+          mkdir -p "releases-repo/desktop/v2" "releases-repo/desktop/artifacts/$VER"
+          node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
+            --installer "work/$installer" --sig "work/$installer.sig" --notes work/notes.md \
+            --out "releases-repo/desktop/v2/$file"
+          cp "work/$installer" "releases-repo/desktop/artifacts/$VER/$installer"
+          echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
+
+      # The manifest is signed too (the native updater refuses an unsigned one): same key, same tool, and the
+      # signed file name is the channel's manifest file, which is what ties a manifest to its channel.
+      - name: Sign the manifest
+        working-directory: desktop-src
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          manifest="../releases-repo/desktop/v2/$MANIFEST_FILE"
+          rm -f "$manifest.sig"
+          bun run tauri signer sign "$manifest" > /dev/null
+          test -s "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --sig "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --manifest "$manifest"
+
+      - name: Commit and push to releases repo
+        working-directory: releases-repo
+        shell: bash
+        env:
+          RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git remote set-url origin "https://x-access-token:${RELEASES_PUSH_TOKEN}@github.com/beebeeb-io/releases.git"
+          git add "desktop/v2/$MANIFEST_FILE" "desktop/v2/$MANIFEST_FILE.sig" "desktop/artifacts/$VER"
+          if git diff --cached --quiet; then
+            echo "desktop/v2/$MANIFEST_FILE already up to date"
+          else
+            git commit -m "desktop: publish native $CHANNEL manifest $TAG"
+            git push
+          fi

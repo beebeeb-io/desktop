@@ -6,4 +6,25 @@ publish = false
 description = "Beebeeb desktop updater: manifest, signature check, version policy and the download-verify-stage machine. No Tauri, no UI."
 license = "AGPL-3.0-or-later"
 
+# Design: docs/superpowers/specs/2026-11-11-native-installer-updater.md.
+# Rule: no `tauri` crate in this dependency tree, ever (`cargo tree -p beebeeb-updater | grep -c tauri` prints 0).
+# Versions match `src-tauri/Cargo.toml` where both use a crate, so the desktop app links one copy.
+
 [dependencies]
+base64 = "0.22"
+# The verifier Tauri's updater uses (same author as minisign, no dependencies): one key and one signature format
+# check 0.8.x artefacts and ours.
+minisign-verify = "0.2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only with `net`: the real HTTP client. The library and its tests never need it.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "default-tls"], optional = true }
+
+[dev-dependencies]
+# Signs test fixtures with a key generated inside each test: no key, test or real, is committed.
+minisign = "0.7"
+tempfile = "3"
+
+[features]
+# The HTTPS client for the shell (`net::HttpsClient`). Off by default so the rules are tested without a TLS stack.
+net = ["dep:reqwest"]
