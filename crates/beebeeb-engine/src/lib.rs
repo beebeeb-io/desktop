@@ -20,6 +20,7 @@ pub mod api_client;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod auth_attempts;
 pub mod backup;
+pub mod backup_actions;
 pub mod backup_protect;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod callback_gate;

@@ -257,6 +257,12 @@ fn own_active_source(own: &OwnBackups, below_root: &str) -> Option<String> {
     Some(display(&original_of(&folder.source_path, below_category)))
 }
 
+/// [`own_active_source`] for the row at `rel` (a state DB path): `None` outside the tree. For the app window's rule
+/// ([`crate::backup_actions`]).
+pub fn own_active_source_of(tree: &BackupsTree, own: &OwnBackups, rel: &str) -> Option<String> {
+    own_active_source(own, tree.below_root(rel)?)
+}
+
 /// Every `local` row at or under `rel` (the item and its subtree) whose file is gone from this device
 /// is cloud-only again, so the placeholder pass mints it again. Returns how many. Used by the
 /// after-the-fact restore of a protected item and, for each Backups root, at start-up (a downloaded
