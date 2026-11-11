@@ -26,9 +26,11 @@ minisign = "0.7"
 tempfile = "3"
 # Builds one legacy (not pre-hashed) minisign signature by hand, from an obviously-test seed.
 ed25519-dalek = "2"
-# The local TLS server of `net_tests` (feature `net`): a certificate made inside the test, never committed.
+# The local TLS server of `net_tests` (feature `net`): a pure-Rust server (rustls), so it runs the same on Linux, macOS
+# and Windows, with a test root and a server certificate made inside the test, never committed. The CLIENT under
+# test keeps the OS TLS stack (Schannel on Windows).
 rcgen = "0.13"
-native-tls = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [features]
 # The HTTPS client for the shell (`net::HttpsClient`). Off by default so the rules are tested without a TLS stack.

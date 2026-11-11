@@ -34,8 +34,10 @@ impl HttpsClient {
         builder().build().map(|client| Self { client }).map_err(|_| Unreachable)
     }
 
-    /// The released client's rules, also trusting one certificate made inside a test (the local TLS server's).
-    #[cfg(all(test, not(windows)))]
+    /// The released client's rules, also trusting one root certificate made inside a test (the local TLS server's
+    /// issuer). Test builds only; it adds a root and switches no check off. There is no "accept invalid
+    /// certificates" path anywhere: `net_tests::the_released_client_refuses_a_certificate_it_was_not_told_to_trust`.
+    #[cfg(test)]
     pub(crate) fn trusting(certificate_pem: &[u8]) -> Self {
         let root = reqwest::Certificate::from_pem(certificate_pem).expect("a test certificate");
         let client = builder()

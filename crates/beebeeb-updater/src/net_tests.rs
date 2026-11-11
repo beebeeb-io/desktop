@@ -1,5 +1,7 @@
-//! Review test 4: the real `HttpsClient` and the machine against a TLS server on this PC. The certificate and its
-//! key are made inside the test; nothing leaves the machine and no key is committed.
+//! Review test 4: the real `HttpsClient` (the OS TLS stack: Schannel on Windows) and the machine against a TLS server
+//! on this PC. The server is pure Rust (rustls), so the same tests run on every OS; its root and certificate are
+//! made inside the test, nothing leaves the machine and no key is committed. The client is told to trust that one
+//! root through its test-only constructor; no check is switched off anywhere.
 
 use std::cell::Cell;
 use std::fs;
@@ -41,25 +43,59 @@ fn ok(body: &[u8]) -> Vec<u8> {
     respond("200 OK", &[("Content-Length", body.len().to_string())], body)
 }
 
+/// A test root and a `localhost` server certificate it issued, both made here. Returns the root (PEM, for the
+/// client to trust) and the server's TLS configuration.
+fn test_tls() -> (String, Arc<rustls::ServerConfig>) {
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+
+    let root_key = KeyPair::generate().expect("a test root key");
+    let mut root = CertificateParams::new(Vec::<String>::new()).expect("root parameters");
+    root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+    root.distinguished_name
+        .push(rcgen::DnType::CommonName, "beebeeb-updater test root");
+    let root = root.self_signed(&root_key).expect("a test root");
+
+    let server_key = KeyPair::generate().expect("a test server key");
+    let mut server = CertificateParams::new(vec!["localhost".to_string()]).expect("server parameters");
+    server.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    server.distinguished_name.push(rcgen::DnType::CommonName, "localhost");
+    let server = server
+        .signed_by(&server_key, &root, &root_key)
+        .expect("a test server certificate");
+
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der());
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![server.der().clone()], key.into())
+        .expect("a server configuration");
+    (root.pem(), Arc::new(config))
+}
+
 impl Server {
     fn start(route: Route) -> Self {
-        let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("a test certificate");
-        let certificate_pem = made.cert.pem();
-        let identity =
-            native_tls::Identity::from_pkcs8(certificate_pem.as_bytes(), made.key_pair.serialize_pem().as_bytes())
-                .expect("a test identity");
-        let acceptor = native_tls::TlsAcceptor::new(identity).expect("a TLS acceptor");
+        let (certificate_pem, config) = test_tls();
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a local port");
         let port = listener.local_addr().expect("address").port();
         let log: RequestLog = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&log);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let Ok(mut tls) = acceptor.accept(stream) else { continue };
+                let Ok(connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+                    continue;
+                };
+                let mut tls = rustls::StreamOwned::new(connection, stream);
                 let mut head = Vec::new();
                 let mut byte = [0u8; 1];
                 while !head.ends_with(b"\r\n\r\n") && tls.read(&mut byte).is_ok_and(|read| read == 1) {
                     head.push(byte[0]);
+                }
+                // A client that refused the certificate never sent a request.
+                if !head.ends_with(b"\r\n\r\n") {
+                    continue;
                 }
                 let head = String::from_utf8_lossy(&head).into_owned();
                 let path = head.split(' ').nth(1).unwrap_or_default().to_string();
@@ -73,7 +109,8 @@ impl Server {
                     .and_then(|range| range.trim_end_matches('-').parse().ok());
                 seen.lock().expect("log").push((path.clone(), range));
                 let _ = tls.write_all(&route(&path, range));
-                let _ = tls.shutdown();
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
             }
         });
         Self {
@@ -328,4 +365,58 @@ fn the_size_caps_hold_against_a_server_that_sends_more() {
         }
     );
     assert!(fs::read_dir(dir.path()).expect("staging").next().is_none());
+}
+
+/// The released client (`HttpsClient::new`) has no way to accept a certificate the OS does not trust: against the
+/// same honest test server, whose root only `HttpsClient::trusting` knows, it gets no response at all, and the
+/// server never sees a request.
+#[test]
+fn the_released_client_refuses_a_certificate_it_was_not_told_to_trust() {
+    use crate::machine::{Http as _, Unreachable};
+    let key = TestKey::generate();
+    let server = serve(&key, honest);
+    let url = format!("{}/desktop/v2/stable.json", server.base());
+
+    // The control: the test client, which trusts the test root, is answered.
+    let mut trusting = HttpsClient::trusting(server.certificate_pem.as_bytes());
+    assert_eq!(trusting.get(&url, 0).map(|response| response.status), Ok(200));
+    assert_eq!(server.paths(), ["/desktop/v2/stable.json"]);
+
+    let mut released = HttpsClient::new().expect("the released client builds");
+    assert!(matches!(released.get(&url, 0), Err(Unreachable)));
+    assert_eq!(server.paths().len(), 1, "no request reached the server");
+}
+
+/// https only: a plain-http address is never asked, although a server is there and would answer.
+#[test]
+fn plain_http_is_never_spoken() {
+    use crate::machine::{Http as _, Unreachable};
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a local port");
+    let port = listener.local_addr().expect("address").port();
+    let connections = Arc::new(Mutex::new(0u32));
+    let counted = Arc::clone(&connections);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            *counted.lock().expect("count") += 1;
+            let mut head = [0u8; 1024];
+            let _ = stream.read(&mut head);
+            let _ = stream.write_all(&ok(b"plain"));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/desktop/v2/stable.json");
+
+    let mut released = HttpsClient::new().expect("the released client builds");
+    assert!(matches!(released.get(&url, 0), Err(Unreachable)));
+    assert_eq!(*connections.lock().expect("count"), 0, "not even a connection");
+
+    // The control: the server is there and answers a plain request.
+    let mut raw = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connects");
+    raw.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("request");
+    let mut answer = String::new();
+    raw.read_to_string(&mut answer).expect("answer");
+    assert!(
+        answer.starts_with("HTTP/1.1 200 OK") && answer.ends_with("plain"),
+        "{answer:?}"
+    );
 }

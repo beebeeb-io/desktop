@@ -31,7 +31,7 @@ impl TestKey {
     }
 
     /// The same test key for a server thread (`net_tests`).
-    #[cfg(all(feature = "net", not(windows)))]
+    #[cfg(feature = "net")]
     pub fn clone_for_thread(&self) -> Self {
         Self(self.0.clone())
     }

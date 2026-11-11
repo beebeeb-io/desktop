@@ -23,10 +23,7 @@ pub mod version;
 
 #[cfg(test)]
 mod machine_tests;
-// Not on Windows: the test server's certificate key is ECDSA (made in the test), and Schannel's PKCS#8 import, which
-// the server side of the test needs there, takes RSA only. The client under test is the same reqwest code on
-// every OS apart from the TLS stack; its Windows TLS path is not covered by a test (stated in the spec, section 10).
-#[cfg(all(test, feature = "net", not(windows)))]
+#[cfg(all(test, feature = "net"))]
 mod net_tests;
 #[cfg(test)]
 mod policy_tests;

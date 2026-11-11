@@ -468,9 +468,6 @@ Rehearsal and the lead's commands: `packaging/windows/README.md`.
   implement the 0.8.25 changes, or touch autostart, tray, single instance, macOS or Linux. Three contracts in §5
   and §2 are therefore promises the shell lane must keep, with nothing in this PR that can test them:
   `BEEBEEB_APP_IDENTIFIER`, `--quit-for-update`, and calling `handoff::arrival()` before `state.db` is opened.
-- `net_tests` (the real `HttpsClient` against a local TLS server) run on Linux and macOS only: on Windows the test
-  server cannot load its ECDSA test key through Schannel. The client's rules there (no redirect, `Content-Range`,
-  the size caps) are the same reqwest code, but its Schannel path has no test of its own.
 - Delta 2 does not build a native MSI, does not remove credentials or the sync root on uninstall (the box says
   so), does not give the upgrade rehearsal a
   release-identity mode (README section B), and does not split `release.yml`'s build step, which compiles and
