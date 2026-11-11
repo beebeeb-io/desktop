@@ -113,6 +113,16 @@ Settings is a state of the main window (DW-0701). The shell routes the section (
 draws the sidebar and the pane, and keeps what is open inside a section (`SettingsUi`: sub-pane, menu, dialog, toast).
 Its checklist of the 50 board frames is `src/frames/settings/FRAMES.md`; its scenes are `frames::settings::FRAMES`.
 
+- **Whether settings shows is the shell's route, and nothing else.** `SettingsUi` has no "open" flag; `frames::settings::sync`
+  (called from `shell::host::dispatch`, one line) forgets what was open inside settings whenever the route leaves it.
+- **Keyboard:** the view sets `cx.web_focus()`: Tab visits every control, Space and Enter press the focused one, a
+  dialog's primary button is its `default_button()`. A row with a pop-up button is ONE control (`Role::PopUp`).
+- **Data:** `SettingsSource` (`source.rs`). `source::first(dev_build)` is what settings starts on: the board's sample
+  content in a development build, `Unwired` in a build that ships (the view then draws the shell's "not built yet"
+  frame, never sample values). The engine lane replaces it, and takes `SettingsUi::take_intents()` in the shell.
+- **Layout:** a pane scrolls when it is taller than the window; a menu is anchored to a point its own row marks
+  (`Trailing::Pop { menu_at }`), so it follows the row.
+
 | Piece | Where | Keys |
 | --- | --- | --- |
 | Sidebar, pane, crumb, heading | `settings_shell.rs` | `<label>-row`, `side-title-*`, `side-foot`, `set-main`, `crumb`, `set-title`, `set-sub` |
