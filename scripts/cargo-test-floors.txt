@@ -5,10 +5,16 @@
 # app's: minus 1). Raise it when the suite grows by more than the margin; lowering one needs a reason in the commit.
 # Measured on ce212efd (2026-11-11), executed tests: desktop lib 2,404 Linux / 2,269 Windows / 2,754 macOS;
 # engine lib 334 / 334 / 329; native app 17 after the merge of PR #278 (Linux only: Windows builds it and runs no tests).
-linux 2280 deps/beebeeb_desktop_lib-
-windows 2150 deps/beebeeb_desktop_lib-
-macos 2610 deps/beebeeb_desktop_lib-
-linux 310 deps/beebeeb_engine-
-windows 310 deps/beebeeb_engine-
-macos 310 deps/beebeeb_engine-
-linux 16 deps/beebeeb_drive-
+# Step 2 of the engine move (2026-11-11, e9b696ab): the running engine's tests moved from the desktop lib to the
+# engine crate, so the desktop floors go DOWN and the engine floors go UP by the same tests. Executed: desktop lib
+# 954 Linux / 921 Windows (build VM); engine lib 1,788 Linux / 1,685 Windows (build VM); native app 19.
+# macOS, first CI run that compiles it (run 43022179510 on 91eadeb2, 2026-11-11), executed: desktop lib 1,236
+# (1,234 passed, 2 source pins failed and were re-pointed), engine lib 1,854. Floors raised from the provisional
+# Linux values to 5% under those counts.
+linux 900 deps/beebeeb_desktop_lib-
+windows 870 deps/beebeeb_desktop_lib-
+macos 1170 deps/beebeeb_desktop_lib-
+linux 1690 deps/beebeeb_engine-
+windows 1600 deps/beebeeb_engine-
+macos 1760 deps/beebeeb_engine-
+linux 18 deps/beebeeb_drive-

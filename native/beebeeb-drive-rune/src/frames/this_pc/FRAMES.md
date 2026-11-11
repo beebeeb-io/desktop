@@ -33,8 +33,11 @@ light and dark. The gate lines per frame are in the PR body.
 | DW-0742 | Delete this backup? with the authenticator code | not built |
 | DW-0741 | Couldn't back up: three failures with Try again, one exclusion without | not built |
 
-Built: 9 of 16 (all of This PC). Not built: the 7 Backups frames (they are a section of the settings
-view; the settings shell, PR 292, was not on `v2-native` while this lane ran).
+Built: 9 of 16 (all of This PC). Not built: the 7 Backups frames. They are a section of the
+settings view; the settings shell (PR 292) reached `v2-native` after the This PC frames were done.
+What exists for them: `frames/backups/source.rs`, the `BackupsSource` trait with the board's
+content of DW-0737, DW-1411, DW-0739 and DW-0741 and the protected root (`is_protected`,
+`BackupsRoot::allows`), with 3 tests and no view.
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
 a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"

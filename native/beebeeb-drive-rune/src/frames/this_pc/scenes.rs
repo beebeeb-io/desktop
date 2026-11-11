@@ -63,3 +63,16 @@ pub fn dw_1306(s: &mut State) {
 pub fn dw_0120(s: &mut State) {
     open(s, Section::AvailableOffline, FixtureSource::nothing_kept());
 }
+
+/// The group's board frames, by frame id (`frames::scenes`).
+pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
+    ("DW-1301", dw_1301),
+    ("DW-1302", dw_1302),
+    ("DW-1303", dw_1303),
+    ("DW-0428", dw_0428),
+    ("DW-1304", dw_1304),
+    ("DW-1305", dw_1305),
+    ("DW-0715", dw_0715),
+    ("DW-1306", dw_1306),
+    ("DW-0120", dw_0120),
+];

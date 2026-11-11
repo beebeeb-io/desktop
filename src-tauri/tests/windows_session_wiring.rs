@@ -1,9 +1,8 @@
 //! Wiring guards complement the behavioral session/gate tests: a new command
 //! or engine entrypoint must not silently bypass the Windows admission boundary.
-#[path = "../src/root_source.rs"]
+#[path = "../../crates/beebeeb-engine/src/root_source.rs"]
 mod root_source;
-static SOURCE: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| root_source::lib_rs().replace("\r\n", "\n"));
+static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| root_source::lib_rs().replace("\r\n", "\n"));
 fn body<'a>(source: &'a str, name: &str) -> &'a str {
     let start = source.find(&format!("fn {name}(")).unwrap();
     let start = start + source[start..].find('{').unwrap();

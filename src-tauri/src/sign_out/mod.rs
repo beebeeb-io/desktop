@@ -8,7 +8,7 @@ pub(crate) mod copy;
 pub(crate) mod flow_window;
 #[cfg(target_os = "macos")]
 pub(crate) mod keep;
-pub(crate) mod kept_names;
+pub(crate) use beebeeb_engine::sign_out::kept_names;
 pub(crate) mod kept_record;
 pub(crate) use beebeeb_engine::sign_out::kept_set;
 #[cfg(target_os = "macos")]
