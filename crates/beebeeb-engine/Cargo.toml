@@ -1,0 +1,37 @@
+[package]
+name = "beebeeb-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Beebeeb desktop engine without a UI toolkit: the local state database and the view models read from it"
+publish = false
+
+# The seam between the engine and its shells (docs/superpowers/specs/2026-11-11-native-engine-boundary.md).
+# `src-tauri` (the Tauri shell) and `native/beebeeb-drive-rune` (the Rune shell) both depend on this crate.
+# Rule: no `tauri` crate in this dependency tree, ever (`cargo tree -p beebeeb-engine | grep -c tauri` prints 0).
+# Versions match `src-tauri/Cargo.toml`, so one copy of each crate is linked into the desktop app.
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+# Only with `test-support`: the helpers a shell's own tests build databases with.
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+# `reconcile_measure_tests` (an `#[ignore]`d measurement on a copy) names this PC as the runner does.
+hostname = "0.4"
+
+[features]
+# Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
+# one. Never enabled by a release build: `src-tauri` turns it on under `[dev-dependencies]` only.
+test-support = ["dep:tempfile"]
