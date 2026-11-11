@@ -203,6 +203,7 @@ mod tests {
     mod basics;
     mod conflicts;
     mod finder_queue;
+    mod heal_2446;
     mod hydration;
     mod metadata;
     mod shared;
