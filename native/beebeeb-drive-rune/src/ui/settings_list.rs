@@ -11,8 +11,8 @@
 //! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret` |
 //! | Switch | `Trailing::Switch` | `item-<L>-<I>-switch`, `-knob` |
 //!
-//! A row is 28 pt, 40 pt with a second line. Rows are separated by a hairline that starts
-//! 10 pt in. What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
+//! A row is 28 pt, 40 pt with a second line; the board rules a row off from the one
+//! above only where the two are siblings in its markup (`Item::ruled`). What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
 //! the press, focus and hover; a `Role::Plain` row is text, and a control inside it (a
 //! switch, a pop-up button) is the thing that takes focus.
 
@@ -70,6 +70,8 @@ pub struct Item {
     pub sub: Option<String>,
     pub trailing: Vec<Trailing>,
     pub role: Role,
+    /// A hairline above the row, from 10 pt in (the board draws it between some rows only).
+    pub ruled: bool,
 }
 
 impl Item {
@@ -80,6 +82,7 @@ impl Item {
             sub: None,
             trailing: Vec::new(),
             role: Role::Plain,
+            ruled: false,
         }
     }
     pub fn sub(mut self, sub: impl Into<String>) -> Self {
@@ -94,6 +97,11 @@ impl Item {
     pub fn opens(mut self) -> Self {
         self.trailing.push(Trailing::Chevron);
         self.role = Role::Link;
+        self
+    }
+    /// A hairline above this row (`.kit-item + .kit-item::before`).
+    pub fn ruled(mut self) -> Self {
+        self.ruled = true;
         self
     }
     pub fn role(mut self, role: Role) -> Self {
@@ -175,8 +183,7 @@ pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
             .press(t.press)
             .focusable(true),
     };
-    if index > 0 {
-        // `.kit-item + .kit-item::before`: a hairline from 10 pt in to the card's edge.
+    if it.ruled {
         r = r.child(
             el().key(format!("{key}-rule"))
                 .pin(Some(10.0), Some(0.0), Some(0.0), None)
@@ -230,22 +237,31 @@ pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>
                 t.text_tertiary,
             )));
     }
-    let mut body = col()
-        .key(format!("list-{index}-body"))
-        .role("list")
+    // The ring is outside the card, so the clip that rounds the rows' hover tint sits one level in.
+    let mut rows_box = col()
+        .key(format!("list-{index}-rows"))
         .w_full()
-        .radius(radius::LG)
-        .clip_rounded(radius::LG)
-        .fill(t.card)
-        .box_shadow(kit::ring(kit::HAIR, t.separator));
+        .clip_rounded(radius::LG);
     for r in rows {
-        body = body.child(r);
+        rows_box = rows_box.child(r);
     }
-    l = l.child(body);
+    l = l.child(
+        col()
+            .key(format!("list-{index}-body"))
+            .role("list")
+            .w_full()
+            .radius(radius::LG)
+            .fill(t.card)
+            .box_shadow(kit::ring(kit::HAIR, t.separator))
+            .child(rows_box),
+    );
     if let Some(foot) = foot {
         l = l.child(
-            el().key(format!("list-{index}-foot-box"))
-                .px(14.0)
+            col()
+                .key(format!("list-{index}-foot-box"))
+                .w_full()
+                .items_start()
+                .px(16.0)
                 .child(kit::label(format!("list-{index}-foot"), foot, FOOT, t.text_tertiary).wrap()),
         );
     }

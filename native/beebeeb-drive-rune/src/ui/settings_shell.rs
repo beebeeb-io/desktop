@@ -133,6 +133,7 @@ pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) 
         .child(
             col()
                 .key("side-foot-box")
+                .items_start()
                 .pt(10.0)
                 .px(6.0)
                 .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)

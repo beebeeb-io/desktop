@@ -87,13 +87,18 @@ try {
     screen.scrollIntoView({ block: 'start' });
     window.scrollBy(0, -20);
     const r = screen.getBoundingClientRect();
-    return { x: r.x + screen.clientLeft + window.scrollX, y: r.y + screen.clientTop + window.scrollY, width: screen.clientWidth, height: screen.clientHeight };
+    // Viewport coordinates, for a viewport screenshot: a full-page one resizes the viewport first, and a
+    // frame that is not the first of its row (the board's rows scroll sideways) then moves from under the clip.
+    return { x: r.x + screen.clientLeft, y: r.y + screen.clientTop, width: screen.clientWidth, height: screen.clientHeight, vw: window.innerWidth, vh: window.innerHeight };
   }, { frameId, dark });
   await page.waitForTimeout(400);
 
   const stem = dark ? `${frameId}-dark` : frameId;
   const png = join(outDir, `${stem}-board.png`);
-  await page.screenshot({ path: png, clip, fullPage: true });
+  if (clip.x < 0 || clip.y < 0 || clip.x + clip.width > clip.vw || clip.y + clip.height > clip.vh) {
+    console.error(`capture-golden: the frame (${clip.width}x${clip.height} at ${clip.x},${clip.y}) does not fit the ${clip.vw}x${clip.vh} viewport`); process.exit(2);
+  }
+  await page.screenshot({ path: png, clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height } });
 
   const geo = await page.evaluate(({ frameId, keymapSrc }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);

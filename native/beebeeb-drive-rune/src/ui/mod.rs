@@ -7,6 +7,7 @@ pub mod gate;
 pub mod keys;
 pub mod kit;
 pub mod settings_controls;
+pub mod settings_dialog;
 pub mod settings_list;
 pub mod settings_shell;
 pub mod sidebar;

@@ -35,6 +35,13 @@ pub enum Menu {
     Theme { hot: usize },
 }
 
+/// A dialog over a pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dialog {
+    /// General › Help and report a problem (DW-0782).
+    ReportProblem,
+}
+
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Intent {
@@ -46,6 +53,8 @@ pub enum Intent {
     Web(&'static str),
     /// Download the new version's installer and show it in File Explorer (DW-0781).
     DownloadUpdate,
+    /// Save the support bundle and open an email to support in the person's email app (DW-0782).
+    SaveBundleAndWriteEmail,
 }
 
 /// The settings state of the window.
@@ -54,6 +63,7 @@ pub struct SettingsUi {
     pub open: bool,
     pub pane: Pane,
     pub menu: Option<Menu>,
+    pub dialog: Option<Dialog>,
     pub source: Box<dyn SettingsSource>,
     pub intents: Vec<Intent>,
 }
@@ -64,6 +74,7 @@ impl Default for SettingsUi {
             open: false,
             pane: Pane::General,
             menu: None,
+            dialog: None,
             source: Box::new(BoardSettings::new()),
             intents: Vec::new(),
         }
@@ -76,19 +87,26 @@ impl SettingsUi {
         self.open = true;
         self.pane = pane;
         self.menu = None;
+        self.dialog = None;
     }
 
     /// Back to Drive, and Esc: the window as it was.
     pub fn leave(&mut self) {
         self.open = false;
         self.menu = None;
+        self.dialog = None;
     }
 
     /// Go where a row or a sidebar item points: a pane of this lane, or an intent for the shell.
     pub fn go(&mut self, frame: &'static str) {
         self.menu = None;
+        self.dialog = None;
         match frame {
             "DW-0701" => self.pane = Pane::General,
+            "DW-0782" => {
+                self.pane = Pane::General;
+                self.dialog = Some(Dialog::ReportProblem);
+            }
             "DW-0401" => self.leave(),
             other => self.intents.push(Intent::Show(other)),
         }
@@ -133,6 +151,10 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0781", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_update_available());
         s.settings.show(Pane::General);
+    }),
+    ("DW-0782", |s| {
+        s.settings.show(Pane::General);
+        s.settings.go("DW-0782");
     }),
     ("DW-0787", |s| {
         s.settings.show(Pane::General);
@@ -314,6 +336,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     match ev.key {
+        Key::Escape if ui.dialog.is_some() => {
+            ui.dialog = None;
+            true
+        }
         Key::Escape => {
             ui.leave();
             true

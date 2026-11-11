@@ -9,7 +9,8 @@ use crate::ui::settings_shell as shell;
 use rune::El;
 
 use super::source::{ThemeChoice, Update};
-use super::{Intent, Menu, SettingsUi};
+use super::{Dialog, Intent, Menu, SettingsUi};
+use crate::ui::settings_dialog::{self as dialogs, Weight};
 
 /// Where the Theme menu drops, in the window's body: over its pop-up button, the board's place.
 const THEME_MENU_AT: (f32, f32) = (700.0, 86.0);
@@ -74,8 +75,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         vec![
             lists::item(2, 0, &Item::new(Some(&ic::SHIELD), "Privacy").opens(), t)
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("privacy"))),
-            lists::item(2, 1, &Item::new(Some(&ic::DOWNLOAD_TRAY), "Export my data").opens(), t)
-                .on_press(|s: &mut State| s.settings.ask(Intent::Open("export-my-data"))),
+            lists::item(
+                2,
+                1,
+                &Item::new(Some(&ic::DOWNLOAD_TRAY), "Export my data").opens().ruled(),
+                t,
+            )
+            .on_press(|s: &mut State| s.settings.ask(Intent::Open("export-my-data"))),
             lists::item(
                 2,
                 2,
@@ -156,5 +162,71 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         }
         None => None,
     };
-    (shell::pane(children, t), menu)
+    let overlay = match ui.dialog {
+        Some(Dialog::ReportProblem) => Some(report_problem(t)),
+        None => menu,
+    };
+    (shell::pane(children, t), overlay)
+}
+
+/// Report a problem (DW-0782): what the support bundle holds and leaves out, before it is
+/// saved; the person sends the email themselves.
+fn report_problem(t: &Theme) -> El {
+    const WORDS: &str = "Beebeeb saves a support bundle on this PC and opens an email to support@beebeeb.io in your email app. Read the file, then attach it and send the email yourself.";
+    const ADDRESS: &str = "support@beebeeb.io";
+    let at = WORDS.find(ADDRESS).unwrap_or(0);
+    let plain = |l: usize, i: usize, icon: &'static rune::Icon, title: &str, ruled: bool| {
+        let mut it = Item::new(Some(icon), title);
+        if ruled {
+            it = it.ruled();
+        }
+        lists::item(l, i, &it, t)
+    };
+    let body = vec![
+        dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t),
+        lists::list(
+            4,
+            Some("In the bundle"),
+            vec![
+                plain(4, 0, &ic::CHECK, "Queue counts", false),
+                plain(4, 1, &ic::CHECK, "An error code and the last error message", true),
+            ],
+            None,
+            t,
+        ),
+        lists::list(
+            5,
+            Some("Removed first"),
+            vec![
+                plain(5, 0, &ic::CLOSE_X, "Paths, file and folder names", false),
+                plain(5, 1, &ic::CLOSE_X, "Sign-in tokens", true),
+            ],
+            Some(
+                "Standard error words, numbers, opaque ids and the server address are kept, so a name the app does not recognise can stay only if it is itself a standard word or a number.",
+            ),
+            t,
+        ),
+        lists::list(
+            6,
+            Some("Your email"),
+            vec![lists::item(
+                6,
+                0,
+                &Item::new(Some(&ic::MAIL), "Sent from your own address")
+                    .sub("Support sees it, as with any email you send."),
+                t,
+            )],
+            None,
+            t,
+        ),
+    ];
+    let foot = vec![
+        dialogs::button(0, "Save and write email", Weight::Primary, t).on_press(|s: &mut State| {
+            s.settings.ask(Intent::SaveBundleAndWriteEmail);
+            s.settings.go("DW-0790b");
+        }),
+        dialogs::button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
+    ];
+    dialogs::dialog("Report a problem", 460.0, "Report a problem", None, body, foot, t)
+        .modal(false, |s: &mut State| s.settings.dialog = None)
 }
