@@ -222,9 +222,16 @@ fn hover_outlines_the_element_under_the_pointer_and_alt_up_steps_to_its_row() {
         "outline {drawn:?} sits on the element {:?}",
         leaf.visible
     );
+    let last = super::app_path(&leaf.path).rsplit('/').next().unwrap().to_string();
+    let chip = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("fb-path-text"))
+        .and_then(|e| e.text)
+        .expect("the key path chip");
     assert!(
-        shown_text(&rt).contains(super::app_path(&leaf.path)),
-        "its key path is shown"
+        chip.ends_with(&last),
+        "the chip {chip:?} ends with the element's own key {last:?}"
     );
 
     // Alt+Up: parent by parent until the row itself.
@@ -757,6 +764,10 @@ fn evidence_pngs() {
     let inbox = temp_inbox("evidence");
     let mut rt = runtime(&inbox);
     let shot = |rt: &mut Runtime<State>, name: &str| {
+        // Past the entrance fades: the picture is the mode at rest.
+        for _ in 0..45 {
+            step(rt);
+        }
         let img = capture::render_headless(rt, SCALE);
         img.write_png(&out.join(name)).unwrap();
         assert_eq!((img.w, img.h), (2560, 1600));

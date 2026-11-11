@@ -112,7 +112,14 @@ fn comment_layer(fb: &Feedback, t: &Theme) -> El {
         );
     if let Some(target) = fb.target() {
         let [x, y, w, h] = target.visible;
-        let path = app_path(&target.path).to_string();
+        // The last three keys are enough to recognise it; the note records the whole path.
+        let full = app_path(&target.path);
+        let tail: Vec<&str> = full.rsplit('/').take(3).collect();
+        let path = format!(
+            "{}{}",
+            if full.split('/').count() > 3 { "…/" } else { "" },
+            tail.into_iter().rev().collect::<Vec<_>>().join("/")
+        );
         layer = layer
             .child(
                 el().key("fb-highlight")
@@ -149,9 +156,10 @@ fn hint_bar(fb: &Feedback, t: &Theme) -> El {
     };
     let mut bar = row()
         .key("fb-hint")
-        .pin(Some(space::MD), None, None, Some(36.0))
-        .h(28.0)
-        .px(space::MD)
+        // In the caption bar's empty drag area: the one place that covers none of the app.
+        .pin(Some(232.0), Some(4.0), None, None)
+        .h(TITLEBAR_H - 8.0)
+        .px(space::SM)
         .gap(space::MD)
         .center_y()
         .radius(radius::MD)
@@ -237,13 +245,14 @@ fn popover(fb: &Feedback, t: &Theme) -> El {
                 ),
         )
         .child(row().key("fb-tags").gap(6.0).children(tags))
+        .child(mono("Shift+Enter new line  Esc cancels", t))
         .child(
             row()
                 .key("fb-popover-foot")
                 .w_full()
                 .center_y()
                 .justify_between()
-                .child(mono("Enter saves  Shift+Enter new line", t))
+                .child(mono("Enter saves", t))
                 .child(
                     row()
                         .gap(6.0)
@@ -301,7 +310,7 @@ fn note_row(fb: &Feedback, note: &NoteEntry, t: &Theme) -> El {
     let id = note.id.clone();
     let mut thumb = el()
         .key(format!("fb-thumb-{}", note.id))
-        .size(64.0, 44.0)
+        .size(96.0, 60.0)
         .radius(radius::SM)
         .fill(t.surface)
         .border(1.0, t.card_border);

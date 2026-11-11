@@ -186,7 +186,7 @@ impl Feedback {
         thumbs.retain(|id, _| notes.iter().any(|n| &n.id == id));
         for n in &notes {
             if !thumbs.contains_key(&n.id) {
-                if let Some(p) = load_pixels(&n.dir.join("element.png"), 240) {
+                if let Some(p) = load_pixels(&n.dir.join("window.png"), 256) {
                     thumbs.insert(n.id.clone(), p);
                 }
             }

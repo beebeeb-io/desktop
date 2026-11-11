@@ -89,6 +89,8 @@ pub fn render_headless<S: 'static>(rt: &mut Runtime<S>, scale: f32) -> Rgba {
     // (The window never needs this: it captures with its own renderer.)
     rt.text.atlas.invalidate();
     let mut ui = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    rt.images.invalidate();
+    ui.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
     render_rgba!(ui, &gpu.device, &gpu.queue, rt, size, OFFSCREEN_FORMAT)
 }
 
